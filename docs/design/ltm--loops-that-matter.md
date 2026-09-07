@@ -317,24 +317,46 @@ For a link from `x` to `z` where `z = f(x, y, ...)`:
 
 ### Flow-to-Stock Links
 
-`generate_flow_to_stock_equation()` in `ltm_augment.rs`.
+`generate_flow_to_stock_equation()` and `generate_net_flow_equation()` in
+`ltm_augment.rs`.
 
-Implements the corrected 2023 formula (Schoenberg et al., Eq. 3). The numerator
-uses `PREVIOUS()` to align timing: at time t, `PREVIOUS(flow)` is the flow value
-at t-1 that drove the stock change from t-1 to t.
+A stock's flows reach it through its wiring, not through an equation, so the
+score is built around a synthetic net-flow auxiliary: every stock with a scored
+flow-to-stock edge gets `$⁚ltm⁚net⁚{stock} = (inflows) - (outflows)`, shaped
+like the stock (`Equation::ApplyToAll` over an arrayed stock's dimensions; `0`
+for a side with no flows), minted beside the score by `shaped_link_score` and
+deduplicated by name (every flow of the stock mints the same aux). The score
+for `flow -> stock` is the ordinary instantaneous link score of that aux with
+respect to the flow. Because the aux is a linear sum its ceteris-paribus
+partial is closed-form -- `Δ_flow net = +Δflow` for an inflow, `-Δflow` for an
+outflow -- so the emitted equation is the standard guard form with that
+numerator:
 
 ```
-numerator = PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))
-denominator = (stock - PREVIOUS(stock)) - (PREVIOUS(stock) - PREVIOUS(PREVIOUS(stock)))
-link_score = sign * ABS(SAFEDIV(numerator, denominator, 0))
+if (TIME = INITIAL_TIME) then 0
+else if ((net - PREVIOUS(net)) = 0) OR ((flow - PREVIOUS(flow)) = 0) then 0
+else SAFEDIV(+/-(flow - PREVIOUS(flow)), ABS(net - PREVIOUS(net)), 0) * SIGN(flow - PREVIOUS(flow))
 ```
 
-The denominator is the second-order change in the stock (its "acceleration").
-The ratio is wrapped in `ABS()` because flow-to-stock polarity is structural:
-inflows always contribute positively (+1), outflows negatively (-1). The sign
-is applied outside the absolute value. This equation returns 0 for the first
-two timesteps (insufficient history for second-order differences), guarded by
-`TIME = INITIAL_TIME` and `PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME`.
+which evaluates to `sign * |Δflow / Δnet|`: the 2023 paper's Eq. 3 (its
+denominator `Δ(S_t) - Δ(S_{t-dt})` is `Δnet`) in the paper's own
+implementation option (b) (section 4.4: aggregate the flows into a net flow,
+score each flow into it, and let the net flow's link into the stock be 1).
+Polarity is structural: inflows +1, outflows -1. Both deltas are read over
+`[t - dt, t]`, the window of every other link score, so a loop's link scores
+all describe one interval, the score is the same whether a stock's flows are
+written separately or as one net flow, and no `dt` appears (an isolated loop
+scores exactly `+/-1` at every `dt`, `tests/integration/ltm_dt_invariance.rs`).
+Like every other score it is 0 at `TIME = INITIAL_TIME` and defined from the
+first step after the start. The net aux is LTM machinery, not a causal node:
+the causal graph keeps its `flow -> stock` edges, and the aux appears in no
+loop and no link.
+
+A scalar flow into an arrayed stock broadcasts into every element's net flow,
+so its score is one arrayed variable over the stock's dimensions
+(`link_score_dimensions`). The structural edge is routed to the per-shape
+emitter ahead of the shape-driven emitters (`emit_link_scores_for_edge`), which
+would otherwise score it as a partial of the stock's initial-value equation.
 
 ### Stock-to-Flow Links
 
@@ -1915,9 +1937,11 @@ enumerated loops.
 
 ### Euler Integration Only
 
-The corrected flow-to-stock formula uses discrete differences that assume Euler
-integration. The papers note compatibility with Runge-Kutta "in principle" but
-this has not been explored in the implementation.
+`assemble_simulation` refuses the overlay under RK2/RK4 (GH #486) when any
+instantiated model emits a flow-to-stock score. The scores are differences of
+saved-step values, so the guard keeps them on Euler-stepped trajectories; the
+2020 paper (section 6.1) says the method is compatible with Runge-Kutta "in
+principle", and Simlin has not established that for RK-stepped runs.
 
 ### Performance on Very Large Models
 
@@ -2051,26 +2075,32 @@ cases remain deliberate carve-outs:
    synthesized compile-time equations, avoiding O(P^2) equation-text growth on
    models with very large same-partition loop sets (e.g. WRLD3).
 
-7. **Flow-to-stock numerator timing and `time_step` scaling**: The flow-to-stock
-   link score numerator uses `time_step * (PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow)))`
-   rather than the published bare `flow - PREVIOUS(flow)`. Two deliberate changes:
-   - *1-DT shift*: in Euler integration, the flow at t-1 drove the stock change
-     from t-1 to t, so `PREVIOUS(flow)` aligns the numerator and denominator to
-     the same causal interval. This produces results shifted by one DT compared
-     to reference SD software (Stella/iThink). The integration test
-     (`tests/integration/simulate_ltm.rs`) compensates by shifting reference
-     timestamps forward by DT when loading golden data. This convention is also
-     documented for end users in the reference doc's Section 3.2 (the "numerator
-     timing convention" note under
-     [Flow-to-Stock Link Score](../reference/ltm--loops-that-matter.md)).
-   - *`time_step` factor*: the denominator (second-order stock change) is
-     `dt * (netflow(t-dt) - netflow(t-2dt))` in Euler, carrying one `dt` that the
-     raw flow delta in the numerator lacks; without the factor every
-     flow-to-stock link score is `1/dt` too large and the error compounds once
-     per stock in a loop. The published Eq. 3 omits the factor because every
-     worked example in the papers uses dt=1. Verified empirically: at dt=0.25
-     an isolated loop scores +1.0 with the factor (4.0 without), and at dt=1
-     the paper's Table 3 values (1.25 / -0.25) reproduce exactly.
+7. **Time labeling, and the flow-to-stock score's window** -- two separate
+   facts:
+   - *Time labeling, for every link score*: Simlin labels the score computed
+     over `[t - dt, t]` (its reading of `PREVIOUS`) with `t`; the
+     Stella-derived golden data in `test/logistic_growth_ltm` labels the score
+     computed over `[t, t + dt]` with `t`. The integration test
+     (`tests/integration/simulate_ltm.rs`) therefore shifts the reference
+     timestamps forward by one DT when loading. That fixture has one flow per
+     stock, so its flow-to-stock scores are identically 1 in either convention
+     and the whole shift sits in the instantaneous links: with the relabel the
+     relative loop scores agree to the file's rounding, and inverting
+     `|b1|/|r1| = (pop/1000)/(1 - pop/1000)` on each golden column reproduces
+     `pop` at the column's own `t`. The convention is documented for end users
+     in the reference doc's Section 3.2 note under
+     [Flow-to-Stock Link Score](../reference/ltm--loops-that-matter.md).
+   - *Flow-to-stock window*: the flow-to-stock score is the paper's
+     implementation option (b) -- the instantaneous score of the stock's
+     net-flow aux with respect to the flow, `sign * |Δflow / Δnet|` -- read
+     over the same `[t - dt, t]` window as every other link, with no `dt`
+     factor, no stock history and a first value at `start + dt`. The paper's
+     Eq. 3 is written over stock differences, each of which carries one `dt`
+     under Euler; expressing `Δnet` as a flow difference removes the factor
+     rather than compensating for it. At dt=1 the paper's table values
+     (1.25 / -0.25) reproduce at the step of the change
+     (`tests/integration/ltm_flow_to_stock.rs`), and an isolated loop scores
+     `+/-1` at every dt (`tests/integration/ltm_dt_invariance.rs`).
 
 8. **Ceteris-paribus via AST transformation**: The papers describe re-evaluating
    equations with current values of one input and previous values of all others.

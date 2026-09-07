@@ -188,15 +188,7 @@ pub(crate) fn endpoint_dimensions(
 }
 
 /// The single integration method the assembled simulation actually runs, when
-/// it is NOT Euler.
-///
-/// LTM's 2023 flow-to-stock link-score formula
-/// (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) only aligns its numerator to
-/// the causal interval that drove the stock change from t-1 to t under Euler
-/// integration; under RK2/RK4 the sub-stepped stock update breaks that
-/// alignment and the link scores become mathematically meaningless. The VM
-/// and wasm backends both genuinely honor RK2/RK4 (distinct stepping loops),
-/// so the bad scores would look plausible while being wrong.
+/// it is NOT Euler -- the method the GH #486 guard keeps LTM off.
 ///
 /// A `CompiledSimulation` has exactly ONE `Specs.method`, resolved by
 /// `assemble_simulation` from the MAIN (root) model's `model_sim_specs`
@@ -223,15 +215,13 @@ pub(super) fn effective_non_euler_method(
 
 /// Whether `model_ltm_variables` emits at least one flow-to-stock link score
 /// for this model -- the EXACT precondition the GH #486/#663 non-Euler guard
-/// must gate on.
+/// gates on.
 ///
-/// A flow-to-stock link score is the only LTM synthetic var the Euler-only
-/// `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` numerator drives; under RK2/RK4
-/// it is mathematically meaningless. The guard previously gated on "the model
-/// has a stock", but that over-rejects a loop-free model (GH #663): in
+/// The guard keys on a flow-to-stock score rather than on "the model has a
+/// stock" because the latter over-rejects a loop-free model (GH #663): in
 /// exhaustive mode LTM scores only the edges of detected feedback loops, so an
 /// open-loop stock (a constant inflow that never reads the stock back) emits
-/// NO flow-to-stock score and nothing is corrupted.
+/// NO flow-to-stock score and there is nothing to guard.
 ///
 /// Crucially this is mode-aware where a loop-presence proxy is NOT: in
 /// DISCOVERY mode (user-forced or auto-flipped) and in any model with input
@@ -289,12 +279,7 @@ fn sim_method_display_name(method: datamodel::SimMethod) -> &'static str {
 pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> String {
     format!(
         "LTM (Loops That Matter) analysis requires Euler integration, but this model uses \
-         {}.  The flow-to-stock link-score formula assumes the Euler update \
-         `stock(t) = stock(t-1) + dt * flow(t-1)`, so its numerator \
-         `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` only aligns to the causal interval that \
-         drove the stock change under Euler.  Higher-order integrators sub-step the stock \
-         update, so the link scores would be mathematically meaningless.  Switch the \
-         integration method to Euler, or disable LTM analysis.",
+         {}.  Switch the integration method to Euler, or disable LTM analysis.",
         sim_method_display_name(method),
     )
 }
@@ -2026,29 +2011,33 @@ pub fn model_ltm_variables(
         });
     }
 
-    // Freeze helpers (GH #995) are minted per referencing partial with
-    // content-derived names, so the same frozen slice reached from several
-    // link scores emits byte-identical duplicates. Collapse them to one --
-    // duplicate names would mint colliding layout slots -- keeping the first
-    // occurrence; a same-name pair with DIFFERENT content would be a
-    // naming-scheme bug, so it is a debug panic rather than silently kept.
+    // A score's companion variables are minted per score with content-derived
+    // names -- a freeze helper (GH #995) once per partial that references the
+    // frozen slice, a stock's net-flow aux once per flow of the stock -- so
+    // the same companion reached from several link scores emits byte-identical
+    // duplicates. Collapse them to one -- duplicate names would mint colliding
+    // layout slots -- keeping the first occurrence; a same-name pair with
+    // DIFFERENT content would be a naming-scheme bug, so it is a debug panic
+    // rather than silently kept.
     {
-        let mut seen_freeze: HashMap<String, LtmSyntheticVar> = HashMap::new();
+        let mut seen_companion: HashMap<String, LtmSyntheticVar> = HashMap::new();
         vars.retain(|v| {
-            if !v.name.starts_with(crate::ltm_augment::FREEZE_HELPER_PREFIX) {
+            if !v.name.starts_with(crate::ltm_augment::FREEZE_HELPER_PREFIX)
+                && !v.name.starts_with(crate::ltm_augment::NET_FLOW_PREFIX)
+            {
                 return true;
             }
-            match seen_freeze.get(&v.name) {
+            match seen_companion.get(&v.name) {
                 Some(first) => {
                     debug_assert!(
                         first == v,
-                        "freeze helper name collision with differing content: {}",
+                        "companion variable name collision with differing content: {}",
                         v.name
                     );
                     false
                 }
                 None => {
-                    seen_freeze.insert(v.name.clone(), v.clone());
+                    seen_companion.insert(v.name.clone(), v.clone());
                     true
                 }
             }
@@ -2058,14 +2047,12 @@ pub fn model_ltm_variables(
     // Sort by evaluation-order category so the VM's sequential flow
     // evaluation respects the dependency chain: composites reference paths
     // which reference loop scores which reference link scores, and link
-    // scores referencing an aggregate node OR a freeze helper read its
-    // current-step value, so those fragments must run first. Within each
-    // category, sort lexically for determinism. (`compute_layout` section 3
-    // re-sorts LTM vars purely by name -- `$⁚ltm⁚agg⁚{n}` <
-    // `$⁚ltm⁚freeze⁚...` < `$⁚ltm⁚link_score⁚...` lexically, so both get
-    // their layout slots before any consumer there too -- but the runlist
-    // order is what the same-timestep ordering hazard turns on, and that
-    // comes from this sort.)
+    // scores referencing an aggregate node, a freeze helper OR a stock's
+    // net-flow aux read its current-step value, so those fragments must run
+    // first. Within each category, sort lexically for determinism.
+    // (`compute_layout` section 3 re-sorts LTM vars purely by name; layout
+    // order assigns slots, but the runlist order is what the same-timestep
+    // ordering hazard turns on, and that comes from this sort.)
     vars.sort_by(|a, b| {
         fn category(name: &str) -> u8 {
             // The agg check uses the `$⁚ltm⁚agg⁚` *prefix*, not a substring
@@ -2075,10 +2062,12 @@ pub fn model_ltm_variables(
             // agg aux it references.
             if crate::ltm_agg::is_synthetic_agg_name(name) {
                 0 // aggregate nodes: before everything that may reference them
-            } else if name.starts_with(crate::ltm_augment::FREEZE_HELPER_PREFIX) {
-                // Array-freeze helpers (GH #995): pure `PREVIOUS` reads of
-                // model variables, referenced by link scores at their
-                // current-step value -- run before every score.
+            } else if name.starts_with(crate::ltm_augment::FREEZE_HELPER_PREFIX)
+                || name.starts_with(crate::ltm_augment::NET_FLOW_PREFIX)
+            {
+                // Array-freeze helpers (GH #995) and net-flow auxes: pure
+                // reads of model variables, referenced by link scores at
+                // their current-step value -- run before every score.
                 1
             } else if name.contains("\u{205A}composite\u{205A}") {
                 5

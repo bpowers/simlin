@@ -94,8 +94,9 @@ use crate::common::{Error, UnitError};
 ///    NaN spreads through arithmetic into whatever reads it.
 /// 5. When LTM is enabled, `emit_conveyor_ltm_degraded_warnings` and
 ///    `emit_queue_ltm_degraded_warnings` -- one `Warning` per conveyor stock
-///    and per queue stock in THIS model, because LTM's flow-to-stock link-score
-///    formula assumes plain INTEG but both are non-INTEG stock types
+///    and per queue stock in THIS model, because LTM's flow-to-stock link score
+///    treats a stock's net flow as its rate of change (plain INTEG) but both
+///    are non-INTEG stock types
 ///    (docs/design/conveyors.md §9.6, docs/design/queues.md §10.5). Emitted here
 ///    rather than inside `model_ltm_variables` so each fires exactly once even
 ///    for a module-referenced sub-model (see those functions' rustdoc for the
@@ -401,11 +402,11 @@ fn emit_duplicate_variable_diagnostics(db: &dyn Db, model: SourceModel) {
 ///
 /// Both stock types have non-INTEG dynamics -- a conveyor's material rides a
 /// fixed-length belt and exits after the transit time, a queue is a FIFO of
-/// batches whose outflow is demand-driven -- so the change from t-1 to t is
-/// NOT `dt * inflow(t-1)`. LTM's flow-to-stock link-score numerator
-/// (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) assumes plain INTEG under
-/// Euler, so any link or loop score touching such a stock would be silently
-/// wrong. The salsa DIAGNOSTIC path never expands either stock type into its
+/// batches whose outflow is demand-driven -- so the stock's rate of change is
+/// NOT `inflows - outflows`. LTM's flow-to-stock link score is the partial of
+/// exactly that net flow (`ltm_augment::generate_flow_to_stock_equation`,
+/// which assumes plain INTEG), so any link or loop score touching such a
+/// stock would be silently wrong. The salsa DIAGNOSTIC path never expands either stock type into its
 /// hidden variables + native pass (only the special-stock build path
 /// `queue_compile::build_vm` does, which CLEARS the marker), so the `Compat`
 /// marker is still present here and the stock would be scored as plain INTEG.
@@ -450,8 +451,8 @@ fn emit_ltm_degraded_warnings(
         let msg = format!(
             "LTM (Loops That Matter) analysis over {noun} stock '{name}' is degraded: a {noun} \
              is a stock with non-INTEG dynamics{dynamics_detail}, but the flow-to-stock \
-             link-score numerator `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` assumes plain \
-             INTEG under Euler, so any link or loop score touching '{name}' may be wrong.  \
+             link score treats the stock's net flow `inflows - outflows` as its rate of \
+             change (plain INTEG), so any link or loop score touching '{name}' may be wrong.  \
              Treat scores involving this {noun} as advisory ({doc_ref})."
         );
         Diagnostic {

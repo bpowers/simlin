@@ -280,7 +280,7 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs flow-to-stock path)
 - **Severity**: medium
-- **Description**: The 2023 flow-to-stock link-score formula assumes Euler integration: `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` aligns the numerator to the causal interval that drove the stock change from t-1 to t. Under RK2/RK4 this alignment breaks and link scores become mathematically nonsensical. Nothing currently prevents a user from setting `integration_method = RK4` and `ltm_enabled = true`; they'd get numbers that look plausible but are wrong. Fix: emit a compile-time diagnostic (preferably an Error) when LTM is enabled on a model whose sim specs select a non-Euler integrator.
+- **Description**: LTM link scores are differences of saved-step values (a flow-to-stock score is `|Δflow / Δnet|` over the stock's net-flow aux), and whether they describe an RK-stepped trajectory faithfully has not been established, so `assemble_simulation` refuses LTM under RK2/RK4 (GH #486) when any instantiated model emits a flow-to-stock score. Open question: lift the refusal once the RK case is validated (the 2020 paper's section 6.1 calls the method compatible with Runge-Kutta "in principle").
 - **Tracked in**: #486 (LTM tracking epic: #488)
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-29

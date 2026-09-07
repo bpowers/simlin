@@ -151,11 +151,17 @@ fn smooth_of_module_output_project() -> datamodel::Project {
     project
 }
 
+/// One feedback loop whose flow reads an arrayed weight by a dynamic index,
+/// so the `level -> growth` score's partial freezes `weight[idx]` as
+/// `PREVIOUS(weight[PREVIOUS(idx, idx)])` and synthesizes a capture helper.
 fn ltm_loop_project() -> datamodel::Project {
     TestProject::new("fragment_input_ltm")
         .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("d", &["d1", "d2"])
+        .array_with_ranges("weight[d]", vec![("d1", "1"), ("d2", "2")])
+        .aux("idx", "1", None)
         .aux("rate", "0.1", None)
-        .flow("growth", "level * rate", None)
+        .flow("growth", "level * rate * weight[idx]", None)
         .stock("level", "10", &["growth"], &[], None)
         .build_datamodel()
 }
@@ -355,8 +361,10 @@ fn ltm_implicit_constructor_is_compile_ltm_implicit_var_fragments_input() {
 
     let helpers = model_ltm_implicit_var_info(&db, model, sync.project);
     assert!(
-        helpers.contains_key("$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0"),
-        "the growth->level score synthesizes PREVIOUS capture helpers"
+        helpers.contains_key("$⁚$⁚ltm⁚link_score⁚level→growth⁚0⁚arg0"),
+        "the level->growth score's frozen dynamic-index read synthesizes a PREVIOUS \
+         capture helper; got {:?}",
+        helpers.keys().collect::<Vec<_>>()
     );
     for (name, meta) in helpers.iter() {
         let production = crate::db::ltm::compile_ltm_implicit_var_fragment(

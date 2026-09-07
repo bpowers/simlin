@@ -152,10 +152,11 @@ fn ltm_capture_helpers_compile_exactly_the_phases_their_kind_demands() {
     }
 }
 
-/// The helpers the score generator actually mints -- the flow-to-stock
-/// score's nested `PREVIOUS` captures -- are flow-only: no initial fragment,
-/// since `PREVIOUS`'s fallback covers every read before the first step
-/// commits.
+/// The helpers the score generator actually mints -- here the frozen
+/// dynamic-index read `PREVIOUS(weight[PREVIOUS(idx, idx)])` of the
+/// `level -> growth` partial, whose argument is no static slot -- are
+/// flow-only: no initial fragment, since `PREVIOUS`'s fallback covers every
+/// read before the first step commits.
 #[test]
 fn generated_ltm_capture_helpers_are_flow_only() {
     use super::compile::{compile_ltm_implicit_var_fragment, ltm_helper_phases_present};
@@ -163,8 +164,11 @@ fn generated_ltm_capture_helpers_are_flow_only() {
     use crate::capture::CaptureKind;
 
     let project = TestProject::new("generated_ltm_capture_phases")
+        .named_dimension("d", &["d1", "d2"])
+        .array_with_ranges("weight[d]", vec![("d1", "1"), ("d2", "2")])
+        .aux("idx", "1", None)
         .stock("level", "100", &["growth"], &[], None)
-        .flow("growth", "level * rate", None)
+        .flow("growth", "level * rate * weight[idx]", None)
         .aux("rate", "0.1", None)
         .build_datamodel();
     let db = SimlinDb::default();
@@ -177,7 +181,7 @@ fn generated_ltm_capture_helpers_are_flow_only() {
         .collect();
     assert!(
         !captures.is_empty(),
-        "the flow-to-stock score mints nested PREVIOUS captures"
+        "the level -> growth score's frozen dynamic-index read mints a capture"
     );
     for meta in captures {
         assert_eq!(
@@ -2698,33 +2702,28 @@ fn delay3_ramp_project(in_submodel: bool) -> datamodel::Project {
 }
 
 /// The `input -> stock` link score of a `DELAY3` instance reads the bound
-/// port's two-step lag through a capture helper, at the main level and inside
-/// a sub-model alike.
+/// port through `PREVIOUS(input)`, at the main level and inside a sub-model
+/// alike.
 ///
-/// The flow-to-stock score (`ltm_augment::generate_flow_to_stock_equation`,
-/// Schoenberg et al. 2023 Eq. 3) is
-/// `|dt * (PREVIOUS(input) - PREVIOUS(PREVIOUS(input)))| / |second difference
-/// of stock|`, zero for the first two steps. The nested lag is a capture
-/// helper (`..⁚1⁚arg0 = PREVIOUS(input, 0)`) inside the `stdlib⁚delay3`
-/// instance, whose body snapshots the instance's BOUND port `input`; lowering
-/// resolves that port to its own slot (`Context::snapshot_storage`), so the
-/// helper is `0, 3, 4, 5, 6` (the fallback, then the lagged ramp).
+/// The score (`ltm_augment::generate_flow_to_stock_equation`) is
+/// `|Δinput / Δnet|` over the instance's net-flow aux
+/// `$⁚ltm⁚net⁚stock = input - flow_1`. `PREVIOUS(input)` snapshots the
+/// instance's BOUND port `input`; lowering resolves that port to its own slot
+/// (`Context::snapshot_storage`), so the lag reads the ramp one step back.
 ///
 /// Derived from the template (`stdlib/delay3.stmx`: `stock` inflow `input`,
 /// outflow `flow_1 = stock / (delay_time / 3)`, `delay_time = 2`, so
-/// `stock(0) = 3 * 2/3 = 2`): `stock = 2, 2, 3, 3.5, 4.25`, the numerator is
-/// `1` from t=2 on (the ramp rises by 1 per step), and the second differences
-/// are `1, -0.5, 0.25`, so the score is `1, 2, 4` at t=2..4.
+/// `stock(0) = 3 * 2/3 = 2`) with `input = 3, 4, 5, 6, 7`:
+/// `stock = 2, 2, 3, 3.5, 4.25`, `flow_1 = 3, 3, 4.5, 5.25, 6.375`, so
+/// `net = 0, 1, 0.5, 0.75, 0.625`; `Δinput` is `1` at every step and
+/// `Δnet = 1, -0.5, 0.25, -0.125`, so the score is `1, 2, 4, 8` at t=1..4.
 ///
-/// A parse that captured the port, or a lowering that could not address it,
-/// gave the helper no fragment at all -- the LTM tail appends helpers by
-/// bytecode presence, so the score silently read an unwritten 0 for the
-/// two-step lag and printed `4, 10, 24` (the numerator degenerated to the
-/// one-step-lagged ramp `4, 5, 6`) with no diagnostic. That is the
-/// silent-wrong-number class the invariant forbids, which is why the values
-/// are pinned here rather than only the helper's presence.
+/// A lowering that could not address the bound port would read an unwritten
+/// slot for the lag with no diagnostic -- the silent-wrong-number class the
+/// invariant forbids -- which is why the values are pinned, with the net aux
+/// beside them.
 #[test]
-fn delay3_input_to_stock_link_score_uses_the_two_step_lag_of_the_bound_port() {
+fn delay3_input_to_stock_link_score_reads_the_bound_port() {
     for (in_submodel, prefix) in [(false, ""), (true, "sub\u{00B7}")] {
         let project = delay3_ramp_project(in_submodel);
         let db = SimlinDb::default();
@@ -2743,9 +2742,9 @@ fn delay3_input_to_stock_link_score_uses_the_two_step_lag_of_the_bound_port() {
             results.get(&name).cloned().unwrap_or_else(|| {
                 let candidates: Vec<&String> = results
                     .keys()
-                    .filter(|k| k.contains("input\u{2192}stock"))
+                    .filter(|k| k.contains("delay3\u{00B7}$\u{205A}ltm"))
                     .collect();
-                panic!("{name} not in results; input->stock names: {candidates:?}")
+                panic!("{name} not in results; the instance's LTM names: {candidates:?}")
             })
         };
         let score = series(format!(
@@ -2753,19 +2752,15 @@ fn delay3_input_to_stock_link_score_uses_the_two_step_lag_of_the_bound_port() {
         ));
         assert_eq!(
             score,
-            vec![0.0, 0.0, 1.0, 2.0, 4.0],
-            "in_submodel={in_submodel}: the input -> stock link score must use the \
-             two-step lag of the bound port (it was 0, 0, 4, 10, 24 when the nested \
-             lag's helper silently failed to compile)"
+            vec![0.0, 1.0, 2.0, 4.0, 8.0],
+            "in_submodel={in_submodel}: the input -> stock link score is |Δinput / Δnet| \
+             with the bound port's one-step lag"
         );
-        let helper = series(format!(
-            "{prefix}$⁚delayed⁚0⁚delay3\u{00B7}$⁚$⁚ltm⁚link_score⁚input\u{2192}stock⁚1⁚arg0"
-        ));
+        let net = series(format!("{prefix}$⁚delayed⁚0⁚delay3\u{00B7}$⁚ltm⁚net⁚stock"));
         assert_eq!(
-            helper,
-            vec![0.0, 3.0, 4.0, 5.0, 6.0],
-            "in_submodel={in_submodel}: the nested-lag helper holds PREVIOUS(input, 0) \
-             of the bound port"
+            net,
+            vec![0.0, 1.0, 0.5, 0.75, 0.625],
+            "in_submodel={in_submodel}: the instance's net-flow aux is input - flow_1"
         );
     }
 }

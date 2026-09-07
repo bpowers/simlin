@@ -86,9 +86,18 @@ fn load_ltm_results(file_path: &str) -> StdResult<LtmResults, Box<dyn Error>> {
 
     let header = rdr.headers()?;
 
-    // The reference data appears to be shifted by 1 DT to the left compared to our output.
-    // Values at reference t=N match our calculations at t=N+1.
-    // We shift the reference timestamps forward by 1 when loading.
+    // A time-labeling convention, applied to EVERY link score: the reference
+    // tool labels the score computed over `[t, t + dt]` with `t`, while
+    // Simlin labels the same computation, over `[t - dt, t]`, with `t` (its
+    // reading of `PREVIOUS`). So a reference value at `t = N` is Simlin's at
+    // `t = N + 1`, and the reference timestamps are shifted forward by one
+    // dt when loading. This is not a flow-to-stock timing effect: the
+    // fixture has one flow per stock, so its flow-to-stock scores are
+    // identically 1 in any convention, and the whole shift sits in the
+    // instantaneous links -- with the +dt relabel the relative loop scores
+    // agree to the file's rounding, and inverting |b1|/|r1| =
+    // (pop/1000)/(1 - pop/1000) on each reference column reproduces pop at
+    // the column's own t.
     let dt = 1.0; // DT from the logistic growth model
 
     let mut times: Vec<f64> = Vec::new();
@@ -174,8 +183,10 @@ fn ensure_ltm_results(
                     let actual_value = *actual_value;
                     actual_series.push((time, actual_value));
 
-                    // Skip t=1 comparison - at initialization we don't have enough history
-                    // for meaningful link scores (need PREVIOUS values)
+                    // The reference's first column (its t = 0, relabelled
+                    // t = 1) is the reference tool's own startup zero; Simlin's
+                    // t = 1 score is its first computed value. Skip that one
+                    // column.
                     if (time - 1.0).abs() < 1e-9 {
                         break;
                     }
@@ -2244,16 +2255,12 @@ fn test_a2a_flow_to_stock_link_score() {
 /// slot is exactly `+1` at `dt = 1` regardless of that element's gain
 /// (Schoenberg, Davidsen & Eberlein 2020, sec. 4.1 / Appendix B).
 ///
-/// The bug: `generate_flow_to_stock_equation` emitted the flow-to-stock
-/// link score with *bare* arrayed names. Inside the resulting
-/// `Equation::ApplyToAll` the `PREVIOUS(PREVIOUS(...))` terms route their
-/// inner `PREVIOUS(name)` through a synthesized *scalar* helper aux (see
-/// `builtins_visitor`), which cannot hold an arrayed value -- so the
-/// helper fragment failed to compile and the LTM compiler silently
-/// stubbed it to 0. With the nested-PREVIOUS terms zeroed the score
-/// collapsed to `1/9` (`= 0.111...`) instead of `1`. `dt = 1` is chosen
-/// so the Finding-1 `dt` factor is a no-op and any deviation from `+1` is
-/// purely Finding 2.
+/// The regression this guards against is an arrayed flow-to-stock score
+/// whose fragment fails to compile per element -- a bare arrayed name in a
+/// position the apply-to-all expansion cannot hold, say -- and is silently
+/// stubbed to 0, collapsing the loop score to a wrong constant (`1/9` was
+/// the observed value) instead of `1`. `dt = 1` is chosen so any deviation
+/// from `+1` is a per-element compile failure, not a step-size effect.
 #[test]
 fn arrayed_isolated_loop_raw_score_is_one_per_element() {
     let project = TestProject::new("arrayed_isolated_loop")
@@ -2289,10 +2296,9 @@ fn arrayed_isolated_loop_raw_score_is_one_per_element() {
 
     // Two regions -> two per-element loop-score slots (slot 0 = north,
     // slot 1 = south). Each is an isolated reinforcing one-stock loop, so
-    // each slot is exactly +1 after the two-step startup guard (the
-    // flow-to-stock score's second-order denominator needs two steps of
-    // history before it is defined).
-    const STARTUP_STEPS: usize = 2;
+    // each slot is exactly +1 after the one-step startup guard (every score
+    // reads one step of history).
+    const STARTUP_STEPS: usize = 1;
     for (elem, region) in ["north", "south"].iter().enumerate() {
         let slot = base_offset + elem;
         for step in 0..results.step_count {
@@ -2307,8 +2313,8 @@ fn arrayed_isolated_loop_raw_score_is_one_per_element() {
                 assert!(
                     (value - 1.0).abs() < 1e-6,
                     "region {region}: arrayed isolated loop score at step {step} is {value}, \
-                     expected exactly +1. A value near 1/9 means the flow-to-stock link \
-                     score's nested PREVIOUS terms were stubbed to 0 (LTM review Finding 2)."
+                     expected exactly +1. A constant other than 1 means part of a \
+                     per-element score fragment was silently stubbed to 0."
                 );
             }
         }
@@ -8071,7 +8077,7 @@ fn test_no_duplicate_ltm_vars_with_agg_routed_and_direct_edge() {
 /// Build a 2-region `share[r] = pop[r] / SUM(pop[*])` model with heterogeneous
 /// stock initial values (`pop[big] >> pop[small]`), `pop` fed back by
 /// `update[r] = share[r] * pop[r] * c` -- the `* pop[r]` makes growth curved
-/// (a near-constant feedback flow has ~zero second-order differences, so the
+/// (a near-constant feedback flow has ~zero step-to-step change, so the
 /// flow→stock link score -- and thus every loop score -- would vanish; the
 /// curvature keeps discovery's loop scores non-degenerate). The
 /// reducer `SUM(pop[*])` is a subexpression, so Phase 5 hoists it into

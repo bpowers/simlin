@@ -1149,14 +1149,21 @@ fn test_model_ltm_fragment_diagnostics_emits_warning() {
 /// The failure is injected via `LtmFragmentFailureGuard` (the same GH #547
 /// mechanism the synthetic-var tests use, extended to the helper compile
 /// path) so this test survives every real helper-compile bug being fixed.
-/// The fixture's flow-to-stock link score genuinely mints `arg0` helpers
-/// (its `PREVIOUS(PREVIOUS(cap_flow))` nested capture), pinned below so the
-/// guard pattern cannot silently match nothing.
+/// The fixture's `cap_stock -> aux_0` link score genuinely mints an `arg0`
+/// helper (the frozen dynamic-index read `PREVIOUS(weight[PREVIOUS(idx,
+/// idx)])`), pinned below so the guard pattern cannot silently match nothing.
 #[test]
 fn test_model_ltm_fragment_diagnostics_covers_implicit_helpers() {
     use crate::db::{LtmFragmentFailureGuard, model_ltm_implicit_var_info};
 
-    let project = build_chain_scc_project("implicit_frag_fail", 5);
+    let project = crate::test_common::TestProject::new("implicit_frag_fail")
+        .named_dimension("d", &["d1", "d2"])
+        .array_with_ranges("weight[d]", vec![("d1", "1"), ("d2", "2")])
+        .aux("idx", "1", None)
+        .aux("aux_0", "cap_stock * weight[idx]", None)
+        .flow("cap_flow", "aux_0", None)
+        .stock("cap_stock", "0", &["cap_flow"], &[], None)
+        .build_datamodel();
     let db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
@@ -3888,15 +3895,9 @@ fn test_ltm_var_name_index_matches_vars() {
 
 // ── GH #486: LTM requires Euler integration ─────────────────────────────
 //
-// The 2023 flow-to-stock link-score formula
-// (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) only aligns the numerator to
-// the causal interval that drove the stock change from t-1 to t under Euler
-// integration. RK2/RK4 sub-step the stock update, so that alignment breaks
-// and the resulting link scores are mathematically meaningless. Non-Euler
-// integration IS honored at runtime (the VM and wasm backends both have
-// distinct RK2/RK4 stepping loops), so the wrong scores would look plausible
-// but be wrong -- a silent-correctness hazard. The engine therefore rejects
-// the combination at sim-compile time.
+// The engine keeps LTM on Euler-stepped runs and rejects the combination of
+// the overlay with RK2/RK4 at sim-compile time, gated on a flow-to-stock
+// score actually being emitted (`model_emits_flow_to_stock_score`).
 //
 // CRITICAL granularity (the multi-model probes below): the VM has a SINGLE
 // global integration method, taken from the MAIN (root) model's

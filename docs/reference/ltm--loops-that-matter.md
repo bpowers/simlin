@@ -345,7 +345,9 @@ flow, not the flow's value. This makes it invariant to how flows are structurall
 specified: combining two separate flows into one net flow (a purely cosmetic choice with no
 mathematical effect on the model) produces identical LTM results. This ensures that
 analysis depends only on the model's mathematical behavior, not on the modeler's structural
-presentation choices.
+presentation choices. Simlin holds this at every time step: a stock with separate flows and
+its twin with one net flow give the same flow-to-stock link scores and the same relative
+loop scores at the same `t` (`tests/integration/ltm_flow_to_stock.rs`).
 
 This aggregation invariance is the key 2023 correction. Any value-based flow-to-stock
 formulation is deprecated and should not be used.
@@ -379,42 +381,29 @@ instantaneous link score. Implementors can either: (a) use this formula directly
 disaggregated flows, or (b) automatically aggregate all flows into net flows and use link
 score 1 for all net-flow-to-stock links. Both produce identical results.
 
-> **Simlin implementation note: numerator timing convention.** The discrete numerator
-> `Delta(i)` has two valid renderings, and Simlin's choice produces output shifted by one
-> DT relative to reference SD software (Stella/iThink) for the same model:
+> **Simlin implementation note.** Simlin takes option (b): every stock with a scored
+> flow-to-stock link gets a synthetic net-flow auxiliary `$⁚ltm⁚net⁚{stock} = inflows -
+> outflows`, and the flow-to-stock link score is the ordinary instantaneous score of that
+> auxiliary with respect to the flow -- `sign * |Delta(flow) / Delta(net)|`, the polarity
+> structural (+1 inflow, -1 outflow). `Delta(net)` is the `Delta(S_t) - Delta(S_{t-dt})`
+> above expressed as a flow difference, so no `dt` appears and the score reads the same
+> `[t - dt, t]` window as every other link score in the model: a loop's link scores all
+> describe one interval, the score is the same whether the stock's flows are written
+> separately or as one net flow, and it is defined from the first step after the start like
+> every other link (0 at `TIME = INITIAL_TIME`).
 >
-> - `i(t) - i(t-dt)` -- the change in the *current* flow rate (the Stella convention).
-> - `i(t-dt) - i(t-2dt)` -- the change in the flow over the interval that *drove* the
->   measured stock change (the Simlin convention).
->
-> Simlin uses the second form. The rationale is causal-interval alignment: under Euler
-> integration the flow value at `t-dt` is what drove the stock change measured at `t`
-> (`S(t) - S(t-dt) = dt * i(t-dt)`), so taking the change in *that* flow puts the numerator
-> and the second-order stock-change denominator on the same causal interval. Concretely,
-> Simlin generates the numerator as `time_step * (PREVIOUS(i) - PREVIOUS(PREVIOUS(i)))`,
-> i.e. `i(t-dt) - i(t-2dt)` (the `time_step` factor is the separate dimensional
-> correction discussed in the design doc, not part of the timing choice).
->
-> Both renderings are mathematically valid and have identical continuous-time limits: as
-> `dt -> 0` both converge to the Section 3.3 continuous ratio `|di/dt / d^2S/dt^2|`
-> (Eq. 6 of Schoenberg, Hayward, and Eberlein 2023), which is
-> timing-convention-agnostic. The discrete divergence is purely a one-DT phase shift of an
-> otherwise numerically-identical series.
->
-> **User-visible consequence.** A user comparing Simlin LTM output against Stella output
-> for the same model and inputs will see numerically identical link/loop scores shifted by
-> one DT. This is not a bug in either tool. To reconcile the two when comparing across
-> tools, shift one set of timestamps by `+/-DT`: Simlin's value at time `t` corresponds to
-> Stella's value at time `t-DT`. (Simlin's own LTM integration tests apply exactly this
-> compensation when validating against reference golden data -- they shift the reference
-> timestamps forward by DT before comparing.)
->
-> This convention is documented per flow-to-stock link. A separate, distinct issue
-> concerns window consistency *within* a loop's chain of links; that is tracked
-> independently and is not the same as this numerator timing choice. See divergence #6,
-> "Flow-to-stock numerator timing and `time_step` scaling," in
-> [the design doc](../design/ltm--loops-that-matter.md) for the implementation details and
-> the empirical verification.
+> **Time labeling, for every link score.** Simlin labels the score computed over
+> `[t - dt, t]` with `t` (its reading of `PREVIOUS`). Stella labels the score computed over
+> `[t, t + dt]` with `t`: on the logistic-growth fixture (`test/logistic_growth_ltm`, one
+> flow per stock, so its flow-to-stock scores are 1 in any convention) Stella's relative
+> loop scores match Simlin's relabelled by `+dt` to the file's rounding, and inverting
+> `|b1|/|r1| = (pop/1000)/(1 - pop/1000)` on each Stella column reproduces `pop` at that
+> column's own `t`. A user comparing Simlin output against Stella output for the same model
+> therefore sees the same link and loop scores one DT apart: Simlin's value at `t` is
+> Stella's at `t - dt`. Simlin's LTM integration test applies exactly that shift to the
+> reference timestamps. Whether Stella computes a multi-flow stock's flow-to-stock score
+> over the same window as its other links is not verifiable from the data in this
+> repository; the paper's aggregation-invariance argument requires it.
 
 ### 3.3 Continuous-Time Form
 
@@ -905,7 +894,9 @@ ones, as demonstrated by the three-party arms race model (Section 12.2).
 - In principle compatible with Runge-Kutta and other integration methods
 - The flow-to-stock formula requires values from two previous timesteps (Delta(S_t) and
   Delta(S_{t-dt})), so link scores for flow-to-stock links are undefined for the first
-  two timesteps
+  two timesteps (Simlin: written as the flow difference `Delta(net)` of the stock's
+  net-flow auxiliary, the score needs one previous timestep and is defined from the first
+  step after the start, like every other link)
 
 ### 9.2 Equation Re-evaluation Cost
 

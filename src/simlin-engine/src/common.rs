@@ -490,8 +490,8 @@ pub enum ErrorCode {
     QueueOverflowNotOnQueue,
     /// LTM (Loops That Matter) analysis was requested on a model containing a
     /// queue. A queue is a stock with non-INTEG dynamics (a FIFO of batches),
-    /// so the flow-to-stock link-score numerator assumes plain INTEG under
-    /// Euler and any score touching the queue may be wrong. Emitted as a
+    /// so the flow-to-stock link score, which treats the stock's net flow as
+    /// its rate of change, and any score touching the queue may be wrong. Emitted as a
     /// Warning naming the queue, mirroring `ConveyorLtmDegraded`
     /// (docs/design/queues.md §10.5).
     QueueLtmDegraded,

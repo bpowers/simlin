@@ -3984,17 +3984,43 @@ fn flow_to_stock_test_flow(ident: &str, eqn: Equation) -> Variable {
     }
 }
 
-/// LTM deep-review Finding 2: for an *arrayed* stock the flow-to-stock
-/// link-score equation must reference the stock and flow with explicit
-/// dimension subscripts. A *bare* arrayed name nested inside
-/// `PREVIOUS(PREVIOUS(...))` is routed through a synthesized *scalar*
-/// helper aux (see `builtins_visitor`) that cannot hold an arrayed
-/// value -- the fragment then fails to compile and the LTM compiler
-/// silently stubs it to 0, collapsing the score to a wrong constant
-/// (`1/9` for the canonical pop/growth model instead of the
-/// isolated-loop invariant `1`).
+/// The `"{net}"` reference a flow-to-stock score reads: the stock's net-flow
+/// aux, quoted (its name needs quoting), with `suffix` (`""` or `[Dim]`).
+fn net_ref(stock: &str, suffix: &str) -> String {
+    format!("\"{}\"{suffix}", net_flow_var_name(stock))
+}
+
+/// The text of a scalar stock's flow-to-stock score: the standard guard form
+/// of the stock's net-flow aux with respect to the flow, the numerator the
+/// flow's own delta (the folded partial of a linear sum; an inflow keeps its
+/// sign), every reference bare. Nothing reads the stock, and no `dt` appears.
 #[test]
-fn test_flow_to_stock_arrayed_subscripts_references() {
+fn flow_to_stock_scalar_inflow_is_the_net_flow_partial() {
+    let stock =
+        flow_to_stock_test_stock("s", Equation::Scalar("100".to_string()), &["births"], &[]);
+    let flow = flow_to_stock_test_flow("births", Equation::Scalar("s * 0.1".to_string()));
+
+    let equation = generate_flow_to_stock_equation("births", "s", &flow, &stock);
+    let LtmEquation::Scalar(arm) = &equation else {
+        panic!("scalar stock must yield Equation::Scalar; got: {equation:?}");
+    };
+    let net = net_ref("s", "");
+    assert_eq!(
+        &*arm.text,
+        format!(
+            "if (TIME = INITIAL_TIME) then 0 else if (({net} - PREVIOUS({net})) = 0) OR \
+             ((births - PREVIOUS(births)) = 0) then 0 else SAFEDIV((births - \
+             PREVIOUS(births)), ABS(({net} - PREVIOUS({net}))), 0) * SIGN((births - \
+             PREVIOUS(births)))"
+        )
+    );
+}
+
+/// An arrayed stock's score is `Equation::ApplyToAll` over the stock's
+/// dimensions, the flow and the net aux both subscripted by them (a scalar
+/// per-element access under the iteration).
+#[test]
+fn flow_to_stock_arrayed_inflow_subscripts_flow_and_net() {
     let stock = flow_to_stock_test_stock(
         "pop",
         Equation::ApplyToAll(vec!["region".to_string()], "100".to_string()),
@@ -4007,71 +4033,26 @@ fn test_flow_to_stock_arrayed_subscripts_references() {
     );
 
     let equation = generate_flow_to_stock_equation("growth", "pop", &flow, &stock);
-    let text = match &equation {
-        LtmEquation::ApplyToAll(dims, arm) => {
-            assert_eq!(dims, &vec!["region".to_string()]);
-            &arm.text
-        }
-        other => panic!("arrayed stock must yield LtmEquation::ApplyToAll; got: {other:?}"),
+    let LtmEquation::ApplyToAll(dims, arm) = &equation else {
+        panic!("arrayed stock must yield LtmEquation::ApplyToAll; got: {equation:?}");
     };
-
-    // Every stock/flow occurrence carries the dimension subscript --
-    // including the nested-PREVIOUS terms, which are exactly the ones
-    // that break with a bare arrayed name.
-    assert!(
-        text.contains("PREVIOUS(PREVIOUS(growth[region]))"),
-        "nested-PREVIOUS flow term must be subscripted; got: {text}"
-    );
-    assert!(
-        text.contains("PREVIOUS(PREVIOUS(pop[region]))"),
-        "nested-PREVIOUS stock term must be subscripted; got: {text}"
-    );
-    // ...and no bare arrayed name survives as a PREVIOUS argument.
-    assert!(
-        !text.contains("PREVIOUS(growth)") && !text.contains("PREVIOUS(growth,"),
-        "no bare arrayed flow reference may remain; got: {text}"
-    );
-    assert!(
-        !text.contains("PREVIOUS(pop)") && !text.contains("PREVIOUS(pop,"),
-        "no bare arrayed stock reference may remain; got: {text}"
+    assert_eq!(dims, &vec!["region".to_string()]);
+    let net = net_ref("pop", "[region]");
+    assert_eq!(
+        &*arm.text,
+        format!(
+            "if (TIME = INITIAL_TIME) then 0 else if (({net} - PREVIOUS({net})) = 0) OR \
+             ((growth[region] - PREVIOUS(growth[region])) = 0) then 0 else \
+             SAFEDIV((growth[region] - PREVIOUS(growth[region])), ABS(({net} - \
+             PREVIOUS({net}))), 0) * SIGN((growth[region] - PREVIOUS(growth[region])))"
+        )
     );
 }
 
-/// Guard: a *scalar* stock's flow-to-stock equation must NOT gain
-/// subscripts -- it stays the bare-name `Equation::Scalar` form so the
-/// scalar isolated-loop invariant (pinned by `ltm_dt_invariance.rs`)
-/// is unaffected.
+/// An outflow's polarity is structural: its numerator is the negated flow
+/// delta, `PREVIOUS(flow) - flow`, and nothing else changes.
 #[test]
-fn test_flow_to_stock_scalar_stays_bare() {
-    let stock =
-        flow_to_stock_test_stock("s", Equation::Scalar("100".to_string()), &["births"], &[]);
-    let flow = flow_to_stock_test_flow("births", Equation::Scalar("s * 0.1".to_string()));
-
-    let equation = generate_flow_to_stock_equation("births", "s", &flow, &stock);
-    let text = match &equation {
-        LtmEquation::Scalar(arm) => &arm.text,
-        other => panic!("scalar stock must yield Equation::Scalar; got: {other:?}"),
-    };
-
-    assert!(
-        text.contains("PREVIOUS(PREVIOUS(births))"),
-        "scalar flow term must stay bare; got: {text}"
-    );
-    assert!(
-        text.contains("PREVIOUS(PREVIOUS(s))"),
-        "scalar stock term must stay bare; got: {text}"
-    );
-    assert!(
-        !text.contains('['),
-        "scalar flow-to-stock equation must have no subscripts; got: {text}"
-    );
-}
-
-/// An arrayed *outflow* keeps the negative structural sign while still
-/// being subscripted: the sign is applied outside `ABS()`, independent
-/// of the subscripting.
-#[test]
-fn test_flow_to_stock_arrayed_outflow_sign() {
+fn flow_to_stock_outflow_negates_the_numerator() {
     let stock = flow_to_stock_test_stock(
         "pop",
         Equation::ApplyToAll(vec!["region".to_string()], "100".to_string()),
@@ -4084,18 +4065,153 @@ fn test_flow_to_stock_arrayed_outflow_sign() {
     );
 
     let equation = generate_flow_to_stock_equation("deaths", "pop", &flow, &stock);
-    let text = match &equation {
-        LtmEquation::ApplyToAll(_, arm) => &arm.text,
-        other => panic!("arrayed stock must yield Equation::ApplyToAll; got: {other:?}"),
+    let LtmEquation::ApplyToAll(_, arm) = &equation else {
+        panic!("arrayed stock must yield LtmEquation::ApplyToAll; got: {equation:?}");
     };
-
     assert!(
-        text.contains("-ABS(SAFEDIV("),
-        "outflow link score must carry the negative structural sign; got: {text}"
+        arm.text
+            .contains("SAFEDIV((PREVIOUS(deaths[region]) - deaths[region]), ABS(("),
+        "an outflow's numerator is the negated flow delta; got: {}",
+        arm.text
     );
     assert!(
-        text.contains("PREVIOUS(PREVIOUS(deaths[region]))"),
-        "outflow must still be subscripted; got: {text}"
+        arm.text
+            .ends_with("* SIGN((deaths[region] - PREVIOUS(deaths[region])))"),
+        "the sign factor is the flow's own delta, unnegated; got: {}",
+        arm.text
+    );
+}
+
+/// A flow declared over other dimensions than its stock's is spelled bare
+/// (the compiler resolves it through the wiring's implicit subscripts), while
+/// the net aux keeps the stock's subscript; so is a scalar flow into an
+/// arrayed stock, which broadcasts into every element's net flow.
+#[test]
+fn flow_to_stock_flow_over_other_dims_or_scalar_is_spelled_bare() {
+    let stock = flow_to_stock_test_stock(
+        "level",
+        Equation::ApplyToAll(vec!["suba".to_string()], "100".to_string()),
+        &["inflow", "fill"],
+        &[],
+    );
+    let mapped = flow_to_stock_test_flow(
+        "inflow",
+        Equation::ApplyToAll(vec!["dimb".to_string()], "1".to_string()),
+    );
+    let scalar = flow_to_stock_test_flow("fill", Equation::Scalar("2".to_string()));
+    let net = net_ref("level", "[suba]");
+
+    for (name, flow) in [("inflow", &mapped), ("fill", &scalar)] {
+        let equation = generate_flow_to_stock_equation(name, "level", flow, &stock);
+        let LtmEquation::ApplyToAll(dims, arm) = &equation else {
+            panic!("arrayed stock must yield LtmEquation::ApplyToAll; got: {equation:?}");
+        };
+        assert_eq!(dims, &vec!["suba".to_string()]);
+        assert_eq!(
+            &*arm.text,
+            format!(
+                "if (TIME = INITIAL_TIME) then 0 else if (({net} - PREVIOUS({net})) = 0) OR \
+                 (({name} - PREVIOUS({name})) = 0) then 0 else SAFEDIV(({name} - \
+                 PREVIOUS({name})), ABS(({net} - PREVIOUS({net}))), 0) * SIGN(({name} - \
+                 PREVIOUS({name})))"
+            )
+        );
+    }
+}
+
+/// The net-flow aux of a scalar stock: `(inflows) - (outflows)`, each side the
+/// declared flows in declaration order.
+#[test]
+fn net_flow_equation_sums_inflows_minus_outflows() {
+    let stock = flow_to_stock_test_stock(
+        "s",
+        Equation::Scalar("100".to_string()),
+        &["births", "immigration"],
+        &["deaths"],
+    );
+    let births = flow_to_stock_test_flow("births", Equation::Scalar("1".to_string()));
+    let immigration = flow_to_stock_test_flow("immigration", Equation::Scalar("1".to_string()));
+    let deaths = flow_to_stock_test_flow("deaths", Equation::Scalar("1".to_string()));
+
+    let equation = generate_net_flow_equation(
+        &stock,
+        &[
+            ("births", Some(&births)),
+            ("immigration", Some(&immigration)),
+        ],
+        &[("deaths", Some(&deaths))],
+    );
+    let LtmEquation::Scalar(arm) = &equation else {
+        panic!("scalar stock must yield Equation::Scalar; got: {equation:?}");
+    };
+    assert_eq!(&*arm.text, "(births + immigration) - (deaths)");
+}
+
+/// A side the stock has no flows on is `0`, so a one-sided stock's net flow
+/// is its flows' sum with the structural sign and the score's `Δnet` is
+/// well-defined.
+#[test]
+fn net_flow_equation_uses_zero_for_a_missing_side() {
+    let births = flow_to_stock_test_flow("births", Equation::Scalar("1".to_string()));
+    let deaths = flow_to_stock_test_flow("deaths", Equation::Scalar("1".to_string()));
+
+    let inflow_only =
+        flow_to_stock_test_stock("s", Equation::Scalar("100".to_string()), &["births"], &[]);
+    let LtmEquation::Scalar(arm) =
+        generate_net_flow_equation(&inflow_only, &[("births", Some(&births))], &[])
+    else {
+        panic!("scalar stock must yield Equation::Scalar");
+    };
+    assert_eq!(&*arm.text, "(births) - (0)");
+
+    let outflow_only =
+        flow_to_stock_test_stock("s", Equation::Scalar("100".to_string()), &[], &["deaths"]);
+    let LtmEquation::Scalar(arm) =
+        generate_net_flow_equation(&outflow_only, &[], &[("deaths", Some(&deaths))])
+    else {
+        panic!("scalar stock must yield Equation::Scalar");
+    };
+    assert_eq!(&*arm.text, "(0) - (deaths)");
+}
+
+/// The net-flow aux is shaped like the stock, and its flows are spelled as
+/// the score spells them: subscripted when their dimensions are the stock's,
+/// bare for a flow over other dimensions, a scalar flow, or a flow the model
+/// could not lower.
+#[test]
+fn net_flow_equation_is_shaped_like_the_stock() {
+    let stock = flow_to_stock_test_stock(
+        "pop",
+        Equation::ApplyToAll(vec!["region".to_string()], "100".to_string()),
+        &["growth", "mapped", "fill", "broken"],
+        &["deaths"],
+    );
+    let region = |eqn: &str| Equation::ApplyToAll(vec!["region".to_string()], eqn.to_string());
+    let growth = flow_to_stock_test_flow("growth", region("1"));
+    let deaths = flow_to_stock_test_flow("deaths", region("1"));
+    let mapped = flow_to_stock_test_flow(
+        "mapped",
+        Equation::ApplyToAll(vec!["dimb".to_string()], "1".to_string()),
+    );
+    let fill = flow_to_stock_test_flow("fill", Equation::Scalar("1".to_string()));
+
+    let equation = generate_net_flow_equation(
+        &stock,
+        &[
+            ("growth", Some(&growth)),
+            ("mapped", Some(&mapped)),
+            ("fill", Some(&fill)),
+            ("broken", None),
+        ],
+        &[("deaths", Some(&deaths))],
+    );
+    let LtmEquation::ApplyToAll(dims, arm) = &equation else {
+        panic!("arrayed stock must yield LtmEquation::ApplyToAll; got: {equation:?}");
+    };
+    assert_eq!(dims, &vec!["region".to_string()]);
+    assert_eq!(
+        &*arm.text,
+        "(growth[region] + mapped + fill + broken) - (deaths[region])"
     );
 }
 

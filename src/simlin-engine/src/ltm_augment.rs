@@ -6,8 +6,9 @@
 //!
 //! This module generates synthetic variables for Loops That Matter (LTM) analysis.
 //! The generated equations use the intrinsic two-argument `PREVIOUS(value, initial)`
-//! function. First- and second-timestep guards are expressed explicitly with
-//! `TIME = INITIAL_TIME` and `PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME`.
+//! function. Every score reads one step of history, so the first-timestep guard
+//! is expressed explicitly with `TIME = INITIAL_TIME` and every score's first
+//! value is at the step after the start.
 
 use crate::ast::{Expr0, IndexExpr0, print_eqn};
 use crate::builtins::UntypedBuiltinFn;
@@ -3100,7 +3101,8 @@ fn target_iterated_dim_names_canonical(to_var: &Variable) -> Vec<String> {
 /// other-dep correspondence check; `None` keeps the historical permissive
 /// collapse for every dep (legacy / db-less callers).
 ///
-/// Flow-to-stock links use a fixed structural formula and ignore `shape`,
+/// A flow-to-stock link is the closed-form partial of the stock's net-flow
+/// aux ([`generate_flow_to_stock_equation`]) and ignores `shape`,
 /// `source_dim_elements`, `dim_ctx`, and `dep_dims`.
 #[allow(clippy::too_many_arguments)] // threads the link-score generation context
 pub(crate) fn generate_link_score_equation_for_link(
@@ -3134,8 +3136,8 @@ pub(crate) fn generate_link_score_equation_for_link(
 /// Returns `Err([`PartialEquationError`])` when the target's equation text
 /// cannot be parsed for the ceteris-paribus partial (GH #311); the
 /// db-bearing caller turns this into a `Warning` and skips the variable.
-/// The flow-to-stock branch uses a fixed structural formula with no parse,
-/// so it is infallible and always returns `Ok`.
+/// The flow-to-stock branch is a closed-form partial with no parse, so it
+/// is infallible and always returns `Ok`.
 #[allow(clippy::too_many_arguments)] // threads the link-score generation context
 fn generate_link_score_equation(
     from: &Ident<Canonical>,
@@ -3157,14 +3159,14 @@ fn generate_link_score_equation(
     // Binding `flow_var` here -- rather than computing an `is_flow_to_stock`
     // bool and re-fetching the (proven-present) flow variable -- lets the
     // generator take a plain `&Variable`.
-    if to_var.is_stock()
-        && let Some(flow_var) = all_vars.get(from)
-        && matches!(flow_var.kind, VarKind::Aux { is_flow: true, .. })
+    if let Some(flow_var) = all_vars
+        .get(from)
+        .filter(|fv| flow_to_stock_wiring(Some(fv), to_var).is_some())
     {
-        // Flow-to-stock uses a fixed structural formula -- no AST parse,
-        // so neither `shape` nor `source_dim_elements` matter here. The
-        // flow variable is passed in only for its declared dimensions, so
-        // an arrayed flow can be referenced with an explicit subscript.
+        // The flow-to-stock score is closed-form -- no AST parse, so
+        // neither `shape` nor `source_dim_elements` matter here. The flow
+        // variable is passed in only for its declared dimensions, so an
+        // arrayed flow can be referenced with an explicit subscript.
         Ok(generate_flow_to_stock_equation(
             from.as_str(),
             to.as_str(),
@@ -3223,7 +3225,9 @@ fn link_score_guard_form(partial_eq: &str, target_ref: &str, source_ref: &str) -
 /// the changed-first form (numerator `(partial - PREVIOUS(target))`), the
 /// changed-last form (numerator `(target - frozen)` -- the
 /// [`shaped_guard_form_text`] fallback and
-/// [`generate_scalar_feeder_to_agg_equation`]), and any future attribution
+/// [`generate_scalar_feeder_to_agg_equation`]), the flow-to-stock score
+/// (numerator `+/-Δflow`, the folded partial of the stock's net-flow aux --
+/// [`generate_flow_to_stock_equation`]), and any future attribution
 /// convention with the same guard structure.
 fn link_score_guard_form_with_numerator(
     numerator: &str,
@@ -3774,105 +3778,154 @@ fn dimension_subscript_suffix(var: &Variable) -> String {
     }
 }
 
-/// Generate flow-to-stock link score equation.
+/// The name prefix of a stock's synthetic net-flow auxiliary,
+/// `$⁚ltm⁚net⁚{stock}` -- see [`generate_net_flow_equation`].
+pub(crate) const NET_FLOW_PREFIX: &str = "$\u{205A}ltm\u{205A}net\u{205A}";
+
+/// The synthetic net-flow auxiliary of `stock` (canonical name).
+pub(crate) fn net_flow_var_name(stock: &str) -> String {
+    format!("{NET_FLOW_PREFIX}{stock}")
+}
+
+/// A stock's declared `(inflows, outflows)`, as [`flow_to_stock_wiring`]
+/// hands them out.
+pub(crate) type StockFlows<'a> = (&'a [Ident<Canonical>], &'a [Ident<Canonical>]);
+
+/// The declared `(inflows, outflows)` of the stock a `(from, to)` link feeds,
+/// when `to` is a stock and `from` a flow; `None` for every other link. A
+/// stock's only causal in-edges are its wiring (`model_causal_edges`: a
+/// stock's equation is its initial value, so nothing else points at it), so
+/// `Some` is also "the edge is structural". The one statement of the pair
+/// test, read by the generator branch, the flow-to-stock generator (which
+/// signs the flow by the side it sits on) and the net-flow aux's emitter.
+pub(crate) fn flow_to_stock_wiring<'a>(
+    from_var: Option<&Variable>,
+    to_var: &'a Variable,
+) -> Option<StockFlows<'a>> {
+    let from_is_flow =
+        from_var.is_some_and(|v| matches!(v.kind, VarKind::Aux { is_flow: true, .. }));
+    match &to_var.kind {
+        VarKind::Stock {
+            inflows, outflows, ..
+        } if from_is_flow => Some((inflows, outflows)),
+        _ => None,
+    }
+}
+
+/// How a stock's flow is spelled inside the stock-shaped LTM equations (the
+/// net-flow aux and the flow-to-stock score): with its own declared
+/// dimensions when they are the stock's (`flow[Region]`, a scalar
+/// per-element access under the equation's iteration over the stock's
+/// axes), else bare.
 ///
-/// The structural inflow/outflow formula has no per-element equation
-/// text -- the compiler applies it element-wise when the stock and flow
-/// are arrayed -- so the result is `Equation::Scalar` for a scalar stock
-/// and `Equation::ApplyToAll(stock_dims, _)` for an arrayed stock (the
-/// shared formula evaluated per element).
+/// A flow declared over OTHER dimensions than its stock's (`inflow[dimb]`
+/// into `level[suba]`, `dimb -> dima` with `suba` inside `dima`) is bare
+/// because under the iteration over the stock's dimensions the compiler
+/// resolves a bare arrayed name through its implicit subscripts
+/// (`get_implicit_subscripts`, the pairing the wiring itself uses to fold
+/// the flow into the stock), where `inflow[dimb]` names an axis that
+/// iteration does not carry and does not lower. A scalar flow into an
+/// arrayed stock is bare too: it broadcasts into every element's net flow.
+/// A flow the model could not lower (`None`) is bare as well, so the
+/// compiler's own refusal of the flow reaches the fragment diagnostics
+/// rather than a guess about its shape.
+fn stock_flow_ref(flow: &str, flow_var: Option<&Variable>, stock_var: &Variable) -> String {
+    let flow_q = quote_ident(flow);
+    match flow_var {
+        Some(fv) if target_equation_dims(fv) == target_equation_dims(stock_var) => {
+            format!("{flow_q}{}", dimension_subscript_suffix(fv))
+        }
+        _ => flow_q,
+    }
+}
+
+/// The stock's net-flow auxiliary `$⁚ltm⁚net⁚{stock}`: `(inflows) - (outflows)`,
+/// shaped like the stock (`Equation::ApplyToAll` over an arrayed stock's
+/// dimensions, scalar otherwise), with `0` for a side the stock has no flows
+/// on.
 ///
-/// For an arrayed stock every stock/flow reference is emitted with an
-/// explicit dimension subscript (`stock[Dim]`, `flow[Dim]`) rather than a
-/// bare arrayed name. A bare arrayed name nested inside
-/// `PREVIOUS(PREVIOUS(...))` does not survive the apply-to-all expansion:
-/// the inner `PREVIOUS(name)` is an *expression* argument, so
-/// `builtins_visitor` routes it through a synthesized *scalar* helper aux
-/// whose equation is `PREVIOUS(name, 0)` -- and a bare arrayed name has no
-/// scalar meaning, so that helper fragment fails to compile and the LTM
-/// fragment compiler silently stubs it to 0 (the score then collapses to
-/// a wrong constant -- `1/9` for the canonical pop/growth model instead
-/// of the isolated-loop invariant `1`). An explicit subscript keeps every
-/// occurrence a scalar per-element access the helper aux can hold. Each
-/// variable is subscripted by its *own* declared dimensions; a valid
-/// arrayed inflow/outflow shares the stock's dimensions, so those names
-/// are all bound by the `ApplyToAll` iteration. A scalar stock/flow has
-/// no dimensions, so its references stay bare -- the pre-fix behavior.
+/// This is the 2023 paper's implementation option (b) (Schoenberg, Hayward
+/// and Eberlein 2023, section 4.4): aggregate every stock's flows into one
+/// net flow and score each flow's link into the net flow with the ordinary
+/// instantaneous formula, the net flow's own link into the stock being
+/// exactly 1. The aux is LTM machinery, not a causal node: the causal graph
+/// keeps its `flow -> stock` edges, and this variable appears in no loop and
+/// no link. It is evaluated each step ahead of the scores that read it (the
+/// evaluation-order sort in `model_ltm_variables`), so a score reads both its
+/// current value and `PREVIOUS(net)`. `inflows` and `outflows` are the
+/// stock's declared flows, in declaration order, each with its lowered
+/// variable when the model has one (see [`stock_flow_ref`]).
+pub(crate) fn generate_net_flow_equation(
+    stock_var: &Variable,
+    inflows: &[(&str, Option<&Variable>)],
+    outflows: &[(&str, Option<&Variable>)],
+) -> LtmEquation {
+    let side = |flows: &[(&str, Option<&Variable>)]| -> String {
+        if flows.is_empty() {
+            "0".to_string()
+        } else {
+            flows
+                .iter()
+                .map(|(flow, flow_var)| stock_flow_ref(flow, *flow_var, stock_var))
+                .collect::<Vec<_>>()
+                .join(" + ")
+        }
+    };
+    let text = format!("({}) - ({})", side(inflows), side(outflows));
+    link_score_equation_for_target(text, stock_var)
+}
+
+/// Generate the flow-to-stock link score equation.
 ///
-/// NOTE: the engine captures a snapshot-only apply-to-all body structurally
-/// (an apply-to-all capture over the target's dimensions), so the bare form
-/// compiles too and this generator-side subscripting is not load-bearing.
-/// It is intentionally retained: the engine fix is a strict superset
-/// (an already-subscripted reference stays on the unchanged scalar-helper
-/// path), this output is pinned by dedicated tests, and re-baselining the
-/// LTM equation text for every arrayed flow-to-stock link score across the
-/// corpus would be a broad change with no behavioral benefit.
+/// The score is the ordinary instantaneous link score
+/// ([`link_score_guard_form_with_numerator`]) of the stock's net-flow aux
+/// ([`generate_net_flow_equation`]) with respect to `flow`. Because the aux
+/// is a linear sum its ceteris-paribus partial is closed-form -- `Δ_flow net`
+/// is `+Δflow` for an inflow and `-Δflow` for an outflow -- so the score is
+/// `sign * |Δflow / Δnet|` with the structural polarity (+1 inflow, -1
+/// outflow): the 2023 paper's Eq. 3 (Schoenberg, Hayward and Eberlein 2023,
+/// section 4.1), whose denominator `Δ(S_t) - Δ(S_{t-dt})` is `Δnet`. Both
+/// deltas are read over `[t - dt, t]`, the window of every other link score,
+/// so a loop's link scores all describe one interval and the score is
+/// invariant to whether the stock's flows are written separately or as one
+/// net flow (the paper's section 4.4). No `dt` appears: the ratio of two
+/// flow deltas is dimensionless as written, and an isolated loop scores
+/// exactly `+/-1` at every `dt` (`tests/integration/ltm_dt_invariance.rs`).
+///
+/// The result is shaped like the stock: `Equation::Scalar` for a scalar
+/// stock, `Equation::ApplyToAll(stock_dims, _)` for an arrayed one, the flow
+/// spelled per [`stock_flow_ref`] and the net aux subscripted by the stock's
+/// own dimensions.
 fn generate_flow_to_stock_equation(
     flow: &str,
     stock: &str,
     flow_var: &Variable,
     stock_var: &Variable,
 ) -> LtmEquation {
-    // Check if this flow is an inflow or outflow
-    let is_inflow = if let VarKind::Stock { inflows, .. } = &stock_var.kind {
-        inflows.iter().any(|f| f.as_str() == flow)
-    } else {
-        true // Default to inflow
+    // Polarity is structural: an inflow raises the stock, an outflow lowers
+    // it. A flow the stock does not list as an inflow is an outflow.
+    let Some((inflows, _)) = flow_to_stock_wiring(Some(flow_var), stock_var) else {
+        unreachable!(
+            "generate_flow_to_stock_equation is reached only through \
+             `flow_to_stock_wiring`, which admits a flow into a stock alone"
+        );
     };
-
-    let sign = if is_inflow { "" } else { "-" };
-
-    // Reference an arrayed stock/flow by its own declared dimensions so
-    // every occurrence is a scalar per-element access; see the function
-    // doc for why a bare arrayed name breaks the nested-PREVIOUS terms.
-    // For a scalar stock/flow the suffix is empty and the references stay
-    // bare, exactly as before. A flow declared over OTHER dimensions than
-    // its stock's (`inflow[dimb]` into `level[suba]`, `dimb -> dima` with
-    // `suba` inside `dima`) is spelled bare too: under the score's
-    // iteration over the stock's dimensions the compiler resolves a bare
-    // arrayed name through its implicit subscripts (`get_implicit_subscripts`,
-    // the pairing the wiring itself uses to fold the flow into the stock),
-    // where `inflow[dimb]` names an axis that iteration does not carry and
-    // does not lower.
-    let stock_ref = format!("{stock}{}", dimension_subscript_suffix(stock_var));
-    let flow_ref = if target_equation_dims(flow_var) == target_equation_dims(stock_var) {
-        format!("{flow}{}", dimension_subscript_suffix(flow_var))
+    let is_inflow = inflows.iter().any(|f| f.as_str() == flow);
+    let flow_ref = stock_flow_ref(flow, Some(flow_var), stock_var);
+    let net_ref = format!(
+        "{}{}",
+        quote_ident(&net_flow_var_name(stock)),
+        dimension_subscript_suffix(stock_var)
+    );
+    // The changed-first numerator `net(flow_t, others_{t-1}) - net_{t-1}` of
+    // a linear sum, folded: the other flows cancel and only this flow's own
+    // delta remains, signed by the side of the sum it sits on.
+    let numerator = if is_inflow {
+        format!("({flow_ref} - PREVIOUS({flow_ref}))")
     } else {
-        flow.to_string()
+        format!("(PREVIOUS({flow_ref}) - {flow_ref})")
     };
-
-    // Per the corrected 2023 formula (Schoenberg et al., Eq. 3):
-    //   LS(inflow -> S)  = |Delta(i) / (Delta(S_t) - Delta(S_{t-dt}))| * (+1)
-    //   LS(outflow -> S) = |Delta(o) / (Delta(S_t) - Delta(S_{t-dt}))| * (-1)
-    //
-    // The polarity is structural (fixed +1/-1), not dynamic.  ABS ensures
-    // the magnitude is always positive; the sign is applied outside.
-    //
-    // The numerator uses PREVIOUS values to align timing with the denominator.
-    // At time t, the flow at t-1 (PREVIOUS(flow)) is what drove the stock change from t-1 to t.
-    // We measure the change in that causal flow: flow(t-1) - flow(t-2).
-    //
-    // The `time_step` factor makes the score the dimensionally-correct
-    // discretization of the continuous form `|di/dt / d^2S/dt^2|`
-    // (Schoenberg et al. 2023, Eq. 6): the denominator below is the
-    // second-order stock change `dt * (netflow(t-1) - netflow(t-2))`, which
-    // already carries one `dt`; the raw flow delta in the numerator carries
-    // none, so without this factor the score is `1/dt` too large and the
-    // error compounds once per flow-to-stock link in a loop. The published
-    // Eq. 3 omits `dt` because every worked example in the papers uses dt=1.
-    let numerator =
-        format!("(time_step * (PREVIOUS({flow_ref}) - PREVIOUS(PREVIOUS({flow_ref}))))");
-    let denominator = format!(
-        "(({stock_ref} - PREVIOUS({stock_ref})) - (PREVIOUS({stock_ref}) - PREVIOUS(PREVIOUS({stock_ref}))))"
-    );
-
-    // Return 0 for the first two timesteps when we don't have enough history for second-order differences
-    let text = format!(
-        "if \
-            (TIME = INITIAL_TIME) OR (PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME) \
-            then 0 \
-            else {sign}ABS(SAFEDIV({numerator}, {denominator}, 0))"
-    );
+    let text = link_score_guard_form_with_numerator(&numerator, &net_ref, &flow_ref);
     link_score_equation_for_target(text, stock_var)
 }
 

@@ -28,7 +28,7 @@ use crate::db::{
     Db, Diagnostic, DiagnosticError, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel,
     SourceProject, VarFragmentResult, canonical_module_input_set,
     compile_phase_to_per_var_bytecodes, lowered_variable_by_name, project_converted_dimensions,
-    project_dimensions_context, variable_tables,
+    project_datamodel_dims, project_dimensions_context, variable_tables,
 };
 
 use super::parse::{parse_ltm_equation, scalarize_ltm_equation};
@@ -165,16 +165,19 @@ pub(crate) fn shaped_link_score_executions() -> usize {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub enum ShapedLinkScore {
-    /// The link-score variable was generated. `freeze_helpers` carries the
-    /// GH #995 array-freeze helper variables the score's partial references
-    /// (usually empty); the emission loop pushes them alongside the score,
-    /// deduplicated by their content-derived names.
+    /// The link-score variable was generated. `helpers` carries the
+    /// companion synthetic variables the score reads at their current-step
+    /// value, which the emission loop registers beside it, deduplicated by
+    /// name: the GH #995 array-freeze helpers the partial references (usually
+    /// none) and, for a flow-to-stock score, the stock's net-flow aux
+    /// (`ltm_augment::generate_net_flow_equation`), which every flow of that
+    /// stock mints identically.
     Scored {
         /// Boxed to keep the enum small next to its dataless variants
         /// (clippy `large_enum_variant`); `LtmSyntheticVar` carries whole
         /// parsed equations.
         var: Box<LtmSyntheticVar>,
-        freeze_helpers: Vec<LtmSyntheticVar>,
+        helpers: Vec<LtmSyntheticVar>,
     },
     /// A `PartialEquationError` made the edge unscoreable: the warning
     /// naming why, which the caller records with the edge. Boxed so the
@@ -275,10 +278,11 @@ pub fn shaped_link_score<'db>(
         }) {
             // Module-link partials thread no dep-dims table (their GH #526
             // check keeps the permissive legacy collapse), so no array
-            // freeze can be materialized on this arm.
+            // freeze can be materialized on this arm, and a module is never
+            // a stock's flow.
             Some(lsv) => ShapedLinkScore::Scored {
                 var: Box::new(lsv),
-                freeze_helpers: vec![],
+                helpers: vec![],
             },
             None => ShapedLinkScore::NoVariable,
         };
@@ -411,6 +415,13 @@ pub fn shaped_link_score<'db>(
         }
     };
 
+    let mut helpers: Vec<LtmSyntheticVar> = raw_freeze_helpers
+        .into_iter()
+        .map(freeze_helper_var)
+        .collect();
+    if let Some(net) = net_flow_aux(db, model, project, from_var.as_deref(), &to_var) {
+        helpers.push(net);
+    }
     ShapedLinkScore::Scored {
         var: Box::new(LtmSyntheticVar {
             name: var_name,
@@ -418,11 +429,67 @@ pub fn shaped_link_score<'db>(
             dimensions: vec![],
             compile_directly: false,
         }),
-        freeze_helpers: raw_freeze_helpers
-            .into_iter()
-            .map(freeze_helper_var)
-            .collect(),
+        helpers,
     }
+}
+
+/// The net-flow aux a flow-to-stock score reads
+/// (`ltm_augment::generate_net_flow_equation`), when `(from, to)` is a flow
+/// into its stock; `None` for every other link.
+///
+/// Built from the stock's declared flows alone, so every flow of one stock
+/// mints the same variable and the emission loop's name dedup keeps one. Its
+/// dimensions are the stock's, in the datamodel casing every arrayed LTM
+/// variable is tagged with, so the score's apply-to-all body over those same
+/// dimensions reads it element for element.
+fn net_flow_aux(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    from_var: Option<&crate::variable::Variable>,
+    to_var: &crate::variable::Variable,
+) -> Option<LtmSyntheticVar> {
+    let (inflows, outflows) = crate::ltm_augment::flow_to_stock_wiring(from_var, to_var)?;
+    let stock = to_var.ident.as_str();
+    let resolve = |flows: &[Ident<Canonical>]| {
+        flows
+            .iter()
+            .map(|flow| {
+                (
+                    flow.clone(),
+                    lowered_variable_by_name(db, model, project, flow.as_str()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let inflow_vars = resolve(inflows);
+    let outflow_vars = resolve(outflows);
+    fn refs(
+        flows: &[(
+            Ident<Canonical>,
+            Option<std::sync::Arc<crate::variable::Variable>>,
+        )],
+    ) -> Vec<(&str, Option<&crate::variable::Variable>)> {
+        flows
+            .iter()
+            .map(|(flow, var)| (flow.as_str(), var.as_deref()))
+            .collect()
+    }
+    let equation = crate::ltm_augment::generate_net_flow_equation(
+        to_var,
+        &refs(&inflow_vars),
+        &refs(&outflow_vars),
+    );
+    let dims = super::link_scores::datamodel_dim_names(
+        &endpoint_dimensions(db, model, project, stock).unwrap_or_default(),
+        project_datamodel_dims(db, project),
+    );
+    Some(LtmSyntheticVar {
+        name: crate::ltm_augment::net_flow_var_name(stock),
+        equation: super::parse::retarget_ltm_equation_dims(equation, &dims),
+        dimensions: dims,
+        compile_directly: false,
+    })
 }
 
 /// Convert a wrap-produced [`crate::ltm_augment::ArrayFreezeHelper`] into the

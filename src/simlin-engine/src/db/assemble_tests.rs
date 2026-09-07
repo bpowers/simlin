@@ -379,7 +379,7 @@ fn generated_ltm_helpers_are_captures_only() {
     let ltm_implicit = model_ltm_implicit_var_info(&db, model, sync.project);
     assert!(
         !ltm_implicit.is_empty(),
-        "the flow-to-stock score synthesizes PREVIOUS capture helpers"
+        "the gap -> adjustment score's frozen dynamic-index read synthesizes a capture helper"
     );
     assert!(
         ltm_implicit
@@ -704,8 +704,10 @@ fn results_offsets_are_the_assembled_layouts_offsets_on_a_module_bearing_model()
 
 /// A goal-seeking loop through a stdlib SMTH1 instance plus an arrayed
 /// growth loop: under LTM the layout grows a synthetic-variable section
-/// (scalar and arrayed link scores, a loop score) and an LTM implicit section
-/// (the flow-to-stock score's nested `PREVIOUS` capture helpers).
+/// (scalar and arrayed link scores, the stocks' net-flow auxes, a loop score)
+/// and an LTM implicit section (the capture helper the `gap -> adjustment`
+/// score's frozen dynamic-index read `PREVIOUS(pop[PREVIOUS(idx, idx)])`
+/// synthesizes).
 fn ltm_project() -> datamodel::Project {
     let mut project = x_project(
         sim_specs(),
@@ -716,7 +718,8 @@ fn ltm_project() -> datamodel::Project {
                 x_stock("level", "50", &["adjustment"], &[], None),
                 x_aux("smoothed_level", "SMTH1(level, 3)", None),
                 x_aux("gap", "goal - smoothed_level", None),
-                x_flow("adjustment", "gap / 5", None),
+                x_aux("idx", "1", None),
+                x_flow("adjustment", "gap / 5 + pop[idx] / 1000", None),
                 datamodel::Variable::Stock(datamodel::Stock {
                     ident: "pop".to_string(),
                     equation: datamodel::Equation::ApplyToAll(
@@ -795,7 +798,7 @@ fn results_offsets_are_the_assembled_layouts_offsets_under_ltm() {
     );
     assert!(
         any_with("arg0"),
-        "the flow-to-stock score's nested PREVIOUS capture helpers are saved series: {keys:?}"
+        "the gap -> adjustment score's capture helper is a saved series: {keys:?}"
     );
 
     // The arrayed `grow -> pop` link score occupies two slots and is keyed once.
@@ -879,8 +882,10 @@ fn dedup_consecutive(names: Vec<String>) -> Vec<String> {
 
 /// A resolved recurrence SCC (`ref.mdl`-shaped `ce`/`ecc`, whose element graph
 /// is acyclic), a stock initialized from it so the SCC's members are scheduled
-/// in the initials too, a goal-seeking loop through a stdlib SMTH1 instance,
-/// and LTM enabled.
+/// in the initials too, a goal-seeking loop through a stdlib SMTH1 instance
+/// whose flow reads an arrayed weight by a dynamic index (so the `gap ->
+/// inflow` score mints a capture helper and the LTM implicit tail is
+/// populated), and LTM enabled.
 fn scc_stdlib_ltm_project() -> datamodel::Project {
     let mut project = x_project(
         sim_specs(),
@@ -901,8 +906,10 @@ fn scc_stdlib_ltm_project() -> datamodel::Project {
                         ("t3", "ce[t3] + 1"),
                     ],
                 ),
+                x_arrayed("w", "t", &[("t1", "1"), ("t2", "2"), ("t3", "3")]),
+                x_aux("idx", "1", None),
                 x_stock("acc", "ecc[t3] * 10", &["inflow"], &[], None),
-                x_flow("inflow", "gap / 5", None),
+                x_flow("inflow", "gap / 5 + w[idx] / 1000", None),
                 x_aux("goal", "100", None),
                 x_aux("smoothed", "SMTH1(acc, 3)", None),
                 x_aux("gap", "goal - smoothed", None),
@@ -972,7 +979,7 @@ fn each_program_emits_in_runlist_order_then_the_ltm_tail() {
     );
     assert!(
         !ltm_implicit.is_empty(),
-        "the flow-to-stock score yields nested PREVIOUS capture helpers"
+        "the gap -> inflow score's frozen dynamic-index read yields a capture helper"
     );
     let synthetic_tail: Vec<String> = ltm_vars
         .vars

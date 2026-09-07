@@ -6789,8 +6789,8 @@ fn corpus_clearn_macros_import() {
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
 /// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
-/// per-step result-row width is **30,123 slots**, 46% of the ceiling, with
-/// 35,413 free. Both numbers come from
+/// per-step result-row width is **28,725 slots**, 44% of the ceiling, with
+/// 36,811 free. Both numbers come from
 /// `examples/ltm_slot_width.rs`, so re-deriving them is a command rather than a
 /// reconstruction -- and they are the CURRENT totals: the transition records
 /// below quote earlier values as the left-hand side of a move, which is what
@@ -6898,6 +6898,29 @@ fn corpus_clearn_macros_import() {
 /// arrayed helpers of three scores, so the width is 29,398 -> 29,447 slots
 /// and the margin 36,089 free against the 65,536-slot ceiling.
 ///
+/// The flow-to-stock score's net-flow form moved the count UP, 6,193 ->
+/// 6,224 (+31), and the width DOWN, 29,447 -> 28,725 (-722). The count is
+/// arithmetic over `examples/ltm_var_dump.rs`: +35 net-flow auxes
+/// (`$⁚ltm⁚net⁚{stock}`, one per stock with a scored flow-to-stock edge --
+/// 24 in `main`, 11 across the stdlib templates and `sample_until`), +2
+/// arrayed scores for the two scalar flows into arrayed stocks
+/// (`global_anthropogenic_ch4_emissions -> ch4_in_atm` and
+/// `global_total_c_emissions -> c_in_atmosphere`, over the 3-element
+/// sensitivity dimension), and -6 for the per-element scalars those two
+/// edges carried before, which were partials of the stocks' INITIAL-VALUE
+/// equations rather than of anything the flow moves. The width is read off
+/// the result-column diff of a C-LEARN `simlin simulate --ltm` run on the
+/// previous and the new CLI: -888 nested-lag capture helper columns
+/// (`$⁚$⁚ltm⁚link_score⁚{flow}→{stock}⁚{n}⁚arg0[..]`, one slot each; the
+/// `PREVIOUS(PREVIOUS(..))` reads of the retired stock-history numerator),
+/// -6 per-element scalars, +6 for the two arrayed scores, and the remaining
+/// +166 slots are the 123 net-aux instances (a stdlib template's aux is
+/// instantiated once per call site; the 166 is the remainder of this
+/// arithmetic, not a separate measurement). Every added column is a net aux
+/// or one of those two scores and every removed one is a nested-lag helper
+/// or one of those six scalars; the margin is 36,811 free against the
+/// 65,536-slot ceiling.
+///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
 #[test]
@@ -6922,7 +6945,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6193,
+        total, 6224,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

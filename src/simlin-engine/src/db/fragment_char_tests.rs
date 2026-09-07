@@ -1651,8 +1651,12 @@ fn char_resolved_recurrence_scc() {
 // The two `db/ltm/compile.rs` emission sites -- each an inline COPY of the
 // shared compile+symbolize tail that `db::assemble` also carries -- are what
 // this fixture reaches: `compile_ltm_synthetic_fragment` for the link/loop
-// score variables, and `compile_ltm_implicit_var_fragment` for the PREVIOUS
-// capture helpers those score equations synthesize.
+// score variables and the stock's net-flow aux, and
+// `compile_ltm_implicit_var_fragment` for the PREVIOUS capture helper a
+// score equation synthesizes -- here the `level -> growth` partial's frozen
+// dynamic-index read `PREVIOUS(weight[PREVIOUS(idx, idx)])`, which is why
+// the flow reads its rate through `weight[idx]` (`weight[d1] = 1`, so the
+// simulated values are those of `growth = level * rate`).
 //
 // Both modes are rendered because they emit DIFFERENT synthetic variables from
 // different arms: exhaustive enumeration produces one link score per LOOP edge
@@ -1665,10 +1669,21 @@ fn char_resolved_recurrence_scc() {
 // ---------------------------------------------------------------------------
 
 fn ltm_loop_model() -> datamodel::Project {
+    ltm_loop_model_with("0.1", "level * rate * weight[idx]")
+}
+
+/// [`ltm_loop_model`] with `rate`'s constant and `growth`'s equation as
+/// given -- the one builder behind the fixture and the edits the
+/// incrementality half applies to it, so an edit changes exactly what it
+/// names.
+fn ltm_loop_model_with(rate: &str, growth: &str) -> datamodel::Project {
     TestProject::new("frag_ltm_loop")
         .with_sim_time(0.0, 2.0, 1.0)
-        .aux("rate", "0.1", None)
-        .flow("growth", "level * rate", None)
+        .named_dimension("d", &["d1", "d2"])
+        .array_with_ranges("weight[d]", vec![("d1", "1"), ("d2", "2")])
+        .aux("idx", "1", None)
+        .aux("rate", rate, None)
+        .flow("growth", growth, None)
         .stock("level", "10", &["growth"], &[], None)
         .build_datamodel()
 }
@@ -1690,26 +1705,30 @@ fn char_ltm_fragments_exhaustive() {
         FixtureExpect {
             models: &[("main", &[])],
             phases: &[
-                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0", "flow"),
-                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0", "flow"),
-                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚level→growth⁚0⁚arg0", "flow"),
                 ("main::$⁚ltm⁚link_score⁚growth→level", "flow"),
                 ("main::$⁚ltm⁚link_score⁚level→growth", "flow"),
                 ("main::$⁚ltm⁚loop_score⁚r1", "flow"),
+                ("main::$⁚ltm⁚net⁚level", "flow"),
                 ("main::growth", "flow"),
+                ("main::idx", "flow"),
                 ("main::level", "initial+stock"),
                 ("main::rate", "flow"),
+                ("main::weight", "flow"),
             ],
             why: "Exhaustive enumeration finds the single circuit \
                   `level -> growth -> level` and emits a link score for each of \
                   its TWO edges plus one `loop_score⁚r1` for the circuit -- so \
-                  `rate→growth`, a causal edge no circuit traverses, gets no \
-                  score here (contrast the discovery fixture). Every synthetic \
-                  is a scalar aux, hence flow-only. Only the `growth→level` \
-                  score synthesizes PREVIOUS capture helpers, and a PREVIOUS \
-                  capture is flow-only too: its kind is its phase demand, and \
-                  the intrinsic's fallback covers every read before the first \
-                  step commits.",
+                  `rate→growth`, `idx→growth` and `weight→growth`, causal edges \
+                  no circuit traverses, get no score here (contrast the \
+                  discovery fixture). The `growth→level` score reads the \
+                  stock's net-flow aux `$⁚ltm⁚net⁚level`, minted beside it. \
+                  Every synthetic is a scalar aux, hence flow-only. Only the \
+                  `level→growth` score synthesizes a PREVIOUS capture helper \
+                  (its frozen dynamic-index read), and a PREVIOUS capture is \
+                  flow-only too: its kind is its phase demand, and the \
+                  intrinsic's fallback covers every read before the first step \
+                  commits.",
             spot_checks: LTM_LOOP_SPOT_CHECKS,
             ltm: FixtureLtm::Exhaustive,
             expect_one_resolved_scc: false,
@@ -1725,26 +1744,36 @@ fn char_ltm_fragments_discovery() {
         FixtureExpect {
             models: &[("main", &[])],
             phases: &[
-                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0", "flow"),
-                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0", "flow"),
-                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚idx→growth⁚0⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚level→growth⁚0⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚rate→growth⁚0⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚weight→growth⁚0⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚weight→growth⁚1⁚arg0", "flow"),
                 ("main::$⁚ltm⁚link_score⁚growth→level", "flow"),
+                ("main::$⁚ltm⁚link_score⁚idx→growth", "flow"),
                 ("main::$⁚ltm⁚link_score⁚level→growth", "flow"),
                 ("main::$⁚ltm⁚link_score⁚rate→growth", "flow"),
+                ("main::$⁚ltm⁚link_score⁚weight→growth", "flow"),
+                ("main::$⁚ltm⁚net⁚level", "flow"),
                 ("main::growth", "flow"),
+                ("main::idx", "flow"),
                 ("main::level", "initial+stock"),
                 ("main::rate", "flow"),
+                ("main::weight", "flow"),
             ],
-            why: "Discovery mode scores every CAUSAL edge, so `rate→growth` \
-                  appears here even though no circuit traverses it, and no \
-                  loop-score variable is emitted at all (discovery finds \
-                  and ranks loops after the run instead of enumerating \
-                  circuits at compile time). \
-                  Every score is a scalar aux, hence flow-only. Only the \
-                  `growth→level` score -- the stock-update edge, whose \
-                  ceteris-paribus numerator re-integrates the stock -- \
-                  synthesizes PREVIOUS capture helpers, and a PREVIOUS capture \
-                  is flow-only too: its kind is its phase demand.",
+            why: "Discovery mode scores every CAUSAL edge, so `rate→growth`, \
+                  `idx→growth` and `weight→growth` appear here even though no \
+                  circuit traverses them, and no loop-score variable is emitted \
+                  at all (discovery finds and ranks loops after the run instead \
+                  of enumerating circuits at compile time). The `growth→level` \
+                  score reads the stock's net-flow aux `$⁚ltm⁚net⁚level`, \
+                  minted beside it. Every score is a scalar aux, hence \
+                  flow-only. Every score into `growth` but the one from \
+                  `level`'s co-read `idx` freezes the dynamic-index read \
+                  `weight[idx]` -- the whole read for `level`/`rate`, the \
+                  index alone or the head alone for `weight` -- and each such \
+                  freeze is a PREVIOUS capture helper, flow-only too: its kind \
+                  is its phase demand.",
             spot_checks: LTM_LOOP_SPOT_CHECKS,
             ltm: FixtureLtm::Discovery,
             expect_one_resolved_scc: false,
@@ -2646,12 +2675,7 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     // Step A: change a CONSTANT. A link score's equation is derived from the
     // TARGET's equation structure, not from any source's value, so no link
     // score's text moves and no LTM fragment recompiles.
-    let rate_edited = TestProject::new("frag_ltm_loop")
-        .with_sim_time(0.0, 2.0, 1.0)
-        .aux("rate", "0.2", None)
-        .flow("growth", "level * rate", None)
-        .stock("level", "10", &["growth"], &[], None)
-        .build_datamodel();
+    let rate_edited = ltm_loop_model_with("0.2", "level * rate * weight[idx]");
     let (ltm_state3, rate_execs) = resync_and_assemble(
         &mut ltm_db,
         &rate_edited,
@@ -2691,12 +2715,7 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     // unchanged dependency set, which is a salsa dependency-verification
     // question rather than a fragment-compiler one. Asserting the full set
     // here would land a flaky test.
-    let growth_edited = TestProject::new("frag_ltm_loop")
-        .with_sim_time(0.0, 2.0, 1.0)
-        .aux("rate", "0.2", None)
-        .flow("growth", "level * rate * 1", None)
-        .stock("level", "10", &["growth"], &[], None)
-        .build_datamodel();
+    let growth_edited = ltm_loop_model_with("0.2", "level * rate * weight[idx] * 1");
     let (_ltm_state4, growth_execs) = resync_and_assemble(
         &mut ltm_db,
         &growth_edited,

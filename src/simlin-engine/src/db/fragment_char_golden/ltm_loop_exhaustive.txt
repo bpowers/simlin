@@ -1,16 +1,17 @@
 ########## model main (module inputs: []) ##########
 == layout ==
-  n_slots: 9
-  $⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0: [6, 7)
-  $⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0: [7, 8)
-  $⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0: [8, 9)
-  $⁚ltm⁚link_score⁚growth→level: [3, 4)
-  $⁚ltm⁚link_score⁚level→growth: [4, 5)
-  $⁚ltm⁚loop_score⁚r1: [5, 6)
+  n_slots: 11
+  $⁚$⁚ltm⁚link_score⁚level→growth⁚0⁚arg0: [10, 11)
+  $⁚ltm⁚link_score⁚growth→level: [6, 7)
+  $⁚ltm⁚link_score⁚level→growth: [7, 8)
+  $⁚ltm⁚loop_score⁚r1: [8, 9)
+  $⁚ltm⁚net⁚level: [9, 10)
   growth: [0, 1)
-  level: [1, 2)
-  rate: [2, 3)
-== main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0 [ltm-implicit-helper] : flow ==
+  idx: [1, 2)
+  level: [2, 3)
+  rate: [3, 4)
+  weight: [4, 6)
+== main::$⁚$⁚ltm⁚link_score⁚level→growth⁚0⁚arg0 [ltm-implicit-helper] : flow ==
   initial: <no fragment>
   flow:
     literals: []
@@ -20,39 +21,12 @@
     module_decls: []
     static_views: []
     code:
-      0000  LoadGlobalVar off=0 (time)
-      0001  AssignCurr $⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0@0
-      0002  Ret
-  stock: <no fragment>
-== main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0 [ltm-implicit-helper] : flow ==
-  initial: <no fragment>
-  flow:
-    literals: [0.0]
-    temp_sizes: []
-    dim_lists: []
-    graphical_functions: []
-    module_decls: []
-    static_views: []
-    code:
-      0000  LoadConstant #0 (=0.0)
-      0001  LoadPrev growth@0
-      0002  AssignCurr $⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0@0
-      0003  Ret
-  stock: <no fragment>
-== main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0 [ltm-implicit-helper] : flow ==
-  initial: <no fragment>
-  flow:
-    literals: [0.0]
-    temp_sizes: []
-    dim_lists: []
-    graphical_functions: []
-    module_decls: []
-    static_views: []
-    code:
-      0000  LoadConstant #0 (=0.0)
-      0001  LoadPrev level@0
-      0002  AssignCurr $⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0@0
-      0003  Ret
+      0000  LoadVar idx@0
+      0001  LoadPrev idx@0
+      0002  PushSubscriptIndex bounds=2
+      0003  LoadSubscript weight@0
+      0004  AssignCurr $⁚$⁚ltm⁚link_score⁚level→growth⁚0⁚arg0@0
+      0005  Ret
   stock: <no fragment>
 == main::$⁚ltm⁚link_score⁚growth→level [ltm-synthetic] : flow ==
   initial: <no fragment>
@@ -65,38 +39,46 @@
     static_views: []
     code:
       0000  LoadConstant #0 (=0.0)
-      0001  LoadGlobalVar off=1 (dt)
-      0002  LoadConstant #0 (=0.0)
-      0003  LoadPrev growth@0
-      0004  LoadConstant #0 (=0.0)
-      0005  LoadPrev $⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0@0
-      0006  Op2 Sub
-      0007  Op2 Mul
-      0008  LoadVar level@0
-      0009  LoadConstant #0 (=0.0)
-      0010  LoadPrev level@0
-      0011  Op2 Sub
-      0012  LoadConstant #0 (=0.0)
-      0013  LoadPrev level@0
+      0001  LoadConstant #0 (=0.0)
+      0002  LoadVar growth@0
+      0003  LoadConstant #0 (=0.0)
+      0004  LoadPrev growth@0
+      0005  Op2 Sub
+      0006  LoadVar $⁚ltm⁚net⁚level@0
+      0007  LoadConstant #0 (=0.0)
+      0008  LoadPrev $⁚ltm⁚net⁚level@0
+      0009  Op2 Sub
+      0010  Apply Abs
+      0011  LoadConstant #0 (=0.0)
+      0012  Apply SafeDiv
+      0013  LoadVar growth@0
       0014  LoadConstant #0 (=0.0)
-      0015  LoadPrev $⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0@0
+      0015  LoadPrev growth@0
       0016  Op2 Sub
-      0017  Op2 Sub
-      0018  LoadConstant #0 (=0.0)
-      0019  Apply SafeDiv
-      0020  Apply Abs
-      0021  LoadGlobalVar off=0 (time)
-      0022  LoadGlobalVar off=2 (initial_time)
-      0023  Op2 Eq
-      0024  LoadGlobalVar off=2 (initial_time)
-      0025  LoadPrev $⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0@0
-      0026  LoadGlobalVar off=2 (initial_time)
-      0027  Op2 Eq
-      0028  Op2 Or
-      0029  SetCond
-      0030  If
-      0031  AssignCurr $⁚ltm⁚link_score⁚growth→level@0
-      0032  Ret
+      0017  Apply Sign
+      0018  Op2 Mul
+      0019  LoadVar $⁚ltm⁚net⁚level@0
+      0020  LoadConstant #0 (=0.0)
+      0021  LoadPrev $⁚ltm⁚net⁚level@0
+      0022  Op2 Sub
+      0023  LoadConstant #0 (=0.0)
+      0024  Op2 Eq
+      0025  LoadVar growth@0
+      0026  LoadConstant #0 (=0.0)
+      0027  LoadPrev growth@0
+      0028  Op2 Sub
+      0029  LoadConstant #0 (=0.0)
+      0030  Op2 Eq
+      0031  Op2 Or
+      0032  SetCond
+      0033  If
+      0034  LoadGlobalVar off=0 (time)
+      0035  LoadGlobalVar off=2 (initial_time)
+      0036  Op2 Eq
+      0037  SetCond
+      0038  If
+      0039  AssignCurr $⁚ltm⁚link_score⁚growth→level@0
+      0040  Ret
   stock: <no fragment>
 == main::$⁚ltm⁚link_score⁚level→growth [ltm-synthetic] : flow ==
   initial: <no fragment>
@@ -115,43 +97,46 @@
       0004  LoadPrev rate@0
       0005  Op2 Mul
       0006  LoadConstant #0 (=0.0)
-      0007  LoadPrev growth@0
-      0008  Op2 Sub
-      0009  LoadVar growth@0
-      0010  LoadConstant #0 (=0.0)
-      0011  LoadPrev growth@0
-      0012  Op2 Sub
-      0013  Apply Abs
-      0014  LoadConstant #0 (=0.0)
-      0015  Apply SafeDiv
-      0016  LoadVar level@0
+      0007  LoadPrev $⁚$⁚ltm⁚link_score⁚level→growth⁚0⁚arg0@0
+      0008  Op2 Mul
+      0009  LoadConstant #0 (=0.0)
+      0010  LoadPrev growth@0
+      0011  Op2 Sub
+      0012  LoadVar growth@0
+      0013  LoadConstant #0 (=0.0)
+      0014  LoadPrev growth@0
+      0015  Op2 Sub
+      0016  Apply Abs
       0017  LoadConstant #0 (=0.0)
-      0018  LoadPrev level@0
-      0019  Op2 Sub
-      0020  Apply Sign
-      0021  Op2 Mul
-      0022  LoadVar growth@0
-      0023  LoadConstant #0 (=0.0)
-      0024  LoadPrev growth@0
-      0025  Op2 Sub
+      0018  Apply SafeDiv
+      0019  LoadVar level@0
+      0020  LoadConstant #0 (=0.0)
+      0021  LoadPrev level@0
+      0022  Op2 Sub
+      0023  Apply Sign
+      0024  Op2 Mul
+      0025  LoadVar growth@0
       0026  LoadConstant #0 (=0.0)
-      0027  Op2 Eq
-      0028  LoadVar level@0
+      0027  LoadPrev growth@0
+      0028  Op2 Sub
       0029  LoadConstant #0 (=0.0)
-      0030  LoadPrev level@0
-      0031  Op2 Sub
+      0030  Op2 Eq
+      0031  LoadVar level@0
       0032  LoadConstant #0 (=0.0)
-      0033  Op2 Eq
-      0034  Op2 Or
-      0035  SetCond
-      0036  If
-      0037  LoadGlobalVar off=0 (time)
-      0038  LoadGlobalVar off=2 (initial_time)
-      0039  Op2 Eq
-      0040  SetCond
-      0041  If
-      0042  AssignCurr $⁚ltm⁚link_score⁚level→growth@0
-      0043  Ret
+      0033  LoadPrev level@0
+      0034  Op2 Sub
+      0035  LoadConstant #0 (=0.0)
+      0036  Op2 Eq
+      0037  Op2 Or
+      0038  SetCond
+      0039  If
+      0040  LoadGlobalVar off=0 (time)
+      0041  LoadGlobalVar off=2 (initial_time)
+      0042  Op2 Eq
+      0043  SetCond
+      0044  If
+      0045  AssignCurr $⁚ltm⁚link_score⁚level→growth@0
+      0046  Ret
   stock: <no fragment>
 == main::$⁚ltm⁚loop_score⁚r1 [ltm-synthetic] : flow ==
   initial: <no fragment>
@@ -168,6 +153,21 @@
       0002  BinOpAssignCurr Mul $⁚ltm⁚loop_score⁚r1@0
       0003  Ret
   stock: <no fragment>
+== main::$⁚ltm⁚net⁚level [ltm-synthetic] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [0.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar growth@0
+      0001  LoadConstant #0 (=0.0)
+      0002  BinOpAssignCurr Sub $⁚ltm⁚net⁚level@0
+      0003  Ret
+  stock: <no fragment>
 == main::growth [explicit] : flow ==
   initial: <no fragment>
   flow:
@@ -180,8 +180,25 @@
     code:
       0000  LoadVar level@0
       0001  LoadVar rate@0
-      0002  BinOpAssignCurr Mul growth@0
-      0003  Ret
+      0002  Op2 Mul
+      0003  LoadVar idx@0
+      0004  PushSubscriptIndex bounds=2
+      0005  LoadSubscript weight@0
+      0006  BinOpAssignCurr Mul growth@0
+      0007  Ret
+  stock: <no fragment>
+== main::idx [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr idx@0 #0 (=1.0)
+      0001  Ret
   stock: <no fragment>
 == main::level [explicit] : initial+stock ==
   initial:
@@ -224,46 +241,66 @@
       0000  AssignConstCurr rate@0 #0 (=0.1)
       0001  Ret
   stock: <no fragment>
+== main::weight [explicit] : flow ==
+  initial: <no fragment>
+  flow:
+    literals: [1.0, 2.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr weight@0 #0 (=1.0)
+      0001  AssignConstCurr weight@1 #1 (=2.0)
+      0002  Ret
+  stock: <no fragment>
 ########## runtime ##########
   step 0:
-    $⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0 = 0.0
-    $⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0 = 0.0
-    $⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0 = 0.0
+    $⁚$⁚ltm⁚link_score⁚level→growth⁚0⁚arg0 = 1.0
     $⁚ltm⁚link_score⁚growth→level = 0.0
     $⁚ltm⁚link_score⁚level→growth = 0.0
     $⁚ltm⁚loop_score⁚r1 = 0.0
+    $⁚ltm⁚net⁚level = 1.0
     dt = 1.0
     final_time = 2.0
     growth = 1.0
+    idx = 1.0
     initial_time = 0.0
     level = 10.0
     rate = 0.1
     time = 0.0
+    weight[d1] = 1.0
+    weight[d2] = 2.0
   step 1:
-    $⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0 = 1.0
-    $⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0 = 1.0
-    $⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0 = 10.0
-    $⁚ltm⁚link_score⁚growth→level = 0.0
+    $⁚$⁚ltm⁚link_score⁚level→growth⁚0⁚arg0 = 1.0
+    $⁚ltm⁚link_score⁚growth→level = 1.0
     $⁚ltm⁚link_score⁚level→growth = 1.0
-    $⁚ltm⁚loop_score⁚r1 = 0.0
+    $⁚ltm⁚loop_score⁚r1 = 1.0
+    $⁚ltm⁚net⁚level = 1.1
     dt = 1.0
     final_time = 2.0
     growth = 1.1
+    idx = 1.0
     initial_time = 0.0
     level = 11.0
     rate = 0.1
     time = 1.0
+    weight[d1] = 1.0
+    weight[d2] = 2.0
   step 2:
-    $⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0 = 2.0
-    $⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0 = 1.1
-    $⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0 = 11.0
-    $⁚ltm⁚link_score⁚growth→level = 1.0000000000000044
+    $⁚$⁚ltm⁚link_score⁚level→growth⁚0⁚arg0 = 1.0
+    $⁚ltm⁚link_score⁚growth→level = 1.0
     $⁚ltm⁚link_score⁚level→growth = 1.0
-    $⁚ltm⁚loop_score⁚r1 = 1.0000000000000044
+    $⁚ltm⁚loop_score⁚r1 = 1.0
+    $⁚ltm⁚net⁚level = 1.21
     dt = 1.0
     final_time = 2.0
     growth = 1.21
+    idx = 1.0
     initial_time = 0.0
     level = 12.1
     rate = 0.1
     time = 2.0
+    weight[d1] = 1.0
+    weight[d2] = 2.0

@@ -28,9 +28,11 @@ variables. Because the rewrite is keyed per link on the target and its live
 range, the whole-model list becomes metadata (which links exist, their names
 and dimensions) while each link's program lives in its own memo, so an edit
 invalidates only the links that touch the edited variable. The families that
-are not partials (flow-to-stock, black-box, aggregate, module composite and
-loop scores) become typed builders over slot reads on the same footing, which
-is what lets the text generators be deleted rather than merely bypassed. Two
+are not partials (black-box, aggregate, module composite and loop scores)
+become typed builders over slot reads on the same footing, which is what lets
+the text generators be deleted rather than merely bypassed; a flow-to-stock
+score is the ordinary partial of the stock's net-flow aux and needs no builder
+of its own. Two
 run-time consequences follow from having a single place that emits a score:
 the 37-opcode guard scaffold collapses to one `LinkScore` opcode reading
 per-variable deltas computed once per step, and, on native and separably, the
@@ -311,7 +313,7 @@ typed builder with no text:
 
 | family | today | this plan |
 |---|---|---|
-| flow -> stock (second-order structural formula, `generate_flow_to_stock_equation`) | text | builder over `LoadVar`/`SymLoadPrev` of the flow and stock |
+| flow -> stock (the partial of the stock's net-flow aux `$⁚ltm⁚net⁚{stock}`, `generate_flow_to_stock_equation` / `generate_net_flow_equation`) | text (closed form) | an ordinary link-score program over the net aux's fragment, live range the flow; the aux is a compiled fragment like any variable |
 | black-box unit transfer (`black_box_unit_transfer_equation`) | text | builder |
 | aggregate nodes (`$⁚ltm⁚agg⁚n`, `AggNode::reducer_expr0`) | typed `Expr0`, then parsed tiers | the reducer's own compiled fragment, live range per feeder |
 | module composites (`m·$⁚ltm⁚composite⁚port`) | text over pathway products | builder over the pathway link scores' slots |
@@ -444,8 +446,8 @@ fragment or one of its per-element segments.
 
 <!-- START_PHASE_4 -->
 ### Phase 4: The formula families, and no text anywhere
-**Goal:** flow-to-stock, black-box, aggregate, composite and loop scores are
-typed builders; the text generators, `LtmArm`, `LtmEquation` and
+**Goal:** the net-flow auxes, black-box, aggregate, composite and loop scores
+are typed builders; the text generators, `LtmArm`, `LtmEquation` and
 `model_ltm_implicit_var_info` are gone.
 
 **Components:**

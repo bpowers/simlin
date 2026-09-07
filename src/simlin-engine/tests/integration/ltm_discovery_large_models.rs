@@ -37,22 +37,22 @@
 //! tractable on the variable graph could still be intractable on the
 //! element graph, and a variable-level test would not catch that.
 //!
-//! ## The 2-step startup guard
+//! ## The startup guard
 //!
-//! LTM link scores are `PREVIOUS()`-based, so the first two saved
-//! timesteps (indices 0 and 1) are startup-degenerate. Step 0's link
-//! scores can be NaN -- both discovery generators skip step 0 for exactly
-//! that reason -- and steps 0-1 carry no
-//! positive loop contribution, so `rank_and_filter` drops every loop
-//! whose only timesteps are those two. Step index 2 is the first
-//! genuinely discoverable timestep. `FIRST_DISCOVERABLE_STEP` and
-//! `TRUNCATED_STEP_COUNT` encode this; the discovery tests truncate
-//! results to `TRUNCATED_STEP_COUNT` (3) so the window holds exactly one
-//! discoverable timestep, and `assert_discovery_contract` only inspects
-//! score values at step indices `>= FIRST_DISCOVERABLE_STEP`. (The same
-//! "step 2 is the first real step" fact is relied on by the existing
-//! discovery test in `simulate_ltm.rs`, which iterates `for step in
-//! 2..`.)
+//! LTM link scores are `PREVIOUS()`-based, so the first saved timestep
+//! (index 0) is startup-degenerate: every score is pinned to 0 there by its
+//! `TIME = INITIAL_TIME` guard, step 0's link scores can be NaN -- both
+//! discovery generators skip step 0 for exactly that reason -- and it
+//! carries no positive loop contribution, so `rank_and_filter` drops every
+//! loop whose only timestep is that one. Step index 1 is the first
+//! genuinely discoverable timestep: every score reads one step of history,
+//! the flow-to-stock score included (it is `|Δflow / Δnet|` over the
+//! stock's net-flow aux, with no stock history behind it).
+//! `FIRST_DISCOVERABLE_STEP` and `TRUNCATED_STEP_COUNT` encode this; the
+//! discovery tests truncate results to `TRUNCATED_STEP_COUNT` (2) so the
+//! window holds exactly one discoverable timestep, and
+//! `assert_discovery_contract` only inspects score values at step indices
+//! `>= FIRST_DISCOVERABLE_STEP`.
 //!
 //! ## Discovery is tractable on World3 (was GH #540, now closed)
 //!
@@ -133,11 +133,11 @@ const CLEARN_MDL: &str = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.m
 /// Index of the first genuinely discoverable saved timestep.
 ///
 /// LTM link scores are `PREVIOUS()`-based: steps 0 and 1 are
-/// startup-degenerate (step 0's link scores can be NaN; steps 0-1 carry
-/// no positive loop contribution). Step index 2 is the first timestep
-/// whose link scores -- and therefore discovered loop scores -- are
-/// meaningful. See the module-level "2-step startup guard" section.
-const FIRST_DISCOVERABLE_STEP: usize = 2;
+/// startup-degenerate (step 0's link scores are guarded to 0 and can be
+/// NaN; it carries no positive loop contribution). Step index 1 is the
+/// first timestep whose link scores -- and therefore discovered loop scores
+/// -- are meaningful. See the module-level "startup guard" section.
+const FIRST_DISCOVERABLE_STEP: usize = 1;
 
 /// Number of saved timesteps to keep when truncating results for a
 /// single-discoverable-timestep discovery run: the two startup-guard
@@ -242,11 +242,10 @@ fn truncate_results(results: &Results, n_steps: usize) -> Results {
 /// unrelated bug.
 ///
 /// Score finiteness is checked only at step indices `>=
-/// FIRST_DISCOVERABLE_STEP`: steps 0-1 are startup-degenerate and step 0
-/// in particular is allowed to be NaN by the LTM algorithm (see the
-/// module-level "2-step startup guard" section), so asserting finiteness
-/// there would be asserting on behavior the algorithm treats as
-/// undefined.
+/// FIRST_DISCOVERABLE_STEP`: step 0 is startup-degenerate and is allowed
+/// to be NaN by the LTM algorithm (see the module-level "startup guard"
+/// section), so asserting finiteness there would be asserting on behavior
+/// the algorithm treats as undefined.
 fn assert_discovery_contract(found: &[ltm_finding::FoundLoop]) {
     assert!(
         !found.is_empty(),

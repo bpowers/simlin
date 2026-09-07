@@ -69,7 +69,8 @@ use super::quote_ident;
 /// | [`super::build_element_reducer_link_score`], `!is_bare` / RANK / un-pinnable-body arms | 2 | never |
 ///
 /// Not numerator producers, and so nothing to wrap: `generate_flow_to_stock_equation`
-/// (a fixed structural formula whose target is a `Variable::Stock`, which
+/// (the closed-form partial of the stock's net-flow aux, a linear sum of
+/// flows with no graphical function; its target is a `Variable::Stock`, which
 /// `is_implicit_with_lookup` excludes) and the module composite / black-box
 /// scores (`Δoutput`-shaped transfer formulas with no target-equation partial).
 ///

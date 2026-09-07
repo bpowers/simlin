@@ -1055,7 +1055,7 @@ fn pinned_scalar_feeder_agg_loop_scored_in_discovery_mode() {
          score; got: {eq}"
     );
 
-    // And the simulated pin score is sustained non-zero past the two-step
+    // And the simulated pin score is sustained non-zero past the one-step
     // startup guard -- the agg halves compile, so the score is no longer
     // silently 0.
     let mut vm = Vm::new(compiled).unwrap();
@@ -1065,7 +1065,7 @@ fn pinned_scalar_feeder_agg_loop_scored_in_discovery_mode() {
         .offsets
         .get(pin_score.name.as_str())
         .expect("pin1 loop_score must have a results slot");
-    const STARTUP_STEPS: usize = 2;
+    const STARTUP_STEPS: usize = 1;
     let series: Vec<f64> = results.iter().map(|row| row[off]).collect();
     assert!(
         series.len() > STARTUP_STEPS,
