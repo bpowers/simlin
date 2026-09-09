@@ -645,6 +645,15 @@ Determined from model structure:
 - **Balancing (B):** Odd number of negative links -> negative loop score
 - **Undetermined (U):** Any link has unknown polarity (a conservative classification)
 
+> **Simlin implementation note: links into a module.** A link that feeds a module
+> instance's input port (a DELAY3's delay time, a user module's input) is signed by
+> composing the sub-model's own link polarities along every internal pathway from
+> that port to the output(s) the parent reads: every pathway agreeing gives that
+> sign; a disagreement, an unsigned link, or a truncated enumeration gives Unknown.
+> The papers say nothing about this; it is the macro-collapse principle of Section 6
+> applied to the sign. The link into a DELAY3's delay-time port is therefore negative
+> (`stock / (delay_time / 3)` on every pathway) and the link into its input port positive.
+
 #### Runtime Polarity
 
 Some models contain links (and therefore loops) that change polarity during simulation.

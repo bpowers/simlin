@@ -777,6 +777,28 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
   independent expressions from truly non-monotonic ones
 - **Flow-to-stock**: Inflows are `Positive`, outflows are `Negative` (fixed
   structural polarity)
+- **Input-to-module** (`CausalGraph::module_input_polarity`): the sign of
+  the sub-model's own pathways from the entry port(s) the source feeds to
+  the output port(s) the parent reads (`module_outputs_read`; the
+  sub-model's sinks when the parent reads nothing). Each pathway's links
+  are signed by these same rules -- recursively for a hop into a nested
+  instance, whose graph the sub-graph carries
+  (`model_variables_and_module_graphs`) -- and multiplied; the edge is
+  `Positive` / `Negative` when every pathway agrees and `Unknown` when any
+  pathway carries an `Unknown` link, two pathways or two read ports
+  disagree, no fed port reaches a read output, or the pathway enumeration
+  was truncated (a fed port that reaches no read output cannot carry a
+  loop and is ignored). The read ports are the union over EVERY parent
+  reader, loop or not, because the sign is a property of the edge: a
+  reporting aux that reads a second, opposite-signed output turns the
+  edge -- and the label of every loop through it -- to `u`, even though
+  the loop exits by the other port and the runtime per-exit-port override
+  scores it correctly. So a DELAY3's delay-time port is `Negative`
+  (`stock/(delay_time/3)` on every pathway), its `input` port `Positive`,
+  and a SMTH1's delay-time port `Negative` by the division convention
+  above (`(input - output)/delay_time`). The `module -> variable` edge
+  needs no special arm: the reader's equation names the output
+  (`module·port`) and the ordinary analysis applies.
 - **Arrayed equations**: Checks all elements; returns `Unknown` if any two
   elements disagree
 
@@ -801,12 +823,13 @@ simulation (e.g., the yeast alcohol model from the papers).
 #### Which surfaces reclassify, and which do not (GH #679)
 
 `model_detected_loops` is a *pre-simulation* salsa query, so it can only report
-*structural* polarity. Pervasively for module-heavy models the static polarity
-of a `variable -> module` / `module -> variable` black-box link is `Unknown`,
-so a loop through a module boundary is labelled `Undetermined` (confidence 0.0)
-even when its simulated loop score is single-signed at every active step.
-Runtime reclassification is therefore a *post-simulation* concern, and the
-surfaces handle it differently:
+*structural* polarity. A `variable -> module` link is signed from the
+sub-model's pathways (see "Static Polarity"), so it is `Unknown` whenever
+those pathways disagree or contain an unsigned link -- common in module-heavy
+models -- and a loop through such a boundary is labelled `Undetermined`
+(confidence 0.0) even when its simulated loop score is single-signed at every
+active step. Runtime reclassification is therefore a *post-simulation*
+concern, and the surfaces handle it differently:
 
 - **Discovery (`analyze_model` / MCP / `simlin_analyze_discover_loops`)**: the
   `FoundLoop` path in `ltm_finding.rs` derives each loop's polarity directly

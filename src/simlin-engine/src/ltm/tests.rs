@@ -4859,3 +4859,8 @@ mod polarity;
 /// `use super::*` reaches this file's private helpers.
 #[path = "with_lookup_tests.rs"]
 mod with_lookup;
+
+/// Static polarity of `input -> module` edges (pathway composition), in a
+/// sibling file for the same line-count reason.
+#[path = "module_polarity_tests.rs"]
+mod module_polarity;

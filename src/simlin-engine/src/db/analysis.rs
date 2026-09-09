@@ -1465,6 +1465,18 @@ type CausalGraphModuleData = (
 /// ports from this sub-graph. A pathless module's sub-graph enumerates no
 /// pathways, so it is harmless; stock enrichment over a stockless sub-graph
 /// finds no stocks.
+///
+/// Sub-graphs are built recursively -- each carries the graphs of ITS
+/// instances -- so a pathway through a nested instance (a user module
+/// wrapping a SMOOTH) is signed one level down by the same rule
+/// (`CausalGraph::module_input_polarity`). The recursion is bounded by the
+/// same gate `model_detected_loops` applies: a model the project's module
+/// graph reaches a cycle from gets no sub-graphs at all (its cycle is the
+/// model error the diagnostics pass reports, GH #806). That gate reads only
+/// explicit instances, which is sound here for the reason
+/// `project_module_graph` documents: the implicit instances the recursion
+/// also follows target stdlib and macro models, which never instantiate a
+/// user model, so no cycle closes through them.
 fn model_variables_and_module_graphs(
     db: &dyn Db,
     model: SourceModel,
@@ -1473,16 +1485,23 @@ fn model_variables_and_module_graphs(
     let edges_result = model_causal_edges(db, model, project);
     let variables = model_lowered_variables(db, model, project);
 
-    let project_models = project.models(db);
     let mut module_graphs: HashMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>> = HashMap::new();
-
-    for (module_var_name, sub_model_name) in &edges_result.dynamic_modules {
-        if let Some(sub_source_model) = project_models.get(sub_model_name.as_str()) {
-            let sub_edges_result = model_causal_edges(db, *sub_source_model, project);
-            let mut sub_graph = causal_graph_from_edges(sub_edges_result);
-            sub_graph.variables = model_lowered_variables(db, *sub_source_model, project);
-            sub_graph.module_outputs_read = Arc::clone(&sub_edges_result.module_outputs_read);
-            module_graphs.insert(Ident::new(module_var_name), Box::new(sub_graph));
+    let reaches_a_cycle = crate::db::project_module_graph(db, project)
+        .cycle_error_from(model.name(db))
+        .is_some();
+    if !reaches_a_cycle {
+        let project_models = project.models(db);
+        for (module_var_name, sub_model_name) in &edges_result.dynamic_modules {
+            if let Some(sub_source_model) = project_models.get(sub_model_name.as_str()) {
+                let sub_edges_result = model_causal_edges(db, *sub_source_model, project);
+                let mut sub_graph = causal_graph_from_edges(sub_edges_result);
+                let (sub_variables, sub_outputs_read, nested) =
+                    model_variables_and_module_graphs(db, *sub_source_model, project);
+                sub_graph.variables = sub_variables;
+                sub_graph.module_outputs_read = sub_outputs_read;
+                sub_graph.module_graphs = nested;
+                module_graphs.insert(Ident::new(module_var_name), Box::new(sub_graph));
+            }
         }
     }
 
@@ -2919,11 +2938,24 @@ fn detected_polarity_from_ltm(polarity: &crate::ltm::LoopPolarity) -> DetectedLo
 /// reading each variable's lowered form (`model_lowered_variables`)
 /// and analyzing how each source variable appears in the target's
 /// equation.
+///
+/// An analysis entry point, so it carries the module-cycle gate
+/// `model_detected_loops` applies: a model the project's module graph
+/// reaches a cycle from has no link polarities -- the empty map -- because
+/// the cycle is the model error the diagnostics pass reports, and signing
+/// a module edge walks the instance's sub-graph, which a module cycle makes
+/// unbounded (GH #806).
 pub fn compute_link_polarities(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
 ) -> HashMap<(String, String), crate::ltm::LinkPolarity> {
+    if crate::db::project_module_graph(db, project)
+        .cycle_error_from(model.name(db))
+        .is_some()
+    {
+        return HashMap::new();
+    }
     let graph = causal_graph_with_modules(db, model, project);
     graph.all_link_polarities()
 }
