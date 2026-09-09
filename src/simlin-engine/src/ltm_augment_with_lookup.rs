@@ -302,9 +302,7 @@ impl WithLookupSlotRefs {
             crate::dimensions::SubscriptIterator::new(target_ast_dims)
                 .enumerate()
                 .filter(|(offset, _)| tables.get(*offset).is_some_and(|t| !t.x.is_empty()))
-                .map(|(_, subscripts)| {
-                    crate::common::CanonicalElementName::from_raw(&subscripts.join(","))
-                })
+                .map(|(_, subscripts)| crate::common::CanonicalElementName::from_parts(&subscripts))
                 .collect();
         SlotRefKind::PerElement { quoted, with_table }
     }

@@ -2547,15 +2547,45 @@ TIME STEP = 1 ~~|
     assert!((get("g[a2]") - 7.0).abs() < 1e-10, "g[A2] should be 7");
     assert!((get("g[a3]") - 7.0).abs() < 1e-10, "g[A3] should be 7");
 
-    // h[DimA] :EXCEPT: [SubA] = 8 (no overrides for A2, A3)
+    // h[DimA] :EXCEPT: [SubA] = 8 (no overrides for A2, A3). Vensim defines
+    // no h[A2] or h[A3] at all -- its output for the sdeverywhere `except`
+    // model lists only h[A1] -- so the 0 here is Simlin's fabricated value
+    // for an element with no equation, named by the MissingElementEquation
+    // warning, not a Vensim result.
     assert!((get("h[a1]") - 8.0).abs() < 1e-10, "h[A1] should be 8");
     assert!(
         (get("h[a2]") - 0.0).abs() < 1e-10,
-        "h[A2] should be 0 (undefined)"
+        "h[A2] is Simlin's fabricated 0 (Vensim has no such element)"
     );
     assert!(
         (get("h[a3]") - 0.0).abs() < 1e-10,
-        "h[A3] should be 0 (undefined)"
+        "h[A3] is Simlin's fabricated 0 (Vensim has no such element)"
+    );
+    // ... and the warning names those two elements on h.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::Off,
+    );
+    let h_missing: Vec<String> = diagnostics
+        .iter()
+        .filter_map(|d| match &d.error {
+            simlin_engine::db::DiagnosticError::Model(e)
+                if e.code == simlin_engine::common::ErrorCode::MissingElementEquation
+                    && d.variable.as_deref() == Some("h") =>
+            {
+                e.get_details()
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(h_missing.len(), 1, "{diagnostics:?}");
+    assert!(
+        h_missing[0].starts_with("array variable 'h' has no equation for 'a2', 'a3'"),
+        "{}",
+        h_missing[0]
     );
 
     // p[DimA] :EXCEPT: [A1] = 2, p[A1] = 5

@@ -811,16 +811,12 @@ type InitListValues = (Vec<f64>, String);
 
 /// Canonical comma-joined subscript key for matching an `Equation::Arrayed`
 /// element entry against the row-major [`element_subscripts_for_dims`]
-/// suffixes. Each comma-separated part is canonicalized independently (the
-/// XMILE reader already stores element keys this way -- `xmile/variables.rs`
-/// `convert_equation` -- but MDL-sourced or hand-built datamodels may not),
-/// so both sides normalize identically regardless of case or whitespace.
+/// suffixes: the one owner of that key,
+/// [`crate::common::CanonicalElementName::from_subscript`], as a `String`.
 pub(crate) fn canonical_subscript_key(subscript: &str) -> String {
-    subscript
-        .split(',')
-        .map(canon)
-        .collect::<Vec<_>>()
-        .join(",")
+    crate::common::CanonicalElementName::from_subscript(subscript)
+        .as_str()
+        .to_string()
 }
 
 /// Resolve a conveyor stock's initial equation against the §7.2 explicit-list

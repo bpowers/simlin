@@ -1043,7 +1043,7 @@ pub fn instantiate_implicit_modules(
             if requirements(&ast) == PerElement::ModuleInstance && !dimensions.is_empty() {
                 let mut elements = HashMap::new();
                 for subscript in SubscriptIterator::new(&dimensions) {
-                    let subscript_key = CanonicalElementName::from_raw(&subscript.join(","));
+                    let subscript_key = CanonicalElementName::from_parts(&subscript);
                     let mut walker = visitor().with_active_element(&dimensions, &subscript);
                     let transformed = walker.walk(ast.clone())?;
                     collect(walker)?;
@@ -1087,11 +1087,8 @@ pub fn instantiate_implicit_modules(
             // distinct slots never claim one name (PR #668).
             let mut new_elements = HashMap::new();
             for (subscript_key, equation) in elements_in_stable_order(elements) {
-                let subscript_parts: Vec<String> = subscript_key
-                    .as_str()
-                    .split(',')
-                    .map(|s| s.to_string())
-                    .collect();
+                let subscript_parts: Vec<String> =
+                    subscript_key.parts().map(str::to_string).collect();
                 let mut walker = visitor().with_active_element(&dimensions, &subscript_parts);
                 let transformed = walker.walk(equation)?;
                 collect(walker)?;
@@ -1102,8 +1099,7 @@ pub fn instantiate_implicit_modules(
             if let Some(default_expr) = default_expr {
                 let missing: Vec<Vec<String>> = SubscriptIterator::new(&dimensions)
                     .filter(|subscript| {
-                        !new_elements
-                            .contains_key(&CanonicalElementName::from_raw(&subscript.join(",")))
+                        !new_elements.contains_key(&CanonicalElementName::from_parts(subscript))
                     })
                     .collect();
                 if apply_default_to_missing
@@ -1117,10 +1113,8 @@ pub fn instantiate_implicit_modules(
                         let mut walker = visitor().with_active_element(&dimensions, &subscript);
                         let transformed = walker.walk(default_expr.clone())?;
                         collect(walker)?;
-                        new_elements.insert(
-                            CanonicalElementName::from_raw(&subscript.join(",")),
-                            transformed,
-                        );
+                        new_elements
+                            .insert(CanonicalElementName::from_parts(&subscript), transformed);
                     }
                     apply_default = false;
                 } else {

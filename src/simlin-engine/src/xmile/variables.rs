@@ -351,11 +351,13 @@ macro_rules! convert_equation(
                 None => vec![],
             };
             let elements = elements.into_iter().map(|e| {
-                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).into_owned()).collect();
+                // The element key's canonical spelling, the one owner of what a
+                // subscript names (`CanonicalElementName::from_subscript`).
+                let canonical_subscript = crate::common::CanonicalElementName::from_subscript(&e.subscript).as_str().to_string();
                 // An eqn-less element (e.g. gf-only, GH #907) gets an empty
                 // equation: with a gf that makes the element a per-element
                 // lookup table; the writer re-emits it without an <eqn> tag.
-                (canonical_subscripts.join(","), e.eqn.unwrap_or_default(), e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
+                (canonical_subscript, e.eqn.unwrap_or_default(), e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
             }).collect();
             // When a top-level <eqn> coexists with <element> entries, the
             // top-level eqn is the EXCEPT default equation.

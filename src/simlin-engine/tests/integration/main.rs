@@ -28,6 +28,7 @@ mod test_helpers;
 
 mod clearn_unit_errors;
 mod compiler_vector;
+mod element_subscripts;
 mod json_roundtrip;
 mod layout;
 mod ltm_array_agg;

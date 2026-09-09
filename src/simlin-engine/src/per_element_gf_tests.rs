@@ -1022,8 +1022,9 @@ fn zero_point_gf_on_scalar_keeps_raw_input_equation() {
 /// expansion's fabricated `Const(0.0)`, and the wrap applies uniformly, so
 /// the element evaluates `gf(0)` (pre-#909 it evaluated the bare fabricated
 /// 0). Both are silent fabrications -- Stella rejects this element shape --
-/// and the zero-fill diagnostic is the open remainder of GH #905; this pins
-/// the uniform-wrap choice.
+/// and a gf-only element's arm is its table, so the `MissingElementEquation`
+/// advisory never names its zero-fill (`variable::elements_without_an_arm`);
+/// this pins the uniform-wrap choice and that silence.
 #[test]
 fn gf_only_element_without_default_evaluates_gf_of_fabricated_zero() {
     // Z has a real input equation (time); A is gf-only (empty eqn) with NO
@@ -1057,6 +1058,22 @@ fn gf_only_element_without_default_evaluates_gf_of_fabricated_zero() {
          gf, so gf_A(0) = 100, got {} (0 would mean the gf was dropped; NaN \
          would mean an empty placeholder was consulted)",
         get("a")
+    );
+
+    // The gf IS the element's arm: the entry names `A` and the table decides
+    // its value, so the missing-element advisory that names an armless slot
+    // must not name it.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let diagnostics =
+        crate::db::collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
+    assert!(
+        !diagnostics.iter().any(|d| matches!(
+            &d.error,
+            crate::db::DiagnosticError::Model(e)
+                if e.code == crate::common::ErrorCode::MissingElementEquation
+        )),
+        "a gf-only element has an arm and is not reported as missing: {diagnostics:?}"
     );
 }
 

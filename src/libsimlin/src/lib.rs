@@ -342,6 +342,9 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             // NaN literal) likewise collapses to the wire Generic code; the
             // message names the variable, which is the whole point of it.
             engine::ErrorCode::UnfilledEquation => SimlinErrorCode::Generic,
+            // A declared element with no equation likewise collapses to the
+            // wire Generic code; the message names the variable and elements.
+            engine::ErrorCode::MissingElementEquation => SimlinErrorCode::Generic,
         }
     }
 }
