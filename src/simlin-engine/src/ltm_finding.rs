@@ -3325,29 +3325,26 @@ pub(crate) fn discover_loops_with_deadlines(
         }
         let polarity_structural = causal_graph.calculate_polarity(&reported_links);
 
-        // Determine runtime polarity from scores, capturing the confidence
-        // ratio alongside it (GH #495). When the loop has no valid runtime
-        // scores we fall back to the structural polarity; the matching
-        // confidence mirrors the structural pipeline's convention in
-        // `db::analysis` (1.0 when the polarity is determined, 0.0 when it is
-        // Undetermined) so the discovery and structural surfaces agree on what
-        // a "fully confident" loop reports.
-        let runtime_scores: Vec<f64> = scores.iter().map(|(_, s)| *s).collect();
-        let (polarity, polarity_confidence) = LoopPolarity::from_runtime_scores(&runtime_scores)
-            .unwrap_or_else(|| {
-                let confidence = if polarity_structural == LoopPolarity::Undetermined {
-                    0.0
-                } else {
-                    1.0
-                };
-                (polarity_structural, confidence)
-            });
+        // The structural polarity, with the structural pipeline's binary
+        // confidence (1.0 when every link is signed, 0.0 when one is Unknown),
+        // is a placeholder until the partition-relative series exist:
+        // `rank_truncate_and_id` reclassifies every surviving loop from those
+        // (GH #495). A loop with no active step never survives retention, so
+        // no discovered loop reports this placeholder except on the
+        // no-score-data path (a run with no saved steps), where there is
+        // nothing to classify; the binary convention keeps that path's
+        // meaning of a 1.0/0.0 confidence the structural surface's.
+        let polarity_confidence = if polarity_structural == LoopPolarity::Undetermined {
+            0.0
+        } else {
+            1.0
+        };
 
         let loop_info = Loop {
             id: String::new(), // Will be assigned below
             links: reported_links,
             stocks: loop_stocks,
-            polarity,
+            polarity: polarity_structural,
             dimensions: vec![],
             slot_links: vec![],
         };
@@ -4297,7 +4294,11 @@ fn rank_truncate_and_id(
     // series get in `ltm_post::compute_rel_loop_scores`.  This is the [-1, 1]
     // importance series `analysis::to_loop_summary` / `to_feedback_loop`
     // surface, so dominance/ranking is partition-relative (comparable across
-    // partitions) rather than raw-magnitude-biased.
+    // partitions) rather than raw-magnitude-biased -- and it is the base the
+    // runtime polarity is classified on (GH #495), so the label a loop gets
+    // here is the one the exhaustive reclassification gives the same series
+    // (`db::analysis::reclassify_loops_from_results`).  The ids assigned
+    // below read the classified polarity, so this runs first.
     let mut keyed: Vec<(RelativeImportance, FoundLoop)> = std::mem::take(found_loops)
         .into_iter()
         .enumerate()
@@ -4306,6 +4307,21 @@ fn rank_truncate_and_id(
             let mean_rel = mean_relative_contribution(&fl, totals);
             let key = loop_sort_key(&fl.loop_info);
             fl.rel_scores = relative_series(fl.scores.iter().map(|&(_, score)| score), totals);
+            // Retention kept this loop for a step at which its finite score
+            // is at least MIN_CONTRIBUTION of a positive finite total, and
+            // that step is a finite non-zero relative sample, so the
+            // classifier always has evidence here: its `None` arm is the API
+            // shape, not a reachable fallback (pinned by
+            // `a_never_active_loop_is_dropped_rather_than_reported_with_its_structural_label`).
+            let classified = LoopPolarity::from_runtime_scores(&fl.rel_scores);
+            debug_assert!(
+                classified.is_some(),
+                "a retained loop has a finite non-zero relative sample"
+            );
+            if let Some((polarity, confidence)) = classified {
+                fl.loop_info.polarity = polarity;
+                fl.polarity_confidence = confidence;
+            }
             (
                 RelativeImportance {
                     mean_rel,

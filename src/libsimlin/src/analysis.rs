@@ -537,8 +537,11 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
 /// `reclassify_loops_from_results` primitive (GH #679) over it: for every loop
 /// whose `$⁚ltm⁚loop_score⁚{id}` series exists in the results, the loop's
 /// polarity and confidence are overwritten by
-/// `crate::ltm::LoopPolarity::from_runtime_scores` (the LTM papers' Rux/Bux/U
-/// classification with the 0.99 confidence gate).  A loop whose runtime score
+/// `crate::ltm::LoopPolarity::from_runtime_scores` over the loop's
+/// partition-RELATIVE series (its per-step share of its cycle partition, the
+/// same series `simlin_analyze_get_relative_loop_score` returns): the LTM
+/// papers' Rux/Bux/U classification with the 0.99 confidence gate, on a
+/// bounded, dominance-weighted base.  A loop whose runtime score
 /// is never active keeps its structural classification.  Loop IDs are stable
 /// (a `u1` stays `u1` even after its polarity flips to Reinforcing).
 ///

@@ -808,7 +808,30 @@ classified as `Undetermined` (`calculate_polarity`).
 ### Runtime Polarity
 
 `LoopPolarity::from_runtime_scores()` in `ltm/types.rs` classifies polarity
-based on actual simulation results. It filters out NaN and zero values, then:
+from the loop's **partition-relative** score series -- the one owner's output
+(`ltm_post::compute_rel_loop_scores` on the exhaustive path, the `rel_scores`
+`rank_truncate_and_id` attaches on the discovery path), never the raw
+`loop_score`. Each relative sample is bounded to `[-1, 1]` and weighted by the
+loop's share of its partition at that step, so the confidence ratio is the
+dominance-weighted time share of each sign; a raw base is unbounded and lets
+the few steps around a dominance inflection, where every raw score in the
+partition diverges, decide the label by themselves. For a loop alone in its
+partition the relative sample is exactly `+1`/`-1`/`0`, so its confidence is
+the plain time share of its sign, and `Mostly*` requires the minority sign on
+at most half a percent of the active steps.
+
+The base is a judgment, not a reproduction. The papers define the confidence
+ratio on instantaneous *pathway* scores (reference section 13.7); the base a
+reference tool uses when it labels a *loop* Rux/Bux is undocumented and
+cannot be checked. The relative base is chosen because it is bounded and
+dominance-weighted: on the raw base a lone loop that spends a tenth of its
+run balancing can still clear the 0.99 gate whenever an exogenous change
+swamps the change in its target and shrinks that phase's raw scores to
+nothing, which is the raw-magnitude incomparability relative scores exist to
+remove. `exhaustive_lone_loop_sign_flip_confidence_is_its_time_share` pins
+that case as `Undetermined`.
+
+The classifier filters out NaN and zero values, then:
 - All remaining scores positive -> `Reinforcing`
 - All remaining scores negative -> `Balancing`
 - Mixed signs, one polarity dominant with confidence >=
@@ -832,10 +855,12 @@ active step. Runtime reclassification is therefore a *post-simulation*
 concern, and the surfaces handle it differently:
 
 - **Discovery (`analyze_model` / MCP / `simlin_analyze_discover_loops`)**: the
-  `FoundLoop` path in `ltm_finding.rs` derives each loop's polarity directly
-  from `from_runtime_scores` over the loop's own per-step score series
-  (falling back to the trimmed-chain structural polarity for an all-zero/NaN
-  series). Fully reclassified.
+  `FoundLoop` path in `ltm_finding.rs` derives each loop's polarity from
+  `from_runtime_scores` over the loop's partition-relative series once
+  `rank_truncate_and_id` has the partition totals. A never-active loop
+  (all-zero/NaN series) is not reported at all: retention drops it before
+  classification, so every discovered loop carries a runtime label. Fully
+  reclassified.
 - **pysimlin `Run.loops`**: sources polarity / confidence / partition straight
   from the engine primitive (bound as `Sim.get_loops_runtime` ->
   `reclassify_loops_from_results`, GH #679/#685, the all-slots Rust source of
@@ -852,12 +877,12 @@ concern, and the surfaces handle it differently:
   runtime one.
 
 `db::analysis::reclassify_loops_from_results(loops, results, loop_partitions)`
-is the **canonical in-engine reclassification primitive** -- it reads each
-loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) from a `Results` and applies
-`from_runtime_scores` to overwrite `polarity`/`polarity_confidence`. As of this
-writing it has **no production caller**: it exists so a future sim-bearing Rust
-consumer (e.g. when GH #495's FFI lands) has one correct place to call rather
-than re-deriving the loop-score read. It is exercised by engine tests.
+is the **canonical in-engine reclassification primitive** -- it normalizes
+every loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) in a `Results` through
+`ltm_post::compute_rel_loop_scores` and applies `from_runtime_scores` to the
+relative series to overwrite `polarity`/`polarity_confidence`. Its production
+caller is libsimlin's `simlin_analyze_get_loops_runtime` (and through it
+pysimlin's `Run.loops`).
 
 The **loop id never changes** under reclassification. Loop detection and the
 deterministic `r{n}`/`b{n}`/`u{n}` id assignment happen at compile time before
@@ -869,14 +894,18 @@ zero or non-finite) keeps its structural polarity -- there is no runtime
 evidence to override it.
 
 **A2A semantics across the sites.** The Rust `reclassify_loops_from_results`
-helper concatenates *all* element slots of an A2A loop into one sample set (so a
-loop that is reinforcing in one element and balancing in another classifies
-`Undetermined`). pysimlin `Run.loops` is built on this primitive, so it reports
-exactly this all-slots classification. Discovery uses one scalar score series
-per `FoundLoop` (its links are element-level, so a discovered loop is always
-scalar). The exhaustive (sim-bearing) and discovery surfaces thus
-agree on scalar loops and differ only in how an A2A loop's element slots are
-reduced -- the exhaustive path now uses the all-slots reading rather than slot 0.
+helper concatenates *all* element slots of an A2A loop into one sample set,
+each slot normalized in its own partition, so a loop that is reinforcing in
+one element and balancing in another classifies `Undetermined`
+(`exhaustive_a2a_loop_with_opposite_signed_elements_is_undetermined` pins
+this at confidence 0 for two isolated one-stock elements of opposite sign).
+pysimlin `Run.loops` is built on this primitive, so it reports exactly this
+all-slots classification. Discovery uses one scalar score series per
+`FoundLoop` (its links are element-level, so a discovered loop is always
+scalar). The exhaustive (sim-bearing) and discovery surfaces thus agree on
+scalar loops and differ only in how an A2A loop's element slots are reduced:
+all slots read together on the exhaustive path, one element-level loop per
+slot on the discovery path.
 
 ## Post-Simulation Loop Discovery
 

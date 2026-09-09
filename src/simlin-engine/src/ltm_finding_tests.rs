@@ -1044,6 +1044,53 @@ fn test_rank_and_filter_truncates_to_max_loops() {
     assert_eq!(loops.len(), CAP, "Should truncate to the cap ({CAP})");
 }
 
+/// A loop with no active step -- every score zero or NaN -- never survives
+/// `rank_and_filter`, whether it shares a partition with an active loop or
+/// sits alone in its own Solo group: retention keeps a loop only for a step
+/// at which its finite score is at least `MIN_CONTRIBUTION` of a positive
+/// finite total, and that same step is a finite non-zero relative sample.
+/// So every loop `rank_truncate_and_id` classifies has a valid sample and
+/// `from_runtime_scores` is `Some` for it: a discovered loop never reports
+/// the structural placeholder label it was built with.
+#[test]
+fn a_never_active_loop_is_dropped_rather_than_reported_with_its_structural_label() {
+    let mut loops = vec![
+        make_found_loop_with_scores(
+            &[("a", "b"), ("b", "a")],
+            &["stock_x"],
+            LoopPolarity::Reinforcing,
+            1.0,
+            vec![(0.0, 1.0), (1.0, 1.0), (2.0, 1.0)],
+        ),
+        // Shares stock_x's partition with the active loop: 0 / total = 0.
+        make_found_loop_with_scores(
+            &[("c", "d"), ("d", "c")],
+            &["stock_x"],
+            LoopPolarity::Balancing,
+            0.0,
+            vec![(0.0, 0.0), (1.0, f64::NAN), (2.0, 0.0)],
+        ),
+        // Unpartitioned, so its own |score| series is its total: never > 0.
+        make_found_loop_with_scores(
+            &[("e", "f"), ("f", "e")],
+            &["stock_y"],
+            LoopPolarity::Balancing,
+            0.0,
+            vec![(0.0, f64::NAN), (1.0, 0.0), (2.0, 0.0)],
+        ),
+    ];
+    let partitions = single_partition(&["stock_x"]);
+    rank_and_filter(&mut loops, &partitions, None);
+    assert_eq!(loops.len(), 1, "only the active loop survives retention");
+    assert_eq!(loops[0].loop_info.polarity, LoopPolarity::Reinforcing);
+    assert_eq!(loops[0].polarity_confidence, 1.0);
+    assert!(
+        loops[0].rel_scores.iter().all(|v| *v == 1.0),
+        "the survivor was classified from its relative series; got {:?}",
+        loops[0].rel_scores
+    );
+}
+
 #[test]
 fn test_rank_and_filter_removes_low_contribution() {
     // Create loops where one dominates and others have negligible contribution.

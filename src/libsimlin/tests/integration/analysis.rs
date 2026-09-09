@@ -3368,31 +3368,51 @@ fn runtime_loops_reclassify_sign_flipping_loop() {
 }
 
 /// #679: the runtime loops surface must be able to report a DEFINITE
-/// `MostlyReinforcing` (Rux) with its real dominance-ratio confidence -- the
-/// sibling test above (`runtime_loops_reclassify_sign_flipping_loop`) only
-/// pins that a sign-straddling series leaves the {Rux, Bux, U} family, while
-/// this one pins the Rux outcome itself through the C ABI.
+/// `MostlyReinforcing` (Rux) / `MostlyBalancing` (Bux) with its real
+/// confidence -- the sibling test above
+/// (`runtime_loops_reclassify_sign_flipping_loop`) only pins that a
+/// sign-straddling series leaves the {Rux, Bux, U} family, while the two
+/// tests below pin each outcome itself through the C ABI.
 ///
 /// The fixture (shared shape with the engine's
-/// `exhaustive_mixed_sign_dominant_loop_reclassifies_to_rux`): `f = s*g + d`
-/// where the marginal gain `g` is +0.02 for t < 100 (loop score +1 per step,
-/// ~400 steps) then -0.0001 while an exogenous ramp `d` dominates the
-/// per-step change in `f` (40 negative samples of magnitude ~1e-4..1e-3).
-/// The dominance ratio lands at ~0.9999: above the 0.99 Rux gate, strictly
-/// below 1.0. Structurally the loop is Reinforcing (the bare co-factor `g`
-/// is positive by the SD labeling convention -- and is exactly the kind of
-/// quantity the convention can be wrong about, since its value flips sign
-/// mid-run), so Rux through this surface both remains the label the issue
-/// says was unreachable AND demonstrates runtime evidence downgrading a
+/// `exhaustive_competing_sign_flip_reclassifies_to_rux` / `_bux`): a stock
+/// with an inflow loop `f_in = s*<inflow gain>` and an outflow loop
+/// `f_out = s*<outflow gain>`, where the `flipping` loop's gain is `g`
+/// (+0.02, flipped to -0.02 for t in [100, 102)) and the other loop's is `d`
+/// (0.01, raised to 2 in that window so it carries the partition while the
+/// flipping loop's sign is wrong). The classifier reads the partition-RELATIVE
+/// series: the flipping loop's share is 2/3 at each of its roughly 430
+/// same-sign steps and ~0.0099 at its 8 opposite-sign steps, so the
+/// confidence is ~0.9994 -- above the 0.99 gate, strictly below 1.0.
+/// Structurally the flipping loop is single-signed (the bare co-factor `g`
+/// is positive by the SD labeling convention -- exactly the kind of quantity
+/// the convention can be wrong about, since its value flips sign mid-run),
+/// so `Mostly*` through this surface both remains the label the issue says
+/// was unreachable AND demonstrates runtime evidence downgrading a
 /// conventional structural sign.
-#[test]
-fn runtime_loops_report_definite_rux() {
-    let test_project = TestProject::new("rux_mixed_sign")
+///
+/// Returns the flipping loop's (structural polarity, structural confidence,
+/// runtime polarity, runtime confidence) and asserts its id is the same on
+/// both surfaces.
+fn competing_sign_flip_through_the_c_abi(
+    flipping: &str,
+) -> (SimlinLoopPolarity, f64, SimlinLoopPolarity, f64) {
+    let (inflow_gain, outflow_gain, flow) = if flipping == "inflow" {
+        ("g", "d", "f_in")
+    } else {
+        ("d", "g", "f_out")
+    };
+    let test_project = TestProject::new("competing_sign_flip")
         .with_sim_time(0.0, 110.0, 0.25)
-        .aux("g", "IF TIME < 100 THEN 0.02 ELSE -0.0001", None)
-        .aux("d", "IF TIME < 100 THEN 0 ELSE 50 * (TIME - 100)", None)
-        .stock("s", "100", &["f"], &[], None)
-        .flow("f", "s * g + d", None);
+        .aux(
+            "g",
+            "IF TIME < 100 OR TIME >= 102 THEN 0.02 ELSE -0.02",
+            None,
+        )
+        .aux("d", "IF TIME < 100 OR TIME >= 102 THEN 0.01 ELSE 2", None)
+        .stock("s", "100", &["f_in"], &["f_out"], None)
+        .flow("f_in", &format!("s * {inflow_gain}"), None)
+        .flow("f_out", &format!("s * {outflow_gain}"), None);
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
     let mut buf = Vec::new();
@@ -3412,47 +3432,92 @@ fn runtime_loops_report_definite_rux() {
         simlin_sim_run_to_end(sim, &mut err);
         assert!(err.is_null());
 
-        // Structural baseline: one loop, Reinforcing by the bare-co-factor
-        // convention at the binary structural confidence 1.0.
+        let is_flipping_loop = |l: &SimlinLoop| {
+            std::slice::from_raw_parts(l.variables, l.var_count)
+                .iter()
+                .any(|v| CStr::from_ptr(*v).to_str().unwrap() == flow)
+        };
+
         let structural = simlin_analyze_get_loops(model, &mut err);
         assert!(err.is_null());
         assert!(!structural.is_null());
-        assert_eq!((*structural).count, 1, "the fixture has exactly one loop");
-        let struct_loop = &std::slice::from_raw_parts((*structural).loops, 1)[0];
-        assert!(struct_loop.polarity == SimlinLoopPolarity::Reinforcing);
-        assert_eq!(struct_loop.polarity_confidence, 1.0);
+        assert_eq!((*structural).count, 2, "an inflow loop and an outflow loop");
+        let struct_loop = std::slice::from_raw_parts((*structural).loops, 2)
+            .iter()
+            .find(|l| is_flipping_loop(l))
+            .expect("the flipping loop");
 
-        // Runtime surface: the same loop reports the definite Rux variant
-        // with the real (>= 0.99, < 1.0) dominance ratio.
         err = ptr::null_mut();
         let runtime = simlin_analyze_get_loops_runtime(sim, &mut err);
         assert!(err.is_null());
         assert!(!runtime.is_null());
-        assert_eq!((*runtime).count, 1);
-        let rt_loop = &std::slice::from_raw_parts((*runtime).loops, 1)[0];
-        assert!(
-            rt_loop.polarity == SimlinLoopPolarity::MostlyReinforcing,
-            "an overwhelmingly-positive mixed-sign loop_score must surface as \
-             MostlyReinforcing through the C ABI (confidence {})",
-            rt_loop.polarity_confidence
-        );
-        assert!(
-            rt_loop.polarity_confidence >= 0.99 && rt_loop.polarity_confidence < 1.0,
-            "the Rux confidence is the real dominance ratio (>= the 0.99 gate, \
-             strictly < 1.0 because both signs are present); got {}",
-            rt_loop.polarity_confidence
-        );
+        assert_eq!((*runtime).count, 2);
+        let rt_loop = std::slice::from_raw_parts((*runtime).loops, 2)
+            .iter()
+            .find(|l| is_flipping_loop(l))
+            .expect("the flipping loop");
+
         // The loop id is stable across the two surfaces.
         let struct_id = CStr::from_ptr(struct_loop.id).to_str().unwrap();
         let rt_id = CStr::from_ptr(rt_loop.id).to_str().unwrap();
         assert_eq!(struct_id, rt_id);
+
+        let out = (
+            struct_loop.polarity,
+            struct_loop.polarity_confidence,
+            rt_loop.polarity,
+            rt_loop.polarity_confidence,
+        );
 
         simlin_free_loops(structural);
         simlin_free_loops(runtime);
         simlin_sim_unref(sim);
         simlin_model_unref(model);
         simlin_project_unref(proj);
+        out
     }
+}
+
+/// The Rux arm through the C ABI: the inflow loop flips, and is
+/// `MostlyReinforcing` at the real (>= 0.99, < 1.0) confidence against a
+/// structural Reinforcing/1.0 baseline.
+#[test]
+fn runtime_loops_report_definite_rux() {
+    let (structural, structural_confidence, runtime, confidence) =
+        competing_sign_flip_through_the_c_abi("inflow");
+    assert!(structural == SimlinLoopPolarity::Reinforcing);
+    assert_eq!(structural_confidence, 1.0);
+    assert!(
+        runtime == SimlinLoopPolarity::MostlyReinforcing,
+        "an overwhelmingly-positive mixed-sign relative series must surface as \
+         MostlyReinforcing through the C ABI (confidence {confidence})"
+    );
+    assert!(
+        (0.99..1.0).contains(&confidence),
+        "the Rux confidence is the real dominance ratio (>= the 0.99 gate, \
+         strictly < 1.0 because both signs are present); got {confidence}"
+    );
+}
+
+/// The Bux arm through the C ABI: the outflow loop flips, and is
+/// `MostlyBalancing` at the same confidence against a structural
+/// Balancing/1.0 baseline (an outflow's link to its stock is Negative).
+#[test]
+fn runtime_loops_report_definite_bux() {
+    let (structural, structural_confidence, runtime, confidence) =
+        competing_sign_flip_through_the_c_abi("outflow");
+    assert!(structural == SimlinLoopPolarity::Balancing);
+    assert_eq!(structural_confidence, 1.0);
+    assert!(
+        runtime == SimlinLoopPolarity::MostlyBalancing,
+        "an overwhelmingly-negative mixed-sign relative series must surface as \
+         MostlyBalancing through the C ABI (confidence {confidence})"
+    );
+    assert!(
+        (0.99..1.0).contains(&confidence),
+        "the Bux confidence is the real dominance ratio (>= the 0.99 gate, \
+         strictly < 1.0 because both signs are present); got {confidence}"
+    );
 }
 
 /// The runtime loops FFI requires a run sim: calling it on a freshly-created

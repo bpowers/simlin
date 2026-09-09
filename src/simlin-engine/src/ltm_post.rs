@@ -1440,6 +1440,50 @@ mod tests {
         assert_eq!(rel_b, vec![0.75, 0.5, 0.0]);
     }
 
+    /// The runtime polarity classifier reads the owner's relative series,
+    /// and the choice of base is what decides a loop with a few violent
+    /// inflection steps.  A synthetic series: a loop balancing at raw -0.5
+    /// for 200 steps and reinforcing at 40/80/40 for three inflection steps,
+    /// beside a sibling at 0.7 that explodes to 60/100/60 at the same
+    /// inflection.  On the raw base the three steps carry 160 of 260 units of
+    /// mass (confidence 0.23); on the relative base they are 0.4, 0.44, 0.4
+    /// against 200 steps at -5/12 (confidence 0.97).  Both are Undetermined
+    /// at the 0.99 gate; the number the classifier reports is the relative
+    /// one.
+    #[test]
+    fn runtime_polarity_confidence_reads_the_relative_series() {
+        let mut raw = vec![-0.5_f64; 203];
+        raw[100..103].copy_from_slice(&[40.0, 80.0, 40.0]);
+        let mut sibling = vec![0.7_f64; 203];
+        sibling[100..103].copy_from_slice(&[60.0, 100.0, 60.0]);
+        let results = make_results_for_loops(&[("L", &raw), ("S", &sibling)]);
+        let partitions = mapping(&[("L", Some(0)), ("S", Some(0))]);
+
+        let (raw_polarity, raw_confidence) =
+            crate::ltm::LoopPolarity::from_runtime_scores(&raw).unwrap();
+        assert_eq!(raw_polarity, crate::ltm::LoopPolarity::Undetermined);
+        assert!(
+            (raw_confidence - 60.0 / 260.0).abs() < 1e-12,
+            "got {raw_confidence}"
+        );
+
+        let relative = compute_rel_loop_scores(&results, &partitions);
+        let series = &relative["L"];
+        assert!((series[0] - (-5.0 / 12.0)).abs() < 1e-12);
+        assert!((series[101] - 80.0 / 180.0).abs() < 1e-12);
+        let (polarity, confidence) = crate::ltm::LoopPolarity::from_runtime_scores(series).unwrap();
+        assert_eq!(polarity, crate::ltm::LoopPolarity::Undetermined);
+        // r = 0.4 + 4/9 + 0.4, |b| = 200 * 5/12.
+        let r = 0.4 + 4.0 / 9.0 + 0.4;
+        let b = 200.0 * 5.0 / 12.0;
+        let expected = (b - r) / (r + b);
+        assert!(
+            (confidence - expected).abs() < 1e-12,
+            "got {confidence}, expected {expected}"
+        );
+        assert!((confidence - 0.9706).abs() < 1e-4);
+    }
+
     /// `argmax_abs_by_step` on a 3-slot series: the slot with the largest
     /// magnitude wins each step, sign preserved.
     #[test]

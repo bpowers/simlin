@@ -2826,10 +2826,12 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// active step.
 ///
 /// After simulation the per-loop `loop_score` series exists; this helper
-/// reads each loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) out of `results` and
-/// runs [`crate::ltm::LoopPolarity::from_runtime_scores`] over them,
-/// overwriting the loop's `polarity` and `polarity_confidence` with the
-/// runtime classification. The loop **id stays unchanged**: loop detection
+/// normalizes every loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) in `results`
+/// through `ltm_post::compute_rel_loop_scores` and runs
+/// [`crate::ltm::LoopPolarity::from_runtime_scores`] over each loop's
+/// partition-relative series, overwriting the loop's `polarity` and
+/// `polarity_confidence` with the runtime classification. The loop **id
+/// stays unchanged**: loop detection
 /// and the deterministic `r{n}`/`b{n}`/`u{n}` id assignment happen at
 /// compile time before any simulation, and the FFI id->score correspondence
 /// plus salsa caching depend on the id never changing retroactively. A loop
@@ -2860,18 +2862,31 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// `analyze_model` / MCP surface is discovery-based and reclassifies through
 /// the `FoundLoop` path.
 ///
+/// # The base is the partition-relative series
+///
+/// The samples fed to the classifier are the loop's **partition-relative**
+/// scores from the one owner (`ltm_post::compute_rel_loop_scores`), not its
+/// raw `loop_score`: each sample is bounded to `[-1, 1]` and weighted by the
+/// loop's share of its partition at that step, so the confidence reads as
+/// the dominance-weighted time share of each sign. A raw base lets a handful
+/// of inflection steps, where every raw score in the partition diverges,
+/// decide the label on their own. For a loop alone in its partition the
+/// relative sample is exactly `+1`/`-1`/`0`, so its confidence is the plain
+/// time share of its sign. See [`crate::ltm::LoopPolarity::from_runtime_scores`].
+///
 /// # A2A semantics differ between the two reclassification sites
 ///
 /// `loop_partitions` is the per-loop slot->partition map carried on
 /// `LtmVariablesResult::loop_partitions`; its slot-vector length is the
 /// `loop_score` series' slot count. For an A2A (per-element) loop this helper
-/// **concatenates every element slot's series into one sample set** and
-/// classifies the mixed result: if any element of the loop is balancing while
-/// another is reinforcing the loop classifies `Undetermined` (a deliberate
-/// "the loop's sign is not uniform across the array" reading). This is NOT
-/// the input construction discovery uses, so do not claim they agree:
-/// **discovery** (`ltm_finding`) classifies each `FoundLoop` from its own
-/// single scalar score series.
+/// **concatenates every element slot's series into one sample set** (the
+/// owner's step-major per-slot layout, each slot normalized in its own
+/// partition) and classifies the mixed result: if any element of the loop
+/// is balancing while another is reinforcing the loop classifies
+/// `Undetermined` (a deliberate "the loop's sign is not uniform across the
+/// array" reading). This is NOT the input construction discovery uses, so do
+/// not claim they agree: **discovery** (`ltm_finding`) classifies each
+/// `FoundLoop` from its own single scalar relative series.
 ///
 /// Both sites share the *scalar* semantics (`from_runtime_scores`'s NaN/zero
 /// filter; all-positive -> Reinforcing, all-negative -> Balancing, mixed
@@ -2883,36 +2898,15 @@ pub fn reclassify_loops_from_results(
     results: &crate::Results,
     loop_partitions: &indexmap::IndexMap<String, Vec<Option<usize>>>,
 ) {
+    // One normalization for every loop at once; a loop with no emitted
+    // `loop_score` column (discovery mode scores only pinned loops) is
+    // absent from the map and keeps its structural label.
+    let relative = crate::ltm_post::compute_rel_loop_scores(results, loop_partitions);
     for loop_item in loops.iter_mut() {
-        let Some(&base_off) = results
-            .offsets
-            .get(&crate::ltm_post::loop_score_ident(&loop_item.id))
-        else {
-            // No emitted loop_score series (e.g. discovery mode emits scores
-            // only for pinned loops): nothing to reclassify against.
+        let Some(series) = relative.get(&loop_item.id) else {
             continue;
         };
-
-        // An A2A loop's loop_score occupies `n_slots` consecutive offsets;
-        // a scalar/cross-element/mixed loop has exactly one. The slot count
-        // comes from the loop's partition vector (1 when absent), the slot
-        // count `ltm_post::compute_rel_loop_scores` lays the loop out with.
-        let n_slots = loop_partitions
-            .get(&loop_item.id)
-            .map(|p| p.len().max(1))
-            .unwrap_or(1);
-
-        let mut scores: Vec<f64> = Vec::with_capacity(results.step_count * n_slots);
-        for row in results.iter() {
-            for slot in 0..n_slots {
-                let off = base_off + slot;
-                if off < results.step_size {
-                    scores.push(row[off]);
-                }
-            }
-        }
-
-        if let Some((polarity, confidence)) = crate::ltm::LoopPolarity::from_runtime_scores(&scores)
+        if let Some((polarity, confidence)) = crate::ltm::LoopPolarity::from_runtime_scores(series)
         {
             loop_item.polarity = detected_polarity_from_ltm(&polarity);
             loop_item.polarity_confidence = confidence;

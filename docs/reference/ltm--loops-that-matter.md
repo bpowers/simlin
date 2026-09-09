@@ -680,8 +680,10 @@ nature of links is not important over the course of the simulation.
 > **Simlin implementation note.** Loop detection (and the deterministic loop-id
 > assignment) happens before simulation, so the structural label is what a pre-simulation
 > surface reports. Whether the *runtime* polarity is surfaced depends on the consumer:
-> discovery (`analyze_model` / MCP) and pysimlin `Run.loops` reclassify from the runtime
-> `loop_score` series while keeping the loop id stable, whereas the libsimlin / WASM / TS
+> discovery (`analyze_model` / MCP) and pysimlin `Run.loops` reclassify from the loop's
+> partition-relative score series (Section 4.4; bounded per step, so the confidence is the
+> dominance-weighted time share of each sign, and for a loop alone in its partition the
+> plain time share) while keeping the loop id stable, whereas the libsimlin / WASM / TS
 > `get_loops` surface is structural-only (it has no simulation results in hand and folds
 > Rux/Bux to R/B at the FFI boundary -- surfacing runtime polarity there is tracked under
 > GH #495). See the "Runtime Polarity" section of
