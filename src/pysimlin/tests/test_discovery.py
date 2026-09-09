@@ -283,15 +283,16 @@ class TestAnalyzeAnalysisError:
     first."""
 
     def test_unanalyzable_model_reports_analysis_error(
-        self, rk4_feedback_model: simlin.Model
+        self, unanalyzable_model: simlin.Model
     ) -> None:
-        # RK4 + a stock in a feedback loop cannot be compiled for LTM (the
-        # flow-to-stock link-score formula assumes Euler stepping -- GH #486).
-        # `Model.analyze()` itself must not raise: this is a structural fact
-        # about the model, surfaced as data on the result.
-        analysis = rk4_feedback_model.analyze()
+        # A flow reading a variable that does not exist cannot be compiled, so
+        # LTM analysis never starts. `Model.analyze()` itself must not raise:
+        # this is a fact about the model, surfaced as data on the result.
+        analysis = unanalyzable_model.analyze()
         assert analysis.analysis_error is not None
-        assert "Euler" in analysis.analysis_error
+        # The message names the variable that failed to compile, never the
+        # reference it could not resolve.
+        assert "births" in analysis.analysis_error, "names the failing variable (births)"
         assert analysis.loops == ()
         assert analysis.dominant_periods == ()
         assert analysis.partitions == ()
@@ -305,16 +306,17 @@ class TestAnalyzeAnalysisError:
         analysis = logistic_model.analyze()
         assert analysis.analysis_error is None
 
+    def test_rk4_model_is_analyzed(self, rk4_feedback_model: simlin.Model) -> None:
+        # LTM runs under RK4 (its scores dt-step ratios reported at the saved
+        # steps), so a feedback loop on an RK4 model is analyzed like any other.
+        analysis = rk4_feedback_model.analyze()
+        assert analysis.analysis_error is None
+        assert [loop.id for loop in analysis.loops] == ["r1"]
+
 
 @pytest.fixture
 def rk4_feedback_model() -> simlin.Model:
-    """A single-stock feedback-loop model using RK4 integration.
-
-    Simulates fine without LTM, but an LTM-enabled compile is rejected (the
-    flow-to-stock link-score formula assumes Euler -- GH #486), which is what
-    makes `Model.analyze()` report `analysis_error` instead of running
-    discovery at all.
-    """
+    """A single-stock feedback-loop model using RK4 integration."""
     from simlin.types import Aux, Flow, Stock
 
     project = simlin.Project.new(name="rk4_feedback", sim_start=0.0, sim_stop=10.0, dt=1.0)
@@ -327,6 +329,28 @@ def rk4_feedback_model() -> simlin.Model:
         )
         patch.upsert(Flow(name="births", equation="population * birth_rate"))
     return model
+
+
+@pytest.fixture
+def unanalyzable_model(tmp_path: Path) -> simlin.Model:
+    """A feedback-loop model whose flow reads a variable that does not exist,
+    so nothing compiles and `Model.analyze()` reports `analysis_error`
+    instead of running discovery at all. Loaded from XMILE, because the edit
+    API refuses a patch that introduces a compile error."""
+    xmile = b"""<?xml version='1.0' encoding='utf-8'?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header><vendor>test</vendor><product lang="en">test</product></header>
+    <sim_specs method="euler"><start>0</start><stop>10</stop><dt>1</dt></sim_specs>
+    <model name="main">
+        <variables>
+            <stock name="population"><eqn>100</eqn><inflow>births</inflow></stock>
+            <flow name="births"><eqn>population * nonexistent_variable</eqn></flow>
+        </variables>
+    </model>
+</xmile>"""
+    path = tmp_path / "unanalyzable.stmx"
+    path.write_bytes(xmile)
+    return simlin.load(path)
 
 
 @pytest.fixture

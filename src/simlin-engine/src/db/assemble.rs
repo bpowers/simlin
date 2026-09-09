@@ -1238,11 +1238,6 @@ fn collect_fragments<'db>(
 
     let mut ltm_tail: Vec<String> = Vec::new();
     if overlay == LtmOverlay::On {
-        // GH #486's non-Euler rejection is NOT enforced per module here: the
-        // integration method that actually runs is a single, main-model-
-        // governed property of the whole assembled simulation, so it is
-        // resolved once, against the main-governed method, in
-        // `assemble_simulation` (`ltm_non_euler_guard`).
         let ltm_vars = model_ltm_variables(db, model, project);
         for (index, ltm_var) in ltm_vars.vars.iter().enumerate() {
             let name = canonicalize(&ltm_var.name).into_owned();
@@ -1754,63 +1749,6 @@ pub fn assemble_simulation(
     // Enumerate module instances by walking module variables recursively.
     // Each unique (model_name, input_set) pair gets its own CompiledModule.
     let module_instances = enumerate_module_instances(db, project, &main_model_name)?;
-
-    // GH #486: the LTM flow-to-stock link-score formula is only valid under
-    // Euler integration; under RK2/RK4 the scores are mathematically
-    // meaningless, and non-Euler IS honored at runtime (the VM and wasm
-    // backends both have distinct RK2/RK4 stepping loops), so it would
-    // silently produce plausible-but-wrong scores. The method that actually
-    // runs is the SINGLE main-model-governed `Specs.method` resolved below
-    // (root override else project specs); a submodel's own override is dead.
-    // Resolve it once and reject only when the assembled sim actually produces
-    // a flow-to-stock score against that main-governed method.
-    //
-    // GH #663 refinement: the old guard rejected on the mere presence of a
-    // stock in any instantiated model. That is a false positive for a loop-free
-    // model (an open-loop accumulation -- a constant inflow that never reads the
-    // stock back): in exhaustive mode LTM scores only the edges of detected
-    // feedback loops, so such a stock emits NO flow-to-stock score and the
-    // non-Euler method has nothing to corrupt. The refined precondition is the
-    // EXACT thing #486 protects against: "an instantiated model actually emits a
-    // flow-to-stock link score" (`model_emits_flow_to_stock_score`).
-    //
-    // The check iterates the instantiated set (root + every transitively-
-    // instantiated submodule) and asks each model's own
-    // `model_emits_flow_to_stock_score`, so a flow-to-stock score produced
-    // entirely inside a submodel instance is caught -- the assembly emits that
-    // submodel's LTM vars too. The root may be stock-free while a submodel under
-    // the main-governed method scores a flow-to-stock link, exactly the hazard a
-    // per-submodel-specs check missed. Unused model definitions sitting in the
-    // project are never instantiated, so they are irrelevant.
-    //
-    // Reading the emitted var set (rather than a loop-presence proxy) is what
-    // makes the refinement SOUND across modes: in discovery mode (user-forced or
-    // auto-flipped) and in any model with input ports, `model_ltm_variables`
-    // scores ALL causal edges, so it emits a flow-to-stock score for an
-    // open-loop stock's `flow → stock` edge even though no loop contains that
-    // stock. A "has any feedback loop" proxy would under-reject those models; the
-    // direct var-set test cannot. `model_ltm_variables` is already salsa-computed
-    // on this LTM-enabled assembly path, so this is a cache hit plus a linear
-    // scan.
-    //
-    // This rejection rides the `assemble_simulation` `Err`, so it reaches
-    // `simlin_sim_new`, `simlin_project_get_errors` (the `vm_error` channel),
-    // and the wasm backend -- the sim-compile path that, unlike
-    // `collect_all_diagnostics`, is what every runnable consumer goes through.
-    if overlay == LtmOverlay::On
-        && let Some(root_model) = project_models.get(main_model_canonical.as_ref())
-        && let Some(method) = ltm::effective_non_euler_method(db, *root_model, project)
-    {
-        let any_flow_to_stock_score = module_instances.keys().any(|name| {
-            let canonical = canonicalize(name.as_str());
-            project_models
-                .get(canonical.as_ref())
-                .is_some_and(|sm| ltm::model_emits_flow_to_stock_score(db, *sm, project))
-        });
-        if any_flow_to_stock_score {
-            return Err(ltm::ltm_non_euler_diagnostic_message(method));
-        }
-    }
 
     // Sort module names: main first, then all others alphabetically
     let main_ident = Ident::<Canonical>::new(&main_model_name);

@@ -879,12 +879,11 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     };
 
     // Compilability is an INTRINSIC property of the project, assessed with LTM
-    // OFF. LTM is an analysis overlay (the flow-to-stock link-score formula
-    // assumes Euler integration, etc.), not part of whether the model is a
+    // OFF. LTM is an analysis overlay, not part of whether the model is a
     // valid, runnable simulation -- so the compile/VM-validation channel must
-    // never be computed under the overlay, or an LTM-only rejection (the GH
-    // #486 non-Euler hard `Err` from `assemble_simulation`) would masquerade
-    // as a project error on a model that simulates fine. `build_sim`
+    // never be computed under the overlay, or an LTM-only failure (a synthetic
+    // fragment the compiler refuses, say) would masquerade as a project error
+    // on a model that simulates fine. `build_sim`
     // additionally routes a conveyor/queue model through its special expansion
     // build path (also LTM-off), so a valid special-stock model is not
     // mis-reported as a project error by the ordinary path's NotExpanded guard.

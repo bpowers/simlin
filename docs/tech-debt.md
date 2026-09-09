@@ -279,8 +279,8 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 ### 31. RK4 + LTM Combination Has No Hard-Error Guard
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs flow-to-stock path)
-- **Severity**: medium
-- **Description**: LTM link scores are differences of saved-step values (a flow-to-stock score is `|Δflow / Δnet|` over the stock's net-flow aux), and whether they describe an RK-stepped trajectory faithfully has not been established, so `assemble_simulation` refuses LTM under RK2/RK4 (GH #486) when any instantiated model emits a flow-to-stock score. Open question: lift the refusal once the RK case is validated (the 2020 paper's section 6.1 calls the method compatible with Runge-Kutta "in principle").
+- **Severity**: RESOLVED (2026-09-07)
+- **Description**: (**Resolved**.) The flow-to-stock link score is `|Δflow / Δnet|` over the stock's synthetic net-flow aux, a ratio of integration-step (dt) deltas with no stock history behind it, and the VM and wasm both re-evaluate the flows at the restored end-of-step state before snapshotting it under RK2/RK4, so LTM runs under every integration method and needs no guard (`tests/integration/ltm_integration_method.rs` pins Euler, RK2 and RK4 identical on an isolated loop and on the births/deaths model, whose flows are proportional to the stock, and pins a nonlinear flow following each method's own trajectory). Keeping the entry as a pointer to the design doc's "Integration Methods and Save Step" note.
 - **Tracked in**: #486 (LTM tracking epic: #488)
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-29

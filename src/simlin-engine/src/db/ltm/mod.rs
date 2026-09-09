@@ -23,7 +23,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::canonicalize;
 use crate::common::{Canonical, Ident};
-use crate::datamodel;
 use crate::ltm::strip_subscript;
 
 use super::{
@@ -185,103 +184,6 @@ pub(crate) fn endpoint_dimensions(
     crate::db::var_fragment::DeclaredName::resolve(db, model, project, name)?
         .dimensions_shape(db, project)
         .map(|shape| shape.dims)
-}
-
-/// The single integration method the assembled simulation actually runs, when
-/// it is NOT Euler -- the method the GH #486 guard keeps LTM off.
-///
-/// A `CompiledSimulation` has exactly ONE `Specs.method`, resolved by
-/// `assemble_simulation` from the MAIN (root) model's `model_sim_specs`
-/// override else the project specs. A submodel's own `model_sim_specs` is
-/// never consulted by the VM, so the GH #486 guard must resolve and apply that
-/// single main-governed method -- NOT each model's own specs (which is the
-/// blocker the per-model resolution had). `root_model` is the model named in
-/// `assemble_simulation(.., main_model_name)`. Returns `None` for Euler (the
-/// supported case), `Some(method)` otherwise.
-pub(super) fn effective_non_euler_method(
-    db: &dyn Db,
-    root_model: SourceModel,
-    project: SourceProject,
-) -> Option<datamodel::SimMethod> {
-    let method = match root_model.model_sim_specs(db) {
-        Some(specs) => specs.sim_method,
-        None => project.sim_specs(db).sim_method,
-    };
-    match method {
-        datamodel::SimMethod::Euler => None,
-        other => Some(other),
-    }
-}
-
-/// Whether `model_ltm_variables` emits at least one flow-to-stock link score
-/// for this model -- the EXACT precondition the GH #486/#663 non-Euler guard
-/// gates on.
-///
-/// The guard keys on a flow-to-stock score rather than on "the model has a
-/// stock" because the latter over-rejects a loop-free model (GH #663): in
-/// exhaustive mode LTM scores only the edges of detected feedback loops, so an
-/// open-loop stock (a constant inflow that never reads the stock back) emits
-/// NO flow-to-stock score and there is nothing to guard.
-///
-/// Crucially this is mode-aware where a loop-presence proxy is NOT: in
-/// DISCOVERY mode (user-forced or auto-flipped) and in any model with input
-/// ports, `model_ltm_variables` scores ALL causal edges, so it DOES emit a
-/// flow-to-stock score for an open-loop stock's `flow → stock` edge even
-/// though that stock is in no loop. Reading the emitted var set directly is
-/// therefore the only sound test: it cannot under-reject a discovery-mode
-/// model with a stock the way "has any loop" would.
-///
-/// A causal edge into a stock can only originate from one of its flows
-/// (`model_causal_edges` adds `flow → stock` edges and nothing else points at
-/// a stock -- a stock's equation is its initial value, not `inflow-outflow`),
-/// so "a link-score var whose `to` endpoint is a stock" is exactly "a
-/// flow-to-stock score". `link_score_edge_endpoints` strips any element
-/// subscript, so an arrayed stock's per-element score matches its base name.
-///
-/// Bounded on the guard's path: `model_ltm_variables` is the same query the
-/// Euler assembly path runs unconditionally (its cost is capped by the
-/// auto-flip-to-discovery gate and the circuit budget), so the guard is not
-/// adding an unbounded computation. On the rejection path the guard runs BEFORE
-/// `assemble_module`, so it computes the query rather than hitting a cache; but
-/// it pays that at most once per instantiated stock-bearing model, and any
-/// later assembly of the same model gets the salsa cache hit.
-pub(super) fn model_emits_flow_to_stock_score(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> bool {
-    let stocks = &crate::db::model_causal_edges(db, model, project).stocks;
-    if stocks.is_empty() {
-        return false;
-    }
-    let ltm = model_ltm_variables(db, model, project);
-    ltm.vars
-        .iter()
-        .any(|v| link_score_edge_endpoints(&v.name).is_some_and(|(_from, to)| stocks.contains(&to)))
-}
-
-/// Human-readable name of a non-Euler integration method, used in the GH #486
-/// diagnostic so the message names the offending method concretely.
-fn sim_method_display_name(method: datamodel::SimMethod) -> &'static str {
-    match method {
-        datamodel::SimMethod::Euler => "Euler",
-        datamodel::SimMethod::RungeKutta2 => "RK2 (2nd-order Runge-Kutta)",
-        datamodel::SimMethod::RungeKutta4 => "RK4 (4th-order Runge-Kutta)",
-    }
-}
-
-/// The GH #486 rejection message: LTM was requested on a simulation whose
-/// (main-model-governed) integration method is non-Euler. Returned as the
-/// `assemble_simulation` `Err` so it reaches `simlin_sim_new`,
-/// `simlin_project_get_errors` (the `vm_error` channel), and the wasm backend
-/// (`WasmGenError::Unsupported`) -- the sim-compile path never produces
-/// silently-wrong scores.
-pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> String {
-    format!(
-        "LTM (Loops That Matter) analysis requires Euler integration, but this model uses \
-         {}.  Switch the integration method to Euler, or disable LTM analysis.",
-        sim_method_display_name(method),
-    )
 }
 
 /// THE shared stateless predicate for the LTM early-return gates (GH #748,
@@ -1125,20 +1027,6 @@ pub fn model_ltm_variables(
             diagnostics: warnings.diagnostics,
         };
     }
-
-    // GH #486's non-Euler rejection is NOT emitted here. The integration
-    // method that the VM actually honors is a single, main-model-governed
-    // property of the assembled simulation (`assemble_simulation`'s `Specs`
-    // selection: the root model's `model_sim_specs` override else the project
-    // specs -- a submodel's own override is dead), and this per-model query has
-    // no main-model context. Emitting per-model with each model's own specs is
-    // both wrong (a stock-free main that overrides to RK4 would be missed while
-    // its stock-bearing submodel falls back to the project's Euler; conversely
-    // a submodel that overrides to RK4 under a Euler main would be wrongly
-    // rejected) and duplicative. The check lives once in `assemble_simulation`
-    // against the resolved method; it surfaces through `compile_project_
-    // incremental` to `simlin_sim_new`, `simlin_project_get_errors` (the
-    // `vm_error` channel), and the wasm backend.
 
     // When the user explicitly requested discovery mode, honor it
     // directly. Otherwise auto-flip if either:

@@ -437,7 +437,7 @@ pub struct SimlinProject {
     /// decide whether to collect diagnostics under the LTM overlay, so the
     /// LTM diagnostic pipeline (the auto-flip-to-discovery warning,
     /// synthetic-fragment compile failures, the GH #311 partial-equation
-    /// warnings, and the GH #486 non-Euler Error) reaches the caller of a
+    /// warnings) reaches the caller of a
     /// project that simulated with LTM (GH #466), while a project that never
     /// requested LTM pays no LTM synthesis cost in `get_errors`. The overlay
     /// is an argument of the queries, not a flag on the project, so no

@@ -539,10 +539,8 @@ class Analysis:
 
     analysis_error: str | None = None
     """Set when the model could not be compiled or analyzed for LTM AT ALL --
-    a malformed equation, an unresolved reference, or a hard compile failure
-    such as picking a non-Euler integration method on a model with a stock in
-    a feedback loop (that link-score formula assumes Euler stepping). When
-    set, every other field describes an analysis that never STARTED: `loops`,
+    a malformed equation, an unresolved reference, or a hard compile failure.
+    When set, every other field describes an analysis that never STARTED: `loops`,
     `dominant_periods`, and `partitions` are empty, `retained_loops` is 0,
     `enumeration_complete` is False, and `universe_loops` is None -- the SAME
     shape a genuinely SAMPLED analysis that happened to find zero loops would

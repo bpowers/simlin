@@ -5308,42 +5308,36 @@ fn mark2_mdl_compiles_after_protobuf_roundtrip() {
 }
 
 /// The browser's model.run() defaults analyzeLtm=true, so simNew is called
-/// with enable_ltm=true. mark2.mdl declares RK4 integration, and the LTM
-/// flow-to-stock link-score formula is only valid under Euler (GH #486), so
-/// enabling LTM on this real-world model must now be rejected with the
-/// Euler-assumption error rather than silently producing wrong scores. The
-/// same model still compiles and runs with LTM disabled. (SMOOTH/DELAY-in-a-
-/// feedback-loop compiling WITH LTM is covered by the Euler-based LTM tests in
-/// `db::ltm_module_tests`.)
+/// with enable_ltm=true. mark2.mdl declares RK4 integration: the LTM overlay
+/// compiles and runs on this real-world model, its scores the dt-step ratios
+/// reported at the saved steps (`ltm_integration_method.rs`), and the overlay
+/// leaves the simulation itself untouched -- every model variable's series is
+/// the same with and without it.
 #[test]
-fn mark2_mdl_rejects_ltm_under_rk4() {
+fn mark2_mdl_simulates_with_ltm_under_rk4() {
     let contents =
         std::fs::read_to_string("../../test/bobby/vdf/econ/mark2.mdl").expect("read mark2.mdl");
     let project = open_vensim(&contents).expect("parse mark2.mdl");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
 
-    // The LTM overlay on an RK4 model: the compile is rejected with the Euler
-    // assumption explained.
-    let err =
-        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
-            .expect_err("LTM + RK4 must be rejected");
-    let details = err.details.unwrap_or_default();
+    let run = |overlay: simlin_engine::db::LtmOverlay| -> Results {
+        let compiled = compile_project_incremental(&db, sync.project, "main", overlay)
+            .unwrap_or_else(|e| panic!("mark2.mdl should compile with overlay {overlay:?}: {e}"));
+        let mut vm = Vm::new(compiled).expect("VM creation should succeed");
+        vm.run_to_end().expect("VM should run to completion");
+        vm.into_results()
+    };
+    let plain = run(simlin_engine::db::LtmOverlay::Off);
+    let with_ltm = run(simlin_engine::db::LtmOverlay::On);
     assert!(
-        details.contains("Euler"),
-        "the rejection must reference the Euler assumption: {details}"
+        with_ltm.offsets.keys().any(|k| k
+            .as_str()
+            .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")),
+        "the LTM run carries loop scores"
     );
-
-    // Without the overlay, the same RK4 model compiles and simulates as before.
-    let compiled = compile_project_incremental(
-        &db,
-        sync.project,
-        "main",
-        simlin_engine::db::LtmOverlay::Off,
-    )
-    .expect("mark2.mdl should compile without LTM");
-    let mut vm = Vm::new(compiled).expect("VM creation should succeed");
-    vm.run_to_end().expect("VM should run to completion");
+    // Every model variable's series is the LTM-free run's, exactly.
+    ensure_results_excluding(&plain, &with_ltm, &[]);
 }
 
 // ===========================================================================

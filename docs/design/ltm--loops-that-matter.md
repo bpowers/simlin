@@ -1935,13 +1935,33 @@ enumerated loops.
 
 ## Current Limitations
 
-### Euler Integration Only
+### Integration Methods and Save Step
 
-`assemble_simulation` refuses the overlay under RK2/RK4 (GH #486) when any
-instantiated model emits a flow-to-stock score. The scores are differences of
-saved-step values, so the guard keeps them on Euler-stepped trajectories; the
-2020 paper (section 6.1) says the method is compatible with Runge-Kutta "in
-principle", and Simlin has not established that for RK-stepped runs.
+LTM runs under Euler, RK2 and RK4 alike (GH #486). A link score is a ratio of
+integration-step (dt) deltas, reported at the saved steps: `PREVIOUS` reads the
+state the previous dt step ended in, because the VM snapshots `prev_values` on
+every dt iteration before the save/advance logic decides whether the row is
+recorded. With `save_step > dt` a recorded score is therefore the ratio over
+the last dt step ending at that time -- the same number a `save_step = dt` run
+records there -- and not a re-differencing of the flows over the saved
+interval (`tests/integration/ltm_integration_method.rs` pins the two apart on
+a nonlinear flow, where they differ by more than a unit of score). This is the
+2020 paper's form (Schoenberg, Davidsen and Eberlein, section 6.1: the scores
+are "computed at each dt").
+
+Under RK2/RK4 the VM re-evaluates the flows at the restored end-of-step state
+before snapshotting it (the RK stages' trial-point evaluations are
+overwritten; wasm mirrors this), so the dt-step ratio is taken over the
+method's own trajectory and never over an intra-step stage evaluation. The
+paper puts Runge-Kutta compatibility as "in principle" ("could in principle
+work ... with Runge-Kutta integration"); this is the form it takes here. Note
+the boundary of what that buys: a model whose flows are proportional to its
+stock scores identically under all three methods while its stock trajectories
+differ, because the ratios of flow deltas cancel the stock's step, but that is
+a property of proportional flows, not of the method. In general the scores
+follow the method's trajectory: on the test's nonlinear model (`deaths =
+0.02 * s ^ 1.3` against `births = 0.1 * s`) the deaths-to-stock score at
+`t = 2` is -22.744 under Euler and -22.749 under RK4.
 
 ### Performance on Very Large Models
 

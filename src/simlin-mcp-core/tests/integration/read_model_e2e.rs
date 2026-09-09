@@ -245,14 +245,11 @@ async fn read_model_surfaces_cycle_partitions() {
     );
 }
 
-/// GH #660: an RK4 model with a stock in a loop cannot be compiled for LTM
-/// analysis (the flow-to-stock link-score formula assumes Euler; GH #486).
-/// Before #660 the read_model surface returned an empty `loopDominance` with
-/// no hint why; now the actionable Euler guidance must reach the caller via
-/// the `analysisError` field so an agent asking "what loops?" understands the
-/// model needs Euler (or LTM disabled).
+/// An RK4 model with a stock in a loop is analyzed like any other: LTM runs
+/// under every integration method (its scores dt-step ratios reported at the
+/// saved steps), so `read_model` reports the loop and no `analysisError`.
 #[tokio::test]
-async fn read_model_rk4_loop_surfaces_euler_analysis_error() {
+async fn read_model_rk4_loop_is_analyzed() {
     let rk4_model = serde_json::json!({
         "name": "rk4_loop",
         "simSpecs": {
@@ -283,26 +280,84 @@ async fn read_model_rk4_loop_surfaces_euler_analysis_error() {
     };
     let output = read_model(&TestFileSystemAccess, input).await.unwrap();
 
+    assert!(
+        output.analysis_error.is_none(),
+        "RK4 + LTM read_model analyzes the model: {:?}",
+        output.analysis_error
+    );
+    assert!(
+        !output.loop_dominance.is_empty(),
+        "the reinforcing loop through births is reported under RK4"
+    );
+
+    // Nothing reaches the wire (serialized) shape either.
+    let value = serde_json::to_value(&output).unwrap();
+    assert!(
+        value.get("analysisError").is_none(),
+        "no analysisError is serialized for an analyzable model"
+    );
+}
+
+/// GH #660: a model that cannot be compiled for LTM analysis -- here a flow
+/// reading a variable that does not exist -- surfaces the actionable compile
+/// error through `analysisError`, on the struct and on the wire under
+/// camelCase, instead of an empty `loopDominance` that an agent asking "what
+/// loops?" could not tell from "none".
+#[tokio::test]
+async fn read_model_uncompilable_loop_surfaces_analysis_error() {
+    let broken_model = serde_json::json!({
+        "name": "broken_loop",
+        "simSpecs": {
+            "startTime": 0.0,
+            "endTime": 10.0,
+            "dt": "1"
+        },
+        "models": [{
+            "name": "main",
+            "stocks": [
+                {"uid": 1, "name": "population", "initialEquation": "100",
+                 "inflows": ["births"], "outflows": []}
+            ],
+            "flows": [
+                {"uid": 2, "name": "births",
+                 "equation": "population * nonexistent_variable"}
+            ]
+        }]
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("broken_loop.sd.json");
+    std::fs::write(&path, broken_model.to_string()).unwrap();
+
+    let input = ReadModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+    };
+    let output = read_model(&TestFileSystemAccess, input).await.unwrap();
+
     let msg = output
         .analysis_error
         .as_deref()
-        .expect("RK4 + LTM read_model must surface an analysisError");
+        .expect("an uncompilable model must surface an analysisError");
+    // The message names the variable that failed to compile, never the
+    // reference it could not resolve.
     assert!(
-        msg.contains("Euler"),
-        "analysisError must reference the Euler assumption, got: {msg}"
+        msg.contains("births"),
+        "analysisError must name the failing variable (births), got: {msg}"
     );
     assert!(
         output.loop_dominance.is_empty(),
         "loop_dominance must be empty when the model can't be compiled for LTM"
     );
 
-    // It must also reach the wire (serialized) shape under camelCase.
+    // It reaches the wire (serialized) shape under camelCase.
     let value = serde_json::to_value(&output).unwrap();
     assert!(
         value["analysisError"]
             .as_str()
-            .is_some_and(|s| s.contains("Euler")),
-        "serialized analysisError must carry the Euler guidance"
+            .is_some_and(|s| s.contains("births")),
+        "serialized analysisError must carry the compile error, got: {}",
+        value["analysisError"]
     );
 }
 

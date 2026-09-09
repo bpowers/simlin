@@ -34,6 +34,7 @@ mod ltm_array_agg;
 mod ltm_discovery_large_models;
 mod ltm_dt_invariance;
 mod ltm_flow_to_stock;
+mod ltm_integration_method;
 // Compares xmutil-based MDL parsing against the native Rust parser, so it
 // needs the optional xmutil C++ converter compiled in.
 #[cfg(feature = "xmutil")]

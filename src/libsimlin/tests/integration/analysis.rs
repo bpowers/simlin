@@ -2649,10 +2649,10 @@ fn discover_loops_null_model_errors_without_panic() {
     }
 }
 
-/// A model that CANNOT be analyzed for LTM at all (GH #486: a non-Euler
-/// integration method with a stock in a feedback loop -- the flow-to-stock
-/// link-score formula assumes Euler stepping) must surface `analysis_error`
-/// non-NULL rather than returning a successful-looking empty/sampled result:
+/// A model that CANNOT be analyzed for LTM at all (here a flow reading a
+/// variable that does not exist, so nothing compiles) must surface
+/// `analysis_error` non-NULL rather than returning a successful-looking
+/// empty/sampled result:
 /// `simlin_analyze_discover_loops` itself still succeeds (this is a
 /// STRUCTURAL fact about the model, not an FFI error), but the discovery
 /// result reports "analysis never ran" -- `enumeration_complete == false`
@@ -2664,9 +2664,8 @@ fn discover_loops_reports_analysis_error_when_ltm_never_ran() {
     unsafe {
         let test_project = TestProject::new("main")
             .with_sim_time(0.0, 10.0, 1.0)
-            .with_sim_method(simlin_engine::datamodel::SimMethod::RungeKutta4)
             .stock("population", "100", &["births"], &[], None)
-            .flow("births", "population * 0.02", None);
+            .flow("births", "population * nonexistent_variable", None);
         let datamodel_project = test_project.build_datamodel();
         let project = engine_serde::serialize(&datamodel_project).unwrap();
         let mut buf = Vec::new();
@@ -2692,14 +2691,16 @@ fn discover_loops_reports_analysis_error_when_ltm_never_ran() {
         let res = &*result;
         assert!(
             !res.analysis_error.is_null(),
-            "RK4 + a stock in a loop cannot be compiled for LTM analysis"
+            "an unresolved reference cannot be compiled for LTM analysis"
         );
         let msg = CStr::from_ptr(res.analysis_error)
             .to_string_lossy()
             .into_owned();
+        // The message names the variable that failed to compile, never the
+        // reference it could not resolve.
         assert!(
-            msg.contains("Euler"),
-            "analysis_error must reference the Euler assumption, got: {msg}"
+            msg.contains("births"),
+            "analysis_error must name the failing variable (births), got: {msg}"
         );
         assert_eq!(res.loop_count, 0, "analysis never reached candidates");
         assert_eq!(res.period_count, 0);
