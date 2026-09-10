@@ -2547,15 +2547,45 @@ TIME STEP = 1 ~~|
     assert!((get("g[a2]") - 7.0).abs() < 1e-10, "g[A2] should be 7");
     assert!((get("g[a3]") - 7.0).abs() < 1e-10, "g[A3] should be 7");
 
-    // h[DimA] :EXCEPT: [SubA] = 8 (no overrides for A2, A3)
+    // h[DimA] :EXCEPT: [SubA] = 8 (no overrides for A2, A3). Vensim defines
+    // no h[A2] or h[A3] at all -- its output for the sdeverywhere `except`
+    // model lists only h[A1] -- so the 0 here is Simlin's fabricated value
+    // for an element with no equation, named by the MissingElementEquation
+    // warning, not a Vensim result.
     assert!((get("h[a1]") - 8.0).abs() < 1e-10, "h[A1] should be 8");
     assert!(
         (get("h[a2]") - 0.0).abs() < 1e-10,
-        "h[A2] should be 0 (undefined)"
+        "h[A2] is Simlin's fabricated 0 (Vensim has no such element)"
     );
     assert!(
         (get("h[a3]") - 0.0).abs() < 1e-10,
-        "h[A3] should be 0 (undefined)"
+        "h[A3] is Simlin's fabricated 0 (Vensim has no such element)"
+    );
+    // ... and the warning names those two elements on h.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::Off,
+    );
+    let h_missing: Vec<String> = diagnostics
+        .iter()
+        .filter_map(|d| match &d.error {
+            simlin_engine::db::DiagnosticError::Model(e)
+                if e.code == simlin_engine::common::ErrorCode::MissingElementEquation
+                    && d.variable.as_deref() == Some("h") =>
+            {
+                e.get_details()
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(h_missing.len(), 1, "{diagnostics:?}");
+    assert!(
+        h_missing[0].starts_with("array variable 'h' has no equation for 'a2', 'a3'"),
+        "{}",
+        h_missing[0]
     );
 
     // p[DimA] :EXCEPT: [A1] = 2, p[A1] = 5
@@ -5308,42 +5338,36 @@ fn mark2_mdl_compiles_after_protobuf_roundtrip() {
 }
 
 /// The browser's model.run() defaults analyzeLtm=true, so simNew is called
-/// with enable_ltm=true. mark2.mdl declares RK4 integration, and the LTM
-/// flow-to-stock link-score formula is only valid under Euler (GH #486), so
-/// enabling LTM on this real-world model must now be rejected with the
-/// Euler-assumption error rather than silently producing wrong scores. The
-/// same model still compiles and runs with LTM disabled. (SMOOTH/DELAY-in-a-
-/// feedback-loop compiling WITH LTM is covered by the Euler-based LTM tests in
-/// `db::ltm_module_tests`.)
+/// with enable_ltm=true. mark2.mdl declares RK4 integration: the LTM overlay
+/// compiles and runs on this real-world model, its scores the dt-step ratios
+/// reported at the saved steps (`ltm_integration_method.rs`), and the overlay
+/// leaves the simulation itself untouched -- every model variable's series is
+/// the same with and without it.
 #[test]
-fn mark2_mdl_rejects_ltm_under_rk4() {
+fn mark2_mdl_simulates_with_ltm_under_rk4() {
     let contents =
         std::fs::read_to_string("../../test/bobby/vdf/econ/mark2.mdl").expect("read mark2.mdl");
     let project = open_vensim(&contents).expect("parse mark2.mdl");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
 
-    // The LTM overlay on an RK4 model: the compile is rejected with the Euler
-    // assumption explained.
-    let err =
-        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
-            .expect_err("LTM + RK4 must be rejected");
-    let details = err.details.unwrap_or_default();
+    let run = |overlay: simlin_engine::db::LtmOverlay| -> Results {
+        let compiled = compile_project_incremental(&db, sync.project, "main", overlay)
+            .unwrap_or_else(|e| panic!("mark2.mdl should compile with overlay {overlay:?}: {e}"));
+        let mut vm = Vm::new(compiled).expect("VM creation should succeed");
+        vm.run_to_end().expect("VM should run to completion");
+        vm.into_results()
+    };
+    let plain = run(simlin_engine::db::LtmOverlay::Off);
+    let with_ltm = run(simlin_engine::db::LtmOverlay::On);
     assert!(
-        details.contains("Euler"),
-        "the rejection must reference the Euler assumption: {details}"
+        with_ltm.offsets.keys().any(|k| k
+            .as_str()
+            .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")),
+        "the LTM run carries loop scores"
     );
-
-    // Without the overlay, the same RK4 model compiles and simulates as before.
-    let compiled = compile_project_incremental(
-        &db,
-        sync.project,
-        "main",
-        simlin_engine::db::LtmOverlay::Off,
-    )
-    .expect("mark2.mdl should compile without LTM");
-    let mut vm = Vm::new(compiled).expect("VM creation should succeed");
-    vm.run_to_end().expect("VM should run to completion");
+    // Every model variable's series is the LTM-free run's, exactly.
+    ensure_results_excluding(&plain, &with_ltm, &[]);
 }
 
 // ===========================================================================
@@ -6789,8 +6813,8 @@ fn corpus_clearn_macros_import() {
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
 /// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
-/// per-step result-row width is **30,123 slots**, 46% of the ceiling, with
-/// 35,413 free. Both numbers come from
+/// per-step result-row width is **28,725 slots**, 44% of the ceiling, with
+/// 36,811 free. Both numbers come from
 /// `examples/ltm_slot_width.rs`, so re-deriving them is a command rather than a
 /// reconstruction -- and they are the CURRENT totals: the transition records
 /// below quote earlier values as the left-hand side of a move, which is what
@@ -6898,6 +6922,45 @@ fn corpus_clearn_macros_import() {
 /// arrayed helpers of three scores, so the width is 29,398 -> 29,447 slots
 /// and the margin 36,089 free against the 65,536-slot ceiling.
 ///
+/// The flow-to-stock score's net-flow form moved the count UP, 6,193 ->
+/// 6,224 (+31), and the width DOWN, 29,447 -> 28,725 (-722). The count is
+/// arithmetic over `examples/ltm_var_dump.rs`: +35 net-flow auxes
+/// (`$⁚ltm⁚net⁚{stock}`, one per stock with a scored flow-to-stock edge --
+/// 24 in `main`, 11 across the stdlib templates and `sample_until`), +2
+/// arrayed scores for the two scalar flows into arrayed stocks
+/// (`global_anthropogenic_ch4_emissions -> ch4_in_atm` and
+/// `global_total_c_emissions -> c_in_atmosphere`, over the 3-element
+/// sensitivity dimension), and -6 for the per-element scalars those two
+/// edges carried before, which were partials of the stocks' INITIAL-VALUE
+/// equations rather than of anything the flow moves. The width is read off
+/// the result-column diff of a C-LEARN `simlin simulate --ltm` run on the
+/// previous and the new CLI: -888 nested-lag capture helper columns
+/// (`$⁚$⁚ltm⁚link_score⁚{flow}→{stock}⁚{n}⁚arg0[..]`, one slot each; the
+/// `PREVIOUS(PREVIOUS(..))` reads of the retired stock-history numerator),
+/// -6 per-element scalars, +6 for the two arrayed scores, and the remaining
+/// +166 slots are the 123 net-aux instances (a stdlib template's aux is
+/// instantiated once per call site; the 166 is the remainder of this
+/// arithmetic, not a separate measurement). Every added column is a net aux
+/// or one of those two scores and every removed one is a nested-lag helper
+/// or one of those six scalars; the margin is 36,811 free against the
+/// 65,536-slot ceiling.
+///
+/// The frozen clock (GH #1016) moved the count UP, 6,224 -> 6,227 (+3), and
+/// the width UP, 28,725 -> 28,980 (+255). The count is the per-model clock
+/// helper `$⁚ltm⁚freeze⁚time` (`examples/ltm_var_dump.rs`: one each in
+/// `main`, the `ramp_from_to` macro model and the stdlib `npv` template,
+/// the three models whose partials read `TIME`). The width is the
+/// result-column diff of a C-LEARN `simlin simulate --ltm` run on the
+/// previous and the new CLI, every added column one of three kinds and
+/// nothing removed: 36 clock-helper instances (`main`'s plus one per
+/// `ramp_from_to` call site), their 36 `PREVIOUS(TIME)` captures, and 183
+/// captures of time-dependent CALLS frozen whole (`PREVIOUS(STEP(..))` and
+/// the like), one per arm and per occurrence; a call inside a frozen
+/// dependency's subscript index is left to that enclosing freeze and mints
+/// none. Without the shared helper the bare `TIME` reads alone cost 9,632
+/// capture slots, which is why the helper exists. The margin is 36,556 free
+/// against the 65,536-slot ceiling.
+///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
 #[test]
@@ -6922,7 +6985,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6193,
+        total, 6227,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

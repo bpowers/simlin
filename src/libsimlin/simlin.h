@@ -376,9 +376,7 @@ typedef struct {
   int64_t universe_loops;
   // Non-NULL when the model could not be compiled or analyzed for LTM at
   // all -- a malformed equation, an unresolved reference, or a hard
-  // compile failure such as the non-Euler-integration-with-a-stock-loop
-  // rejection (GH #486, which needs Euler stepping for its flow-to-stock
-  // link-score formula).  When set, every OTHER field describes an
+  // compile failure.  When set, every OTHER field describes an
   // analysis that never started: `loops`/`periods`/`partitions` are
   // empty, `loop_count`/`period_count`/`partition_count`/`retained_loops`
   // are `0`, `enumeration_complete` is `false`, and `universe_loops` is
@@ -504,8 +502,11 @@ SimlinLoops *simlin_analyze_get_loops(SimlinModel *model, SimlinError **out_erro
 // `reclassify_loops_from_results` primitive (GH #679) over it: for every loop
 // whose `$⁚ltm⁚loop_score⁚{id}` series exists in the results, the loop's
 // polarity and confidence are overwritten by
-// `crate::ltm::LoopPolarity::from_runtime_scores` (the LTM papers' Rux/Bux/U
-// classification with the 0.99 confidence gate).  A loop whose runtime score
+// `crate::ltm::LoopPolarity::from_runtime_scores` over the loop's
+// partition-RELATIVE series (its per-step share of its cycle partition, the
+// same series `simlin_analyze_get_relative_loop_score` returns): the LTM
+// papers' Rux/Bux/U classification with the 0.99 confidence gate, on a
+// bounded, dominance-weighted base.  A loop whose runtime score
 // is never active keeps its structural classification.  Loop IDs are stable
 // (a `u1` stays `u1` even after its polarity flips to Reinforcing).
 //
@@ -676,10 +677,10 @@ void simlin_free_links(SimlinLinks *links);
 // slab.
 //
 // The wasm-backend twin of `simlin_analyze_get_relative_loop_score`.  Both
-// FFIs funnel through `rel_loop_score_series` (extracted in Subcomponent A)
-// over an `engine::Results` and the `(loop_partitions, loop_element_index)`
-// snapshots, so the per-loop time series they produce cannot diverge by
-// construction.
+// FFIs resolve the loop id against the `loop_element_index` snapshot and
+// funnel through `rel_loop_score_series` over an `engine::Results` and the
+// `loop_partitions` snapshot, so the per-loop time series they produce
+// cannot diverge by construction.
 //
 // Unlike the links twin, the rel-loop-score path needs the snapshots
 // `model_ltm_variables` derives (the per-loop partition map and slot
@@ -1657,10 +1658,11 @@ void simlin_project_render_png(SimlinProject *project,
 // `enable_ltm` requests Loops That Matter instrumentation. For an ordinary
 // model this produces a sim whose results carry the LTM link/loop-score
 // series. For a model containing a conveyor or queue stock, LTM is a
-// documented degradation: the flow-to-stock link-score formula assumes plain
-// INTEG under Euler, which neither special stock is, so the sim is created
-// WITHOUT LTM instrumentation and `simlin_sim_get_ltm_mode` reports
-// `Disabled`. `enable_ltm = true` is still honored as a request in that case:
+// documented degradation: the flow-to-stock link score treats a stock's net
+// flow as its rate of change (plain INTEG), which neither special stock is,
+// so the sim is created WITHOUT LTM instrumentation and
+// `simlin_sim_get_ltm_mode` reports `Disabled`. `enable_ltm = true` is still
+// honored as a request in that case:
 // `simlin_project_get_errors` will surface a `ConveyorLtmDegraded` /
 // `QueueLtmDegraded` `Warning` naming the offending stock, so the caller learns
 // why scores are absent instead of the request being silently dropped.

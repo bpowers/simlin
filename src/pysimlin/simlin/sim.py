@@ -343,9 +343,12 @@ class Sim:
         only a model and reports STRUCTURAL polarity).  It builds the same
         exhaustive structural loop set, then reclassifies each loop's polarity
         and ``polarity_confidence`` from its post-simulation
-        ``$:ltm:loop_score:{id}`` series via the engine's
+        ``$:ltm:loop_score:{id}`` series, normalized to the loop's share of its
+        cycle partition at each step, via the engine's
         ``reclassify_loops_from_results`` primitive (GH #679): the LTM papers'
-        Rux/Bux/U runtime classification with the 0.99 confidence gate.  A loop
+        Rux/Bux/U runtime classification with the 0.99 confidence gate, read on
+        the partition-relative series (the same series
+        :attr:`Loop.behavior_time_series` carries).  A loop
         whose runtime score is never active keeps its structural classification;
         loop ids are stable across the two surfaces.
 
@@ -450,6 +453,10 @@ class Sim:
         The relative loop score normalizes a loop's raw ``loop_score`` by the
         magnitudes of all loops that share its cycle-partition, so it reads as
         the loop's fractional contribution to model behavior at each step.
+        Every element of an arrayed loop is one member of its element's
+        partition, alongside the loop's other elements, other arrayed loops'
+        elements and scalar loops, so the magnitudes over a partition's
+        members sum to 1 at every active step.
 
         This requires the simulation to have been run with enable_ltm=True.
 

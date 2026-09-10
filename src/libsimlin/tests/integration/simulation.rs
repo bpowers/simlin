@@ -1207,12 +1207,13 @@ fn test_ltm_enabled_sim() {
     }
 }
 
-/// GH #486: enabling LTM on a model with a non-Euler integration method must
-/// fail `simlin_sim_new` cleanly with a readable error referencing the Euler
-/// assumption -- not silently produce mathematically-wrong link scores. The
-/// same model with LTM disabled must still compile and simulate.
+/// Enabling LTM on a model with a non-Euler integration method compiles and
+/// runs: the scores are dt-step ratios reported at the saved steps (the
+/// engine's `ltm_integration_method` tests pin them equal to Euler's for a
+/// flow proportional to its stock, as this one is), the sim reports an LTM
+/// mode, and the overlay leaves the model's own series untouched.
 #[test]
-fn test_ltm_non_euler_sim_fails_cleanly() {
+fn test_ltm_non_euler_sim_runs() {
     let datamodel = TestProject::new("ltm_rk4")
         .with_sim_time(0.0, 10.0, 1.0)
         .with_sim_method(engine::datamodel::SimMethod::RungeKutta4)
@@ -1227,43 +1228,29 @@ fn test_ltm_non_euler_sim_fails_cleanly() {
         assert!(err.is_null());
         assert!(!model.is_null());
 
-        // LTM enabled on an RK4 model: the compile failure is deferred to run
-        // time (the established `simlin_sim_new` contract returns a non-null
-        // handle carrying the compile error and surfaces it on run), and the
-        // surfaced error references the Euler assumption.
         err = ptr::null_mut();
         let sim_ltm = simlin_sim_new(model, true, &mut err as *mut *mut SimlinError);
-        assert!(
-            err.is_null(),
-            "simlin_sim_new defers the compile error to run"
-        );
+        assert!(err.is_null(), "an LTM + RK4 sim compiles");
         assert!(!sim_ltm.is_null());
+        run_to_end(sim_ltm);
         err = ptr::null_mut();
-        simlin_sim_run_to_end(sim_ltm, &mut err as *mut *mut SimlinError);
-        assert!(
-            !err.is_null(),
-            "running an LTM + RK4 sim must surface an error"
-        );
-        let msg_ptr = simlin_error_get_message(err);
-        assert!(!msg_ptr.is_null(), "the error must carry a message");
-        let msg = CStr::from_ptr(msg_ptr).to_str().unwrap();
-        assert!(
-            msg.contains("Euler"),
-            "the error must reference the Euler assumption, got: {msg}"
-        );
-        simlin_error_free(err);
-        simlin_sim_unref(sim_ltm);
+        let mode = simlin_sim_get_ltm_mode(sim_ltm, &mut err);
+        assert!(err.is_null());
+        assert_eq!(mode, SimlinLtmMode::Exhaustive, "LTM ran under RK4");
 
-        // The same model without LTM compiles and runs as before.
         err = ptr::null_mut();
-        let sim_no_ltm = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
+        let sim_plain = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
         assert!(err.is_null(), "RK4 without LTM must compile");
-        assert!(!sim_no_ltm.is_null());
-        err = ptr::null_mut();
-        simlin_sim_run_to_end(sim_no_ltm, &mut err as *mut *mut SimlinError);
-        assert!(err.is_null(), "RK4 without LTM must simulate");
+        assert!(!sim_plain.is_null());
+        run_to_end(sim_plain);
+        assert_eq!(
+            get_series_vec(sim_ltm, "population", 64),
+            get_series_vec(sim_plain, "population", 64),
+            "the overlay leaves the RK4 trajectory untouched"
+        );
 
-        simlin_sim_unref(sim_no_ltm);
+        simlin_sim_unref(sim_ltm);
+        simlin_sim_unref(sim_plain);
         simlin_model_unref(model);
         simlin_project_unref(proj);
     }

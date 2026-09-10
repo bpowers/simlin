@@ -728,18 +728,14 @@ fn test_ltm_bare_element_subscripts_no_helpers() {
     );
 
     let info = model_ltm_implicit_var_info(&db, source_model, sync.project);
-    // The only helpers allowed are the flow-to-stock link score's nested
-    // PREVIOUS(PREVIOUS(...)) captures (semantically necessary: the VM keeps
-    // one step of history, so a two-step lag needs a helper that re-lags a
-    // lagged value). Bare-element subscripts (`rate[b2]`, `pop[b2]`) must not
-    // synthesize any.
-    let non_flow_to_stock: Vec<&String> = info
-        .keys()
-        .filter(|name| !name.contains("grow\u{2192}pop"))
-        .collect();
+    // Bare-element subscripts (`rate[b2]`, `pop[b2]`) are static slots and
+    // must synthesize no helper; every other generated read here is a static
+    // slot too (a flow-to-stock score reads only the flow and the stock's
+    // net-flow aux), so the model mints no LTM helper at all.
     assert!(
-        non_flow_to_stock.is_empty(),
-        "only the flow-to-stock nested-PREVIOUS helpers may remain; unexpected: {non_flow_to_stock:?}"
+        info.is_empty(),
+        "a bare-element subscript must not synthesize a helper; unexpected: {:?}",
+        info.keys().collect::<Vec<_>>()
     );
 }
 

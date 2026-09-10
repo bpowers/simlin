@@ -1077,6 +1077,9 @@ fn test_diagnostics_stable_across_unrelated_input_change() {
         .to(vec![PinnedLoopSpec {
             name: "dummy_loop".to_string(),
             variables: vec![],
+            uids: vec![],
+            unresolved_uids: vec![],
+            model_variables_carry_uids: true,
             description: String::new(),
         }]);
 
@@ -2420,13 +2423,12 @@ fn test_unknown_element_subscript_no_warning_for_canonical_variants() {
     );
 }
 
-/// Adversarial counterexample 1: an element NAME containing a comma. The
-/// compiler matches the whole canonicalized subscript string against the
-/// declared combination's comma-joined key, so an entry for the literal
-/// element "a,b" of a one-dimensional variable RESOLVES and its equation is
-/// used by the simulation. The per-part matcher alone would mis-split it
-/// into two parts and flag it -- with a message falsely claiming the
-/// equation is ignored. Must not warn.
+/// An element NAME containing a comma: the key owner
+/// (`CanonicalElementName::from_subscript`) joins canonical parts with `,`,
+/// so the entry `a,b` and the declared element `a,b` key identically, the
+/// compiler resolves the entry, and the advisory -- which matches by the same
+/// key -- must not warn (the comma ambiguity is the owner's documented
+/// limitation, not a matching rule of its own).
 #[test]
 fn test_unknown_element_subscript_comma_element_name_not_flagged() {
     let db = SimlinDb::default();
@@ -2448,13 +2450,11 @@ fn test_unknown_element_subscript_comma_element_name_not_flagged() {
     );
 }
 
-/// Adversarial counterexample 2: a QUOTED whole subscript on a
-/// two-dimensional variable. `canonicalize` strips balanced quotes, so the
-/// whole-string key of `"a1,b1"` equals the declared combination `a1,b1`
-/// and the compiler resolves the entry. The per-part split would leave
-/// unbalanced quote characters on each half and flag it. Must not warn.
-/// (Only reachable from API-built datamodels -- both file readers normalize
-/// per-part on import.)
+/// A QUOTED whole subscript on a two-dimensional variable: the owner splits
+/// only on commas outside quotes, so `"a1,b1"` is one part whose quotes
+/// `canonicalize` strips, keying the declared combination `a1,b1`; the
+/// compiler resolves the entry and the advisory must not warn. (Reachable
+/// from API-built datamodels; the file readers store the canonical key.)
 #[test]
 fn test_unknown_element_subscript_quoted_whole_subscript_not_flagged() {
     let db = SimlinDb::default();
@@ -2823,6 +2823,9 @@ fn macro_registry_build_error_survives_an_unrelated_input_change() {
         .to(vec![PinnedLoopSpec {
             name: "dummy_loop".to_string(),
             variables: vec![],
+            uids: vec![],
+            unresolved_uids: vec![],
+            model_variables_carry_uids: true,
             description: String::new(),
         }]);
 
@@ -2952,6 +2955,9 @@ fn unit_definition_errors_survive_an_unrelated_input_change() {
         .to(vec![PinnedLoopSpec {
             name: "dummy_loop".to_string(),
             variables: vec![],
+            uids: vec![],
+            unresolved_uids: vec![],
+            model_variables_carry_uids: true,
             description: String::new(),
         }]);
 

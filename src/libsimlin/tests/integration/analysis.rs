@@ -2207,7 +2207,7 @@ fn test_get_loop_element_count_arrayed_vs_scalar() {
 // `None` cohort and cross-normalized to a pooled value (each ~0.5); the per-slot
 // `loop_partitions` keep them separate.  This test confirms the FFI exposes the
 // per-slot data correctly (the subscripted-loop-id accessor) and that what it
-// returns matches the engine's `compute_rel_loop_scores_per_element` exactly --
+// returns matches the engine's `compute_rel_loop_scores` exactly --
 // i.e. a round trip through the C API preserves the per-slot partitions.
 
 /// Build the two-A2A-subsystem datamodel project.
@@ -2255,8 +2255,7 @@ fn engine_reference_rel_per_element(
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    let rel =
-        simlin_engine::ltm_post::compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    let rel = simlin_engine::ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     (rel, n_slots_by_loop)
 }
 
@@ -2352,7 +2351,7 @@ fn test_two_a2a_subsystems_per_slot_rel_score_round_trips() {
                     assert_eq!(
                         ffi_v, engine_v,
                         "FFI rel-loop-score for {loop_id}[{elem_name}] at step {s} must match \
-                         compute_rel_loop_scores_per_element ({ffi_v} vs {engine_v})"
+                         compute_rel_loop_scores ({ffi_v} vs {engine_v})"
                     );
                     // AC2.1: each loop is alone in its (per-element) partition,
                     // so the score is +1 once dynamics are nonzero -- NOT the
@@ -2649,10 +2648,10 @@ fn discover_loops_null_model_errors_without_panic() {
     }
 }
 
-/// A model that CANNOT be analyzed for LTM at all (GH #486: a non-Euler
-/// integration method with a stock in a feedback loop -- the flow-to-stock
-/// link-score formula assumes Euler stepping) must surface `analysis_error`
-/// non-NULL rather than returning a successful-looking empty/sampled result:
+/// A model that CANNOT be analyzed for LTM at all (here a flow reading a
+/// variable that does not exist, so nothing compiles) must surface
+/// `analysis_error` non-NULL rather than returning a successful-looking
+/// empty/sampled result:
 /// `simlin_analyze_discover_loops` itself still succeeds (this is a
 /// STRUCTURAL fact about the model, not an FFI error), but the discovery
 /// result reports "analysis never ran" -- `enumeration_complete == false`
@@ -2664,9 +2663,8 @@ fn discover_loops_reports_analysis_error_when_ltm_never_ran() {
     unsafe {
         let test_project = TestProject::new("main")
             .with_sim_time(0.0, 10.0, 1.0)
-            .with_sim_method(simlin_engine::datamodel::SimMethod::RungeKutta4)
             .stock("population", "100", &["births"], &[], None)
-            .flow("births", "population * 0.02", None);
+            .flow("births", "population * nonexistent_variable", None);
         let datamodel_project = test_project.build_datamodel();
         let project = engine_serde::serialize(&datamodel_project).unwrap();
         let mut buf = Vec::new();
@@ -2692,14 +2690,16 @@ fn discover_loops_reports_analysis_error_when_ltm_never_ran() {
         let res = &*result;
         assert!(
             !res.analysis_error.is_null(),
-            "RK4 + a stock in a loop cannot be compiled for LTM analysis"
+            "an unresolved reference cannot be compiled for LTM analysis"
         );
         let msg = CStr::from_ptr(res.analysis_error)
             .to_string_lossy()
             .into_owned();
+        // The message names the variable that failed to compile, never the
+        // reference it could not resolve.
         assert!(
-            msg.contains("Euler"),
-            "analysis_error must reference the Euler assumption, got: {msg}"
+            msg.contains("births"),
+            "analysis_error must name the failing variable (births), got: {msg}"
         );
         assert_eq!(res.loop_count, 0, "analysis never reached candidates");
         assert_eq!(res.period_count, 0);
@@ -3369,31 +3369,51 @@ fn runtime_loops_reclassify_sign_flipping_loop() {
 }
 
 /// #679: the runtime loops surface must be able to report a DEFINITE
-/// `MostlyReinforcing` (Rux) with its real dominance-ratio confidence -- the
-/// sibling test above (`runtime_loops_reclassify_sign_flipping_loop`) only
-/// pins that a sign-straddling series leaves the {Rux, Bux, U} family, while
-/// this one pins the Rux outcome itself through the C ABI.
+/// `MostlyReinforcing` (Rux) / `MostlyBalancing` (Bux) with its real
+/// confidence -- the sibling test above
+/// (`runtime_loops_reclassify_sign_flipping_loop`) only pins that a
+/// sign-straddling series leaves the {Rux, Bux, U} family, while the two
+/// tests below pin each outcome itself through the C ABI.
 ///
 /// The fixture (shared shape with the engine's
-/// `exhaustive_mixed_sign_dominant_loop_reclassifies_to_rux`): `f = s*g + d`
-/// where the marginal gain `g` is +0.02 for t < 100 (loop score +1 per step,
-/// ~400 steps) then -0.0001 while an exogenous ramp `d` dominates the
-/// per-step change in `f` (40 negative samples of magnitude ~1e-4..1e-3).
-/// The dominance ratio lands at ~0.9999: above the 0.99 Rux gate, strictly
-/// below 1.0. Structurally the loop is Reinforcing (the bare co-factor `g`
-/// is positive by the SD labeling convention -- and is exactly the kind of
-/// quantity the convention can be wrong about, since its value flips sign
-/// mid-run), so Rux through this surface both remains the label the issue
-/// says was unreachable AND demonstrates runtime evidence downgrading a
+/// `exhaustive_competing_sign_flip_reclassifies_to_rux` / `_bux`): a stock
+/// with an inflow loop `f_in = s*<inflow gain>` and an outflow loop
+/// `f_out = s*<outflow gain>`, where the `flipping` loop's gain is `g`
+/// (+0.02, flipped to -0.02 for t in [100, 102)) and the other loop's is `d`
+/// (0.01, raised to 2 in that window so it carries the partition while the
+/// flipping loop's sign is wrong). The classifier reads the partition-RELATIVE
+/// series: the flipping loop's share is 2/3 at each of its roughly 430
+/// same-sign steps and ~0.0099 at its 8 opposite-sign steps, so the
+/// confidence is ~0.9994 -- above the 0.99 gate, strictly below 1.0.
+/// Structurally the flipping loop is single-signed (the bare co-factor `g`
+/// is positive by the SD labeling convention -- exactly the kind of quantity
+/// the convention can be wrong about, since its value flips sign mid-run),
+/// so `Mostly*` through this surface both remains the label the issue says
+/// was unreachable AND demonstrates runtime evidence downgrading a
 /// conventional structural sign.
-#[test]
-fn runtime_loops_report_definite_rux() {
-    let test_project = TestProject::new("rux_mixed_sign")
+///
+/// Returns the flipping loop's (structural polarity, structural confidence,
+/// runtime polarity, runtime confidence) and asserts its id is the same on
+/// both surfaces.
+fn competing_sign_flip_through_the_c_abi(
+    flipping: &str,
+) -> (SimlinLoopPolarity, f64, SimlinLoopPolarity, f64) {
+    let (inflow_gain, outflow_gain, flow) = if flipping == "inflow" {
+        ("g", "d", "f_in")
+    } else {
+        ("d", "g", "f_out")
+    };
+    let test_project = TestProject::new("competing_sign_flip")
         .with_sim_time(0.0, 110.0, 0.25)
-        .aux("g", "IF TIME < 100 THEN 0.02 ELSE -0.0001", None)
-        .aux("d", "IF TIME < 100 THEN 0 ELSE 50 * (TIME - 100)", None)
-        .stock("s", "100", &["f"], &[], None)
-        .flow("f", "s * g + d", None);
+        .aux(
+            "g",
+            "IF TIME < 100 OR TIME >= 102 THEN 0.02 ELSE -0.02",
+            None,
+        )
+        .aux("d", "IF TIME < 100 OR TIME >= 102 THEN 0.01 ELSE 2", None)
+        .stock("s", "100", &["f_in"], &["f_out"], None)
+        .flow("f_in", &format!("s * {inflow_gain}"), None)
+        .flow("f_out", &format!("s * {outflow_gain}"), None);
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
     let mut buf = Vec::new();
@@ -3413,47 +3433,92 @@ fn runtime_loops_report_definite_rux() {
         simlin_sim_run_to_end(sim, &mut err);
         assert!(err.is_null());
 
-        // Structural baseline: one loop, Reinforcing by the bare-co-factor
-        // convention at the binary structural confidence 1.0.
+        let is_flipping_loop = |l: &SimlinLoop| {
+            std::slice::from_raw_parts(l.variables, l.var_count)
+                .iter()
+                .any(|v| CStr::from_ptr(*v).to_str().unwrap() == flow)
+        };
+
         let structural = simlin_analyze_get_loops(model, &mut err);
         assert!(err.is_null());
         assert!(!structural.is_null());
-        assert_eq!((*structural).count, 1, "the fixture has exactly one loop");
-        let struct_loop = &std::slice::from_raw_parts((*structural).loops, 1)[0];
-        assert!(struct_loop.polarity == SimlinLoopPolarity::Reinforcing);
-        assert_eq!(struct_loop.polarity_confidence, 1.0);
+        assert_eq!((*structural).count, 2, "an inflow loop and an outflow loop");
+        let struct_loop = std::slice::from_raw_parts((*structural).loops, 2)
+            .iter()
+            .find(|l| is_flipping_loop(l))
+            .expect("the flipping loop");
 
-        // Runtime surface: the same loop reports the definite Rux variant
-        // with the real (>= 0.99, < 1.0) dominance ratio.
         err = ptr::null_mut();
         let runtime = simlin_analyze_get_loops_runtime(sim, &mut err);
         assert!(err.is_null());
         assert!(!runtime.is_null());
-        assert_eq!((*runtime).count, 1);
-        let rt_loop = &std::slice::from_raw_parts((*runtime).loops, 1)[0];
-        assert!(
-            rt_loop.polarity == SimlinLoopPolarity::MostlyReinforcing,
-            "an overwhelmingly-positive mixed-sign loop_score must surface as \
-             MostlyReinforcing through the C ABI (confidence {})",
-            rt_loop.polarity_confidence
-        );
-        assert!(
-            rt_loop.polarity_confidence >= 0.99 && rt_loop.polarity_confidence < 1.0,
-            "the Rux confidence is the real dominance ratio (>= the 0.99 gate, \
-             strictly < 1.0 because both signs are present); got {}",
-            rt_loop.polarity_confidence
-        );
+        assert_eq!((*runtime).count, 2);
+        let rt_loop = std::slice::from_raw_parts((*runtime).loops, 2)
+            .iter()
+            .find(|l| is_flipping_loop(l))
+            .expect("the flipping loop");
+
         // The loop id is stable across the two surfaces.
         let struct_id = CStr::from_ptr(struct_loop.id).to_str().unwrap();
         let rt_id = CStr::from_ptr(rt_loop.id).to_str().unwrap();
         assert_eq!(struct_id, rt_id);
+
+        let out = (
+            struct_loop.polarity,
+            struct_loop.polarity_confidence,
+            rt_loop.polarity,
+            rt_loop.polarity_confidence,
+        );
 
         simlin_free_loops(structural);
         simlin_free_loops(runtime);
         simlin_sim_unref(sim);
         simlin_model_unref(model);
         simlin_project_unref(proj);
+        out
     }
+}
+
+/// The Rux arm through the C ABI: the inflow loop flips, and is
+/// `MostlyReinforcing` at the real (>= 0.99, < 1.0) confidence against a
+/// structural Reinforcing/1.0 baseline.
+#[test]
+fn runtime_loops_report_definite_rux() {
+    let (structural, structural_confidence, runtime, confidence) =
+        competing_sign_flip_through_the_c_abi("inflow");
+    assert!(structural == SimlinLoopPolarity::Reinforcing);
+    assert_eq!(structural_confidence, 1.0);
+    assert!(
+        runtime == SimlinLoopPolarity::MostlyReinforcing,
+        "an overwhelmingly-positive mixed-sign relative series must surface as \
+         MostlyReinforcing through the C ABI (confidence {confidence})"
+    );
+    assert!(
+        (0.99..1.0).contains(&confidence),
+        "the Rux confidence is the real dominance ratio (>= the 0.99 gate, \
+         strictly < 1.0 because both signs are present); got {confidence}"
+    );
+}
+
+/// The Bux arm through the C ABI: the outflow loop flips, and is
+/// `MostlyBalancing` at the same confidence against a structural
+/// Balancing/1.0 baseline (an outflow's link to its stock is Negative).
+#[test]
+fn runtime_loops_report_definite_bux() {
+    let (structural, structural_confidence, runtime, confidence) =
+        competing_sign_flip_through_the_c_abi("outflow");
+    assert!(structural == SimlinLoopPolarity::Balancing);
+    assert_eq!(structural_confidence, 1.0);
+    assert!(
+        runtime == SimlinLoopPolarity::MostlyBalancing,
+        "an overwhelmingly-negative mixed-sign relative series must surface as \
+         MostlyBalancing through the C ABI (confidence {confidence})"
+    );
+    assert!(
+        (0.99..1.0).contains(&confidence),
+        "the Bux confidence is the real dominance ratio (>= the 0.99 gate, \
+         strictly < 1.0 because both signs are present); got {confidence}"
+    );
 }
 
 /// The runtime loops FFI requires a run sim: calling it on a freshly-created
@@ -3828,5 +3893,110 @@ fn polarity_label(p: SimlinLoopPolarity) -> &'static str {
         SimlinLoopPolarity::MostlyReinforcing => "Rux",
         SimlinLoopPolarity::MostlyBalancing => "Bux",
         SimlinLoopPolarity::Undetermined => "U",
+    }
+}
+
+// The FFI relative-loop-score accessor reads the engine's one normalization
+// owner (`ltm_post::compute_rel_loop_scores`), so on a COUPLED arrayed model
+// every `(loop, slot)` of a partition divides by the same partition sum.
+// `test/cross_element_ltm` is the hand-computed case (the engine-side twin is
+// `ltm_relative_scores::cross_element_loops_normalize_over_the_whole_partition`):
+// one partition holds both regions; the births loop scores +1 at both slots,
+// the NYC migration_out loop -0.5, the cross-element migration_in loop +0.5,
+// every other loop 0; so the shares are 1/3, 1/3, -1/6 and +1/6 and their
+// magnitudes sum to 1.
+
+/// The FFI loop whose variable set is exactly `vars`; returns its id.
+unsafe fn ffi_loop_id_with_variables(loops: *mut SimlinLoops, vars: &[&str]) -> String {
+    let want: std::collections::HashSet<&str> = vars.iter().copied().collect();
+    let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+    let mut seen = Vec::new();
+    for l in loop_slice {
+        let names: Vec<String> = std::slice::from_raw_parts(l.variables, l.var_count)
+            .iter()
+            .map(|v| CStr::from_ptr(*v).to_str().unwrap().to_string())
+            .collect();
+        let id = CStr::from_ptr(l.id).to_str().unwrap().to_string();
+        if names
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>()
+            == want
+        {
+            return id;
+        }
+        seen.push((id, names));
+    }
+    panic!("no loop over {vars:?}; loops: {seen:?}");
+}
+
+#[test]
+fn test_cross_element_rel_scores_share_one_partition_denominator_via_ffi() {
+    let xml = std::fs::read_to_string("../../test/cross_element_ltm/cross_element.stmx").unwrap();
+    let project = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("the cross_element fixture parses");
+    let pb = engine_serde::serialize(&project).unwrap();
+    let mut buf = Vec::new();
+    pb.encode(&mut buf).unwrap();
+
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let births = ffi_loop_id_with_variables(loops, &["population", "births"]);
+        let out_loop = ffi_loop_id_with_variables(
+            loops,
+            &["population", "migration_pressure", "migration_out"],
+        );
+        let cross = ffi_loop_id_with_variables(
+            loops,
+            &[
+                "population[nyc]",
+                "migration_pressure[boston]",
+                "migration_in[nyc]",
+            ],
+        );
+        simlin_free_loops(loops);
+
+        let read = |id: &str| {
+            read_relative_loop_series(sim, id)
+                .unwrap_or_else(|(c, m)| panic!("reading {id} failed: {c:?} {m}"))
+        };
+        let births_nyc = read(&format!("{births}[NYC]"));
+        let births_boston = read(&format!("{births}[Boston]"));
+        let births_bare = read(&births);
+        let out_nyc = read(&format!("{out_loop}[NYC]"));
+        let out_boston = read(&format!("{out_loop}[Boston]"));
+        let out_bare = read(&out_loop);
+        let cross_series = read(&cross);
+
+        // The ratios are time-invariant on this fixture (both populations
+        // grow at exactly 2% per step), so every step from the first active
+        // one reads the same shares.
+        for step in [2usize, 10, 30] {
+            let close = |got: f64, want: f64, what: &str| {
+                assert!(
+                    (got - want).abs() < 1e-9,
+                    "step {step}: {what} = {got}, expected {want}"
+                );
+            };
+            close(births_nyc[step], 1.0 / 3.0, "births[NYC]");
+            close(births_boston[step], 1.0 / 3.0, "births[Boston]");
+            close(births_bare[step], 1.0 / 3.0, "births (bare id, argmax-abs)");
+            close(out_nyc[step], -1.0 / 6.0, "migration_out loop[NYC]");
+            close(out_boston[step], 0.0, "migration_out loop[Boston]");
+            close(out_bare[step], -1.0 / 6.0, "migration_out loop (bare id)");
+            close(
+                cross_series[step],
+                1.0 / 6.0,
+                "cross-element migration_in loop",
+            );
+        }
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
     }
 }

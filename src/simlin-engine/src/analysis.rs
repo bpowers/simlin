@@ -61,10 +61,9 @@ pub struct ModelAnalysis {
     /// `Some(message)` when the model could **not** be compiled or simulated
     /// for LTM analysis, so the loop fields are empty *because of a failure*
     /// rather than because the model genuinely has no loops.  This is the
-    /// actionable diagnostic the caller should surface: most notably the GH #486
-    /// Euler guidance when a model with stocks in a loop selects a non-Euler
-    /// integrator with LTM enabled, but also any other compile error
-    /// (unresolved references, etc.) or a `Vm::new`/`run_to_end` failure.
+    /// actionable diagnostic the caller should surface: a compile error
+    /// (an unresolved reference, a malformed equation) or a
+    /// `Vm::new`/`run_to_end` failure.
     /// `None` means the pipeline either
     /// succeeded or degraded gracefully for a non-compile reason (a structural
     /// edge case), so an empty `loop_dominance` with `analysis_error == None`
@@ -137,8 +136,8 @@ fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json
 /// resolution.
 ///
 /// A failure to *compile or simulate* the model for LTM analysis (a malformed
-/// equation, an unresolved reference, the GH #486 non-Euler hard-fail, or a
-/// `Vm::new`/`run_to_end` failure) is NOT collapsed into a silent empty result:
+/// equation, an unresolved reference, or a `Vm::new`/`run_to_end` failure) is
+/// NOT collapsed into a silent empty result:
 /// `Ok` is returned with the model snapshot, empty loop fields, AND
 /// `ModelAnalysis::analysis_error` set to the actionable error message, so a
 /// caller asking "what loops does this model have?" can tell "could not
@@ -211,8 +210,8 @@ pub fn analyze_model(
     //   Err(message)     -- the model could not be compiled for LTM analysis;
     //                       empty loops, message carried as `analysis_error`
     //                       so the caller can surface the actionable error
-    //                       (e.g. the GH #486 Euler guidance) rather than an
-    //                       indistinguishable "no loops" result (GH #660).
+    //                       rather than an indistinguishable "no loops"
+    //                       result (GH #660).
     let (result, analysis_error) = match loop_result {
         Ok(Some(result)) => (Some(result), None),
         Ok(None) => (None, None),
@@ -355,11 +354,10 @@ struct PipelineResult {
 ///   bailed). Empty loops, but NOT a compile error -- the caller reports "no
 ///   loops", not "could not analyse".
 /// * `Err(message)` -- the model could not be *compiled* for LTM analysis (a
-///   malformed equation, an unresolved reference, or the GH #486 non-Euler
-///   hard-fail). The message is the actionable compile error the caller
-///   surfaces via `ModelAnalysis::analysis_error` (GH #660); before this it was
-///   swallowed by an `.ok()?` and the empty result looked identical to "no
-///   loops".
+///   malformed equation or an unresolved reference). The message is the
+///   actionable compile error the caller surfaces via
+///   `ModelAnalysis::analysis_error` (GH #660): never swallow it into the
+///   `Ok(None)` arm, whose empty result is indistinguishable from "no loops".
 ///
 /// Uses the caller-provided salsa `SimlinDb` and `SourceProject` for
 /// both compilation/simulation and structural loop analysis (via
@@ -398,12 +396,12 @@ fn run_ltm_pipeline(
     // degrades to empty loops (conveyor/queue + LTM is a documented
     // degradation) and reports no false error.
     //
-    // A compile failure here is still the actionable GH #660 case: the GH #486
-    // non-Euler hard-fail (and any other compile/`Vm::new`/`run_to_end` error)
-    // carries a specific, user-facing message that must reach the caller rather
-    // than collapsing into an empty "no loops" result. Format it the same way
-    // regardless of origin: prefer the rich `details` (e.g. the Euler guidance),
-    // fall back to the code's Display when a bare error carries none.
+    // A compile failure here is the actionable GH #660 case: a compile,
+    // `Vm::new` or `run_to_end` error carries a specific, user-facing message
+    // that must reach the caller rather than collapsing into an empty "no
+    // loops" result. Format it the same way regardless of origin: prefer the
+    // rich `details` (the failing variable's name, say), fall back to the
+    // code's Display when a bare error carries none.
     let mut vm = crate::build_sim(
         db,
         source_project,
@@ -592,19 +590,14 @@ fn signed_relative_importance(fl: &crate::ltm_finding::FoundLoop) -> Vec<f64> {
         .collect()
 }
 
-/// Extract the ordered variable names from a `FoundLoop`.
+/// The ordered variable names of a `FoundLoop`: the node sequence around the
+/// cycle WITHOUT a trailing repeat of the first node, read by the one owner
+/// the structural surface uses (`db::loop_node_sequence`), so both kinds of
+/// loop populate the same `Loop` type consistently: consumers that render the
+/// cycle (e.g. pysimlin's `Loop.__str__`) close it themselves by appending
+/// the first variable, and a stored repeat would double that closing node.
 fn loop_variables(fl: &crate::ltm_finding::FoundLoop) -> Vec<String> {
-    // The bare node sequence around the cycle (each link's `from`), WITHOUT a
-    // trailing repeat of the first node. This matches the structural-loop
-    // convention (`db::analysis` `model_detected_loops`) so both kinds of loop
-    // populate the same `Loop` type consistently: consumers that render the
-    // cycle (e.g. pysimlin's `Loop.__str__`) close it themselves by appending
-    // the first variable, and a stored repeat would double that closing node.
-    fl.loop_info
-        .links
-        .iter()
-        .map(|l| l.from.to_string())
-        .collect()
+    crate::db::loop_node_sequence(&fl.loop_info)
 }
 
 /// Convert a `FoundLoop` to a `LoopSummary`, resolving a human-readable
@@ -1254,33 +1247,29 @@ mod tests {
 
     // ---- GH #660: a compile failure surfaces an actionable analysis_error ----
 
-    /// An RK4 model with a stock in a loop cannot be compiled for LTM analysis
-    /// (the flow-to-stock link-score formula assumes Euler; GH #486). Before
-    /// GH #660 the compile `Err` was swallowed by `run_ltm_pipeline`'s `.ok()?`
-    /// and `analyze_model` returned an empty `ModelAnalysis` indistinguishable
-    /// from "this model genuinely has no loops". Now the Euler guidance must
-    /// reach the caller through `ModelAnalysis::analysis_error`, with the loop
-    /// fields empty.
+    /// A model that cannot be compiled -- here a flow reading a variable that
+    /// does not exist -- populates `ModelAnalysis::analysis_error` with the
+    /// compile failure. Before GH #660 the compile `Err` was swallowed by
+    /// `run_ltm_pipeline`'s `.ok()?` and `analyze_model` returned an empty
+    /// `ModelAnalysis` indistinguishable from "this model genuinely has no
+    /// loops"; now the failure reaches the caller, with the loop fields empty.
     #[test]
-    fn ac660_rk4_ltm_surfaces_euler_analysis_error() {
-        let project = crate::test_common::TestProject::new("main")
-            .with_sim_time(0.0, 10.0, 1.0)
-            .with_sim_method(datamodel::SimMethod::RungeKutta4)
-            .stock("population", "100", &["births"], &[], None)
-            .flow("births", "population * 0.02", None)
-            .build_datamodel();
+    fn ac660_a_compile_failure_surfaces_analysis_error() {
+        let project = broken_project();
 
         let (mut db, sp) = synced_db(&project);
         let analysis = analyze_model(&project, &mut db, sp, "main", None)
-            .expect("analyze_model should not return Err on a compilable-without-LTM model");
+            .expect("analyze_model should not return Err on an uncompilable model");
 
         let msg = analysis
             .analysis_error
             .as_deref()
-            .expect("RK4 + LTM compile failure must populate analysis_error");
+            .expect("a compile failure must populate analysis_error");
+        // The message names the variable that failed to compile, never the
+        // reference it could not resolve.
         assert!(
-            msg.contains("Euler"),
-            "the analysis_error must reference the Euler assumption, got: {msg}"
+            msg.contains("births"),
+            "the analysis_error must name the failing variable (births), got: {msg}"
         );
 
         // The model snapshot is still intact and the loop fields stay empty.
@@ -1290,11 +1279,11 @@ mod tests {
         );
         assert!(
             analysis.loop_dominance.is_empty(),
-            "loop_dominance must be empty when the model can't be compiled for LTM"
+            "loop_dominance must be empty when the model can't be compiled"
         );
         assert!(
             analysis.time.is_empty(),
-            "time must be empty when the model can't be compiled for LTM"
+            "time must be empty when the model can't be compiled"
         );
     }
 
@@ -1320,26 +1309,6 @@ mod tests {
         assert!(
             !analysis.loop_dominance.is_empty(),
             "healthy logistic-growth fixture must still discover loops"
-        );
-    }
-
-    /// A structural/equation error that prevents compilation (not the #486
-    /// Euler case) is still a compile failure, so it too must surface through
-    /// `analysis_error` rather than vanishing into an empty result.
-    #[test]
-    fn ac660_broken_model_surfaces_analysis_error() {
-        let project = broken_project();
-        let (mut db, sp) = synced_db(&project);
-        let analysis = analyze_model(&project, &mut db, sp, "main", None)
-            .expect("analyze_model should not return Err");
-
-        assert!(
-            analysis.analysis_error.is_some(),
-            "a model that fails to compile must populate analysis_error"
-        );
-        assert!(
-            analysis.loop_dominance.is_empty(),
-            "loop_dominance must be empty when compilation fails"
         );
     }
 

@@ -490,8 +490,8 @@ pub enum ErrorCode {
     QueueOverflowNotOnQueue,
     /// LTM (Loops That Matter) analysis was requested on a model containing a
     /// queue. A queue is a stock with non-INTEG dynamics (a FIFO of batches),
-    /// so the flow-to-stock link-score numerator assumes plain INTEG under
-    /// Euler and any score touching the queue may be wrong. Emitted as a
+    /// so the flow-to-stock link score, which treats the stock's net flow as
+    /// its rate of change, and any score touching the queue may be wrong. Emitted as a
     /// Warning naming the queue, mirroring `ConveyorLtmDegraded`
     /// (docs/design/queues.md §10.5).
     QueueLtmDegraded,
@@ -620,6 +620,23 @@ pub enum ErrorCode {
     /// diagnostic that asserted otherwise would send the modeller looking in the
     /// wrong place.
     UnfilledEquation,
+    /// A declared element of a non-apply-to-all arrayed variable has no
+    /// equation: no `<element>` arm names it and no EXCEPT default applies,
+    /// so the compiler's arrayed expansion assigns it a fabricated zero (the
+    /// silent wrong number GH #905 left open). Warning-level, naming the
+    /// elements: Vensim legitimately defines a subscripted variable on part
+    /// of its range (`h[DimA] :EXCEPT: [SubA] = 8` defines `h[A1]` only, and
+    /// Vensim's own output -- `test/sdeverywhere/models/except/except.dat`
+    /// -- has no `h[A2]` at all), so an Error would refuse real models whose
+    /// fabricated zeros nothing reads, while an API-built model that dropped
+    /// an arm is told exactly which elements it lost. An arm whose subscript
+    /// names nothing is the sibling shape, reported by
+    /// [`ErrorCode::UnknownElementSubscript`]; a typo'd arm leaves its
+    /// element uncovered, so both fire. The fidelity fix for imported models
+    /// is for the MDL reader to declare a partially defined variable over the
+    /// subrange its arms cover, so that no fabricated element exists to warn
+    /// about (GH #1059).
+    MissingElementEquation,
 }
 
 impl fmt::Display for ErrorCode {
@@ -708,6 +725,7 @@ impl fmt::Display for ErrorCode {
             UnknownElementSubscript => "unknown_element_subscript",
             MacroContainsModule => "macro_contains_module",
             UnfilledEquation => "unfilled_equation",
+            MissingElementEquation => "missing_element_equation",
         };
 
         write!(f, "{name}")
@@ -2360,6 +2378,77 @@ impl CanonicalElementName {
         CanonicalElementName(CanonicalStorage::intern(&canonicalize(s)))
     }
 
+    /// The key of a per-element equation's subscript -- `nyc`, `nyc,young`,
+    /// `"a1,b1"` -- as one comma-joined string of canonical element names:
+    /// the subscript is split on the commas outside double quotes, each part
+    /// trimmed and canonicalized, and the parts joined with `,`.
+    ///
+    /// This is the ONE owner of what a subscript names.  Every side of the
+    /// match goes through it -- the arm keys the compiler expands
+    /// (`variable::parse_equation`), the combination keys it expands them
+    /// against (`compiler::expand_per_element`, `ast::lower_arrayed_arms`,
+    /// `variable::unfilled_arms`), the per-element graphical-function
+    /// tables, the conveyor init lists, the unknown-subscript advisory, and
+    /// every reader that stores a subscript (XMILE, JSON, protobuf) -- so
+    /// `nyc, young`, `NYC,Young` and `nyc,young` are the same element and a
+    /// spelling that matches nowhere is reported rather than dropped.
+    /// Never key one side by canonicalizing the whole string instead: that
+    /// turns the space after a comma into an underscore (`nyc,_young`), a
+    /// key no combination of canonical element names ever equals, and the
+    /// arm is silently ignored.  A quoted whole subscript (`"a1,b1"`) is
+    /// one part whose quotes `canonicalize` strips, so it keys the same
+    /// two-dimensional combination as `a1,b1`; a comma inside quotes is part
+    /// of an element name.
+    ///
+    /// Readers may store any spelling: the JSON, protobuf and XMILE readers
+    /// store the canonical key, the MDL reader stores the source spelling
+    /// (`mdl/convert/helpers.rs`), and every consumer re-keys through this
+    /// owner, so the datamodel invariant is only that a subscript names its
+    /// element under this rule.
+    ///
+    /// Standing limitation: the key is the parts joined with `,`, so an
+    /// element whose NAME contains a comma is indistinguishable from the
+    /// combination of its pieces -- `"ny,c"` on a one-dimensional variable
+    /// keys as `ny,c`, the same key the pair (`ny`, `c`) would have on a
+    /// two-dimensional one; `parts` splits it back the same way.
+    pub fn from_subscript(subscript: &str) -> Self {
+        let mut parts: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        for ch in subscript.chars() {
+            match ch {
+                '"' => {
+                    in_quotes = !in_quotes;
+                    current.push(ch);
+                }
+                ',' if !in_quotes => parts.push(std::mem::take(&mut current)),
+                _ => current.push(ch),
+            }
+        }
+        parts.push(current);
+        Self::from_parts(&parts)
+    }
+
+    /// The same key as [`Self::from_subscript`], from a subscript already
+    /// split into its parts -- one element name per dimension, as
+    /// `dimensions::SubscriptIterator` enumerates the declared combinations.
+    /// Each part is trimmed and canonicalized, and the parts joined with `,`.
+    pub fn from_parts<S: AsRef<str>>(parts: &[S]) -> Self {
+        let key = parts
+            .iter()
+            .map(|part| canonicalize(part.as_ref().trim()))
+            .collect::<Vec<_>>()
+            .join(",");
+        CanonicalElementName(CanonicalStorage::intern(&key))
+    }
+
+    /// The key's parts, one canonical element name per dimension: the
+    /// inverse of [`Self::from_parts`] under the comma limitation noted on
+    /// [`Self::from_subscript`].
+    pub fn parts(&self) -> impl Iterator<Item = &str> {
+        self.as_str().split(',')
+    }
+
     /// Get the underlying canonical string
     pub fn as_str(&self) -> &str {
         self.0.as_str()
@@ -2889,6 +2978,93 @@ mod whitespace_replacement_tests {
     #[test]
     fn test_multiple_segments() {
         assert_eq!(replace_whitespace_with_underscore("a b c d"), "a_b_c_d");
+    }
+}
+
+#[cfg(test)]
+mod element_subscript_key_tests {
+    //! `CanonicalElementName::from_subscript` is the one owner of what a
+    //! per-element subscript names, so every spelling a reader or an API
+    //! caller can produce for one element combination must key the same
+    //! string as the combination's canonical comma-joined element names.
+
+    use super::CanonicalElementName;
+    use proptest::prelude::*;
+
+    /// A canonical element name as the dimension declares it.
+    fn element_name() -> impl Strategy<Value = String> {
+        "[a-z][a-z0-9_]{0,7}".prop_map(|s| s.to_string())
+    }
+
+    /// Spell one canonical element name the way a modeller or a tool might:
+    /// optional spaces on either side, and an upper-cased first letter.
+    fn spelling(name: &str, pad_left: usize, pad_right: usize, upper: bool) -> String {
+        let mut spelled = String::new();
+        spelled.push_str(&" ".repeat(pad_left));
+        if upper {
+            let mut chars = name.chars();
+            if let Some(first) = chars.next() {
+                spelled.extend(first.to_uppercase());
+                spelled.push_str(chars.as_str());
+            }
+        } else {
+            spelled.push_str(name);
+        }
+        spelled.push_str(&" ".repeat(pad_right));
+        spelled
+    }
+
+    proptest! {
+        /// Any spacing and capitalization of a one-, two- or three-dimensional
+        /// combination keys the same string as the canonical join -- and the
+        /// canonical join is a fixed point of the owner.
+        #[test]
+        fn every_spelling_of_a_combination_keys_the_canonical_join(
+            names in prop::collection::vec(element_name(), 1..=3),
+            pads in prop::collection::vec((0usize..=2, 0usize..=2, any::<bool>()), 3),
+        ) {
+            let canonical = names.join(",");
+            let spelled: Vec<String> = names
+                .iter()
+                .zip(pads.iter())
+                .map(|(name, &(l, r, upper))| spelling(name, l, r, upper))
+                .collect::<Vec<_>>();
+            let spelled = spelled.join(",");
+            let key = CanonicalElementName::from_subscript(&spelled);
+            prop_assert_eq!(key.as_str(), canonical.as_str(), "spelling {:?}", spelled);
+            let fixed_point = CanonicalElementName::from_subscript(&canonical);
+            prop_assert_eq!(fixed_point.as_str(), canonical.as_str());
+        }
+    }
+
+    /// A quoted whole subscript is one part whose quotes canonicalization
+    /// strips, so it keys the two-dimensional combination `a1,b1`; a comma
+    /// inside quotes stays part of the element name.
+    #[test]
+    fn quotes_keep_a_comma_inside_an_element_name() {
+        assert_eq!(
+            CanonicalElementName::from_subscript("\"a1,b1\"").as_str(),
+            "a1,b1"
+        );
+        assert_eq!(
+            CanonicalElementName::from_subscript("\"a,b\", c").as_str(),
+            "a,b,c"
+        );
+    }
+
+    /// Whole-string canonicalization is the key no combination ever equals:
+    /// the space after the comma becomes an underscore.  Pinned so the owner
+    /// is never replaced by it.
+    #[test]
+    fn whole_string_canonicalization_is_not_the_key() {
+        assert_eq!(
+            CanonicalElementName::from_subscript("nyc, young").as_str(),
+            "nyc,young"
+        );
+        assert_ne!(
+            CanonicalElementName::from_raw("nyc, young").as_str(),
+            "nyc,young"
+        );
     }
 }
 

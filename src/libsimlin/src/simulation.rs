@@ -35,10 +35,11 @@ fn is_internal_var(name: &str) -> bool {
 /// `enable_ltm` requests Loops That Matter instrumentation. For an ordinary
 /// model this produces a sim whose results carry the LTM link/loop-score
 /// series. For a model containing a conveyor or queue stock, LTM is a
-/// documented degradation: the flow-to-stock link-score formula assumes plain
-/// INTEG under Euler, which neither special stock is, so the sim is created
-/// WITHOUT LTM instrumentation and `simlin_sim_get_ltm_mode` reports
-/// `Disabled`. `enable_ltm = true` is still honored as a request in that case:
+/// documented degradation: the flow-to-stock link score treats a stock's net
+/// flow as its rate of change (plain INTEG), which neither special stock is,
+/// so the sim is created WITHOUT LTM instrumentation and
+/// `simlin_sim_get_ltm_mode` reports `Disabled`. `enable_ltm = true` is still
+/// honored as a request in that case:
 /// `simlin_project_get_errors` will surface a `ConveyorLtmDegraded` /
 /// `QueueLtmDegraded` `Warning` naming the offending stock, so the caller learns
 /// why scores are absent instead of the request being silently dropped.
@@ -127,9 +128,10 @@ pub unsafe extern "C" fn simlin_sim_new(
             // overlay), so the sim is created WITHOUT instrumentation and
             // `get_ltm_mode` reports Disabled. LTM over a conveyor/queue is a
             // documented degradation (docs/design/conveyors.md §9.6, queues.md
-            // §10.5): the flow-to-stock link-score formula assumes plain INTEG
-            // under Euler, and neither special stock is INTEG. `enable_ltm=true` is
-            // still HONORED as a request via the `ltm_requested` latch above, so
+            // §10.5): the flow-to-stock link score treats a stock's net flow as
+            // its rate of change (plain INTEG), and neither special stock is
+            // INTEG. `enable_ltm=true` is still HONORED as a request via the
+            // `ltm_requested` latch above, so
             // `simlin_project_get_errors` surfaces the ConveyorLtmDegraded /
             // QueueLtmDegraded warning that explains why scores are absent.
             let special = result.as_ref().map(|b| b.special).unwrap_or(false);
@@ -227,7 +229,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             loop_partitions: captured_loop_partitions,
             loop_element_index: captured_loop_element_index,
             ltm_mode: captured_ltm_mode,
-            cached_partition_denominators: HashMap::new(),
+            cached_rel_loop_scores: None,
             conveyor_plans,
             queue_plans,
         }),
@@ -300,7 +302,7 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(
         match vm.run_to_end() {
             Ok(_) => {
                 state.results = Some(vm.into_results());
-                state.cached_partition_denominators.clear();
+                state.cached_rel_loop_scores = None;
             }
             Err(err) => {
                 state.vm = Some(vm);
@@ -365,7 +367,7 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
 
     let mut state = sim_ref.state.lock().unwrap();
     state.results = None;
-    state.cached_partition_denominators.clear();
+    state.cached_rel_loop_scores = None;
 
     if let Some(ref mut vm) = state.vm {
         // Fast path: reuse existing VM allocation
@@ -684,10 +686,10 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
             *slot = val;
             // Defensive invalidation: only constant slots are writable now,
             // and a constant is never a `loop_score` input to the cached
-            // partition denominators -- but clearing the cache is cheap (the
-            // next FFI call repopulates lazily) and keeps this write path
+            // relative loop scores -- but dropping the cache is cheap (the
+            // next FFI call recomputes lazily) and keeps this write path
             // trivially safe against future loosening of the gate.
-            state.cached_partition_denominators.clear();
+            state.cached_rel_loop_scores = None;
             return;
         }
     }

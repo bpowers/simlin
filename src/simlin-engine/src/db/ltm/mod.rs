@@ -23,7 +23,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::canonicalize;
 use crate::common::{Canonical, Ident};
-use crate::datamodel;
 use crate::ltm::strip_subscript;
 
 use super::{
@@ -185,118 +184,6 @@ pub(crate) fn endpoint_dimensions(
     crate::db::var_fragment::DeclaredName::resolve(db, model, project, name)?
         .dimensions_shape(db, project)
         .map(|shape| shape.dims)
-}
-
-/// The single integration method the assembled simulation actually runs, when
-/// it is NOT Euler.
-///
-/// LTM's 2023 flow-to-stock link-score formula
-/// (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) only aligns its numerator to
-/// the causal interval that drove the stock change from t-1 to t under Euler
-/// integration; under RK2/RK4 the sub-stepped stock update breaks that
-/// alignment and the link scores become mathematically meaningless. The VM
-/// and wasm backends both genuinely honor RK2/RK4 (distinct stepping loops),
-/// so the bad scores would look plausible while being wrong.
-///
-/// A `CompiledSimulation` has exactly ONE `Specs.method`, resolved by
-/// `assemble_simulation` from the MAIN (root) model's `model_sim_specs`
-/// override else the project specs. A submodel's own `model_sim_specs` is
-/// never consulted by the VM, so the GH #486 guard must resolve and apply that
-/// single main-governed method -- NOT each model's own specs (which is the
-/// blocker the per-model resolution had). `root_model` is the model named in
-/// `assemble_simulation(.., main_model_name)`. Returns `None` for Euler (the
-/// supported case), `Some(method)` otherwise.
-pub(super) fn effective_non_euler_method(
-    db: &dyn Db,
-    root_model: SourceModel,
-    project: SourceProject,
-) -> Option<datamodel::SimMethod> {
-    let method = match root_model.model_sim_specs(db) {
-        Some(specs) => specs.sim_method,
-        None => project.sim_specs(db).sim_method,
-    };
-    match method {
-        datamodel::SimMethod::Euler => None,
-        other => Some(other),
-    }
-}
-
-/// Whether `model_ltm_variables` emits at least one flow-to-stock link score
-/// for this model -- the EXACT precondition the GH #486/#663 non-Euler guard
-/// must gate on.
-///
-/// A flow-to-stock link score is the only LTM synthetic var the Euler-only
-/// `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` numerator drives; under RK2/RK4
-/// it is mathematically meaningless. The guard previously gated on "the model
-/// has a stock", but that over-rejects a loop-free model (GH #663): in
-/// exhaustive mode LTM scores only the edges of detected feedback loops, so an
-/// open-loop stock (a constant inflow that never reads the stock back) emits
-/// NO flow-to-stock score and nothing is corrupted.
-///
-/// Crucially this is mode-aware where a loop-presence proxy is NOT: in
-/// DISCOVERY mode (user-forced or auto-flipped) and in any model with input
-/// ports, `model_ltm_variables` scores ALL causal edges, so it DOES emit a
-/// flow-to-stock score for an open-loop stock's `flow → stock` edge even
-/// though that stock is in no loop. Reading the emitted var set directly is
-/// therefore the only sound test: it cannot under-reject a discovery-mode
-/// model with a stock the way "has any loop" would.
-///
-/// A causal edge into a stock can only originate from one of its flows
-/// (`model_causal_edges` adds `flow → stock` edges and nothing else points at
-/// a stock -- a stock's equation is its initial value, not `inflow-outflow`),
-/// so "a link-score var whose `to` endpoint is a stock" is exactly "a
-/// flow-to-stock score". `link_score_edge_endpoints` strips any element
-/// subscript, so an arrayed stock's per-element score matches its base name.
-///
-/// Bounded on the guard's path: `model_ltm_variables` is the same query the
-/// Euler assembly path runs unconditionally (its cost is capped by the
-/// auto-flip-to-discovery gate and the circuit budget), so the guard is not
-/// adding an unbounded computation. On the rejection path the guard runs BEFORE
-/// `assemble_module`, so it computes the query rather than hitting a cache; but
-/// it pays that at most once per instantiated stock-bearing model, and any
-/// later assembly of the same model gets the salsa cache hit.
-pub(super) fn model_emits_flow_to_stock_score(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> bool {
-    let stocks = &crate::db::model_causal_edges(db, model, project).stocks;
-    if stocks.is_empty() {
-        return false;
-    }
-    let ltm = model_ltm_variables(db, model, project);
-    ltm.vars
-        .iter()
-        .any(|v| link_score_edge_endpoints(&v.name).is_some_and(|(_from, to)| stocks.contains(&to)))
-}
-
-/// Human-readable name of a non-Euler integration method, used in the GH #486
-/// diagnostic so the message names the offending method concretely.
-fn sim_method_display_name(method: datamodel::SimMethod) -> &'static str {
-    match method {
-        datamodel::SimMethod::Euler => "Euler",
-        datamodel::SimMethod::RungeKutta2 => "RK2 (2nd-order Runge-Kutta)",
-        datamodel::SimMethod::RungeKutta4 => "RK4 (4th-order Runge-Kutta)",
-    }
-}
-
-/// The GH #486 rejection message: LTM was requested on a simulation whose
-/// (main-model-governed) integration method is non-Euler. Returned as the
-/// `assemble_simulation` `Err` so it reaches `simlin_sim_new`,
-/// `simlin_project_get_errors` (the `vm_error` channel), and the wasm backend
-/// (`WasmGenError::Unsupported`) -- the sim-compile path never produces
-/// silently-wrong scores.
-pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> String {
-    format!(
-        "LTM (Loops That Matter) analysis requires Euler integration, but this model uses \
-         {}.  The flow-to-stock link-score formula assumes the Euler update \
-         `stock(t) = stock(t-1) + dt * flow(t-1)`, so its numerator \
-         `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` only aligns to the causal interval that \
-         drove the stock change under Euler.  Higher-order integrators sub-step the stock \
-         update, so the link scores would be mathematically meaningless.  Switch the \
-         integration method to Euler, or disable LTM analysis.",
-        sim_method_display_name(method),
-    )
 }
 
 /// THE shared stateless predicate for the LTM early-return gates (GH #748,
@@ -1141,20 +1028,6 @@ pub fn model_ltm_variables(
         };
     }
 
-    // GH #486's non-Euler rejection is NOT emitted here. The integration
-    // method that the VM actually honors is a single, main-model-governed
-    // property of the assembled simulation (`assemble_simulation`'s `Specs`
-    // selection: the root model's `model_sim_specs` override else the project
-    // specs -- a submodel's own override is dead), and this per-model query has
-    // no main-model context. Emitting per-model with each model's own specs is
-    // both wrong (a stock-free main that overrides to RK4 would be missed while
-    // its stock-bearing submodel falls back to the project's Euler; conversely
-    // a submodel that overrides to RK4 under a Euler main would be wrongly
-    // rejected) and duplicative. The check lives once in `assemble_simulation`
-    // against the resolved method; it surfaces through `compile_project_
-    // incremental` to `simlin_sim_new`, `simlin_project_get_errors` (the
-    // `vm_error` channel), and the wasm backend.
-
     // When the user explicitly requested discovery mode, honor it
     // directly. Otherwise auto-flip if either:
     //   1. The variable-level SCC exceeds `MAX_LTM_SCC_NODES`, or
@@ -1604,15 +1477,15 @@ pub fn model_ltm_variables(
         };
 
         // Capture each loop's per-slot partition vector before consuming
-        // `partitions` so post-sim `compute_rel_loop_scores*` can group slots
-        // into the same `(partition, slot)` denominator bins.  The vector's
+        // `partitions` so post-sim `compute_rel_loop_scores` can put each slot
+        // in its own partition's normalization group.  The vector's
         // length must match the loop_score series' slot count -- 1 for a
         // scalar/cross-element/mixed loop, the dimension-element-space size
         // for an A2A loop -- which is the same `n_slots` that
         // `ltm_post::build_loop_element_index` derives from
         // `LtmSyntheticVar.dimensions` + the project dims; both feed
-        // `compute_rel_loop_scores_per_element`, so a length mismatch would
-        // desync the per-element normalization.
+        // `compute_rel_loop_scores`, so a length mismatch would desync the
+        // per-slot normalization.
         for l in detected_loops.iter() {
             let parts = partitions.partition_for_loop(l, dm_dims);
             debug_assert!(
@@ -1632,7 +1505,7 @@ pub fn model_ltm_variables(
                 },
                 "loop {:?}: per-slot partition vector length {} disagrees with the loop's slot \
                  count; it must equal `build_loop_element_index`'s n_slots (both feed \
-                 `compute_rel_loop_scores_per_element`)",
+                 `compute_rel_loop_scores`)",
                 l.id,
                 parts.len(),
             );
@@ -1722,6 +1595,11 @@ pub fn model_ltm_variables(
         // silently score nothing, which is the failure mode #466 warns about.
         let _ = name;
         warnings.warn(None, reason.clone());
+    }
+    for (_name, message) in &pinned.warnings {
+        // A pin that scored a different loop than written (a stale uid was
+        // dropped) is the other silent wrong number: say which loop it scored.
+        warnings.warn(None, message.clone());
     }
     if !pinned.loops.is_empty() {
         // The variable-level node set of each already-emitted enumerated loop,
@@ -2026,29 +1904,53 @@ pub fn model_ltm_variables(
         });
     }
 
-    // Freeze helpers (GH #995) are minted per referencing partial with
-    // content-derived names, so the same frozen slice reached from several
-    // link scores emits byte-identical duplicates. Collapse them to one --
-    // duplicate names would mint colliding layout slots -- keeping the first
-    // occurrence; a same-name pair with DIFFERENT content would be a
-    // naming-scheme bug, so it is a debug panic rather than silently kept.
+    // The frozen clock's helper (GH #1016) is one value for the whole model,
+    // so it is minted here, once, when any arm reads it -- the wrap spells a
+    // frozen `TIME` as a reference to it rather than threading a helper
+    // channel through every generator (the reducer-body and per-element
+    // generators have none). Registered as the freeze helper it is, so the
+    // dedup and the category sort below treat it like every other.
+    let reads_frozen_clock = vars.iter().any(|v| {
+        v.equation.arms().any(|arm| {
+            arm.expr.as_deref().is_some_and(|expr| {
+                crate::ltm_augment::expr_reference_idents(expr)
+                    .contains(crate::ltm_augment::FROZEN_CLOCK_HELPER)
+            })
+        })
+    });
+    if reads_frozen_clock {
+        vars.push(compile::freeze_helper_var(
+            crate::ltm_augment::frozen_clock_helper(),
+        ));
+    }
+
+    // A score's companion variables are minted per score with content-derived
+    // names -- a freeze helper (GH #995) once per partial that references the
+    // frozen slice, a stock's net-flow aux once per flow of the stock -- so
+    // the same companion reached from several link scores emits byte-identical
+    // duplicates. Collapse them to one -- duplicate names would mint colliding
+    // layout slots -- keeping the first occurrence; a same-name pair with
+    // DIFFERENT content would be a naming-scheme bug, so it is a debug panic
+    // rather than silently kept.
     {
-        let mut seen_freeze: HashMap<String, LtmSyntheticVar> = HashMap::new();
+        let mut seen_companion: HashMap<String, LtmSyntheticVar> = HashMap::new();
         vars.retain(|v| {
-            if !v.name.starts_with(crate::ltm_augment::FREEZE_HELPER_PREFIX) {
+            if !v.name.starts_with(crate::ltm_augment::FREEZE_HELPER_PREFIX)
+                && !v.name.starts_with(crate::ltm_augment::NET_FLOW_PREFIX)
+            {
                 return true;
             }
-            match seen_freeze.get(&v.name) {
+            match seen_companion.get(&v.name) {
                 Some(first) => {
                     debug_assert!(
                         first == v,
-                        "freeze helper name collision with differing content: {}",
+                        "companion variable name collision with differing content: {}",
                         v.name
                     );
                     false
                 }
                 None => {
-                    seen_freeze.insert(v.name.clone(), v.clone());
+                    seen_companion.insert(v.name.clone(), v.clone());
                     true
                 }
             }
@@ -2058,14 +1960,12 @@ pub fn model_ltm_variables(
     // Sort by evaluation-order category so the VM's sequential flow
     // evaluation respects the dependency chain: composites reference paths
     // which reference loop scores which reference link scores, and link
-    // scores referencing an aggregate node OR a freeze helper read its
-    // current-step value, so those fragments must run first. Within each
-    // category, sort lexically for determinism. (`compute_layout` section 3
-    // re-sorts LTM vars purely by name -- `$⁚ltm⁚agg⁚{n}` <
-    // `$⁚ltm⁚freeze⁚...` < `$⁚ltm⁚link_score⁚...` lexically, so both get
-    // their layout slots before any consumer there too -- but the runlist
-    // order is what the same-timestep ordering hazard turns on, and that
-    // comes from this sort.)
+    // scores referencing an aggregate node, a freeze helper OR a stock's
+    // net-flow aux read its current-step value, so those fragments must run
+    // first. Within each category, sort lexically for determinism.
+    // (`compute_layout` section 3 re-sorts LTM vars purely by name; layout
+    // order assigns slots, but the runlist order is what the same-timestep
+    // ordering hazard turns on, and that comes from this sort.)
     vars.sort_by(|a, b| {
         fn category(name: &str) -> u8 {
             // The agg check uses the `$⁚ltm⁚agg⁚` *prefix*, not a substring
@@ -2075,10 +1975,12 @@ pub fn model_ltm_variables(
             // agg aux it references.
             if crate::ltm_agg::is_synthetic_agg_name(name) {
                 0 // aggregate nodes: before everything that may reference them
-            } else if name.starts_with(crate::ltm_augment::FREEZE_HELPER_PREFIX) {
-                // Array-freeze helpers (GH #995): pure `PREVIOUS` reads of
-                // model variables, referenced by link scores at their
-                // current-step value -- run before every score.
+            } else if name.starts_with(crate::ltm_augment::FREEZE_HELPER_PREFIX)
+                || name.starts_with(crate::ltm_augment::NET_FLOW_PREFIX)
+            {
+                // Array-freeze helpers (GH #995) and net-flow auxes: pure
+                // reads of model variables, referenced by link scores at
+                // their current-step value -- run before every score.
                 1
             } else if name.contains("\u{205A}composite\u{205A}") {
                 5

@@ -219,6 +219,27 @@ impl ArrayedSlotMap {
     }
 }
 
+/// The declared dimension names of `dims` in the project's datamodel casing
+/// -- the names `parse_ltm_equation` feeds into `Equation::ApplyToAll`, which
+/// `get_dimensions` resolves by exact string match against the project's
+/// datamodel dimensions. A dimension the datamodel does not declare keeps its
+/// canonical name.
+pub(super) fn datamodel_dim_names(
+    dims: &[crate::dimensions::Dimension],
+    dm_dims: &[crate::datamodel::Dimension],
+) -> Vec<String> {
+    dims.iter()
+        .map(|d| {
+            let canonical = d.name();
+            dm_dims
+                .iter()
+                .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
+                .map(|dm| dm.name().to_string())
+                .unwrap_or_else(|| canonical.to_string())
+        })
+        .collect()
+}
+
 /// Whether `(from, to)` is a stock's structural inflow/outflow edge -- the one
 /// Bare edge the wiring's pairing (`db::BareSpelling::StockFlow`) applies to.
 fn is_structural_flow_to_stock(db: &dyn Db, model: SourceModel, from: &str, to: &str) -> bool {
@@ -271,18 +292,25 @@ pub(super) fn link_score_dimensions(
 
     let from_dims = endpoint_dimensions(db, model, project, from).unwrap_or_default();
 
-    // Scalar source -> arrayed target: NOT handled here. The main
-    // link-score loop routes these to `try_scalar_to_arrayed_link_scores`
-    // (one scalar link score per target element) before
-    // `emit_per_shape_link_scores` is reached. Returning empty here is
-    // the safe fallback if that routing is ever bypassed (e.g. the
-    // target failed to lower): a scalar Bare link score
+    // Scalar source -> arrayed target. A scalar FLOW feeds every element of
+    // its arrayed stock, and its flow-to-stock score is one arrayed variable
+    // over the stock's dimensions (the flow broadcast into each element's net
+    // flow): the element graph emits `flow -> stock[e]` for every element and
+    // discovery's `expand_a2a_link_offsets` attaches a scalar source to every
+    // target-element slot, so the arrayed score is the shape both read. Every
+    // other scalar-source edge is NOT handled here: the main link-score loop
+    // routes it to `try_scalar_to_arrayed_link_scores` (one scalar link score
+    // per target element) before `emit_per_shape_link_scores` is reached, and
+    // returning empty is the safe fallback if that routing is ever bypassed
+    // (e.g. the target failed to lower): a scalar Bare link score
     // (`{from}→{to}`, no dims) parses to the useless-but-harmless edge
-    // `(from, to)`, whereas a Bare-A2A var would make
-    // `expand_a2a_link_offsets` invent a phantom `from[elem]` node that
-    // breaks loops through `from` in the search graph.
+    // `(from, to)`.
     if from_dims.is_empty() {
-        return vec![];
+        return if is_structural_flow_to_stock(db, model, from, to) {
+            datamodel_dim_names(to_dims, dm_dims)
+        } else {
+            vec![]
+        };
     }
 
     // Same-dimension A2A: both have identical dimension(s).
@@ -378,17 +406,7 @@ pub(super) fn link_score_dimensions(
     if dims_compatible {
         // Map canonical dimension names back to their original
         // datamodel names for correct equation parsing.
-        to_dims
-            .iter()
-            .map(|d| {
-                let canonical = d.name();
-                dm_dims
-                    .iter()
-                    .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
-                    .map(|dm| dm.name().to_string())
-                    .unwrap_or_else(|| canonical.to_string())
-            })
-            .collect()
+        datamodel_dim_names(to_dims, dm_dims)
     } else {
         // Cross-dimensional (arrayed-to-scalar, or mismatched
         // dimensions). These edges are handled by
@@ -1591,17 +1609,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             // Map the owner's canonical dim names back to their
             // datamodel casing for correct equation parsing (the
             // same mapping `link_score_dimensions` applies).
-            to_dims
-                .iter()
-                .map(|d| {
-                    let canonical = d.name();
-                    dm_dims
-                        .iter()
-                        .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
-                        .map(|dm| dm.name().to_string())
-                        .unwrap_or_else(|| canonical.to_string())
-                })
-                .collect()
+            datamodel_dim_names(&to_dims, dm_dims)
         } else {
             agg.result_dims.clone()
         };
@@ -2481,10 +2489,7 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
                 return Some(vec![]);
             }
             ShapedLinkScore::NoVariable => continue,
-            ShapedLinkScore::Scored {
-                var: lsv,
-                freeze_helpers,
-            } => {
+            ShapedLinkScore::Scored { var: lsv, helpers } => {
                 let mut lsv = *lsv;
                 // `lsv.name` is already `link_score_var_name(from, to, &shape)`
                 // from the shaped path -- no need to re-derive it here.
@@ -2492,7 +2497,7 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
                 lsv.dimensions = dims.clone();
                 lsv.equation = retarget_ltm_equation_dims(lsv.equation, &dims);
                 lsv.compile_directly = false;
-                vars.extend(freeze_helpers);
+                vars.extend(helpers);
                 vars.push(lsv);
             }
         }
@@ -2657,6 +2662,34 @@ pub(super) fn emit_per_shape_link_scores(
         return;
     }
 
+    emit_shaped_link_scores(
+        db, from, to, shapes, vars_start, model, project, dm_dims, vars, warnings,
+    );
+}
+
+/// Emit one link-score variable per shape of `shapes` for the `(from, to)`
+/// edge, through the per-shape query (`shaped_link_score`), with the
+/// companions each score reads registered beside it.
+///
+/// The two callers decide the shape set: [`emit_per_shape_link_scores`]
+/// reads it off the edge's classified reference sites, and the structural
+/// flow-to-stock branch of [`emit_link_scores_for_edge`] passes `Bare` alone.
+/// `vars_start` is `vars`' length before anything for this edge was pushed:
+/// a GH #780 doom discards back to it, so no already-emitted sibling var
+/// survives for an edge whose loops are dropped.
+#[allow(clippy::too_many_arguments)] // threads the emission context
+fn emit_shaped_link_scores(
+    db: &dyn Db,
+    from: &str,
+    to: &str,
+    shapes: Vec<RefShape>,
+    vars_start: usize,
+    model: SourceModel,
+    project: SourceProject,
+    dm_dims: &[crate::datamodel::Dimension],
+    vars: &mut Vec<LtmSyntheticVar>,
+    warnings: &mut LtmWarnings,
+) {
     let target_dims = link_score_dimensions(db, from, to, model, project, dm_dims);
 
     // GH #758: when BOTH endpoints are arrayed non-module variables but
@@ -2739,14 +2772,11 @@ pub(super) fn emit_per_shape_link_scores(
                 // composite-less module link); not an unscoreable edge.
                 continue;
             }
-            ShapedLinkScore::Scored {
-                var: lsv,
-                freeze_helpers,
-            } => {
+            ShapedLinkScore::Scored { var: lsv, helpers } => {
                 let mut lsv = *lsv;
                 // Set the canonical name and dimensions per Phase 3 Task 4/5.
                 lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
-                vars.extend(freeze_helpers);
+                vars.extend(helpers);
                 // Every shape takes the target's dimensions: for FixedIndex
                 // each per-element link score is scalar when the target is
                 // scalar and arrayed when the target is arrayed; Bare (and
@@ -3114,8 +3144,10 @@ fn emit_per_element_link_scores(
 /// the freeze set (`model_deps`) and -- when arrayed -- its declared
 /// dimension count (`arrayed_dep_dims`, the row-pinning gate). Identifiers
 /// in the body that are not model variables (dimension/element names in
-/// subscripts, TIME) are excluded, so the body partial leaves them live,
-/// matching `build_partial_equation_shaped`'s deps-only freezing.
+/// subscripts) are excluded, so the body partial leaves them live; the clock
+/// is not an identifier at all but a builtin, frozen by
+/// `ltm_augment::is_time_dependent_builtin`'s rule (GH #1016), matching
+/// `build_partial_equation_shaped`'s convention.
 fn reducer_body_ctx_parts(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
@@ -4284,6 +4316,37 @@ pub(super) fn emit_link_scores_for_edge(
     vars: &mut Vec<LtmSyntheticVar>,
     warnings: &mut LtmWarnings,
 ) {
+    // A flow into its stock. A stock's only causal in-edges are its wiring,
+    // and the flow reaches the stock through that wiring rather than through
+    // an equation, so the edge has exactly one shape, `Bare`, and one owner:
+    // `shaped_link_score` builds the flow-to-stock score and the stock's
+    // net-flow aux. The reference-site IR is deliberately NOT consulted: a
+    // stock's classified sites are those of its INITIAL-VALUE equation (a
+    // stock's `ast()` is its initial), so a per-element initial reading its
+    // own flow (`s[a] = f[a] * 5`) would mint one per-element score per
+    // slot, all byte-identical, and a pinned-element read in a
+    // two-dimensional initial would divert the edge to the per-element arm
+    // and drop every loop through it. Routed FIRST because the shape
+    // emitters below decide by endpoint dimensions alone: a scalar flow into
+    // an arrayed stock looks like a scalar-to-arrayed aux edge to
+    // `try_scalar_to_arrayed_link_scores`, which would score it as a partial
+    // of that same initial-value equation, a plausible-looking wrong number.
+    if is_structural_flow_to_stock(db, model, from, to) {
+        let vars_start = vars.len();
+        emit_shaped_link_scores(
+            db,
+            from,
+            to,
+            vec![RefShape::Bare],
+            vars_start,
+            model,
+            project,
+            dm_dims,
+            vars,
+            warnings,
+        );
+        return;
+    }
     // The set of synthetic aggs `(from, to)` routes through, read off
     // the reference-site IR (the unique `ThroughAgg` `AggRef`s of this
     // edge's classified sites, in first-occurrence order). The routing

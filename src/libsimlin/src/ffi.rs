@@ -373,9 +373,7 @@ pub struct SimlinDiscoveryResult {
     pub universe_loops: i64,
     /// Non-NULL when the model could not be compiled or analyzed for LTM at
     /// all -- a malformed equation, an unresolved reference, or a hard
-    /// compile failure such as the non-Euler-integration-with-a-stock-loop
-    /// rejection (GH #486, which needs Euler stepping for its flow-to-stock
-    /// link-score formula).  When set, every OTHER field describes an
+    /// compile failure.  When set, every OTHER field describes an
     /// analysis that never started: `loops`/`periods`/`partitions` are
     /// empty, `loop_count`/`period_count`/`partition_count`/`retained_loops`
     /// are `0`, `enumeration_complete` is `false`, and `universe_loops` is

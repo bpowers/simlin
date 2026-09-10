@@ -126,6 +126,19 @@ pub struct PinnedLoopSpec {
     /// deduplicated so the spec is order-independent (a loop's identity is
     /// its node set; the cycle order is recovered from the causal graph).
     pub variables: Vec<String>,
+    /// The entry's `uids` exactly as written in the `LoopMetadata`: the
+    /// identity a user sees in the file, reported when the pin cannot be
+    /// scored so the entry can be found (the name alone is not unique).
+    pub uids: Vec<i32>,
+    /// The subset of `uids` that matched no variable's uid, ascending: a
+    /// stale reference after a delete, or a file whose pins were written
+    /// against something other than variable uids (view element uids, say).
+    pub unresolved_uids: Vec<i32>,
+    /// Whether any variable of the model carried a uid at sync. UIDs live
+    /// only on the datamodel, so this is recorded here for the failure
+    /// message: when no variable has one, the pin's uids cannot name
+    /// anything whatever they are, and saying so points at the cause.
+    pub model_variables_carry_uids: bool,
     /// The user-supplied description (empty when none was given).
     pub description: String,
 }

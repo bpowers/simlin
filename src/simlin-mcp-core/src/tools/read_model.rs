@@ -119,9 +119,8 @@ pub struct ReadModelOutput {
     pub warnings: Vec<ErrorOutput>,
     /// `Some(message)` when the model could not be compiled for LTM loop
     /// analysis, so `loop_dominance` is empty *because of a failure*, not
-    /// because the model has no loops (GH #660).  The message is actionable --
-    /// most notably the GH #486 Euler guidance for a non-Euler model with LTM
-    /// enabled.  Elided from the wire shape when `None`.
+    /// because the model has no loops (GH #660).  Elided from the wire shape
+    /// when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analysis_error: Option<String>,
 }

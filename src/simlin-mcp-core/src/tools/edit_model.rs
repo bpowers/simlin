@@ -299,10 +299,9 @@ pub async fn edit_model<A: ProjectAccess>(
     // diagnostic passes collect under the LTM overlay (GH #662), as libsimlin
     // does for a project that simulated with LTM (GH #466). Collecting under
     // the overlay on the pre- AND post-edit passes keeps the new-error delta
-    // symmetric: the LTM-only diagnostics (advisory Warnings; the GH #486
-    // non-Euler rejection rides the assemble path, not this accumulator) are
-    // computed the same way on both sides, so they can never spuriously read
-    // as a "new error".
+    // symmetric: the LTM-only diagnostics (advisory Warnings) are computed
+    // the same way on both sides, so they can never spuriously read as a
+    // "new error".
     let pre_edit_error_keys: std::collections::HashSet<_> = {
         let pre_db = simlin_engine::db::SimlinDb::default();
         let pre_sync = simlin_engine::db::sync_from_datamodel(&pre_db, &project);

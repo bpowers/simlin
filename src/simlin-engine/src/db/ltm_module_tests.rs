@@ -1843,7 +1843,10 @@ fn test_multi_output_module_link_score_holds_document_order_first_live() {
 /// argument, so the instance is wired straight from `m·a`, and
 /// `find_model_output_ports` reads every helper's `Dt` reads ("Phase 8.5
 /// semantic divergences" 6). The sub-model is instrumented, and a loop
-/// through it selects the `via⁚a` exit override at the instance.
+/// through it selects the `via⁚a` exit override at the instance. The loop
+/// is `r1`: every hop is positive, the two module entries included --
+/// `level -> m` through `a = inp * 0.5` and `m -> smth1` through the
+/// smooth's input port, both composed from the sub-models' pathways.
 #[test]
 fn a_stdlib_instance_with_bare_arguments_reads_an_output_port() {
     let child = || {
@@ -1902,7 +1905,7 @@ fn a_stdlib_instance_with_bare_arguments_reads_an_output_port() {
         .push(x_module_named("m", "child", &[(".level", "m.inp")], None));
     looped.models.push(child());
     let main = ltm_names(&looped, "main");
-    for key in ["$|ltm|link_score|level>m|via|a", "$|ltm|loop_score|u1"] {
+    for key in ["$|ltm|link_score|level>m|via|a", "$|ltm|loop_score|r1"] {
         assert!(main.contains(&name(key)), "{key} in {main:?}");
     }
     assert_eq!(ltm_names(&looped, "child").len(), 4);

@@ -191,6 +191,14 @@ impl TestProject {
         self
     }
 
+    /// Set the interval between recorded rows. `with_sim_time` resets it to
+    /// dt, so call this after it.
+    #[allow(dead_code)]
+    pub fn with_save_step(mut self, save_step: f64) -> Self {
+        self.sim_specs.save_step = Some(datamodel::Dt::Dt(save_step));
+        self
+    }
+
     /// Set the integration method
     pub fn with_sim_method(mut self, method: datamodel::SimMethod) -> Self {
         self.sim_specs.sim_method = method;

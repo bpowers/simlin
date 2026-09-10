@@ -209,7 +209,7 @@ fn decision_cell(ast: &Ast<Expr0>) -> String {
             let mut unfilled = 0usize;
             let mut uncovered = false;
             for combination in crate::dimensions::SubscriptIterator::new(dims) {
-                let key = CanonicalElementName::from_raw(&combination.join(","));
+                let key = CanonicalElementName::from_parts(&combination);
                 match elements.get(&key) {
                     Some(e) => {
                         with_arm += 1;
@@ -839,15 +839,13 @@ fn an_unreachable_nan_default_is_not_reported() {
 }
 
 /// A SPARSE array whose every listed arm is unfilled is not WHOLLY unfilled:
-/// the slots with no arm compile to a finite `0`, not to NaN.
+/// the slot with no arm compiles to a finite `0`, not to NaN.
 ///
 /// `sparse[c]` has no entry and no default, so it is 0 while `[a]` and `[b]` are
 /// NaN. Before the coverage axis this said "variable 'sparse' has no equation",
 /// which reads as every slot being NaN. It now names the two arms that are.
-///
-/// (That silent `0` for an armless slot is its own reportable shape and a
-/// deliberately separate one -- GH #905 covers it -- so this test asserts the
-/// value rather than expecting a second finding.)
+/// The armless slot is a separate finding of its own: the
+/// `MissingElementEquation` advisory names `c` as evaluating to 0.
 #[test]
 fn a_sparse_array_of_unfilled_arms_names_the_arms_not_the_variable() {
     let project = read_xmile(
@@ -868,6 +866,28 @@ fn a_sparse_array_of_unfilled_arms_names_the_arms_not_the_variable() {
         "the message must name the unfilled arms, not claim the whole variable \
          has no equation: {:?}",
         findings[0].2
+    );
+    let missing: Vec<(String, String)> = diagnostics(&project)
+        .into_iter()
+        .filter_map(|d| match &d.error {
+            DiagnosticError::Model(e) if e.code == ErrorCode::MissingElementEquation => {
+                assert_eq!(DiagnosticSeverity::Warning, d.severity);
+                Some((
+                    d.variable.clone().unwrap_or_default(),
+                    e.get_details().unwrap_or_default().to_string(),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(1, missing.len(), "one armless slot: {missing:#?}");
+    assert_eq!("sparse", missing[0].0);
+    assert!(
+        missing[0]
+            .1
+            .starts_with("array variable 'sparse' has no equation for 'c'"),
+        "the warning names the armless element: {:?}",
+        missing[0].1
     );
     assert!(final_value(&project, "sparse[a]").is_nan());
     assert!(final_value(&project, "sparse[b]").is_nan());

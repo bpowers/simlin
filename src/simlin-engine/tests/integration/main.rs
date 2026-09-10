@@ -28,11 +28,17 @@ mod test_helpers;
 
 mod clearn_unit_errors;
 mod compiler_vector;
+mod element_subscripts;
 mod json_roundtrip;
 mod layout;
 mod ltm_array_agg;
 mod ltm_discovery_large_models;
 mod ltm_dt_invariance;
+mod ltm_flow_to_stock;
+mod ltm_frozen_clock;
+mod ltm_integration_method;
+mod ltm_loop_nodes;
+mod ltm_relative_scores;
 // Compares xmutil-based MDL parsing against the native Rust parser, so it
 // needs the optional xmutil C++ converter compiled in.
 #[cfg(feature = "xmutil")]

@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 //! Regression tests for the `dt`-invariance of LTM (Loops That Matter)
-//! loop scores -- "Finding 1" of the LTM deep review.
+//! loop scores.
 //!
 //! ## The invariant being pinned
 //!
@@ -13,30 +13,30 @@
 //! loop acting on its stock(s) -- is exactly `+/-1` at every timestep,
 //! regardless of loop gain *and regardless of the integration step `dt`*.
 //!
-//! ## The bug these tests guard against
+//! ## Why it holds, and what a regression looks like
 //!
-//! `generate_flow_to_stock_equation` in `ltm_augment.rs` builds the
-//! flow-to-stock link score. The 2023 paper's Eq. 3 writes it as
-//! `sign * |Delta(flow) / (Delta(S_t) - Delta(S_{t-dt}))|`. Taken
-//! literally that is only correct for `dt = 1`: the denominator is the
-//! second-order stock change, which under Euler integration is
-//! `dt * (netflow(t-dt) - netflow(t-2dt))` and so already carries one
-//! factor of `dt`, while the raw flow delta in the numerator carries
-//! none. The dimensionally-correct discretization of the paper's
-//! continuous form (Eq. 6, `|di/dt / d^2S/dt^2|`, which is manifestly
-//! dimensionless) multiplies the numerator by `dt`.
+//! A flow-to-stock link score is the partial of the stock's net-flow aux
+//! `$⁚ltm⁚net⁚{stock}` with respect to the flow, `sign * |Δflow / Δnet|`
+//! (`generate_flow_to_stock_equation` in `ltm_augment.rs`; the 2023
+//! paper's Eq. 3). For a stock with one flow the net flow IS that flow, so
+//! the score is `|Δf / Δf| = 1` identically: no `dt` appears, because both
+//! deltas are flow deltas over the same `[t - dt, t]` window. The
+//! stock-to-flow link of an isolated loop is likewise `+/-1` (the stock is
+//! the flow's only moving input), so the product is `+/-1` whatever the
+//! step size.
 //!
-//! Without that factor each flow-to-stock link score is `1/dt` too
-//! large, and because a loop score is the product of its link scores
-//! the error compounds once per flow-to-stock link: an isolated
-//! one-stock loop reads `1/dt`, an isolated two-stock loop reads
-//! `1/dt^2`, and so on. Normalization into relative loop scores does
-//! *not* cancel it when a partition mixes loops of different stock
-//! counts -- so at `dt != 1` the dominant loop of a partition can flip
-//! purely as an artifact of the step size.
+//! A regression is any score that reads the stock's own history instead:
+//! a stock changes by `dt * net` per step, so a score written over stock
+//! differences (`|Δflow / Δ(ΔS)|`) is `1/dt` too large, and because a loop
+//! score is the product of its link scores the error compounds once per
+//! flow-to-stock link -- an isolated one-stock loop reads `1/dt`, a
+//! two-stock loop `1/dt^2`. Normalization into relative loop scores does
+//! *not* cancel it when a partition mixes loops of different stock counts,
+//! so at `dt != 1` the dominant loop of a partition can flip purely as an
+//! artifact of the step size.
 //!
 //! The three tests below pin, respectively: the one-stock isolated-loop
-//! value, the two-stock isolated-loop value (proving the error does not
+//! value, the two-stock isolated-loop value (proving a regression does not
 //! merely rescale every loop equally), and the `dt`-invariance of the
 //! relative scores in a mixed-stock-count partition (the real-world
 //! impact).
@@ -111,16 +111,15 @@ fn loop_score_series(results: &Results, name: &str) -> Vec<f64> {
     results.iter().map(|row| row[offset]).collect()
 }
 
-/// Number of saved steps at the start of a flow-to-stock link score
-/// series that are pinned to `0` by the equation's startup guard
-/// (`TIME = INITIAL_TIME` and `PREVIOUS(TIME, INITIAL_TIME) =
-/// INITIAL_TIME`): the second-order stock difference in the score's
-/// denominator needs two steps of history before it is defined.
-const STARTUP_STEPS: usize = 2;
+/// Number of saved steps at the start of a link-score series that are
+/// pinned to `0` by the equation's startup guard (`TIME = INITIAL_TIME`):
+/// every score reads one step of history, so its first value is at the
+/// step after the start.
+const STARTUP_STEPS: usize = 1;
 
 /// Absolute tolerance for the isolated-loop `+/-1` check. Observed
-/// floating-point error in the settled region is ~1e-13; the bug this
-/// guards against shifts the score by a whole `(1/dt)^k - 1 >= 1`, so
+/// floating-point error in the settled region is ~1e-13; the regression
+/// this guards against shifts the score by a whole `(1/dt)^k - 1 >= 1`, so
 /// any tolerance well below 1 catches it.
 const SETTLED_TOL: f64 = 1e-6;
 
@@ -147,22 +146,22 @@ fn assert_isolated_loop_series(series: &[f64], expected: f64, dt: f64) {
                 (value - expected).abs() < SETTLED_TOL,
                 "dt={dt}: settled step {step} has loop_score {value}, expected {expected}. \
                  An isolated loop's raw score is exactly +/-1 at every dt; a value scaled \
-                 by (1/dt)^k means the flow-to-stock link score lost its `dt` factor \
-                 (LTM review Finding 1)."
+                 by (1/dt)^k means a flow-to-stock link score is reading the stock's own \
+                 history instead of the net flow's."
             );
         }
     }
 }
 
-/// Finding 1, one-stock case: an isolated single-stock reinforcing loop
+/// One-stock case: an isolated single-stock reinforcing loop
 /// (`s -> births -> s`) has a raw loop score of exactly `+1` at every
-/// `dt`. `dt = 1.0` is the control -- the missing `dt` factor is
-/// invisible there, so this case also guards against an over-correction
-/// -- while `dt = 0.5` and `dt = 0.25` are where a regressed formula
-/// would read `1/dt` (`2.0` and `4.0` respectively).
+/// `dt`. `dt = 1.0` is the control -- a stock-history score is invisible
+/// there, so this case also guards against an over-correction -- while the
+/// fractional steps are where a regressed formula would read `1/dt`
+/// (`2.0`, `4.0` and `8.0` respectively).
 #[test]
 fn isolated_one_stock_loop_raw_score_is_one_at_every_dt() {
-    for dt in [1.0_f64, 0.5, 0.25] {
+    for dt in [1.0_f64, 0.5, 0.25, 0.125] {
         let project = TestProject::new("iso_one_stock")
             .with_sim_time(0.0, 8.0, dt)
             .stock("s", "100", &["births"], &[], None)
@@ -185,17 +184,18 @@ fn isolated_one_stock_loop_raw_score_is_one_at_every_dt() {
     }
 }
 
-/// Finding 1, two-stock case: an isolated two-stock reinforcing loop
+/// Two-stock case: an isolated two-stock reinforcing loop
 /// (`a -> in_b -> b -> in_a -> a`) also has a raw loop score of exactly
-/// `+1` at every `dt`. This is the key test that the missing-`dt` error
+/// `+1` at every `dt`. This is the key test that a stock-history score
 /// does *not* simply rescale every loop equally: the loop has two
 /// flow-to-stock links, so a regressed formula compounds the error to
-/// `1/dt^2` (`4.0` at `dt = 0.5`, `16.0` at `dt = 0.25`) -- a different
-/// power of `dt` than the one-stock loop, which is precisely why
-/// normalization cannot rescue a mixed-stock-count partition.
+/// `1/dt^2` (`4.0` at `dt = 0.5`, `16.0` at `dt = 0.25`, `64.0` at
+/// `dt = 0.125`) -- a different power of `dt` than the one-stock loop,
+/// which is precisely why normalization cannot rescue a mixed-stock-count
+/// partition.
 #[test]
 fn isolated_two_stock_loop_raw_score_is_one_at_every_dt() {
-    for dt in [1.0_f64, 0.5, 0.25] {
+    for dt in [1.0_f64, 0.5, 0.25, 0.125] {
         let project = TestProject::new("iso_two_stock")
             .with_sim_time(0.0, 8.0, dt)
             .stock("a", "100", &["in_a"], &[], None)
@@ -272,17 +272,18 @@ fn dominant_loop(scores: &HashMap<String, f64>) -> String {
         .expect("at least one loop")
 }
 
-/// Finding 1, real-world impact: in a single cycle partition that mixes
-/// a one-stock and a two-stock loop, the *relative* loop scores must be
-/// near-invariant to `dt` for a near-linear model.
+/// Real-world impact: in a single cycle partition that mixes a one-stock
+/// and a two-stock loop, the *relative* loop scores must be near-invariant
+/// to `dt` for a near-linear model.
 ///
 /// Normalization divides each loop score by the partition sum, so a
-/// per-loop factor that is the *same* for every loop cancels. The
-/// missing-`dt` error is *not* the same for every loop: it is
+/// per-loop factor that is the *same* for every loop cancels. A
+/// stock-history score's error is *not* the same for every loop: it is
 /// `(1/dt)^(stock count)`, so it survives normalization whenever a
-/// partition mixes stock counts. Pre-fix, the relative split of this
-/// model swung ~0.33 between `dt = 1.0` and `dt = 0.25` and the dominant
-/// loop flipped; post-fix the drift is ~0.01 and the ordering is stable.
+/// partition mixes stock counts -- with such a score the relative split of
+/// this model swings ~0.33 between `dt = 1.0` and `dt = 0.25` and the
+/// dominant loop flips, where the net-flow score drifts ~0.01 and keeps
+/// the ordering.
 #[test]
 fn relative_loop_scores_are_dt_invariant_for_mixed_stock_counts() {
     let at_full_dt = relative_scores_at_dt(1.0);
@@ -304,10 +305,10 @@ fn relative_loop_scores_are_dt_invariant_for_mixed_stock_counts() {
         "the same loop ids must be present at both dt values"
     );
 
-    // Per-loop drift bound. Observed post-fix drift is ~0.01; the
-    // pre-fix drift was ~0.33. 0.05 leaves comfortable margin above the
-    // floating-point / near-linearity noise floor while staying far
-    // below the regressed behavior.
+    // Per-loop drift bound. The observed drift is ~0.01 and a stock-history
+    // score's is ~0.33; 0.05 leaves comfortable margin above the
+    // floating-point / near-linearity noise floor while staying far below
+    // the regressed behavior.
     const MAX_DRIFT: f64 = 0.05;
     for (id, full_score) in &at_full_dt {
         let quarter_score = at_quarter_dt[id];
@@ -315,14 +316,14 @@ fn relative_loop_scores_are_dt_invariant_for_mixed_stock_counts() {
         assert!(
             drift < MAX_DRIFT,
             "loop {id}: relative score drifted {drift:.4} between dt=1.0 ({full_score:.4}) \
-             and dt=0.25 ({quarter_score:.4}). A drift this large means the flow-to-stock \
-             link score lost its `dt` factor, inflating each loop by (1/dt)^(stock count) \
-             so the error survives partition normalization (LTM review Finding 1)."
+             and dt=0.25 ({quarter_score:.4}). A drift this large means a flow-to-stock \
+             link score is reading the stock's own history, inflating each loop by \
+             (1/dt)^(stock count) so the error survives partition normalization."
         );
     }
 
-    // The headline symptom of Finding 1: the dominant loop of the
-    // partition flipping purely because the integration step changed.
+    // The headline symptom: the dominant loop of the partition flipping
+    // purely because the integration step changed.
     let dominant_full = dominant_loop(&at_full_dt);
     let dominant_quarter = dominant_loop(&at_quarter_dt);
     assert_eq!(

@@ -474,32 +474,33 @@ fn unsupported_ltm_model_returns_wasmgen_error() {
     );
 }
 
-/// GH #486: the wasm LTM compile path shares the salsa pipeline, so a non-Euler
-/// integration method with LTM enabled surfaces the same Euler-assumption guard
-/// as a clean `WasmGenError` -- no silently-wrong LTM slab.
+/// LTM under RK4 lowers to wasm and agrees with the VM: both backends
+/// re-evaluate the flows at the restored end-of-step state before
+/// snapshotting it, so the LTM columns are the dt-step ratios reported at the
+/// saved steps on both (`tests/integration/ltm_integration_method.rs` pins
+/// those scores equal to Euler's for this proportional-flow model; this pins
+/// the two backends equal to each other under RK4).
 #[test]
-fn ltm_non_euler_returns_wasmgen_error() {
+fn series_rk4_births_deaths_matches_vm() {
     use simlin_engine::test_common::TestProject;
 
     let project = TestProject::new("ltm_rk4_wasm")
-        .with_sim_time(0.0, 10.0, 1.0)
+        .with_sim_time(0.0, 8.0, 1.0)
         .with_sim_method(datamodel::SimMethod::RungeKutta4)
-        .stock("population", "100", &["births"], &[], None)
-        .flow("births", "population * 0.02", None)
+        .stock("a", "100", &["births"], &["deaths"], None)
+        .flow("births", "0.1 * a", None)
+        .flow("deaths", "a / 20", None)
         .build_datamodel();
-
-    match compile_datamodel_to_artifact(&project, "main", true, false) {
-        Ok(_) => panic!("wasm compile of an RK4 LTM model must fail, not succeed"),
-        Err(WasmGenError::Unsupported(msg)) => assert!(
-            msg.contains("Euler"),
-            "the error must reference the Euler assumption, got: {msg}"
-        ),
-    }
-
-    // The same model lowers cleanly with LTM disabled (the guard fires only
-    // when LTM is requested).
-    compile_datamodel_to_artifact(&project, "main", false, false)
-        .expect("RK4 model without LTM must lower to wasm");
+    let vm = vm_results_for_ltm(&project, "main");
+    let wasm = wasm_results_for_ltm(&project, "main")
+        .unwrap_or_else(|msg| panic!("an RK4 LTM model should lower to wasm: {msg}"));
+    assert!(
+        wasm.offsets
+            .keys()
+            .any(|k| k.as_str().starts_with(LTM_LOOP_SCORE_PREFIX)),
+        "the RK4 wasm run carries loop scores"
+    );
+    assert_ltm_slabs_match(&vm, &wasm);
 }
 
 // ---------------------------------------------------------------------------

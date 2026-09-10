@@ -816,9 +816,8 @@ class Model:
 
         * ``analysis_error`` is non-``None`` when the model could not be
           compiled/analyzed for LTM AT ALL (a malformed equation, an
-          unresolved reference, or a hard compile failure such as choosing a
-          non-Euler integration method on a model with a stock in a feedback
-          loop). When set, ``loops``/``dominant_periods``/``partitions`` are
+          unresolved reference, or a hard compile failure). When set,
+          ``loops``/``dominant_periods``/``partitions`` are
           empty, ``enumeration_complete`` is False, and ``universe_loops`` is
           ``None`` -- the SAME shape a genuinely sampled analysis with zero
           discovered loops would report, which is exactly why this is the

@@ -28,7 +28,10 @@ use super::partitions::{CyclePartitions, tarjan_scc};
 use super::polarity::{
     analyze_agg_consumer_polarity, analyze_link_polarity, compose_with_lookup_polarity,
 };
-use super::types::{Link, LinkPolarity, Loop, LoopPolarity, TruncatedByBudget};
+use super::types::{
+    Link, LinkPolarity, Loop, LoopPolarity, TruncatedByBudget, is_synthetic_node_name,
+    normalize_module_ref,
+};
 
 /// Internal module pathways keyed by input port: each port maps to its list of
 /// open `input -> ... -> output` link-paths.
@@ -492,34 +495,43 @@ impl CausalGraph {
             let pred_idx = if i == 0 { circuit.len() - 1 } else { i - 1 };
             let predecessor = &circuit[pred_idx];
 
-            // Find which input port the predecessor maps to.
-            let internal_port = module_var
-                .iter()
-                .find(|inp| &inp.src == predecessor)
-                .map(|inp| &inp.dst);
+            // The input port(s) the predecessor feeds -- the same match the
+            // polarity composition makes (`entry_ports`), so a hop wired
+            // from another instance's output resolves here too.
+            let ports: Vec<&Ident<Canonical>> = entry_ports(module_var, predecessor).collect();
 
             let (pathways, truncated_ports) =
                 module_graph.enumerate_pathways_to_outputs_with_truncation(&[]);
 
-            let internal_stocks: Vec<Ident<Canonical>> = if let Some(port) = internal_port {
-                // Collect stocks from all pathways for the matched input port.
-                // When that port's pathway enumeration hit the budget (GH #649)
-                // the kept paths are a prefix and could miss a stock that lives
-                // only on a dropped pathway, so degrade to the conservative
-                // "all module-internal stocks" fallback rather than silently
-                // dropping stocks from the enriched loop.
-                match pathways.get(port) {
-                    Some(paths) if !truncated_ports.contains(port) => {
-                        collect_stocks_from_pathways(module_graph, paths, node)
-                    }
-                    // Port has no pathway, or its enumeration was truncated:
-                    // fall back to all module-internal stocks.
-                    _ => all_module_stocks(module_graph, node),
-                }
-            } else {
+            let internal_stocks: Vec<Ident<Canonical>> = if ports.is_empty() {
                 // Predecessor doesn't match any module input (shouldn't happen
                 // with a well-formed graph). Conservative fallback.
                 all_module_stocks(module_graph, node)
+            } else {
+                // Collect stocks from all pathways of every matched input port.
+                // When a port's pathway enumeration hit the budget (GH #649)
+                // the kept paths are a prefix and could miss a stock that lives
+                // only on a dropped pathway, so degrade to the conservative
+                // "all module-internal stocks" fallback rather than silently
+                // dropping stocks from the enriched loop; a port with no
+                // pathway at all falls back the same way.
+                let mut collected: Vec<Ident<Canonical>> = Vec::new();
+                for port in ports {
+                    match pathways.get(port) {
+                        Some(paths) if !truncated_ports.contains(port) => {
+                            for stock in collect_stocks_from_pathways(module_graph, paths, node) {
+                                if !collected.contains(&stock) {
+                                    collected.push(stock);
+                                }
+                            }
+                        }
+                        _ => {
+                            collected = all_module_stocks(module_graph, node);
+                            break;
+                        }
+                    }
+                }
+                collected
             };
 
             for s in internal_stocks {
@@ -1166,15 +1178,22 @@ impl CausalGraph {
                 // If 'from' is not a flow for this stock, fall through to AST analysis
             }
 
-            // When the target is a module, the edge represents an input
-            // feeding into the module. Module inputs are direct bindings
-            // (positive relationship). If the module has an internal graph,
-            // we could trace through it, but for the input->module edge
-            // itself the polarity is positive.
+            // When the target is a module instance the edge feeds one (or
+            // more) of its input ports, and the sign the parent sees is the
+            // sign of the sub-model's internal pathways from that port to
+            // the output(s) the parent reads -- a DELAY3's delay-time port
+            // reaches `output` through `stock/(delay_time/3)` and is
+            // Negative, its `input` port Positive.  Compose those pathways
+            // rather than labelling every input edge Positive: the loop id
+            // (`r`/`b`/`u` prefix) and every structural-only surface read
+            // this sign, and a wrong one is a loop reported reinforcing that
+            // scores negative at every step.
             if let VarKind::Module { inputs, .. } = &to_var.kind
-                && inputs.iter().any(|inp| &inp.src == from)
+                && inputs
+                    .iter()
+                    .any(|inp| &normalize_module_ref(&inp.src) == from)
             {
-                return LinkPolarity::Positive;
+                return self.module_input_polarity(from, to, inputs);
             }
 
             // General case: analyze the equation AST. The AST is the RAW
@@ -1189,6 +1208,93 @@ impl CausalGraph {
             }
         }
         LinkPolarity::Unknown
+    }
+
+    /// Static polarity of an `input -> module` edge: the sign of the
+    /// sub-model's own pathways from the entry port(s) `from` feeds to the
+    /// output port(s) the parent reads.
+    ///
+    /// Every pathway is a chain of the sub-model's links, each signed by the
+    /// same [`get_link_polarity`](Self::get_link_polarity) rules a top-level
+    /// link gets -- recursively: the sub-graph carries its own nested
+    /// instances' graphs (`db::analysis::model_variables_and_module_graphs`),
+    /// so a hop into a nested instance composes the same way one level down
+    /// -- so there is one owner of what a link's sign is; this only
+    /// multiplies the signs along each pathway and compares.  The edge is
+    /// `Positive` or `Negative` when every pathway agrees on that sign, and
+    /// `Unknown` when any pathway carries an `Unknown` link, two pathways
+    /// (or two read ports, or two entry ports fed by `from`) disagree, no
+    /// fed entry port reaches a read output, or the pathway enumeration was
+    /// truncated (a dropped pathway could disagree).  A fed port that
+    /// reaches no read output cannot carry a loop, so it is ignored rather
+    /// than vetoing the sign the other ports give.
+    ///
+    /// The exit ports are the union of what EVERY parent reader reads from
+    /// the instance (`module_outputs_read`), loop or not: a link's sign is
+    /// a property of the edge, not of the port one particular loop exits by
+    /// (the runtime per-exit-port override, `compute_module_link_overrides`,
+    /// scores each loop against the pathway it traverses), so a reporting
+    /// variable reading a second, opposite-signed port turns the edge -- and
+    /// every loop through it -- `Unknown`.  When the parent reads nothing
+    /// from the instance the sub-model's own output convention decides
+    /// (`enumerate_pathways_to_outputs_with_truncation` with no ports: its
+    /// sinks), the same fallback the composite path takes.
+    fn module_input_polarity(
+        &self,
+        from: &Ident<Canonical>,
+        module: &Ident<Canonical>,
+        inputs: &[crate::variable::ModuleInput],
+    ) -> LinkPolarity {
+        let Some(module_graph) = self.module_graphs.get(module) else {
+            return LinkPolarity::Unknown;
+        };
+        // The nodes of the sub-graph the parent reads: `x` for a read of
+        // `m·x`, the nested instance `n` for a read of `m·n·x`.  A read of
+        // the instance's LTM internals (`m·$⁚ltm⁚…`) names no model output
+        // -- the rule `db::unique_module_output` applies when it picks a
+        // loop's exit port; no source variable reads one today (the LTM
+        // synthetics are emitted after the dependency walk), so the filter is
+        // defensive.
+        let mut exit_nodes: Vec<Ident<Canonical>> = self
+            .module_outputs_read
+            .values()
+            .flatten()
+            .filter(|t| t.module_path.first() == Some(module))
+            .filter(|t| !is_synthetic_node_name(t.variable.as_str()))
+            .map(|t| {
+                t.module_path
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| t.variable.clone())
+            })
+            .collect();
+        exit_nodes.sort();
+        exit_nodes.dedup();
+        let (pathways, truncated_ports) =
+            module_graph.enumerate_pathways_to_outputs_with_truncation(&exit_nodes);
+
+        let mut sign: Option<LinkPolarity> = None;
+        for port in entry_ports(inputs, from) {
+            if truncated_ports.contains(port) {
+                return LinkPolarity::Unknown;
+            }
+            // A port that reaches no read output cannot carry a loop.
+            let Some(paths) = pathways.get(port) else {
+                continue;
+            };
+            for path in paths {
+                let path_sign = path.iter().fold(LinkPolarity::Positive, |acc, link| {
+                    acc.compose(link.polarity)
+                });
+                match (sign, path_sign) {
+                    (_, LinkPolarity::Unknown) => return LinkPolarity::Unknown,
+                    (Some(prev), next) if prev != next => return LinkPolarity::Unknown,
+                    (None, next) => sign = Some(next),
+                    (Some(_), _) => {}
+                }
+            }
+        }
+        sign.unwrap_or(LinkPolarity::Unknown)
     }
 
     /// Polarity of `consumer`'s equation with respect to a reducer
@@ -1279,6 +1385,22 @@ impl CausalGraph {
             LoopPolarity::Balancing
         }
     }
+}
+
+/// The input ports of a module instance that `from` feeds: the `dst` of
+/// every input whose source, with a `·output` suffix stripped
+/// (`normalize_module_ref`, so an input wired from another instance's
+/// output matches that instance's node), is `from`.  The one owner of the
+/// entry-port match, read by the polarity composition and the stock
+/// enrichment alike.
+fn entry_ports<'a>(
+    inputs: &'a [crate::variable::ModuleInput],
+    from: &'a Ident<Canonical>,
+) -> impl Iterator<Item = &'a Ident<Canonical>> + 'a {
+    inputs
+        .iter()
+        .filter(move |inp| &normalize_module_ref(&inp.src) == from)
+        .map(|inp| &inp.dst)
 }
 
 /// Collect stocks from a set of internal pathways, namespaced with the

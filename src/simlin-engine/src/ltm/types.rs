@@ -101,9 +101,9 @@ pub struct Link {
 /// `partition_for_loop` looks up stocks in `model_element_cycle_partitions`,
 /// whose `stock_partition` map is element-keyed.  Variable-level names here
 /// would cause `partition_for_loop` to return `None`, silently corrupting
-/// per-loop / per-slot normalization in `ltm_post::compute_rel_loop_scores*`
-/// (the loop would bucket into the catch-all `None` group instead of its
-/// actual SCC).
+/// the per-slot normalization in `ltm_post::compute_rel_loop_scores` (the
+/// loop would become a Solo member instead of joining its actual SCC's
+/// group).
 ///
 /// `assign_loop_ids` derives loop IDs from `links` (sorted distinct
 /// variable names), not `stocks`, so the element-level `stocks` granularity
@@ -168,9 +168,9 @@ impl Loop {
 /// - Odd number of negative links → Balancing
 /// - ANY link with unknown polarity → Undetermined
 ///
-/// At runtime, the loop score series is also classified according to the
-/// signed-sum confidence ratio `|r - |b|| / (r + |b|)` (Schoenberg and
-/// Eberlein, 2020; see `docs/reference/ltm--loops-that-matter.md`):
+/// At runtime, the loop's partition-relative score series is also classified
+/// according to the signed-sum confidence ratio `|r - |b|| / (r + |b|)`
+/// (Schoenberg and Eberlein, 2020; see `docs/reference/ltm--loops-that-matter.md`):
 /// - r is the sum of positive scores, |b| the absolute sum of negative scores
 /// - When all valid scores share a sign the ratio is exactly 1 and the loop
 ///   is classified Reinforcing or Balancing.
@@ -225,8 +225,28 @@ pub enum LoopPolarity {
 pub const POLARITY_CONFIDENCE_THRESHOLD: f64 = 0.99;
 
 impl LoopPolarity {
-    /// Classify loop polarity based on actual runtime loop score values
-    /// and return the polarity-confidence ratio in `[0.0, 1.0]`.
+    /// Classify loop polarity from a runtime loop-score series and return the
+    /// polarity-confidence ratio in `[0.0, 1.0]`.
+    ///
+    /// `scores` is the loop's **partition-relative** series (the one owner,
+    /// `ltm_post::compute_rel_loop_scores` / `relative_series`), never its
+    /// raw `loop_score`. Each relative sample is bounded to `[-1, 1]` and is
+    /// the loop's share of its partition at that step, so the ratio below is
+    /// the dominance-weighted time share of each sign: a loop that carries
+    /// the partition while reinforcing and is negligible while balancing is
+    /// `MostlyReinforcing`, and a loop that spends a tenth of its active
+    /// steps balancing at full share is `Undetermined`. The raw series is
+    /// the wrong base because it is unbounded: at a dominance inflection
+    /// every raw score in the partition diverges together, so a few
+    /// inflection steps can outweigh the whole run, and an exogenous change
+    /// that swamps a target's change shrinks the raw scores of one phase to
+    /// nothing. For a loop alone in its partition the relative sample is
+    /// exactly `+1`, `-1` or `0`, so its confidence is the plain time share of
+    /// its sign and `Mostly*` needs the minority sign on at most half a
+    /// percent of its active steps. The papers define the ratio on
+    /// instantaneous pathway scores; the base a reference tool uses for loops
+    /// is not documented, so this is a judgment recorded here, not a
+    /// reproduction.
     ///
     /// The confidence is `|r - |b|| / (r + |b|)` over the valid (finite,
     /// non-zero) entries, where `r` and `|b|` are the sum of positive and

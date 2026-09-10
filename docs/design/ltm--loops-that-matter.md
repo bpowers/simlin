@@ -19,7 +19,7 @@ The implementation is split across these modules in `src/simlin-engine/src/`:
 | `ltm_finding.rs` | Post-simulation loop discovery for models too large for exhaustive enumeration: scoring, retention, ranking, and the cap |
 | `ltm_finding_enum.rs` | Discovery's exact candidate generator: union-graph elementary-circuit enumeration and its retention pass |
 | `ltm_finding_fallback.rs` | Discovery's shortest-path candidate generator, used when the enumeration cannot finish within its budgets or the caller's deadline |
-| `ltm_post.rs` | Post-simulation computation: normalizes loop scores into relative loop scores using the cycle-partition mapping produced during LTM compilation |
+| `ltm_post.rs` | Post-simulation computation: the one owner of relative loop-score normalization (`compute_rel_loop_scores`, every `(loop, slot)` a member of its slot's cycle partition) plus the `group_totals` / `relative_series` pair discovery normalizes through |
 
 The production entry point is the `model_ltm_variables` tracked function in
 `db/ltm/mod.rs`, invoked as part of `compile_project_incremental`. LTM compilation
@@ -177,16 +177,26 @@ disconnected stock groups, each subcomponent has a separate loop dominance profi
 
 ### How Partitions Are Used
 
-- **Exhaustive mode**: `generate_loop_score_variables()` records each loop's
-  partition on the emitted `loop_score` `LtmSyntheticVar`. Post-simulation,
-  `compute_rel_loop_scores()` (`ltm_post.rs`) groups loops by partition and
-  normalizes each loop score against the sum of absolute scores within its own
-  partition, ensuring structurally independent stock groups don't dilute each
-  other's scores.
+- **Exhaustive mode**: `model_ltm_variables` records each loop's per-slot
+  partition vector (`LtmVariablesResult::loop_partitions`). Post-simulation,
+  `compute_rel_loop_scores()` (`ltm_post.rs`) makes every `(loop, slot)` a
+  member of its slot's partition -- a scalar loop one member, an arrayed loop
+  one per element -- and normalizes each member against the sum of absolute
+  scores over all members of that partition, so structurally independent
+  stock groups don't dilute each other's scores and an arrayed loop's element
+  competes with its siblings and with scalar loops exactly as the
+  de-subscripted model's N scalar loops would. The group is the partition and
+  nothing finer: a slot index is a position in one loop's own dimension space,
+  so keying on it too splits a partition into denominators that miss most of
+  its members.
 - **Discovery mode**: `rank_and_filter()` computes per-partition, per-timestep
-  score totals. A loop is retained if at any single timestep its absolute score
-  is >= `MIN_CONTRIBUTION` of its partition's total. This prevents globally tiny
-  but partition-dominant loops from being filtered out.
+  score totals with the same accumulator (`ltm_post::add_to_total`, through
+  `group_totals` for the discovered set and `retain_circuits` for the
+  enumerated universe) and divides through the same
+  `ltm_post::relative_series`. A loop is retained if at any single
+  timestep its absolute score is >= `MIN_CONTRIBUTION` of its partition's
+  total. This prevents globally tiny but partition-dominant loops from being
+  filtered out.
 
 ### Module-Internal Stocks and Partitions
 
@@ -317,24 +327,46 @@ For a link from `x` to `z` where `z = f(x, y, ...)`:
 
 ### Flow-to-Stock Links
 
-`generate_flow_to_stock_equation()` in `ltm_augment.rs`.
+`generate_flow_to_stock_equation()` and `generate_net_flow_equation()` in
+`ltm_augment.rs`.
 
-Implements the corrected 2023 formula (Schoenberg et al., Eq. 3). The numerator
-uses `PREVIOUS()` to align timing: at time t, `PREVIOUS(flow)` is the flow value
-at t-1 that drove the stock change from t-1 to t.
+A stock's flows reach it through its wiring, not through an equation, so the
+score is built around a synthetic net-flow auxiliary: every stock with a scored
+flow-to-stock edge gets `$⁚ltm⁚net⁚{stock} = (inflows) - (outflows)`, shaped
+like the stock (`Equation::ApplyToAll` over an arrayed stock's dimensions; `0`
+for a side with no flows), minted beside the score by `shaped_link_score` and
+deduplicated by name (every flow of the stock mints the same aux). The score
+for `flow -> stock` is the ordinary instantaneous link score of that aux with
+respect to the flow. Because the aux is a linear sum its ceteris-paribus
+partial is closed-form -- `Δ_flow net = +Δflow` for an inflow, `-Δflow` for an
+outflow -- so the emitted equation is the standard guard form with that
+numerator:
 
 ```
-numerator = PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))
-denominator = (stock - PREVIOUS(stock)) - (PREVIOUS(stock) - PREVIOUS(PREVIOUS(stock)))
-link_score = sign * ABS(SAFEDIV(numerator, denominator, 0))
+if (TIME = INITIAL_TIME) then 0
+else if ((net - PREVIOUS(net)) = 0) OR ((flow - PREVIOUS(flow)) = 0) then 0
+else SAFEDIV(+/-(flow - PREVIOUS(flow)), ABS(net - PREVIOUS(net)), 0) * SIGN(flow - PREVIOUS(flow))
 ```
 
-The denominator is the second-order change in the stock (its "acceleration").
-The ratio is wrapped in `ABS()` because flow-to-stock polarity is structural:
-inflows always contribute positively (+1), outflows negatively (-1). The sign
-is applied outside the absolute value. This equation returns 0 for the first
-two timesteps (insufficient history for second-order differences), guarded by
-`TIME = INITIAL_TIME` and `PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME`.
+which evaluates to `sign * |Δflow / Δnet|`: the 2023 paper's Eq. 3 (its
+denominator `Δ(S_t) - Δ(S_{t-dt})` is `Δnet`) in the paper's own
+implementation option (b) (section 4.4: aggregate the flows into a net flow,
+score each flow into it, and let the net flow's link into the stock be 1).
+Polarity is structural: inflows +1, outflows -1. Both deltas are read over
+`[t - dt, t]`, the window of every other link score, so a loop's link scores
+all describe one interval, the score is the same whether a stock's flows are
+written separately or as one net flow, and no `dt` appears (an isolated loop
+scores exactly `+/-1` at every `dt`, `tests/integration/ltm_dt_invariance.rs`).
+Like every other score it is 0 at `TIME = INITIAL_TIME` and defined from the
+first step after the start. The net aux is LTM machinery, not a causal node:
+the causal graph keeps its `flow -> stock` edges, and the aux appears in no
+loop and no link.
+
+A scalar flow into an arrayed stock broadcasts into every element's net flow,
+so its score is one arrayed variable over the stock's dimensions
+(`link_score_dimensions`). The structural edge is routed to the per-shape
+emitter ahead of the shape-driven emitters (`emit_link_scores_for_edge`), which
+would otherwise score it as a partial of the stock's initial-value equation.
 
 ### Stock-to-Flow Links
 
@@ -767,6 +799,28 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
   independent expressions from truly non-monotonic ones
 - **Flow-to-stock**: Inflows are `Positive`, outflows are `Negative` (fixed
   structural polarity)
+- **Input-to-module** (`CausalGraph::module_input_polarity`): the sign of
+  the sub-model's own pathways from the entry port(s) the source feeds to
+  the output port(s) the parent reads (`module_outputs_read`; the
+  sub-model's sinks when the parent reads nothing). Each pathway's links
+  are signed by these same rules -- recursively for a hop into a nested
+  instance, whose graph the sub-graph carries
+  (`model_variables_and_module_graphs`) -- and multiplied; the edge is
+  `Positive` / `Negative` when every pathway agrees and `Unknown` when any
+  pathway carries an `Unknown` link, two pathways or two read ports
+  disagree, no fed port reaches a read output, or the pathway enumeration
+  was truncated (a fed port that reaches no read output cannot carry a
+  loop and is ignored). The read ports are the union over EVERY parent
+  reader, loop or not, because the sign is a property of the edge: a
+  reporting aux that reads a second, opposite-signed output turns the
+  edge -- and the label of every loop through it -- to `u`, even though
+  the loop exits by the other port and the runtime per-exit-port override
+  scores it correctly. So a DELAY3's delay-time port is `Negative`
+  (`stock/(delay_time/3)` on every pathway), its `input` port `Positive`,
+  and a SMTH1's delay-time port `Negative` by the division convention
+  above (`(input - output)/delay_time`). The `module -> variable` edge
+  needs no special arm: the reader's equation names the output
+  (`module·port`) and the ordinary analysis applies.
 - **Arrayed equations**: Checks all elements; returns `Unknown` if any two
   elements disagree
 
@@ -776,7 +830,30 @@ classified as `Undetermined` (`calculate_polarity`).
 ### Runtime Polarity
 
 `LoopPolarity::from_runtime_scores()` in `ltm/types.rs` classifies polarity
-based on actual simulation results. It filters out NaN and zero values, then:
+from the loop's **partition-relative** score series -- the one owner's output
+(`ltm_post::compute_rel_loop_scores` on the exhaustive path, the `rel_scores`
+`rank_truncate_and_id` attaches on the discovery path), never the raw
+`loop_score`. Each relative sample is bounded to `[-1, 1]` and weighted by the
+loop's share of its partition at that step, so the confidence ratio is the
+dominance-weighted time share of each sign; a raw base is unbounded and lets
+the few steps around a dominance inflection, where every raw score in the
+partition diverges, decide the label by themselves. For a loop alone in its
+partition the relative sample is exactly `+1`/`-1`/`0`, so its confidence is
+the plain time share of its sign, and `Mostly*` requires the minority sign on
+at most half a percent of the active steps.
+
+The base is a judgment, not a reproduction. The papers define the confidence
+ratio on instantaneous *pathway* scores (reference section 13.7); the base a
+reference tool uses when it labels a *loop* Rux/Bux is undocumented and
+cannot be checked. The relative base is chosen because it is bounded and
+dominance-weighted: on the raw base a lone loop that spends a tenth of its
+run balancing can still clear the 0.99 gate whenever an exogenous change
+swamps the change in its target and shrinks that phase's raw scores to
+nothing, which is the raw-magnitude incomparability relative scores exist to
+remove. `exhaustive_lone_loop_sign_flip_confidence_is_its_time_share` pins
+that case as `Undetermined`.
+
+The classifier filters out NaN and zero values, then:
 - All remaining scores positive -> `Reinforcing`
 - All remaining scores negative -> `Balancing`
 - Mixed signs, one polarity dominant with confidence >=
@@ -791,18 +868,21 @@ simulation (e.g., the yeast alcohol model from the papers).
 #### Which surfaces reclassify, and which do not (GH #679)
 
 `model_detected_loops` is a *pre-simulation* salsa query, so it can only report
-*structural* polarity. Pervasively for module-heavy models the static polarity
-of a `variable -> module` / `module -> variable` black-box link is `Unknown`,
-so a loop through a module boundary is labelled `Undetermined` (confidence 0.0)
-even when its simulated loop score is single-signed at every active step.
-Runtime reclassification is therefore a *post-simulation* concern, and the
-surfaces handle it differently:
+*structural* polarity. A `variable -> module` link is signed from the
+sub-model's pathways (see "Static Polarity"), so it is `Unknown` whenever
+those pathways disagree or contain an unsigned link -- common in module-heavy
+models -- and a loop through such a boundary is labelled `Undetermined`
+(confidence 0.0) even when its simulated loop score is single-signed at every
+active step. Runtime reclassification is therefore a *post-simulation*
+concern, and the surfaces handle it differently:
 
 - **Discovery (`analyze_model` / MCP / `simlin_analyze_discover_loops`)**: the
-  `FoundLoop` path in `ltm_finding.rs` derives each loop's polarity directly
-  from `from_runtime_scores` over the loop's own per-step score series
-  (falling back to the trimmed-chain structural polarity for an all-zero/NaN
-  series). Fully reclassified.
+  `FoundLoop` path in `ltm_finding.rs` derives each loop's polarity from
+  `from_runtime_scores` over the loop's partition-relative series once
+  `rank_truncate_and_id` has the partition totals. A never-active loop
+  (all-zero/NaN series) is not reported at all: retention drops it before
+  classification, so every discovered loop carries a runtime label. Fully
+  reclassified.
 - **pysimlin `Run.loops`**: sources polarity / confidence / partition straight
   from the engine primitive (bound as `Sim.get_loops_runtime` ->
   `reclassify_loops_from_results`, GH #679/#685, the all-slots Rust source of
@@ -819,12 +899,12 @@ surfaces handle it differently:
   runtime one.
 
 `db::analysis::reclassify_loops_from_results(loops, results, loop_partitions)`
-is the **canonical in-engine reclassification primitive** -- it reads each
-loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) from a `Results` and applies
-`from_runtime_scores` to overwrite `polarity`/`polarity_confidence`. As of this
-writing it has **no production caller**: it exists so a future sim-bearing Rust
-consumer (e.g. when GH #495's FFI lands) has one correct place to call rather
-than re-deriving the loop-score read. It is exercised by engine tests.
+is the **canonical in-engine reclassification primitive** -- it normalizes
+every loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) in a `Results` through
+`ltm_post::compute_rel_loop_scores` and applies `from_runtime_scores` to the
+relative series to overwrite `polarity`/`polarity_confidence`. Its production
+caller is libsimlin's `simlin_analyze_get_loops_runtime` (and through it
+pysimlin's `Run.loops`).
 
 The **loop id never changes** under reclassification. Loop detection and the
 deterministic `r{n}`/`b{n}`/`u{n}` id assignment happen at compile time before
@@ -836,14 +916,18 @@ zero or non-finite) keeps its structural polarity -- there is no runtime
 evidence to override it.
 
 **A2A semantics across the sites.** The Rust `reclassify_loops_from_results`
-helper concatenates *all* element slots of an A2A loop into one sample set (so a
-loop that is reinforcing in one element and balancing in another classifies
-`Undetermined`). pysimlin `Run.loops` is built on this primitive, so it reports
-exactly this all-slots classification. Discovery uses one scalar score series
-per `FoundLoop` (its links are element-level, so a discovered loop is always
-scalar). The exhaustive (sim-bearing) and discovery surfaces thus
-agree on scalar loops and differ only in how an A2A loop's element slots are
-reduced -- the exhaustive path now uses the all-slots reading rather than slot 0.
+helper concatenates *all* element slots of an A2A loop into one sample set,
+each slot normalized in its own partition, so a loop that is reinforcing in
+one element and balancing in another classifies `Undetermined`
+(`exhaustive_a2a_loop_with_opposite_signed_elements_is_undetermined` pins
+this at confidence 0 for two isolated one-stock elements of opposite sign).
+pysimlin `Run.loops` is built on this primitive, so it reports exactly this
+all-slots classification. Discovery uses one scalar score series per
+`FoundLoop` (its links are element-level, so a discovered loop is always
+scalar). The exhaustive (sim-bearing) and discovery surfaces thus agree on
+scalar loops and differ only in how an A2A loop's element slots are reduced:
+all slots read together on the exhaustive path, one element-level loop per
+slot on the discovery path.
 
 ## Post-Simulation Loop Discovery
 
@@ -1131,8 +1215,8 @@ Over the materialized loops:
    non-survivor's mass is still in the denominator, matching exhaustive mode,
    where the enumerated set IS the universe. On the fallback path there is no
    universe to measure against, so the discovered set supplies its own totals.
-   `NaN` summands are excluded and `Inf` kept, mirroring
-   `ltm_post::denom_summand`.
+   `NaN` summands are excluded and `Inf` kept, the one accumulator
+   `ltm_post::add_to_total` applies on every path.
 3. **Retention filter**, peak semantics: keep a loop if at ANY single step its
    |score| is >= `MIN_CONTRIBUTION` (0.1%) of its group's total there. This runs
    BEFORE any cap (GH #310), so a loop dominant in a small partition but
@@ -1706,11 +1790,14 @@ dominance profiles. The loop-id → cycle-partition mapping is cached as
 `LtmVariablesResult::loop_partitions: HashMap<String, Vec<Option<usize>>>` --
 *per slot* of an A2A loop, since two elements of the same A2A loop can land in
 different cycle partitions (the slot's stocks differ). Relative loop scores are
-derived post-simulation by `compute_rel_loop_scores` consumers (e.g.
-`libsimlin::analysis`), normalizing each `(partition, slot)` loop score against
-the sum of absolute scores in that partition at that slot -- so an independent
-A2A loop's normalization does not cross-pollute a sibling A2A loop that
-happens to share a loop ID but lives in a different partition.
+derived post-simulation by `ltm_post::compute_rel_loop_scores` -- the one
+owner every reader (`libsimlin::analysis`, the layout's importance series)
+goes through -- which normalizes each slot against the sum of absolute scores
+over every member of the slot's partition: the loop's sibling slots, other
+arrayed loops' slots and scalar loops alike. Two slots of one A2A loop that
+live in different partitions therefore never normalize against each other,
+while two coupled slots do, and a scalar loop in the partition is one member
+with one series.
 
 **Cross-element / mixed loops**: Circuits containing scalar nodes or with
 inconsistent variable-level structures. Each circuit becomes its own scalar
@@ -1913,11 +2000,33 @@ enumerated loops.
 
 ## Current Limitations
 
-### Euler Integration Only
+### Integration Methods and Save Step
 
-The corrected flow-to-stock formula uses discrete differences that assume Euler
-integration. The papers note compatibility with Runge-Kutta "in principle" but
-this has not been explored in the implementation.
+LTM runs under Euler, RK2 and RK4 alike (GH #486). A link score is a ratio of
+integration-step (dt) deltas, reported at the saved steps: `PREVIOUS` reads the
+state the previous dt step ended in, because the VM snapshots `prev_values` on
+every dt iteration before the save/advance logic decides whether the row is
+recorded. With `save_step > dt` a recorded score is therefore the ratio over
+the last dt step ending at that time -- the same number a `save_step = dt` run
+records there -- and not a re-differencing of the flows over the saved
+interval (`tests/integration/ltm_integration_method.rs` pins the two apart on
+a nonlinear flow, where they differ by more than a unit of score). This is the
+2020 paper's form (Schoenberg, Davidsen and Eberlein, section 6.1: the scores
+are "computed at each dt").
+
+Under RK2/RK4 the VM re-evaluates the flows at the restored end-of-step state
+before snapshotting it (the RK stages' trial-point evaluations are
+overwritten; wasm mirrors this), so the dt-step ratio is taken over the
+method's own trajectory and never over an intra-step stage evaluation. The
+paper puts Runge-Kutta compatibility as "in principle" ("could in principle
+work ... with Runge-Kutta integration"); this is the form it takes here. Note
+the boundary of what that buys: a model whose flows are proportional to its
+stock scores identically under all three methods while its stock trajectories
+differ, because the ratios of flow deltas cancel the stock's step, but that is
+a property of proportional flows, not of the method. In general the scores
+follow the method's trajectory: on the test's nonlinear model (`deaths =
+0.02 * s ^ 1.3` against `births = 0.1 * s`) the deaths-to-stock score at
+`t = 2` is -22.744 under Euler and -22.749 under RK4.
 
 ### Performance on Very Large Models
 
@@ -2051,26 +2160,32 @@ cases remain deliberate carve-outs:
    synthesized compile-time equations, avoiding O(P^2) equation-text growth on
    models with very large same-partition loop sets (e.g. WRLD3).
 
-7. **Flow-to-stock numerator timing and `time_step` scaling**: The flow-to-stock
-   link score numerator uses `time_step * (PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow)))`
-   rather than the published bare `flow - PREVIOUS(flow)`. Two deliberate changes:
-   - *1-DT shift*: in Euler integration, the flow at t-1 drove the stock change
-     from t-1 to t, so `PREVIOUS(flow)` aligns the numerator and denominator to
-     the same causal interval. This produces results shifted by one DT compared
-     to reference SD software (Stella/iThink). The integration test
-     (`tests/integration/simulate_ltm.rs`) compensates by shifting reference
-     timestamps forward by DT when loading golden data. This convention is also
-     documented for end users in the reference doc's Section 3.2 (the "numerator
-     timing convention" note under
-     [Flow-to-Stock Link Score](../reference/ltm--loops-that-matter.md)).
-   - *`time_step` factor*: the denominator (second-order stock change) is
-     `dt * (netflow(t-dt) - netflow(t-2dt))` in Euler, carrying one `dt` that the
-     raw flow delta in the numerator lacks; without the factor every
-     flow-to-stock link score is `1/dt` too large and the error compounds once
-     per stock in a loop. The published Eq. 3 omits the factor because every
-     worked example in the papers uses dt=1. Verified empirically: at dt=0.25
-     an isolated loop scores +1.0 with the factor (4.0 without), and at dt=1
-     the paper's Table 3 values (1.25 / -0.25) reproduce exactly.
+7. **Time labeling, and the flow-to-stock score's window** -- two separate
+   facts:
+   - *Time labeling, for every link score*: Simlin labels the score computed
+     over `[t - dt, t]` (its reading of `PREVIOUS`) with `t`; the
+     Stella-derived golden data in `test/logistic_growth_ltm` labels the score
+     computed over `[t, t + dt]` with `t`. The integration test
+     (`tests/integration/simulate_ltm.rs`) therefore shifts the reference
+     timestamps forward by one DT when loading. That fixture has one flow per
+     stock, so its flow-to-stock scores are identically 1 in either convention
+     and the whole shift sits in the instantaneous links: with the relabel the
+     relative loop scores agree to the file's rounding, and inverting
+     `|b1|/|r1| = (pop/1000)/(1 - pop/1000)` on each golden column reproduces
+     `pop` at the column's own `t`. The convention is documented for end users
+     in the reference doc's Section 3.2 note under
+     [Flow-to-Stock Link Score](../reference/ltm--loops-that-matter.md).
+   - *Flow-to-stock window*: the flow-to-stock score is the paper's
+     implementation option (b) -- the instantaneous score of the stock's
+     net-flow aux with respect to the flow, `sign * |Δflow / Δnet|` -- read
+     over the same `[t - dt, t]` window as every other link, with no `dt`
+     factor, no stock history and a first value at `start + dt`. The paper's
+     Eq. 3 is written over stock differences, each of which carries one `dt`
+     under Euler; expressing `Δnet` as a flow difference removes the factor
+     rather than compensating for it. At dt=1 the paper's table values
+     (1.25 / -0.25) reproduce at the step of the change
+     (`tests/integration/ltm_flow_to_stock.rs`), and an isolated loop scores
+     `+/-1` at every dt (`tests/integration/ltm_dt_invariance.rs`).
 
 8. **Ceteris-paribus via AST transformation**: The papers describe re-evaluating
    equations with current values of one input and previous values of all others.
@@ -2078,7 +2193,18 @@ cases remain deliberate carve-outs:
    recursively transforming it to wrap non-excluded dependencies in `PREVIOUS()`,
    and printing the result back to equation text. This is done once at
    augmentation time (not per-timestep), producing a static equation that the
-   simulation engine evaluates normally.
+   simulation engine evaluates normally. The clock is one of the "all others"
+   (GH #1016): inside a changed-first partial `TIME` reads the per-model helper
+   `$⁚ltm⁚freeze⁚time = PREVIOUS(TIME)` and a time-dependent call (`STEP`,
+   `RAMP`, `PULSE`, by the builtin's own `Invariance::TimeDependent`) is lagged
+   whole, arguments verbatim, unless the call holds an occurrence of the
+   isolated input's live shape, in which case it stays live, clock included;
+   inside a frozen dependency's subscript index the enclosing freeze already
+   lags the clock once and it is left alone. The changed-last fallback leaves
+   the clock live, as it leaves every other input live. A source with no
+   influence on its target therefore scores 0 under an exogenous forcing, and
+   a forcing on a loop takes its own share of the target's change rather than
+   the loop's (`tests/integration/ltm_frozen_clock.rs`).
 
 ## Test Coverage
 
@@ -2098,9 +2224,11 @@ cases remain deliberate carve-outs:
   IF-THEN-ELSE, loop score equations, generated variable structure
 
 - **`ltm_post.rs`**: Post-simulation relative loop score computation --
-  partition grouping, SAFEDIV-0 semantics on empty-denominator timesteps,
-  property-based equivalence with the reference compile-time formula on
-  synthetic loop-score matrices
+  per-partition grouping of every `(loop, slot)`, Solo groups for unresolved
+  slots, NaN exclusion / Inf retention / saturating totals, SAFEDIV-0 on
+  empty-denominator timesteps, and a property test against a naive
+  per-member reference on generated per-slot partition vectors that also
+  checks the partition identity (each partition's magnitudes sum to 1)
 
 - **`ltm_finding_tests.rs`** (the `#[cfg(test)]` sibling of `ltm_finding.rs`),
   by family:

@@ -37,7 +37,7 @@ use crate::common::{Canonical, Ident, Result};
 use crate::datamodel;
 use crate::db::LtmSyntheticVar;
 use crate::ltm::{CausalGraph, CyclePartitions, Link, LinkPolarity, Loop, LoopPolarity};
-use crate::ltm_post::NormGroup;
+use crate::ltm_post::{NormGroup, group_totals, relative_series};
 use crate::results::Results;
 
 // Union-graph circuit enumeration: discovery's primary candidate generator
@@ -3325,29 +3325,26 @@ pub(crate) fn discover_loops_with_deadlines(
         }
         let polarity_structural = causal_graph.calculate_polarity(&reported_links);
 
-        // Determine runtime polarity from scores, capturing the confidence
-        // ratio alongside it (GH #495). When the loop has no valid runtime
-        // scores we fall back to the structural polarity; the matching
-        // confidence mirrors the structural pipeline's convention in
-        // `db::analysis` (1.0 when the polarity is determined, 0.0 when it is
-        // Undetermined) so the discovery and structural surfaces agree on what
-        // a "fully confident" loop reports.
-        let runtime_scores: Vec<f64> = scores.iter().map(|(_, s)| *s).collect();
-        let (polarity, polarity_confidence) = LoopPolarity::from_runtime_scores(&runtime_scores)
-            .unwrap_or_else(|| {
-                let confidence = if polarity_structural == LoopPolarity::Undetermined {
-                    0.0
-                } else {
-                    1.0
-                };
-                (polarity_structural, confidence)
-            });
+        // The structural polarity, with the structural pipeline's binary
+        // confidence (1.0 when every link is signed, 0.0 when one is Unknown),
+        // is a placeholder until the partition-relative series exist:
+        // `rank_truncate_and_id` reclassifies every surviving loop from those
+        // (GH #495). A loop with no active step never survives retention, so
+        // no discovered loop reports this placeholder except on the
+        // no-score-data path (a run with no saved steps), where there is
+        // nothing to classify; the binary convention keeps that path's
+        // meaning of a 1.0/0.0 confidence the structural surface's.
+        let polarity_confidence = if polarity_structural == LoopPolarity::Undetermined {
+            0.0
+        } else {
+            1.0
+        };
 
         let loop_info = Loop {
             id: String::new(), // Will be assigned below
             links: reported_links,
             stocks: loop_stocks,
-            polarity,
+            polarity: polarity_structural,
             dimensions: vec![],
             slot_links: vec![],
         };
@@ -3521,8 +3518,8 @@ fn loop_partition_slot(fl: &FoundLoop, partitions: &CyclePartitions) -> Option<u
 /// against the discovered set instead.
 struct UniverseStats {
     /// Per-partition per-step `Sum_j |score_j[t]|` over the whole population
-    /// (`NaN` summands excluded, `Inf` kept -- `ltm_post::denom_summand`'s
-    /// rule). Not every circuit `loop_counts` counts contributed to this sum
+    /// (accumulated by `ltm_post::add_to_total`: `NaN` summands excluded,
+    /// `Inf` kept). Not every circuit `loop_counts` counts contributed to this sum
     /// -- see the struct doc's boundary note.
     totals: HashMap<usize, Vec<f64>>,
     /// Per-partition count of circuits in the enumerated universe that
@@ -3644,6 +3641,9 @@ fn subtract_reported_mass_from_totals(
 /// no active steps returns `NaN` (it sorts last). `Inf/Inf = NaN` at a
 /// dominance inflection is naturally excluded since `NaN` is not active.
 fn mean_relative_contribution(fl: &FoundLoop, totals: &[f64]) -> f64 {
+    // The same division every relative series gets (`ltm_post::relative_series`,
+    // SAFEDIV-0); the active-step mask below is what this statistic adds.
+    let relative = relative_series(fl.scores.iter().map(|&(_, score)| score), totals);
     let mut sum = 0.0;
     let mut active = 0usize;
     for (i, &(_, score)) in fl.scores.iter().enumerate() {
@@ -3661,10 +3661,10 @@ fn mean_relative_contribution(fl: &FoundLoop, totals: &[f64]) -> f64 {
         if inactive {
             continue;
         }
-        let rel = score.abs() / total;
-        // rel is in [0, 1] for a finite score (the loop's own |score| is part of
-        // total). An Inf score makes total Inf, so rel == Inf/Inf == NaN and the
-        // step drops out here; guard against any residual NaN to be safe.
+        // |rel| is in [0, 1] for a finite score (the loop's own |score| is part
+        // of total). An Inf score makes total Inf, so rel == Inf/Inf == NaN and
+        // the step drops out here; guard against any residual NaN to be safe.
+        let rel = relative[i].abs();
         if rel.is_nan() {
             continue;
         }
@@ -3813,8 +3813,8 @@ fn cmp_relative_importance(a: &RelativeImportance, b: &RelativeImportance) -> st
 /// cross-partition equivalence is by design -- the relative key measures
 /// in-partition dominance, not how long the partition itself stays active.
 ///
-/// **NaN/Inf handling** mirrors `ltm_post.rs::denom_summand` (GH #542) so the
-/// two LTM paths agree: a `NaN` `score[t]` contributes nothing to a partition
+/// **NaN/Inf handling** is the shared accumulator's (`ltm_post::group_totals`,
+/// GH #542), so the two LTM paths agree: a `NaN` `score[t]` contributes nothing to a partition
 /// total and that step is skipped in the loop's own mean; an `Inf` `score[t]`
 /// stays in the partition total (a real dominance-inflection signal), so the
 /// loop's own `Inf/Inf = NaN` step is skipped and dominated siblings see a
@@ -3885,7 +3885,7 @@ fn rank_and_filter(
     let loop_groups: Vec<NormGroup> = found_loops
         .iter()
         .enumerate()
-        .map(|(i, fl)| NormGroup::for_loop(slot0(fl), i))
+        .map(|(i, fl)| NormGroup::for_member(slot0(fl), i))
         .collect();
 
     // Group loops by normalization group over the FULL discovered set
@@ -3928,44 +3928,34 @@ fn rank_and_filter(
         .collect();
 
     // Per-group per-timestep totals: Σ|score_j[t]| over the group's loops,
-    // NaN excluded (an undefined score is not signal; matches GH #542's
-    // denom_summand). Inf is kept -- a real divergence at a dominance
-    // inflection. Computed over ALL discovered loops, before any cap, so the
-    // denominator reflects the whole partition (the truncate-before-filter
-    // order of GH #310 used to compute totals over only the top-200
-    // survivors). A Solo-group total is just that loop's own |score| series.
-    // On the enumeration path, a Partition group's totals instead come from
-    // `external_totals` -- the full enumerated universe's mass (see the fn
-    // doc above).
+    // accumulated by the shared owner (`ltm_post::group_totals`: NaN
+    // excluded, Inf kept, finite overflow saturating -- the same rule the
+    // exhaustive series are normalized under, so the two surfaces agree).
+    // Computed over ALL discovered loops, before any cap, so the
+    // denominator reflects the whole partition (a truncate-before-filter
+    // order would total only the survivors, GH #310). A Solo-group total
+    // is just that loop's own |score| series. On the enumeration path, a
+    // Partition group's totals instead come from the universe -- the full
+    // enumerated population's mass (see the fn doc above).
     let mut partition_totals: HashMap<NormGroup, Vec<f64>> = HashMap::new();
     if step_count > 0 {
-        for (&group, indices) in &partition_groups {
+        for &group in partition_groups.keys() {
             if let (NormGroup::Partition(p), Some(stats)) = (group, universe)
                 && let Some(totals) = stats.totals.get(&p)
             {
                 debug_assert_eq!(totals.len(), step_count);
                 partition_totals.insert(group, totals.clone());
-                continue;
             }
-            let mut totals = vec![0.0; step_count];
-            for &idx in indices {
-                for (i, &(_, score)) in found_loops[idx].scores.iter().enumerate() {
-                    if !score.is_nan() {
-                        // Saturating, as retention's own bank is: a finite
-                        // sum overflowing to Inf would zero every finite share.
-                        let mass = score.abs();
-                        let sum = totals[i] + mass;
-                        totals[i] =
-                            if sum.is_infinite() && mass.is_finite() && totals[i].is_finite() {
-                                f64::MAX
-                            } else {
-                                sum
-                            };
-                    }
-                }
-            }
-            partition_totals.insert(group, totals);
         }
+        let discovered_totals = group_totals(
+            loop_groups
+                .iter()
+                .zip(found_loops.iter())
+                .filter(|(group, _)| !partition_totals.contains_key(group))
+                .map(|(&group, fl)| (group, fl.scores.iter().map(|&(_, score)| score))),
+            step_count,
+        );
+        partition_totals.extend(discovered_totals);
     }
 
     // Partition-aware MIN_CONTRIBUTION retention filter (peak semantics,
@@ -4085,26 +4075,6 @@ fn attach_partition_metadata(
     meta
 }
 
-/// The SIGNED per-timestep partition-relative loop score series for one loop.
-///
-/// `rel[t] = score[t] / totals[t]`, with `totals[t]` the loop's cycle-partition
-/// denominator (`Σ_{j in partition} |score_j[t]|`, NaN summands already
-/// excluded by `rank_and_filter`).  SAFEDIV-0 (`totals[t] == 0` -> `0.0`) and a
-/// `NaN` numerator propagating to `NaN` both match
-/// `ltm_post::compute_rel_loop_scores` exactly, so the discovery and pinned-loop
-/// relative-score surfaces agree.  Sign is preserved (a balancing loop reads
-/// negative), giving a value in `[-1, 1]` for a finite score.
-fn signed_relative_scores(fl: &FoundLoop, totals: &[f64]) -> Vec<f64> {
-    fl.scores
-        .iter()
-        .enumerate()
-        .map(|(t, &(_, score))| {
-            let total = totals.get(t).copied().unwrap_or(0.0);
-            if total == 0.0 { 0.0 } else { score / total }
-        })
-        .collect()
-}
-
 /// The deepest per-step rank a loop can hold and still be anchored (AC5.1).
 ///
 /// `k = 1` is the guarantee: every step's dominant loop in a competing group
@@ -4136,7 +4106,7 @@ const ANCHOR_SHARE_OF_CAP: f64 = 0.5;
 /// One ranked loop, as the coverage-aware cap sees it.
 ///
 /// `rel` is the loop's signed per-step relative score series
-/// ([`signed_relative_scores`]); the selection reads magnitudes and treats a
+/// (`FoundLoop::rel_scores`); the selection reads magnitudes and treats a
 /// `NaN` as absent (a `NaN` score is an undefined contribution, exactly as in
 /// [`mean_relative_contribution`]).
 struct SelectionRow<'a> {
@@ -4318,12 +4288,17 @@ fn rank_truncate_and_id(
     // permutation and the key survives ID assignment (no recomputation).
     //
     // While the per-partition denominators are in hand, also attach each loop's
-    // SIGNED per-timestep relative score series (`rel_scores`) -- the same
-    // `score[t] / partition_total[t]` normalization, SAFEDIV-0, that
-    // `ltm_post::compute_rel_loop_scores` applies on the pinned-loop path.  This
-    // is the [-1, 1] importance series `analysis::to_loop_summary` /
-    // `to_feedback_loop` surface, so dominance/ranking is partition-relative
-    // (comparable across partitions) rather than raw-magnitude-biased.
+    // SIGNED per-timestep relative score series (`rel_scores`) through the
+    // shared owner (`ltm_post::relative_series`: `score[t] /
+    // partition_total[t]`, SAFEDIV-0), the same division the exhaustive
+    // series get in `ltm_post::compute_rel_loop_scores`.  This is the [-1, 1]
+    // importance series `analysis::to_loop_summary` / `to_feedback_loop`
+    // surface, so dominance/ranking is partition-relative (comparable across
+    // partitions) rather than raw-magnitude-biased -- and it is the base the
+    // runtime polarity is classified on (GH #495), so the label a loop gets
+    // here is the one the exhaustive reclassification gives the same series
+    // (`db::analysis::reclassify_loops_from_results`).  The ids assigned
+    // below read the classified polarity, so this runs first.
     let mut keyed: Vec<(RelativeImportance, FoundLoop)> = std::mem::take(found_loops)
         .into_iter()
         .enumerate()
@@ -4331,7 +4306,22 @@ fn rank_truncate_and_id(
             let totals = &partition_totals[&loop_groups[idx]];
             let mean_rel = mean_relative_contribution(&fl, totals);
             let key = loop_sort_key(&fl.loop_info);
-            fl.rel_scores = signed_relative_scores(&fl, totals);
+            fl.rel_scores = relative_series(fl.scores.iter().map(|&(_, score)| score), totals);
+            // Retention kept this loop for a step at which its finite score
+            // is at least MIN_CONTRIBUTION of a positive finite total, and
+            // that step is a finite non-zero relative sample, so the
+            // classifier always has evidence here: its `None` arm is the API
+            // shape, not a reachable fallback (pinned by
+            // `a_never_active_loop_is_dropped_rather_than_reported_with_its_structural_label`).
+            let classified = LoopPolarity::from_runtime_scores(&fl.rel_scores);
+            debug_assert!(
+                classified.is_some(),
+                "a retained loop has a finite non-zero relative sample"
+            );
+            if let Some((polarity, confidence)) = classified {
+                fl.loop_info.polarity = polarity;
+                fl.polarity_confidence = confidence;
+            }
             (
                 RelativeImportance {
                     mean_rel,

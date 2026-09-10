@@ -709,9 +709,7 @@ fn test_get_errors_ltm_warning_survives_subsequent_non_ltm_sim() {
 }
 
 /// Build a single-stock feedback-loop project (population/births/birth_rate)
-/// with the requested integration method. Under RK4 an LTM-enabled compile is
-/// rejected (the flow-to-stock link-score formula assumes Euler -- GH #486),
-/// but the project itself simulates fine without LTM.
+/// with the requested integration method.
 fn build_feedback_loop_datamodel(
     name: &str,
     method: engine::datamodel::SimMethod,
@@ -725,15 +723,14 @@ fn build_feedback_loop_datamodel(
 }
 
 /// GH #466 follow-up regression: a project that uses RK4 is intrinsically
-/// valid -- it simulates fine without LTM. Creating an LTM sim on it (which the
-/// GH #486 guard rejects at compile time) must NOT make `get_errors` report the
-/// non-Euler rejection as a project error. LTM is an analysis overlay, not part
-/// of the project's intrinsic compilability: `get_errors` assesses the
-/// compile/vm_error channel with LTM OFF, and uses the latched re-enable only to
-/// harvest the additional LTM diagnostics (which here are none, since the model
-/// does not auto-flip and has no failing fragments).
+/// valid, and creating an LTM sim on it must NOT make `get_errors` report
+/// anything. LTM is an analysis overlay, not part of the project's intrinsic
+/// compilability: `get_errors` assesses the compile/vm_error channel with LTM
+/// OFF, and uses the latched re-enable only to harvest the additional LTM
+/// diagnostics (which here are none, since the model does not auto-flip and
+/// has no failing fragments).
 #[test]
-fn test_get_errors_rk4_ltm_compile_failure_is_not_a_project_error() {
+fn test_get_errors_after_an_rk4_ltm_sim_stays_clean() {
     let datamodel =
         build_feedback_loop_datamodel("rk4_ltm_overlay", engine::datamodel::SimMethod::RungeKutta4);
     let proj = open_project_from_datamodel(&datamodel);
@@ -753,9 +750,8 @@ fn test_get_errors_rk4_ltm_compile_failure_is_not_a_project_error() {
         assert!(me.is_null());
         assert!(!model.is_null());
 
-        // Create an LTM-enabled sim; the GH #486 rejection rides the compile/VM
-        // path. The sim object is still created (the error defers to run time),
-        // and the project's ltm_requested latch is now set.
+        // Create an LTM-enabled sim; the project's ltm_requested latch is now
+        // set.
         let mut se: *mut SimlinError = ptr::null_mut();
         let sim = simlin_sim_new(model, true, &mut se as *mut *mut SimlinError);
         if !se.is_null() {
@@ -763,14 +759,12 @@ fn test_get_errors_rk4_ltm_compile_failure_is_not_a_project_error() {
         }
 
         // The regression: get_errors must still report the RK4 model as clean.
-        // The non-Euler rejection is an LTM-overlay concern, not a project error.
         let mut e1: *mut SimlinError = ptr::null_mut();
         let post = simlin_project_get_errors(proj, &mut e1 as *mut *mut SimlinError);
         assert!(e1.is_null());
         assert!(
             post.is_null(),
-            "RK4 model that simulates fine without LTM must not report errors \
-             after a latched LTM sim; the non-Euler rejection is an analysis overlay"
+            "an RK4 model must not report errors after a latched LTM sim"
         );
 
         if !sim.is_null() {

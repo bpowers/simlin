@@ -334,10 +334,25 @@ pub(crate) fn reorder_arrayed_element_tables<T>(
 ) -> Vec<T> {
     crate::dimensions::SubscriptIterator::new(dims)
         .map(|subscripts| {
-            let key = CanonicalElementName::from_raw(&subscripts.join(","));
+            let key = CanonicalElementName::from_parts(&subscripts);
             present.get(&key).map(&clone_table).unwrap_or_else(&empty)
         })
         .collect()
+}
+
+/// Whether an equation's graphical-function tables are laid out PER ELEMENT
+/// -- one slot per declared combination in row-major order, an empty
+/// placeholder where the element has no gf (`reorder_arrayed_element_tables`)
+/// -- rather than one variable-level table. The layout [`build_tables`]
+/// chooses when any entry of an arrayed equation carries its own gf; the one
+/// rule, read by the missing-element advisory to tell a gf-only element's
+/// table from a variable-level one.
+pub(crate) fn has_per_element_tables(equation: &datamodel::Equation) -> bool {
+    matches!(
+        equation,
+        datamodel::Equation::Arrayed(_, elements, _, _)
+            if elements.iter().any(|(_, _, _, gf)| gf.is_some())
+    )
 }
 
 /// Build the tables vector from equation and variable-level gf.
@@ -357,46 +372,43 @@ fn build_tables(
     let mut errors = Vec::new();
 
     // Check for per-element gfs in arrayed equation
-    if let datamodel::Equation::Arrayed(dim_names, elements, _, _) = equation {
-        let has_element_gfs = elements.iter().any(|(_, _, _, gf)| gf.is_some());
-        if has_element_gfs {
-            // Parse each element's table, keyed by the element's canonical
-            // (comma-joined) subscript name. Elements without a GF are simply
-            // absent from the map and get an empty placeholder at their slot.
-            let mut present: HashMap<CanonicalElementName, Table> = HashMap::new();
-            for (subscript, _, _, elem_gf) in elements {
-                match parse_table(elem_gf.as_ref()) {
-                    Ok(Some(table)) => {
-                        present.insert(CanonicalElementName::from_raw(subscript), table);
-                    }
-                    Ok(None) => {}
-                    Err(err) => errors.push(err),
+    if let datamodel::Equation::Arrayed(dim_names, elements, _, _) = equation
+        && has_per_element_tables(equation)
+    {
+        // Parse each element's table, keyed by the element's canonical
+        // (comma-joined) subscript name. Elements without a GF are simply
+        // absent from the map and get an empty placeholder at their slot.
+        let mut present: HashMap<CanonicalElementName, Table> = HashMap::new();
+        for (subscript, _, _, elem_gf) in elements {
+            match parse_table(elem_gf.as_ref()) {
+                Ok(Some(table)) => {
+                    present.insert(CanonicalElementName::from_subscript(subscript), table);
                 }
+                Ok(None) => {}
+                Err(err) => errors.push(err),
             }
-
-            // Resolve the equation's dimensions so the reorder maps each
-            // element name to its row-major declared-order flat offset. If the
-            // dimensions cannot be resolved (a separate BadDimensionName error
-            // the model already surfaces), fall back to the original
-            // Vec-positional layout rather than dropping tables.
-            let tables = match get_dimensions(dimensions, dim_names) {
-                Ok(dims) => {
-                    reorder_arrayed_element_tables(&dims, &present, Table::empty, |t: &Table| {
-                        t.clone()
-                    })
-                }
-                Err(_) => elements
-                    .iter()
-                    .map(|(subscript, _, _, _)| {
-                        present
-                            .get(&CanonicalElementName::from_raw(subscript))
-                            .cloned()
-                            .unwrap_or_else(Table::empty)
-                    })
-                    .collect(),
-            };
-            return (tables, errors);
         }
+
+        // Resolve the equation's dimensions so the reorder maps each
+        // element name to its row-major declared-order flat offset. If the
+        // dimensions cannot be resolved (a separate BadDimensionName error
+        // the model already surfaces), fall back to the original
+        // Vec-positional layout rather than dropping tables.
+        let tables = match get_dimensions(dimensions, dim_names) {
+            Ok(dims) => {
+                reorder_arrayed_element_tables(&dims, &present, Table::empty, |t: &Table| t.clone())
+            }
+            Err(_) => elements
+                .iter()
+                .map(|(subscript, _, _, _)| {
+                    present
+                        .get(&CanonicalElementName::from_subscript(subscript))
+                        .cloned()
+                        .unwrap_or_else(Table::empty)
+                })
+                .collect(),
+        };
+        return (tables, errors);
     }
 
     // Fall back to variable-level gf
@@ -550,7 +562,7 @@ pub(crate) fn unfilled_arms(ast: &Ast<Expr0>) -> Option<UnfilledArms> {
             let mut slots_with_an_arm = 0usize;
             let mut default_is_selected = false;
             for combination in crate::dimensions::SubscriptIterator::new(dims) {
-                let key = CanonicalElementName::from_raw(&combination.join(","));
+                let key = CanonicalElementName::from_parts(&combination);
                 match elements.get(&key) {
                     Some(expr) => {
                         slots_with_an_arm += 1;
@@ -567,9 +579,9 @@ pub(crate) fn unfilled_arms(ast: &Ast<Expr0>) -> Option<UnfilledArms> {
             let default_unfilled = default_is_selected
                 && *apply_default_to_missing
                 && default.as_ref().is_some_and(is_nan_constant);
-            // The silent `0` is finite, so a slot that falls to it is NOT an
-            // unfilled equation. (It is its own reportable shape, and a
-            // deliberately separate one: GH #905.)
+            // The fabricated `0` is finite, so a slot that falls to it is NOT an
+            // unfilled equation. (It is reported separately, by the
+            // `MissingElementEquation` advisory.)
             let slots_past_the_arms_are_nan = !default_is_selected || default_unfilled;
 
             if unfilled.is_empty() && !default_unfilled {
@@ -585,6 +597,43 @@ pub(crate) fn unfilled_arms(ast: &Ast<Expr0>) -> Option<UnfilledArms> {
             }
         }
     }
+}
+
+/// The declared element combinations of a PARSED arrayed equation that no arm
+/// covers -- the slots `compiler::expand_per_element` assigns the fabricated
+/// 0 -- in row-major declared order; empty for a scalar or apply-to-all
+/// equation, and for an arrayed one whose EXCEPT default is live.
+///
+/// Like [`unfilled_arms`] this reads the parsed `Ast`, never the datamodel's
+/// entry list, for the same reason: an entry whose equation is empty is
+/// dropped by [`parse_equation`] and takes the fabricated 0 exactly as an
+/// absent entry does, and an EXCEPT default that is the empty string parses
+/// to `None` and covers nothing. (An entry that does NOT parse is dropped the
+/// same way, but its variable carries a fatal parse error and never
+/// evaluates; the caller skips such a variable rather than naming a 0 it
+/// will not produce.) The one arm the `Ast` does not
+/// carry is a graphical function: an element whose entry has its own gf has
+/// an arm even when its equation is empty -- the expansion wraps the table
+/// around the fabricated 0 input (`gf(0)`, pinned by
+/// `gf_only_element_without_default_evaluates_gf_of_fabricated_zero`) -- so
+/// `per_element_table_at(offset)`, the per-element table layout
+/// [`build_tables`] built ([`has_per_element_tables`]), counts as coverage.
+pub(crate) fn elements_without_an_arm(
+    ast: &Ast<Expr0>,
+    per_element_table_at: impl Fn(usize) -> bool,
+) -> Vec<CanonicalElementName> {
+    let Ast::Arrayed(dims, elements, default, apply_default_to_missing) = ast else {
+        return vec![];
+    };
+    if *apply_default_to_missing && default.is_some() {
+        return vec![];
+    }
+    crate::dimensions::SubscriptIterator::new(dims)
+        .enumerate()
+        .map(|(offset, combination)| (offset, CanonicalElementName::from_parts(&combination)))
+        .filter(|(offset, key)| !elements.contains_key(key) && !per_element_table_at(*offset))
+        .map(|(_, key)| key)
+        .collect()
 }
 
 /// Is `expr` exactly a NaN constant -- the whole formula, not a NaN inside one?
@@ -912,7 +961,7 @@ fn parse_equation(
                         parse_inner(eqn)
                     };
                     errors.extend(single_errors);
-                    (CanonicalElementName::from_raw(subscript), ast)
+                    (CanonicalElementName::from_subscript(subscript), ast)
                 })
                 .filter(|(_, ast)| ast.is_some())
                 .map(|(subscript, ast)| (subscript, ast.unwrap()))

@@ -1465,6 +1465,18 @@ type CausalGraphModuleData = (
 /// ports from this sub-graph. A pathless module's sub-graph enumerates no
 /// pathways, so it is harmless; stock enrichment over a stockless sub-graph
 /// finds no stocks.
+///
+/// Sub-graphs are built recursively -- each carries the graphs of ITS
+/// instances -- so a pathway through a nested instance (a user module
+/// wrapping a SMOOTH) is signed one level down by the same rule
+/// (`CausalGraph::module_input_polarity`). The recursion is bounded by the
+/// same gate `model_detected_loops` applies: a model the project's module
+/// graph reaches a cycle from gets no sub-graphs at all (its cycle is the
+/// model error the diagnostics pass reports, GH #806). That gate reads only
+/// explicit instances, which is sound here for the reason
+/// `project_module_graph` documents: the implicit instances the recursion
+/// also follows target stdlib and macro models, which never instantiate a
+/// user model, so no cycle closes through them.
 fn model_variables_and_module_graphs(
     db: &dyn Db,
     model: SourceModel,
@@ -1473,16 +1485,23 @@ fn model_variables_and_module_graphs(
     let edges_result = model_causal_edges(db, model, project);
     let variables = model_lowered_variables(db, model, project);
 
-    let project_models = project.models(db);
     let mut module_graphs: HashMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>> = HashMap::new();
-
-    for (module_var_name, sub_model_name) in &edges_result.dynamic_modules {
-        if let Some(sub_source_model) = project_models.get(sub_model_name.as_str()) {
-            let sub_edges_result = model_causal_edges(db, *sub_source_model, project);
-            let mut sub_graph = causal_graph_from_edges(sub_edges_result);
-            sub_graph.variables = model_lowered_variables(db, *sub_source_model, project);
-            sub_graph.module_outputs_read = Arc::clone(&sub_edges_result.module_outputs_read);
-            module_graphs.insert(Ident::new(module_var_name), Box::new(sub_graph));
+    let reaches_a_cycle = crate::db::project_module_graph(db, project)
+        .cycle_error_from(model.name(db))
+        .is_some();
+    if !reaches_a_cycle {
+        let project_models = project.models(db);
+        for (module_var_name, sub_model_name) in &edges_result.dynamic_modules {
+            if let Some(sub_source_model) = project_models.get(sub_model_name.as_str()) {
+                let sub_edges_result = model_causal_edges(db, *sub_source_model, project);
+                let mut sub_graph = causal_graph_from_edges(sub_edges_result);
+                let (sub_variables, sub_outputs_read, nested) =
+                    model_variables_and_module_graphs(db, *sub_source_model, project);
+                sub_graph.variables = sub_variables;
+                sub_graph.module_outputs_read = sub_outputs_read;
+                sub_graph.module_graphs = nested;
+                module_graphs.insert(Ident::new(module_var_name), Box::new(sub_graph));
+            }
         }
     }
 
@@ -2679,31 +2698,11 @@ pub fn model_detected_loops(
         resolve_loop_partitions(&final_loops, &partitions, dims.as_slice());
 
     let enumerated_loops = loops.into_iter().map(|l| {
-        // Extract variable names from the loop's links. Synthetic
-        // `$⁚ltm⁚agg⁚{n}` hops are an LTM scoring implementation detail and
-        // are trimmed from the user-facing list (mirroring
-        // `detected_loop_from_loop`); they stay in the links so the id sort
-        // key and the pin-dedup rotation see them. A cross-element loop's
-        // links carry element subscripts, so its variables are
-        // element-subscripted (`pool[a]`) -- the same convention a
-        // cross-element pin's `detected_loop_from_loop` output uses.
-        let is_agg =
-            |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
-        let mut vars = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        // The reported node sequence (`loop_node_sequence`): the element
+        // circuit with synthetic agg hops trimmed. The hops stay in the
+        // links so the id sort key and the pin-dedup rotation see them.
+        let vars = loop_node_sequence(&l);
         let loop_key = loop_rotation(&l);
-        if !l.links.is_empty() {
-            let first = l.links[0].from.to_string();
-            if !is_agg(&first) && seen.insert(first.clone()) {
-                vars.push(first);
-            }
-            for link in &l.links {
-                let to = link.to.to_string();
-                if !is_agg(&to) && seen.insert(to.clone()) {
-                    vars.push(to);
-                }
-            }
-        }
         // Structural classification has no runtime score data, so
         // confidence is binary: 1.0 when every link in the loop has
         // a determined polarity (R/B), 0.0 when any link is unknown
@@ -2750,6 +2749,52 @@ pub fn model_detected_loops(
     }
 }
 
+/// The node sequence a loop is reported with (`DetectedLoop::variables`):
+/// the element-level circuit `n_0 -> n_1 -> ... -> n_{k-1}`, each node
+/// once, the cycle implicitly closed, with synthetic `$⁚ltm⁚agg⁚{n}` hops
+/// trimmed -- they are an LTM scoring implementation detail, like
+/// macro/module internals, and a pin expanded through a hoisted reducer
+/// carries them in its links (GH #737). A cross-element loop's nodes are
+/// element-subscripted (`pool[a]`); an A2A loop's are bare variables.
+///
+/// Read off each link's `to`, starting from the last link's (the first
+/// node), never from `Link.from`. Every link builder keeps an element
+/// subscript on `to` whenever the target is arrayed, but `from` doubles as
+/// the link-score name-resolution flag: the mixed branch of
+/// `db/ltm/loops.rs` `build_element_level_loops` strips it to the variable
+/// level on a same-element A2A hop (`build_element_subscripted_links`, the
+/// cross-element builder, keeps a subscripted `from`), so the circuit
+/// `growth[boston] -> pop[boston] -> total` arrives as the links
+/// `growth -> pop[boston]`, `pop[boston] -> total`, `total -> growth[boston]`
+/// and a `from`-led reading reports four nodes with `growth` twice. Every
+/// node of an elementary circuit is the `to` of exactly one link; a
+/// stitched cross-agg loop visits its agg twice, which the trim absorbs.
+/// Discovery's `FoundLoop` links (`crate::analysis`) read through here too,
+/// so the two surfaces report one convention.
+pub(crate) fn loop_node_sequence(l: &crate::ltm::Loop) -> Vec<String> {
+    let is_agg = |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
+    let Some(last) = l.links.last() else {
+        return Vec::new();
+    };
+    let mut vars = Vec::with_capacity(l.links.len());
+    let mut seen = std::collections::HashSet::new();
+    for link in std::iter::once(last).chain(l.links.iter().take(l.links.len() - 1)) {
+        let node = link.to.to_string();
+        if is_agg(&node) {
+            continue;
+        }
+        let fresh = seen.insert(node.clone());
+        debug_assert!(
+            fresh,
+            "a loop's circuit visits each node once: {node} repeats"
+        );
+        if fresh {
+            vars.push(node);
+        }
+    }
+    vars
+}
+
 /// Build a `DetectedLoop` (the FFI loop surface) from one of a pin's scored
 /// loops, preserving its pin-derived id (`pin{n}` / `pin{n}⁚{j}`). Mirrors the
 /// per-loop body of `model_detected_loops`: the variable list is the cycle's
@@ -2757,25 +2802,7 @@ pub fn model_detected_loops(
 /// structural polarity confidence is binary (1.0 for a fully-known polarity
 /// loop, 0.0 when any link is Unknown).
 fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop {
-    let mut vars = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    // Synthetic `$⁚ltm⁚agg⁚{n}` hops are an LTM scoring implementation
-    // detail; like macro/module internals they are trimmed from the reported
-    // node sequence (a pin expanded through a hoisted reducer carries them
-    // in its links -- GH #737).
-    let is_agg = |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
-    if !l.links.is_empty() {
-        let first = l.links[0].from.to_string();
-        if !is_agg(&first) && seen.insert(first.clone()) {
-            vars.push(first);
-        }
-        for link in &l.links {
-            let to = link.to.to_string();
-            if !is_agg(&to) && seen.insert(to.clone()) {
-                vars.push(to);
-            }
-        }
-    }
+    let vars = loop_node_sequence(l);
     let polarity = detected_polarity_from_ltm(&l.polarity);
     let polarity_confidence = match polarity {
         DetectedLoopPolarity::Undetermined => 0.0,
@@ -2807,10 +2834,12 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// active step.
 ///
 /// After simulation the per-loop `loop_score` series exists; this helper
-/// reads each loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) out of `results` and
-/// runs [`crate::ltm::LoopPolarity::from_runtime_scores`] over them,
-/// overwriting the loop's `polarity` and `polarity_confidence` with the
-/// runtime classification. The loop **id stays unchanged**: loop detection
+/// normalizes every loop's `$⁚ltm⁚loop_score⁚{id}` slot(s) in `results`
+/// through `ltm_post::compute_rel_loop_scores` and runs
+/// [`crate::ltm::LoopPolarity::from_runtime_scores`] over each loop's
+/// partition-relative series, overwriting the loop's `polarity` and
+/// `polarity_confidence` with the runtime classification. The loop **id
+/// stays unchanged**: loop detection
 /// and the deterministic `r{n}`/`b{n}`/`u{n}` id assignment happen at
 /// compile time before any simulation, and the FFI id->score correspondence
 /// plus salsa caching depend on the id never changing retroactively. A loop
@@ -2841,18 +2870,31 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// `analyze_model` / MCP surface is discovery-based and reclassifies through
 /// the `FoundLoop` path.
 ///
+/// # The base is the partition-relative series
+///
+/// The samples fed to the classifier are the loop's **partition-relative**
+/// scores from the one owner (`ltm_post::compute_rel_loop_scores`), not its
+/// raw `loop_score`: each sample is bounded to `[-1, 1]` and weighted by the
+/// loop's share of its partition at that step, so the confidence reads as
+/// the dominance-weighted time share of each sign. A raw base lets a handful
+/// of inflection steps, where every raw score in the partition diverges,
+/// decide the label on their own. For a loop alone in its partition the
+/// relative sample is exactly `+1`/`-1`/`0`, so its confidence is the plain
+/// time share of its sign. See [`crate::ltm::LoopPolarity::from_runtime_scores`].
+///
 /// # A2A semantics differ between the two reclassification sites
 ///
 /// `loop_partitions` is the per-loop slot->partition map carried on
 /// `LtmVariablesResult::loop_partitions`; its slot-vector length is the
 /// `loop_score` series' slot count. For an A2A (per-element) loop this helper
-/// **concatenates every element slot's series into one sample set** and
-/// classifies the mixed result: if any element of the loop is balancing while
-/// another is reinforcing the loop classifies `Undetermined` (a deliberate
-/// "the loop's sign is not uniform across the array" reading). This is NOT
-/// the input construction discovery uses, so do not claim they agree:
-/// **discovery** (`ltm_finding`) classifies each `FoundLoop` from its own
-/// single scalar score series.
+/// **concatenates every element slot's series into one sample set** (the
+/// owner's step-major per-slot layout, each slot normalized in its own
+/// partition) and classifies the mixed result: if any element of the loop
+/// is balancing while another is reinforcing the loop classifies
+/// `Undetermined` (a deliberate "the loop's sign is not uniform across the
+/// array" reading). This is NOT the input construction discovery uses, so do
+/// not claim they agree: **discovery** (`ltm_finding`) classifies each
+/// `FoundLoop` from its own single scalar relative series.
 ///
 /// Both sites share the *scalar* semantics (`from_runtime_scores`'s NaN/zero
 /// filter; all-positive -> Reinforcing, all-negative -> Balancing, mixed
@@ -2864,36 +2906,15 @@ pub fn reclassify_loops_from_results(
     results: &crate::Results,
     loop_partitions: &indexmap::IndexMap<String, Vec<Option<usize>>>,
 ) {
+    // One normalization for every loop at once; a loop with no emitted
+    // `loop_score` column (discovery mode scores only pinned loops) is
+    // absent from the map and keeps its structural label.
+    let relative = crate::ltm_post::compute_rel_loop_scores(results, loop_partitions);
     for loop_item in loops.iter_mut() {
-        let Some(&base_off) = results
-            .offsets
-            .get(&crate::ltm_post::loop_score_ident(&loop_item.id))
-        else {
-            // No emitted loop_score series (e.g. discovery mode emits scores
-            // only for pinned loops): nothing to reclassify against.
+        let Some(series) = relative.get(&loop_item.id) else {
             continue;
         };
-
-        // An A2A loop's loop_score occupies `n_slots` consecutive offsets;
-        // a scalar/cross-element/mixed loop has exactly one. The slot count
-        // comes from the loop's partition vector (1 when absent), matching
-        // `ltm_post`'s `loop_n_slots`.
-        let n_slots = loop_partitions
-            .get(&loop_item.id)
-            .map(|p| p.len().max(1))
-            .unwrap_or(1);
-
-        let mut scores: Vec<f64> = Vec::with_capacity(results.step_count * n_slots);
-        for row in results.iter() {
-            for slot in 0..n_slots {
-                let off = base_off + slot;
-                if off < results.step_size {
-                    scores.push(row[off]);
-                }
-            }
-        }
-
-        if let Some((polarity, confidence)) = crate::ltm::LoopPolarity::from_runtime_scores(&scores)
+        if let Some((polarity, confidence)) = crate::ltm::LoopPolarity::from_runtime_scores(series)
         {
             loop_item.polarity = detected_polarity_from_ltm(&polarity);
             loop_item.polarity_confidence = confidence;
@@ -2919,11 +2940,24 @@ fn detected_polarity_from_ltm(polarity: &crate::ltm::LoopPolarity) -> DetectedLo
 /// reading each variable's lowered form (`model_lowered_variables`)
 /// and analyzing how each source variable appears in the target's
 /// equation.
+///
+/// An analysis entry point, so it carries the module-cycle gate
+/// `model_detected_loops` applies: a model the project's module graph
+/// reaches a cycle from has no link polarities -- the empty map -- because
+/// the cycle is the model error the diagnostics pass reports, and signing
+/// a module edge walks the instance's sub-graph, which a module cycle makes
+/// unbounded (GH #806).
 pub fn compute_link_polarities(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
 ) -> HashMap<(String, String), crate::ltm::LinkPolarity> {
+    if crate::db::project_module_graph(db, project)
+        .cycle_error_from(model.name(db))
+        .is_some()
+    {
+        return HashMap::new();
+    }
     let graph = causal_graph_with_modules(db, model, project);
     graph.all_link_polarities()
 }
@@ -4364,6 +4398,92 @@ mod polarity_confidence_tests {
 /// key for scalar and arrayed models alike -- pinned by
 /// `exhaustive_and_discovery_partitions_agree_..._scalar` and
 /// `exhaustive_and_discovery_partitions_agree_on_stock_sets_arrayed`.
+/// `loop_node_sequence` reads the circuit off each link's `to`. The link
+/// shapes here are the documented output of `build_element_level_loops`
+/// for the hops named, not free inventions: a same-element A2A hop keeps
+/// `to[e]` and strips `from`, a cross-dimensional hop keeps `from[e]` and
+/// a bare `to`, an A2A loop's links are bare, and a hoisted reducer's agg
+/// hop names the agg. `ltm_loop_nodes` (integration) pins the same
+/// sequences through the real pipeline.
+#[cfg(test)]
+mod loop_node_sequence_tests {
+    use super::loop_node_sequence;
+    use crate::common::Ident;
+    use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+    fn link(from: &str, to: &str) -> Link {
+        Link {
+            from: Ident::new(from),
+            to: Ident::new(to),
+            polarity: LinkPolarity::Positive,
+        }
+    }
+
+    fn loop_of(links: Vec<Link>) -> Loop {
+        Loop {
+            id: String::new(),
+            links,
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+            dimensions: vec![],
+            slot_links: vec![],
+        }
+    }
+
+    /// The mixed circuit `growth[boston] -> pop[boston] -> total`: the first
+    /// link's `from` is the stripped `growth`, so a `from`-led reading would
+    /// report `growth, pop[boston], total, growth[boston]`.
+    #[test]
+    fn a_mixed_loop_through_a_reducer_is_its_element_circuit() {
+        let l = loop_of(vec![
+            link("growth", "pop[boston]"),
+            link("pop[boston]", "total"),
+            link("total", "growth[boston]"),
+        ]);
+        assert_eq!(
+            loop_node_sequence(&l),
+            vec!["growth[boston]", "pop[boston]", "total"]
+        );
+    }
+
+    /// Bare A2A links and cross-element links read the same either way; the
+    /// sequence starts at the first link's source node.
+    #[test]
+    fn bare_and_cross_element_loops_start_at_the_first_source() {
+        let a2a = loop_of(vec![link("pop", "growth"), link("growth", "pop")]);
+        assert_eq!(loop_node_sequence(&a2a), vec!["pop", "growth"]);
+        let cross = loop_of(vec![
+            link("pop[nyc]", "migration[boston]"),
+            link("migration[boston]", "pop[boston]"),
+            link("pop[boston]", "migration[nyc]"),
+            link("migration[nyc]", "pop[nyc]"),
+        ]);
+        assert_eq!(
+            loop_node_sequence(&cross),
+            vec![
+                "pop[nyc]",
+                "migration[boston]",
+                "pop[boston]",
+                "migration[nyc]"
+            ]
+        );
+    }
+
+    /// A synthetic agg hop is trimmed, including its slot suffix, and an
+    /// empty loop reports no nodes.
+    #[test]
+    fn agg_hops_are_trimmed_and_an_empty_loop_is_empty() {
+        let agg = format!("{}[nyc]", crate::ltm_agg::synthetic_agg_name(3));
+        let l = loop_of(vec![
+            link("pop[nyc]", &agg),
+            link(&agg, "growth[nyc]"),
+            link("growth", "pop[nyc]"),
+        ]);
+        assert_eq!(loop_node_sequence(&l), vec!["pop[nyc]", "growth[nyc]"]);
+        assert!(loop_node_sequence(&loop_of(vec![])).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod detected_loop_partition_tests {
     use super::*;

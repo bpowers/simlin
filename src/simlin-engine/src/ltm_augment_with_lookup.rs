@@ -69,7 +69,8 @@ use super::quote_ident;
 /// | [`super::build_element_reducer_link_score`], `!is_bare` / RANK / un-pinnable-body arms | 2 | never |
 ///
 /// Not numerator producers, and so nothing to wrap: `generate_flow_to_stock_equation`
-/// (a fixed structural formula whose target is a `Variable::Stock`, which
+/// (the closed-form partial of the stock's net-flow aux, a linear sum of
+/// flows with no graphical function; its target is a `Variable::Stock`, which
 /// `is_implicit_with_lookup` excludes) and the module composite / black-box
 /// scores (`Δoutput`-shaped transfer formulas with no target-equation partial).
 ///
@@ -302,9 +303,7 @@ impl WithLookupSlotRefs {
             crate::dimensions::SubscriptIterator::new(target_ast_dims)
                 .enumerate()
                 .filter(|(offset, _)| tables.get(*offset).is_some_and(|t| !t.x.is_empty()))
-                .map(|(_, subscripts)| {
-                    crate::common::CanonicalElementName::from_raw(&subscripts.join(","))
-                })
+                .map(|(_, subscripts)| crate::common::CanonicalElementName::from_parts(&subscripts))
                 .collect();
         SlotRefKind::PerElement { quoted, with_table }
     }

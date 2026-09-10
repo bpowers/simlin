@@ -39,13 +39,11 @@ use crate::test_common::TestProject;
 /// each arm's fate is decided independently:
 ///
 /// * `nyc` reads the link source `pop[nyc]` AND carries `TIME`. For the
-///   `pop[nyc]` link this arm is live on both counts; for the OTHER links it is
-///   the load-bearing row -- every occurrence of their source is frozen, and
-///   the arm must still be materialized because `TIME` advances. This is the
-///   mechanism that makes the naive "the source stayed frozen" collapse unsound
-///   (5,035 of C-LEARN's 9,514 no-live-source arms are blocked solely by a live
-///   `time()`; GH #1016). If a future relaxation drops it, this arm goes to zero
-///   and the assertion below reds.
+///   `pop[nyc]` link this arm is live and scored; for the OTHER links every
+///   occurrence of their source is frozen and so is the clock (GH #1016: the
+///   partial reads `PREVIOUS(TIME)`), so the arm is provably `PREVIOUS(growth)`
+///   and is omitted to an exact `+0.0` -- the row that shows the clock is a
+///   frozen input rather than the thing that keeps a source-free arm alive.
 /// * `boston` reads `alt[a1]` -- a source in a dimension DISJOINT from the
 ///   target's, subscripted by a bare element name. This is the ACCESS SHAPE in
 ///   which GH #977's 322 unwrapped-bare-variable arms arise (raw
@@ -221,27 +219,36 @@ fn ltm_slot_values_are_pinned_on_the_value_gate_fixture() {
     assert_value_golden("value_gate", &render_slab(&series));
 }
 
-/// Mechanism 1: an arm with NO live source reference but a live `TIME` must be
-/// materialized and must carry a non-zero value.
+/// Mechanism 1: an arm with NO live source reference whose only varying
+/// content is the clock is a structural zero, because the clock is a frozen
+/// input of the partial (GH #1016).
 ///
 /// The `alt[a1] -> growth` link's `nyc` slot is that arm: `pop[nyc]` and `base`
 /// are frozen for this link, `alt[a1]` does not appear in the `nyc` equation at
-/// all, and what remains live is `TIME * 0.002`. Under the negative "the
-/// source stayed frozen" criterion this slot would be dropped to zero; under
-/// the positive predicate `TIME` is `BuiltinReach::Varying`, so the arm stays.
+/// all, and `TIME * 0.002` is read as `PREVIOUS(TIME) * 0.002` -- so the
+/// partial is `PREVIOUS(growth[nyc])` term for term, the positive predicate
+/// establishes it, and the slot is omitted to an exact `+0.0`. The same arm for
+/// the `pop[nyc]` link reads its source live and is scored, which is what
+/// shows the omission is the arm's, not the fixture's.
 ///
-/// This assertion does not depend on the golden, which is the point: a careless
-/// `UPDATE_LTM_VALUE_GOLDEN=1` re-capture would bless the zeroed slot, and this
-/// would still red.
+/// Neither assertion depends on the golden, which is the point: a careless
+/// `UPDATE_LTM_VALUE_GOLDEN=1` re-capture would bless either a materialized
+/// clock-driven score or a zeroed live arm, and this would still red.
 #[test]
-fn a_time_bearing_arm_with_no_live_source_is_not_zeroed() {
+fn a_time_bearing_arm_with_no_live_source_is_a_structural_zero() {
     let series = ltm_slot_series(&ltm_value_gate_project());
     // Region declaration order: nyc=0, boston=1, la=2.
-    let nyc = slot(&series, "link_score\u{205A}alt[a1]\u{2192}growth", 0);
+    let nyc_for_alt = slot(&series, "link_score\u{205A}alt[a1]\u{2192}growth", 0);
     assert!(
-        nyc.iter().any(|v| v.abs() > 1e-12 && v.is_finite()),
-        "the TIME-bearing `nyc` arm was zeroed: an arm whose only live content \
-         is a time-dependent builtin is NOT a structural zero; got {nyc:?}"
+        nyc_for_alt.iter().all(|v| v.to_bits() == 0.0f64.to_bits()),
+        "the `nyc` arm of the alt[a1] link reads no live source and the clock \
+         is frozen, so it is omitted to an exact +0.0; got {nyc_for_alt:?}"
+    );
+    let nyc_for_pop = slot(&series, "link_score\u{205A}pop[nyc]\u{2192}growth", 0);
+    assert!(
+        nyc_for_pop.iter().any(|v| v.abs() > 1e-12 && v.is_finite()),
+        "the same arm reads pop[nyc] live for its own link and is scored; \
+         got {nyc_for_pop:?}"
     );
 }
 
@@ -427,7 +434,7 @@ fn a_nested_freeze_arm_is_not_a_structural_zero() {
 ///   comes from the guard form's own `NaN - NaN`, not from the modeller's
 ///   equation -- and the arm has no causal dependence on the source at all, so
 ///   `0` is the structurally known answer rather than a guess.
-/// * GH #542 points the other way. `ltm_post::denom_summand` excludes a `NaN`
+/// * GH #542 points the other way. `ltm_post::group_totals` excludes a `NaN`
 ///   summand from its partition denominator specifically so that one undefined
 ///   score does not poison its siblings, while the bad loop's OWN numerator
 ///   stays `NaN` -- described there as "the honest per-loop 'undefined here'

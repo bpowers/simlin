@@ -194,7 +194,10 @@ pub(super) fn cartesian_product(dim_elements: &[Vec<String>]) -> Vec<String> {
         result = new_result;
     }
 
-    // Join each combination into a comma-separated string (no spaces - compiler expects "a,b" not "a, b")
+    // Join each combination into a comma-separated string, in the source's
+    // spelling: every consumer re-keys a stored subscript through
+    // `CanonicalElementName::from_subscript`, so the reader owes it only a
+    // subscript that names its element under that rule.
     result.into_iter().map(|combo| combo.join(",")).collect()
 }
 

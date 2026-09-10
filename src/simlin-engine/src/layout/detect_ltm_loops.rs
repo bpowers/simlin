@@ -10,8 +10,6 @@
 //! importance series and cycle partitions -- from the incremental salsa LTM
 //! pipeline, falling back to persisted `loop_metadata` when any step fails.
 
-use std::collections::HashMap;
-
 use crate::ltm_dominance::{FeedbackLoop, LoopPolarity};
 
 /// Try to detect feedback loops using LTM analysis via the incremental
@@ -61,60 +59,32 @@ fn try_detect_ltm_loops_incremental(
         Some(vm)
     });
 
-    // Capture the loop_partitions mapping AND per-loop slot counts off the
-    // same `model_ltm_variables` derivation the VM's program was assembled
-    // from. Per-element rel scores need both the partition map (which loops
-    // normalize together) and the per-loop slot count (how many elements
-    // each A2A loop occupies).
-    let (loop_partitions, n_slots_by_loop) = if vm_result.is_some() {
-        let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
-        let dm_dims = crate::db::project_datamodel_dims(db, source_project);
-        let dim_size: HashMap<&str, usize> = dm_dims.iter().map(|d| (d.name(), d.len())).collect();
-        let prefix = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
-        let n_slots: HashMap<String, usize> = ltm_vars
-            .vars
-            .iter()
-            .filter_map(|v| {
-                let id = v.name.strip_prefix(prefix)?;
-                let n = if v.dimensions.is_empty() {
-                    1
-                } else {
-                    v.dimensions
-                        .iter()
-                        .map(|d| dim_size.get(d.as_str()).copied().unwrap_or(1))
-                        .product()
-                };
-                Some((id.to_string(), n))
-            })
-            .collect();
-        (ltm_vars.loop_partitions.clone(), n_slots)
+    // Capture the per-slot loop_partitions mapping off the same
+    // `model_ltm_variables` derivation the VM's program was assembled from:
+    // it says which `(loop, slot)`s normalize together, and its per-loop
+    // vector length is the loop's slot count.
+    let loop_partitions = if vm_result.is_some() {
+        crate::db::model_ltm_variables(db, source_model, source_project)
+            .loop_partitions
+            .clone()
     } else {
-        (indexmap::IndexMap::new(), HashMap::new())
+        indexmap::IndexMap::new()
     };
 
     let vm = vm_result?;
     let results = vm.into_results();
 
-    // `rel_loop_score` is no longer a VM variable; derive it post-sim from
-    // the `loop_score` series the VM does emit, using the per-slot partition
-    // mapping cached on `model_ltm_variables`.  See
-    // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
-    //
-    // For arrayed (A2A) loops we compute per-element rel scores then
-    // aggregate to a single signed series via argmax-abs across slots --
-    // i.e. each step's importance is the dominant element's contribution,
-    // with sign preserved.  For scalar loops this reduces to identity.
-    // The aggregation is delegated to `ltm_post::aggregate_per_element_argmax_abs`
-    // so the partition-stride handling (mixed partitions where stride >
-    // per-loop n_slots) is centralized and unit-testable.  See issue #463.
-    // `compute_rel_loop_scores_per_element` derives each loop's slot count
-    // from `loop_partitions[id].len()`, so no separate slot-count map is
-    // threaded; `aggregate_per_element_argmax_abs` still takes one.
+    // Relative loop scores are derived post-sim from the `loop_score` series
+    // the VM emits, by the one owner of the partition normalization
+    // (`ltm_post::compute_rel_loop_scores`).  An arrayed (A2A) loop's
+    // per-slot series is collapsed to one signed importance series by
+    // argmax-abs across its slots -- each step's importance is the dominant
+    // element's contribution, sign preserved; a scalar loop's series is
+    // already one per step (issue #463).
     let per_element_rel_scores =
-        crate::ltm_post::compute_rel_loop_scores_per_element(&results, &loop_partitions);
+        crate::ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     let importance_by_loop = crate::ltm_post::aggregate_per_element_argmax_abs(
         &per_element_rel_scores,
-        &n_slots_by_loop,
         results.step_count,
     );
 

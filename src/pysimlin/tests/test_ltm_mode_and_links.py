@@ -12,6 +12,7 @@ the contribution that flows *through* them as a composite edge.
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import pytest
@@ -566,11 +567,7 @@ class TestLtmDiagnosticsThroughGetErrors:
 
 
 def _rk4_feedback_model() -> simlin.Model:
-    """Build a single-stock feedback-loop model that uses RK4 integration.
-
-    The model simulates fine without LTM, but an LTM-enabled compile is rejected
-    (the flow-to-stock link-score formula assumes Euler -- GH #486).
-    """
+    """Build a single-stock feedback-loop model that uses RK4 integration."""
     project = simlin.Project.new(name="rk4_feedback", sim_start=0.0, sim_stop=10.0, dt=1.0)
     project.set_sim_specs(sim_method="rk4")
     model = project.main_model
@@ -585,39 +582,37 @@ def _rk4_feedback_model() -> simlin.Model:
     return model
 
 
-class TestLtmOverlayNotProjectError:
-    """GH #466 follow-up: LTM is an analysis overlay, not part of the project's
-    intrinsic validity. A latched LTM run on an RK4 model (whose LTM compile the
-    GH #486 guard rejects) must NOT make get_errors()/check() report the model as
-    broken -- it simulates fine without LTM. This is the reviewer's exact repro.
+class TestLtmUnderRk4:
+    """LTM runs under RK4 like under Euler: the scores are dt-step ratios
+    reported at the saved steps (the engine's `ltm_integration_method` tests
+    pin them equal to Euler's for a flow proportional to its stock, as this
+    one is), so `run()` neither warns nor falls back to a run without loop
+    analysis, and the project reports no errors afterwards (GH #466: LTM is an
+    analysis overlay, not part of the project's intrinsic validity).
     """
 
-    def test_rk4_run_then_get_errors_is_clean(self) -> None:
+    def test_rk4_run_analyzes_loops_without_warning(self) -> None:
         model = _rk4_feedback_model()
         project = model.project
         assert project is not None
-
-        # Baseline: a fresh RK4 model has no errors.
         assert project.get_errors() == []
 
-        # run() defaults to analyze_loops=True -> LTM sim -> ltm_requested latch.
-        # The LTM compile fails under RK4, so run() degrades to a non-LTM run
-        # (emitting a warning); the run itself succeeds.
-        with pytest.warns(RuntimeWarning):
+        # run() defaults to analyze_loops=True -> an LTM sim; no fallback, no warning.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             run = model.run()
         assert not run.results.empty
+        assert run.ltm_mode == "exhaustive"
+        assert [loop.id for loop in run.loops] == ["r1"], "the births loop is scored"
 
-        # The regression: the RK4 model still reports no errors. The non-Euler
-        # rejection is an LTM-overlay concern, not a project error.
-        assert project.get_errors() == [], (
-            "a latched LTM run on an RK4 model that simulates fine must not make "
-            "get_errors report the non-Euler rejection as a project error"
-        )
+        # The RK4 model still reports no errors after the latched LTM run.
+        assert project.get_errors() == []
 
     def test_rk4_run_then_check_reports_no_errors(self) -> None:
         model = _rk4_feedback_model()
 
-        with pytest.warns(RuntimeWarning):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             model.run()
 
         issues = model.check()

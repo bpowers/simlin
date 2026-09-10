@@ -12,6 +12,7 @@
             "stocks": [
                 {
                     "name": "hero_culture",
+                    "uid": 1,
                     "initialEquation": "10",
                     "units": "dimensionless",
                     "inflows": [
@@ -24,6 +25,7 @@
                 },
                 {
                     "name": "incidents",
+                    "uid": 2,
                     "initialEquation": "5",
                     "units": "incidents",
                     "inflows": [
@@ -36,6 +38,7 @@
                 },
                 {
                     "name": "system_reliability",
+                    "uid": 3,
                     "initialEquation": "80",
                     "units": "dimensionless",
                     "inflows": [
@@ -48,6 +51,7 @@
                 },
                 {
                     "name": "technical_debt",
+                    "uid": 4,
                     "initialEquation": "20",
                     "units": "dimensionless",
                     "inflows": [
@@ -62,48 +66,56 @@
             "flows": [
                 {
                     "name": "culture_decay",
+                    "uid": 5,
                     "equation": "Hero_Culture * culture_decay_fraction",
                     "units": "dimensionless/Month",
                     "documentation": "Natural decay of hero culture without reinforcement"
                 },
                 {
                     "name": "culture_reinforcement",
+                    "uid": 6,
                     "equation": "Incidents * heroic_response_fraction * hero_recognition_factor / response_time",
                     "units": "dimensionless/Month",
                     "documentation": "Recognition and rewards for firefighting reinforce hero culture"
                 },
                 {
                     "name": "debt_accumulation",
+                    "uid": 7,
                     "equation": "Incidents * heroic_response_fraction * debt_per_heroic_fix / response_time",
                     "units": "dimensionless/Month",
                     "documentation": "Technical debt from heroic quick fixes that skip proper solutions"
                 },
                 {
                     "name": "debt_paydown",
+                    "uid": 8,
                     "equation": "investment_in_prevention * debt_paydown_effectiveness",
                     "units": "dimensionless/Month",
                     "documentation": "Technical debt reduction through proper engineering investment"
                 },
                 {
                     "name": "incident_occurrence",
+                    "uid": 9,
                     "equation": "base_incident_rate * (100 - System_Reliability) / 50 + Technical_Debt * debt_incident_factor",
                     "units": "incidents/Month",
                     "documentation": "New incidents arising from system fragility and technical debt"
                 },
                 {
                     "name": "incident_resolution",
+                    "uid": 10,
                     "equation": "Incidents * (heroic_response_fraction + fundamental_fix_fraction) / response_time",
                     "units": "incidents/Month",
                     "documentation": "Incidents resolved through heroic intervention or fundamental fixes"
                 },
                 {
                     "name": "reliability_erosion",
+                    "uid": 11,
                     "equation": "Incidents * heroic_response_fraction * quick_fix_erosion / response_time + Technical_Debt * debt_erosion_factor",
                     "units": "dimensionless/Month",
                     "documentation": "Reliability loss from quick fixes and mounting tech debt"
                 },
                 {
                     "name": "reliability_improvement",
+                    "uid": 12,
                     "equation": "investment_in_prevention * prevention_effectiveness",
                     "units": "dimensionless/Month",
                     "documentation": "Improvements from proactive reliability investments"
@@ -112,90 +124,105 @@
             "auxiliaries": [
                 {
                     "name": "base_incident_rate",
+                    "uid": 13,
                     "equation": "2",
                     "units": "incidents/Month",
                     "documentation": "Baseline rate of incidents in a normal system"
                 },
                 {
                     "name": "culture_decay_fraction",
+                    "uid": 14,
                     "equation": "0.02",
                     "units": "1/Month",
                     "documentation": "Natural decay rate of hero culture"
                 },
                 {
                     "name": "debt_erosion_factor",
+                    "uid": 15,
                     "equation": "0.02",
                     "units": "1/Month",
                     "documentation": "Rate at which technical debt erodes reliability"
                 },
                 {
                     "name": "debt_incident_factor",
+                    "uid": 16,
                     "equation": "0.05",
                     "units": "incidents/Month",
                     "documentation": "Incidents generated per unit of technical debt"
                 },
                 {
                     "name": "debt_paydown_effectiveness",
+                    "uid": 17,
                     "equation": "0.01",
                     "units": "dimensionless",
                     "documentation": "Rate at which prevention investment pays down debt"
                 },
                 {
                     "name": "debt_per_heroic_fix",
+                    "uid": 18,
                     "equation": "0.3",
                     "units": "dimensionless/incidents",
                     "documentation": "Technical debt created per incident fixed heroically"
                 },
                 {
                     "name": "fundamental_fix_fraction",
+                    "uid": 19,
                     "equation": "0.2 * (1 - Hero_Culture / 100)",
                     "units": "dimensionless",
                     "documentation": "Fraction of incidents fixed properly, decreases as hero culture dominates"
                 },
                 {
                     "name": "hero_recognition_factor",
+                    "uid": 20,
                     "equation": "0.05",
                     "units": "dimensionless/incidents",
                     "documentation": "How much hero culture grows per heroic incident resolution"
                 },
                 {
                     "name": "heroic_response_fraction",
+                    "uid": 21,
                     "equation": "0.3 * (1 + Hero_Culture / 50)",
                     "units": "dimensionless",
                     "documentation": "Fraction of incidents addressed heroically, increases with hero culture"
                 },
                 {
                     "name": "investment_in_prevention",
+                    "uid": 22,
                     "equation": "total_engineering_capacity * (1 - Hero_Culture / 100) * prevention_priority",
                     "units": "dimensionless/Month",
                     "documentation": "Resources devoted to proactive reliability work"
                 },
                 {
                     "name": "prevention_effectiveness",
+                    "uid": 23,
                     "equation": "0.02",
                     "units": "dimensionless",
                     "documentation": "How much reliability improves per unit of prevention investment"
                 },
                 {
                     "name": "prevention_priority",
+                    "uid": 24,
                     "equation": "0.003",
                     "units": "1/Month",
                     "documentation": "Management priority given to prevention vs. feature work"
                 },
                 {
                     "name": "quick_fix_erosion",
+                    "uid": 25,
                     "equation": "0.1",
                     "units": "dimensionless/incidents",
                     "documentation": "Reliability lost per incident resolved via quick fix"
                 },
                 {
                     "name": "response_time",
+                    "uid": 26,
                     "equation": "2",
                     "units": "Month",
                     "documentation": "Average time to resolve an incident"
                 },
                 {
                     "name": "total_engineering_capacity",
+                    "uid": 27,
                     "equation": "100",
                     "units": "dimensionless",
                     "documentation": "Total available engineering capacity (normalized)"

@@ -101,6 +101,30 @@ pub(crate) struct ArrayFreezeHelper {
 /// The reserved name prefix for materialized freeze helpers.
 pub(crate) const FREEZE_HELPER_PREFIX: &str = "$\u{205A}ltm\u{205A}freeze\u{205A}";
 
+/// The one freeze helper every model shares: `$⁚ltm⁚freeze⁚time =
+/// PREVIOUS(TIME)`, the clock read at the previous step (GH #1016).
+///
+/// A frozen clock is one value for the whole model, so a partial reads this
+/// helper rather than spelling `PREVIOUS(TIME)` inline: the inline spelling is
+/// a capture per arm and per occurrence (`snapshot_arg` routes a builtin
+/// argument through a capture), which on C-LEARN v77 cost 9,632 result slots
+/// -- a third of the row -- for one number. Minted once per model by
+/// `db::ltm::model_ltm_variables` when any arm references it, and sorted with
+/// the other freeze helpers ahead of every score. Its name is under
+/// [`FREEZE_HELPER_PREFIX`] so the companion dedup and the evaluation-order
+/// category treat it as the freeze helper it is.
+pub(crate) const FROZEN_CLOCK_HELPER: &str = "$\u{205A}ltm\u{205A}freeze\u{205A}time";
+
+/// The [`FROZEN_CLOCK_HELPER`] as the scalar one-arm helper the emission loop
+/// registers through `freeze_helper_var`.
+pub(crate) fn frozen_clock_helper() -> ArrayFreezeHelper {
+    ArrayFreezeHelper {
+        name: FROZEN_CLOCK_HELPER.to_string(),
+        dims: Vec::new(),
+        arms: vec![(String::new(), "PREVIOUS(TIME)".to_string())],
+    }
+}
+
 /// One axis of a materializable slice, post-classification.
 enum FreezeAxis {
     /// A statically-kept index: the verbatim text baked into every arm.
@@ -850,6 +874,20 @@ mod tests {
     /// Two identical freezes in one expression share one helper; the helper
     /// name survives canonicalization unchanged (assembly canonicalizes every
     /// LTM var name, so a name that mutates there would orphan its fragment).
+    /// The clock helper must sort and dedup as a freeze helper, which is a
+    /// property of its NAME.
+    #[test]
+    fn the_frozen_clock_helper_is_named_under_the_freeze_prefix() {
+        assert!(FROZEN_CLOCK_HELPER.starts_with(FREEZE_HELPER_PREFIX));
+        let helper = frozen_clock_helper();
+        assert_eq!(helper.name, FROZEN_CLOCK_HELPER);
+        assert!(helper.dims.is_empty());
+        assert_eq!(
+            helper.arms,
+            vec![(String::new(), "PREVIOUS(TIME)".to_string())]
+        );
+    }
+
     #[test]
     fn identical_freezes_dedup_and_names_are_canonical() {
         let (dep_dims, ctx) = dims_fixture();

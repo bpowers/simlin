@@ -876,3 +876,99 @@ pub fn ltm_discovery_inputs(
         sub_model_output_ports,
     }
 }
+
+/// One LTM-instrumented run of `project`'s `main` model: the results, the
+/// loop-id -> per-slot cycle-partition map that
+/// `ltm_post::compute_rel_loop_scores` consumes, and the structurally
+/// detected loops (id, node sequence, static polarity) the ids refer to.
+#[allow(dead_code)]
+pub struct LtmRun {
+    pub results: Results,
+    pub loop_partitions: simlin_engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
+    pub loops: Vec<simlin_engine::db::DetectedLoop>,
+    /// The variable-level causal edges (`model_causal_edges`), as
+    /// `(from, to)` pairs -- the graph the FFI's link listing is built over.
+    pub edges: Vec<(String, String)>,
+    /// The LTM derivation's own warnings, rendered.
+    pub diagnostics: Vec<String>,
+}
+
+impl LtmRun {
+    /// The id of the one detected loop whose node sequence names `variable`.
+    #[allow(dead_code)]
+    pub fn loop_through(&self, variable: &str) -> &str {
+        let mut hits = self
+            .loops
+            .iter()
+            .filter(|l| l.variables.iter().any(|v| v == variable));
+        let found = hits
+            .next()
+            .unwrap_or_else(|| panic!("no detected loop passes through {variable:?}"));
+        assert!(
+            hits.next().is_none(),
+            "more than one detected loop passes through {variable:?}"
+        );
+        &found.id
+    }
+}
+
+/// Compile `project`'s `main` model with the LTM overlay on -- exhaustive
+/// mode, or discovery (every causal edge scored) when `discovery` is set --
+/// and run it to completion in the bytecode VM.
+///
+/// Imperative Shell: drives the salsa compile pipeline and the VM.
+#[allow(dead_code)]
+pub fn ltm_run(project: &datamodel::Project, discovery: bool) -> LtmRun {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, model_causal_edges, model_detected_loops,
+        model_ltm_variables, set_project_ltm_discovery_mode, sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    if discovery {
+        set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    }
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let loop_partitions = ltm.loop_partitions.clone();
+    let diagnostics = ltm.diagnostics.iter().map(|d| format!("{d:?}")).collect();
+    let loops = model_detected_loops(&db, source_model, sync.project).loops;
+    let mut edges: Vec<(String, String)> = model_causal_edges(&db, source_model, sync.project)
+        .edges
+        .iter()
+        .flat_map(|(from, tos)| tos.iter().map(move |to| (from.clone(), to.clone())))
+        .collect();
+    edges.sort();
+    let mut vm = Vm::new(compiled).expect("Vm::new should succeed");
+    vm.run_to_end().expect("Vm::run_to_end should succeed");
+    LtmRun {
+        results: vm.into_results(),
+        loop_partitions,
+        loops,
+        edges,
+        diagnostics,
+    }
+}
+
+/// The saved series of results key `name` at element slot `slot` (`0` for a
+/// scalar key; an arrayed key is registered once, by its bare name, at its
+/// base slot), bounded to the run's real step count. Panics naming the
+/// available keys when `name` is not a results key.
+#[allow(dead_code)]
+pub fn ltm_series(results: &Results, name: &str, slot: usize) -> Vec<f64> {
+    let ident = results
+        .offsets
+        .keys()
+        .find(|k| k.as_str() == name)
+        .unwrap_or_else(|| {
+            let mut keys: Vec<&str> = results.offsets.keys().map(|k| k.as_str()).collect();
+            keys.sort_unstable();
+            panic!("{name:?} is not a results key; have: {keys:?}")
+        });
+    let offset = results.offsets[ident] + slot;
+    results.iter().map(|row| row[offset]).collect()
+}
