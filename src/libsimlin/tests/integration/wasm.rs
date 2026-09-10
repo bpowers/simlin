@@ -13,6 +13,8 @@
 //! stride from the results region (using only the returned layout) is checked
 //! against the bytecode VM via `simlin_sim_get_series`.
 
+mod incremental;
+
 use std::ptr;
 
 use crate::common::open_project_from_datamodel;

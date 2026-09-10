@@ -34,13 +34,14 @@ use super::SimlinDb;
 /// The db is reached through [`ProbedDb::db`] / [`ProbedDb::db_mut`] and used
 /// exactly like any other; [`ProbedDb::reset`] starts a measured region and
 /// [`ProbedDb::counts`] reads it back as query name -> execution count.
-pub(crate) struct ProbedDb {
+pub struct ProbedDb {
     db: SimlinDb,
     log: Arc<Mutex<Vec<DatabaseKeyIndex>>>,
 }
 
 impl ProbedDb {
-    pub(crate) fn new() -> Self {
+    /// Create an empty database whose tracked-query executions are recorded.
+    pub fn new() -> Self {
         let log: Arc<Mutex<Vec<DatabaseKeyIndex>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&log);
         let storage = salsa::Storage::new(Some(Box::new(move |event: Event| {
@@ -62,18 +63,20 @@ impl ProbedDb {
         }
     }
 
-    pub(crate) fn db(&self) -> &SimlinDb {
+    /// Read the database without changing its execution log.
+    pub fn db(&self) -> &SimlinDb {
         &self.db
     }
 
-    pub(crate) fn db_mut(&mut self) -> &mut SimlinDb {
+    /// Mutably access the database for production sync and compilation calls.
+    pub fn db_mut(&mut self) -> &mut SimlinDb {
         &mut self.db
     }
 
     /// Start (or restart) a measured region, discarding what came before.
     /// Call it after the fixture is built and primed, so setup is not charged
     /// to the region.
-    pub(crate) fn reset(&self) {
+    pub fn reset(&self) {
         self.log
             .lock()
             .expect("execution-probe log poisoned")
@@ -87,7 +90,7 @@ impl ProbedDb {
     /// name. Both halves are reported because they answer different questions
     /// -- one key re-running `n` times is a query being re-demanded, `n` keys
     /// running once each is a query having been re-keyed or newly demanded.
-    pub(crate) fn counts(&self) -> BTreeMap<String, (usize, usize)> {
+    pub fn counts(&self) -> BTreeMap<String, (usize, usize)> {
         let log = self.log.lock().expect("execution-probe log poisoned");
         let mut runs: BTreeMap<String, usize> = BTreeMap::new();
         let mut keys: BTreeMap<String, HashSet<DatabaseKeyIndex>> = BTreeMap::new();

@@ -73,15 +73,17 @@ unsafe fn parse_filter(filter: *const c_char) -> Result<Option<String>, SimlinEr
 ///   series from the results region using `results_offset`, `n_slots`, and the
 ///   variable's `offset` from this map.
 ///
-/// Works from the model's datamodel alone -- no `SimlinSim` is required. Any
-/// compile or codegen failure stores a `SimlinError` (never panics across the
-/// boundary) and leaves both output buffers NULL.
+/// Uses the project's persistent incremental compiler -- no `SimlinSim` is
+/// required. Unchanged compilation reuses the same queries as VM creation when
+/// the requested discovery mode matches the project setting.
+/// Any compile or codegen failure stores a `SimlinError` and leaves both
+/// output buffers NULL.
 ///
-/// `ltm_enabled` selects the LTM overlay for this compile (the same choice
-/// `simlin_sim_new(.., enable_ltm)` makes) and `ltm_discovery_mode` sets the
-/// discovery flag on this compile's own `SourceProject`: the produced blob's
-/// layout includes the `$\u{205A}ltm\u{205A}*` synthetic series iff
-/// `ltm_enabled` is true.
+/// `ltm_enabled` selects the LTM overlay and latches the project's LTM
+/// diagnostic request, as `simlin_sim_new` does. `ltm_discovery_mode` overrides
+/// discovery for this compile only; the shared project's prior flag is restored
+/// on success and failure. Special stocks follow the VM's expansion path and
+/// LTM degradation contract.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
@@ -125,18 +127,56 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
         }
     };
 
-    // The compiled-model wasm is regenerated from the project's datamodel; it
-    // does not depend on the VM `SimState`, so this works even before a
-    // `SimlinSim` has been created for the model.
     let project_ref = &*model_ref.project;
-    let datamodel = project_ref.datamodel.lock().unwrap();
-
-    let artifact = match engine::wasmgen::compile_datamodel_to_artifact(
-        &datamodel,
-        model_ref.model_name.as_str(),
-        ltm_enabled,
-        ltm_discovery_mode,
-    ) {
+    let build = {
+        // Edits and VM creation take these locks in the same order. Keep both
+        // until the snapshot is assembled so special-stock dispatch cannot
+        // observe markers from a different revision than its source inputs.
+        let datamodel = project_ref.datamodel.lock().unwrap();
+        let mut db = project_ref.lock_db();
+        if let Some(source_project) = db.current_source_project() {
+            if ltm_enabled {
+                project_ref
+                    .ltm_requested
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            // Discovery is per-call, unlike the project's persistent input.
+            // Restore before inspecting the result so compilation errors cannot
+            // leak the override into VM creation, analysis, or diagnostics.
+            let prior_discovery = source_project.ltm_discovery_mode(&*db);
+            engine::db::set_project_ltm_discovery_mode(&mut db, source_project, ltm_discovery_mode);
+            let build = engine::queue_compile::compile_sim(
+                &mut db,
+                source_project,
+                &datamodel,
+                model_ref.model_name.as_str(),
+                engine::db::LtmOverlay::from(ltm_enabled),
+            );
+            engine::db::set_project_ltm_discovery_mode(&mut db, source_project, prior_discovery);
+            build
+        } else {
+            Err(engine::Error {
+                kind: engine::ErrorKind::Simulation,
+                code: engine::ErrorCode::NotSimulatable,
+                details: Some("incremental compilation: no sync state available".to_string()),
+            })
+        }
+    };
+    // Emission reads only the immutable compiled snapshot and its side plans;
+    // release the project locks before doing this independent work.
+    let artifact = match build
+        .map_err(|e| {
+            engine::wasmgen::WasmGenError::Unsupported(format!(
+                "wasmgen: incremental compile failed: {e:?}"
+            ))
+        })
+        .and_then(|build| {
+            engine::wasmgen::compile_simulation_with_plans(
+                &build.compiled,
+                &build.conveyor_plans,
+                &build.queue_plans,
+            )
+        }) {
         Ok(artifact) => artifact,
         Err(err) => {
             store_error(
