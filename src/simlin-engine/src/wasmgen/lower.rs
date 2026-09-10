@@ -2190,9 +2190,8 @@ fn emit_op2(op: Op2, ctx: &EmitCtx, f: &mut Function) -> Result<(), WasmGenError
         // `And`/`Or` are `(is_truthy(l) OP is_truthy(r)) as f64`.
         Op2::And => emit_logical(ctx, f, Instruction::I32And),
         Op2::Or => emit_logical(ctx, f, Instruction::I32Or),
-        // `Exp` is `l.powf(r)`: the operands `[l, r]` are already in call
-        // order, so `call pow` directly. Matches `powf` for a positive base
-        // (a negative base diverges -- see `super::math::emit_pow`).
+        // `pow` handles negative bases and special values explicitly; ordinary
+        // finite results use the approximation documented in `math::emit_pow`.
         Op2::Exp => {
             f.instruction(&Instruction::Call(ctx.helpers.pow));
         }
