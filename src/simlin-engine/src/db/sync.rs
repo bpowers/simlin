@@ -168,11 +168,13 @@ fn macro_declarations_from_datamodel(
 ///
 /// UIDs live only on the datamodel `Variable`s and are never synced into the
 /// db, so we must resolve them here at sync time. A UID with no matching
-/// variable (a stale reference after a delete) is dropped from that loop's
-/// set; the LTM pin-resolution query then validates whatever survives against
-/// the causal graph (an incomplete set fails the cycle check and surfaces a
-/// diagnostic rather than scoring a partial loop). Deleted entries are
-/// excluded entirely -- a deleted pin contributes no `loop_score`.
+/// variable (a stale reference after a delete, or a pin written against
+/// view-element uids) is dropped from that loop's set and recorded on the
+/// spec as unresolved; the LTM pin-resolution query then validates whatever
+/// survives against the causal graph (an incomplete set fails the cycle
+/// check and surfaces a diagnostic that names the entry's uids rather than
+/// scoring a partial loop). Deleted entries are excluded entirely -- a
+/// deleted pin contributes no `loop_score`.
 fn pinned_loops_from_datamodel(model: &datamodel::Model) -> Vec<PinnedLoopSpec> {
     use std::collections::BTreeSet;
 
@@ -203,9 +205,20 @@ fn pinned_loops_from_datamodel(model: &datamodel::Model) -> Vec<PinnedLoopSpec> 
                 .collect::<BTreeSet<String>>()
                 .into_iter()
                 .collect();
+            let unresolved_uids: Vec<i32> = lm
+                .uids
+                .iter()
+                .filter(|uid| !uid_to_name.contains_key(uid))
+                .copied()
+                .collect::<BTreeSet<i32>>()
+                .into_iter()
+                .collect();
             PinnedLoopSpec {
                 name: lm.name.clone(),
                 variables,
+                uids: lm.uids.clone(),
+                unresolved_uids,
+                model_variables_carry_uids: !uid_to_name.is_empty(),
                 description: lm.description.clone(),
             }
         })

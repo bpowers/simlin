@@ -889,8 +889,10 @@ fn check_stock_updates_are_emittable(ast: &[Expr], ident: &str) -> Result<()> {
 /// expansion's fabricated `Const(0.0)` input and therefore evaluates
 /// `gf(0)`: the wrap applies uniformly to whatever input the expansion
 /// produced. Both the old `0` and the new `gf(0)` are silent fabrications
-/// (Stella rejects that element shape outright); the zero-fill itself, and
-/// a diagnostic for this class, are the open remainder of GH #905.
+/// (Stella rejects that element shape outright). Standing constraint: a
+/// gf-only element's arm IS its table (`variable::elements_without_an_arm`),
+/// so the `MissingElementEquation` advisory that names an ARMLESS element's
+/// zero-fill never names it; keep the two in step if either rule moves.
 ///
 /// Only the per-element `AssignCurr` nodes the expansion paths emit are
 /// rewritten; hoisted pre-computations (`AssignTemp`) feed those assignments
@@ -1431,8 +1433,8 @@ fn lower_element(ctx: &Context, elem_ctx: &Context, ast: &crate::ast::Expr2) -> 
 /// row-major order, lower the arm it evaluates under that element's active
 /// subscripts and assign the result to the element's slot. An element with no
 /// arm at all -- no explicit equation, and an EXCEPT default that does not
-/// apply to it -- is assigned a fabricated zero (the open remainder of
-/// GH #905).
+/// apply to it -- is assigned a fabricated zero, which the
+/// `MissingElementEquation` advisory names (GH #905).
 ///
 /// Nothing is hoisted here. An element whose expression is or contains an array
 /// value codegen cannot express in place is left as it lowered, and
@@ -1450,7 +1452,7 @@ fn expand_per_element(
     let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
     let mut exprs: Vec<Expr> = Vec::new();
     for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
-        let key = CanonicalElementName::from_raw(&subscripts.join(","));
+        let key = CanonicalElementName::from_parts(&subscripts);
         let Some(ast) = arrayed_arm(elements, default_ast, apply_default_for_missing, &key) else {
             exprs.push(Expr::AssignCurr(
                 base.offset_by(i),

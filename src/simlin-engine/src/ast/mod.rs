@@ -235,7 +235,7 @@ fn lower_arrayed_arms<A, B>(
         return Ok(lowered);
     }
     for combination in crate::dimensions::SubscriptIterator::new(dims) {
-        let key = CanonicalElementName::from_raw(&combination.join(","));
+        let key = CanonicalElementName::from_parts(&combination);
         if let Some(first) = failures.iter().position(|(id, _)| *id == key) {
             return Err(failures.swap_remove(first).1);
         }

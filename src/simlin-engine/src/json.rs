@@ -878,7 +878,14 @@ impl From<Stock> for datamodel::Stock {
                             .into_iter()
                             .map(|ee| {
                                 (
-                                    ee.subscript,
+                                    // The datamodel stores the element key's
+                                    // canonical spelling, the one owner of
+                                    // what a subscript names (`from_subscript`).
+                                    crate::common::CanonicalElementName::from_subscript(
+                                        &ee.subscript,
+                                    )
+                                    .as_str()
+                                    .to_string(),
                                     ee.equation,
                                     ee.compat
                                         .and_then(|c| c.active_initial)
@@ -966,7 +973,14 @@ impl From<Flow> for datamodel::Flow {
                             .into_iter()
                             .map(|ee| {
                                 (
-                                    ee.subscript,
+                                    // The datamodel stores the element key's
+                                    // canonical spelling, the one owner of
+                                    // what a subscript names (`from_subscript`).
+                                    crate::common::CanonicalElementName::from_subscript(
+                                        &ee.subscript,
+                                    )
+                                    .as_str()
+                                    .to_string(),
                                     ee.equation,
                                     ee.compat
                                         .and_then(|c| c.active_initial)
@@ -1049,7 +1063,14 @@ impl From<Auxiliary> for datamodel::Aux {
                             .into_iter()
                             .map(|ee| {
                                 (
-                                    ee.subscript,
+                                    // The datamodel stores the element key's
+                                    // canonical spelling, the one owner of
+                                    // what a subscript names (`from_subscript`).
+                                    crate::common::CanonicalElementName::from_subscript(
+                                        &ee.subscript,
+                                    )
+                                    .as_str()
+                                    .to_string(),
                                     ee.equation,
                                     ee.compat
                                         .and_then(|c| c.active_initial)

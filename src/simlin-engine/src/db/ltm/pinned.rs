@@ -69,6 +69,26 @@ pub struct PinnedLoopsResult {
     /// scorable feedback loop. The reason is a human-readable explanation for
     /// the surfaced diagnostic.
     pub invalid: Vec<(String, String)>,
+    /// `(name, message)` for each pinned loop that DID score, but not the
+    /// loop as written: a uid that matched no variable was dropped and the
+    /// survivors still formed a cycle, so the score is that cycle's. Surfaced
+    /// as a Warning so a renamed or re-created variable never silently turns
+    /// a pin into a different loop under the same name.
+    pub warnings: Vec<(String, String)>,
+}
+
+impl PinnedLoopsResult {
+    /// Record a pin that scores nothing. The one site that appends the
+    /// unresolved-uid clause, so every rejection arm -- too few variables,
+    /// no cycle, no stock, a failed element expansion -- names a dropped
+    /// uid: a pin whose dropped uid was its only stock, say, must still say
+    /// which uid went missing.
+    fn reject(&mut self, spec: &crate::db::input::PinnedLoopSpec, reason: String) {
+        self.invalid.push((
+            spec.name.clone(),
+            format!("{reason}{}", unresolved_uids_clause(spec)),
+        ));
+    }
 }
 
 /// Resolve and validate a model's pinned loops against its causal graph.
@@ -134,15 +154,16 @@ pub(crate) fn model_pinned_loops(
         let id = format!("pin{}", idx + 1);
 
         if spec.variables.len() < 2 {
-            result.invalid.push((
-                spec.name.clone(),
+            result.reject(
+                spec,
                 format!(
                     "a pinned loop must name at least two variables that form a feedback loop; \
-                     '{}' names {}",
+                     '{}' (uids {:?}) names {}",
                     spec.name,
-                    spec.variables.len()
+                    spec.uids,
+                    spec.variables.len(),
                 ),
-            ));
+            );
             continue;
         }
 
@@ -150,15 +171,16 @@ pub(crate) fn model_pinned_loops(
             spec.variables.iter().map(|v| Ident::new(v)).collect();
 
         let Some(cycle) = graph.order_variable_cycle(&vars) else {
-            result.invalid.push((
-                spec.name.clone(),
+            result.reject(
+                spec,
                 format!(
-                    "the variables named by pinned loop '{}' do not form a closed feedback loop \
-                     in the model's causal graph: [{}]",
+                    "the variables named by pinned loop '{}' (uids {:?}) do not form a closed \
+                     feedback loop in the model's causal graph: [{}]",
                     spec.name,
-                    spec.variables.join(", ")
+                    spec.uids,
+                    spec.variables.join(", "),
                 ),
-            ));
+            );
             continue;
         };
 
@@ -195,14 +217,14 @@ pub(crate) fn model_pinned_loops(
             .enrich_with_module_stocks(&cycle, parent_stocks)
             .is_empty();
         if !has_stock && !cycle_has_lagged_edge(db, project, source_vars, &cycle) {
-            result.invalid.push((
-                spec.name.clone(),
+            result.reject(
+                spec,
                 format!(
                     "pinned loop '{}' contains no stock; a feedback loop must pass through at \
                      least one stock (or other state, such as a PREVIOUS-lagged reference)",
                     spec.name
                 ),
-            ));
+            );
             continue;
         }
 
@@ -236,15 +258,25 @@ pub(crate) fn model_pinned_loops(
                         loops
                     }
                     Err(reason) => {
-                        result.invalid.push((
-                            spec.name.clone(),
-                            format!("pinned loop '{}' {reason}", spec.name),
-                        ));
+                        result.reject(spec, format!("pinned loop '{}' {reason}", spec.name));
                         continue;
                     }
                 }
             }
         };
+        if !spec.unresolved_uids.is_empty() {
+            result.warnings.push((
+                spec.name.clone(),
+                format!(
+                    "pinned loop '{}' (uids {:?}) dropped uids {:?}, which match no variable's \
+                     uid, and scored the loop its remaining variables form instead: {}",
+                    spec.name,
+                    spec.uids,
+                    spec.unresolved_uids,
+                    cycle_strs.join(" -> ")
+                ),
+            ));
+        }
         result.loops.push(PinnedLoop {
             loops,
             name: spec.name.clone(),
@@ -252,6 +284,28 @@ pub(crate) fn model_pinned_loops(
     }
 
     result
+}
+
+/// The clause a pin's failure message carries when some of its uids matched
+/// no variable, so the entry can be found in the file and the cause seen: a
+/// pin names variables by their uid, and a file whose variables carry none
+/// (`PinnedLoopSpec::model_variables_carry_uids`) says so outright, because that is the shape a
+/// pin written against view-element uids takes. Empty when every uid
+/// resolved.
+fn unresolved_uids_clause(spec: &crate::db::input::PinnedLoopSpec) -> String {
+    if spec.unresolved_uids.is_empty() {
+        return String::new();
+    }
+    let cause = if !spec.model_variables_carry_uids {
+        "; no variable in the model carries a uid (a pin names variables by their uid, \
+         which SetLoopName assigns)"
+    } else {
+        ""
+    };
+    format!(
+        "; uids {:?} match no variable's uid{cause}",
+        spec.unresolved_uids
+    )
 }
 
 /// Whether any edge `from -> to` of the ordered cycle is a PREVIOUS-lagged

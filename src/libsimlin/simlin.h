@@ -502,8 +502,11 @@ SimlinLoops *simlin_analyze_get_loops(SimlinModel *model, SimlinError **out_erro
 // `reclassify_loops_from_results` primitive (GH #679) over it: for every loop
 // whose `$⁚ltm⁚loop_score⁚{id}` series exists in the results, the loop's
 // polarity and confidence are overwritten by
-// `crate::ltm::LoopPolarity::from_runtime_scores` (the LTM papers' Rux/Bux/U
-// classification with the 0.99 confidence gate).  A loop whose runtime score
+// `crate::ltm::LoopPolarity::from_runtime_scores` over the loop's
+// partition-RELATIVE series (its per-step share of its cycle partition, the
+// same series `simlin_analyze_get_relative_loop_score` returns): the LTM
+// papers' Rux/Bux/U classification with the 0.99 confidence gate, on a
+// bounded, dominance-weighted base.  A loop whose runtime score
 // is never active keeps its structural classification.  Loop IDs are stable
 // (a `u1` stays `u1` even after its polarity flips to Reinforcing).
 //
@@ -674,10 +677,10 @@ void simlin_free_links(SimlinLinks *links);
 // slab.
 //
 // The wasm-backend twin of `simlin_analyze_get_relative_loop_score`.  Both
-// FFIs funnel through `rel_loop_score_series` (extracted in Subcomponent A)
-// over an `engine::Results` and the `(loop_partitions, loop_element_index)`
-// snapshots, so the per-loop time series they produce cannot diverge by
-// construction.
+// FFIs resolve the loop id against the `loop_element_index` snapshot and
+// funnel through `rel_loop_score_series` over an `engine::Results` and the
+// `loop_partitions` snapshot, so the per-loop time series they produce
+// cannot diverge by construction.
 //
 // Unlike the links twin, the rel-loop-score path needs the snapshots
 // `model_ltm_variables` derives (the per-loop partition map and slot

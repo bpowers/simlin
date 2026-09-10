@@ -229,7 +229,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             loop_partitions: captured_loop_partitions,
             loop_element_index: captured_loop_element_index,
             ltm_mode: captured_ltm_mode,
-            cached_partition_denominators: HashMap::new(),
+            cached_rel_loop_scores: None,
             conveyor_plans,
             queue_plans,
         }),
@@ -302,7 +302,7 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(
         match vm.run_to_end() {
             Ok(_) => {
                 state.results = Some(vm.into_results());
-                state.cached_partition_denominators.clear();
+                state.cached_rel_loop_scores = None;
             }
             Err(err) => {
                 state.vm = Some(vm);
@@ -367,7 +367,7 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
 
     let mut state = sim_ref.state.lock().unwrap();
     state.results = None;
-    state.cached_partition_denominators.clear();
+    state.cached_rel_loop_scores = None;
 
     if let Some(ref mut vm) = state.vm {
         // Fast path: reuse existing VM allocation
@@ -686,10 +686,10 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
             *slot = val;
             // Defensive invalidation: only constant slots are writable now,
             // and a constant is never a `loop_score` input to the cached
-            // partition denominators -- but clearing the cache is cheap (the
-            // next FFI call repopulates lazily) and keeps this write path
+            // relative loop scores -- but dropping the cache is cheap (the
+            // next FFI call recomputes lazily) and keeps this write path
             // trivially safe against future loosening of the gate.
-            state.cached_partition_denominators.clear();
+            state.cached_rel_loop_scores = None;
             return;
         }
     }

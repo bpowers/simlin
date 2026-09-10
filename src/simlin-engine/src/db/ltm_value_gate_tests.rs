@@ -434,7 +434,7 @@ fn a_nested_freeze_arm_is_not_a_structural_zero() {
 ///   comes from the guard form's own `NaN - NaN`, not from the modeller's
 ///   equation -- and the arm has no causal dependence on the source at all, so
 ///   `0` is the structurally known answer rather than a guess.
-/// * GH #542 points the other way. `ltm_post::denom_summand` excludes a `NaN`
+/// * GH #542 points the other way. `ltm_post::group_totals` excludes a `NaN`
 ///   summand from its partition denominator specifically so that one undefined
 ///   score does not poison its siblings, while the bad loop's OWN numerator
 ///   stays `NaN` -- described there as "the honest per-loop 'undefined here'

@@ -587,7 +587,14 @@ impl From<project_io::variable::Equation> for Equation {
                         .into_iter()
                         .map(|e| {
                             (
-                                migrate_stored_ident(e.subscript),
+                                // Migrated like the declaration (#690), then
+                                // stored as the element key's canonical
+                                // spelling (`from_subscript`, the one owner).
+                                crate::common::CanonicalElementName::from_subscript(
+                                    &migrate_stored_ident(e.subscript),
+                                )
+                                .as_str()
+                                .to_string(),
                                 e.equation,
                                 e.initial_equation,
                                 e.gf.map(GraphicalFunction::from),
@@ -646,6 +653,41 @@ fn test_has_except_default_proto_roundtrip() {
 
     let roundtripped = Equation::from(proto);
     assert_eq!(roundtripped, eq);
+}
+
+/// The protobuf reader stores a per-element subscript as the element key's
+/// canonical spelling (`CanonicalElementName::from_subscript`), like the JSON
+/// and XMILE readers: a stored `"NYC, Young"` reads back as `nyc,young`.
+#[test]
+fn arrayed_element_subscripts_deserialize_to_the_canonical_key() {
+    let proto = project_io::variable::Equation {
+        equation: Some(project_io::variable::equation::Equation::Arrayed(
+            project_io::variable::ArrayedEquation {
+                dimension_names: vec!["Region".to_string(), "Age".to_string()],
+                elements: vec![
+                    project_io::variable::arrayed_equation::Element {
+                        subscript: "NYC, Young".to_string(),
+                        equation: "100".to_string(),
+                        initial_equation: None,
+                        gf: None,
+                    },
+                    project_io::variable::arrayed_equation::Element {
+                        subscript: " boston ,old".to_string(),
+                        equation: "80".to_string(),
+                        initial_equation: None,
+                        gf: None,
+                    },
+                ],
+                default_equation: None,
+                has_except_default: None,
+            },
+        )),
+    };
+    let Equation::Arrayed(_, elements, _, _) = Equation::from(proto) else {
+        panic!("expected Arrayed");
+    };
+    let keys: Vec<&str> = elements.iter().map(|(k, _, _, _)| k.as_str()).collect();
+    assert_eq!(keys, ["nyc,young", "boston,old"]);
 }
 
 #[test]

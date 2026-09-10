@@ -776,6 +776,22 @@ fn every_warning_family_is_emitted_once_across_revisions() {
             matches: |d| assembly_reason_contains(d, "pinned loop 'bogus'"),
         },
         Family {
+            name: "ltm: a pin that scored the loop its surviving variables form",
+            child: || {
+                let mut project = loop_child();
+                pin_loop(&mut project.models[0], "growth", &["s", "in_f"]);
+                // A uid no variable carries: dropped, the survivors still
+                // form the loop, and the pin scores it with a warning.
+                project.models[0].loop_metadata[0].uids.push(99);
+                project
+            },
+            probe: "s",
+            wiring: &[],
+            discovery: false,
+            guards: no_guards,
+            matches: |d| assembly_reason_contains(d, "dropped uids [99]"),
+        },
+        Family {
             name: "ltm: an arrayed edge whose dimensions do not correspond",
             child: || {
                 as_child(

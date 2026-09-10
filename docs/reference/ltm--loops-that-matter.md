@@ -622,7 +622,19 @@ The **relative loop score** normalizes by the sum of absolute loop scores:
 RelativeLoopScore(L) = LoopScore(L) / sum_Y(|LoopScore(Y)|)
 ```
 
-where the sum runs over all loops Y in the same cycle partition.
+where the sum runs over all loops Y in the same cycle partition. In an arrayed model
+the members of a partition are the loops of the de-subscripted model: each element of
+an apply-to-all loop is one member, as is each scalar or cross-element loop, and every
+member divides by the same partition sum (Section 15.4).
+
+> **Simlin implementation note.** `ltm_post::compute_rel_loop_scores` is the single
+> owner of this normalization: every `(loop, slot)` with a `loop_score` column is one
+> member of its slot's partition, and the libsimlin accessors and the layout's importance
+> series read it rather than dividing on their own; discovery's ranking accumulates its
+> partition totals with the same `add_to_total` (through `group_totals` for the
+> discovered set, `retain_circuits` for the enumerated universe) and divides with the
+> same `relative_series`. The group is the partition and nothing finer --
+> a slot index names an element only within one loop's own dimension space.
 
 Properties:
 - Normalized to range [-1, 1]
@@ -642,6 +654,15 @@ Determined from model structure:
 - **Reinforcing (R):** Even number of negative links -> positive loop score
 - **Balancing (B):** Odd number of negative links -> negative loop score
 - **Undetermined (U):** Any link has unknown polarity (a conservative classification)
+
+> **Simlin implementation note: links into a module.** A link that feeds a module
+> instance's input port (a DELAY3's delay time, a user module's input) is signed by
+> composing the sub-model's own link polarities along every internal pathway from
+> that port to the output(s) the parent reads: every pathway agreeing gives that
+> sign; a disagreement, an unsigned link, or a truncated enumeration gives Unknown.
+> The papers say nothing about this; it is the macro-collapse principle of Section 6
+> applied to the sign. The link into a DELAY3's delay-time port is therefore negative
+> (`stock / (delay_time / 3)` on every pathway) and the link into its input port positive.
 
 #### Runtime Polarity
 
@@ -669,8 +690,10 @@ nature of links is not important over the course of the simulation.
 > **Simlin implementation note.** Loop detection (and the deterministic loop-id
 > assignment) happens before simulation, so the structural label is what a pre-simulation
 > surface reports. Whether the *runtime* polarity is surfaced depends on the consumer:
-> discovery (`analyze_model` / MCP) and pysimlin `Run.loops` reclassify from the runtime
-> `loop_score` series while keeping the loop id stable, whereas the libsimlin / WASM / TS
+> discovery (`analyze_model` / MCP) and pysimlin `Run.loops` reclassify from the loop's
+> partition-relative score series (Section 4.4; bounded per step, so the confidence is the
+> dominance-weighted time share of each sign, and for a loop alone in its partition the
+> plain time share) while keeping the loop id stable, whereas the libsimlin / WASM / TS
 > `get_loops` surface is structural-only (it has no simulation results in hand and folds
 > Rux/Bux to R/B at the FFI boundary -- surfacing runtime polarity there is tracked under
 > GH #495). See the "Runtime Polarity" section of

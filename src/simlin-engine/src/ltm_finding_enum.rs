@@ -1330,17 +1330,13 @@ pub(super) fn retain_circuits(
             if mass != 0.0 {
                 banked_mass = true;
             }
-            // Saturating: a sum of FINITE masses that would overflow to Inf
-            // would make every finite share read as 0 and drop a real loop
-            // universe wholesale; capping the total at f64::MAX keeps shares
-            // finite (and merely compressed) there. A genuinely infinite mass
-            // still makes the total Inf, the dominance-inflection convention.
-            let sum = totals[t] + mass;
-            totals[t] = if sum.is_infinite() && mass.is_finite() && totals[t].is_finite() {
-                f64::MAX
-            } else {
-                sum
-            };
+            // The one accumulator every partition total goes through
+            // (`ltm_post::add_to_total`): a sum of FINITE masses that would
+            // overflow saturates at f64::MAX so every finite share stays
+            // finite (merely compressed) instead of reading 0 and dropping a
+            // real loop universe wholesale; a genuinely infinite mass still
+            // makes the total Inf, the dominance-inflection convention.
+            crate::ltm_post::add_to_total(&mut totals[t], scratch[t]);
             if totals[t] > 0.0 {
                 // `max` drops a NaN ratio (`Inf / Inf` at a dominance
                 // inflection), which is right: the exact test rejects that step

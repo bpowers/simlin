@@ -328,8 +328,9 @@ class Loop:
     FFI verbatim (GH #495) -- the MOSTLY_* ("Rux"/"Bux") variants are no longer
     coalesced onto REINFORCING/BALANCING. They occur on the runtime surfaces
     (``Run.loops``, ``Sim.get_loops_runtime``, and discovery), where the
-    polarity is classified from runtime score series; see
-    :attr:`polarity_confidence`."""
+    polarity is classified from the loop's partition-relative runtime score
+    series (its per-step share of its cycle partition, the series
+    :attr:`behavior_time_series` carries); see :attr:`polarity_confidence`."""
 
     polarity_confidence: float = 1.0
     """Polarity-confidence ratio in ``[0.0, 1.0]`` behind :attr:`polarity`

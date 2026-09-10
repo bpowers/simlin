@@ -40,11 +40,9 @@ fn compile_ltm_incremental(
 }
 
 /// Compile with LTM enabled and capture the per-slot loop_partitions
-/// mapping `compute_rel_loop_scores*` need to derive relative scores
-/// post-sim.  Since rel_loop_score is no longer emitted as a VM variable
-/// (see docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md), tests
-/// that used to filter `results.offsets` for `$⁚ltm⁚rel_loop_score⁚{id}`
-/// must now invoke `ltm_post::compute_rel_loop_scores(results, loop_partitions)`.
+/// mapping `ltm_post::compute_rel_loop_scores` needs to derive relative
+/// scores post-sim (relative scores are not VM variables; see
+/// docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).
 fn compile_ltm_incremental_with_partitions(
     project: &simlin_engine::datamodel::Project,
 ) -> (
@@ -3932,18 +3930,6 @@ fn find_loop_score_offsets(results: &Results) -> Vec<(String, usize)> {
     entries
 }
 
-/// Test helper: thin forwarder to the production per-element helper.
-/// Retained so the existing A2A integration tests keep calling the
-/// same name; they now pin the production code rather than a parallel
-/// implementation.  The per-slot `loop_partitions` carries each loop's
-/// slot count (its `len()`), so no separate slot-count map is threaded.
-fn compute_rel_loop_scores_per_element(
-    results: &Results,
-    loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
-) -> HashMap<String, Vec<f64>> {
-    ltm_post::compute_rel_loop_scores_per_element(results, loop_partitions)
-}
-
 /// AC6.1 + AC6.4 + AC6.5: Pure A2A loop scores for an arrayed feedback model.
 ///
 /// Model: population[Region] (3 regions) with a reinforcing birth loop:
@@ -4115,14 +4101,11 @@ fn test_a2a_two_loop_relative_scores_sum_to_100() {
         "Number of loop partitions should equal number of loop score vars"
     );
 
-    // For each element, the absolute values of the per-element relative
-    // loop scores across all loops should sum to approximately 1.0.  We
-    // use the per-element helper because the A2A case requires per-element
-    // normalization, while the scalar view (`ltm_post::compute_rel_loop_scores`)
-    // collapses to element 0.  Both A2A loops pass through `population[r]`,
-    // so at each element their slots land in the same `(partition, slot)`
-    // bucket and self-normalize together.
-    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    // Both A2A loops pass through `population[r]` and the elements are
+    // uncoupled, so each element is its own partition holding exactly the
+    // two loops' slots for that element: the magnitudes of the two
+    // per-element relative scores sum to 1.0 there.
+    let rel_per_element = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
 
     for elem in 0..n_elements {
         // Pick a timestep late enough to have meaningful values (skip
@@ -4234,7 +4217,7 @@ fn test_disconnected_a2a_loops_normalize_per_partition() {
     // Both subsystems are purely reinforcing, so every nonzero relative score is
     // exactly +1.0 -- NOT the pre-fix pooled value the two loops would share if
     // they cross-normalized.
-    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    let rel_per_element = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     assert_eq!(
         rel_per_element.len(),
         2,
@@ -5297,7 +5280,7 @@ fn test_arrayed_population_ltm_exhaustive() {
     );
     // This is a pure-A2A model over `Region`, so every loop has
     // `n_elements` slots and its rel-score series strides by `n_elements`.
-    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    let rel_per_element = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
 
     // Check that relative loop scores per element sum to ~1.0 at some
     // timestep after initialization.
@@ -10476,11 +10459,10 @@ fn exhaustive_never_active_loop_keeps_structural_polarity() {
     );
 }
 
-/// GH #679 fixture: a single-stock loop whose runtime loop score genuinely
-/// MIXES signs with overwhelming positive dominance, so runtime
-/// reclassification must produce `MostlyReinforcing` (the LTM papers' "Rux")
-/// -- the variant that is structurally unreachable on the exhaustive
-/// pre-simulation surface.
+/// GH #679 fixture: a single-stock loop, ALONE in its partition, whose
+/// runtime loop score genuinely MIXES signs -- reinforcing at every active
+/// step before t = 100 (about 400 of them at dt = 0.25), balancing at the
+/// 40 after.
 ///
 /// Construction: `f = s * g + d` with a sign-flipping marginal gain `g` and
 /// an exogenous drive `d`.
@@ -10495,15 +10477,24 @@ fn exhaustive_never_active_loop_keeps_structural_polarity() {
 ///   so each of the 40 negative loop-score samples has magnitude
 ///   `|g * delta s / delta f|` of only ~1e-4..1e-3.
 ///
-/// The dominance ratio `|r - |b|| / (r + |b|)` lands at ~0.9999 -- above the
-/// 0.99 Rux gate but strictly below 1.0 (both signs are present). The
-/// `s -> f` link is statically signed Positive by the bare-named-co-factor
+/// On the raw base the dominance ratio `|r - |b|| / (r + |b|)` would land at
+/// ~0.9999, above the 0.99 Rux gate -- only because the exogenous ramp
+/// swamped `delta f` and shrank the 40 balancing samples to nothing, the
+/// raw-magnitude incomparability the relative base exists to remove. The
+/// classifier reads the partition-RELATIVE series, and a loop alone in its
+/// partition has a relative score of exactly +1/-1 while active, so the
+/// ratio is the time share of its sign, `(400 - 40) / 440` or about 0.82,
+/// below the gate. (The exact count depends on how many startup steps the
+/// flow-to-stock score leaves inactive; the test reads it off the series.)
+/// The loop spent nine percent of its active life balancing, and the label
+/// says so: `Undetermined` at that confidence.
+///
+/// The `s -> f` link is statically signed Positive by the bare-named-co-factor
 /// convention (`g` is a named quantity, conventionally positive-valued),
 /// so the structural label is Reinforcing/1.0 -- and `g` is exactly the
-/// kind of quantity that convention can be WRONG about, which is what
-/// makes this fixture doubly useful: the runtime reclassification both
-/// upgrades the label to the honest mixed-sign Rux AND demonstrates that
-/// runtime evidence overrides a conventional structural sign.
+/// kind of quantity that convention can be WRONG about: the runtime
+/// reclassification demonstrates runtime evidence overriding a conventional
+/// structural sign.
 fn mixed_sign_dominant_loop_project() -> simlin_engine::datamodel::Project {
     TestProject::new("rux_mixed_sign")
         .with_sim_time(0.0, 110.0, 0.25)
@@ -10514,15 +10505,16 @@ fn mixed_sign_dominant_loop_project() -> simlin_engine::datamodel::Project {
         .build_datamodel()
 }
 
-/// GH #679: the exhaustive surface must be able to report the mixed-sign
-/// `MostlyReinforcing` (Rux) classification with its REAL dominance-ratio
-/// confidence -- not just the single-signed R/B flip that
-/// `exhaustive_module_loop_polarity_reclassified_from_runtime` pins.
-/// This is the canonical case from the issue: a loop whose polarity
-/// genuinely changes sign during simulation, where the honest post-sim
-/// answer is Rux with a concrete confidence, not a blanket Undetermined.
+/// GH #679: the exhaustive surface reports a mixed-sign loop's runtime
+/// classification with its REAL confidence -- not just the single-signed
+/// R/B flip that `exhaustive_module_loop_polarity_reclassified_from_runtime`
+/// pins. For a loop ALONE in its partition the relative series is +1/-1
+/// while active, so the confidence is the time share of its sign, here
+/// about 0.82 (see the fixture doc): sub-threshold, `Undetermined`.
+/// The Rux and Bux outcomes need a competing sibling and are pinned by
+/// `exhaustive_competing_sign_flip_reclassifies_to_rux` / `_bux`.
 #[test]
-fn exhaustive_mixed_sign_dominant_loop_reclassifies_to_rux() {
+fn exhaustive_lone_loop_sign_flip_confidence_is_its_time_share() {
     use simlin_engine::ltm::POLARITY_CONFIDENCE_THRESHOLD;
 
     let project = mixed_sign_dominant_loop_project();
@@ -10554,21 +10546,239 @@ fn exhaustive_mixed_sign_dominant_loop_reclassifies_to_rux() {
     let mut loops = detected.loops.clone();
     reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
 
+    // The relative series of a lone loop is +1/-1/0 exactly, so the
+    // confidence is the time share of its sign: count the signs from the
+    // owner's series rather than pinning the fixture doc's approximate
+    // counts.
+    let relative = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
+    let series = &relative[&loops[0].id];
+    assert!(
+        series.iter().all(|v| *v == 0.0 || v.abs() == 1.0),
+        "a loop alone in its partition has a relative score of exactly 0 or +/-1"
+    );
+    let positive = series.iter().filter(|v| **v > 0.0).count() as f64;
+    let negative = series.iter().filter(|v| **v < 0.0).count() as f64;
+    assert!(positive > 0.0 && negative > 0.0, "both signs occur");
+    let time_share = (positive - negative).abs() / (positive + negative);
+    assert!(
+        time_share < POLARITY_CONFIDENCE_THRESHOLD,
+        "nine percent of the active steps balancing is far below the gate: {time_share}"
+    );
     assert_eq!(
         loops[0].polarity,
-        DetectedLoopPolarity::MostlyReinforcing,
-        "a mixed-sign series with >=0.99 positive dominance must classify Rux \
+        DetectedLoopPolarity::Undetermined,
+        "a lone loop balancing for a tenth of its active life is Undetermined \
          (got {:?} at confidence {})",
         loops[0].polarity,
         loops[0].polarity_confidence
     );
     assert!(
-        loops[0].polarity_confidence >= POLARITY_CONFIDENCE_THRESHOLD
-            && loops[0].polarity_confidence < 1.0,
-        "the Rux confidence is the REAL dominance ratio: at or above the {} gate but \
-         strictly below 1.0 (both signs are present in the series); got {}",
-        POLARITY_CONFIDENCE_THRESHOLD,
+        (loops[0].polarity_confidence - time_share).abs() < 1e-12,
+        "the confidence is the time share of the sign, {time_share}; got {}",
         loops[0].polarity_confidence
+    );
+}
+
+/// A stock `s` with an inflow loop and an outflow loop; the loop through
+/// `flipping` has gain `g` (+0.02, flipped to -0.02 for t in [100, 102)),
+/// the other loop gain `d` (0.01, raised to 2 in that window so it carries
+/// the partition while the first loop's sign is wrong).  With the inflow
+/// flipping the inflow loop is reinforcing-then-briefly-balancing (Rux);
+/// with the outflow flipping the outflow loop is the mirror (Bux).
+///
+/// Hand calculation, both loops through `s` in one partition, dt = 0.25
+/// over [0, 110] (441 saved steps, N of them active -- all but the startup
+/// step or two the flow-to-stock score leaves at zero): outside the window
+/// the flipping loop's raw score is 2 and the other's is 1 in magnitude, so
+/// the flipping loop's share is 2/3 at every one of its N - 8 same-sign
+/// steps; inside the window its raw score is ~0.0099 against the other
+/// loop's ~0.99, a share of ~0.0099 at each of its 8 opposite-sign steps.
+/// r ~= (N - 8) * 2/3 ~= 288, |b| ~= 8 * 0.0099 = 0.08, confidence
+/// (288 - 0.08) / 288.1 = 0.9994 for any N near 440: above the gate and
+/// below 1, `Mostly*`.
+fn competing_sign_flip_project(flipping: &str) -> simlin_engine::datamodel::Project {
+    let (inflow_gain, outflow_gain) = if flipping == "inflow" {
+        ("g", "d")
+    } else {
+        ("d", "g")
+    };
+    TestProject::new("competing_sign_flip")
+        .with_sim_time(0.0, 110.0, 0.25)
+        .aux(
+            "g",
+            "IF TIME < 100 OR TIME >= 102 THEN 0.02 ELSE -0.02",
+            None,
+        )
+        .aux("d", "IF TIME < 100 OR TIME >= 102 THEN 0.01 ELSE 2", None)
+        .stock("s", "100", &["f_in"], &["f_out"], None)
+        .flow("f_in", &format!("s * {inflow_gain}"), None)
+        .flow("f_out", &format!("s * {outflow_gain}"), None)
+        .build_datamodel()
+}
+
+/// Reclassify `competing_sign_flip_project(flipping)` on the exhaustive path
+/// and return the flipping loop (the one through `f_{flipping}`) with the
+/// sign counts of its relative series.
+fn reclassified_flipping_loop(flipping: &str) -> (DetectedLoop, usize, usize) {
+    let project = competing_sign_flip_project(flipping);
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let source_model = sync.models["main"].source_model;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert_eq!(
+        detected.loops.len(),
+        2,
+        "one inflow loop and one outflow loop"
+    );
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+    let mut loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
+    let relative = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
+    let flow = if flipping == "inflow" {
+        "f_in"
+    } else {
+        "f_out"
+    };
+    let l = loops
+        .iter()
+        .find(|l| l.variables.iter().any(|v| v == flow))
+        .expect("the flipping loop")
+        .clone();
+    let series = &relative[&l.id];
+    let positive = series.iter().filter(|v| **v > 0.0).count();
+    let negative = series.iter().filter(|v| **v < 0.0).count();
+    (l, positive, negative)
+}
+
+/// GH #679, the Rux arm on the relative base: a loop whose wrong-signed
+/// steps coincide with a sibling carrying the partition is
+/// `MostlyReinforcing` at the hand-calculated ~0.9994 (see
+/// `competing_sign_flip_project`).
+#[test]
+fn exhaustive_competing_sign_flip_reclassifies_to_rux() {
+    use simlin_engine::ltm::POLARITY_CONFIDENCE_THRESHOLD;
+    let (l, positive, negative) = reclassified_flipping_loop("inflow");
+    assert!(
+        positive > 400 && negative == 8,
+        "got {positive} positive, {negative} negative steps"
+    );
+    assert_eq!(
+        l.polarity,
+        DetectedLoopPolarity::MostlyReinforcing,
+        "got {:?} at confidence {}",
+        l.polarity,
+        l.polarity_confidence
+    );
+    assert!(
+        l.polarity_confidence >= POLARITY_CONFIDENCE_THRESHOLD
+            && l.polarity_confidence < 1.0
+            && (l.polarity_confidence - 0.9994).abs() < 1e-3,
+        "the Rux confidence is the hand-calculated ~0.9994; got {}",
+        l.polarity_confidence
+    );
+}
+
+/// The Bux arm: the mirror fixture (the OUTFLOW loop flips) is
+/// `MostlyBalancing` at the same ~0.9994.
+#[test]
+fn exhaustive_competing_sign_flip_reclassifies_to_bux() {
+    use simlin_engine::ltm::POLARITY_CONFIDENCE_THRESHOLD;
+    let (l, positive, negative) = reclassified_flipping_loop("outflow");
+    assert!(
+        negative > 400 && positive == 8,
+        "got {positive} positive, {negative} negative steps"
+    );
+    assert_eq!(
+        l.polarity,
+        DetectedLoopPolarity::MostlyBalancing,
+        "got {:?} at confidence {}",
+        l.polarity,
+        l.polarity_confidence
+    );
+    assert!(
+        l.polarity_confidence >= POLARITY_CONFIDENCE_THRESHOLD
+            && l.polarity_confidence < 1.0
+            && (l.polarity_confidence - 0.9994).abs() < 1e-3,
+        "the Bux confidence is the hand-calculated ~0.9994; got {}",
+        l.polarity_confidence
+    );
+}
+
+/// The yeast alcohol model (Schoenberg et al. 2020, section "yeast alcohol
+/// model": `b = c*(1.1 - 0.1*a)/b1`, `d = c*EXP(a - 11)/d1`, `da/dt = p*c`,
+/// c0 = 1, a0 = 0, b1 = 16, d1 = 30, p = 0.01, dt 0.5 over [0, 100]).
+/// Its growth loop `c -> b -> c` is reinforcing at every active step before
+/// the alcohol level pushes `1.1 - 0.1*a` negative (about 147 of them; the
+/// first scored step is start + dt) and balancing for the 53 after, so it
+/// is `Undetermined` on either base; on the relative base the confidence is
+/// about 0.967 (the reinforcing shares sum to some sixty times the balancing
+/// ones), the reading a dominance-weighted time share gives it. The test
+/// reads the counts and the sums off the series the classifier saw.
+#[test]
+fn yeast_growth_loop_stays_undetermined_on_the_relative_base() {
+    use simlin_engine::ltm::POLARITY_CONFIDENCE_THRESHOLD;
+    let project = TestProject::new("yeast")
+        .with_sim_time(0.0, 100.0, 0.5)
+        .stock("c", "1", &["b"], &["d"], None)
+        .stock("a", "0", &["prod"], &[], None)
+        .aux("b1", "16", None)
+        .aux("d1", "30", None)
+        .aux("p", "0.01", None)
+        .flow("b", "c * (1.1 - 0.1 * a) / b1", None)
+        .flow("d", "c * EXP(a - 11) / d1", None)
+        .flow("prod", "p * c", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let source_model = sync.models["main"].source_model;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("the yeast model simulates");
+    let results = vm.into_results();
+    let mut loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
+    let relative = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
+
+    let growth = loops
+        .iter()
+        .find(|l| {
+            let mut vars = l.variables.clone();
+            vars.sort();
+            vars == ["b", "c"]
+        })
+        .expect("the c -> b -> c growth loop");
+    let series = &relative[&growth.id];
+    let positive = series.iter().filter(|v| **v > 0.0).count();
+    let negative = series.iter().filter(|v| **v < 0.0).count();
+    assert_eq!(negative, 53, "balancing once 1.1 - 0.1 * a turns negative");
+    assert!(
+        (146..=148).contains(&positive),
+        "reinforcing at every active step before that; got {positive}"
+    );
+    let r: f64 = series.iter().filter(|v| **v > 0.0).sum();
+    let b: f64 = series.iter().filter(|v| **v < 0.0).map(|v| -v).sum();
+    let ratio = (r - b).abs() / (r + b);
+    assert!(
+        (growth.polarity_confidence - ratio).abs() < 1e-12,
+        "the confidence is the dominance ratio of the relative series, {ratio}; got {}",
+        growth.polarity_confidence
+    );
+    assert_eq!(
+        growth.polarity,
+        DetectedLoopPolarity::Undetermined,
+        "got {:?} at confidence {}",
+        growth.polarity,
+        growth.polarity_confidence
+    );
+    assert!(
+        (growth.polarity_confidence - 0.967).abs() < 2e-3
+            && growth.polarity_confidence < POLARITY_CONFIDENCE_THRESHOLD,
+        "the relative-base confidence is about 0.967; got {}",
+        growth.polarity_confidence
     );
 }
 
@@ -10582,12 +10792,16 @@ fn exhaustive_mixed_sign_dominant_loop_reclassifies_to_rux() {
 fn exhaustive_mixed_sign_balanced_loop_stays_undetermined() {
     use simlin_engine::ltm::POLARITY_CONFIDENCE_THRESHOLD;
 
-    // Two phases of equal length and comparable per-step magnitude (the
-    // score is +1 then -1 per step), so the dominance ratio is far below
-    // the 0.99 gate.
+    // Two phases of comparable per-step magnitude (the loop is alone in
+    // its partition, so its relative score is +1 then -1 per step) and
+    // UNEQUAL length -- reinforcing for the first twelve time units of
+    // twenty, balancing for the last eight -- so the dominance ratio is the
+    // time share of the signs, about 0.2: well below the 0.99 gate and,
+    // deliberately, not the exact 0 an equal split would give, which the
+    // structural sentinel could not be told from.
     let project = TestProject::new("u_mixed_sign")
         .with_sim_time(0.0, 20.0, 0.25)
-        .aux("g", "IF TIME < 10 THEN 0.02 ELSE -0.02", None)
+        .aux("g", "IF TIME < 12 THEN 0.02 ELSE -0.02", None)
         .stock("s", "100", &["f"], &[], None)
         .flow("f", "s * g", None)
         .build_datamodel();
@@ -10606,73 +10820,244 @@ fn exhaustive_mixed_sign_balanced_loop_stays_undetermined() {
     let mut loops = detected.loops.clone();
     reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
 
+    // The lone loop's relative series is exactly +1/-1 while active, so the
+    // confidence is the time share of its signs, read off the series.
+    let relative = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
+    let series = &relative[&loops[0].id];
+    assert!(series.iter().all(|v| *v == 0.0 || v.abs() == 1.0));
+    let positive = series.iter().filter(|v| **v > 0.0).count() as f64;
+    let negative = series.iter().filter(|v| **v < 0.0).count() as f64;
+    assert!(
+        negative == 32.0 && positive > negative,
+        "balancing at each of the 32 steps in (12, 20], reinforcing before; got {positive}/{negative}"
+    );
+    let time_share = (positive - negative) / (positive + negative);
+
     assert_eq!(
         loops[0].polarity,
         DetectedLoopPolarity::Undetermined,
         "comparable-magnitude mixed signs stay Undetermined below the Rux gate"
     );
     assert!(
-        loops[0].polarity_confidence > 0.0
-            && loops[0].polarity_confidence < POLARITY_CONFIDENCE_THRESHOLD,
-        "the runtime U confidence is the real sub-threshold dominance ratio, not the \
-         structural 0.0 sentinel; got {}",
+        (loops[0].polarity_confidence - time_share).abs() < 1e-12
+            && time_share > 0.1
+            && time_share < POLARITY_CONFIDENCE_THRESHOLD,
+        "the runtime U confidence is the real sub-threshold dominance ratio ({time_share}), \
+         not the structural 0.0 sentinel; got {}",
         loops[0].polarity_confidence
     );
 }
 
 /// GH #679 parity: discovery mode and the exhaustive runtime-reclassification
-/// path must agree on the Rux fixture -- same `MostlyReinforcing` label and
-/// the same dominance-ratio confidence. Both classify via
-/// `LoopPolarity::from_runtime_scores`; for this single-loop fixture the
-/// discovery score series is the same per-step product of
-/// link scores the exhaustive `loop_score` variable computes, so the two
-/// modes must not disagree about the same model.
+/// path classify the same partition-relative series, so they agree on both
+/// fixtures -- the lone loop (`Undetermined` at its time share) and the
+/// competing Rux loop -- label and confidence alike. The discovery series
+/// is the same per-step product of link scores the exhaustive `loop_score`
+/// variable computes, normalized against the same partition.
 #[test]
-fn discovery_rux_classification_matches_exhaustive() {
-    use simlin_engine::ltm::{LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD};
+fn discovery_classification_matches_exhaustive_on_the_relative_base() {
+    use simlin_engine::ltm::LoopPolarity;
 
-    let project = mixed_sign_dominant_loop_project();
+    let exhaustive = |project: &simlin_engine::datamodel::Project, flow: &str| {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, project, None);
+        let source_model = sync.models["main"].source_model;
+        let detected = model_detected_loops(&db, source_model, sync.project);
+        let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(project);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().expect("exhaustive simulation should run");
+        let results = vm.into_results();
+        let mut loops = detected.loops.clone();
+        reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
+        loops
+            .into_iter()
+            .find(|l| l.variables.iter().any(|v| v == flow))
+            .expect("the loop through the flow")
+    };
+    let discovered = |project: &simlin_engine::datamodel::Project, flow: &str| {
+        let (_results, found) = run_discovery(project);
+        found
+            .into_iter()
+            .find(|fl| fl.loop_info.links.iter().any(|l| l.from.as_str() == flow))
+            .expect("discovery finds the loop through the flow")
+    };
+    let to_ltm = |p: DetectedLoopPolarity| match p {
+        DetectedLoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
+        DetectedLoopPolarity::Balancing => LoopPolarity::Balancing,
+        DetectedLoopPolarity::MostlyReinforcing => LoopPolarity::MostlyReinforcing,
+        DetectedLoopPolarity::MostlyBalancing => LoopPolarity::MostlyBalancing,
+        DetectedLoopPolarity::Undetermined => LoopPolarity::Undetermined,
+    };
 
-    // Exhaustive: reclassify the detected loop from the simulated series.
+    for (project, flow, expected) in [
+        (
+            mixed_sign_dominant_loop_project(),
+            "f",
+            LoopPolarity::Undetermined,
+        ),
+        (
+            competing_sign_flip_project("inflow"),
+            "f_in",
+            LoopPolarity::MostlyReinforcing,
+        ),
+    ] {
+        let e = exhaustive(&project, flow);
+        let d = discovered(&project, flow);
+        assert_eq!(to_ltm(e.polarity), expected, "exhaustive label on {flow}");
+        assert_eq!(d.loop_info.polarity, expected, "discovery label on {flow}");
+        // Both modes classify the same per-step product of the same link-score
+        // series over the same partition total, so the confidences agree to
+        // float precision -- a loose 1e-6 tolerance allows for the two paths'
+        // different accumulation order.
+        assert!(
+            (d.polarity_confidence - e.polarity_confidence).abs() < 1e-6,
+            "{flow}: discovery confidence {} must match exhaustive confidence {}",
+            d.polarity_confidence,
+            e.polarity_confidence
+        );
+    }
+}
+
+/// The all-slots reading of an A2A loop: `reclassify_loops_from_results`
+/// concatenates every element slot's relative series into one sample set,
+/// so a loop reinforcing in one element and balancing in another is
+/// `Undetermined` -- the loop's sign is not uniform across the array --
+/// even though each element on its own is single-signed and the structural
+/// label (the bare co-factor `g` signs `s -> f` Positive) is Reinforcing.
+/// Each region is an isolated one-stock loop, so its relative score is
+/// exactly `+1` (region `a`, `g = 0.02`) or `-1` (region `b`, `g = -0.02`)
+/// at every active step, and the two slots cancel: confidence exactly 0.
+#[test]
+fn exhaustive_a2a_loop_with_opposite_signed_elements_is_undetermined() {
+    let project = TestProject::new("a2a_mixed_elements")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("region", &["a", "b"])
+        .array_stock("s[region]", "100", &["f"], &[], None)
+        .array_flow("f[region]", "s[region] * g[region]", None)
+        .array_with_ranges("g[region]", vec![("a", "0.02"), ("b", "-0.02")])
+        .build_datamodel();
+
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     let source_model = sync.models["main"].source_model;
     let detected = model_detected_loops(&db, source_model, sync.project);
+    assert_eq!(detected.loops.len(), 1, "one A2A loop over both regions");
+    assert_eq!(
+        detected.loops[0].polarity,
+        DetectedLoopPolarity::Reinforcing,
+        "the bare co-factor g signs s -> f Positive, so the structural label is Reinforcing"
+    );
+    let id = detected.loops[0].id.clone();
+
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    assert_eq!(loop_partitions[&id].len(), 2, "one slot per region");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
+
+    // The owner's series is step-major, `series[t * 2 + k]`: region a in
+    // slot 0, region b in slot 1.
+    let relative = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
+    let series = &relative[&id];
+    assert_eq!(series.len(), 2 * results.step_count);
+    let mut active_steps = 0;
+    for t in 0..results.step_count {
+        let (a, b) = (series[2 * t], series[2 * t + 1]);
+        assert_eq!(
+            a == 0.0,
+            b == 0.0,
+            "both regions are active at the same steps"
+        );
+        if a != 0.0 {
+            active_steps += 1;
+            assert_eq!(
+                a, 1.0,
+                "region a is an isolated reinforcing loop at step {t}"
+            );
+            assert_eq!(
+                b, -1.0,
+                "region b is an isolated balancing loop at step {t}"
+            );
+        }
+    }
+    assert!(active_steps > 0, "the loop is active");
+
+    let mut loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
+    assert_eq!(
+        loops[0].polarity,
+        DetectedLoopPolarity::Undetermined,
+        "one reinforcing element and one balancing element read together are \
+         Undetermined; got {:?} at confidence {}",
+        loops[0].polarity,
+        loops[0].polarity_confidence
+    );
+    assert_eq!(
+        loops[0].polarity_confidence, 0.0,
+        "the two slots carry equal mass of opposite sign"
+    );
+}
+
+/// A loop that is never active -- `f = s * g` with `g = 0`, so neither `f`
+/// nor `s` ever changes and every link score is exactly zero -- is not
+/// reported by discovery at all: enumeration considers only edges active at
+/// some step, and `rank_and_filter`'s retention keeps a loop only for a step
+/// at which it holds `MIN_CONTRIBUTION` of its partition.  So discovery never
+/// asks the classifier about a series with no valid sample.  The exhaustive
+/// surface does report the loop, from the structural analysis, and
+/// reclassification leaves that label alone: with no runtime evidence there
+/// is nothing to override it with.
+#[test]
+fn never_active_loop_is_structural_on_the_exhaustive_surface_and_absent_from_discovery() {
+    let project = TestProject::new("never_active")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("g", "0", None)
+        .stock("s", "100", &["f"], &[], None)
+        .flow("f", "s * g", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let source_model = sync.models["main"].source_model;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert_eq!(detected.loops.len(), 1, "the loop exists structurally");
+    let structural = (
+        detected.loops[0].polarity,
+        detected.loops[0].polarity_confidence,
+    );
+
     let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
     let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().expect("exhaustive simulation should run");
+    vm.run_to_end().expect("simulation should run");
     let results = vm.into_results();
-    let mut exhaustive_loops = detected.loops.clone();
-    reclassify_loops_from_results(&mut exhaustive_loops, &results, &loop_partitions);
-    assert_eq!(
-        exhaustive_loops[0].polarity,
-        DetectedLoopPolarity::MostlyReinforcing
-    );
-    let exhaustive_confidence = exhaustive_loops[0].polarity_confidence;
-
-    // Discovery: run loop discovery over the discovery-mode sim.
-    let (_discovery_results, found) = run_discovery(&project);
-    assert_eq!(found.len(), 1, "discovery finds the single feedback loop");
-
-    assert_eq!(
-        found[0].loop_info.polarity,
-        LoopPolarity::MostlyReinforcing,
-        "discovery must report the same Rux label exhaustive reclassification does"
-    );
+    let relative = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     assert!(
-        found[0].polarity_confidence >= POLARITY_CONFIDENCE_THRESHOLD
-            && found[0].polarity_confidence < 1.0,
-        "discovery Rux confidence must clear the gate and stay below 1.0; got {}",
-        found[0].polarity_confidence
+        relative[&detected.loops[0].id]
+            .iter()
+            .all(|v| *v == 0.0 || v.is_nan()),
+        "the loop's relative series has no valid sample"
     );
-    // Both modes classify the same per-step product of the same link-score
-    // series, so the confidences agree to float precision -- a loose 1e-6
-    // tolerance allows for the two paths' different accumulation order.
+    let mut loops = detected.loops.clone();
+    reclassify_loops_from_results(&mut loops, &results, &loop_partitions);
+    assert_eq!(
+        (loops[0].polarity, loops[0].polarity_confidence),
+        structural,
+        "no runtime evidence, so the structural label stands"
+    );
+
+    let (_results, found) = run_discovery(&project);
     assert!(
-        (found[0].polarity_confidence - exhaustive_confidence).abs() < 1e-6,
-        "discovery confidence {} must match exhaustive confidence {}",
-        found[0].polarity_confidence,
-        exhaustive_confidence
+        found.is_empty(),
+        "discovery does not report a never-active loop; got {:?}",
+        found
+            .iter()
+            .map(|fl| fl
+                .loop_info
+                .links
+                .iter()
+                .map(|l| l.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
     );
 }
 
