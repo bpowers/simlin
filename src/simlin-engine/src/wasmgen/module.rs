@@ -39,8 +39,9 @@
 //! nested modules (incl. SMOOTH/DELAY stdlib expansions), QUEUE models (whose
 //! per-step FIFO side-table pass is lowered by [`super::passes`]), and CONVEYOR
 //! models (whose per-step belt pass is lowered by [`super::belt`]). A genuine
-//! runtime view range (`ViewRangeDynamic`), array unrolling past the per-function
-//! budget, or a conveyor construct [`super::belt::reject_unsupported`] refuses
+//! runtime view range (`ViewRangeDynamic`), array unrolling past the per-program
+//! work budget, an emitted function exceeding the host's byte limit, or a
+//! conveyor construct [`super::belt::reject_unsupported`] refuses
 //! returns `WasmGenError::Unsupported`.
 
 use wasm_encoder::Instruction as I;
@@ -65,6 +66,7 @@ use super::lower::{
     self, BuiltHelpers, HelperFn, build_helpers, f64_const, max_condition_depth, memarg,
 };
 use super::passes::{self, QueuePass, QueuePassLayout, QueuePassLocals};
+use super::split::{self, ProgramHelper, ProgramSplitter};
 
 // Reserved global slots, mirroring `crate::vm`.
 const TIME_OFF: usize = 0;
@@ -467,7 +469,8 @@ fn build_gf_regions(
 // The module's function slots are: the emitted helper functions
 // ([`lower::build_helpers`]) at `0..n_helpers`, then one
 // `[initials, flows, stocks]` triple per module instance (in `instance_order`),
-// then `run` last. So instance `i`'s `StepPart` function is at
+// then the fixed driver entries, optional reconciliation initials, and appended
+// program-partition helpers. Instance `i`'s `StepPart` function is at
 // `n_helpers + i*FUNCS_PER_INSTANCE + {F_INITIALS,F_FLOWS,F_STOCKS}`, and `run`
 // is at `n_helpers + n_instances*FUNCS_PER_INSTANCE`. Keeping these relative
 // (and adding `n_helpers`/the triple base at the call/export sites) means new
@@ -476,12 +479,13 @@ const F_INITIALS: u32 = 0;
 const F_FLOWS: u32 = 1;
 const F_STOCKS: u32 = 2;
 const FUNCS_PER_INSTANCE: u32 = 3;
+const DRIVER_FUNCTION_COUNT: u32 = 7;
 
 /// The function index of `run` (the first driver function, after the helpers and
 /// the per-instance triples). The driver functions follow in this fixed order:
 /// `run`, `set_value`, `reset`, `clear_values`, `run_to`, `run_initials`,
-/// `get_error` -- each addition appending, so earlier indices stay stable. The
-/// optional container-skipping initials is last of all. Used both at emit time
+/// `get_error`. Optional container-skipping initials follow the drivers, then
+/// program-partition helpers. Used both at emit time
 /// (`compile_with_passes`, to resolve the delegation targets) and at assembly time
 /// (`assemble_simulation`), so the two never drift.
 fn run_fn_index_of(n_helpers: u32, n_instances: u32) -> u32 {
@@ -539,7 +543,7 @@ struct PerInstance<'a> {
 /// plain, un-fused scalar set (the VM's superinstruction fusion runs on a private
 /// execution copy), so each `Opcode` lowers via [`lower::emit_bytecode`].
 /// Anything outside the supported set -- an unsupported opcode, or array
-/// unrolling past the per-function budget -- returns [`WasmGenError::Unsupported`]
+/// unrolling past the per-program work budget -- returns [`WasmGenError::Unsupported`]
 /// rather than emitting a wrong module.
 ///
 /// This is the ORDINARY-model entry point: no conveyor or queue pass is
@@ -566,7 +570,7 @@ pub(super) fn compile_simulation_with_fault(
     sim: &CompiledSimulation,
     fault: errors::FaultInjection,
 ) -> Result<WasmArtifact, WasmGenError> {
-    compile_with_passes(sim, &[], &[], Some(fault))
+    compile_with_passes(sim, &[], &[], Some(fault), split::TARGET_BODY_BYTES)
 }
 
 /// [`compile_simulation`] for a special-stock `CompiledSimulation`: additionally
@@ -583,7 +587,13 @@ pub fn compile_simulation_with_plans(
     conveyor_plans: &[ConveyorPlan],
     queue_plans: &[QueuePlan],
 ) -> Result<WasmArtifact, WasmGenError> {
-    compile_with_passes(sim, conveyor_plans, queue_plans, None)
+    compile_with_passes(
+        sim,
+        conveyor_plans,
+        queue_plans,
+        None,
+        split::TARGET_BODY_BYTES,
+    )
 }
 
 /// Whether a module's passes can raise a runtime error, i.e. whether the drivers
@@ -627,6 +637,7 @@ fn compile_with_passes(
     conveyor_plans: &[ConveyorPlan],
     queue_plans: &[QueuePlan],
     fault: Option<errors::FaultInjection>,
+    target_body_bytes: usize,
 ) -> Result<WasmArtifact, WasmGenError> {
     belt::reject_unsupported(conveyor_plans)?;
     // Decides three things, all no-ops for a model whose passes are total: the
@@ -1068,6 +1079,12 @@ fn compile_with_passes(
         )
         .collect();
     let mut initials_skipping_fn: Option<Function> = None;
+    // Program partitions follow every fixed entry point, so a phase can call
+    // any child's phase before the number of partitions is known.
+    let first_partition_index = run_fn_index_of(n_helpers, instances.len() as u32)
+        + DRIVER_FUNCTION_COUNT
+        + u32::from(!reconcile_skip.is_empty());
+    let mut splitter = ProgramSplitter::new(first_partition_index, target_body_bytes);
 
     let mut program_fns: Vec<Function> = Vec::with_capacity(instances.len() * 3);
     for (inst_idx, inst) in instances.iter().enumerate() {
@@ -1112,18 +1129,21 @@ fn compile_with_passes(
             inst.n_inputs,
             &make_ctx,
             None,
+            &mut splitter,
         )?);
         program_fns.push(emit_opcode_fn(
             &inst.module.compiled_flows,
             inst.n_inputs,
             StepPart::Flows,
             &make_ctx,
+            &mut splitter,
         )?);
         program_fns.push(emit_opcode_fn(
             &inst.module.compiled_stocks,
             inst.n_inputs,
             StepPart::Stocks,
             &make_ctx,
+            &mut splitter,
         )?);
         // Container stocks and conveyor stocks are variables of the MAIN model
         // (expansion appends them there), so only the root instance can hold one; a
@@ -1135,6 +1155,7 @@ fn compile_with_passes(
                 inst.n_inputs,
                 &make_ctx,
                 Some(&reconcile_skip),
+                &mut splitter,
             )?);
         }
     }
@@ -1172,7 +1193,7 @@ fn compile_with_passes(
     let reset_fn_index = run_fn_index + 2;
     let run_to_fn_index = run_fn_index + 4;
     let run_initials_fn_index = run_fn_index + 5;
-    let initials_skipping_fn_index = run_fn_index + 7;
+    let initials_skipping_fn_index = run_fn_index + DRIVER_FUNCTION_COUNT;
 
     // The resumable run ABI: `run_initials` (idempotent), `run_to(target)` (the
     // single shared stepping loop), and `run` (re-expressed as `reset;
@@ -1236,6 +1257,7 @@ fn compile_with_passes(
     let wasm = assemble_simulation(AssembleParts {
         helpers,
         program_fns,
+        program_helpers: splitter.functions,
         run_fn,
         set_value_fn,
         reset_fn,
@@ -1253,7 +1275,7 @@ fn compile_with_passes(
         gf_regions: &gf_images,
         const_init: &const_init,
         belt_init_data: &belt_init_data,
-    });
+    })?;
 
     let var_offsets = sim
         .offsets
@@ -1326,6 +1348,7 @@ fn emit_initials_fn<'a>(
     n_inputs: u32,
     make_ctx: &impl Fn(usize, u32, StepPart) -> lower::EmitCtx<'a>,
     skip_offsets: Option<&std::collections::HashSet<usize>>,
+    splitter: &mut ProgramSplitter,
 ) -> Result<Function, WasmGenError> {
     let cond_depth = module
         .compiled_initials
@@ -1350,7 +1373,9 @@ fn emit_initials_fn<'a>(
         .max()
         .unwrap_or(0);
     let ctx = make_ctx(cond_depth, extra_i32, StepPart::Initials);
-    let mut f = new_opcode_fn(n_inputs, cond_depth, extra_i32, module_input_scratch);
+    let frame = new_opcode_fn(n_inputs, cond_depth, extra_i32, module_input_scratch);
+    let mut f = frame.clone();
+    let mut safe_offsets = Vec::new();
     for ci in module.compiled_initials.iter() {
         if let Some(skip) = skip_offsets
             && !ci.offsets.is_empty()
@@ -1358,10 +1383,10 @@ fn emit_initials_fn<'a>(
         {
             continue;
         }
-        lower::emit_bytecode(&ci.bytecode, &ctx, &mut f)?;
+        safe_offsets.extend(lower::emit_bytecode(&ci.bytecode, &ctx, &mut f)?);
     }
     f.instruction(&I::End);
-    Ok(f)
+    splitter.finish(frame, f, &safe_offsets, n_inputs)
 }
 
 /// Build one opcode-program function from a single `ByteCode`, lowering it as
@@ -1373,15 +1398,17 @@ fn emit_opcode_fn<'a>(
     n_inputs: u32,
     step_part: StepPart,
     make_ctx: &impl Fn(usize, u32, StepPart) -> lower::EmitCtx<'a>,
+    splitter: &mut ProgramSplitter,
 ) -> Result<Function, WasmGenError> {
     let cond_depth = max_condition_depth(bc);
     let extra_i32 = lower::count_extra_i32_locals(bc);
     let module_input_scratch = lower::count_module_input_scratch(bc);
     let ctx = make_ctx(cond_depth, extra_i32, step_part);
-    let mut f = new_opcode_fn(n_inputs, cond_depth, extra_i32, module_input_scratch);
-    lower::emit_bytecode(bc, &ctx, &mut f)?;
+    let frame = new_opcode_fn(n_inputs, cond_depth, extra_i32, module_input_scratch);
+    let mut f = frame.clone();
+    let safe_offsets = lower::emit_bytecode(bc, &ctx, &mut f)?;
     f.instruction(&I::End);
-    Ok(f)
+    splitter.finish(frame, f, &safe_offsets, n_inputs)
 }
 
 /// A fresh opcode-program `Function` for an instance with `n_inputs` f64 input
@@ -2935,6 +2962,9 @@ struct AssembleParts<'a> {
     /// `[initials_0, flows_0, stocks_0, initials_1, ...]`. `instance_input_counts`
     /// (same instance order) gives each triple's f64 input-param count.
     program_fns: Vec<Function>,
+    /// Bounded opcode-program bodies called by the phase entries, appended
+    /// after the driver functions and optional reconcile-skipping initials.
+    program_helpers: Vec<ProgramHelper>,
     /// `run() -> ()`, re-expressed as `reset; run_to(stop)`.
     run_fn: Function,
     /// `set_value(offset: i32, val: f64) -> i32` (Phase 7 Task 2).
@@ -2984,15 +3014,16 @@ struct AssembleParts<'a> {
 /// functions ([`build_helpers`], plus the queue pass's FIFO primitives when the
 /// model has one) lead the function/code sections (indices `0..n_helpers`); then
 /// one `[initials, flows, stocks]` triple per module instance (in
-/// `instance_order`); then the seven drivers, and last -- for a queue model with
-/// container variables -- the root's container-skipping initials. Exports
+/// `instance_order`); then the fixed drivers and optional reconciliation initials,
+/// followed by all opcode-program partitions. Exports
 /// `memory`, `run`, and the three self-describing i32 geometry globals. Each
 /// GF-bearing instance contributes two active `DataSection` segments (its
 /// directory + data) at its own bases.
-fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
+fn assemble_simulation(parts: AssembleParts) -> Result<Vec<u8>, WasmGenError> {
     let AssembleParts {
         helpers,
         program_fns,
+        program_helpers,
         run_fn,
         set_value_fn,
         reset_fn,
@@ -3096,6 +3127,9 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         // type `(module_off: i32) -> ()`; the root always takes 0 module inputs.
         functions.function(opcode_type_index[&0]);
     }
+    for helper in &program_helpers {
+        functions.function(opcode_type_index[&helper.n_inputs]);
+    }
     wasm.section(&functions);
 
     let mut memories = MemorySection::new();
@@ -3188,21 +3222,25 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     // functions in index order: `run`, `set_value`, `reset`, `clear_values`,
     // `run_to`, `run_initials`, `get_error`.
     let mut code = CodeSection::new();
-    for hf in &helpers.functions {
-        code.function(&hf.body);
-    }
-    for program in &program_fns {
-        code.function(program);
-    }
-    code.function(&run_fn);
-    code.function(&set_value_fn);
-    code.function(&reset_fn);
-    code.function(&clear_values_fn);
-    code.function(&run_to_fn);
-    code.function(&run_initials_fn);
-    code.function(&get_error_fn);
-    if let Some(skipping) = &initials_skipping_fn {
-        code.function(skipping);
+    for body in helpers
+        .functions
+        .iter()
+        .map(|helper| &helper.body)
+        .chain(&program_fns)
+        .chain([
+            &run_fn,
+            &set_value_fn,
+            &reset_fn,
+            &clear_values_fn,
+            &run_to_fn,
+            &run_initials_fn,
+            &get_error_fn,
+        ])
+        .chain(initials_skipping_fn.as_ref())
+        .chain(program_helpers.iter().map(|helper| &helper.body))
+    {
+        split::check_function(body)?;
+        code.function(body);
     }
     wasm.section(&code);
 
@@ -3248,9 +3286,13 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         wasm.section(&data);
     }
 
-    wasm.finish()
+    Ok(wasm.finish())
 }
 
 #[cfg(test)]
 #[path = "module_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "split_tests.rs"]
+mod split_tests;

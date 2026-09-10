@@ -11,10 +11,11 @@
 //! The intended use case is interactive scrubbing: compile a model to wasm
 //! once, then re-run it on every slider change at display refresh rates.
 //!
-//! The backend walks every module instance's un-fused opcode programs
+//! The backend walks every module instance's opcode programs
 //! (`compiled_initials`/`compiled_flows`/`compiled_stocks`) and emits a wasm
-//! function-triple per `(model, input_set)` instance plus a `run` driver (see
-//! `lower` for the per-opcode lowering and `module` for whole-model assembly).
+//! function-triple per `(model, input_set)` instance plus simulation drivers.
+//! Large phase bodies call smaller helpers partitioned at boundaries with no
+//! live runtime evaluation state (see `lower`, `split`, and `module`).
 //! Modules are emitted with the `wasm-encoder` crate; correctness is validated
 //! in tests by executing the emitted module under the DLR-FT `wasm-interpreter`
 //! and comparing against the bytecode VM.
@@ -27,7 +28,8 @@
 //! leaks, zones, discrete admission, `<sample>`/`<arrest>`, container access,
 //! and queue coupling -- is hand-lowered by `belt`) are in place. A genuine
 //! runtime view range (`ViewRangeDynamic`), array unrolling past the
-//! per-function budget, or a conveyor inflow carrying a non-default
+//! per-program work budget, an emitted function exceeding the host's byte limit,
+//! or a conveyor inflow carrying a non-default
 //! `isee:spreadflow` (`even`/`dest`/`dist`/`source`, §8, GH #946 -- see
 //! `belt::reject_unsupported`) returns `WasmGenError::Unsupported`.
 //!
@@ -56,6 +58,7 @@ mod lower;
 mod math;
 mod module;
 mod passes;
+mod split;
 mod vector;
 mod views;
 
@@ -71,10 +74,11 @@ use std::fmt;
 ///
 /// The backend covers the full scalar + array opcode set, Euler/RK2/RK4
 /// integration, nested modules (including SMOOTH/DELAY stdlib expansions), and both
-/// special stock types -- queue models and conveyor models. Four constructs return
+/// special stock types -- queue models and conveyor models. Unsupported constructs return
 /// `Unsupported` rather than silently emitting an incorrect module: a genuine
-/// runtime view range (`ViewRangeDynamic`), array unrolling past the per-function
-/// budget, and the two conditions `belt::reject_unsupported` refuses -- a conveyor
+/// runtime view range (`ViewRangeDynamic`), array unrolling past the per-program
+/// work budget, an emitted function exceeding the host's byte limit, and the two
+/// conditions `belt::reject_unsupported` refuses -- a conveyor
 /// inflow carrying a non-default `isee:spreadflow` (`even`/`dest`/`dist`/`source`,
 /// §8, GH #946), and a `conveyor::slat_bound()` above `i32::MAX` (a soundness guard
 /// on the emitted `i32.trunc_f64_s` narrowings, not a feature gap).

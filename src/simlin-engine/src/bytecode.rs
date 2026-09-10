@@ -1230,13 +1230,13 @@ macro_rules! declare_opcodes {
 
         impl Opcode {
             /// Returns (pops, pushes) describing this opcode's effect on the arithmetic stack.
-            /// Used by `ByteCode::max_stack_depth` to statically validate that compiled
-            /// bytecode cannot overflow the fixed-size VM stack.
+            /// Used by `ByteCode::max_stack_depth` to validate the VM stack bound
+            /// and by wasm lowering to locate empty-stack function boundaries.
             ///
             /// Opcodes that only affect the view stack or the iter stack return
             /// (0, 0) since they don't touch the arithmetic stack.
             #[allow(unused_variables)]
-            fn stack_effect(&self) -> (u8, u8) {
+            pub(crate) fn stack_effect(&self) -> (u8, u8) {
                 match *self {
                     $( Opcode::$name $({ $($field),* })? => ($pops, $pushes), )*
                 }
