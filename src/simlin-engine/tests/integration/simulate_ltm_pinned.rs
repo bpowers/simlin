@@ -2095,3 +2095,240 @@ fn pinned_loop_through_unscoreable_edge_skipped_with_single_warnings() {
     vm.run_to_end()
         .expect("simulation should run to completion");
 }
+
+/// The `hero_culture_ltm` fixture's fourteen `loopMetadata` entries name
+/// their variables by uid (each variable carries the uid of its diagram
+/// element, the one number space `patch::next_available_uid` spans), so
+/// every pin resolves, validates against the causal graph, and -- in
+/// discovery mode, where a pin is the only way a specific loop is scored --
+/// emits a non-trivial `pin{n}` loop score.
+#[test]
+fn hero_culture_fixture_pins_all_resolve_and_score() {
+    let f = std::fs::File::open("../../test/hero_culture_ltm/hero_culture.sd.json").unwrap();
+    let json_project =
+        simlin_engine::json::Project::from_reader(std::io::BufReader::new(f)).unwrap();
+    let project: datamodel::Project = json_project.into();
+    let pins = project.models[0].loop_metadata.len();
+    assert_eq!(pins, 14, "the fixture declares fourteen pins");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
+    let pin_warnings: Vec<String> = diagnostics
+        .iter()
+        .map(|d| format!("{:?}", d.error))
+        .filter(|m| m.contains("pinned"))
+        .collect();
+    assert!(
+        pin_warnings.is_empty(),
+        "every fixture pin resolves and validates; got {pin_warnings:#?}"
+    );
+
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let pin_ids: Vec<String> = (1..=pins).map(|n| format!("pin{n}")).collect();
+    for id in &pin_ids {
+        assert!(
+            ltm.vars
+                .iter()
+                .any(|v| v.name == format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{id}")),
+            "{id} is scored; have {:?}",
+            ltm.vars
+                .iter()
+                .filter(|v| v.name.contains("loop_score"))
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("the fixture compiles with its pins");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    for id in &pin_ids {
+        assert_loop_score_is_link_product(&results, id);
+    }
+    // Relative-score sanity through the one normalization owner: every pin's
+    // share of its partition is finite and bounded, and is non-zero at some
+    // step (a pin that never carries any share would be scoring nothing).
+    let relative = simlin_engine::ltm_post::compute_rel_loop_scores(&results, &ltm.loop_partitions);
+    for id in &pin_ids {
+        let series = relative
+            .get(id)
+            .unwrap_or_else(|| panic!("{id} has a relative series; have {:?}", relative.keys()));
+        assert!(
+            series
+                .iter()
+                .all(|v| v.is_finite() && v.abs() <= 1.0 + 1e-12),
+            "{id}: relative scores are finite and bounded; got {series:?}"
+        );
+        assert!(
+            series.iter().any(|v| *v != 0.0),
+            "{id}: the pin carries a share of its partition at some step"
+        );
+    }
+}
+
+/// A pin whose uids match no variable is reported with the entry's own
+/// identity -- its name AND its uids as written -- and with the cause when
+/// the model's variables carry no uid at all, which is the shape a pin
+/// written against diagram-element uids takes (the fixture above before it
+/// was regenerated). The name alone is not an identity: the fixture has four
+/// entries named "Technical Debt Spiral".
+#[test]
+fn a_pin_whose_uids_match_no_variable_is_reported_with_its_identity() {
+    // No `assign_uids`: the variables carry none, so nothing can match.
+    let mut project = TestProject::new("ghost_pin")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * 0.08", None)
+        .build_datamodel();
+    project.models[0]
+        .loop_metadata
+        .push(datamodel::LoopMetadata {
+            uids: vec![7, 4],
+            deleted: false,
+            name: "Ghost".to_string(),
+            description: String::new(),
+        });
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
+    let message = diagnostics
+        .iter()
+        .map(|d| format!("{:?}", d.error))
+        .find(|m| m.contains("'Ghost'"))
+        .unwrap_or_else(|| panic!("the pin is reported; got {:?}", diagnostics));
+    for needle in [
+        "(uids [7, 4])",
+        "names 0",
+        "uids [4, 7] match no variable's uid",
+        "no variable in the model carries a uid",
+    ] {
+        assert!(message.contains(needle), "{needle:?} in {message}");
+    }
+}
+
+/// A pin with one stale uid beside one that resolves fails the two-variable
+/// gate and names the stale uid; the model's other variables DO carry uids,
+/// so the message does not claim none do.
+#[test]
+fn a_pin_with_a_stale_uid_names_it() {
+    let mut project = two_loop_population();
+    // `population` is uid 1 (`assign_uids` numbers in declaration order);
+    // 99 was never assigned.
+    project.models[0]
+        .loop_metadata
+        .push(datamodel::LoopMetadata {
+            uids: vec![1, 99],
+            deleted: false,
+            name: "Half".to_string(),
+            description: String::new(),
+        });
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
+    let message = diagnostics
+        .iter()
+        .map(|d| format!("{:?}", d.error))
+        .find(|m| m.contains("'Half'"))
+        .unwrap_or_else(|| panic!("the pin is reported; got {:?}", diagnostics));
+    assert!(message.contains("(uids [1, 99]) names 1"), "{message}");
+    assert!(
+        message.contains("uids [99] match no variable's uid"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("no variable in the model carries a uid"),
+        "{message}"
+    );
+}
+
+/// A pin that drops a stale uid but whose surviving variables still form a
+/// cycle scores that cycle -- and says so: a user who deleted or re-created a
+/// variable would otherwise get a different loop under the pin's name with
+/// no signal. The warning names the pin, its uids as written, the dropped
+/// uids and the cycle scored instead; the pin still scores.
+#[test]
+fn a_valid_pin_that_dropped_a_stale_uid_warns_and_names_the_cycle_it_scored() {
+    let mut project = two_loop_population();
+    // `assign_uids` numbers in declaration order: population 1, births 2,
+    // crowding 3, deaths 4; 99 was never assigned.
+    project.models[0]
+        .loop_metadata
+        .push(datamodel::LoopMetadata {
+            uids: vec![1, 2, 99],
+            deleted: false,
+            name: "Growth".to_string(),
+            description: String::new(),
+        });
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
+    let message = diagnostics
+        .iter()
+        .map(|d| format!("{:?}", d.error))
+        .find(|m| m.contains("'Growth'"))
+        .unwrap_or_else(|| panic!("the pin is reported; got {:?}", diagnostics));
+    for needle in [
+        "(uids [1, 2, 99])",
+        "dropped uids [99], which match no variable's uid",
+        "scored the loop its remaining variables form instead: births -> population",
+    ] {
+        assert!(message.contains(needle), "{needle:?} in {message}");
+    }
+
+    // The pin still scores: in discovery mode it is the only scored loop.
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name == "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1"),
+        "the surviving cycle is scored under pin1"
+    );
+}
+
+/// The not-a-cycle arm names the entry's uids as written and the dropped
+/// one: `population` and `crowding` do not close a loop on their own, and
+/// 99 matched nothing.
+#[test]
+fn a_pin_that_is_no_cycle_names_its_uids_and_the_dropped_one() {
+    let mut project = two_loop_population();
+    // population 1, crowding 3 (`assign_uids` declaration order); 99 stale.
+    project.models[0]
+        .loop_metadata
+        .push(datamodel::LoopMetadata {
+            uids: vec![1, 3, 99],
+            deleted: false,
+            name: "Split".to_string(),
+            description: String::new(),
+        });
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
+    let message = diagnostics
+        .iter()
+        .map(|d| format!("{:?}", d.error))
+        .find(|m| m.contains("'Split'"))
+        .unwrap_or_else(|| panic!("the pin is reported; got {:?}", diagnostics));
+    for needle in [
+        "pinned loop 'Split' (uids [1, 3, 99]) do not form a closed feedback loop",
+        "[crowding, population]",
+        "; uids [99] match no variable's uid",
+    ] {
+        assert!(message.contains(needle), "{needle:?} in {message}");
+    }
+    assert!(
+        !message.contains("no variable in the model carries a uid"),
+        "{message}"
+    );
+}

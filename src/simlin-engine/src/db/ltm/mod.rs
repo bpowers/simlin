@@ -1723,6 +1723,11 @@ pub fn model_ltm_variables(
         let _ = name;
         warnings.warn(None, reason.clone());
     }
+    for (_name, message) in &pinned.warnings {
+        // A pin that scored a different loop than written (a stale uid was
+        // dropped) is the other silent wrong number: say which loop it scored.
+        warnings.warn(None, message.clone());
+    }
     if !pinned.loops.is_empty() {
         // The variable-level node set of each already-emitted enumerated loop,
         // keyed by canonical rotation, so a pin that duplicates one is skipped.

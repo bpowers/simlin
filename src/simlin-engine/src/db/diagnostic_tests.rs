@@ -1077,6 +1077,9 @@ fn test_diagnostics_stable_across_unrelated_input_change() {
         .to(vec![PinnedLoopSpec {
             name: "dummy_loop".to_string(),
             variables: vec![],
+            uids: vec![],
+            unresolved_uids: vec![],
+            model_variables_carry_uids: true,
             description: String::new(),
         }]);
 
@@ -2820,6 +2823,9 @@ fn macro_registry_build_error_survives_an_unrelated_input_change() {
         .to(vec![PinnedLoopSpec {
             name: "dummy_loop".to_string(),
             variables: vec![],
+            uids: vec![],
+            unresolved_uids: vec![],
+            model_variables_carry_uids: true,
             description: String::new(),
         }]);
 
@@ -2949,6 +2955,9 @@ fn unit_definition_errors_survive_an_unrelated_input_change() {
         .to(vec![PinnedLoopSpec {
             name: "dummy_loop".to_string(),
             variables: vec![],
+            uids: vec![],
+            unresolved_uids: vec![],
+            model_variables_carry_uids: true,
             description: String::new(),
         }]);
 
