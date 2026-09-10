@@ -174,6 +174,7 @@ mod analysis;
 pub use analysis::RefShape;
 pub use analysis::causal_graph_from_element_edges;
 pub use analysis::causal_graph_from_element_edges_with_modules;
+pub(crate) use analysis::loop_node_sequence;
 pub(crate) use analysis::model_lowered_variables;
 pub(crate) use analysis::unique_module_output;
 pub use analysis::{ModuleOutputsRead, causal_graph_from_edges};

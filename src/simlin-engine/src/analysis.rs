@@ -592,19 +592,14 @@ fn signed_relative_importance(fl: &crate::ltm_finding::FoundLoop) -> Vec<f64> {
         .collect()
 }
 
-/// Extract the ordered variable names from a `FoundLoop`.
+/// The ordered variable names of a `FoundLoop`: the node sequence around the
+/// cycle WITHOUT a trailing repeat of the first node, read by the one owner
+/// the structural surface uses (`db::loop_node_sequence`), so both kinds of
+/// loop populate the same `Loop` type consistently: consumers that render the
+/// cycle (e.g. pysimlin's `Loop.__str__`) close it themselves by appending
+/// the first variable, and a stored repeat would double that closing node.
 fn loop_variables(fl: &crate::ltm_finding::FoundLoop) -> Vec<String> {
-    // The bare node sequence around the cycle (each link's `from`), WITHOUT a
-    // trailing repeat of the first node. This matches the structural-loop
-    // convention (`db::analysis` `model_detected_loops`) so both kinds of loop
-    // populate the same `Loop` type consistently: consumers that render the
-    // cycle (e.g. pysimlin's `Loop.__str__`) close it themselves by appending
-    // the first variable, and a stored repeat would double that closing node.
-    fl.loop_info
-        .links
-        .iter()
-        .map(|l| l.from.to_string())
-        .collect()
+    crate::db::loop_node_sequence(&fl.loop_info)
 }
 
 /// Convert a `FoundLoop` to a `LoopSummary`, resolving a human-readable

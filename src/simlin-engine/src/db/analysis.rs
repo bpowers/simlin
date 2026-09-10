@@ -2698,31 +2698,11 @@ pub fn model_detected_loops(
         resolve_loop_partitions(&final_loops, &partitions, dims.as_slice());
 
     let enumerated_loops = loops.into_iter().map(|l| {
-        // Extract variable names from the loop's links. Synthetic
-        // `$⁚ltm⁚agg⁚{n}` hops are an LTM scoring implementation detail and
-        // are trimmed from the user-facing list (mirroring
-        // `detected_loop_from_loop`); they stay in the links so the id sort
-        // key and the pin-dedup rotation see them. A cross-element loop's
-        // links carry element subscripts, so its variables are
-        // element-subscripted (`pool[a]`) -- the same convention a
-        // cross-element pin's `detected_loop_from_loop` output uses.
-        let is_agg =
-            |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
-        let mut vars = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        // The reported node sequence (`loop_node_sequence`): the element
+        // circuit with synthetic agg hops trimmed. The hops stay in the
+        // links so the id sort key and the pin-dedup rotation see them.
+        let vars = loop_node_sequence(&l);
         let loop_key = loop_rotation(&l);
-        if !l.links.is_empty() {
-            let first = l.links[0].from.to_string();
-            if !is_agg(&first) && seen.insert(first.clone()) {
-                vars.push(first);
-            }
-            for link in &l.links {
-                let to = link.to.to_string();
-                if !is_agg(&to) && seen.insert(to.clone()) {
-                    vars.push(to);
-                }
-            }
-        }
         // Structural classification has no runtime score data, so
         // confidence is binary: 1.0 when every link in the loop has
         // a determined polarity (R/B), 0.0 when any link is unknown
@@ -2769,6 +2749,52 @@ pub fn model_detected_loops(
     }
 }
 
+/// The node sequence a loop is reported with (`DetectedLoop::variables`):
+/// the element-level circuit `n_0 -> n_1 -> ... -> n_{k-1}`, each node
+/// once, the cycle implicitly closed, with synthetic `$⁚ltm⁚agg⁚{n}` hops
+/// trimmed -- they are an LTM scoring implementation detail, like
+/// macro/module internals, and a pin expanded through a hoisted reducer
+/// carries them in its links (GH #737). A cross-element loop's nodes are
+/// element-subscripted (`pool[a]`); an A2A loop's are bare variables.
+///
+/// Read off each link's `to`, starting from the last link's (the first
+/// node), never from `Link.from`. Every link builder keeps an element
+/// subscript on `to` whenever the target is arrayed, but `from` doubles as
+/// the link-score name-resolution flag: the mixed branch of
+/// `db/ltm/loops.rs` `build_element_level_loops` strips it to the variable
+/// level on a same-element A2A hop (`build_element_subscripted_links`, the
+/// cross-element builder, keeps a subscripted `from`), so the circuit
+/// `growth[boston] -> pop[boston] -> total` arrives as the links
+/// `growth -> pop[boston]`, `pop[boston] -> total`, `total -> growth[boston]`
+/// and a `from`-led reading reports four nodes with `growth` twice. Every
+/// node of an elementary circuit is the `to` of exactly one link; a
+/// stitched cross-agg loop visits its agg twice, which the trim absorbs.
+/// Discovery's `FoundLoop` links (`crate::analysis`) read through here too,
+/// so the two surfaces report one convention.
+pub(crate) fn loop_node_sequence(l: &crate::ltm::Loop) -> Vec<String> {
+    let is_agg = |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
+    let Some(last) = l.links.last() else {
+        return Vec::new();
+    };
+    let mut vars = Vec::with_capacity(l.links.len());
+    let mut seen = std::collections::HashSet::new();
+    for link in std::iter::once(last).chain(l.links.iter().take(l.links.len() - 1)) {
+        let node = link.to.to_string();
+        if is_agg(&node) {
+            continue;
+        }
+        let fresh = seen.insert(node.clone());
+        debug_assert!(
+            fresh,
+            "a loop's circuit visits each node once: {node} repeats"
+        );
+        if fresh {
+            vars.push(node);
+        }
+    }
+    vars
+}
+
 /// Build a `DetectedLoop` (the FFI loop surface) from one of a pin's scored
 /// loops, preserving its pin-derived id (`pin{n}` / `pin{n}⁚{j}`). Mirrors the
 /// per-loop body of `model_detected_loops`: the variable list is the cycle's
@@ -2776,25 +2802,7 @@ pub fn model_detected_loops(
 /// structural polarity confidence is binary (1.0 for a fully-known polarity
 /// loop, 0.0 when any link is Unknown).
 fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop {
-    let mut vars = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    // Synthetic `$⁚ltm⁚agg⁚{n}` hops are an LTM scoring implementation
-    // detail; like macro/module internals they are trimmed from the reported
-    // node sequence (a pin expanded through a hoisted reducer carries them
-    // in its links -- GH #737).
-    let is_agg = |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
-    if !l.links.is_empty() {
-        let first = l.links[0].from.to_string();
-        if !is_agg(&first) && seen.insert(first.clone()) {
-            vars.push(first);
-        }
-        for link in &l.links {
-            let to = link.to.to_string();
-            if !is_agg(&to) && seen.insert(to.clone()) {
-                vars.push(to);
-            }
-        }
-    }
+    let vars = loop_node_sequence(l);
     let polarity = detected_polarity_from_ltm(&l.polarity);
     let polarity_confidence = match polarity {
         DetectedLoopPolarity::Undetermined => 0.0,
@@ -4390,6 +4398,92 @@ mod polarity_confidence_tests {
 /// key for scalar and arrayed models alike -- pinned by
 /// `exhaustive_and_discovery_partitions_agree_..._scalar` and
 /// `exhaustive_and_discovery_partitions_agree_on_stock_sets_arrayed`.
+/// `loop_node_sequence` reads the circuit off each link's `to`. The link
+/// shapes here are the documented output of `build_element_level_loops`
+/// for the hops named, not free inventions: a same-element A2A hop keeps
+/// `to[e]` and strips `from`, a cross-dimensional hop keeps `from[e]` and
+/// a bare `to`, an A2A loop's links are bare, and a hoisted reducer's agg
+/// hop names the agg. `ltm_loop_nodes` (integration) pins the same
+/// sequences through the real pipeline.
+#[cfg(test)]
+mod loop_node_sequence_tests {
+    use super::loop_node_sequence;
+    use crate::common::Ident;
+    use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+    fn link(from: &str, to: &str) -> Link {
+        Link {
+            from: Ident::new(from),
+            to: Ident::new(to),
+            polarity: LinkPolarity::Positive,
+        }
+    }
+
+    fn loop_of(links: Vec<Link>) -> Loop {
+        Loop {
+            id: String::new(),
+            links,
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+            dimensions: vec![],
+            slot_links: vec![],
+        }
+    }
+
+    /// The mixed circuit `growth[boston] -> pop[boston] -> total`: the first
+    /// link's `from` is the stripped `growth`, so a `from`-led reading would
+    /// report `growth, pop[boston], total, growth[boston]`.
+    #[test]
+    fn a_mixed_loop_through_a_reducer_is_its_element_circuit() {
+        let l = loop_of(vec![
+            link("growth", "pop[boston]"),
+            link("pop[boston]", "total"),
+            link("total", "growth[boston]"),
+        ]);
+        assert_eq!(
+            loop_node_sequence(&l),
+            vec!["growth[boston]", "pop[boston]", "total"]
+        );
+    }
+
+    /// Bare A2A links and cross-element links read the same either way; the
+    /// sequence starts at the first link's source node.
+    #[test]
+    fn bare_and_cross_element_loops_start_at_the_first_source() {
+        let a2a = loop_of(vec![link("pop", "growth"), link("growth", "pop")]);
+        assert_eq!(loop_node_sequence(&a2a), vec!["pop", "growth"]);
+        let cross = loop_of(vec![
+            link("pop[nyc]", "migration[boston]"),
+            link("migration[boston]", "pop[boston]"),
+            link("pop[boston]", "migration[nyc]"),
+            link("migration[nyc]", "pop[nyc]"),
+        ]);
+        assert_eq!(
+            loop_node_sequence(&cross),
+            vec![
+                "pop[nyc]",
+                "migration[boston]",
+                "pop[boston]",
+                "migration[nyc]"
+            ]
+        );
+    }
+
+    /// A synthetic agg hop is trimmed, including its slot suffix, and an
+    /// empty loop reports no nodes.
+    #[test]
+    fn agg_hops_are_trimmed_and_an_empty_loop_is_empty() {
+        let agg = format!("{}[nyc]", crate::ltm_agg::synthetic_agg_name(3));
+        let l = loop_of(vec![
+            link("pop[nyc]", &agg),
+            link(&agg, "growth[nyc]"),
+            link("growth", "pop[nyc]"),
+        ]);
+        assert_eq!(loop_node_sequence(&l), vec!["pop[nyc]", "growth[nyc]"]);
+        assert!(loop_node_sequence(&loop_of(vec![])).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod detected_loop_partition_tests {
     use super::*;
