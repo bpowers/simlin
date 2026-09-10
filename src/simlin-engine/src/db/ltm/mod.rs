@@ -1899,6 +1899,26 @@ pub fn model_ltm_variables(
         });
     }
 
+    // The frozen clock's helper (GH #1016) is one value for the whole model,
+    // so it is minted here, once, when any arm reads it -- the wrap spells a
+    // frozen `TIME` as a reference to it rather than threading a helper
+    // channel through every generator (the reducer-body and per-element
+    // generators have none). Registered as the freeze helper it is, so the
+    // dedup and the category sort below treat it like every other.
+    let reads_frozen_clock = vars.iter().any(|v| {
+        v.equation.arms().any(|arm| {
+            arm.expr.as_deref().is_some_and(|expr| {
+                crate::ltm_augment::expr_reference_idents(expr)
+                    .contains(crate::ltm_augment::FROZEN_CLOCK_HELPER)
+            })
+        })
+    });
+    if reads_frozen_clock {
+        vars.push(compile::freeze_helper_var(
+            crate::ltm_augment::frozen_clock_helper(),
+        ));
+    }
+
     // A score's companion variables are minted per score with content-derived
     // names -- a freeze helper (GH #995) once per partial that references the
     // frozen slice, a stock's net-flow aux once per flow of the stock -- so

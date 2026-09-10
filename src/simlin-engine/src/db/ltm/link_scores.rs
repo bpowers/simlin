@@ -3144,8 +3144,10 @@ fn emit_per_element_link_scores(
 /// the freeze set (`model_deps`) and -- when arrayed -- its declared
 /// dimension count (`arrayed_dep_dims`, the row-pinning gate). Identifiers
 /// in the body that are not model variables (dimension/element names in
-/// subscripts, TIME) are excluded, so the body partial leaves them live,
-/// matching `build_partial_equation_shaped`'s deps-only freezing.
+/// subscripts) are excluded, so the body partial leaves them live; the clock
+/// is not an identifier at all but a builtin, frozen by
+/// `ltm_augment::is_time_dependent_builtin`'s rule (GH #1016), matching
+/// `build_partial_equation_shaped`'s convention.
 fn reducer_body_ctx_parts(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,

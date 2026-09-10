@@ -2268,6 +2268,151 @@ fn partial_equation_unknown_ident_unchanged() {
     assert!(!partial.contains("PREVIOUS(unknown)"), "partial: {partial}");
 }
 
+// -- GH #1016: the clock is a frozen input of a changed-first partial --
+//
+// The paper's partial reads every input but the isolated one at the previous
+// step, and the clock is an input like any other. The rule is one owner: a
+// builtin whose signature is `Invariance::TimeDependent` (`TIME`, `STEP`,
+// `RAMP`, `PULSE`) is read at the previous step -- a bare `TIME` as the
+// per-model helper `$⁚ltm⁚freeze⁚time = PREVIOUS(TIME)`, a call as
+// `PREVIOUS(<the call>)` with its arguments verbatim (a capture lags the whole
+// call once; freezing inside as well would read two steps back) -- unless the
+// call's arguments read the live source, in
+// which case the call stays live, clock included (the stated residual: the
+// isolated input and the clock are then inseparable in one call). The run
+// constants `DT`, `INITIAL_TIME`, `FINAL_TIME` are `Invariance::Pure` and are
+// left alone: freezing them would not change them.
+
+/// The rows enumerate `Invariance`'s two classes a partial can meet -- the
+/// `TimeDependent` forms (bare `TIME`; a call of constants; a call of a frozen
+/// dep; a call reading the live source; a call reading ANOTHER element of the
+/// source, which is not the live shape; the other two time-dependent
+/// builtins; a `TIME` and a call inside a FROZEN dep's index, left to that
+/// enclosing freeze) and the `Pure` run constants. The `Lagged` and
+/// `Snapshot` classes are the pre-existing `PREVIOUS`/`INIT` passthrough,
+/// pinned by `partial_equation_does_not_rewrap_inside_previous`; the clock
+/// inside a LIVE reference's index (`PREVIOUS(time(), time())`) is the
+/// "a 0-arity builtin index" row of
+/// `pin_tests::per_element_pin_index_verdict_enumeration`.
+#[test]
+fn partial_equation_freezes_the_clock() {
+    let deps = deps_set(&["pop", "helper", "arr"]);
+    let live = Ident::<Canonical>::new("pop");
+    let shape = RefShape::Bare;
+    let dims = region_dim_elements();
+    let rows: [(&str, &str, &str); 8] = [
+        (
+            "a bare TIME reads the per-model frozen-clock helper",
+            "pop + TIME",
+            "pop + \"$\u{205A}ltm\u{205A}freeze\u{205A}time\"",
+        ),
+        (
+            "a time-dependent call of constants, wrapped whole",
+            "pop + STEP(2, 2)",
+            "pop + PREVIOUS(step(2, 2))",
+        ),
+        (
+            "a time-dependent call of a frozen dep: the call is lagged once, its \
+             argument is not lagged again",
+            "pop + STEP(helper, 2)",
+            "pop + PREVIOUS(step(helper, 2))",
+        ),
+        (
+            "a time-dependent call reading the live source keeps its clock live",
+            "STEP(pop, 2) + helper",
+            "step(pop, 2) + PREVIOUS(helper)",
+        ),
+        (
+            "a time-dependent call reading ANOTHER element of the source is not \
+             the live shape and is frozen whole",
+            "pop + STEP(pop[nyc], 2)",
+            "pop + PREVIOUS(step(pop[nyc], 2))",
+        ),
+        (
+            "RAMP and PULSE are time-dependent too",
+            "pop + RAMP(1, 0) + PULSE(1, 2, 3)",
+            "pop + PREVIOUS(ramp(1, 0)) + PREVIOUS(pulse(1, 2, 3))",
+        ),
+        (
+            "a TIME index of a FROZEN dep is left to the enclosing freeze, which \
+             lags the whole read once (lagging it again would read \
+             arr_{t-1}[TIME_{t-2}])",
+            "pop + arr[TIME]",
+            "pop + PREVIOUS(arr[time()])",
+        ),
+        (
+            "a time-dependent call in a FROZEN dep's index, likewise",
+            "pop + arr[STEP(2, 2)]",
+            "pop + PREVIOUS(arr[step(2, 2)])",
+        ),
+    ];
+    for (label, eqn, want) in rows {
+        let partial =
+            build_partial_equation_shaped(eqn, &deps, &live, &shape, &dims, None, None).unwrap();
+        assert_eq!(partial, want, "{label}");
+    }
+    // The run constants are `Invariance::Pure`: nothing to freeze.
+    let partial = build_partial_equation_shaped(
+        "pop * DT + INITIAL_TIME + FINAL_TIME",
+        &deps,
+        &live,
+        &shape,
+        &dims,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        !partial.contains("PREVIOUS("),
+        "the run constants are not clock reads; got: {partial}"
+    );
+}
+
+/// The changed-LAST dual leaves the clock live, as it leaves every other
+/// input live: `Delta_x z = z(x_t, w_t) - z(x_{t-1}, w_t)` reads the clock at
+/// `t` on both sides, so only the feeder is lagged in the frozen evaluation.
+#[test]
+fn scalar_feeder_changed_last_keeps_the_clock_live() {
+    let eq = generate_scalar_feeder_to_agg_equation(
+        "scale",
+        "$\u{205A}ltm\u{205A}agg\u{205A}0",
+        &expr("sum(pop[*] * scale * TIME)"),
+        None,
+    );
+    assert!(
+        eq.contains("sum(pop[*] * PREVIOUS(scale) * time())"),
+        "the feeder-frozen evaluation keeps the clock live; got: {eq}"
+    );
+    assert!(!eq.contains("PREVIOUS(time"), "got: {eq}");
+}
+
+/// A reducer body reading the clock (GH #763): the row-pinned terms freeze
+/// the clock with the model references, so the all-frozen terms reproduce
+/// `PREVIOUS(agg)` and the anchor identity holds.
+#[test]
+fn nonlinear_body_partial_freezes_the_clock_in_every_term() {
+    let elements = vec!["region·nyc".to_string(), "region·boston".to_string()];
+    let fixture = BodyCtxFixture::new("pop[*] * TIME", "pop", &[("pop", 1)], &[], &["region"]);
+    let eq = generate_element_to_scalar_equation(
+        "pop",
+        "total",
+        "region·nyc",
+        &elements,
+        &ReducerKind::Nonlinear,
+        "MIN",
+        true,
+        Some(&fixture.ctx()),
+        None,
+    );
+    let clock = "\"$\u{205A}ltm\u{205A}freeze\u{205A}time\"";
+    assert!(
+        eq.contains(&format!(
+            "MIN((pop[region·nyc] * {clock}), (PREVIOUS(pop[region·boston]) * {clock}))"
+        )),
+        "got: {eq}"
+    );
+}
+
 // -- GH #311: parse failure must be a loud error, never a silent
 //    semantics-changing fallback --
 //
@@ -5277,6 +5422,46 @@ fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
         "if (TIME = INITIAL_TIME) then 0 \
          else if ((growth - PREVIOUS(growth)) = 0) OR ((frac - PREVIOUS(frac)) = 0) then 0 \
          else SAFEDIV((growth - (sum(matrix[d1, *] * PREVIOUS(frac)))), \
+         ABS((growth - PREVIOUS(growth))), 0) * SIGN((frac - PREVIOUS(frac)))"
+    );
+}
+
+/// The changed-last leg leaves the clock LIVE (GH #1016): its numerator
+/// `z(x_t, w_t, T_t) - z(x_{t-1}, w_t, T_t)` reads the clock at `t` on both
+/// sides, so only the isolated input is lagged in the frozen evaluation --
+/// the same GH #743 shape with `+ TIME` on the target, where the frozen
+/// evaluation keeps `time()` and neither the clock helper nor a
+/// `PREVIOUS(time())` appears.
+#[test]
+fn shaped_guard_form_changed_last_keeps_the_clock_live() {
+    let deps = deps_set(&["matrix", "frac"]);
+    let live = Ident::<Canonical>::new("frac");
+    let source_dims = vec![vec!["r1".to_string(), "r2".to_string()]];
+    let source_dim_names = vec!["d1".to_string()];
+    let target_iterated = vec!["d1".to_string()];
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names: &source_dim_names,
+        target_iterated_dims: &target_iterated,
+        dep_dims: None,
+    };
+    let text = sgft(
+        "SUM(matrix[D1, *] * frac[D1]) + TIME",
+        &deps,
+        &live,
+        &RefShape::Bare,
+        &source_dims,
+        &source_dim_names,
+        Some(&iter_ctx),
+        None,
+        "growth",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        text,
+        "if (TIME = INITIAL_TIME) then 0 \
+         else if ((growth - PREVIOUS(growth)) = 0) OR ((frac - PREVIOUS(frac)) = 0) then 0 \
+         else SAFEDIV((growth - (sum(matrix[d1, *] * PREVIOUS(frac)) + time())), \
          ABS((growth - PREVIOUS(growth))), 0) * SIGN((frac - PREVIOUS(frac)))"
     );
 }

@@ -312,6 +312,27 @@ re-evaluation per input per variable).
 > loses nothing. The two renderings differ only in which step's co-factor weights the
 > isolated input's change.
 
+> **Simlin implementation note: the clock is a frozen input.**
+> "All other inputs" includes the clock. In the changed-first partial `TIME` is
+> read at the previous step, and a call of a time-dependent builtin (`STEP`,
+> `RAMP`, `PULSE`) is evaluated whole at the previous step, so
+> `f(x_current, y_previous)` is the target's equation with the isolated input
+> alone advanced. Without that, a source with no influence on its target scores
+> +/-1 whenever an exogenous forcing moves the target, and the forcing is
+> credited to every link into it; with it, the identity `Delta_x(z) = 0` for an
+> input `x` that `f` does not read holds exactly, and an exogenous forcing on a
+> loop takes its own share of `Delta(z)` rather than the loop's. The run
+> constants `DT`, `INITIAL TIME` and `FINAL TIME` are not clock reads. One
+> residual: a time-dependent call that reads the isolated input itself
+> (`STEP(x, 2)`; a read of another element of an arrayed input is not one)
+> cannot be evaluated at the previous step without lagging `x` too, so that
+> call is left live, clock included, and its whole change is attributed to
+> `x`. The changed-last fallback leaves the clock live by
+> construction: `z(x_current, w_current) - z(x_previous, w_current)` reads
+> every other input at the current step on both sides, so the clock's own
+> motion cancels. What Vensim and Stella do here is unverified; this is the
+> reading of the formula above (GH #1016).
+
 ### 3.2 Flow-to-Stock Link Score
 
 For a stock S with inflow i and outflow o, the link scores from the flows to the stock

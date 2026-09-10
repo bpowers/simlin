@@ -982,14 +982,17 @@ short of it rather than taking a ~2-3%.
 10. **LTM link-score arms** — the dominant cost of an LTM-enabled run on an
     arrayed model, and mostly a generation question rather than a VM one. An
     arm whose ceteris-paribus partial is *provably* `PREVIOUS(target)` is
-    omitted and lowers to a single zero-store; on C-LEARN that is 4,335 arms
-    and −19.2% of the flow program. The residual is gated on a semantics
-    question, not on engineering: ~5,000 further arms are blocked solely by a
-    live `time()`, because TIME is excluded from the freeze (GH #1016), and
-    resolving that would roughly double the win. Do **not** substitute the
-    cheaper negative test ("the link's source stayed frozen") — it asks a
-    different question and silently rewrites 187 result slots. GH #977 carries
-    the decomposition and the standing constraints.
+    omitted and lowers to a single zero-store. The clock is a frozen input of
+    the partial (GH #1016: `TIME` and the time-dependent builtins read at the
+    previous step), so an arm whose only varying content was the clock is
+    omitted too. A frozen bare `TIME` reads one per-model helper
+    (`$⁚ltm⁚freeze⁚time = PREVIOUS(TIME)`; spelled inline it was a capture per
+    arm and per occurrence, 9,632 slots on C-LEARN), while a frozen
+    time-dependent CALL is still a capture per arm (183 slots there), which
+    is the cost side of the same rule. Do
+    **not** substitute the cheaper negative test ("the link's source stayed
+    frozen") — it asks a different question and silently rewrites real
+    scores. GH #977 carries the decomposition and the standing constraints.
 
     "Provably" carries a LAG-ALIGNMENT requirement that a walk stopping at the
     first `PREVIOUS` will miss: the partial equals `PREVIOUS(target)` only if

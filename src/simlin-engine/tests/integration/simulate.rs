@@ -6915,6 +6915,22 @@ fn corpus_clearn_macros_import() {
 /// or one of those six scalars; the margin is 36,811 free against the
 /// 65,536-slot ceiling.
 ///
+/// The frozen clock (GH #1016) moved the count UP, 6,224 -> 6,227 (+3), and
+/// the width UP, 28,725 -> 28,980 (+255). The count is the per-model clock
+/// helper `$⁚ltm⁚freeze⁚time` (`examples/ltm_var_dump.rs`: one each in
+/// `main`, the `ramp_from_to` macro model and the stdlib `npv` template,
+/// the three models whose partials read `TIME`). The width is the
+/// result-column diff of a C-LEARN `simlin simulate --ltm` run on the
+/// previous and the new CLI, every added column one of three kinds and
+/// nothing removed: 36 clock-helper instances (`main`'s plus one per
+/// `ramp_from_to` call site), their 36 `PREVIOUS(TIME)` captures, and 183
+/// captures of time-dependent CALLS frozen whole (`PREVIOUS(STEP(..))` and
+/// the like), one per arm and per occurrence; a call inside a frozen
+/// dependency's subscript index is left to that enclosing freeze and mints
+/// none. Without the shared helper the bare `TIME` reads alone cost 9,632
+/// capture slots, which is why the helper exists. The margin is 36,556 free
+/// against the 65,536-slot ceiling.
+///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
 #[test]
@@ -6939,7 +6955,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6224,
+        total, 6227,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

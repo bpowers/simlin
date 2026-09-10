@@ -11258,6 +11258,26 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 /// when the omission is disabled" would be equally consistent with a digest that
 /// cannot see the omission at all.
 ///
+/// Two emission changes moved the pin, measured one commit apart so each
+/// carries its own numbers (this gate is `#[ignore]`d and release-only, so
+/// neither the hook nor `cargo test` runs it; the first change landed without
+/// re-pinning it and the second re-derived both):
+///
+/// * the flow-to-stock score's net-flow aux: slots 20,221 -> 20,337 (+116:
+///   the 24 `$⁚ltm⁚net⁚{stock}` auxes of `main`, one slot per stock element,
+///   while the two arrayed scores it added and the six per-element scalars it
+///   removed are a wash), `nonzero_slots` 3,106 -> 3,198 (+92, the net-aux
+///   slots whose stock has a moving flow), every slot still finite.
+/// * the frozen clock (GH #1016): slots 20,337 -> 20,338 (+1, the
+///   `$⁚ltm⁚freeze⁚time` helper), `nonzero_slots` 3,198 -> 2,876 (-322: the
+///   arms whose only varying content was the clock, which now read
+///   `PREVIOUS(TIME)` and are provably `PREVIOUS(target)`, so they are
+///   omitted to an exact zero -- the DROP this gate exists to catch, here
+///   derived rather than absorbed), every slot still finite. The 146
+///   link-score series that change on a `simlin simulate --ltm` run lie on
+///   no retained loop: the 153 loops, their relative-score series and the 565
+///   dominant periods `analyze()` reports are identical before and after.
+///
 /// Run with:
 ///   cargo test -p simlin-engine --release --test integration -- --ignored \
 ///     clearn_ltm_slot_maxima_digest
@@ -11572,10 +11592,10 @@ fn the_digest_sees_both_a_value_swap_and_a_rebinding() {
 }
 
 /// Pinned by `clearn_ltm_slot_maxima_digest`; see its rustdoc before changing.
-const CLEARN_LTM_SLOTS: usize = 20_221;
+const CLEARN_LTM_SLOTS: usize = 20_338;
 const CLEARN_LTM_UNKNOWN_EXTENT: usize = 0;
-const CLEARN_LTM_NONZERO_SLOTS: usize = 3_106;
-const CLEARN_LTM_FINITE_SLOTS: usize = 20_221;
-const CLEARN_LTM_MANTISSA_DIGEST: i64 = 790_401_758_590;
-const CLEARN_LTM_EXPONENT_DIGEST: i64 = 2_212;
-const CLEARN_LTM_IDENTITY_DIGEST: u64 = 16_953_901_100_024_641_861;
+const CLEARN_LTM_NONZERO_SLOTS: usize = 2_876;
+const CLEARN_LTM_FINITE_SLOTS: usize = 20_338;
+const CLEARN_LTM_MANTISSA_DIGEST: i64 = 763_629_105_850;
+const CLEARN_LTM_EXPONENT_DIGEST: i64 = 2_449;
+const CLEARN_LTM_IDENTITY_DIGEST: u64 = 10_121_477_288_851_905_900;

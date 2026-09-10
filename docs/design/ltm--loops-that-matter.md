@@ -2128,7 +2128,18 @@ cases remain deliberate carve-outs:
    recursively transforming it to wrap non-excluded dependencies in `PREVIOUS()`,
    and printing the result back to equation text. This is done once at
    augmentation time (not per-timestep), producing a static equation that the
-   simulation engine evaluates normally.
+   simulation engine evaluates normally. The clock is one of the "all others"
+   (GH #1016): inside a changed-first partial `TIME` reads the per-model helper
+   `$⁚ltm⁚freeze⁚time = PREVIOUS(TIME)` and a time-dependent call (`STEP`,
+   `RAMP`, `PULSE`, by the builtin's own `Invariance::TimeDependent`) is lagged
+   whole, arguments verbatim, unless the call holds an occurrence of the
+   isolated input's live shape, in which case it stays live, clock included;
+   inside a frozen dependency's subscript index the enclosing freeze already
+   lags the clock once and it is left alone. The changed-last fallback leaves
+   the clock live, as it leaves every other input live. A source with no
+   influence on its target therefore scores 0 under an exogenous forcing, and
+   a forcing on a loop takes its own share of the target's change rather than
+   the loop's (`tests/integration/ltm_frozen_clock.rs`).
 
 ## Test Coverage
 

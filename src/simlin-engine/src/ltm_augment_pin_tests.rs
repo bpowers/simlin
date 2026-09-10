@@ -1436,12 +1436,16 @@ fn per_element_pin_index_verdict_enumeration() {
             // not) inside an `Expr0::App` without a fourth copy of the builtin
             // classification `builtins`/`compiler::invariance` own -- so it
             // declined conservatively. It no longer has to decide: the rule keeps
-            // the index either way, and the wrap's index pass leaves a 0-arity
-            // builtin live exactly as it does everywhere else in a partial (TIME
-            // is not a dep being isolated, and the guard form reads it live too).
+            // the index either way, and what the wrap's index pass does with it
+            // is the builtin's own classification (`Invariance::TimeDependent`,
+            // read through `ltm_augment::is_time_dependent_builtin`): the clock is
+            // a frozen input of the partial (GH #1016), so the bare column's
+            // runtime read is lagged with the un-lagged index as its first-DT
+            // value, exactly like `idx` two rows down, while inside the
+            // pre-existing freeze it is already lagged and left alone.
             "a 0-arity builtin index",
             "pop[Region, TIME]",
-            Some("pop[region\u{B7}boston, time()]"),
+            Some("pop[region\u{B7}boston, PREVIOUS(time(), time())]"),
             Some("pop[region\u{B7}boston, time()]"),
         ),
         // --- unspellable: a COMPILABILITY verdict, so loud in BOTH contexts ----

@@ -11,7 +11,7 @@
 //! value is at the step after the start.
 
 use crate::ast::{Expr0, IndexExpr0, print_eqn};
-use crate::builtins::UntypedBuiltinFn;
+use crate::builtins::{BuiltinSig, Invariance, UntypedBuiltinFn};
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, RawIdent};
 use crate::datamodel::{self, Equation};
@@ -104,6 +104,36 @@ pub(crate) struct IteratedDimCtx<'a> {
 /// even though it is never hoisted).
 fn is_array_reducer_name(name: &str, arity: usize) -> bool {
     crate::ltm_agg::reducer_kind_from_name(&name.to_ascii_lowercase(), arity).is_some()
+}
+
+/// Does `name` call a builtin that reads the clock -- `TIME`, `STEP`, `RAMP`,
+/// `PULSE`? Decided by the signature's `Invariance`, the compiler's own
+/// statement of which builtins vary with time (`compiler::invariance` reads
+/// the same field to refuse hoisting them), so the ceteris-paribus freeze and
+/// the hoisting classifier cannot disagree about what a clock read is. The run
+/// constants `DT`, `INITIAL_TIME` and `FINAL_TIME` are `Pure`: they do not
+/// change across a run, so freezing them would change nothing.
+fn is_time_dependent_builtin(name: &str) -> bool {
+    BuiltinSig::by_name(&name.to_ascii_lowercase())
+        .is_some_and(|sig| sig.invariance == Invariance::TimeDependent)
+}
+
+/// The frozen read of a time-dependent `call` (GH #1016): a bare `TIME` in a
+/// value position is the per-model helper [`FROZEN_CLOCK_HELPER`]
+/// (`PREVIOUS(TIME)`, one value for the whole model, so one variable rather
+/// than a capture per arm); every other form -- `STEP`/`RAMP`/`PULSE`, whose
+/// arguments make each call its own, and a `TIME` in a subscript index, whose
+/// first-DT value must be the un-lagged index -- is the call lagged whole by
+/// [`freeze_at_previous`], arguments verbatim.
+fn freeze_clock_read(call: Expr0, loc: crate::builtins::Loc, in_subscript_index: bool) -> Expr0 {
+    if !in_subscript_index
+        && let Expr0::App(UntypedBuiltinFn(name, args), _) = &call
+        && args.is_empty()
+        && name.eq_ignore_ascii_case("time")
+    {
+        return Expr0::Var(RawIdent::new_from_str(FROZEN_CLOCK_HELPER), loc);
+    }
+    freeze_at_previous(call, loc, in_subscript_index)
 }
 
 /// Whether any subexpression of `expr` prints exactly as `reducer_text` -- the
@@ -267,7 +297,10 @@ use freeze::freeze_at_previous;
 #[path = "ltm_augment_array_freeze.rs"]
 mod array_freeze;
 
-pub(crate) use array_freeze::{ArrayFreezeHelper, FREEZE_HELPER_PREFIX, materialize_array_freezes};
+pub(crate) use array_freeze::{
+    ArrayFreezeHelper, FREEZE_HELPER_PREFIX, FROZEN_CLOCK_HELPER, frozen_clock_helper,
+    materialize_array_freezes,
+};
 
 /// Deciding when a per-element link-score arm is provably `PREVIOUS(target)`
 /// and may therefore be OMITTED rather than materialized (GH #977), in its own
@@ -360,6 +393,36 @@ fn other_dep_verdict(
 /// unknown identifiers). Indices of subscripts are recursively transformed
 /// even when the outer subscript matches the live shape, so nested
 /// references like `arr[other_var]` still get wrapped.
+///
+/// The clock is a frozen input too (GH #1016). The paper's partial
+/// `f(x_t, y_{t-1}) - z_{t-1}` reads every input but the isolated one at the
+/// previous step, and `TIME` is an input of `f` like any other: with it live,
+/// a source with no influence on its target scores +/-1 whenever an exogenous
+/// forcing moves the target, and the forcing is credited to every link into
+/// it. So a call of a time-dependent builtin ([`is_time_dependent_builtin`]:
+/// `TIME`, `STEP`, `RAMP`, `PULSE`) is read at the previous step
+/// ([`freeze_clock_read`]: a bare `TIME` through the per-model helper
+/// [`FROZEN_CLOCK_HELPER`], any other call wrapped WHOLE in `PREVIOUS` with
+/// its arguments verbatim -- the capture lags the whole call by one step, and
+/// lagging a frozen dep inside it as well would read that dep two steps back)
+/// -- unless the call holds an occurrence of the isolated input's LIVE SHAPE
+/// (the occurrence IR's verdict, `subtree_has_live_shape`, the same one the
+/// reducer arm takes; a read of another element of an arrayed input, or an
+/// index-nested read, is not one), in which case the call stays live, clock
+/// included: the isolated input and the clock are then inseparable inside one
+/// call, and the score attributes that call's whole change to the input (the
+/// stated residual, pinned by `tests/integration/ltm_frozen_clock.rs`). Inside
+/// a subtree the wrap is about to lag (`frozen`: a frozen dep's subscript
+/// index) the call is left verbatim, because the enclosing synthesized freeze
+/// already lags it once -- a capture evaluates the whole `arr[TIME]` at `t`
+/// and `PREVIOUS` reads it a step back, index included -- and lagging the
+/// clock again would read `arr_{t-1}[TIME_{t-2}]`. (A model dependency in
+/// that position IS lagged twice, `PREVIOUS(q[PREVIOUS(ctr, ctr)])`, the
+/// residual `ltm_augment_zero_slot` documents; the clock does not join it.)
+/// In a LIVE reference's index the frozen clock takes the un-lagged read as
+/// its first-DT value like every other index freeze ([`freeze_at_previous`]).
+/// The guard form's own `TIME = INITIAL_TIME` arm is outside the partial and
+/// reads the clock live.
 ///
 /// `ctx.iter_ctx` carries the GH #511 iterated-dimension context (the live
 /// source's declared dimension names + the target equation's iterated
@@ -723,6 +786,43 @@ fn wrap_non_matching_in_previous(
                     None => call,
                 };
             }
+            // Whether the reducer held LIVE by `live_reducer_text` sits inside
+            // this call's arguments (Track A stage 1, finding 2; see the reducer
+            // arm below, which shares the answer).
+            let holds_live_reducer = live_reducer_text
+                .is_some_and(|text| args.iter().any(|a| expr0_contains_reducer_text(a, text)));
+            // The clock is a frozen input (GH #1016; see the rustdoc): a
+            // time-dependent call holding no live-shape occurrence of the
+            // isolated input is read at the previous step, arguments verbatim
+            // -- unless the wrap is about to lag the subtree it sits in, where
+            // that enclosing freeze already lags it once. Frozen whole or left
+            // to the enclosing freeze, the wrap never descends into it, so the
+            // `PerElement` pin-only descent reaches the source references it
+            // may still hold (another element's, an index-nested one), exactly
+            // as for a frozen-whole reducer.
+            if is_time_dependent_builtin(&name)
+                && !holds_live_reducer
+                && !ctx
+                    .occ
+                    .subtree_has_live_shape(path, live_source, live_shape)
+            {
+                let call = Expr0::App(UntypedBuiltinFn(name, args), loc);
+                let call = match ctx.pin {
+                    Some(pin_ctx) => post_transform::pin_only_source_refs(
+                        call,
+                        pin_ctx,
+                        ctx.occ,
+                        path,
+                        &mut out.missing_occurrence,
+                    ),
+                    None => call,
+                };
+                return if frozen {
+                    call
+                } else {
+                    freeze_clock_read(call, loc, in_subscript_index)
+                };
+            }
             // A LOOKUP call's first argument names a graphical-function table
             // (a lookup-only variable, or the WITH-LOOKUP self-reference); the
             // table HEAD is static data the compiler resolves to a table id, not
@@ -806,8 +906,6 @@ fn wrap_non_matching_in_previous(
             // slice partial). The top-of-function guard has already declined to
             // hold THIS reducer live (its own text does not equal
             // `live_reducer_text`), so this only affects an enclosing reducer.
-            let holds_live_reducer = live_reducer_text
-                .is_some_and(|text| args.iter().any(|a| expr0_contains_reducer_text(a, text)));
             if is_array_reducer_name(&name, args.len())
                 && !holds_live_reducer
                 && !ctx
@@ -1355,7 +1453,11 @@ fn contains_unfreezable_previous(expr: &Expr0) -> bool {
 /// untouched (already lagged/frozen; double-wrapping would read two steps
 /// back). Non-matching occurrences of `live_source` -- and all other
 /// references -- stay current: their influence is attributed by their own
-/// link-score variables.
+/// link-score variables. The clock stays current too, deliberately: the
+/// changed-last partial `z(x_t, w_t) - z(x_{t-1}, w_t)` reads every other
+/// input, `TIME` included, at `t` on both sides, so the clock's own motion
+/// cancels and only the isolated input's change is attributed (the
+/// changed-first dual freezes it instead; GH #1016).
 ///
 /// Boundary: unlike its changed-first dual, this walker never recurses
 /// into subscript INDEX expressions -- so every wrap it emits is the
@@ -1724,7 +1826,9 @@ fn shaped_guard_form_text(
 /// "feeder frozen" evaluation of a hoisted reducer's equation. References
 /// already inside a `PREVIOUS(...)`/`INIT(...)` call are left untouched
 /// (their contents are already lagged/frozen; double-wrapping would read
-/// two steps back). Subscript index expressions are recursed into so a
+/// two steps back), and the clock stays live: this is the changed-last
+/// convention, which reads every input but the feeder at `t` on both sides
+/// of its numerator (see [`wrap_live_shaped_in_previous`]). Subscript index expressions are recursed into so a
 /// `arr[target + 1]` style index reference is frozen too; the outer
 /// subscripted variable itself is wrapped only when it names `target`
 /// (defensive -- the feeder this is used for is scalar and so is always a
@@ -4664,9 +4768,10 @@ pub(crate) struct ReducerBodyCtx<'a> {
     /// against the row's axis; an unprovable correspondence bails.
     pub arrayed_dep_dims: &'a HashMap<String, usize>,
     /// Every model-variable ident the body may reference -- the freeze set.
-    /// References to idents NOT in this set (TIME, function names resolved
-    /// as `App`s, dimension/element names) stay live, matching
-    /// `build_partial_equation_shaped`'s deps-only freezing convention.
+    /// References to idents NOT in this set (function names resolved as
+    /// `App`s, dimension/element names) stay live; the clock is frozen by the
+    /// builtin rule ([`is_time_dependent_builtin`]), not by membership here,
+    /// matching `build_partial_equation_shaped`'s convention.
     pub model_deps: &'a HashSet<String>,
     /// Canonical dimension names of the live source's axes, in declared
     /// order -- parallel to the row tuple.
@@ -4971,7 +5076,14 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
 
 /// Wrap every model-variable reference of a row-pinned body in
 /// `PREVIOUS()` (the value-position form of [`freeze_at_previous`]), except
-/// occurrences of `keep_live` (when given). Subscript
+/// occurrences of `keep_live` (when given), and every clock read the same
+/// way -- a time-dependent call ([`is_time_dependent_builtin`]) whose
+/// arguments do not read `keep_live` is read at the previous step
+/// ([`freeze_clock_read`]), the rule [`wrap_non_matching_in_previous`]
+/// states (GH #1016). Freezing the
+/// clock alongside the model references is what keeps the all-frozen row
+/// terms equal to the ones that produced `PREVIOUS(agg)`, the anchor identity
+/// the nonlinear body partial rests on (GH #763). Subscript
 /// indices are never recursed into: on an arrayed MODEL dep's subscript,
 /// pinning has already replaced them with literal qualified elements (not
 /// causal references); on a non-model head (whose expression indices
@@ -4983,6 +5095,14 @@ fn freeze_pinned_body(expr: Expr0, freeze: &HashSet<String>, keep_live: Option<&
     let should_freeze = |ident: &str| -> bool {
         let c = canonicalize(ident);
         freeze.contains(c.as_ref()) && Some(c.as_ref()) != keep_live
+    };
+    // By ident, which in a ROW-PINNED body is the occurrence-level answer the
+    // wrap walker takes from the IR: every surviving reference to the source
+    // is the row's own element (`pin_body_to_row` bails on a fixed-literal
+    // self-reference), so "the call names the source" is "the call reads the
+    // live row".
+    let reads_live = |arg: &Expr0| -> bool {
+        keep_live.is_some_and(|live| expr_reference_idents(arg).contains(live))
     };
     match expr {
         Expr0::Const(..) => expr,
@@ -5003,6 +5123,13 @@ fn freeze_pinned_body(expr: Expr0, freeze: &HashSet<String>, keep_live: Option<&
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
             if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
                 return Expr0::App(UntypedBuiltinFn(name, args), loc);
+            }
+            if is_time_dependent_builtin(&name) && !args.iter().any(reads_live) {
+                return freeze_clock_read(
+                    Expr0::App(UntypedBuiltinFn(name, args), loc),
+                    loc,
+                    false,
+                );
             }
             let args = args
                 .into_iter()
@@ -5294,14 +5421,16 @@ fn generate_linear_body_partial(
 /// keeps the GH #483 unrolled population-variance form (divisor `N`,
 /// inlined mean) over the body terms.
 ///
-/// Anchor caveat (GH #763): "frozen" freezes MODEL references only, so a
-/// body referencing TIME, a time builtin (PULSE/STEP/RAMP), or a nested
-/// `PREVIOUS(x)` keeps that factor live in every term, and then
-/// `R(all-frozen terms) != PREVIOUS(agg)` -- the anchor subtraction
-/// attributes the time-drift to every row, including rows whose true
-/// partial is 0 (destroying the frozen-argmin-scores-0 property of
-/// MIN/MAX). For pure-model-ref bodies the anchor identity holds exactly
-/// because per-variable `PREVIOUS` sampling commutes with arithmetic.
+/// Anchor identity: "frozen" freezes the model references AND the clock
+/// ([`freeze_pinned_body`], GH #1016), so an all-frozen term is the
+/// previous step's evaluation of that row and `R(all-frozen terms) =
+/// PREVIOUS(agg)` exactly, because per-variable `PREVIOUS` sampling commutes
+/// with arithmetic; a row that is never the argmin therefore scores 0
+/// (`tests/integration/ltm_frozen_clock.rs`, the GH #763 repro). The one
+/// residue is an ORIGINAL `PREVIOUS(x)` in the body: it is left untouched,
+/// so the frozen term reads `x(t-1)` where the anchor read `x(t-2)`, and the
+/// misalignment is attributed to every row -- the same lag-misalignment
+/// class `ltm_augment_zero_slot` documents.
 ///
 /// When the pinned body is the bare source reference the legacy
 /// [`generate_nonlinear_partial`] is returned byte-identically; RANK is

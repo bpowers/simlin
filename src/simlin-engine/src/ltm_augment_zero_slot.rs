@@ -9,6 +9,9 @@
 
 use crate::ast::{Expr0, IndexExpr0};
 use crate::builtins::UntypedBuiltinFn;
+use crate::canonicalize;
+
+use super::FROZEN_CLOCK_HELPER;
 
 /// Whether the caller's result is a whole VARIABLE's equation or one slot of an
 /// `Ast::Arrayed` one -- which is the only thing that decides whether a
@@ -70,13 +73,14 @@ pub(crate) enum ZeroSlotPolicy {
     ///
     /// The tempting negative test -- "the link's source
     /// stayed frozen" -- says nothing about what else the arm reads, and
-    /// collapsing on it changes 187 C-LEARN result slots across 35 link-score
-    /// variables (151 by >= 1.0, worst 8,086.97 -> 0), because the wrap does not
-    /// freeze everything that varies: a live `time()` remains, and a
+    /// collapsing on it rewrote real scores to zero when it was tried on
+    /// C-LEARN, because the wrap does not freeze everything that varies: a
     /// raw-vs-canonical element-spelling mismatch can leave the source itself
-    /// unwrapped. Those are tracked as #1016 and the wrap defects in #977; this
-    /// predicate is correct whether or not they are fixed, because it asks about
-    /// the emitted tree rather than about the wrap's bookkeeping.
+    /// unwrapped (the wrap defects in #977). This predicate is correct whether
+    /// or not that is fixed, because it asks about the emitted tree rather
+    /// than about the wrap's bookkeeping: a frozen clock reads the clock helper
+    /// or `PREVIOUS(<call>)`, which the walk sees as the one-step lag it is,
+    /// and a live read is a live read.
     OmitStructuralZero,
 }
 
@@ -139,8 +143,11 @@ enum BuiltinReach {
 /// `lookup` is deliberately `Varying` even though a graphical function is a
 /// compile-time constant: it would only matter for an arm whose lookup index is
 /// itself invariant, and GH #977 measured that relaxation as buying **exactly
-/// zero** additional arms on C-LEARN (those arms hit a live `time()` inside the
-/// lookup's own index immediately afterwards). Conservative and free.
+/// zero** additional arms on C-LEARN, measured with the clock live in every
+/// partial and not redone under the frozen clock, where a lookup's argument
+/// reads the clock helper and a table-head index reads
+/// `PREVIOUS(time(), time())`; a relaxation would also have to treat the table
+/// HEAD, a `Var`, as static. Conservative and free.
 fn classify_builtin_reach(name: &str) -> BuiltinReach {
     // Lowercased at parse time, but classify case-insensitively so a future
     // caller with raw source spelling cannot silently fall into `Varying`.
@@ -186,7 +193,13 @@ fn classify_builtin_reach(name: &str) -> BuiltinReach {
 /// A `Var` or `Subscript` reached outside a frozen subtree is a live read and
 /// ends the walk, which is why subscript INDICES are never descended into: the
 /// whole reference is already `NotEstablished`, so `IndexExpr0` needs no arm
-/// here and a new index variant cannot change any verdict.
+/// here and a new index variant cannot change any verdict. The one `Var` that
+/// is not a live read is the frozen clock's helper ([`FROZEN_CLOCK_HELPER`]),
+/// whose definition IS `PREVIOUS(TIME)`: the wrap spells a frozen `TIME` as a
+/// reference to it rather than inline, and it is the one-step lag the anchor
+/// expects, so it is `Established` exactly as the inline `PREVIOUS(TIME)`
+/// would be. No other freeze helper is recognized here: their arms are
+/// one-step lags too, but that relaxation is unmeasured and not taken.
 pub(super) fn partial_is_provably_previous_target(original: &Expr0, partial: &Expr0) -> bool {
     !contains_previous_call(original) && reach_of(partial) == Reach::Established
 }
@@ -226,8 +239,13 @@ fn contains_previous_call(expr: &Expr0) -> bool {
 fn reach_of(expr: &Expr0) -> Reach {
     match expr {
         Expr0::Const(..) => Reach::Established,
-        // A live read of model state: the value it yields this step is exactly
-        // what the wrap was supposed to freeze and did not.
+        // The frozen clock's helper is `PREVIOUS(TIME)` by definition (see the
+        // rustdoc); every other bare reference is a live read of model state,
+        // the value it yields this step being exactly what the wrap was
+        // supposed to freeze and did not.
+        Expr0::Var(name, _) if canonicalize(name.as_str()).as_ref() == FROZEN_CLOCK_HELPER => {
+            Reach::Established
+        }
         Expr0::Var(..) => Reach::NotEstablished,
         Expr0::Subscript(..) => Reach::NotEstablished,
         Expr0::Op1(_, inner, _) => reach_of(inner),

@@ -2323,7 +2323,7 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
     let score_name = offsets
         .keys()
         .map(|k| k.as_str().to_string())
-        .find(|k| k.contains("link_score") && k.contains("factor\u{2192}out[b]"))
+        .find(|k| k == "$\u{205A}ltm\u{205A}link_score\u{205A}factor\u{2192}out[b]")
         .expect("the factor->out[b] per-element link score must be emitted");
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("run");
@@ -2333,13 +2333,28 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
         .map(|s| results.data[s * results.step_size + base])
         .collect();
 
-    // The EXACT series, both elements. `b`'s table has slope 3 and `a`'s has 2,
-    // and `drift` supplies a second varying contribution so the score does not
-    // saturate at 1 -- which is what makes the pinned element observable in the
-    // VALUE. Pinning is the whole subject of this test, so the assertion has to
-    // be the number, not a property the number happens to satisfy.
-    let expected_a = [0.0, 0.0, 0.805_022_617_376_384_4, 0.809_579_376_075_400_5];
-    let expected_b = [0.0, 0.0, 0.860_979_814_269_031_9, 0.864_449_016_428_508_1];
+    // The EXACT series, both elements. The partial reads the clock frozen
+    // (`LOOKUP(tbl[e], "$⁚ltm⁚freeze⁚time")`, the per-model `PREVIOUS(TIME)`
+    // helper, GH #1016), so the numerator is
+    // `L_e(TIME_{t-1}) * Δfactor`: the table's own slope over the step and the
+    // drift are the rest of `Δout[e]` and are not credited to `factor`, which
+    // is why the scores are small. `b`'s table has slope 3 and `a`'s has 2, so
+    // `L_e(TIME_{t-1})` -- and with it the score -- differs per element, which
+    // is what makes the pinned element observable in the VALUE. Pinning is the
+    // whole subject of this test, so the assertion has to be the number, not a
+    // property the number happens to satisfy.
+    let expected_a = [
+        0.0,
+        0.0,
+        0.004_757_448_136_016_217_4,
+        0.018_677_978_159_516_23,
+    ];
+    let expected_b = [
+        0.0,
+        0.0,
+        0.005_088_138_797_753_429,
+        0.019_943_887_314_840_866,
+    ];
     assert_eq!(
         series.len(),
         expected_b.len(),
@@ -2358,7 +2373,7 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
     let a_off = offsets
         .keys()
         .map(|k| k.as_str().to_string())
-        .find(|k| k.contains("link_score") && k.contains("factor\u{2192}out[a]"))
+        .find(|k| k == "$\u{205A}ltm\u{205A}link_score\u{205A}factor\u{2192}out[a]")
         .map(|n| offsets[&crate::common::Ident::new(&n)])
         .expect("the factor->out[a] per-element link score must be emitted");
     let series_a: Vec<f64> = (0..results.step_count)
@@ -2763,4 +2778,79 @@ fn delay3_input_to_stock_link_score_reads_the_bound_port() {
             "in_submodel={in_submodel}: the instance's net-flow aux is input - flow_1"
         );
     }
+}
+
+/// The frozen clock's helper (GH #1016) is one variable per model: minted
+/// once when any arm reads it, named as a freeze helper so it sorts ahead of
+/// every score, defined as `PREVIOUS(TIME)`, and absent from a model whose
+/// partials read no clock.
+#[test]
+fn the_frozen_clock_helper_is_minted_once_per_model_that_reads_the_clock() {
+    use crate::ltm_augment::FROZEN_CLOCK_HELPER;
+
+    // Two targets read the clock, on two loops through one stock.
+    let project = TestProject::new("frozen_clock_helper")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .stock("s", "10", &["a", "b"], &[], None)
+        .flow("a", "0.1 * s + TIME", None)
+        .flow("b", "0.2 * s + STEP(1, 2) * TIME", None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let ltm = crate::db::model_ltm_variables(&db, sync.models["main"].source, sync.project);
+
+    let helpers: Vec<&crate::db::LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name == FROZEN_CLOCK_HELPER)
+        .collect();
+    assert_eq!(
+        helpers.len(),
+        1,
+        "one clock helper for the model; have {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    let helper = helpers[0];
+    assert_eq!(helper.equation.source_text(), "PREVIOUS(TIME)");
+    assert!(helper.dimensions.is_empty());
+    assert!(helper.compile_directly);
+
+    // Both scores read it, and it is evaluated before either.
+    let helper_pos = ltm
+        .vars
+        .iter()
+        .position(|v| v.name == FROZEN_CLOCK_HELPER)
+        .unwrap();
+    let mut readers = 0;
+    for (pos, var) in ltm.vars.iter().enumerate() {
+        let reads = var.equation.arms().any(|arm| {
+            arm.expr.as_deref().is_some_and(|e| {
+                crate::ltm_augment::expr_reference_idents(e).contains(FROZEN_CLOCK_HELPER)
+            })
+        });
+        if reads {
+            readers += 1;
+            assert!(
+                pos > helper_pos,
+                "{} reads the clock helper but is ordered before it",
+                var.name
+            );
+        }
+    }
+    assert_eq!(readers, 2, "the s -> a and s -> b scores read the helper");
+
+    // The other arm of the decision: a model whose partials read no clock
+    // mints no helper.
+    let project = TestProject::new("no_clock")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .stock("s", "10", &["a"], &[], None)
+        .flow("a", "0.1 * s", None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let ltm = crate::db::model_ltm_variables(&db, sync.models["main"].source, sync.project);
+    assert!(
+        ltm.vars.iter().all(|v| v.name != FROZEN_CLOCK_HELPER),
+        "no clock read, no helper"
+    );
 }

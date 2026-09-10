@@ -196,6 +196,23 @@ impl LtmEquation {
         }
     }
 
+    /// Every arm of the equation, in slot order (the default last).
+    pub(crate) fn arms(&self) -> impl Iterator<Item = &LtmArm> {
+        let (single, elements, default): (Option<&LtmArm>, &[(String, LtmArm)], Option<&LtmArm>) =
+            match self {
+                LtmEquation::Scalar(arm) | LtmEquation::ApplyToAll(_, arm) => {
+                    (Some(arm), &[], None)
+                }
+                LtmEquation::Arrayed {
+                    elements, default, ..
+                } => (None, elements.as_slice(), default.as_ref()),
+            };
+        single
+            .into_iter()
+            .chain(elements.iter().map(|(_, arm)| arm))
+            .chain(default)
+    }
+
     /// The equation's diagnostic source text concatenated into a single string
     /// (the generator's exact spelling): the scalar / apply-to-all formula
     /// verbatim, or -- for the per-element (`Arrayed`) variant -- every element
