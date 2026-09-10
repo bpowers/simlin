@@ -160,7 +160,7 @@ pub struct LinkExpansionContext {
 /// Maximum loops to retain after discovery (paper uses 200)
 const MAX_LOOPS: usize = 200;
 
-/// Minimum average relative contribution to keep a loop (paper uses 0.1%)
+/// Minimum peak relative contribution to keep a loop (0.1%).
 const MIN_CONTRIBUTION: f64 = 0.001;
 
 #[cfg(test)]
@@ -3631,14 +3631,17 @@ fn subtract_reported_mass_from_totals(
     }
 }
 
-/// Mean magnitude of a loop's relative loop score over the steps where it is
-/// active -- the partition-relative importance statistic (GH #543).
+/// Mean magnitude of a loop's relative loop score over the steps where its
+/// partition is active and its own score is defined (GH #543).
 ///
 /// `totals[t]` is the loop's cycle-partition denominator at step `t` (the sum
-/// of `|loop_score_j|` over the partition, `NaN` excluded). The loop is *active*
-/// at step `t` iff its own `score[t]` is non-`NaN` and `totals[t] > 0`; the mean
-/// is taken only over active steps ("delayed averaging", ref 13.3). A loop with
-/// no active steps returns `NaN` (it sorts last). `Inf/Inf = NaN` at a
+/// of `|loop_score_j|` over the partition, `NaN` excluded). A step is included
+/// iff the loop's `score[t]` is non-`NaN` and `totals[t] > 0`; a zero score
+/// counts in the mean whenever a sibling is active, including before this
+/// loop's first nonzero score. This is Simlin's partition-active averaging
+/// policy, distinct from the thesis's per-loop delayed start (reference
+/// section 13.3). A loop with no included steps returns `NaN` (it sorts last).
+/// `Inf/Inf = NaN` at a
 /// dominance inflection is naturally excluded since `NaN` is not active.
 fn mean_relative_contribution(fl: &FoundLoop, totals: &[f64]) -> f64 {
     // The same division every relative series gets (`ltm_post::relative_series`,
@@ -3682,9 +3685,9 @@ fn mean_relative_contribution(fl: &FoundLoop, totals: &[f64]) -> f64 {
 /// as the ranking and truncation key (GH #543).
 ///
 /// `mean_rel` is the **mean magnitude of the loop's relative loop score** over
-/// the steps where it is active -- `mean_t(|score[t]| / partition_total[t])`,
-/// the literature's loop-inclusion measure ("average magnitude of the relative
-/// loop score across the simulation period"; docs/reference 13.3).
+/// the steps included by [`mean_relative_contribution`] --
+/// `mean_t(|score[t]| / partition_total[t])`. It measures average contribution
+/// across the partition's activity, including this loop's zero-score steps.
 ///
 /// `competing` is whether the loop shares its cycle partition with at least
 /// one other DISCOVERED loop.  A loop that is trivially alone in its partition
@@ -3792,21 +3795,18 @@ fn cmp_relative_importance(a: &RelativeImportance, b: &RelativeImportance) -> st
 /// **Ranking key choice (mean vs peak).** The retention filter (step 3) uses
 /// the *peak* per-timestep relative contribution -- "did this loop ever
 /// matter?" The *ranking* key (steps 2/4/6) uses the *mean* relative
-/// contribution -- "how important is it overall?" The mean is the
-/// literature-aligned loop-inclusion measure (docs/reference 13.3). These are
-/// deliberately different statistics for two different questions.
+/// contribution -- "how important is it overall?" These are deliberately
+/// different statistics for two different questions.
 ///
-/// **Active-step (delayed) averaging.** A loop is *active* at step `t` when its
-/// own `score[t]` is non-`NaN` and `partition_total[t] > 0`. The mean is taken
-/// only over active steps (skip, do not count-as-zero). This is the
-/// literature's "delayed averaging: starts from the first instant the loop
-/// becomes active" (ref 13.3) generalized to "any inactive step" -- counting an
-/// inactive step as a 0 contribution would penalize a loop that is sharply
-/// dominant for a brief window (the briefly-dominant loop the retention filter
-/// is specifically built to keep), pushing it below a perpetually-mediocre
-/// loop. A loop with no active steps gets `NaN`, which sorts last.
+/// **Partition-active averaging.** A step is included when the loop's own
+/// `score[t]` is non-`NaN` and `partition_total[t] > 0`. Its zero scores count
+/// whenever a sibling is active, including before this loop first becomes
+/// active. This differs from the thesis's per-loop delayed averaging
+/// (reference section 13.3): the ranking measures sustained contribution,
+/// while the peak retention filter and coverage-aware cap protect brief
+/// contributions. A loop with no included steps gets `NaN`, which sorts last.
 ///
-/// Because the mean is over each loop's *own* active-step set, a loop that
+/// Because zero-mass partition steps are excluded, a loop that
 /// dominates a partition that is active for only a brief window ties one
 /// that dominates an always-active partition: both have a mean relative
 /// contribution near `1.0` over their respective active steps. This

@@ -237,9 +237,15 @@ Where:
 - Measures the *force* that input x exerts on output z, relative to the total effect on z
 - Unlike a partial derivative (which measures sensitivity), this measures how much the
   change in x *contributed* to the total change in z
-- For linear equations (addition/subtraction only), values are always in [0, 1]
-- For nonlinear equations with mixed polarities, can take very large values -- but this
-  does not jeopardize analysis since relative values are compared
+- There is no general upper bound, even for addition/subtraction: for `z = x - y`,
+  changes `Delta(x) = 2` and `Delta(y) = 1` give magnitudes 2 and 1. Opposing
+  contributions can nearly cancel in `Delta(z)` while their partial changes remain large.
+  The bound [0, 1] requires non-cancelling additive contributions. The 2020 paper's
+  prose on p. 165 states a broader bound for linear equations; its Eq. 1 itself gives
+  this counterexample.
+- Relative normalization makes large finite scores interpretable, but its implementation
+  must also prevent overflow in products and denominator sums. Normalization alone does
+  not recover information lost to floating-point overflow.
 
 **Polarity** `sign(Delta_x(z) / Delta(x))`:
 - Uses Richardson's (1995) polarity definition
@@ -1523,6 +1529,14 @@ average contribution to behavior.
 - Delayed averaging: starts from the first instant the loop becomes active (avoids
   penalizing loops during initialization)
 - A threshold of 0.01 (1%) means the loop contributes only 1% of total behavior on average
+
+Simlin's discovery ranking uses a different averaging window: all steps with
+positive partition mass and a defined score for the loop, including zero scores
+before that loop first becomes active. This measures sustained contribution
+within the partition. Discovery retention instead uses a peak contribution
+threshold, and its report cap protects per-step leading loops. These are
+implementation policies, distinct from the thesis's delayed averaging and
+average-based CLD inclusion threshold.
 
 #### Simplification Examples (Market Growth Model)
 

@@ -834,9 +834,8 @@ fn per_element_pin_reaches_inside_a_whole_frozen_reducer() {
 /// must still be row-pinned.
 ///
 /// `growth[Region] = pop[Region, young] + PREVIOUS(pop[Region, young]) +
-/// INIT(pop[Region, old])` -- the wrap deliberately does not descend into an
-/// already-lagged or already-frozen call (wrapping its contents again would read
-/// two steps back and force a nested-PREVIOUS helper chain), so the row pinning
+/// INIT(pop[Region, old])` -- the selected-source PREVIOUS retains its temporal
+/// read and INIT is constant, so neither call's contents are wrapped. Row pinning
 /// has to reach in through the pin-only descent. Left un-pinned,
 /// `pop[region, young]` -- a DIMENSION-name subscript -- survives into a scalar
 /// link-score fragment, which cannot compile: the fragment is dropped, the

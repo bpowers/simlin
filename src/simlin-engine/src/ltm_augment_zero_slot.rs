@@ -40,14 +40,12 @@ pub(crate) enum ZeroSlotPolicy {
     /// positive predicate. Bit-exactness rests on a LAG-ALIGNMENT requirement
     /// that is easy to state and easy to miss: the partial equals
     /// `PREVIOUS(target)` only if every read in it is lagged by EXACTLY one
-    /// step. Two shapes look entirely frozen and are not aligned -- an ORIGINAL
-    /// `PREVIOUS(z)` from the target's own equation, which the wrap
-    /// deliberately leaves untouched (so the partial reads `z(t-1)` where the
-    /// anchor read `z(t-2)`), and a synthesized `PREVIOUS` nested inside
-    /// another, which the subscript-index freeze produces. Both are rejected by
-    /// [`partial_is_provably_previous_target`], and each is pinned by its own
-    /// row in `db::ltm_value_gate_tests`; skipping either omits an arm worth
-    /// close to the canonical +/-1 attribution.
+    /// step relative to the ORIGINAL target expression. Original `PREVIOUS`
+    /// calls require a temporal proof: co-input snapshots gain one freeze,
+    /// while selected-source snapshots retain their lag. The predicate
+    /// conservatively refuses every original `PREVIOUS`, and synthesized
+    /// nested freezes as well, because the subscript-index freeze can lag an
+    /// index twice. `db::ltm_value_gate_tests` covers these refusal classes.
     ///
     /// Bit-exactness has ONE disclosed exception, and it is a value change
     /// rather than a representation one: when the target slot is NON-FINITE.
@@ -180,15 +178,14 @@ fn classify_builtin_reach(name: &str) -> BuiltinReach {
 /// negative form asks a different question, one that says nothing about the rest
 /// of the arm; see [`ZeroSlotPolicy::OmitStructuralZero`] for what that costs.
 ///
-/// "Frozen" is not enough on its own: the partial reproduces `target(t-1)` only
-/// if every read is lagged by EXACTLY one step, so this takes the ORIGINAL
-/// element expression as well as the emitted partial. An original `PREVIOUS(z)`
-/// has to be found in the original, because in the emitted tree it is the same
-/// node as a synthesized freeze and nothing distinguishes them; a NESTED
-/// `PREVIOUS` is found in the partial, because the wrap is what introduces it.
-/// Neither check subsumes the other -- reverting either one alone leaves the
-/// other case wrongly omitted, measured row by row in
-/// `db::ltm_value_gate_tests`.
+/// "Frozen" is not enough on its own: every read must be lagged by exactly
+/// one step RELATIVE TO its position in the original target. Co-input
+/// snapshots acquire that extra lag while selected-source snapshots retain
+/// their existing temporal read. Rather than prove those cases separately,
+/// this predicate conservatively refuses every original `PREVIOUS` outside
+/// an `INIT`. It also refuses nested freezes in the partial, because a frozen
+/// dynamic index can have acquired two lags. These checks can retain an
+/// aligned zero arm; they must never omit a misaligned one.
 ///
 /// A `Var` or `Subscript` reached outside a frozen subtree is a live read and
 /// ends the walk, which is why subscript INDICES are never descended into: the
@@ -206,11 +203,10 @@ pub(super) fn partial_is_provably_previous_target(original: &Expr0, partial: &Ex
 
 /// Does `expr` call `PREVIOUS` outside every `INIT(..)` subtree?
 ///
-/// Asked of the ORIGINAL element equation, never of the partial, because in the
-/// emitted tree an original `PREVIOUS(z)` and a synthesized freeze
-/// `PREVIOUS(x)` are the same node and nothing distinguishes them. `INIT`
-/// subtrees are skipped: `INIT(PREVIOUS(z))` is the run's initial value, a
-/// constant, so it aligns at every step.
+/// Asked of the original element equation to conservatively exclude its
+/// temporal-source policy from the one-step proof. `INIT` subtrees are
+/// skipped: `INIT(PREVIOUS(z))` is the run's initial value, a constant, so it
+/// aligns at every step.
 fn contains_previous_call(expr: &Expr0) -> bool {
     match expr {
         Expr0::Const(..) | Expr0::Var(..) => false,

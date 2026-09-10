@@ -39,6 +39,7 @@ mod ltm_frozen_clock;
 mod ltm_integration_method;
 mod ltm_loop_nodes;
 mod ltm_relative_scores;
+mod ltm_snapshot_inputs;
 // Compares xmutil-based MDL parsing against the native Rust parser, so it
 // needs the optional xmutil C++ converter compiled in.
 #[cfg(feature = "xmutil")]

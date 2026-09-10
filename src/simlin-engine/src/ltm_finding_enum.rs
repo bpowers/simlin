@@ -1690,14 +1690,13 @@ fn circuit_partition(
 ///   `ModuleOverrideCache::series`'s doc), so the substituted product is 0 or
 ///   NaN there whatever the other rows do.
 ///
-/// An elementary circuit repeats no node, so at most one row's target is a
-/// module instance and one lookup decides the window (a memoized `HashMap`
-/// hit after the first). Circuits touching no module node never look up.
-/// The intersection matters for cost, not just tightness: on World3 most
-/// circuits pass through a SMOOTH/DELAY module whose pathway is active for
-/// nearly the whole run, so the override window alone is ~5x wider than the
-/// circuit's own ~79-step activity window; scoring over the override window
-/// alone regressed discovery from ~0.4 s to ~1.1 s.
+/// A circuit may traverse several distinct module instances. Intersecting
+/// with the first one's override is a conservative bound: later overrides
+/// can narrow the active range further, but cannot make the product active
+/// outside this range. This uses one memoized lookup per module-bearing
+/// circuit; circuits touching no module node never look up. Keeping the raw
+/// window in the intersection avoids widening a short-lived circuit to a
+/// pathway that is active for most of the run.
 fn effective_scoring_window(
     rows: &[u32],
     graph: &ActivityGraph,

@@ -2919,9 +2919,9 @@ fn bare_body_and_feeder_agg_equations_unchanged() {
     );
     assert_eq!(
         bare_score.equation.source_text(),
-        "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
-         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")) = 0) OR ((pop[region\u{B7}north] - \
-         PREVIOUS(pop[region\u{B7}north])) = 0) then 0 else \
+        "if (TIME = INITIAL_TIME) then 0 else if (ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))) <= 0) OR (ABS((pop[region\u{B7}north] - \
+         PREVIOUS(pop[region\u{B7}north]))) <= 0) then 0 else \
          SAFEDIV((PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\") + (pop[region\u{B7}north] - \
          PREVIOUS(pop[region\u{B7}north])) - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")), \
          ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))), 0) * \
@@ -2937,8 +2937,8 @@ fn bare_body_and_feeder_agg_equations_unchanged() {
     );
     assert_eq!(
         feeder_score.equation.source_text(),
-        "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
-         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")) = 0) OR ((scale - PREVIOUS(scale)) = 0) \
+        "if (TIME = INITIAL_TIME) then 0 else if (ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))) <= 0) OR (ABS((scale - PREVIOUS(scale))) <= 0) \
          then 0 else SAFEDIV((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - (sum(pop[*] * \
          PREVIOUS(scale)))), ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
          PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))), 0) * SIGN((scale - PREVIOUS(scale)))",
@@ -3204,9 +3204,9 @@ fn nonlinear_bare_body_equations_unchanged() {
     );
     assert_eq!(
         min_score.equation.source_text(),
-        "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
-         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")) = 0) OR ((pop[region\u{B7}north] - \
-         PREVIOUS(pop[region\u{B7}north])) = 0) then 0 else \
+        "if (TIME = INITIAL_TIME) then 0 else if (ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))) <= 0) OR (ABS((pop[region\u{B7}north] - \
+         PREVIOUS(pop[region\u{B7}north]))) <= 0) then 0 else \
          SAFEDIV((MIN(pop[region\u{B7}north], PREVIOUS(pop[region\u{B7}south])) - \
          PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")), \
          ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))), 0) * \
@@ -3221,9 +3221,9 @@ fn nonlinear_bare_body_equations_unchanged() {
     );
     assert_eq!(
         stddev_score.equation.source_text(),
-        "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
-         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\")) = 0) OR ((pop[region\u{B7}north] - \
-         PREVIOUS(pop[region\u{B7}north])) = 0) then 0 else \
+        "if (TIME = INITIAL_TIME) then 0 else if (ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\" - \
+         PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"))) <= 0) OR (ABS((pop[region\u{B7}north] - \
+         PREVIOUS(pop[region\u{B7}north]))) <= 0) then 0 else \
          SAFEDIV((sqrt((((pop[region\u{B7}north] - ((pop[region\u{B7}north] + \
          PREVIOUS(pop[region\u{B7}south])) / 2))^2) + ((PREVIOUS(pop[region\u{B7}south]) - \
          ((pop[region\u{B7}north] + PREVIOUS(pop[region\u{B7}south])) / 2))^2)) / 2) - \
@@ -3326,9 +3326,9 @@ fn iterated_dim_feeder_closure_scores_via_hoist() {
     let var = ltm_var(&ltm_vars, &feeder_r1);
     assert_eq!(
         var.equation.source_text(),
-        "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
-         PREVIOUS(growth[d1\u{B7}r1])) = 0) OR ((frac[d1\u{B7}r1] - \
-         PREVIOUS(frac[d1\u{B7}r1])) = 0) then 0 else \
+        "if (TIME = INITIAL_TIME) then 0 else if (ABS((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1]))) <= 0) OR (ABS((frac[d1\u{B7}r1] - \
+         PREVIOUS(frac[d1\u{B7}r1]))) <= 0) then 0 else \
          SAFEDIV((growth[d1\u{B7}r1] - (sum(matrix[d1\u{B7}r1, *] * \
          PREVIOUS(frac[d1\u{B7}r1])))), ABS((growth[d1\u{B7}r1] - \
          PREVIOUS(growth[d1\u{B7}r1]))), 0) * SIGN((frac[d1\u{B7}r1] - \
@@ -3471,9 +3471,9 @@ fn iterated_dim_feeder_co_source_closure_scores_real_values() {
     let var = ltm_var(&ltm_vars, &m_r1c1);
     assert_eq!(
         var.equation.source_text(),
-        "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
-         PREVIOUS(growth[d1\u{B7}r1])) = 0) OR ((matrix[d1\u{B7}r1,d2\u{B7}c1] - \
-         PREVIOUS(matrix[d1\u{B7}r1,d2\u{B7}c1])) = 0) then 0 else \
+        "if (TIME = INITIAL_TIME) then 0 else if (ABS((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1]))) <= 0) OR (ABS((matrix[d1\u{B7}r1,d2\u{B7}c1] - \
+         PREVIOUS(matrix[d1\u{B7}r1,d2\u{B7}c1]))) <= 0) then 0 else \
          SAFEDIV((PREVIOUS(growth[d1\u{B7}r1]) + ((matrix[d1\u{B7}r1, d2\u{B7}c1] * \
          PREVIOUS(frac[d1\u{B7}r1])) - (PREVIOUS(matrix[d1\u{B7}r1, d2\u{B7}c1]) * \
          PREVIOUS(frac[d1\u{B7}r1]))) - PREVIOUS(growth[d1\u{B7}r1])), \
@@ -9535,9 +9535,9 @@ fn aligned_partial_reduce_emissions_stay_byte_identical() {
     // The exact equation text of the first row's score, captured at the T3
     // parent commit. Byte-identity here is the regression guard for the
     // derivation swap on already-correct shapes.
-    let golden = "if (TIME = INITIAL_TIME) then 0 else if ((inflow[d1\u{B7}a] - \
-                  PREVIOUS(inflow[d1\u{B7}a])) = 0) OR ((matrix[d1\u{B7}a,d2\u{B7}x] - \
-                  PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])) = 0) then 0 else \
+    let golden = "if (TIME = INITIAL_TIME) then 0 else if (ABS((inflow[d1\u{B7}a] - \
+                  PREVIOUS(inflow[d1\u{B7}a]))) <= 0) OR (ABS((matrix[d1\u{B7}a,d2\u{B7}x] - \
+                  PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x]))) <= 0) then 0 else \
                   SAFEDIV((PREVIOUS(inflow[d1\u{B7}a]) + (matrix[d1\u{B7}a,d2\u{B7}x] - \
                   PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])) - PREVIOUS(inflow[d1\u{B7}a])), \
                   ABS((inflow[d1\u{B7}a] - PREVIOUS(inflow[d1\u{B7}a]))), 0) * \
@@ -10336,9 +10336,9 @@ fn whole_rhs_mapped_reduce_emissions_stay_byte_identical() {
 
     // The exact source-half equation text captured at the T4 parent commit
     // (148a17d8).
-    let golden = "if (TIME = INITIAL_TIME) then 0 else if ((\"$\u{205A}ltm\u{205A}agg\u{205A}0\"\
-[ca] - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca])) = 0) OR ((matrix[region\u{B7}west,\
-d2\u{B7}x] - PREVIOUS(matrix[region\u{B7}west,d2\u{B7}x])) = 0) then 0 else SAFEDIV((PREVIOUS\
+    let golden = "if (TIME = INITIAL_TIME) then 0 else if (ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\"\
+[ca] - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca]))) <= 0) OR (ABS((matrix[region\u{B7}west,\
+d2\u{B7}x] - PREVIOUS(matrix[region\u{B7}west,d2\u{B7}x]))) <= 0) then 0 else SAFEDIV((PREVIOUS\
 (\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca]) + (matrix[region\u{B7}west,d2\u{B7}x] - PREVIOUS(\
 matrix[region\u{B7}west,d2\u{B7}x])) - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca])), \
 ABS((\"$\u{205A}ltm\u{205A}agg\u{205A}0\"[ca] - PREVIOUS(\"$\u{205A}ltm\u{205A}agg\u{205A}0\"\
@@ -11988,8 +11988,8 @@ fn scalar_feeder_of_whole_rhs_reduce_scores_via_agg_arm() {
     );
     assert_eq!(
         feeder.equation.source_text(),
-        "if (TIME = INITIAL_TIME) then 0 else if ((growth - PREVIOUS(growth)) = 0) OR \
-         ((scale - PREVIOUS(scale)) = 0) then 0 else SAFEDIV((growth - (sum(matrix[d1, *] * \
+        "if (TIME = INITIAL_TIME) then 0 else if (ABS((growth - PREVIOUS(growth))) <= 0) OR \
+         (ABS((scale - PREVIOUS(scale))) <= 0) then 0 else SAFEDIV((growth - (sum(matrix[d1, *] * \
          PREVIOUS(scale)))), ABS((growth - PREVIOUS(growth))), 0) * SIGN((scale - PREVIOUS(scale)))",
         "the scalar-feeder changed-last equation must match the hand-derived form"
     );
@@ -12962,8 +12962,8 @@ fn scalar_feeder_of_broadcast_reduce_scores_via_agg_arm() {
     );
     assert_eq!(
         feeder.equation.source_text(),
-        "if (TIME = INITIAL_TIME) then 0 else if ((growth - PREVIOUS(growth)) = 0) OR \
-         ((scale - PREVIOUS(scale)) = 0) then 0 else SAFEDIV((growth - (sum(matrix[a, *] * \
+        "if (TIME = INITIAL_TIME) then 0 else if (ABS((growth - PREVIOUS(growth))) <= 0) OR \
+         (ABS((scale - PREVIOUS(scale))) <= 0) then 0 else SAFEDIV((growth - (sum(matrix[a, *] * \
          PREVIOUS(scale)))), ABS((growth - PREVIOUS(growth))), 0) * SIGN((scale - PREVIOUS(scale)))",
         "the broadcast scalar-feeder changed-last equation must match the hand-derived form"
     );

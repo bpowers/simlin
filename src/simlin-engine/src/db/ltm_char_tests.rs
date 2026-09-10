@@ -1872,13 +1872,10 @@ fn reducer_index_nested_freeze_preserves_loud_failure_not_silent_compile() {
 // Model G (Track A3 stage 2, review finding 2): an already-lagged other-dep
 // (Fig. 2 Q3).
 //
-// `to = from + PREVIOUS(g)`, edge `(from -> to)`, `Bare` shape. `g` occurs
-// only inside `PREVIOUS(g)` -- it is already lagged. The changed-first partial
-// holds `from` live and must LEAVE `PREVIOUS(g)` untouched
-// (`from + PREVIOUS(g)`), NOT re-wrap it to `PREVIOUS(PREVIOUS(g))` (a t-2
-// read). This pins the already-lagged selection semantics the wrap reproduces by
-// recognizing a `PREVIOUS`/`INIT` node structurally: it suppresses the wrap of an
-// already-lagged occurrence but not its live selection.
+// `to = from + PREVIOUS(g)`, edge `(from -> to)`, `Bare` shape. The anchor
+// PREVIOUS(to) contains g from two steps ago, so the partial freezes the whole
+// PREVIOUS(g) co-input to preserve that same value. The fixture constrains
+// rendering and compilation; ltm_snapshot_inputs checks moving values.
 // ---------------------------------------------------------------------------
 
 fn already_lagged_other_dep_model() -> datamodel::Project {
