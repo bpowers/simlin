@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use crate::datamodel::ViewElement;
 use crate::datamodel::view_element::LabelSide;
-use crate::diagram::common::Rect;
+use crate::diagram::common::{Rect, merge_bounds};
 use crate::diagram::label::label_bounds;
 
 use super::metrics::{
@@ -162,13 +162,46 @@ pub fn remove_overlaps(items: &[Footprint], margin: f64) -> (Vec<(f64, f64)>, bo
         return (disp, true);
     }
 
+    // Each item's rects' union: the broad phase's box.
+    let bounds: Vec<Option<Rect>> = items
+        .iter()
+        .map(|item| item.rects.iter().copied().reduce(merge_bounds))
+        .collect();
+
     let mut converged = false;
     for _ in 0..MAX_RELAX_ITERS {
         let mut net = vec![(0.0_f64, 0.0_f64); n];
         let mut any_overlap = false;
 
+        // Broad phase: two items can be pushed apart only if their boxes,
+        // grown by the margin, meet. Candidates are visited in the (i, j)
+        // order a full pair scan uses and a skipped pair adds nothing, so the
+        // accumulated pushes are bit-identical to that scan.
+        let grown: Vec<Option<Rect>> = bounds
+            .iter()
+            .zip(&disp)
+            .map(|(b, d)| b.map(|b| grow(&translate(&b, d.0, d.1), margin)))
+            .collect();
+        let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        for (k, b) in grown.iter().enumerate() {
+            if let Some(b) = b {
+                for cell in grid_cells(b) {
+                    grid.entry(cell).or_default().push(k);
+                }
+            }
+        }
+        let mut candidates: Vec<usize> = Vec::new();
         for i in 0..n {
-            for j in (i + 1)..n {
+            let Some(bi) = &grown[i] else { continue };
+            candidates.clear();
+            for cell in grid_cells(bi) {
+                if let Some(items_in_cell) = grid.get(&cell) {
+                    candidates.extend(items_in_cell.iter().copied().filter(|&j| j > i));
+                }
+            }
+            candidates.sort_unstable();
+            candidates.dedup();
+            for &j in &candidates {
                 if !items[i].movable && !items[j].movable {
                     continue; // two fixed obstacles never push each other
                 }
@@ -208,6 +241,26 @@ pub fn remove_overlaps(items: &[Footprint], margin: f64) -> (Vec<(f64, f64)>, bo
     }
 
     (disp, converged)
+}
+
+/// Cell size of the relaxation's broad-phase grid: about a node with its label.
+const RELAX_GRID_CELL: f64 = 96.0;
+
+/// The broad-phase grid cells a box covers.
+fn grid_cells(r: &Rect) -> impl Iterator<Item = (i64, i64)> {
+    let cell = |v: f64| (v / RELAX_GRID_CELL).floor() as i64;
+    let (x0, x1, y0, y1) = (cell(r.left), cell(r.right), cell(r.top), cell(r.bottom));
+    (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+}
+
+/// `r` grown by `d` on every side.
+fn grow(r: &Rect, d: f64) -> Rect {
+    Rect {
+        top: r.top - d,
+        bottom: r.bottom + d,
+        left: r.left - d,
+        right: r.right + d,
+    }
 }
 
 /// A labeled element's per-side label-box options for side selection.
@@ -1001,6 +1054,98 @@ mod tests {
         let (disp, converged) = remove_overlaps(&items, 6.0);
         assert_eq!(disp, vec![(0.0, 0.0), (0.0, 0.0)]);
         assert!(converged, "already-clear layout converges immediately");
+    }
+
+    /// The all-pairs relaxation `remove_overlaps` must reproduce bit for bit.
+    fn remove_overlaps_by_full_scan(items: &[Footprint], margin: f64) -> (Vec<(f64, f64)>, bool) {
+        let n = items.len();
+        let mut disp = vec![(0.0_f64, 0.0_f64); n];
+        if n < 2 {
+            return (disp, true);
+        }
+        let mut converged = false;
+        for _ in 0..MAX_RELAX_ITERS {
+            let mut net = vec![(0.0_f64, 0.0_f64); n];
+            let mut any_overlap = false;
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    if !items[i].movable && !items[j].movable {
+                        continue;
+                    }
+                    let (si, sj) = match (items[i].movable, items[j].movable) {
+                        (true, true) => (0.5, 0.5),
+                        (true, false) => (1.0, 0.0),
+                        (false, true) => (0.0, 1.0),
+                        (false, false) => unreachable!(),
+                    };
+                    for ra in &items[i].rects {
+                        let ra = translate(ra, disp[i].0, disp[i].1);
+                        for rb in &items[j].rects {
+                            let rb = translate(rb, disp[j].0, disp[j].1);
+                            if let Some((mx, my)) = separation_mtv(&ra, &rb, margin) {
+                                any_overlap = true;
+                                net[i].0 -= mx * si;
+                                net[i].1 -= my * si;
+                                net[j].0 += mx * sj;
+                                net[j].1 += my * sj;
+                            }
+                        }
+                    }
+                }
+            }
+            if !any_overlap {
+                converged = true;
+                break;
+            }
+            for k in 0..n {
+                if items[k].movable {
+                    disp[k].0 += RELAX_STEP * net[k].0;
+                    disp[k].1 += RELAX_STEP * net[k].1;
+                }
+            }
+        }
+        (disp, converged)
+    }
+
+    #[test]
+    fn remove_overlaps_matches_a_full_pair_scan() {
+        // Crowded scenes of shape-plus-label footprints, a fifth of them fixed,
+        // dense enough that some jam: the broad phase must push exactly what
+        // the all-pairs scan pushes.
+        for scene in 0..4u64 {
+            let mut state = 0x9e37_79b9_7f4a_7c15u64 ^ scene;
+            let mut next = move || {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((state >> 11) as f64) / ((1u64 << 53) as f64)
+            };
+            let count = 20 + 15 * scene as usize;
+            let span = 60.0 + 40.0 * scene as f64;
+            let items: Vec<Footprint> = (0..count)
+                .map(|id| {
+                    let (x, y) = (next() * span, next() * span);
+                    let shape = rect(x - 9.0, y - 9.0, x + 9.0, y + 9.0);
+                    let w = 20.0 + next() * 80.0;
+                    let label = rect(x - w / 2.0, y + 11.0, x + w / 2.0, y + 25.0);
+                    Footprint {
+                        id,
+                        rects: vec![shape, label],
+                        movable: next() > 0.2,
+                    }
+                })
+                .collect();
+            let (disp, converged) = remove_overlaps(&items, SEPARATION_MARGIN);
+            let (want_disp, want_converged) =
+                remove_overlaps_by_full_scan(&items, SEPARATION_MARGIN);
+            assert_eq!(converged, want_converged, "scene {scene}");
+            for (k, (got, want)) in disp.iter().zip(&want_disp).enumerate() {
+                assert!(
+                    got.0.to_bits() == want.0.to_bits() && got.1.to_bits() == want.1.to_bits(),
+                    "scene {scene} item {k}: {got:?} vs {want:?}"
+                );
+            }
+        }
     }
 
     // ── choose_label_sides ──
