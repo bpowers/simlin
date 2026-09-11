@@ -5,7 +5,8 @@
 //! Incremental layout's flow contract.
 //!
 //! A flow is rebuilt only when the patch creates it or changes the flow's own
-//! attachment: it moves to another stock, an attached stock is deleted, or an
+//! attachment: it moves to another stock, it is dropped from a stock's list or
+//! listed on a stock at its cloud end, an attached stock is deleted, or an
 //! attached stock changes kind. Every other flow comes back byte for byte --
 //! points, valve, label side and clouds -- even where its stored geometry is
 //! not what a fresh layout would draw. A flow the pass builds holds the flow
@@ -15,13 +16,18 @@
 //!
 //! - names the flow: an upsert keeps it, a rename keeps all but the name, a
 //!   delete removes it with its clouds
-//! - changes its attachment -- moves it to another stock, deletes an attached
-//!   stock, changes an attached stock's kind: rebuilt
+//! - changes its attachment -- moves it to another stock, drops it from a
+//!   stock's list (that end becomes a cloud), lists it on a stock at its cloud
+//!   end (the cloud end becomes the stock), deletes an attached stock, changes
+//!   an attached stock's kind: rebuilt
 //! - touches only a sibling -- a flow added on its face, a chain flow added on
 //!   a face it occupies, its stock's chain removed: preserved, and a created
 //!   sibling takes the largest free gap
+//! - creates flows on an imported view (`SIR.xmile`, `mark2.mdl`): they land
+//!   clear of the ends and clouds already there, and nothing else moves
 //! - touches an unrelated element, with a new element (the settle path) and
-//!   without one (the early-return path): preserved, an off-pipe valve included
+//!   without one (the early-return path): preserved, a diagonal pipe, an
+//!   off-face endpoint and an off-pipe valve included
 //!
 //! Label sides are enumerated in `layout_label_tests.rs`.
 
@@ -372,6 +378,32 @@ fn a_flow_whose_attachment_changes_is_rebuilt() {
             preserved: &["chain_flow"],
         },
         Reattachment {
+            label: "a stock drops the flow from its list (that end becomes a cloud)",
+            edit: Box::new(|m| set_stock_flows(m, "stock_a", &[], &["chain_flow"])),
+            ops: vec![ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string()],
+            }],
+            ident: "waste_a",
+            source: None,
+            sink: None,
+            preserved: &["chain_flow"],
+        },
+        Reattachment {
+            label: "a stock lists the flow at its cloud end (the cloud end becomes the stock)",
+            edit: Box::new(|m| set_stock_flows(m, "stock_b", &["chain_flow", "waste_a"], &[])),
+            ops: vec![ModelOperation::UpdateStockFlows {
+                ident: "stock_b".to_string(),
+                inflows: vec!["chain_flow".to_string(), "waste_a".to_string()],
+                outflows: vec![],
+            }],
+            ident: "waste_a",
+            source: Some("stock_a"),
+            sink: Some("stock_b"),
+            preserved: &["chain_flow"],
+        },
+        Reattachment {
             label: "an attached stock deleted",
             edit: Box::new(|m| m.variables.retain(|v| v.get_ident() != "stock_b")),
             ops: vec![ModelOperation::DeleteVariable {
@@ -528,23 +560,220 @@ fn a_flow_whose_sibling_changes_is_preserved() {
     assert_in_largest_free_gap(&new, "chain_flow", row);
 }
 
-/// The old view's waste_a has its valve moved off its pipe: stored geometry
-/// that breaks the invariants (a hand edit, or a view saved before they held)
-/// is exactly what no pass may "repair" on a flow the patch did not touch.
+/// Created flows on production views, through the importers: the flows a
+/// patch creates hold the invariants and land clear of the flows already
+/// there, and every pre-existing flow comes back byte for byte. Rows:
+///
+/// - `SIR.xmile`: `relapse` from `infectious` back to `susceptible`, whose
+///   facing faces already carry `succumbing`'s ends. The pipe runs straight,
+///   clear of those ends: the joint slot gives it one line (pinned on its own
+///   by `face_slots::tests::place_created_flow_ends_rows`), and the finishing
+///   pass's collapse would merge two independent slots' riser anyway, so this
+///   row pins the outcome, not which of the two produces it.
+/// - `mark2.mdl`: two cloud outflows added at once to `risk taking behavior`,
+///   whose face a pre-existing flow occupies. Their clouds do not overlap
+///   each other or any other cloud.
+#[test]
+fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
+    fn pre_existing_flows(view: &datamodel::StockFlow) -> Vec<(view_element::Flow, Vec<Cloud>)> {
+        view.elements
+            .iter()
+            .filter_map(|e| match e {
+                ViewElement::Flow(f) => Some(flow_and_clouds(view, &canonicalize(&f.name))),
+                _ => None,
+            })
+            .collect()
+    }
+    fn stock_lists(project: &datamodel::Project, ident: &str) -> (Vec<String>, Vec<String>) {
+        project.models[0]
+            .variables
+            .iter()
+            .find_map(|v| match v {
+                datamodel::Variable::Stock(s) if canonicalize(&s.ident) == ident => {
+                    Some((s.inflows.clone(), s.outflows.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("stock {ident}"))
+    }
+    fn incremental_on_import(
+        project: &datamodel::Project,
+        new_flows: &[&str],
+        lists: &[(&str, Vec<String>, Vec<String>)],
+    ) -> (datamodel::StockFlow, datamodel::StockFlow) {
+        let model_name = project.models[0].name.clone();
+        let datamodel::View::StockFlow(old) = &project.models[0].views[0];
+        let mut patched = project.clone();
+        let model = &mut patched.models[0];
+        let mut ops = Vec::new();
+        for name in new_flows {
+            model
+                .variables
+                .push(datamodel::Variable::Flow(flow(name, "1")));
+            ops.push(ModelOperation::UpsertFlow(flow(name, "1")));
+        }
+        for (ident, inflows, outflows) in lists {
+            for var in &mut model.variables {
+                if let datamodel::Variable::Stock(s) = var
+                    && canonicalize(&s.ident) == *ident
+                {
+                    s.inflows = inflows.clone();
+                    s.outflows = outflows.clone();
+                }
+            }
+            ops.push(ModelOperation::UpdateStockFlows {
+                ident: ident.to_string(),
+                inflows: inflows.clone(),
+                outflows: outflows.clone(),
+            });
+        }
+        let patch = ModelPatch {
+            name: model_name.clone(),
+            ops,
+        };
+        let new = incremental_layout(old, &patched, &model_name, &patch, None)
+            .expect("incremental layout");
+        (old.clone(), new)
+    }
+    fn assert_pre_existing_preserved(
+        old: &datamodel::StockFlow,
+        new: &datamodel::StockFlow,
+        row: &str,
+    ) {
+        for (f, clouds) in pre_existing_flows(old) {
+            assert_eq!(
+                flow_and_clouds(new, &canonicalize(&f.name)),
+                (f.clone(), clouds),
+                "{row}: {} must come back byte for byte",
+                f.name
+            );
+        }
+    }
+
+    const SIR: &str = include_str!("../../../../test/test-models/samples/SIR/SIR.xmile");
+    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(SIR.as_bytes()))
+        .expect("SIR imports");
+    let (infectious_in, mut infectious_out) = stock_lists(&project, "infectious");
+    let (mut susceptible_in, susceptible_out) = stock_lists(&project, "susceptible");
+    infectious_out.push("relapse".to_string());
+    susceptible_in.push("relapse".to_string());
+    let (old, new) = incremental_on_import(
+        &project,
+        &["relapse"],
+        &[
+            ("infectious", infectious_in, infectious_out),
+            ("susceptible", susceptible_in, susceptible_out),
+        ],
+    );
+    let row = "SIR relapse";
+    assert_pre_existing_preserved(&old, &new, row);
+    assert_eq!(
+        violations_of(&new, "relapse"),
+        Vec::<String>::new(),
+        "{row}"
+    );
+    let relapse = find_flow(&new, "relapse").unwrap();
+    assert_eq!(relapse.points.len(), 2, "{row}: a straight pipe");
+    let succumbing = find_flow(&new, "succumbing").unwrap();
+    for p in [&relapse.points[0], relapse.points.last().unwrap()] {
+        for q in [&succumbing.points[0], succumbing.points.last().unwrap()] {
+            assert!(
+                (p.x - q.x).hypot(p.y - q.y) > 1.0,
+                "{row}: relapse's end ({}, {}) lands on succumbing's ({}, {})",
+                p.x,
+                p.y,
+                q.x,
+                q.y
+            );
+        }
+    }
+
+    const MARK2: &str = include_str!("../../../../test/bobby/vdf/econ/mark2.mdl");
+    let project = crate::compat::open_vensim(MARK2).expect("mark2 imports");
+    let (inflows, mut outflows) = stock_lists(&project, "risk_taking_behavior");
+    outflows.push("probe_a".to_string());
+    outflows.push("probe_b".to_string());
+    let (old, new) = incremental_on_import(
+        &project,
+        &["probe_a", "probe_b"],
+        &[("risk_taking_behavior", inflows, outflows)],
+    );
+    let row = "mark2 two outflows";
+    assert_pre_existing_preserved(&old, &new, row);
+    let clouds: Vec<(i32, f64, f64)> = new
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Cloud(c) => Some((c.uid, c.x, c.y)),
+            _ => None,
+        })
+        .collect();
+    for probe in ["probe_a", "probe_b"] {
+        assert_eq!(
+            violations_of(&new, probe),
+            Vec::<String>::new(),
+            "{row}: {probe}"
+        );
+        for (c, _) in flow_and_clouds(&new, probe).1.iter().map(|c| (c, ())) {
+            for &(other, x, y) in &clouds {
+                if other == c.uid {
+                    continue;
+                }
+                assert!(
+                    (c.x - x).hypot(c.y - y)
+                        >= 2.0 * crate::diagram::constants::CLOUD_RADIUS - 1e-6,
+                    "{row}: {probe}'s cloud at ({}, {}) overlaps cloud {other} at ({x}, {y})",
+                    c.x,
+                    c.y
+                );
+            }
+        }
+    }
+}
+
+/// The old view breaks the invariants on both flows the patch does not touch,
+/// in each way a pass could "repair": waste_a's valve is off its pipe and its
+/// stock end is off stock_a's faces (the endpoint snap), and chain_flow's pipe
+/// is diagonal (the orthogonalizer). Stored geometry like that -- a hand edit,
+/// or a view saved before the invariants held -- is exactly what no pass may
+/// move on a flow the patch did not touch, with a new element (the settle
+/// path, which runs the snap and the finishing pass) and without one (the
+/// early-return path).
 #[test]
 fn a_flow_the_patch_does_not_touch_is_preserved() {
     let base = chain_and_waste();
     let mut old = generate_layout(&base, TEST_MODEL, None).expect("initial layout");
+    let stock_a_uid = stock_named(&old, "stock_a").uid;
     for e in &mut old.elements {
         if let ViewElement::Flow(f) = e
             && canonicalize(&f.name) == "waste_a"
         {
             f.x += 30.0;
+            for p in &mut f.points {
+                if p.attached_to_uid == Some(stock_a_uid) {
+                    p.x += 4.0;
+                    p.y -= 5.0;
+                }
+            }
+        }
+        if let ViewElement::Flow(f) = e
+            && canonicalize(&f.name) == "chain_flow"
+        {
+            let last = f.points.len() - 1;
+            f.points[last].y += 6.0;
         }
     }
+    let waste_problems = violations_of(&old, "waste_a");
     assert!(
-        !violations_of(&old, "waste_a").is_empty(),
-        "fixture: waste_a's valve is off its pipe"
+        waste_problems.iter().any(|v| v.contains("off the pipe"))
+            && waste_problems.iter().any(|v| v.contains("off the faces")),
+        "fixture: waste_a's valve is off its pipe and its stock end off the faces: {waste_problems:?}"
+    );
+    assert!(
+        violations_of(&old, "chain_flow")
+            .iter()
+            .any(|v| v.contains("diagonal")),
+        "fixture: chain_flow's pipe is diagonal"
     );
 
     let new = incremental(

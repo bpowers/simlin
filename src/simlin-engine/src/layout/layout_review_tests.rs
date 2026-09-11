@@ -2508,15 +2508,15 @@ fn test_incremental_chain_flow_seeded_between_stocks() {
 }
 
 // ---------------------------------------------------------------------------
-// P2: Redistributing flows must preserve existing positional order
+// P2: Adding a sibling keeps a hand-reordered face exactly as it was
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_incremental_redistribute_preserves_visual_order() {
+fn test_incremental_add_side_flow_keeps_reordered_siblings_in_place() {
     // Three side outflows beside a chain flow: waste_a and waste_c share the
     // bottom face (waste_b holds the top). Construct a view where waste_c is
-    // visually LEFT of waste_a (non-alphabetical order). Adding waste_d, which
-    // reclassifies every flow on the stock, must not swap waste_a and waste_c.
+    // visually LEFT of waste_a (non-alphabetical order). Adding waste_d must
+    // leave every sibling exactly as drawn, the swapped order included.
 
     // First, build an initial model with chain + waste_a + waste_b + waste_c
     let initial_model = datamodel::Model {
@@ -2723,33 +2723,39 @@ fn test_incremental_redistribute_preserves_visual_order() {
     let new_view = incremental_layout(&swapped_view, &patched_project, TEST_MODEL, &patch, None)
         .expect("incremental layout");
 
-    // After redistribution, waste_c should still be to the left of waste_a
-    let new_wa_x = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => {
-                f.points.first().map(|p| p.x)
-            }
-            _ => None,
-        })
-        .expect("waste_a in new view");
-    let new_wc_x = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
-                f.points.first().map(|p| p.x)
-            }
-            _ => None,
-        })
-        .expect("waste_c in new view");
-
+    // waste_a, waste_b and waste_c are siblings the patch did not touch: they
+    // come back byte for byte, the swapped order included, and waste_d's stock
+    // end lands on none of theirs.
+    let flow_named = |view: &datamodel::StockFlow, name: &str| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == name => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} in view"))
+    };
+    for name in ["waste_a", "waste_b", "waste_c"] {
+        assert!(
+            flow_named(&new_view, name) == flow_named(&swapped_view, name),
+            "{name} must come back byte for byte"
+        );
+    }
+    let wd = flow_named(&new_view, "waste_d").points[0].clone();
+    for name in ["waste_a", "waste_b", "waste_c"] {
+        let end = flow_named(&swapped_view, name).points[0].clone();
+        assert!(
+            (wd.x - end.x).hypot(wd.y - end.y) > 1.0,
+            "waste_d's end ({}, {}) must not land on {name}'s ({}, {})",
+            wd.x,
+            wd.y,
+            end.x,
+            end.y,
+        );
+    }
     assert!(
-        new_wc_x < new_wa_x,
-        "waste_c ({}) should remain left of waste_a ({}) after adding waste_d",
-        new_wc_x,
-        new_wa_x,
+        swapped_wc_x < swapped_wa_x,
+        "fixture: waste_c stays left of waste_a"
     );
 }
 
