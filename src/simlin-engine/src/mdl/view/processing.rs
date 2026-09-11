@@ -1167,6 +1167,31 @@ mod tests {
             );
         }
 
+        /// A pipe with one end: its axis is read off the valve, so a control
+        /// point sharing the valve's x makes it vertical and the end takes its
+        /// stock's y (the other side has no stock and no pipe end, so it is
+        /// free).
+        #[test]
+        fn a_single_pipe_end_drawn_vertical_takes_its_stocks_y() {
+            let symbols = symbols(vec![("stock b", stock(&["flow rate"], &[]))]);
+            let view = view_of(vec![
+                variable(2, "Stock B", 100, 250, false, false),
+                valve(3, 100, 150),
+                variable(4, "Flow Rate", 120, 150, true, false),
+                connector(5, 3, 2, (100, 200)),
+            ]);
+            let ends = ends_of(&view, &symbols);
+            assert_eq!(
+                ends.sink,
+                FlowEnd::Pipe {
+                    x: 100,
+                    y: 250,
+                    target: PipeTarget::Stock("stock b".to_string())
+                }
+            );
+            assert_eq!(ends.source, FlowEnd::Free);
+        }
+
         /// A cloud serves the side the model gives no stock; a pipe end at a
         /// stock that does not list the flow does too, as a cloud clear of that
         /// stock.

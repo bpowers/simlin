@@ -793,12 +793,14 @@ fn create_flow_view_element(
                 if half_h * dx.abs() >= half_w * dy.abs() {
                     FlowPoint {
                         x: stock_pos.x + dx.signum() * half_w,
-                        y: clamp_to_face_span(pos.y, stock_pos.y, half_h),
+                        // The face's span only: the finishing pass
+                        // (`finish_flow_geometry`) owns corner clearance.
+                        y: pos.y.clamp(stock_pos.y - half_h, stock_pos.y + half_h),
                         attached_to_uid: Some(stock_uid),
                     }
                 } else {
                     FlowPoint {
-                        x: clamp_to_face_span(pos.x, stock_pos.x, half_w),
+                        x: pos.x.clamp(stock_pos.x - half_w, stock_pos.x + half_w),
                         y: stock_pos.y + dy.signum() * half_h,
                         attached_to_uid: Some(stock_uid),
                     }

@@ -869,6 +869,64 @@ fn normalization_is_idempotent() {
     }
 }
 
+/// The slide's fold-back guard. A stock-to-cloud L whose first segment runs
+/// along the stock's bottom face: the Face arm needs the line 3px up, onto the
+/// cloud end's own row, where the slide would leave the L's riser of no length.
+/// The guard refuses that slide; the collapse then removes the 3px final
+/// segment and the attach arms bring the straight pipe onto the face. Without
+/// the guard the zero-length riser stays, since the collapse skips a segment
+/// of no length. Found by a differential over 40,000 generated views, where it
+/// was the first input whose unguarded result the checker rejects.
+#[test]
+fn a_slide_that_would_fold_a_neighbour_is_refused() {
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        cloud(11, 2, 197.0, 114.5),
+        flow(
+            2,
+            (-4.0, 417.5),
+            vec![
+                pt(118.0, 117.5, Some(1)),
+                pt(197.0, 117.5, None),
+                pt(197.0, 114.5, Some(11)),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![(122.5, 114.5), (197.0, 114.5)]
+    );
+}
+
+/// The commit guard (the validity check that ends `attach_end_segment`). Two
+/// overlapping stocks, s1 at (100, 100) and s3 at (95, 110.5), and a two-point
+/// pipe whose source end is off s1's faces: the Face arms would land that end
+/// on s1's left face with the segment running through s3's body. That result
+/// is not committed, so the pipe stays as the producer wrote it. Overlapping
+/// bodies leave G1-G5 to best effort (the design plan's G6 precondition), so
+/// this row pins what is not committed rather than a valid route. Found by the
+/// same differential.
+#[test]
+fn an_attach_whose_endpoint_would_be_invalid_is_not_committed() {
+    let original = vec![pt(49.0, 100.0, Some(1)), pt(72.5, 100.0, Some(3))];
+    let mut elements = vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 95.0, 110.5),
+        flow(2, (60.75, 100.0), original.clone()),
+    ];
+    normalize_flow_geometry(&mut elements);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        original.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()
+    );
+    assert!(
+        !flow_invariant_violations(&elements)
+            .iter()
+            .any(|v| v.contains("runs through an endpoint stock")),
+        "no segment through a body is committed"
+    );
+}
+
 #[test]
 fn clamp_to_face_span_keeps_corner_clearance() {
     assert_eq!(clamp_to_face_span(100.0, 100.0, 22.5), 100.0);

@@ -63,6 +63,7 @@ pub(super) struct PendingFlowRoute {
     pub(super) sink: RouteEnd,
 }
 
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy)]
 enum Axis {
     Horizontal,
@@ -165,6 +166,7 @@ pub(super) fn route_pending_flows(elements: &mut Vec<ViewElement>, pending: &[Pe
 /// A route end with its stock's position resolved. A stock uid with no stock
 /// element (not produced by the importer, but not assumed away) is an end with
 /// no stock.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 enum End<'a> {
     Point(&'a FlowPoint),
     CloudNearStock { end: (f64, f64), stock: (f64, f64) },
@@ -323,5 +325,96 @@ fn route_without_sketch(
             let sink_cloud = new_cloud((valve.0 + CLOUD_DISTANCE, valve.1));
             vec![source_cloud, sink_cloud]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cloud_maker(next_uid: &mut i32) -> impl FnMut((f64, f64)) -> FlowPoint + '_ {
+        move |p| {
+            let uid = *next_uid;
+            *next_uid += 1;
+            attached(p, uid)
+        }
+    }
+
+    fn coords(points: &[FlowPoint]) -> Vec<(f64, f64, Option<i32>)> {
+        points
+            .iter()
+            .map(|p| (p.x, p.y, p.attached_to_uid))
+            .collect()
+    }
+
+    /// A route from a placed end through the valve to a stock the model links:
+    /// straight on when the stock is ahead of the valve by at least the
+    /// margin, and otherwise turning `BEND_STEP` past the valve toward the
+    /// stock's line, so the valve keeps its margin from the bend.
+    #[test]
+    fn a_route_to_its_stock_turns_past_the_valve_when_the_stock_is_behind() {
+        let mut uid = 100;
+        let placed = attached((0.0, 100.0), 1);
+
+        let ahead = End::Stock {
+            uid: 7,
+            at: (300.0, 180.0),
+        };
+        let points = route_through_valve(
+            placed.clone(),
+            (50.0, 100.0),
+            &ahead,
+            &mut cloud_maker(&mut uid),
+        );
+        assert_eq!(
+            coords(&points),
+            vec![(0.0, 100.0, Some(1)), (300.0, 100.0, Some(7))],
+            "stock ahead: straight on"
+        );
+
+        let behind = End::Stock {
+            uid: 7,
+            at: (40.0, 300.0),
+        };
+        let points =
+            route_through_valve(placed, (50.0, 100.0), &behind, &mut cloud_maker(&mut uid));
+        assert_eq!(
+            coords(&points),
+            vec![
+                (0.0, 100.0, Some(1)),
+                (50.0 + BEND_STEP, 100.0, None),
+                (50.0 + BEND_STEP, 300.0, Some(7))
+            ],
+            "stock behind the valve: a bend BEND_STEP past it"
+        );
+    }
+
+    /// A cloud for a pipe end drawn into a stock that does not list the flow
+    /// sits just outside that stock along the pipe, but never within the
+    /// valve's margin: rows for a stock far from the valve and one close to it.
+    #[test]
+    fn a_cloud_near_an_unlinked_stock_stays_off_the_valve() {
+        let mut uid = 100;
+        let far = End::CloudNearStock {
+            end: (300.0, 100.0),
+            stock: (300.0, 100.0),
+        };
+        let cloud = place_sketch_end(&far, (100.0, 100.0), &mut cloud_maker(&mut uid));
+        assert_eq!(
+            (cloud.x, cloud.y),
+            (300.0 - (STOCK_WIDTH / 2.0 + CLOUD_RADIUS), 100.0),
+            "just outside the stock, along the pipe"
+        );
+
+        let near = End::CloudNearStock {
+            end: (140.0, 100.0),
+            stock: (130.0, 100.0),
+        };
+        let cloud = place_sketch_end(&near, (100.0, 100.0), &mut cloud_maker(&mut uid));
+        assert_eq!(
+            (cloud.x, cloud.y),
+            (100.0 + VALVE_MARGIN, 100.0),
+            "a stock close to the valve: kept the margin off the valve"
+        );
     }
 }
