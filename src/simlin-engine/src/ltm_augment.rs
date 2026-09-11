@@ -7,7 +7,7 @@
 //! This module generates synthetic variables for Loops That Matter (LTM) analysis.
 //! The generated equations use the intrinsic two-argument `PREVIOUS(value, initial)`
 //! function. Every score reads one step of history, so the first-timestep guard
-//! is expressed explicitly with `TIME = INITIAL_TIME` and every score's first
+//! is expressed explicitly with `TIME <= INITIAL_TIME` and every score's first
 //! value is at the step after the start.
 
 use crate::ast::{Expr0, IndexExpr0, print_eqn};
@@ -421,7 +421,7 @@ fn other_dep_verdict(
 /// residual `ltm_augment_zero_slot` documents; the clock does not join it.)
 /// In a LIVE reference's index the frozen clock takes the un-lagged read as
 /// its first-DT value like every other index freeze ([`freeze_at_previous`]).
-/// The guard form's own `TIME = INITIAL_TIME` arm is outside the partial and
+/// The guard form's own `TIME <= INITIAL_TIME` arm is outside the partial and
 /// reads the clock live.
 ///
 /// `ctx.iter_ctx` carries the GH #511 iterated-dimension context (the live
@@ -757,16 +757,24 @@ fn wrap_non_matching_in_previous(
             }
         }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
-            // A PREVIOUS(...) / INIT(...) call from the original equation:
-            // everything inside it is already lagged (read at the prior step)
-            // or frozen (read at t=0), so it is already ceteris-paribus -- the
-            // current-step perturbation cannot affect it. Wrapping its
-            // contents again would read values from TWO steps ago
-            // (semantically wrong) and force a nested-PREVIOUS helper chain
-            // (one synthesized helper variable per occurrence; on
-            // SAMPLE-IF-TRUE-heavy models like C-LEARN this was the dominant
-            // helper source). Leave the whole call untouched.
+            // An original PREVIOUS is a changing input: at t its value is
+            // g(t-1), while the PREVIOUS(target) anchor contains g(t-2). The
+            // changed-first partial must freeze that WHOLE input, including
+            // its initial fallback, or g's motion is credited to this source.
+            // This is the previous-input rule in Schoenberg et al. 2020,
+            // p. 171 / Fig. 1, applied to the value of a snapshot expression.
+            // INIT is constant. A PREVIOUS of the selected source retains
+            // the existing temporal-edge policy: the graph groups that read
+            // with its current reads. Its fallback is initial-only, so it
+            // cannot make the snapshot a selected-source read at later steps.
             if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
+                let freeze_snapshot = name.eq_ignore_ascii_case("previous")
+                    && !frozen
+                    && !ctx.occ.subtree_has_live_shape(
+                        &child_path(path, 0),
+                        live_source,
+                        live_shape,
+                    );
                 // The wrap adds nothing inside, but the `PerElement` row pinning
                 // still has to reach the source references in there: an already-
                 // lagged read is still a read of a concrete element, and leaving
@@ -775,7 +783,7 @@ fn wrap_non_matching_in_previous(
                 // does exactly that lowering with the same path cursor and the
                 // same occurrence IR, and wraps nothing.
                 let call = Expr0::App(UntypedBuiltinFn(name, args), loc);
-                return match ctx.pin {
+                let call = match ctx.pin {
                     Some(pin_ctx) => post_transform::pin_only_source_refs(
                         call,
                         pin_ctx,
@@ -784,6 +792,11 @@ fn wrap_non_matching_in_previous(
                         &mut out.missing_occurrence,
                     ),
                     None => call,
+                };
+                return if freeze_snapshot {
+                    freeze_at_previous(call, loc, in_subscript_index)
+                } else {
+                    call
                 };
             }
             // Whether the reducer held LIVE by `live_reducer_text` sits inside
@@ -3353,10 +3366,34 @@ fn link_score_guard_form_with_numerator(
     // the partial, and the per-step evaluation cost.
     let target_diff = format!("({target_ref} - PREVIOUS({target_ref}))");
     let source_diff = format!("({source_ref} - PREVIOUS({source_ref}))");
+    link_score_guard(
+        target_ref,
+        source_ref,
+        &format!("SAFEDIV({numerator}, ABS({target_diff}), 0) * SIGN({source_diff})"),
+    )
+}
+
+/// The guard every link-score generator wraps its score in: `0` at the first
+/// evaluation, `0` when the target or the source did not change over the last
+/// dt step (an inactive link, Eq. 1 of Schoenberg et al. 2020), and `score`
+/// otherwise. `target_ref` and `source_ref` are pre-formatted reference
+/// expressions, spelled exactly as `score` reads them.
+///
+/// Keep this the only spelling of the guard. Equation `=` is approximate
+/// (`float::approx_eq`: within `f64::EPSILON`, or within 4 ULPs), so
+/// `(delta) = 0` zeroes every step of a model whose values are small, and
+/// `TIME <= INITIAL_TIME` zeroes the steps whose time lies within a few ULPs of
+/// the start: scores that change with the model's units or time scale. Both
+/// comparisons are exact instead. The VM and the wasm backend start the clock
+/// at exactly the start time and only advance it, so `TIME <= INITIAL_TIME` is
+/// the first evaluation; `ABS(delta) <= 0` is an exact zero that stays false
+/// for NaN, so an undefined score propagates rather than becoming 0.
+pub(crate) fn link_score_guard(target_ref: &str, source_ref: &str, score: &str) -> String {
     format!(
-        "if (TIME = INITIAL_TIME) then 0 \
-         else if ({target_diff} = 0) OR ({source_diff} = 0) then 0 \
-         else SAFEDIV({numerator}, ABS({target_diff}), 0) * SIGN({source_diff})"
+        "if (TIME <= INITIAL_TIME) then 0 \
+         else if (ABS(({target_ref} - PREVIOUS({target_ref}))) <= 0) OR \
+         (ABS(({source_ref} - PREVIOUS({source_ref}))) <= 0) then 0 \
+         else {score}"
     )
 }
 
@@ -3767,7 +3804,7 @@ fn generate_auxiliary_to_auxiliary_equation(
 /// exact source slice the partial isolates (`arr[PREVIOUS(idx)]`,
 /// `pop[NYC,*]`) wrapped in `SUM(...)`: `SUM` of a single element is the
 /// identity, `SUM` of a slice is scalar, and the result feeds only the
-/// SIGN factor and the `=0` zero-guard (both sign/zero-only), so using
+/// SIGN factor and the zero-change guard (both sign/zero-only), so using
 /// `SUM` in place of the reducer's own algebra is harmless. If the
 /// transform left no live reference (the source vanished from the
 /// equation -- a parse failure is now reported as a `PartialEquationError`
@@ -5089,8 +5126,9 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
 /// causal references); on a non-model head (whose expression indices
 /// [`pin_body_to_row`] preserves) any index reference is left live -- the
 /// same model/non-model boundary the pinning walk draws. The contents of
-/// `PREVIOUS`/`INIT` calls are already lagged/frozen so they are not
-/// re-wrapped (mirroring [`wrap_matching_in_previous`]).
+/// `PREVIOUS` co-inputs freeze whole so their history aligns with the
+/// previous-step anchor; a snapshot of `keep_live` retains the selected-source
+/// temporal policy. `INIT` is already constant.
 fn freeze_pinned_body(expr: Expr0, freeze: &HashSet<String>, keep_live: Option<&str>) -> Expr0 {
     let should_freeze = |ident: &str| -> bool {
         let c = canonicalize(ident);
@@ -5122,7 +5160,14 @@ fn freeze_pinned_body(expr: Expr0, freeze: &HashSet<String>, keep_live: Option<&
         }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
             if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
-                return Expr0::App(UntypedBuiltinFn(name, args), loc);
+                let freeze_snapshot =
+                    name.eq_ignore_ascii_case("previous") && !args.first().is_some_and(reads_live);
+                let call = Expr0::App(UntypedBuiltinFn(name, args), loc);
+                return if freeze_snapshot {
+                    freeze_at_previous(call, loc, false)
+                } else {
+                    call
+                };
             }
             if is_time_dependent_builtin(&name) && !args.iter().any(reads_live) {
                 return freeze_clock_read(
@@ -5426,11 +5471,9 @@ fn generate_linear_body_partial(
 /// previous step's evaluation of that row and `R(all-frozen terms) =
 /// PREVIOUS(agg)` exactly, because per-variable `PREVIOUS` sampling commutes
 /// with arithmetic; a row that is never the argmin therefore scores 0
-/// (`tests/integration/ltm_frozen_clock.rs`, the GH #763 repro). The one
-/// residue is an ORIGINAL `PREVIOUS(x)` in the body: it is left untouched,
-/// so the frozen term reads `x(t-1)` where the anchor read `x(t-2)`, and the
-/// misalignment is attributed to every row -- the same lag-misalignment
-/// class `ltm_augment_zero_slot` documents.
+/// (`tests/integration/ltm_frozen_clock.rs`, the GH #763 repro). An original
+/// `PREVIOUS` co-input is frozen whole as well; the selected row's lagged
+/// source reads retain the temporal-edge policy of the ordinary wrapper.
 ///
 /// When the pinned body is the bare source reference the legacy
 /// [`generate_nonlinear_partial`] is returned byte-identically; RANK is
@@ -5740,17 +5783,12 @@ fn build_element_reducer_link_score(
         }
     };
 
-    // Standard link score formula wrapping the partial equation, in the
-    // single-numerator form (see `link_score_guard_form` for the algebra):
-    // the partial appears once instead of twice.
-    format!(
-        "if \
-            (TIME = INITIAL_TIME) \
-            then 0 \
-            else if \
-                (({target_ref} - PREVIOUS({target_ref})) = 0) OR (({source_elem} - PREVIOUS({source_elem})) = 0) \
-                then 0 \
-                else SAFEDIV(({partial_eq} - PREVIOUS({target_ref})), ABS(({target_ref} - PREVIOUS({target_ref}))), 0) * SIGN(({source_elem} - PREVIOUS({source_elem})))"
+    // The changed-first numerator in the standard guard form (see
+    // `link_score_guard_form_with_numerator` for the algebra).
+    link_score_guard_form_with_numerator(
+        &format!("({partial_eq} - PREVIOUS({target_ref}))"),
+        target_ref,
+        &source_elem,
     )
 }
 

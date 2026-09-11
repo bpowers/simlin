@@ -9,8 +9,8 @@ model alongside the modeler's own variables. Today those programs are built as
 equation text. For a link `x -> z` the generator prints `z`'s equation back
 out with every read except `x` wrapped in `PREVIOUS(..)`, prints a guard
 around it, parses the result, and pushes that parse through the entire
-compiler a second time -- once per link, 6,155 times on C-LEARN. The numbers
-that come out are right. The construction is what costs: every compiler tier
+compiler a second time -- once per link, 6,155 times on C-LEARN. The construction
+has both a correctness obligation and a cost: every compiler tier
 of every link is retained (a 222 MiB database against 29 MiB without LTM),
 and because all of the generated equations live in one whole-model value,
 editing any variable invalidates all of them, so one edit recompiles thousands
@@ -20,12 +20,13 @@ This plan builds each link score's program from the target's already-compiled
 fragment instead. A fragment is one variable's equation lowered to symbolic
 bytecode, the same artifact the plain simulation assembles, and the "hold
 everything else at the previous step" partial a link score needs is a
-mechanical rewrite of that opcode stream: reads outside the source's live slot
-range become previous-step reads, the final assignment is redirected to the
-score's own slot, and every other opcode is copied. It is a pure function over
-bytecode -- no printing, no parsing, no re-lowering, and no synthesized helper
-variables. Because the rewrite is keyed per link on the target and its live
-range, the whole-model list becomes metadata (which links exist, their names
+rewrite of that opcode stream under an explicit selection of live reads:
+ordinary co-input reads become previous-step reads, temporal and effectful
+operations follow their own rules, and the final assignment is redirected to
+the score's own slot. It is a pure transformation over bytecode -- no printing,
+parsing, or re-lowering. Captured history remains where a temporal expression
+requires it. Because the rewrite is keyed per link on the target and its read
+selection, the whole-model list becomes metadata (which links exist, their names
 and dimensions) while each link's program lives in its own memo, so an edit
 invalidates only the links that touch the edited variable. The families that
 are not partials (black-box, aggregate, module composite and loop scores)
@@ -36,9 +37,10 @@ of its own. Two
 run-time consequences follow from having a single place that emits a score:
 the 37-opcode guard scaffold collapses to one `LinkScore` opcode reading
 per-variable deltas computed once per step, and, on native and separably, the
-LTM program moves out of the integration loop into a post-pass over saved
-states. Six phases, each gated on bit-identical score series against the text
-generators, which are held as a retained oracle until Phase 4 deletes them.
+LTM program may move out of the integration loop into a post-pass over retained
+integration-step evidence. Six phases are gated on independently derived
+semantic tests as well as parity against the text generators; parity preserves
+validated behavior but cannot establish correctness of a shared assumption.
 
 ## Definition of Done
 
@@ -74,7 +76,7 @@ command or test that shows it.
    cargo run --release --example clearn_profile` reports the database under
    40 MiB after an LTM compile (222 MiB today) and no `Expr0` family among the
    LTM residency rows.
-5. **One opcode per link score at run time.** The 37-opcode guard scaffold is
+5. **One opcode for the link-score guard at run time.** The 37-opcode guard scaffold is
    one `LinkScore` opcode over per-variable delta slots computed once per
    step, in both backends (`vm.rs` and `wasmgen`); the C-LEARN LTM flow
    program is under 250 K opcodes per step (855 K today) and
@@ -92,7 +94,7 @@ from them.
 ### link-scores-from-fragments.AC1: A link score's program is a rewrite of the target's fragment
 - **link-scores-from-fragments.AC1.1 Success:** For a scalar auxiliary-to-auxiliary link, `freeze_reads` over the target's flows-phase fragment with the source's slot as the live range yields a program whose resolved bytecode, run in the VM, produces the same score series bit for bit as the text path's program on every model of the LTM corpus.
 - **link-scores-from-fragments.AC1.2 Success:** The same holds for a stock-to-flow link (the source is a stock, read at the current step).
-- **link-scores-from-fragments.AC1.3 Success:** A `SymLoadPrev` already present in the target's fragment is left unchanged by the rewrite, and a target that reads `TIME` scores identically under both paths.
+- **link-scores-from-fragments.AC1.3 Success:** The rewrite preserves the selected source's temporal-read policy and freezes every independent co-input at the counterfactual baseline. Tests derive expectations from the partial definition for current, `PREVIOUS`, and `INIT` reads, mixed current/lagged occurrences, and the clock (`TIME`, `STEP`, `RAMP`, `PULSE`). In particular, freezing a `PREVIOUS(y)` co-input requires the previous value of that lagged expression; leaving its load unchanged is not a general freeze. Agreement with the text generator alone is insufficient evidence.
 - **link-scores-from-fragments.AC1.4 Success:** A target that reads a sub-model variable (`m·x`) scores identically under both paths; the frozen read is a previous-step read of the module block's slot.
 - **link-scores-from-fragments.AC1.5 Success:** After Phase 4, `rg "link_score_guard_form|LtmArm|LtmEquation" src/simlin-engine/src` is empty and `LtmSyntheticVar` carries a `kind`, not an equation.
 
@@ -100,8 +102,8 @@ from them.
 - **link-scores-from-fragments.AC2.1 Success:** Every model under `test/test-models/**/*ltm*` and every `sdeverywhere` model with a detected loop produces bit-identical link-score, loop-score and relative-loop-score series before and after each phase (`tests/integration/ltm_synthesis_parity.rs` while the generators exist, the golden outputs after).
 - **link-scores-from-fragments.AC2.2 Success:** C-LEARN v77 under LTM produces bit-identical series (an `--ignored` release test, run and recorded in the ledger per phase).
 - **link-scores-from-fragments.AC2.3 Failure:** A target whose fragment does not compile yields no link score and one `Warning` naming the target and the source, as the `PartialEquationError` path does today; no score reads a constant 0 without a diagnostic.
-- **link-scores-from-fragments.AC2.4 Success:** Every arrayed reference shape (`FixedIndex`, `Wildcard`, `DynamicIndex`, `PerElement`, mapped and iterated axes) is a live range, and the arrayed corpus (`arrayed_population_ltm`, `cross_element_ltm`, `cross_agg_ltm`, `tests/integration/ltm_array_agg.rs`) is bit-identical.
-- **link-scores-from-fragments.AC2.5 Failure:** An edge the generators decline today (a dynamic-pinned slice, a repeated-dimension target, an unfreezable partial) is declined with the same `Warning` under the new path; a shape that cannot be expressed as a live range is a loud decline, never a silent score.
+- **link-scores-from-fragments.AC2.4 Success:** Every admitted arrayed reference shape (`FixedIndex`, `Wildcard`, `DynamicIndex`, `PerElement`, mapped and iterated axes) has an explicit live-read selection. Non-contiguous views, repeated reads of one slot through different occurrences, and dynamic indices are tested against a scalar expansion. A single contiguous range is an optimization for shapes that admit it, not the semantic definition. The arrayed corpus (`arrayed_population_ltm`, `cross_element_ltm`, `cross_agg_ltm`, `tests/integration/ltm_array_agg.rs`) preserves every independently validated score.
+- **link-scores-from-fragments.AC2.5 Failure:** An edge the generators decline today (a dynamic-pinned slice, a repeated-dimension target, an unfreezable partial) is declined with the same `Warning` until its semantics are independently established; a shape without an admitted read-selection rule is a loud decline, never a silent score. Non-contiguous selection alone is not a reason for rejection.
 
 ### link-scores-from-fragments.AC3: Incremental by construction
 - **link-scores-from-fragments.AC3.1 Success:** Under the overlay, editing one variable's literal re-executes that variable's fragment and the link-score memos whose target or source it is, and no other `link_score_fragment` or `compile_var_fragment` body (`db::exec_probe::ProbedDb` counts, on a model with two independent loops).
@@ -109,7 +111,7 @@ from them.
 
 ### link-scores-from-fragments.AC4: Nothing whole-model holds a per-link program
 - **link-scores-from-fragments.AC4.1 Success:** `model_ltm_variables` holds no `Expr0` and no equation text; `CLEARN_LTM=1 CLEARN_RESIDENCY=1` reports the database under 40 MiB after an LTM compile.
-- **link-scores-from-fragments.AC4.2 Success:** `model_ltm_implicit_var_info` and layout section 3b are gone, and the results-offset map of every corpus model is unchanged (every synthetic variable keeps its name and its slot; `ltm_post` and the FFI are untouched).
+- **link-scores-from-fragments.AC4.2 Success:** Ordinary instantaneous partials need no parse-generated expression captures. Required temporal captures have one typed owner and retain their history semantics. Public score names and dimensions remain compatible with the readers in `ltm_post` and the FFI; temporary slot placement is an implementation detail.
 
 ### link-scores-from-fragments.AC5: One opcode per link score at run time
 - **link-scores-from-fragments.AC5.1 Success:** The C-LEARN LTM flow program is under 250 K opcodes per step and its series are unchanged.
@@ -117,7 +119,7 @@ from them.
 - **link-scores-from-fragments.AC5.3 Edge:** The first-step and zero-delta guards produce exactly the 0 the scaffold produced, including when `Δz` is 0 while `Δx` is not.
 
 ### link-scores-from-fragments.AC6: Post-pass (native)
-- **link-scores-from-fragments.AC6.1 Success:** The post-pass over saved states produces series identical to the in-loop form, on the LTM corpus and C-LEARN, with `save_step > dt` still scoring every dt.
+- **link-scores-from-fragments.AC6.1 Success:** The post-pass receives the actual current and previous integration-step inputs, initial snapshots, and any additional captured lagged-expression values each admitted score needs. With `save_step > dt`, it agrees with the in-loop form on a nonlinear model where differencing adjacent saved rows gives a different answer. Scoring every dt requires retaining the unsaved evidence too; adjacent public result rows cannot reconstruct it. Peak memory is measured alongside runtime before adopting this optional pass.
 - **link-scores-from-fragments.AC6.2 Success:** The C-LEARN LTM run on native is within 3x of the plain run; the wasm bundle keeps the in-loop form and its series are unchanged.
 
 ## Glossary
@@ -137,10 +139,10 @@ from them.
   source advanced to the current step and every other read held at the
   previous step. It is the numerator of a link score, and the thing this plan
   synthesizes by rewriting bytecode instead of printing text.
-- **Live range**: the new key of the rewrite. The source's slots that stay
-  current under the freeze -- a whole variable block for a bare reference, a
-  single element slot for an indexed one. Every reference shape becomes a
-  choice of live range.
+- **Live read selection**: the key of the rewrite, describing which source
+  occurrences and element slots stay live under the freeze and their temporal
+  policy. A **live range** is its contiguous-slot optimization; it does not
+  describe every mapped, indexed, or occurrence-sensitive read.
 - **Reference shape (`RefShape`)**: how a target's equation reads its source
   (`Bare`, `FixedIndex`, `Wildcard`, `DynamicIndex`, `PerElement`, mapped and
   iterated axes). Classified once per variable in `db/ltm_ir.rs`; it decides
@@ -257,35 +259,42 @@ shares a variable recomputes that variable's delta
 The target's flows-phase symbolic fragment (`VarFragmentResult` from
 `db::compile_var_fragment`, the same memo assembly reads) already IS the
 target's equation, lowered. The ceteris-paribus freeze is a rewrite over that
-opcode stream, keyed by the LIVE SLOT RANGE (the source's slots that stay
-current):
+opcode stream, keyed by the live-read selection. For an ordinary contiguous
+selection, the basic opcode rules are:
 
 | opcode in the target's fragment | outside the live range becomes | inside it |
 |---|---|---|
 | `LoadVar { var }` | `SymLoadPrev { var }` (the previous-step snapshot, what `PREVIOUS()` reads) | unchanged |
 | `PushStaticView` with base `SymStaticViewBase::Var(v)` | base `PrevVar(v)` (`ViewStorage::Prev` exists) | unchanged |
 | `PushVarViewDirect { var, .. }` | a previous-storage twin of the direct view (new symbolic row, resolves to `ViewStorage::Prev`) | unchanged |
-| an original `SymLoadPrev`, `SymLoadInitial`, `LoadGlobalVar` | unchanged: a lagged read is not lagged twice, a snapshot is a snapshot, and the implicit globals follow the text generators' rule (settled by the parity test in Phase 1) | unchanged |
+| an original `SymLoadPrev` | the previous value of this lagged co-input expression, through captured history; a single previous-state buffer cannot in general supply it | preserve the explicitly selected temporal occurrence |
+| an original `SymLoadInitial` | unchanged for an immutable initial snapshot; preserve any index-selection semantics explicitly | unchanged |
+| `LoadGlobalVar` | freeze changing globals such as `TIME`; keep run constants such as `DT` unchanged | only unchanged when the global is itself the selected input |
 | `AssignCurr { var: target }` | `AssignCurr { var: <the link score's partial slot> }` | -- |
-| everything else | copied | copied |
+| pure arithmetic and control flow over admitted operands | copied, with fragment-local storage and branch targets remapped as needed | copied |
+| other opcodes | require an explicit effect/temporal rule or decline with a diagnostic | require an explicit rule |
 
-Freezing READS is the freeze of the expression: a pure expression over
-previous-step values is the previous-step value of that expression, so the
-`PREVIOUS(<subexpression>)` helper slots the text path synthesizes for
-non-atomic wrapped subtrees (`model_ltm_implicit_var_info`, 738 helpers on
-C-LEARN, layout section 3b) are not needed -- every frozen read is a direct
-`LoadPrev` of a variable slot. The rewrite is a pure function
-`freeze_reads(&SymbolicByteCode, &LiveRange) -> SymbolicByteCode` in a new
+For a pure expression whose only changing inputs are current-state reads,
+freezing those reads reproduces its previous-step value. This permits
+eliminating capture helpers for that admitted subset. Lagged reads, dynamic
+index selection, implicit clock dependencies and stateful calls need their
+own temporal/effect rules; a blanket opcode copy does not establish those
+rules. Some expressions require captured history even when their arithmetic
+can be reused. The rewrite is a pure function
+`freeze_reads(&SymbolicByteCode, &LiveReadSelection) -> Result<SymbolicByteCode>` in a new
 module `db/ltm/synthesize.rs`, with no text, no parse and no lowering.
 
-Per-element attribution is a choice of live range. A `Bare` source is its
+For shapes representable by one contiguous range, a `Bare` source is its
 whole slot block; a `FixedIndex`/`PerElement` occurrence is one element slot;
 an arrayed target's per-element link score is the rewrite of that element's
 segment of the fragment (`assemble::segment_member_by_element` already cuts
 a fragment per element for the SCC path). The reference-shape classification
 that decides which occurrences of the source are live
 (`db::analysis::RefShape`, `ltm_ir`) is unchanged; only what it drives
-changes: a slot range instead of a text rewrite.
+changes: a read selection instead of a text rewrite. Preserve occurrence and
+view provenance where distinct reference sites resolve to overlapping slots;
+slot membership alone cannot distinguish those sites. The per-link memo key
+must contain all facts that affect this selection.
 
 The guard is emitted by a typed builder over the partial's result: the
 comparisons, the `SAFEDIV`, the `SIGN`. In Phase 2 it is the same opcode
@@ -294,9 +303,9 @@ it with one `LinkScore` opcode.
 
 ### Keying: nothing whole-model between an equation and a link's program
 
-    link_score_fragment(db, target: SourceVariable, live: LiveRange, model, project) -> Arc<VarFragmentResult>
+    link_score_fragment(db, target: SourceVariable, live: LiveReadSelection, model, project) -> Arc<VarFragmentResult>
 
-reads `compile_var_fragment(target)` and the live range. `model_ltm_variables`
+reads `compile_var_fragment(target)` and the live-read selection. `model_ltm_variables`
 keeps deciding WHICH links exist (the causal edges, the loops, the
 partitions) and becomes metadata: `LtmSyntheticVar { name, dimensions,
 kind: LinkScore { target, live } | LoopScore { .. } | .. }` with no equation.
@@ -319,7 +328,7 @@ typed builder with no text:
 | module composites (`m·$⁚ltm⁚composite⁚port`) | text over pathway products | builder over the pathway link scores' slots |
 | loop scores (products of link scores) | text | builder |
 
-### Run time: one opcode per link, deltas shared
+### Run time: one guard opcode per link, deltas shared
 
 `LinkScore { partial, target, source }` reads three slots -- the partial's
 result, the target's, the source's -- and the per-variable deltas
@@ -332,10 +341,15 @@ twin, `wasmgen/lower.rs` the lowering.
 
 ### Post-pass (native)
 
-A link score reads only current and previous state. With every-dt states
-saved (41 MB for C-LEARN), the LTM program is a post-pass over saved states
-that is parallel across steps; the wasm bundle keeps the in-loop form. This
-is Phase 6 and is separable from the rest.
+A score over ordinary instantaneous inputs reads current and previous dt
+state. A general score can also need the initial snapshot and captured
+lagged-expression values. A post-pass must retain those inputs before the
+simulation discards them; `save_step > dt` makes the public results slab
+insufficient. Once each step's evidence is complete and immutable, independent
+step evaluations can run in parallel. Compare this extra retention with a
+streaming analysis pass that consumes the same evidence before it is discarded,
+saving only score columns. The native post-pass is optional Phase 6; the wasm
+bundle keeps the in-loop form.
 
 ## Existing Patterns
 
@@ -380,9 +394,9 @@ the program, not its spelling).
 path on scalar targets.
 
 **Components:**
-- `db/ltm/synthesize.rs` -- `LiveRange` (a variable and a slot range within
-  it), `freeze_reads(&SymbolicByteCode, &LiveRange) -> SymbolicByteCode`, the
-  guard builder emitting today's opcode sequence.
+- `db/ltm/synthesize.rs` -- `LiveReadSelection` (with a contiguous-range fast
+  path), `freeze_reads`, the explicit temporal/effect rules and the guard
+  builder emitting today's opcode sequence.
 - `compiler/symbolic.rs` -- the previous-storage direct-view row in
   `symbolic_opcode_table!`, resolving to `ViewStorage::Prev`.
 - `tests/integration/ltm_synthesis_parity.rs` -- for a scalar
@@ -424,16 +438,16 @@ edit recompiles no scalar link score; `AC2.1` to `AC2.3`, `AC3.1`.
 
 <!-- START_PHASE_3 -->
 ### Phase 3: Arrayed and per-element attribution
-**Goal:** every reference shape (`FixedIndex`, `Wildcard`, `DynamicIndex`,
-`PerElement`, mapped and iterated axes) is a live range over the target's
-fragment or one of its per-element segments.
+**Goal:** every admitted reference shape (`FixedIndex`, `Wildcard`,
+`DynamicIndex`, `PerElement`, mapped and iterated axes) has a validated
+live-read selection over the target's fragment or its per-element segments.
 
 **Components:**
-- `db/ltm/synthesize.rs` -- live ranges from `RefShape` and the occurrence IR
+- `db/ltm/synthesize.rs` -- live-read selections from `RefShape` and the occurrence IR
   (`ltm_ir`), per-element segments via `segment_member_by_element`.
 - `db/ltm/link_scores.rs` -- the arrayed emitters (`emit_per_shape_link_scores`,
   the `PerElement` row pinning, the array-freeze helpers) produce live
-  ranges; `ltm_augment_array_freeze.rs`, `ltm_augment_index.rs`,
+  selections; `ltm_augment_array_freeze.rs`, `ltm_augment_index.rs`,
   `ltm_augment_post_transform.rs` stop producing text for these shapes.
 - `tests/integration/ltm_synthesis_parity.rs` -- every arrayed fixture
   (`arrayed_population_ltm`, `cross_element_ltm`, `cross_agg_ltm`,
@@ -447,8 +461,8 @@ fragment or one of its per-element segments.
 <!-- START_PHASE_4 -->
 ### Phase 4: The formula families, and no text anywhere
 **Goal:** the net-flow auxes, black-box, aggregate, composite and loop scores
-are typed builders; the text generators, `LtmArm`, `LtmEquation` and
-`model_ltm_implicit_var_info` are gone.
+are typed builders; the text generators, `LtmArm` and `LtmEquation` are gone.
+Required temporal captures are produced by the typed history owner.
 
 **Components:**
 - `db/ltm/synthesize.rs` -- builders for each family, over slot reads.
@@ -456,7 +470,8 @@ are typed builders; the text generators, `LtmArm`, `LtmEquation` and
   emitter produces metadata plus a builder call.
 - `ltm_augment.rs` and its `ltm_augment_*.rs` siblings -- deleted, with
   their tests moved to the synthesized-program goldens.
-- `db/layout.rs` -- section 3b (LTM implicit helpers) removed.
+- `db/layout.rs` -- only required temporal captures receive persistent history;
+  scratch partials do not require parse-generated helper variables.
 - `db/ltm_char_tests.rs` -- goldens over opcode streams.
 - `docs/design/ltm--loops-that-matter.md` -- the derivation described as a
   rewrite.
@@ -468,7 +483,7 @@ are typed builders; the text generators, `LtmArm`, `LtmEquation` and
 
 <!-- START_PHASE_5 -->
 ### Phase 5: The `LinkScore` opcode and shared deltas
-**Goal:** one opcode per link score at run time, deltas once per variable
+**Goal:** one opcode per link-score guard at run time, deltas once per variable
 per step, in both backends.
 
 **Components:**

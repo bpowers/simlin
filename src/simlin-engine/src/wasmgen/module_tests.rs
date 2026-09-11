@@ -212,6 +212,7 @@ fn assembled_module_initializes_gf_regions_in_memory() {
     let wasm = assemble_simulation(AssembleParts {
         helpers,
         program_fns: vec![empty(), empty(), empty()],
+        program_helpers: Vec::new(),
         run_fn: empty(),
         // Empty (no-op) override functions: this test only checks the GF data
         // segments, so the override exports are present but trivial.
@@ -245,7 +246,8 @@ fn assembled_module_initializes_gf_regions_in_memory() {
         gf_regions: &[&regions],
         const_init: &empty_const_init,
         belt_init_data: &[],
-    });
+    })
+    .expect("assembly should succeed");
 
     let info = validate(&wasm).expect("module must validate");
     let mut store = Store::new(());
@@ -400,7 +402,7 @@ fn compile_datamodel_to_wasm_validates() {
 
 /// Build a `CompiledSimulation` for the named model of `datamodel` via the
 /// production incremental pipeline (the same path the VM corpus uses).
-fn compile_sim(
+pub(super) fn compile_sim(
     datamodel: &crate::datamodel::Project,
     model_name: &str,
 ) -> std::sync::Arc<CompiledSimulation> {
@@ -412,7 +414,7 @@ fn compile_sim(
 
 /// Run a `WasmArtifact` under the DLR-FT interpreter and return the
 /// step-major results slab (`n_chunks * n_slots` f64, row-major by step).
-fn run_artifact_results(artifact: &WasmArtifact) -> Vec<f64> {
+pub(super) fn run_artifact_results(artifact: &WasmArtifact) -> Vec<f64> {
     let info = validate(&artifact.wasm).expect("generated module must validate");
     let mut store = Store::new(());
     let inst = store
@@ -654,7 +656,7 @@ fn compile_simulation_previous_matches_vm() {
 /// on every change" usage (interactive scrubbing; the POC's `run` "re-runs
 /// the whole simulation" per call) -- which exercises the cross-run state
 /// reset that a single `run` invocation cannot.
-fn run_artifact_results_repeated(artifact: &WasmArtifact, runs: usize) -> Vec<Vec<f64>> {
+pub(super) fn run_artifact_results_repeated(artifact: &WasmArtifact, runs: usize) -> Vec<Vec<f64>> {
     let info = validate(&artifact.wasm).expect("generated module must validate");
     let mut store = Store::new(());
     let inst = store
@@ -1239,7 +1241,7 @@ fn compile_simulation_rk4_with_previous_and_init_matches_vm() {
 /// submodel carries internal stocks reached only through `EvalModule` (the
 /// nested-stock-offset case). `TestProject` only emits a single `main` model,
 /// so this is built as an explicit datamodel.
-fn submodel_project(
+pub(super) fn submodel_project(
     name: &str,
     method: crate::datamodel::SimMethod,
     in_value: &str,
@@ -2166,7 +2168,7 @@ fn compile_simulation_transpose_reducer_matches_vm() {
 /// Assert every layout variable matches the VM, treating a NaN on both sides
 /// as equal (the OOB-subscript result). The plain `assert_matches_vm` uses a
 /// finite-difference compare that a NaN would fail, so the OOB tests use this.
-fn assert_matches_vm_nan_aware(
+pub(super) fn assert_matches_vm_nan_aware(
     sim: std::sync::Arc<CompiledSimulation>,
     artifact: &WasmArtifact,
 ) -> usize {
@@ -2395,7 +2397,7 @@ fn set_value_rc(artifact: &WasmArtifact, off: i32, val: f64) -> i32 {
 }
 
 /// The absolute slab offset of `name` in the artifact's layout.
-fn layout_offset(artifact: &WasmArtifact, name: &str) -> usize {
+pub(super) fn layout_offset(artifact: &WasmArtifact, name: &str) -> usize {
     artifact
         .layout
         .var_offsets
@@ -2409,7 +2411,7 @@ fn layout_offset(artifact: &WasmArtifact, name: &str) -> usize {
 /// `var` (`Ident::join`, the U+00B7 module-hierarchy separator), e.g.
 /// `sub0·k`. Built the same way `db::layout::flattened_offsets` keys the
 /// layout, so it stays correct if the separator ever changes.
-fn qualified_ident(instance: &str, var: &str) -> Ident<Canonical> {
+pub(super) fn qualified_ident(instance: &str, var: &str) -> Ident<Canonical> {
     Ident::<Canonical>::join(
         &Ident::<Canonical>::new(instance).as_canonical_str(),
         &Ident::<Canonical>::new(var).as_canonical_str(),
@@ -2811,7 +2813,7 @@ fn resumable_fixture(stop: f64) -> crate::datamodel::Project {
 /// step-major slab out. The in-module peer of the integration-test helper
 /// `run_wasm_results_segmented`; kept here because the lib `#[cfg(test)]`
 /// module cannot reach the integration crate's private helpers.
-fn run_artifact_segmented(artifact: &WasmArtifact, targets: &[f64]) -> Vec<f64> {
+pub(super) fn run_artifact_segmented(artifact: &WasmArtifact, targets: &[f64]) -> Vec<f64> {
     let info = validate(&artifact.wasm).expect("generated module must validate");
     let mut store = Store::new(());
     let inst = store

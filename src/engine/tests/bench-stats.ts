@@ -26,6 +26,20 @@ export type Stat = {
   readonly iters: number;
 };
 
+/** Select the benchmark's LTM configurations without silently ignoring a typo. */
+export function selectLtmModes(selection: string | undefined): ReadonlyArray<boolean> {
+  switch (selection ?? 'off') {
+    case 'off':
+      return [false];
+    case 'on':
+      return [true];
+    case 'both':
+      return [false, true];
+    default:
+      throw new Error(`BENCH_LTM must be off, on, or both; got '${selection}'`);
+  }
+}
+
 /**
  * The median of `times`, in milliseconds.
  *

@@ -27,9 +27,13 @@
 //! this backend must clear the same comparison the VM clears. The kernels here
 //! are chosen so each helper's worst-case error over its domain sits *far*
 //! inside that bar (each emitter's rustdoc records the measured worst-case error
-//! and the test that pins it); the slack absorbs any DLR-FT-vs-native rounding
-//! drift. The per-helper unit tests assert against Rust `f64` with a documented
-//! tolerance comfortably tighter than the corpus bar.
+//! and the test that samples it). The per-helper unit tests compare against
+//! Rust `f64` with a documented tolerance tighter than the corpus bar; model
+//! tests establish the accuracy of composed calculations on their fixtures.
+//! Cancellation and division by a small delta can amplify helper differences,
+//! especially in raw LTM scores. Ordinary trajectory tolerances therefore do
+//! not imply a uniform absolute error bound on derived scores. Check raw score
+//! magnitudes, normalized scores, signs, and nonfinite values separately.
 //!
 //! ## Composition
 //!

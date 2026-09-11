@@ -463,7 +463,7 @@ fn test_model_ltm_variables_scalar_to_arrayed_link_score() {
             "equation for {expected:?} should reference growth_factor unsubscripted, got: {eq}"
         );
         assert!(
-            eq.contains("if (TIME = INITIAL_TIME)"),
+            eq.contains("if (TIME <= INITIAL_TIME)"),
             "equation for {expected:?} should be a link-score guard form, got: {eq}"
         );
     }

@@ -1531,7 +1531,7 @@ fn agg_nested_reducer_partial_scores_full_attribution() {
     // because `pop` is a stock fed by `growth > 0`, so both `agg` and `growth`
     // increase every step. 1.0 is full attribution, which is the right answer:
     // `agg` is the only changing driver of `growth`. The first saved step is 0
-    // by the score's own `TIME = INITIAL_TIME` guard.
+    // by the score's own `TIME <= INITIAL_TIME` guard.
     //
     // Every wrong reading lands somewhere else: a failed or stubbed fragment
     // reads a constant 0, and freezing the whole declined outer reducer (the
@@ -1872,13 +1872,10 @@ fn reducer_index_nested_freeze_preserves_loud_failure_not_silent_compile() {
 // Model G (Track A3 stage 2, review finding 2): an already-lagged other-dep
 // (Fig. 2 Q3).
 //
-// `to = from + PREVIOUS(g)`, edge `(from -> to)`, `Bare` shape. `g` occurs
-// only inside `PREVIOUS(g)` -- it is already lagged. The changed-first partial
-// holds `from` live and must LEAVE `PREVIOUS(g)` untouched
-// (`from + PREVIOUS(g)`), NOT re-wrap it to `PREVIOUS(PREVIOUS(g))` (a t-2
-// read). This pins the already-lagged selection semantics the wrap reproduces by
-// recognizing a `PREVIOUS`/`INIT` node structurally: it suppresses the wrap of an
-// already-lagged occurrence but not its live selection.
+// `to = from + PREVIOUS(g)`, edge `(from -> to)`, `Bare` shape. The anchor
+// PREVIOUS(to) contains g from two steps ago, so the partial freezes the whole
+// PREVIOUS(g) co-input to preserve that same value. The fixture constrains
+// rendering and compilation; ltm_snapshot_inputs checks moving values.
 // ---------------------------------------------------------------------------
 
 fn already_lagged_other_dep_model() -> datamodel::Project {

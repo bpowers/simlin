@@ -46,7 +46,7 @@ use crate::builtins::UntypedBuiltinFn;
 ///
 /// Value positions keep the bare unary spelling, and deliberately -- but the
 /// reason is that `0` is a VALID value, not that it is unobservable. The guard
-/// form's `if (TIME = INITIAL_TIME) then 0` arm does own the score's own first
+/// form's `if (TIME <= INITIAL_TIME) then 0` arm does own the score's own first
 /// step, but a value-position freeze that lands inside a capture is read at
 /// step 1 by exactly the route this issue is about. What makes it
 /// benign there is that `0` is in range for a value where it is out of range for

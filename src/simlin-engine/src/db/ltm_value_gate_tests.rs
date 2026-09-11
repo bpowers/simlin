@@ -299,33 +299,12 @@ fn a_structural_zero_arm_is_exactly_zero() {
     }
 }
 
-/// Mechanism 4: an arm whose lag is MISALIGNED with the anchor must not be
-/// claimed as a structural zero, even though every leaf sits under a
-/// `PREVIOUS`.
-///
-/// The omission's soundness condition is `partial(t) == target(t-1)`, which
-/// needs every read lagged by exactly ONE step. Two things break that while
-/// leaving the emitted tree looking entirely frozen:
-///
-/// * an ORIGINAL `PREVIOUS(z)` from the target's own equation, which
-///   `wrap_non_matching_in_previous` deliberately leaves untouched -- so the
-///   partial reads `z(t-1)` where `target(t-1)` read `z(t-2)`;
-/// * a synthesized `PREVIOUS` nested inside another, which the subscript-index
-///   freeze produces (`PREVIOUS(q[PREVIOUS(ctr, ctr)])` reads `q` at `t-1`
-///   indexed at `t-2`).
-///
-/// This fixture is the first. `growth[boston] = PREVIOUS(z) * 0.02 + pop[la] *
-/// 0.001` has no live `pop[nyc]` reference, so the shape match records none and
-/// every occurrence is frozen -- yet the arm is worth ~0.985, near the
-/// canonical +/-1 single-input attribution. Omitting it rewrites a real score
-/// to zero, which is exactly the failure GH #977 rejected the negative
-/// criterion for, reached by a different route.
-///
-/// `INIT` is deliberately NOT in this class and is not tested here as a
-/// failure: `INIT(x)` is the run's initial value, identical at `t` and `t-1`,
-/// so it aligns at every step.
-fn lag_misalignment_project() -> datamodel::Project {
-    TestProject::new("lag_misalignment")
+/// A materialized per-element arm must respect the same causal zero as an
+/// omitted arm. Boston never reads pop[nyc]; its PREVIOUS(z) co-input must be
+/// frozen to the value the previous growth[boston] evaluation used. An
+/// unchanged snapshot would credit z's history to pop[nyc].
+fn snapshot_co_input_project() -> datamodel::Project {
+    TestProject::new("snapshot_co_input")
         .with_sim_time(0.0, 5.0, 1.0)
         .named_dimension("Region", &["nyc", "boston", "la"])
         .aux("z", "1 + TIME", None)
@@ -342,31 +321,21 @@ fn lag_misalignment_project() -> datamodel::Project {
 }
 
 #[test]
-fn an_original_previous_arm_is_not_a_structural_zero() {
-    let series = ltm_slot_series(&lag_misalignment_project());
+fn an_original_previous_co_input_cannot_create_an_unrelated_score() {
+    let series = ltm_slot_series(&snapshot_co_input_project());
     // Region declaration order: nyc=0, boston=1, la=2.
     let boston = slot(&series, "link_score\u{205A}pop[nyc]\u{2192}growth", 1);
-    assert!(
-        boston.iter().any(|v| v.abs() > 0.5 && v.is_finite()),
-        "the `boston` arm carries an ORIGINAL PREVIOUS, so its partial reads \
-         z(t-1) where the PREVIOUS(target) anchor read z(t-2); the arm is worth \
-         ~0.985 and must not be omitted as a structural zero; got {boston:?}"
-    );
+    assert!(boston.iter().all(|v| *v == 0.0), "{boston:?}");
 }
 
-/// Mechanism 4, second clause: a synthesized `PREVIOUS` NESTED inside another.
+/// A synthesized `PREVIOUS` NESTED inside another can misalign an index.
 ///
-/// `growth[boston] = q[ctr] * 0.002` has no original `PREVIOUS` at all, so the
-/// clause above cannot see it. The subscript-index freeze produces
+/// `growth[boston] = q[ctr] * 0.002` has no original `PREVIOUS` at all, but
+/// the subscript-index freeze produces
 /// `PREVIOUS(q[PREVIOUS(ctr, ctr)])` -- `q` read at `t-1` indexed by `ctr` at
 /// `t-2`, where the `PREVIOUS(growth)` anchor indexed at `t-1`. Every leaf is
 /// under a `PREVIOUS`, so a walk that stops at the first one calls this a
 /// structural zero; it is not.
-///
-/// The two clauses need separate rows because either one alone leaves the other
-/// case omitted: reverting only the `contains_previous_call(original)` check
-/// keeps this row green, and reverting only the nested-`PREVIOUS` descent keeps
-/// the row above green. Both were measured that way.
 ///
 /// This is the shape `db::ltm_tests::colliding_index_boston_series` documents a
 /// -1.06/+0.73/-1.03/+0.82 residual for, under the heading of an unadjudicated

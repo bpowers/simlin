@@ -943,15 +943,17 @@ void simlin_free_string(char *s);
 //   series from the results region using `results_offset`, `n_slots`, and the
 //   variable's `offset` from this map.
 //
-// Works from the model's datamodel alone -- no `SimlinSim` is required. Any
-// compile or codegen failure stores a `SimlinError` (never panics across the
-// boundary) and leaves both output buffers NULL.
+// Uses the project's persistent incremental compiler -- no `SimlinSim` is
+// required. Unchanged compilation reuses the same queries as VM creation when
+// the requested discovery mode matches the project setting.
+// Any compile or codegen failure stores a `SimlinError` and leaves both
+// output buffers NULL.
 //
-// `ltm_enabled` selects the LTM overlay for this compile (the same choice
-// `simlin_sim_new(.., enable_ltm)` makes) and `ltm_discovery_mode` sets the
-// discovery flag on this compile's own `SourceProject`: the produced blob's
-// layout includes the `$\u{205A}ltm\u{205A}*` synthetic series iff
-// `ltm_enabled` is true.
+// `ltm_enabled` selects the LTM overlay and latches the project's LTM
+// diagnostic request, as `simlin_sim_new` does. `ltm_discovery_mode` overrides
+// discovery for this compile only; the shared project's prior flag is restored
+// on success and failure. Special stocks follow the VM's expansion path and
+// LTM degradation contract.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel

@@ -1079,6 +1079,12 @@ fn slot_byte_offset(chunk_base: u32, off: u16) -> u64 {
 /// [`emit_ops`] so an unrolled iteration body can be re-emitted at each
 /// compile-time index without re-deriving the view stack.
 struct EmitState {
+    /// Arithmetic values cannot cross a generated helper's void call boundary.
+    arithmetic_depth: usize,
+    /// Encoded byte offsets where no operand or local-backed state is live.
+    /// Offsets include the function's local declarations, even when several
+    /// initial programs append to the same function with fresh emitter state.
+    safe_offsets: Vec<usize>,
     /// Emit-time stack pointer into `ctx.condition_locals`, mirroring the VM's
     /// single `condition` register but generalized to nested `If`s.
     cond_sp: usize,
@@ -1101,67 +1107,85 @@ struct EmitState {
     /// subscript draws fresh i32 locals from here; the count is pre-sized by
     /// [`count_extra_i32_locals`], so this never exceeds the declared count.
     next_i32_local: u32,
-    /// Cumulative count of unrolled element-emit "units" for the function being
-    /// lowered, checked against [`MAX_UNROLL_UNITS`] (see [`EmitState::charge_unroll`]).
+    /// Cumulative unrolled element-emission work for this bytecode program,
+    /// checked against [`MAX_UNROLL_UNITS`] (see [`EmitState::charge_unroll`]).
     /// Every full unroll -- a reducer fold, a `BeginIter` body re-emission --
     /// charges its iteration count here. Nested iterations
     /// multiply naturally: an inner site is reached once per outer iteration, so
     /// each inner charge already reflects the outer multiplier. When the running
     /// total would exceed the cap, lowering aborts with `Unsupported` (the caller
-    /// receives an explicit error, no silent VM fallback) instead of emitting a
-    /// multi-megabyte function body that a wasm engine would reject.
+    /// receives an explicit error, no silent VM fallback). Splitting the emitted
+    /// program into helper functions does not reset this work budget.
     unroll_units: usize,
 }
 
-/// Upper bound on the cumulative number of unrolled element-emit "units" per
-/// wasm function (one reducer-fold element, or one `BeginIter` body
-/// re-emission, is one unit).
+/// Upper bound on cumulative array-emission work per [`emit_bytecode`] call:
+/// one reducer-fold element or `BeginIter` body re-emission is one unit.
 ///
 /// Every array reducer and iteration loop is fully unrolled at compile time
 /// (each element address becomes a wasm constant -- see [`emit_reduce_fold`] and
-/// the `BeginIter` arm). Without a bound, a large arrayed
-/// model -- especially nested iterations whose counts multiply -- could emit a
-/// function body exceeding what wasm engines accept (V8, for instance, caps a
-/// single function near ~7.6 MB of bytecode; the spec's 4 GiB ceiling is
-/// academic). At a generous ~50 bytes of emitted code per unit, this cap bounds
-/// unroll-driven code at roughly 3 MB, comfortably under the strictest engine
-/// limit.
+/// the `BeginIter` arm). Nested iterations multiply this work, so partitioning
+/// the resulting function alone cannot bound compilation cost. This budget is
+/// charged before each unroll site emits its body; it applies to each complete
+/// Flows/Stocks program and separately to each variable's initials program,
+/// regardless of how many wasm helpers subsequently hold those instructions.
+/// The actual encoded-byte acceptance limit is enforced independently by
+/// [`super::split::check_function`]; element counts cannot prove a byte bound.
 ///
-/// The value `65_536` (2^16) is the natural ceiling of a single `u16` array
-/// dimension (`ViewDesc::dims` entries are `u16`, so one dimension tops out at
-/// 65_535). Real system-dynamics arrays are tiny -- the test corpus's largest
-/// single dimension is 9, and even a region x sector x cohort nest is on the
-/// order of 10^3 elements -- so this leaves >60x headroom for legitimate models
-/// while rejecting pathological products (e.g. a `[300, 300]` view, 90_000
-/// elements) before any code is emitted.
+/// `65_536` permits a full single `u16` dimension while bounding larger products
+/// such as a `[300, 300]` view. The cap can reject valid large arrayed models;
+/// it is an explicit compilation-work policy, not a model-semantics restriction.
 ///
 /// future: a runtime wasm loop driven by a precomputed offset table (per the
 /// Phase 5 design's non-contiguous path) would lift this cap entirely, trading a
 /// constant-size loop body for the current fully-unrolled form.
 const MAX_UNROLL_UNITS: usize = 65_536;
 
-// The headroom claim above is a compile-time obligation, not a comment: a
-// future narrowing of the cap that drops below a deliberately roomy 10^4
-// would start rejecting legitimate arrayed models, and it fails to build
-// here rather than surfacing as an `Unsupported` on a user's model.
+// Keep a deliberate minimum amount of array work available even if this
+// compilation-cost policy is tightened.
 const _: () = assert!(
     MAX_UNROLL_UNITS >= 10_000,
     "the unroll cap must leave ample headroom for realistic arrayed models"
 );
 
 impl EmitState {
-    /// Charge `units` against the per-function unroll budget, returning
+    /// A helper shares the slab and parameters, but none of its caller's operand
+    /// stack or scratch locals. Temp contents and static view geometry can span
+    /// a cut: temp storage is shared and view addresses are already emitted.
+    /// Views with runtime offsets or validity flags retain live scratch locals.
+    ///
+    /// Each opcode must close every wasm block it opens and must not emit a
+    /// phase-level Return or branch to an enclosing opcode's block. The recorded
+    /// offset is after that opcode's complete lowering, so splitting cannot alter
+    /// structured branch targets or change a whole-phase return into a helper return.
+    fn record_boundary(&mut self, f: &Function) {
+        if self.arithmetic_depth == 0
+            && self.cond_sp == 0
+            && self.iter_stack.is_empty()
+            && self.subscript.indices.is_empty()
+            && self.subscript.valid_local.is_none()
+            && self.safe_offsets.last().copied() != Some(f.byte_len())
+            && self
+                .view_stack
+                .iter()
+                .all(|view| view.runtime_off_local.is_none() && view.valid_local.is_none())
+        {
+            self.safe_offsets.push(f.byte_len());
+        }
+    }
+
+    /// Charge `units` against the per-program emission-work budget, returning
     /// `Unsupported` (an explicit error to the caller, no silent VM fallback)
     /// if the running total would exceed [`MAX_UNROLL_UNITS`]. Called *before*
     /// an unroll site emits its body, so an over-budget model is rejected
-    /// without ever materializing the oversized function. `units` saturates
+    /// without materializing that site's body. `units` saturates
     /// rather than wrapping, so a pathological multi-dimensional product can
     /// never alias back under the cap.
     fn charge_unroll(&mut self, units: usize) -> Result<(), WasmGenError> {
         self.unroll_units = self.unroll_units.saturating_add(units);
         if self.unroll_units > MAX_UNROLL_UNITS {
             return Err(WasmGenError::Unsupported(format!(
-                "wasmgen: array unrolling exceeds the per-function budget of \
+                "wasmgen: array unrolling exceeds the per-program budget of \
                  {MAX_UNROLL_UNITS} elements (a large arrayed model); the caller \
                  receives an explicit Unsupported error (no silent VM fallback)"
             )));
@@ -1203,12 +1227,15 @@ struct IterCtx {
 /// the wasm operand stack; the assignment opcodes emit a store and leave the
 /// stack empty, exactly as the VM's stack-machine arms do. `Ret` is a no-op
 /// here: the wasm function's terminating `End` is emitted by the caller.
+/// Returns encoded byte offsets at which a new void helper can safely begin.
 pub(crate) fn emit_bytecode(
     bc: &ByteCode,
     ctx: &EmitCtx,
     f: &mut Function,
-) -> Result<(), WasmGenError> {
+) -> Result<Vec<usize>, WasmGenError> {
     let mut state = EmitState {
+        arithmetic_depth: 0,
+        safe_offsets: Vec::new(),
         cond_sp: 0,
         view_stack: Vec::new(),
         iter_stack: Vec::new(),
@@ -1216,7 +1243,15 @@ pub(crate) fn emit_bytecode(
         next_i32_local: ctx.extra_i32_local_base,
         unroll_units: 0,
     };
-    emit_ops(&bc.code, &bc.literals, ctx, &mut state, f)
+    emit_ops(&bc.code, &bc.literals, ctx, &mut state, f)?;
+    // The VM discards its evaluation state when a program returns. Descriptors
+    // and scratch locals need not survive this endpoint, even if an unrolled
+    // iteration leaves view descriptors behind. Arithmetic results still must
+    // stay in their caller, as lower-level expression tests return those values.
+    if state.arithmetic_depth == 0 && state.safe_offsets.last().copied() != Some(f.byte_len()) {
+        state.safe_offsets.push(f.byte_len());
+    }
+    Ok(state.safe_offsets)
 }
 
 /// An upper bound on the extra i32 wasm locals a program's dynamic subscripts
@@ -1628,6 +1663,7 @@ fn emit_ops(
                     state.iter_stack.pop();
                 }
                 pc = end_pc;
+                state.record_boundary(f);
                 continue;
             }
             // `NextIterOrJump`/`EndIter` are consumed by the `BeginIter` unroll
@@ -1779,6 +1815,18 @@ fn emit_ops(
             }
             other => return Err(WasmGenError::Unsupported(unsupported_opcode(other))),
         }
+        let (pops, pushes) = op.stack_effect();
+        state.arithmetic_depth = state
+            .arithmetic_depth
+            .checked_sub(usize::from(pops))
+            .ok_or_else(|| {
+                WasmGenError::Unsupported(format!(
+                    "wasmgen: arithmetic stack underflow at {}",
+                    op.name()
+                ))
+            })?
+            + usize::from(pushes);
+        state.record_boundary(f);
         pc += 1;
     }
     Ok(())
@@ -2142,9 +2190,8 @@ fn emit_op2(op: Op2, ctx: &EmitCtx, f: &mut Function) -> Result<(), WasmGenError
         // `And`/`Or` are `(is_truthy(l) OP is_truthy(r)) as f64`.
         Op2::And => emit_logical(ctx, f, Instruction::I32And),
         Op2::Or => emit_logical(ctx, f, Instruction::I32Or),
-        // `Exp` is `l.powf(r)`: the operands `[l, r]` are already in call
-        // order, so `call pow` directly. Matches `powf` for a positive base
-        // (a negative base diverges -- see `super::math::emit_pow`).
+        // `pow` handles negative bases and special values explicitly; ordinary
+        // finite results use the approximation documented in `math::emit_pow`.
         Op2::Exp => {
             f.instruction(&Instruction::Call(ctx.helpers.pow));
         }

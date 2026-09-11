@@ -121,6 +121,13 @@ impl FeedbackLoop {
 ///
 /// `dt` is the time between consecutive entries in each loop's importance_series.
 /// `start_time` is the simulation start time.
+///
+/// A reported set must reach 50% of the mass its importance series were
+/// normalized against (LTM's dominance definition, reference section 2.1).
+/// Missing periods mean no supplied set establishes that threshold: the
+/// partition may be inactive, or retention/the report cap may have omitted
+/// necessary loops. A gap does not establish an absence of feedback. With
+/// sample-normalized scores, dominance describes that sample only.
 pub fn calculate_dominant_periods(
     loops: &[FeedbackLoop],
     start_time: f64,
@@ -178,10 +185,11 @@ pub enum PartitionSurface {
 /// determined by score sign (positive = reinforcing, negative = balancing),
 /// matching the Praxis reference.  A two-pass approach first computes
 /// aggregate totals per polarity, then selects the winning polarity and
-/// accumulates loops until the combined score reaches 0.5.  If neither
-/// polarity reaches 0.5, all loops from whichever polarity has the higher
-/// total are used.  Consecutive timesteps with the same dominant loop set
-/// are grouped into a single `DominantPeriod` tagged with `partition`.
+/// accumulates loops until the combined score reaches 0.5. If neither
+/// polarity reaches 0.5, the step has no reported dominant set: missing
+/// loops could reverse the apparent polarity winner. Consecutive timesteps
+/// with the same dominant loop set are grouped into a single `DominantPeriod`
+/// tagged with `partition`.
 fn calculate_dominant_periods_for_group(
     loops: &[&FeedbackLoop],
     partition: Option<usize>,
@@ -228,16 +236,11 @@ fn calculate_dominant_periods_for_group(
         // Pass 1: compute polarity totals using score sign
         let mut reinforcing_sum = 0.0_f64;
         let mut balancing_sum = 0.0_f64;
-        let mut reinforcing_loops: Vec<&str> = Vec::new();
-        let mut balancing_loops: Vec<&str> = Vec::new();
-
-        for &(name, score) in &scored {
+        for &(_, score) in &scored {
             if score > 0.0 {
                 reinforcing_sum += score;
-                reinforcing_loops.push(name);
             } else if score < 0.0 {
                 balancing_sum += score.abs();
-                balancing_loops.push(name);
             }
         }
 
@@ -270,20 +273,14 @@ fn calculate_dominant_periods_for_group(
                     }
                 }
             }
-        } else if reinforcing_wins {
-            // Fallback: use ALL loops from the higher-scoring polarity
-            dominant_names = reinforcing_loops.iter().map(|s| s.to_string()).collect();
-            combined = reinforcing_sum;
-        } else {
-            dominant_names = balancing_loops.iter().map(|s| s.to_string()).collect();
-            combined = balancing_sum;
         }
 
         // Sorted copy for order-independent set comparison
         let mut sorted_names = dominant_names.clone();
         sorted_names.sort();
 
-        // Skip timesteps with no meaningful dominance
+        // An unresolved step splits periods even if the same set qualifies
+        // again later; joining across the gap would assert missing evidence.
         if combined == 0.0 {
             if let Some(last) = periods.last_mut()
                 && score_count > 0
@@ -623,9 +620,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dominant_periods_fallback_uses_all_from_higher_polarity() {
-        // Neither polarity reaches 0.5, so all loops from the polarity
-        // with the higher aggregate total should be used.
+    fn test_dominant_periods_require_half_the_normalization_mass() {
+        // These are valid shares from an incomplete report: the omitted
+        // 40% could all be balancing, reversing the apparent 40%-vs-20%
+        // winner. No set supplied here establishes the LTM 50% criterion.
         let loops = vec![
             FeedbackLoop {
                 name: "R1".to_string(),
@@ -653,11 +651,55 @@ mod tests {
             },
         ];
         let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        assert!(periods.is_empty());
+    }
+
+    #[test]
+    fn dominance_threshold_and_unresolved_gaps_cover_both_polarities_and_surfaces() {
+        // This isolates the threshold/period-grouping decision; the
+        // production-derived capped population is covered by
+        // ltm_finding::tests::capped_analysis_does_not_reverse_the_dominant_polarity.
+        for surface in [
+            PartitionSurface::NoMetadata,
+            PartitionSurface::PartitionBearing,
+        ] {
+            for sign in [-1.0, 1.0] {
+                let series = vec![0.5, 0.75, 0.0, 0.5, 0.49, 0.5, f64::NAN, 0.5];
+                let loops = vec![partitioned_loop(
+                    "loop",
+                    series.into_iter().map(|v| sign * v).collect(),
+                    None,
+                )];
+                let periods = calculate_dominant_periods(&loops, 10.0, 0.25, surface);
+                let intervals: Vec<_> = periods.iter().map(|p| (p.start, p.end)).collect();
+                assert_eq!(
+                    intervals,
+                    vec![
+                        (10.0, 10.25),
+                        (10.75, 10.75),
+                        (11.25, 11.25),
+                        (11.75, 11.75)
+                    ]
+                );
+                assert_eq!(periods[0].combined_score, 0.625);
+                assert!(periods.iter().all(|p| p.combined_score >= 0.5));
+            }
+        }
+    }
+
+    #[test]
+    fn equal_polarity_halves_meet_the_threshold() {
+        // A 50/50 split has two qualifying sets. The reinforcing-first
+        // tie break is deterministic, without requiring a strict majority.
+        let loops = vec![
+            partitioned_loop("balancing", vec![-0.5], Some(0)),
+            partitioned_loop("reinforcing", vec![0.5], Some(0)),
+        ];
+        let periods =
+            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
         assert_eq!(periods.len(), 1);
-        // Reinforcing total (0.4) > Balancing total (0.2), so both R1+R2
-        let mut names = periods[0].dominant_loops.clone();
-        names.sort();
-        assert_eq!(names, vec!["R1", "R2"]);
+        assert_eq!(periods[0].dominant_loops, vec!["reinforcing"]);
+        assert_eq!(periods[0].combined_score, 0.5);
     }
 
     #[test]
@@ -709,15 +751,15 @@ mod tests {
 
     #[test]
     fn test_dominant_periods_zero_score_loops_excluded_from_dominant_set() {
-        // One loop has a small negative score, another has zero score.
+        // One loop meets the dominance threshold, another has zero score.
         // The zero-score loop contributes nothing and should not inflate
-        // the dominant set in the fallback path.
+        // the dominant set.
         let loops = vec![
             FeedbackLoop {
                 name: "B1".to_string(),
                 polarity: LoopPolarity::Balancing,
                 variables: vec!["a".to_string()],
-                importance_series: vec![-0.01],
+                importance_series: vec![-0.5],
                 dominant_period: None,
                 partition: None,
             },

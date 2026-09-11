@@ -148,7 +148,7 @@ impl<'a> OccurrenceLookup<'a> {
     }
 
     /// Does any occurrence of the live source (a model `Variable` or a
-    /// `ModuleOutput` composite) STRICTLY under `prefix` carry access shape
+    /// `ModuleOutput` composite) at or under `prefix` carry access shape
     /// `shape`? This is the occurrence-IR form of the retired
     /// `expr0_contains_live_match` lookahead: an array-reducer `App` at
     /// `prefix` is frozen whole (GH #517) unless it genuinely holds the live
@@ -178,7 +178,7 @@ impl<'a> OccurrenceLookup<'a> {
         shape: &RefShape,
     ) -> bool {
         self.entries.iter().any(|(p, o)| {
-            p.len() > prefix.len()
+            p.len() >= prefix.len()
                 && p.starts_with(prefix)
                 && !o.index_nested
                 && occurrence_realizes_shape(o, shape)

@@ -112,7 +112,7 @@ fn loop_score_series(results: &Results, name: &str) -> Vec<f64> {
 }
 
 /// Number of saved steps at the start of a link-score series that are
-/// pinned to `0` by the equation's startup guard (`TIME = INITIAL_TIME`):
+/// pinned to `0` by the equation's startup guard (`TIME <= INITIAL_TIME`):
 /// every score reads one step of history, so its first value is at the
 /// step after the start.
 const STARTUP_STEPS: usize = 1;

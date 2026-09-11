@@ -46,7 +46,7 @@ C-LEARN currently uses builtins that are not yet implemented in the bytecode com
 
 ## Node VM-vs-wasm eval benchmark
 
-`@simlin/engine` can run a model on two backends: the libsimlin VM or a compiled WebAssembly blob. This benchmark compares their **simulation (eval) time** through the public `Model.simulate({ engine })` API, on fishbanks, WORLD3, and C-LEARN.
+`@simlin/engine` can run a model on two backends: the libsimlin VM or a compiled WebAssembly blob. This benchmark compares their **simulation (eval) time** through the public `Model.simulate({}, { engine, enableLtm })` API, on fishbanks, WORLD3, and C-LEARN.
 
 It is an [rstest](https://rstest.rs/) test gated behind `RUN_BENCH` so it stays out of the default `pnpm test` (a full C-LEARN run on both engines exceeds the per-test time budget):
 
@@ -56,15 +56,26 @@ RUN_BENCH=1 pnpm -C src/engine exec rstest run backend-bench
 
 # Subset the models (comma-separated: fishbanks, wrld3, clearn)
 RUN_BENCH=1 BENCH_MODELS=fishbanks,wrld3 pnpm -C src/engine exec rstest run backend-bench
+
+# Exercise Node/V8 acceptance and numerical parity on a large LTM model
+RUN_BENCH=1 BENCH_MODELS=clearn BENCH_LTM=on pnpm -C src/engine exec rstest run backend-bench
+
+# Compare both LTM settings (off is the default; choices: off, on, both)
+RUN_BENCH=1 BENCH_LTM=both pnpm -C src/engine exec rstest run backend-bench
 ```
 
-It prints a markdown table of the warm **median** eval time per engine plus the wasm/VM ratio.
+Use the system Node v24 and build shipping artifacts with
+`env -u DISABLE_WASM_OPT bash src/engine/build.sh` before measuring performance.
+Pre-commit stages a faster gate build whose timings do not represent shipping.
+The benchmark runs native Node/V8; it does not establish browser UI latency.
+
+It prints a markdown table of the warm **median** eval time per engine and LTM setting plus the VM/wasm ratio.
 
 What it measures, and what it deliberately excludes:
 
 - **Eval only.** The `Sim` for each `(model, engine)` is built once in untimed setup; for wasm that one-time cost is the blob compile and instantiate. Each measured iteration is a `reset()` (also untimed) followed by a timed `runToEnd()`. Result extraction (`getRun`/`getSeries`) is not timed.
 - **Median over an explicit warmup.** A discard-only warmup runs first, then the harness collects timings adaptively (until a max iteration count or a per-model wall-clock budget) and reports the median. The pure stats/harness lives in `src/engine/tests/bench-stats.ts` and is always-on unit-tested.
-- **Cross-checked before trusted.** Before timing, the benchmark runs each model on both engines and compares a representative series within the engine's tolerance, so a broken run can't masquerade as a fast one.
+- **Cross-checked before trusted.** Before timing, the benchmark runs each model and selected LTM setting on both engines and compares every public variable series within the engine's tolerance. A generated module that V8 rejects fails the test. This checks public trajectories; link-score analysis has separate tests.
 
 Absolute numbers include the async public-API overhead, so the VM/wasm ratio is the figure to compare across runs.
 

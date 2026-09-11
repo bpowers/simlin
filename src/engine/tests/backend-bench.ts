@@ -19,7 +19,7 @@ import { performance } from 'node:perf_hooks';
 
 import { Project } from '../src/project';
 import { Model } from '../src/model';
-import { runTimedAsync, seriesClose, type BenchOpts, type Stat } from './bench-stats';
+import { runTimedAsync, selectLtmModes, seriesClose, type BenchOpts, type Stat } from './bench-stats';
 
 // Which execution backend a Sim runs on. Mirrors SimEngine in src/backend.ts;
 // the public Model.simulate accepts this union directly, so the benchmark needs
@@ -60,6 +60,7 @@ const MODEL_ORDER: ReadonlyArray<ModelKey> = ['fishbanks', 'wrld3', 'clearn'];
 
 export type BenchRow = {
   readonly model: string;
+  readonly enableLtm: boolean;
   readonly vm: Stat;
   readonly wasm: Stat;
   readonly ratio: number;
@@ -93,8 +94,8 @@ function selectedModels(): ReadonlyArray<ModelKey> {
  * reset re-runs without recompiling) BEFORE the clock is sampled, then times
  * only runToEnd(). Result extraction (getRun/getSeries) is never timed.
  */
-async function timeEngine(model: Model, engine: Engine, opts: Readonly<BenchOpts>): Promise<Stat> {
-  const sim = await model.simulate({}, { engine });
+async function timeEngine(model: Model, engine: Engine, enableLtm: boolean, opts: Readonly<BenchOpts>): Promise<Stat> {
+  const sim = await model.simulate({}, { engine, enableLtm });
   try {
     return await runTimedAsync(opts, async () => {
       await sim.reset();
@@ -115,38 +116,45 @@ async function timeEngine(model: Model, engine: Engine, opts: Readonly<BenchOpts
  * `seriesClose` predicate). Throws on the first mismatch -- a divergence beyond
  * that tolerance is a real parity bug, not something to benchmark over.
  */
-async function crossCheck(model: Model, label: string): Promise<void> {
-  const vmSim = await model.simulate({}, { engine: 'vm' });
-  const wasmSim = await model.simulate({}, { engine: 'wasm' });
+async function crossCheck(model: Model, label: string, enableLtm: boolean): Promise<void> {
+  const vmSim = await model.simulate({}, { engine: 'vm', enableLtm });
   try {
-    await vmSim.runToEnd();
-    await wasmSim.runToEnd();
+    const wasmSim = await model.simulate({}, { engine: 'wasm', enableLtm });
+    try {
+      await vmSim.runToEnd();
+      await wasmSim.runToEnd();
 
-    const names = await wasmSim.getVarNames();
-    if (names.length === 0) {
-      throw new Error(`cross-check failed for ${label}: model produced no variables`);
-    }
+      const names = await wasmSim.getVarNames();
+      if (names.length === 0) {
+        throw new Error(`cross-check failed for ${label}: model produced no variables`);
+      }
+      const vmNames = new Set(await vmSim.getVarNames());
+      if (vmNames.size !== names.length || names.some((name) => !vmNames.has(name))) {
+        throw new Error(`cross-check failed for ${label}: public variable sets differ`);
+      }
 
-    for (const name of names) {
-      const vmSeries = await vmSim.getSeries(name);
-      const wasmSeries = await wasmSim.getSeries(name);
-      const result = seriesClose(vmSeries, wasmSeries);
-      if (!result.match) {
-        if (result.index < 0) {
+      for (const name of names) {
+        const vmSeries = await vmSim.getSeries(name);
+        const wasmSeries = await wasmSim.getSeries(name);
+        const result = seriesClose(vmSeries, wasmSeries);
+        if (!result.match) {
+          if (result.index < 0) {
+            throw new Error(
+              `cross-check failed for ${label}: series length differs for '${name}' ` +
+                `(vm ${result.expected} vs wasm ${result.actual})`,
+            );
+          }
           throw new Error(
-            `cross-check failed for ${label}: series length differs for '${name}' ` +
+            `cross-check failed for ${label}: '${name}' diverges at step ${result.index} ` +
               `(vm ${result.expected} vs wasm ${result.actual})`,
           );
         }
-        throw new Error(
-          `cross-check failed for ${label}: '${name}' diverges at step ${result.index} ` +
-            `(vm ${result.expected} vs wasm ${result.actual})`,
-        );
       }
+    } finally {
+      await wasmSim.dispose();
     }
   } finally {
     await vmSim.dispose();
-    await wasmSim.dispose();
   }
 }
 
@@ -172,11 +180,11 @@ function printSummary(rows: BenchTable): void {
   lines.push('');
   lines.push('### Node VM-vs-wasm eval benchmark (median ms)');
   lines.push('');
-  lines.push('| model | VM eval (median ms) | wasm eval (median ms) | wasm/VM | iters |');
-  lines.push('|---|--:|--:|--:|--:|');
+  lines.push('| model | LTM | VM eval (median ms) | wasm eval (median ms) | VM/wasm | iters |');
+  lines.push('|---|---|--:|--:|--:|--:|');
   for (const r of rows) {
     lines.push(
-      `| ${r.model} | ${fmtMs(r.vm.medianMs)} | ${fmtMs(r.wasm.medianMs)} | ${fmtRatio(r.ratio)} ` +
+      `| ${r.model} | ${r.enableLtm ? 'on' : 'off'} | ${fmtMs(r.vm.medianMs)} | ${fmtMs(r.wasm.medianMs)} | ${fmtRatio(r.ratio)} ` +
         `| vm ${r.vm.iters} / wasm ${r.wasm.iters} |`,
     );
   }
@@ -184,7 +192,7 @@ function printSummary(rows: BenchTable): void {
   lines.push(
     '_Eval-only: blob compile/instantiate and result extraction are excluded. ' +
       'Absolute numbers include the async public-API overhead (per-call await), ' +
-      'so the wasm/VM ratio is the meaningful figure._',
+      'so the VM/wasm ratio is the meaningful figure._',
   );
   console.log(lines.join('\n'));
 }
@@ -196,6 +204,7 @@ function printSummary(rows: BenchTable): void {
  */
 export async function runBenchmark(opts: Readonly<BenchOpts>): Promise<BenchTable> {
   const rows: Array<BenchRow> = [];
+  const ltmModes = selectLtmModes(process.env.BENCH_LTM);
 
   for (const key of selectedModels()) {
     const spec = MODELS[key];
@@ -204,12 +213,14 @@ export async function runBenchmark(opts: Readonly<BenchOpts>): Promise<BenchTabl
     try {
       const model = await project.mainModel();
 
-      await crossCheck(model, spec.label);
+      for (const enableLtm of ltmModes) {
+        await crossCheck(model, `${spec.label} (LTM ${enableLtm ? 'on' : 'off'})`, enableLtm);
 
-      const vm = await timeEngine(model, 'vm', opts);
-      const wasm = await timeEngine(model, 'wasm', opts);
+        const vm = await timeEngine(model, 'vm', enableLtm, opts);
+        const wasm = await timeEngine(model, 'wasm', enableLtm, opts);
 
-      rows.push({ model: spec.label, vm, wasm, ratio: vm.medianMs / wasm.medianMs });
+        rows.push({ model: spec.label, enableLtm, vm, wasm, ratio: vm.medianMs / wasm.medianMs });
+      }
     } finally {
       await project.dispose();
     }

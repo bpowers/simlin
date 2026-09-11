@@ -1549,11 +1549,11 @@ pub(crate) struct LtmSnapshots {
 ///   consistent with the results after the project is edited.
 /// - `simlin_analyze_rel_loop_score_from_wasm_results` has no `SimState` and
 ///   calls it per query.  The blob it analyzes was compiled by
-///   `simlin_model_compile_to_wasm` in a fresh, throwaway db under that call's
-///   own `ltm_discovery_mode` flag, so the snapshot matches the blob's layout
-///   only when the project's contents are the ones the blob was compiled from
-///   and the blob was compiled in exhaustive mode (the FFI never sets the
-///   project db's discovery flag).  A discovery-mode blob carries loop-score
+///   `simlin_model_compile_to_wasm` under that call's own `ltm_discovery_mode`
+///   override, which is restored before returning. The snapshot matches the
+///   blob's layout only when the project contents and discovery mode match
+///   those used to compile it. In the default exhaustive project mode, a
+///   discovery-mode blob carries loop-score
 ///   columns for pinned loops only while this snapshot names every enumerated
 ///   loop: a query for one of those resolves here, then fails the
 ///   `results.offsets` lookup in the core (`DoesNotExist`), and the

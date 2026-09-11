@@ -41,7 +41,7 @@
 //!
 //! LTM link scores are `PREVIOUS()`-based, so the first saved timestep
 //! (index 0) is startup-degenerate: every score is pinned to 0 there by its
-//! `TIME = INITIAL_TIME` guard, step 0's link scores can be NaN -- both
+//! `TIME <= INITIAL_TIME` guard, step 0's link scores can be NaN -- both
 //! discovery generators skip step 0 for exactly that reason -- and it
 //! carries no positive loop contribution, so `rank_and_filter` drops every
 //! loop whose only timestep is that one. Step index 1 is the first

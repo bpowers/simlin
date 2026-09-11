@@ -9,7 +9,30 @@
 
 import { describe, it, expect } from '@rstest/core';
 
-import { median, runTimed, runTimedAsync, seriesClose, type BenchOpts } from './bench-stats';
+import { median, runTimed, runTimedAsync, selectLtmModes, seriesClose, type BenchOpts } from './bench-stats';
+
+describe('selectLtmModes', () => {
+  it('defaults to LTM off', () => {
+    expect(selectLtmModes(undefined)).toEqual([false]);
+  });
+
+  it('selects every supported mode without duplicates', () => {
+    // All BENCH_LTM choices; both preserves off-before-on table ordering.
+    for (const [selection, expected] of [
+      ['off', [false]],
+      ['on', [true]],
+      ['both', [false, true]],
+    ] as const) {
+      expect(selectLtmModes(selection)).toEqual(expected);
+    }
+  });
+
+  it('rejects invalid choices rather than silently running without LTM', () => {
+    for (const selection of ['', 'true', 'OFF', 'on,off']) {
+      expect(() => selectLtmModes(selection)).toThrow('BENCH_LTM must be off, on, or both');
+    }
+  });
+});
 
 describe('median', () => {
   it('returns the middle element of an odd-length input', () => {

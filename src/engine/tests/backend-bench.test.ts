@@ -15,13 +15,16 @@
 import { it, expect } from '@rstest/core';
 
 import { runBenchmark } from './backend-bench';
+import { selectLtmModes } from './bench-stats';
 
 const RUN = process.env.RUN_BENCH === '1';
 
 (RUN ? it : it.skip)(
-  'benchmarks VM vs wasm eval (fishbanks/WORLD3/C-LEARN)',
+  'benchmarks VM vs wasm eval with selected LTM modes (fishbanks/WORLD3/C-LEARN)',
   async () => {
     const rows = await runBenchmark({ warmup: 3, minIters: 3, maxIters: 100, budgetMs: 2500 });
+    expect(rows.length).toBeGreaterThan(0);
+    expect([...new Set(rows.map((r) => r.enableLtm))]).toEqual(selectLtmModes(process.env.BENCH_LTM));
     for (const r of rows) {
       expect(Number.isFinite(r.vm.medianMs)).toBe(true);
       expect(r.vm.medianMs).toBeGreaterThan(0);

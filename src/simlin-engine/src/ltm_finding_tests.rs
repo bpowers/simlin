@@ -1837,7 +1837,7 @@ fn two_circuit_universe(weak_sibling: bool) -> UniverseStats {
 
 /// The one retention survivor of the `two_circuit_universe` fixture, as the
 /// `FoundLoop` materialization would build it: zero at step 0 (every link
-/// score's `TIME = INITIAL_TIME` arm) and the product 1.0 at step 1.
+/// score's `TIME <= INITIAL_TIME` arm) and the product 1.0 at step 1.
 fn universe_survivor_loop() -> FoundLoop {
     make_found_loop_with_scores(
         &[("a", "b"), ("b", "a")],
@@ -2536,7 +2536,7 @@ fn discovery_graph_stats_reports_structure_and_scores() {
         // step 0: `sample_steps` below (`&[1, 2]`) never asks for it, so its
         // value is never read either way. NaN here (rather than the literal
         // `0` production actually emits for every link score at
-        // `TIME = INITIAL_TIME`) is a sentinel: an accidental read would
+        // `TIME <= INITIAL_TIME`) is a sentinel: an accidental read would
         // propagate loudly instead of silently matching a plausible score.
         f64::NAN,
         f64::NAN,
@@ -2935,6 +2935,72 @@ fn discovery_no_agg_model_unaffected_by_stitching() {
                 .iter()
                 .all(|k| !k.from.as_str().contains("\u{205A}agg\u{205A}")),
             "no synthetic agg can appear in a no-agg model's loops"
+        );
+    }
+}
+
+/// The report cap can keep the largest individual loop while dropping part
+/// of the opposite polarity's dominant set. Drive the production analysis
+/// pipeline so both the shares and the capped loop population come from the
+/// simulator/discovery, rather than supplying a fabricated incomplete list.
+#[test]
+fn capped_analysis_does_not_reverse_the_dominant_polarity() {
+    use crate::test_common::TestProject;
+
+    // Both polarity directions: the single largest loop has 40% of the
+    // partition's mass; the two opposite-polarity loops jointly have 60%.
+    for leader_reinforces in [false, true] {
+        let (inflows, outflows) = if leader_reinforces {
+            (vec!["leader"], vec!["member_a", "member_b"])
+        } else {
+            (vec!["member_a", "member_b"], vec!["leader"])
+        };
+        let project = TestProject::new("capped_dominance")
+            .with_sim_time(0.0, 3.0, 1.0)
+            .stock("population", "100", &inflows, &outflows, None)
+            .flow("leader", "population * 0.4", None)
+            .flow("member_a", "population * 0.3", None)
+            .flow("member_b", "population * 0.3", None)
+            .build_datamodel();
+        let mut db = crate::db::SimlinDb::default();
+        let source = crate::db::sync_from_datamodel_incremental(&mut db, &project, None).project;
+
+        let full = crate::analysis::analyze_model(&project, &mut db, source, "main", None)
+            .expect("analysis succeeds");
+        assert!(full.analysis_error.is_none());
+        assert!(full.enumeration_complete);
+        assert_eq!(full.loop_dominance.len(), 3);
+        assert!(!full.dominant_loops_by_period.is_empty());
+        for period in &full.dominant_loops_by_period {
+            assert!(period.combined_score >= 0.5);
+            assert_eq!(period.dominant_loops.len(), 2);
+            for id in &period.dominant_loops {
+                let member = full
+                    .loop_dominance
+                    .iter()
+                    .find(|l| &l.loop_id == id)
+                    .unwrap();
+                assert!(member.variables.iter().all(|name| name != "leader"));
+            }
+        }
+
+        let _cap = MaxLoopsGuard::new(2);
+        let capped = crate::analysis::analyze_model(&project, &mut db, source, "main", None)
+            .expect("capped analysis succeeds");
+        assert!(capped.analysis_error.is_none());
+        assert!(capped.enumeration_complete);
+        assert_eq!(capped.retained_loops, 3);
+        assert_eq!(capped.loop_dominance.len(), 2);
+        assert!(
+            capped
+                .loop_dominance
+                .iter()
+                .any(|l| l.variables.iter().any(|v| v == "leader"))
+        );
+        assert!(
+            capped.dominant_loops_by_period.is_empty(),
+            "the reported 40% leader cannot establish dominance over the omitted 60% set: {:?}",
+            capped.dominant_loops_by_period,
         );
     }
 }

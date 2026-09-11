@@ -864,7 +864,7 @@ fn test_generate_stddev_equation() {
     );
     assert_eq!(
         eq,
-        "if (TIME = INITIAL_TIME) then 0 else if ((total - PREVIOUS(total)) = 0) OR ((s[d1] - PREVIOUS(s[d1])) = 0) then 0 else SAFEDIV((sqrt((((s[d1] - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d2]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d3]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2)) / 3) - PREVIOUS(total)), ABS((total - PREVIOUS(total))), 0) * SIGN((s[d1] - PREVIOUS(s[d1])))"
+        "if (TIME <= INITIAL_TIME) then 0 else if (ABS((total - PREVIOUS(total))) <= 0) OR (ABS((s[d1] - PREVIOUS(s[d1]))) <= 0) then 0 else SAFEDIV((sqrt((((s[d1] - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d2]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d3]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2)) / 3) - PREVIOUS(total)), ABS((total - PREVIOUS(total))), 0) * SIGN((s[d1] - PREVIOUS(s[d1])))"
     );
     // The live source element drives the partial; the other elements
     // are frozen at PREVIOUS.
@@ -1160,7 +1160,7 @@ fn test_generate_nested_reducer_uses_delta_ratio() {
         "should not use algebraic shortcut for nested reducer: {eq}"
     );
     // Should still have the standard link score wrapping
-    assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+    assert!(eq.contains("TIME <= INITIAL_TIME"), "equation: {eq}");
     assert!(eq.contains("SAFEDIV("), "equation: {eq}");
     // The partial equation uses target directly (delta-ratio approach)
     assert!(
@@ -1184,11 +1184,14 @@ fn test_generate_link_score_wrapping() {
         None,
     );
     // Should have initial time guard
-    assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+    assert!(eq.contains("TIME <= INITIAL_TIME"), "equation: {eq}");
     // Should have zero-change guards
-    assert!(eq.contains("(tgt - PREVIOUS(tgt)) = 0"), "equation: {eq}");
     assert!(
-        eq.contains("(src[a] - PREVIOUS(src[a])) = 0"),
+        eq.contains("ABS((tgt - PREVIOUS(tgt))) <= 0"),
+        "equation: {eq}"
+    );
+    assert!(
+        eq.contains("ABS((src[a] - PREVIOUS(src[a]))) <= 0"),
         "equation: {eq}"
     );
     // Should have the single-numerator magnitude and sign parts
@@ -1674,12 +1677,12 @@ fn test_generate_reduced_sum_equation() {
     );
     // Target reference is subscripted by the result element.
     assert!(
-        eq.contains("(agg[a] - PREVIOUS(agg[a])) = 0"),
+        eq.contains("ABS((agg[a] - PREVIOUS(agg[a]))) <= 0"),
         "equation: {eq}"
     );
     // Source reference is the full source tuple.
     assert!(
-        eq.contains("(matrix[a,x] - PREVIOUS(matrix[a,x])) = 0"),
+        eq.contains("ABS((matrix[a,x] - PREVIOUS(matrix[a,x]))) <= 0"),
         "equation: {eq}"
     );
     // The other reduced-axis element must not be enumerated.
@@ -1812,7 +1815,7 @@ fn test_generate_reduced_nested_uses_delta_ratio() {
         eq.contains("(row_agg[a] - PREVIOUS(row_agg[a]))"),
         "should use the row element in the delta-ratio: {eq}"
     );
-    assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+    assert!(eq.contains("TIME <= INITIAL_TIME"), "equation: {eq}");
 }
 
 #[test]
@@ -1839,7 +1842,7 @@ fn test_generate_full_reduce_unchanged_after_refactor() {
     // stable (the explicit-string assertion below catches regressions).
     assert_eq!(
         scalar_eq,
-        "if (TIME = INITIAL_TIME) then 0 else if ((total_pop - PREVIOUS(total_pop)) = 0) OR ((population[nyc] - PREVIOUS(population[nyc])) = 0) then 0 else SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), ABS((total_pop - PREVIOUS(total_pop))), 0) * SIGN((population[nyc] - PREVIOUS(population[nyc])))"
+        "if (TIME <= INITIAL_TIME) then 0 else if (ABS((total_pop - PREVIOUS(total_pop))) <= 0) OR (ABS((population[nyc] - PREVIOUS(population[nyc]))) <= 0) then 0 else SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), ABS((total_pop - PREVIOUS(total_pop))), 0) * SIGN((population[nyc] - PREVIOUS(population[nyc])))"
     );
 }
 
@@ -3193,15 +3196,12 @@ fn partial_equation_wildcard_live_iterated_dim_index_not_wrapped() {
     assert_eq!(partial, "sum(matrix[state, *])");
 }
 
-/// References that are already inside a PREVIOUS() call's argument are
-/// already lagged: their value is fixed at the prior step and cannot be
-/// affected by the current-step ceteris-paribus perturbation, so the
-/// wrapper must NOT wrap them again. Double-wrapping reads the value from
-/// two steps ago (semantically wrong) and forces a nested-PREVIOUS helper
-/// chain (one synthesized helper variable per occurrence -- the dominant
-/// remaining helper source on SAMPLE-IF-TRUE-heavy models like C-LEARN).
+/// A sample-and-hold memory is a co-input of the selected current input.
+/// Freezing the whole memory call preserves its fallback at the first scored
+/// step; the fallback's reference to input is initial-only and does not make
+/// the memory a selected-source read at later steps.
 #[test]
-fn partial_equation_does_not_rewrap_inside_previous() {
+fn partial_equation_freezes_sample_and_hold_memory() {
     // Target equation shape: `if cond then input else previous(self, input)`
     // -- the SAMPLE IF TRUE pattern. `target` (the self-reference) and
     // `cond` are other-deps; `input` is the live source.
@@ -3220,21 +3220,15 @@ fn partial_equation_does_not_rewrap_inside_previous() {
     )
     .unwrap();
 
-    // The dep `cond` (outside any PREVIOUS) is wrapped...
     assert!(
         partial.to_lowercase().contains("previous(cond)"),
         "cond must be wrapped for ceteris-paribus; got: {partial}",
     );
-    // ...but `target` inside the original PREVIOUS call is already
-    // lagged and must NOT be double-wrapped.
     assert!(
-        !partial.to_lowercase().contains("previous(previous(target)"),
-        "reference inside PREVIOUS must not be double-wrapped; got: {partial}",
-    );
-    // The original previous(target, input) call survives intact.
-    assert!(
-        partial.to_lowercase().contains("previous(target,"),
-        "the original lagged self-reference must survive; got: {partial}",
+        partial
+            .to_lowercase()
+            .contains("previous(previous(target, input))"),
+        "the previous evaluation of the memory, including its fallback, must survive; got: {partial}",
     );
 }
 
@@ -3283,20 +3277,10 @@ fn partial_freezes_whole_reducer_over_index_nested_live_source() {
     );
 }
 
-/// Fig. 2 Q3 (Track A3 stage 2, review finding 2): an already-lagged other-dep
-/// occurrence -- one that sits inside an ORIGINAL `PREVIOUS(...)` -- must be
-/// left untouched (its live selection is suppressed AND it is never re-wrapped),
-/// so the changed-first partial does not double-lag it to a t-2 read.
-///
-/// `to = from + PREVIOUS(g)` with live source `from` (Bare): `from` stays live;
-/// the already-lagged `PREVIOUS(g)` survives verbatim, NOT wrapped again as
-/// `PREVIOUS(PREVIOUS(g))`. This complements
-/// `partial_equation_does_not_rewrap_inside_previous` (which uses the
-/// two-argument SAMPLE-IF-TRUE `PREVIOUS(target, input)` shape) with the exact
-/// `to = from + PREVIOUS(g)` shape the wrap's structural PREVIOUS/INIT skip must
-/// reproduce.
+/// The anchor for `to = from + PREVIOUS(g)` contains g from two steps ago.
+/// The partial must use that same memory value to isolate from's change.
 #[test]
-fn partial_leaves_already_lagged_other_dep_untouched() {
+fn partial_freezes_the_previous_value_of_a_lagged_other_dep() {
     let deps = deps_set(&["from", "g"]);
     let live = Ident::<Canonical>::new("from");
     let shape = RefShape::Bare;
@@ -3306,13 +3290,8 @@ fn partial_leaves_already_lagged_other_dep_untouched() {
             .unwrap();
 
     assert_eq!(
-        partial, "from + previous(g)",
-        "the already-lagged `PREVIOUS(g)` must survive verbatim and `from` must \
-         stay live; got: {partial}"
-    );
-    assert!(
-        !partial.to_lowercase().contains("previous(previous(g"),
-        "an already-lagged occurrence must not be double-wrapped; got: {partial}"
+        partial, "from + PREVIOUS(previous(g))",
+        "the memory must be held at its previous value and from must stay live"
     );
 }
 
@@ -4153,8 +4132,8 @@ fn flow_to_stock_scalar_inflow_is_the_net_flow_partial() {
     assert_eq!(
         &*arm.text,
         format!(
-            "if (TIME = INITIAL_TIME) then 0 else if (({net} - PREVIOUS({net})) = 0) OR \
-             ((births - PREVIOUS(births)) = 0) then 0 else SAFEDIV((births - \
+            "if (TIME <= INITIAL_TIME) then 0 else if (ABS(({net} - PREVIOUS({net}))) <= 0) OR \
+             (ABS((births - PREVIOUS(births))) <= 0) then 0 else SAFEDIV((births - \
              PREVIOUS(births)), ABS(({net} - PREVIOUS({net}))), 0) * SIGN((births - \
              PREVIOUS(births)))"
         )
@@ -4186,8 +4165,8 @@ fn flow_to_stock_arrayed_inflow_subscripts_flow_and_net() {
     assert_eq!(
         &*arm.text,
         format!(
-            "if (TIME = INITIAL_TIME) then 0 else if (({net} - PREVIOUS({net})) = 0) OR \
-             ((growth[region] - PREVIOUS(growth[region])) = 0) then 0 else \
+            "if (TIME <= INITIAL_TIME) then 0 else if (ABS(({net} - PREVIOUS({net}))) <= 0) OR \
+             (ABS((growth[region] - PREVIOUS(growth[region]))) <= 0) then 0 else \
              SAFEDIV((growth[region] - PREVIOUS(growth[region])), ABS(({net} - \
              PREVIOUS({net}))), 0) * SIGN((growth[region] - PREVIOUS(growth[region])))"
         )
@@ -4255,8 +4234,8 @@ fn flow_to_stock_flow_over_other_dims_or_scalar_is_spelled_bare() {
         assert_eq!(
             &*arm.text,
             format!(
-                "if (TIME = INITIAL_TIME) then 0 else if (({net} - PREVIOUS({net})) = 0) OR \
-                 (({name} - PREVIOUS({name})) = 0) then 0 else SAFEDIV(({name} - \
+                "if (TIME <= INITIAL_TIME) then 0 else if (ABS(({net} - PREVIOUS({net}))) <= 0) OR \
+                 (ABS(({name} - PREVIOUS({name}))) <= 0) then 0 else SAFEDIV(({name} - \
                  PREVIOUS({name})), ABS(({net} - PREVIOUS({net}))), 0) * SIGN(({name} - \
                  PREVIOUS({name})))"
             )
@@ -4826,7 +4805,7 @@ fn test_generate_scalar_feeder_to_agg_equation_freezes_only_feeder() {
     );
     // Standard guard structure: initial-step zero, zero-delta zero, SAFEDIV.
     assert!(
-        eq.starts_with("if (TIME = INITIAL_TIME) then 0"),
+        eq.starts_with("if (TIME <= INITIAL_TIME) then 0"),
         "got: {eq}"
     );
     assert!(eq.contains("SAFEDIV("), "got: {eq}");
@@ -4853,9 +4832,9 @@ fn test_generate_iterated_feeder_to_agg_equation_pins_slot_and_freezes_feeder() 
     .expect("the feeder occurrence freezes");
     assert_eq!(
         eq,
-        "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
-         PREVIOUS(growth[d1\u{B7}r1])) = 0) OR ((frac[d1\u{B7}r1] - \
-         PREVIOUS(frac[d1\u{B7}r1])) = 0) then 0 else \
+        "if (TIME <= INITIAL_TIME) then 0 else if (ABS((growth[d1\u{B7}r1] - \
+         PREVIOUS(growth[d1\u{B7}r1]))) <= 0) OR (ABS((frac[d1\u{B7}r1] - \
+         PREVIOUS(frac[d1\u{B7}r1]))) <= 0) then 0 else \
          SAFEDIV((growth[d1\u{B7}r1] - (sum(matrix[d1\u{B7}r1, *] * \
          PREVIOUS(frac[d1\u{B7}r1])))), ABS((growth[d1\u{B7}r1] - \
          PREVIOUS(growth[d1\u{B7}r1]))), 0) * SIGN((frac[d1\u{B7}r1] - \
@@ -5419,8 +5398,8 @@ fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
     .unwrap();
     assert_eq!(
         text,
-        "if (TIME = INITIAL_TIME) then 0 \
-         else if ((growth - PREVIOUS(growth)) = 0) OR ((frac - PREVIOUS(frac)) = 0) then 0 \
+        "if (TIME <= INITIAL_TIME) then 0 \
+         else if (ABS((growth - PREVIOUS(growth))) <= 0) OR (ABS((frac - PREVIOUS(frac))) <= 0) then 0 \
          else SAFEDIV((growth - (sum(matrix[d1, *] * PREVIOUS(frac)))), \
          ABS((growth - PREVIOUS(growth))), 0) * SIGN((frac - PREVIOUS(frac)))"
     );
@@ -5459,8 +5438,8 @@ fn shaped_guard_form_changed_last_keeps_the_clock_live() {
     .unwrap();
     assert_eq!(
         text,
-        "if (TIME = INITIAL_TIME) then 0 \
-         else if ((growth - PREVIOUS(growth)) = 0) OR ((frac - PREVIOUS(frac)) = 0) then 0 \
+        "if (TIME <= INITIAL_TIME) then 0 \
+         else if (ABS((growth - PREVIOUS(growth))) <= 0) OR (ABS((frac - PREVIOUS(frac))) <= 0) then 0 \
          else SAFEDIV((growth - (sum(matrix[d1, *] * PREVIOUS(frac)) + time())), \
          ABS((growth - PREVIOUS(growth))), 0) * SIGN((frac - PREVIOUS(frac)))"
     );
@@ -5506,8 +5485,8 @@ fn shaped_guard_form_keeps_changed_first_when_freezable() {
     assert_eq!(
         text,
         format!(
-            "if (TIME = INITIAL_TIME) then 0 \
-             else if ((share - PREVIOUS(share)) = 0) OR ((population - PREVIOUS(population)) = 0) then 0 \
+            "if (TIME <= INITIAL_TIME) then 0 \
+             else if (ABS((share - PREVIOUS(share))) <= 0) OR (ABS((population - PREVIOUS(population))) <= 0) then 0 \
              else SAFEDIV((({expected_partial}) - PREVIOUS(share)), \
              ABS((share - PREVIOUS(share))), 0) * SIGN((population - PREVIOUS(population)))"
         )

@@ -914,7 +914,7 @@ fn external_totals_are_used_for_partition_denominators() {
 /// supplied row-major as `data[step * n_offsets + offset]`.
 ///
 /// Step 0 is whatever the caller left there, and every fixture below leaves it
-/// zero: every link score's `TIME = INITIAL_TIME` guard arm emits the literal
+/// zero: every link score's `TIME <= INITIAL_TIME` guard arm emits the literal
 /// constant `0` there (`ltm_augment::link_score_guard_form_with_numerator`),
 /// so it carries no signal in a real run -- confirmed on World3 and C-LEARN,
 /// where every union edge's step-0 value is exactly 0.
@@ -1396,7 +1396,7 @@ fn retention_confirms_a_circuit_whose_running_bound_overstates_its_share() {
 
 /// Defense in depth for the `head & !1u64` step-0 mask and `active_window`'s
 /// `lo == 0` case (see the `bits` field doc on `ActivityGraph`): production
-/// never sets bit 0 (every link score's `TIME = INITIAL_TIME` guard arm is
+/// never sets bit 0 (every link score's `TIME <= INITIAL_TIME` guard arm is
 /// the literal `0` there), so this fixture makes an edge genuinely active AT
 /// step 0 too -- a shape no real run produces, but one the enumerator does
 /// not assume away. Correctness requires two things simultaneously: the mask

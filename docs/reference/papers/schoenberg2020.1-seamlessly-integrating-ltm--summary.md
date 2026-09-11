@@ -240,8 +240,10 @@ The simplest population model: one stock (Population), one flow (births), one pa
 ### 5.2 Population with Births and Deaths (Figure 5)
 
 Adding deaths with an average lifetime of 20 produces slower exponential growth with two loops:
-- R1 (reinforcing): 67% contribution
-- B1 (balancing): 35% contribution (note: magnitudes sum to more than 100% in instantaneous terms because opposing effects inflate both)
+- R1 (reinforcing): +66.67% contribution
+- B1 (balancing): -33.33% contribution
+
+**Editorial source note:** Figure 5 on PDF page 12 displays +66.67% and -33.33%. The adjacent prose says 67% and 35%; the latter appears to be a typographical error. Opposing effects do not make absolute **relative** loop scores sum above 100%: normalization divides by the sum of absolute loop scores.
 
 **Pedagogical insight:** If students set "average lifetime" to exactly 10, nothing changes and no loops are reported. This is a **learning moment**: the lack of reported loops is an artifact of LTM (it cannot analyze equilibrium) but also reflects that two opposing loops are perfectly balanced -- either cosmic coincidence or meaningful. This naturally leads to introducing **carrying capacity**.
 
