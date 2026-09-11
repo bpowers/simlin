@@ -3531,28 +3531,44 @@ fn detect_chains(
             }
             chain_stocks.push(stock.clone());
 
-            // Follow inflows to connected stocks
+            // A stock claims a flow for its chain only when the metadata names
+            // it as that flow's sink (for an inflow) or source (for an
+            // outflow). A flow has one element and one attachment per side, so
+            // when two stocks list the same flow on one side (degenerate input)
+            // only the stock `flow_to_stocks` chose lays it out; claiming it in
+            // both chains would emit a second, detached copy.
             if let Some(inflows) = stock_to_inflows.get(&stock) {
                 for flow in inflows {
+                    let Some((from_stock, to_stock)) = flow_to_stocks.get(flow) else {
+                        continue;
+                    };
+                    if to_stock.as_deref() != Some(stock.as_str()) {
+                        continue;
+                    }
                     if seen_flows.insert(flow.clone()) {
                         chain_flows.push(flow.clone());
                         flows_in_chains.insert(flow.clone());
                     }
-                    if let Some((Some(from_stock), _)) = flow_to_stocks.get(flow)
+                    if let Some(from_stock) = from_stock
                         && !visited.contains(from_stock)
                     {
                         queue.push_back(from_stock.clone());
                     }
                 }
             }
-            // Follow outflows to connected stocks
             if let Some(outflows) = stock_to_outflows.get(&stock) {
                 for flow in outflows {
+                    let Some((from_stock, to_stock)) = flow_to_stocks.get(flow) else {
+                        continue;
+                    };
+                    if from_stock.as_deref() != Some(stock.as_str()) {
+                        continue;
+                    }
                     if seen_flows.insert(flow.clone()) {
                         chain_flows.push(flow.clone());
                         flows_in_chains.insert(flow.clone());
                     }
-                    if let Some((_, Some(to_stock))) = flow_to_stocks.get(flow)
+                    if let Some(to_stock) = to_stock
                         && !visited.contains(to_stock)
                     {
                         queue.push_back(to_stock.clone());
