@@ -99,7 +99,8 @@ Knobs (environment variables): `LAYOUT_EVAL_MODELS` (corpus keys),
 `LAYOUT_EVAL_TIERS` (`small,medium,large`), `LAYOUT_EVAL_EXTRA` (`key=path` ad
 hoc models), `LAYOUT_EVAL_SEEDS` (default 25), `LAYOUT_EVAL_OUT` (default
 `target/layout-eval`), `LAYOUT_EVAL_COMPARE` (a previous run's output dir),
-`LAYOUT_EVAL_WRITE_BASELINE`, `LAYOUT_EVAL_DECLUTTER=0`.
+`LAYOUT_EVAL_WRITE_BASELINE`, `LAYOUT_EVAL_DECLUTTER=0`,
+`LAYOUT_EVAL_REPLAY_STEPS` (0 skips the replay).
 
 For each corpus model it:
 
@@ -107,10 +108,18 @@ For each corpus model it:
   summarized benchstat-style in `layout::eval_stats`);
 - runs `generate_best_layout` once, timed -- the layout a user gets and what it
   costs;
-- renders the hand-drawn reference, the production layout, and the median and
-  worst seeds to PNG (small diagrams upscaled so labels are legible), with
-  `*_defects.png` overlays for the reference and production and a
-  `*.view.json` of every rendered view;
+- replays building the model from empty over a few edits
+  (`LAYOUT_EVAL_REPLAY_STEPS`, default 4) -- each stock-flow chain arriving
+  whole, then the other variables nearest the backbone first -- syncing the
+  diagram after every edit the way MCP `edit_model` and pysimlin's patch sync
+  do (`generate_best_layout` while the view is empty, `incremental_layout`
+  after), and scores the final diagram: what an agent or notebook user ends up
+  looking at, which can differ sharply from a fresh layout because incremental
+  layout preserves everything already placed;
+- renders the hand-drawn reference, the production and incremental layouts,
+  and the median and worst seeds to PNG (small diagrams upscaled so labels are
+  legible), with `*_defects.png` overlays for the reference, production, and
+  incremental diagrams and a `*.view.json` of every rendered view;
 - runs the taste battery on the reference and the production layout.
 
 It writes `metrics.json` (per-term breakdowns, timings, taste checks),

@@ -7,8 +7,10 @@
 //! For each corpus model: lay it out across many seeds and score each layout
 //! with the layout-quality metric (the algorithm's quality DISTRIBUTION), run
 //! the production `generate_best_layout` call once, timed (what a user GETS),
-//! and render the hand-authored reference, the production layout, and the
-//! median and worst seeds to PNG. Writes `metrics.json`, `corpus.json`, and an
+//! replay building the model over a few edits with the diagram synced
+//! incrementally after each (what an agent or notebook user GETS), and render
+//! the hand-authored reference, the production and incremental layouts, and
+//! the median and worst seeds to PNG. Writes `metrics.json`, `corpus.json`, and an
 //! `index.html` contact sheet under a gitignored `target/` directory.
 //!
 //! This is a thin imperative shell over the metric core
@@ -31,6 +33,8 @@
 //!   LAYOUT_EVAL_WRITE_BASELINE 1 -> write this run's report to the committed
 //!                              baseline JSON instead of diffing against it
 //!   LAYOUT_EVAL_DECLUTTER      0 -> disable the declutter pass in the seed sweep
+//!   LAYOUT_EVAL_REPLAY_STEPS   edits in the incremental-build replay (default 4;
+//!                              0 skips the replay)
 //!
 //! Baseline diff: the committed `examples/layout_eval_baseline.json` (a
 //! serialized `CorpusReport`) records a reference run. A normal run re-scores
@@ -43,6 +47,7 @@
 mod corpus;
 mod knobs;
 mod render;
+mod replay;
 mod report;
 mod sweep;
 mod taste;
@@ -150,9 +155,23 @@ fn process_model(
             )
         })
     };
+    let replayed = (knobs.replay_steps > 0)
+        .then(|| replay::replay(key, &project, knobs.replay_steps))
+        .flatten();
+    let incremental = replayed.as_ref().and_then(|r| {
+        render::render_view(
+            &project,
+            &r.view,
+            None,
+            &format!("{key}_incremental.png"),
+            out,
+            true,
+        )
+    });
     let renders = ModelRenders {
         reference,
         production: production_render,
+        incremental,
         median: seed_render("median", stats.median_seed),
         worst: seed_render("worst", stats.worst_seed),
     };
@@ -168,6 +187,12 @@ fn process_model(
         },
         stats.samples.len(),
     );
+    if let (Some(r), Some(render)) = (&replayed, &renders.incremental) {
+        println!(
+            "{key}: incremental={:.4} over {} edits in {:.0}ms",
+            render.weighted_cost, r.steps, r.elapsed_ms
+        );
+    }
 
     // Taste checks run on the diagrams worth degrading: a single-view reference
     // (a stacked multi-view reference is not one diagram) and production.
@@ -189,6 +214,7 @@ fn process_model(
         },
         variables,
         production_ms: production.as_ref().map(|p| p.elapsed_ms),
+        incremental_ms: replayed.as_ref().map(|r| r.elapsed_ms),
         taste_reference,
         taste_production,
     };

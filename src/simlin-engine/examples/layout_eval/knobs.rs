@@ -11,6 +11,10 @@ use crate::corpus::Tier;
 /// Default number of seeds to sample per model when `LAYOUT_EVAL_SEEDS` is unset.
 const DEFAULT_SEEDS: u64 = 25;
 
+/// Default number of edits in the incremental-build replay: a handful, like an
+/// agent's session of `edit_model` calls.
+const DEFAULT_REPLAY_STEPS: usize = 4;
+
 pub struct Knobs {
     /// `LAYOUT_EVAL_MODELS`: corpus keys to run (`None` = all).
     pub models: Option<Vec<String>>,
@@ -29,6 +33,9 @@ pub struct Knobs {
     pub compare_dir: Option<String>,
     /// `LAYOUT_EVAL_DECLUTTER=0` disables the declutter pass in the seed sweep.
     pub declutter: bool,
+    /// `LAYOUT_EVAL_REPLAY_STEPS`: edits in the incremental-build replay; 0
+    /// skips it.
+    pub replay_steps: usize,
 }
 
 fn list(name: &str) -> Option<Vec<String>> {
@@ -99,6 +106,10 @@ impl Knobs {
                 env::var("LAYOUT_EVAL_DECLUTTER").unwrap_or_default().trim(),
                 "0" | "false"
             ),
+            replay_steps: env::var("LAYOUT_EVAL_REPLAY_STEPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_REPLAY_STEPS),
         }
     }
 }

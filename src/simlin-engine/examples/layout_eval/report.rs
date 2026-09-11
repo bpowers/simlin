@@ -22,6 +22,7 @@ use crate::taste::{TasteCheck, tally};
 pub struct ModelRenders {
     pub reference: Option<Render>,
     pub production: Option<Render>,
+    pub incremental: Option<Render>,
     pub median: Option<Render>,
     pub worst: Option<Render>,
 }
@@ -33,6 +34,8 @@ pub struct ModelFacts {
     pub variables: usize,
     /// Wall-clock milliseconds of the production `generate_best_layout` call.
     pub production_ms: Option<f64>,
+    /// Total wall-clock milliseconds of the incremental replay's diagram syncs.
+    pub incremental_ms: Option<f64>,
     /// Taste checks over the reference (empty when it is not one diagram).
     pub taste_reference: Vec<TasteCheck>,
     /// Taste checks over the production layout.
@@ -65,11 +68,15 @@ pub struct ModelReport {
     pub worst_seed: u64,
     pub production_ms: Option<f64>,
     #[serde(default)]
+    pub incremental_ms: Option<f64>,
+    #[serde(default)]
     pub taste_reference: Vec<TasteCheck>,
     #[serde(default)]
     pub taste_production: Vec<TasteCheck>,
     pub reference: Option<RenderReport>,
     pub production: Option<RenderReport>,
+    #[serde(default)]
+    pub incremental: Option<RenderReport>,
     pub median: Option<RenderReport>,
     pub worst: Option<RenderReport>,
 }
@@ -136,10 +143,12 @@ pub fn build_report(
             median_seed: stats.median_seed,
             worst_seed: stats.worst_seed,
             production_ms: fact.production_ms,
+            incremental_ms: fact.incremental_ms,
             taste_reference: fact.taste_reference.clone(),
             taste_production: fact.taste_production.clone(),
             reference: render.reference.as_ref().map(render_report),
             production: render.production.as_ref().map(render_report),
+            incremental: render.incremental.as_ref().map(render_report),
             median: render.median.as_ref().map(render_report),
             worst: render.worst.as_ref().map(render_report),
         })
@@ -459,6 +468,12 @@ pub fn render_index_html(report: &EvalReport, before: Option<&EvalReport>) -> St
             "production",
             model.production.as_ref(),
             prior.and_then(|p| p.production.as_ref()),
+        );
+        write_render_cell(
+            &mut html,
+            "incremental",
+            model.incremental.as_ref(),
+            prior.and_then(|p| p.incremental.as_ref()),
         );
         write_render_cell(
             &mut html,
