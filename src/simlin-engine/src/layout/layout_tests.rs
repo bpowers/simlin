@@ -299,6 +299,167 @@ fn test_compute_metadata_dep_graph() {
 }
 
 #[test]
+fn test_compute_metadata_reads_through_builtin_calls_and_tables() {
+    // A variable's reads reach rendered variables by more routes than its
+    // equation's direct heads, and a diagram must draw every one: the parse
+    // turns a builtin module call (SMTH1, DELAY3, TREND, ...) into a
+    // synthesized instance whose inputs are the call's arguments, hoists a
+    // non-identifier argument into a helper, captures an expression under
+    // PREVIOUS, and records a LOOKUP table as a referenced table rather than a
+    // read. One row per route.
+    let table = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "table".to_string(),
+        equation: datamodel::Equation::Scalar(String::new()),
+        documentation: String::new(),
+        units: None,
+        gf: Some(datamodel::GraphicalFunction {
+            kind: datamodel::GraphicalFunctionKind::Continuous,
+            x_points: Some(vec![0.0, 1.0, 2.0]),
+            y_points: vec![4.0, 2.0, 0.0],
+            x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+            y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 4.0 },
+        }),
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    let aux = |ident: &str, equation: &str| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar(equation.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    };
+    let rows: &[(&str, &str, &[&str])] = &[
+        ("direct reads", "a + b", &["a", "b"]),
+        ("builtin module call", "SMTH1(a, b)", &["a", "b"]),
+        (
+            "hoisted module-call argument",
+            "SMTH1(a * 2, b)",
+            &["a", "b"],
+        ),
+        ("captured PREVIOUS argument", "PREVIOUS(a + b)", &["a", "b"]),
+        ("lookup table", "LOOKUP(table, a)", &["a", "table"]),
+        (
+            "lookup table inside a module call",
+            "SMTH1(LOOKUP(table, a), b)",
+            &["a", "b", "table"],
+        ),
+    ];
+    for &(route, equation, expected) in rows {
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                aux("a", "1"),
+                aux("b", "2"),
+                table.clone(),
+                aux("out", equation),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+            macro_spec: None,
+        };
+        let metadata = compute_metadata(&test_project(model), TEST_MODEL, None).unwrap();
+        let deps: Vec<&str> = metadata.dep_graph["out"]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(deps, expected, "{route}: `out = {equation}`");
+        for dep in expected {
+            assert!(
+                metadata.reverse_dep_graph[*dep].contains("out"),
+                "{route}: {dep} must record out as a dependent"
+            );
+        }
+        assert!(!metadata.is_constant("out"), "{route}: out reads variables");
+    }
+}
+
+#[test]
+fn test_generate_layout_links_builtin_call_inputs_and_tables() {
+    // The drawn counterpart of the metadata rows above: each name typed into
+    // a builtin call or a LOOKUP gets its arrow, so none of them is parked as
+    // an isolated variable.
+    let table = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "effect_table".to_string(),
+        equation: datamodel::Equation::Scalar(String::new()),
+        documentation: String::new(),
+        units: None,
+        gf: Some(datamodel::GraphicalFunction {
+            kind: datamodel::GraphicalFunctionKind::Continuous,
+            x_points: Some(vec![0.0, 1.0, 2.0]),
+            y_points: vec![4.0, 2.0, 0.0],
+            x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+            y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 4.0 },
+        }),
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    let aux = |ident: &str, equation: &str| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar(equation.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    };
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            aux("ratio", "1"),
+            aux("smoothing_time", "3"),
+            table,
+            aux("effect", "LOOKUP(effect_table, ratio)"),
+            aux("perceived_effect", "SMTH1(effect, smoothing_time)"),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let view = generate_layout(&test_project(model), TEST_MODEL, None).unwrap();
+    let uid_of = |name: &str| {
+        view.elements
+            .iter()
+            .find(|e| e.get_name().is_some_and(|n| canonicalize(n) == name))
+            .map(ViewElement::get_uid)
+            .unwrap_or_else(|| panic!("{name} is drawn"))
+    };
+    let links: BTreeSet<(i32, i32)> = view
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Link(l) => Some((l.from_uid, l.to_uid)),
+            _ => None,
+        })
+        .collect();
+    for (from, to) in [
+        ("effect_table", "effect"),
+        ("ratio", "effect"),
+        ("effect", "perceived_effect"),
+        ("smoothing_time", "perceived_effect"),
+    ] {
+        assert!(
+            links.contains(&(uid_of(from), uid_of(to))),
+            "missing link {from} -> {to}"
+        );
+    }
+}
+
+#[test]
 fn test_compute_metadata_constants() {
     let project = test_project(simple_model());
     let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();

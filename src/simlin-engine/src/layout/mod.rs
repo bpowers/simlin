@@ -4365,6 +4365,54 @@ fn rendered_dependency_ident(
     mapped.filter(|ident| ident != dependent)
 }
 
+/// The names a variable's diagram links come from: the head of every read (a
+/// module read is drawn to the module box), with each read of a helper the
+/// parse synthesized -- a builtin module instance such as `SMTH1`'s, a hoisted
+/// call argument, a captured `PREVIOUS`/`INIT` argument -- replaced by what
+/// that helper reads, plus every lookup table the variable or its helpers call.
+/// A modeler writes `SMTH1(input, delay)` or `LOOKUP(table, x)` and expects an
+/// arrow from each name they typed; the synthesized helpers are invisible, and
+/// a table is a layout reference (not a data-flow read), so neither shows up
+/// among the plain heads (#650). Sorted and deduplicated.
+fn drawn_reads(var_deps: &crate::db::VariableDeps) -> Vec<String> {
+    let helpers: HashMap<&str, _> = var_deps
+        .implicit_vars
+        .iter()
+        .map(|helper| (helper.name.as_str(), helper))
+        .collect();
+    let mut reads: BTreeSet<String> = var_deps
+        .referenced_tables
+        .iter()
+        .map(|table| table.as_str().to_string())
+        .collect();
+    let mut expanded: HashSet<&str> = HashSet::new();
+    let mut pending = vec![&var_deps.deps];
+    while let Some(deps) = pending.pop() {
+        for head in deps.heads() {
+            let name = head.as_str();
+            match helpers.get(name) {
+                Some(helper) => {
+                    // A helper can be read by several siblings (an instance
+                    // reads the argument hoisted for it); expand it once.
+                    if expanded.insert(name) {
+                        pending.push(&helper.deps);
+                        reads.extend(
+                            helper
+                                .referenced_tables
+                                .iter()
+                                .map(|table| table.as_str().to_string()),
+                        );
+                    }
+                }
+                None => {
+                    reads.insert(name.to_string());
+                }
+            }
+        }
+    }
+    reads.into_iter().collect()
+}
+
 /// Build feedback loops from the persisted model loop_metadata (UIDs only,
 /// no LTM simulation). Used as a fallback when LTM detection fails.
 fn build_feedback_loops_from_metadata(
@@ -4542,15 +4590,7 @@ pub fn compute_metadata(
                 let empty_inputs = crate::db::ModuleInputSet::empty(db);
                 let var_deps =
                     crate::db::variable_direct_dependencies(db, sv, source_project, empty_inputs);
-                // A module read is drawn to the module box: the read's head.
-                let mut combined: Vec<String> = var_deps
-                    .deps
-                    .heads()
-                    .into_iter()
-                    .map(|head| head.as_str().to_string())
-                    .collect();
-                combined.sort();
-                combined.dedup();
+                let combined = drawn_reads(var_deps);
                 if combined.is_empty() {
                     // Check whether the equation actually parsed. If the AST
                     // is None, the equation has syntax errors and we fall back
