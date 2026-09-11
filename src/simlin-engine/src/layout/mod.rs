@@ -19,6 +19,7 @@ pub mod metrics;
 mod objective;
 mod orthogonal;
 pub mod placement;
+mod polish;
 pub mod sfdp;
 #[cfg(any(test, feature = "layout_eval"))]
 pub mod taste;
@@ -2864,6 +2865,11 @@ pub fn fresh_layout(
     let rerouted = generate_ghosts(&mut state, config, metadata);
     build_connectors(&mut state, model, metadata, &rerouted)?;
 
+    // Phase 3b: Move free nodes off crossings where a nearby spot uncrosses
+    // their connectors, on the drawn connector geometry.
+    polish::polish_crossings(&mut state.elements);
+    sync_free_node_positions(&mut state);
+
     // Phase 4: Apply optimal label placement
     optimize_labels(&mut state, model, metadata);
 
@@ -2918,6 +2924,22 @@ pub fn fresh_layout(
         font: None,
         sketch_compat: None,
     })
+}
+
+/// Copy free nodes' element coordinates back into `state.positions` after a
+/// pass that moved the elements directly.
+fn sync_free_node_positions(state: &mut LayoutState) {
+    for elem in &state.elements {
+        let (uid, x, y) = match elem {
+            ViewElement::Aux(a) => (a.uid, a.x, a.y),
+            ViewElement::Module(m) => (m.uid, m.x, m.y),
+            ViewElement::Alias(a) => (a.uid, a.x, a.y),
+            _ => continue,
+        };
+        if let Some(pos) = state.positions.get_mut(&uid) {
+            *pos = Position::new(x, y);
+        }
+    }
 }
 
 /// Check if a dependency edge is a structural flow->stock connection (already
@@ -3646,25 +3668,36 @@ fn build_view_segments(view: &datamodel::StockFlow) -> Vec<LineSegment> {
 
     // Resolve every element by uid so a link can find its endpoints regardless
     // of the endpoint's kind (Module/Alias included).
-    let mut uid_elements: HashMap<i32, &ViewElement> = HashMap::new();
-    for elem in &view.elements {
-        uid_elements.insert(elem.get_uid(), elem);
-    }
+    let uid_elements: HashMap<i32, &ViewElement> =
+        view.elements.iter().map(|e| (e.get_uid(), e)).collect();
+    view.elements
+        .iter()
+        .flat_map(|elem| element_segments(elem, &uid_elements))
+        .collect()
+}
 
+/// The crossing segments one connector draws -- a link's polyline or a flow's
+/// pipe -- with vertices named so connectors sharing an element never count as
+/// crossing there; empty for every other element. `uid_elements` resolves a
+/// link's endpoints.
+pub(crate) fn element_segments(
+    elem: &ViewElement,
+    uid_elements: &HashMap<i32, &ViewElement>,
+) -> Vec<LineSegment> {
     // Crossing detection is center-based and deterministic; no element is
     // treated as arrayed (matching the historic behavior).
     let not_arrayed = |_: &str| false;
 
     let mut segments: Vec<LineSegment> = Vec::new();
 
-    for elem in &view.elements {
+    {
         match elem {
             ViewElement::Link(link) => {
                 let (Some(&from), Some(&to)) = (
                     uid_elements.get(&link.from_uid),
                     uid_elements.get(&link.to_uid),
                 ) else {
-                    continue; // an endpoint is genuinely missing
+                    return segments; // an endpoint is genuinely missing
                 };
 
                 let polyline = crate::diagram::connector::connector_polyline(
@@ -3675,7 +3708,7 @@ fn build_view_segments(view: &datamodel::StockFlow) -> Vec<LineSegment> {
                     crate::diagram::connector::ARC_POLYLINE_SAMPLES,
                 );
                 if polyline.len() < 2 {
-                    continue; // MultiPoint / degenerate: nothing drawn
+                    return segments; // MultiPoint / degenerate: nothing drawn
                 }
 
                 let last_idx = polyline.len() - 1;
@@ -3706,7 +3739,7 @@ fn build_view_segments(view: &datamodel::StockFlow) -> Vec<LineSegment> {
             }
             ViewElement::Flow(flow) => {
                 if flow.points.len() < 2 {
-                    continue;
+                    return segments;
                 }
 
                 // Build the pipe as a sequence of named vertices. A point
