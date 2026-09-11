@@ -57,6 +57,14 @@ pub(crate) const MIN_SINK_SEGMENT: f64 = FLOW_ARROWHEAD_RADIUS + 7.5;
 /// path is at least twice this long.
 pub(crate) const VALVE_CLAMP_MARGIN: f64 = 10.0;
 
+/// The distance a flow that newly lands on a face keeps from the ends already
+/// there, where the face has room: the design plan's routing preference ("a
+/// flow that newly lands on a face takes a slot at least `PIPE_SPACING` from
+/// existing endpoints on that face if one exists, else the slot maximizing
+/// the minimum distance"). A preference of the layout's placement, not an
+/// invariant this module establishes.
+pub(crate) const PIPE_SPACING: f64 = 10.0;
+
 /// The segment minimum when the terminals crowd each other. G3 demands no
 /// minimum then, so no segment is short for the checker; this is only the
 /// shortest segment an attach arm builds, so that no arm leaves a segment of

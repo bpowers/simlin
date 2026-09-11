@@ -10,9 +10,10 @@
 //! attached stock changes kind. Every other flow comes back byte for byte --
 //! points, valve, label side and clouds -- even where its stored geometry is
 //! not what a fresh layout would draw. A flow the pass builds holds the flow
-//! invariants (`diagram::flow_geometry`), and its stock end takes the largest
-//! free gap on its face, so it never lands on a preserved sibling. One test per
-//! way a patch relates to a flow:
+//! invariants (`diagram::flow_geometry`), and its stock end keeps
+//! `PIPE_SPACING` from the ends already on its face where the face has room
+//! (the design plan's routing preference). One test per way a patch relates to
+//! a flow:
 //!
 //! - names the flow: an upsert keeps it, a rename keeps all but the name, a
 //!   delete removes it with its clouds
@@ -22,9 +23,11 @@
 //!   an attached stock's kind: rebuilt
 //! - touches only a sibling -- a flow added on its face, a chain flow added on
 //!   a face it occupies, its stock's chain removed: preserved, and a created
-//!   sibling takes the largest free gap
-//! - creates flows on an imported view (`SIR.xmile`, `mark2.mdl`): they land
-//!   clear of the ends and clouds already there, and nothing else moves
+//!   sibling keeps the spacing
+//! - creates flows on an imported view (`SIR.xmile`, `mark2.mdl`, and a
+//!   reverse flow between offset stocks imported from XMILE): they keep the
+//!   spacing from the ends already there, their clouds stay off other clouds
+//!   and pipes, and nothing else moves
 //! - touches an unrelated element, with a new element (the settle path) and
 //!   without one (the early-return path): preserved, a diagonal pipe, an
 //!   off-face endpoint and an off-pipe valve included
@@ -33,7 +36,8 @@
 
 use super::*;
 use crate::datamodel::{self, view_element::Cloud};
-use crate::diagram::flow_geometry::{CORNER_CLEARANCE, flow_invariant_violations};
+use crate::diagram::constants::CLOUD_RADIUS;
+use crate::diagram::flow_geometry::{CORNER_CLEARANCE, PIPE_SPACING, flow_invariant_violations};
 use crate::patch::{ModelOperation, ModelPatch};
 
 fn stock(ident: &str, inflows: &[&str], outflows: &[&str]) -> datamodel::Variable {
@@ -187,10 +191,12 @@ fn assert_preserved(
     }
 }
 
-/// Each stock end of `ident` sits at the center of the gap it occupies on its
-/// face, and that gap is the largest one the other flows' ends and the corner
-/// clearance leave: stated independently of `face_slots`, from the geometry.
-fn assert_in_largest_free_gap(view: &datamodel::StockFlow, ident: &str, row: &str) {
+/// Each stock end of `ident` keeps the design plan's routing preference on its
+/// face, stated from the geometry independently of `face_slots`: at least
+/// `PIPE_SPACING` from every other end on that face when the face's clearance
+/// span has such a position, and otherwise as far from them as the span
+/// allows (sampled at a quarter pixel).
+fn assert_slot_keeps_spacing(view: &datamodel::StockFlow, ident: &str, row: &str) {
     let config = LayoutConfig::default();
     let (half_w, half_h) = (config.stock_width / 2.0, config.stock_height / 2.0);
     let f = find_flow(view, ident).unwrap();
@@ -227,7 +233,7 @@ fn assert_in_largest_free_gap(view: &datamodel::StockFlow, ident: &str, row: &st
             (s.1, half_h)
         };
         let reach = half - CORNER_CLEARANCE;
-        let mut bounds = vec![center - reach, center + reach];
+        let mut others: Vec<f64> = Vec::new();
         for e in &view.elements {
             let ViewElement::Flow(g) = e else { continue };
             let g_last = g.points.len() - 1;
@@ -238,23 +244,35 @@ fn assert_in_largest_free_gap(view: &datamodel::StockFlow, ident: &str, row: &st
                 if let Some((along, g_face)) = face_of(q, s)
                     && g_face == face
                 {
-                    bounds.push(along);
+                    others.push(along);
                 }
             }
         }
-        bounds.sort_by(f64::total_cmp);
-        let gaps: Vec<(f64, f64)> = bounds.windows(2).map(|w| (w[0], w[1])).collect();
-        let largest = gaps.iter().map(|(lo, hi)| hi - lo).fold(0.0, f64::max);
-        let (lo, hi) = gaps
-            .iter()
-            .copied()
-            .find(|&(lo, hi)| lo < at && at < hi)
-            .unwrap_or_else(|| panic!("{row}: {ident}'s end at {at} coincides with another end"));
-        assert!(
-            (at - (lo + hi) / 2.0).abs() < 1e-6 && (hi - lo) >= largest - 1e-6,
-            "{row}: {ident}'s end at {at} is not the center of the largest free gap \
-             (its gap [{lo}, {hi}], largest {largest})"
-        );
+        let least = |v: f64| {
+            others
+                .iter()
+                .map(|o| (o - v).abs())
+                .fold(f64::INFINITY, f64::min)
+        };
+        let samples = (8.0 * reach) as usize;
+        let best = (0..=samples)
+            .map(|i| center - reach + 2.0 * reach * i as f64 / samples as f64)
+            .map(least)
+            .fold(0.0, f64::max);
+        let got = least(at);
+        if best >= PIPE_SPACING {
+            assert!(
+                got >= PIPE_SPACING - 1e-6,
+                "{row}: {ident}'s end at {at} is {got} from another end on its face, \
+                 under PIPE_SPACING though the face has room"
+            );
+        } else {
+            assert!(
+                got >= best - 0.25,
+                "{row}: {ident}'s end at {at} is {got} from another end on its face, \
+                 though the face offers {best}"
+            );
+        }
     }
 }
 
@@ -495,7 +513,7 @@ fn a_flow_whose_sibling_changes_is_preserved() {
         Vec::<String>::new(),
         "{row}"
     );
-    assert_in_largest_free_gap(&new, "waste_b", row);
+    assert_slot_keeps_spacing(&new, "waste_b", row);
 
     // Classification now puts waste_a on the right face (stock_a has no chain
     // outflow left); the preserved flow stays on the bottom.
@@ -557,7 +575,7 @@ fn a_flow_whose_sibling_changes_is_preserved() {
         Vec::<String>::new(),
         "{row}"
     );
-    assert_in_largest_free_gap(&new, "chain_flow", row);
+    assert_slot_keeps_spacing(&new, "chain_flow", row);
 }
 
 /// Created flows on production views, through the importers: the flows a
@@ -565,14 +583,12 @@ fn a_flow_whose_sibling_changes_is_preserved() {
 /// there, and every pre-existing flow comes back byte for byte. Rows:
 ///
 /// - `SIR.xmile`: `relapse` from `infectious` back to `susceptible`, whose
-///   facing faces already carry `succumbing`'s ends. The pipe runs straight,
-///   clear of those ends: the joint slot gives it one line (pinned on its own
-///   by `face_slots::tests::place_created_flow_ends_rows`), and the finishing
-///   pass's collapse would merge two independent slots' riser anyway, so this
-///   row pins the outcome, not which of the two produces it.
+///   facing faces already carry `succumbing`'s ends. The pipe runs straight
+///   on one line a pipe spacing off those ends (the joint slot, pinned on its
+///   own by `face_slots::tests::place_created_flow_ends_rows`).
 /// - `mark2.mdl`: two cloud outflows added at once to `risk taking behavior`,
-///   whose face a pre-existing flow occupies. Their clouds do not overlap
-///   each other or any other cloud.
+///   whose face a pre-existing flow occupies. Their ends keep the spacing,
+///   and their clouds overlap no other cloud and lie across no other pipe.
 #[test]
 fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
     fn pre_existing_flows(view: &datamodel::StockFlow) -> Vec<(view_element::Flow, Vec<Cloud>)> {
@@ -674,19 +690,7 @@ fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
     );
     let relapse = find_flow(&new, "relapse").unwrap();
     assert_eq!(relapse.points.len(), 2, "{row}: a straight pipe");
-    let succumbing = find_flow(&new, "succumbing").unwrap();
-    for p in [&relapse.points[0], relapse.points.last().unwrap()] {
-        for q in [&succumbing.points[0], succumbing.points.last().unwrap()] {
-            assert!(
-                (p.x - q.x).hypot(p.y - q.y) > 1.0,
-                "{row}: relapse's end ({}, {}) lands on succumbing's ({}, {})",
-                p.x,
-                p.y,
-                q.x,
-                q.y
-            );
-        }
-    }
+    assert_slot_keeps_spacing(&new, "relapse", row);
 
     const MARK2: &str = include_str!("../../../../test/bobby/vdf/econ/mark2.mdl");
     let project = crate::compat::open_vensim(MARK2).expect("mark2 imports");
@@ -714,20 +718,140 @@ fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
             Vec::<String>::new(),
             "{row}: {probe}"
         );
-        for (c, _) in flow_and_clouds(&new, probe).1.iter().map(|c| (c, ())) {
+        assert_slot_keeps_spacing(&new, probe, row);
+        let (probe_flow, probe_clouds) = flow_and_clouds(&new, probe);
+        for c in &probe_clouds {
             for &(other, x, y) in &clouds {
                 if other == c.uid {
                     continue;
                 }
                 assert!(
-                    (c.x - x).hypot(c.y - y)
-                        >= 2.0 * crate::diagram::constants::CLOUD_RADIUS - 1e-6,
+                    (c.x - x).hypot(c.y - y) >= 2.0 * CLOUD_RADIUS - 1e-6,
                     "{row}: {probe}'s cloud at ({}, {}) overlaps cloud {other} at ({x}, {y})",
                     c.x,
                     c.y
                 );
             }
+            for e in &new.elements {
+                let ViewElement::Flow(g) = e else { continue };
+                if g.uid == probe_flow.uid {
+                    continue;
+                }
+                for w in g.points.windows(2) {
+                    let (dx, dy) = (w[1].x - w[0].x, w[1].y - w[0].y);
+                    let len2 = dx * dx + dy * dy;
+                    let t = if len2 == 0.0 {
+                        0.0
+                    } else {
+                        (((c.x - w[0].x) * dx + (c.y - w[0].y) * dy) / len2).clamp(0.0, 1.0)
+                    };
+                    let d = (c.x - (w[0].x + t * dx)).hypot(c.y - (w[0].y + t * dy));
+                    assert!(
+                        d >= CLOUD_RADIUS - 1e-6,
+                        "{row}: {probe}'s cloud at ({}, {}) lies across {}'s pipe ({d} away)",
+                        c.x,
+                        c.y,
+                        g.name
+                    );
+                }
+            }
         }
+    }
+}
+
+/// A reverse flow added between two stocks offset along their facing faces,
+/// through the XMILE importer and incremental layout: the existing flow `f1`
+/// comes back byte for byte, the created flow holds the flow invariants, and
+/// each of its stock ends keeps `PIPE_SPACING` from `f1`'s end on the same
+/// face. Rows: stock B's offset below A across the range where the two faces'
+/// clearance spans overlap (0 to 29), with `f1`'s line at the ends and the
+/// middle of that overlap, plus the worst cases of the reviewed sweep (B 28
+/// below with `f1` at 114; 26 and 27 at 113; 27 at 114; 24 and 25 at 112).
+#[test]
+fn a_flow_created_between_offset_stocks_keeps_its_spacing() {
+    const XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>joint</name><vendor>simlin</vendor><product version="1.0">simlin</product></header>
+  <sim_specs><start>0</start><stop>3</stop><dt>1</dt></sim_specs>
+  <model>
+    <variables>
+      <stock name="A"><eqn>10</eqn><outflow>f1</outflow></stock>
+      <stock name="B"><eqn>10</eqn><inflow>f1</inflow></stock>
+      <flow name="f1"><eqn>1</eqn></flow>
+    </variables>
+    <views>
+      <view>
+        <stock x="100" y="100" name="A"/>
+        <stock x="300" y="STOCK_B_Y" name="B"/>
+        <flow x="200" y="F1_Y" name="f1">
+          <pts>
+            <pt x="122.5" y="F1_Y"/>
+            <pt x="277.5" y="F1_Y"/>
+          </pts>
+        </flow>
+      </view>
+    </views>
+  </model>
+</xmile>"#;
+    let mut rows: Vec<(i32, i32)> = vec![
+        (28, 114),
+        (26, 113),
+        (27, 113),
+        (27, 114),
+        (24, 112),
+        (25, 112),
+    ];
+    for offset in [0, 1, 2, 10, 14, 20, 29] {
+        let lo = (86 + offset).max(86);
+        let hi = (114 + offset).min(114);
+        rows.extend([(offset, lo), (offset, (lo + hi) / 2), (offset, hi)]);
+    }
+    for (offset, line) in rows {
+        let row = format!("B {offset} below A, f1 at {line}");
+        let text = XML
+            .replace("STOCK_B_Y", &(100 + offset).to_string())
+            .replace("F1_Y", &line.to_string());
+        let project = crate::compat::open_xmile(&mut std::io::BufReader::new(text.as_bytes()))
+            .expect("the view imports");
+        let model_name = project.models[0].name.clone();
+        let datamodel::View::StockFlow(old) = &project.models[0].views[0];
+        let mut patched = project.clone();
+        let model = &mut patched.models[0];
+        model
+            .variables
+            .push(datamodel::Variable::Flow(flow("back", "1")));
+        for var in &mut model.variables {
+            if let datamodel::Variable::Stock(s) = var {
+                let (inflows, outflows): (&[&str], &[&str]) = match canonicalize(&s.ident).as_ref()
+                {
+                    "a" => (&["back"], &["f1"]),
+                    _ => (&["f1"], &["back"]),
+                };
+                s.inflows = inflows.iter().map(|f| f.to_string()).collect();
+                s.outflows = outflows.iter().map(|f| f.to_string()).collect();
+            }
+        }
+        let patch = ModelPatch {
+            name: model_name.clone(),
+            ops: vec![
+                ModelOperation::UpsertFlow(flow("back", "1")),
+                ModelOperation::UpdateStockFlows {
+                    ident: "a".to_string(),
+                    inflows: vec!["back".to_string()],
+                    outflows: vec!["f1".to_string()],
+                },
+                ModelOperation::UpdateStockFlows {
+                    ident: "b".to_string(),
+                    inflows: vec!["f1".to_string()],
+                    outflows: vec!["back".to_string()],
+                },
+            ],
+        };
+        let new = incremental_layout(old, &patched, &model_name, &patch, None)
+            .expect("incremental layout");
+        assert_preserved(old, &new, &["f1"], &row);
+        assert_eq!(violations_of(&new, "back"), Vec::<String>::new(), "{row}");
+        assert_slot_keeps_spacing(&new, "back", &row);
     }
 }
 

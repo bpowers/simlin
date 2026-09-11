@@ -1926,7 +1926,7 @@ fn test_incremental_new_side_flow_valve_on_pipe() {
 }
 
 // ---------------------------------------------------------------------------
-// P2: A preserved side flow keeps its slot when a sibling joins its face
+// A preserved side flow keeps its slot when a sibling joins its face
 // ---------------------------------------------------------------------------
 
 #[test]

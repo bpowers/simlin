@@ -1944,9 +1944,10 @@ pub fn incremental_layout(
     // Step 6b: Settle the geometry of the flows this pass created, and only
     // those: an untouched flow comes back byte for byte, even where a fresh
     // layout would draw it differently. Each created flow's stock ends snap
-    // onto the face its valve approaches and take the largest free gap on
-    // that face, so a created flow never lands on a preserved sibling; the
-    // pipe is then orthogonalized and brought to the flow invariants.
+    // onto the face its valve approaches and take a slot `PIPE_SPACING` clear
+    // of the ends already on that face where the face has room
+    // (`face_slots`); the pipe is then orthogonalized and brought to the flow
+    // invariants.
     let created_flows: HashSet<i32> = created_flow_idents
         .iter()
         .filter_map(|ident| state.uid_manager.get_uid(ident))
