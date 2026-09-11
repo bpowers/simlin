@@ -19,6 +19,8 @@ mod objective;
 mod orthogonal;
 pub mod placement;
 pub mod sfdp;
+#[cfg(any(test, feature = "layout_eval"))]
+pub mod taste;
 pub mod text;
 pub mod uid;
 

@@ -32,7 +32,7 @@ use crate::diagram::common::{Rect, rect_overlap_area};
 use crate::diagram::label::label_bounds;
 
 use super::metrics::{
-    alias_label_props_for, alias_source_names, element_label_props_for, node_shape_box,
+    alias_label_props_for, alias_source_names, element_label_props_for, node_shape_box, pipe_rects,
 };
 
 /// Breathing room (logical units) enforced between any two element footprints
@@ -408,6 +408,26 @@ fn translate_element(element: &mut ViewElement, dx: f64, dy: f64) {
     }
 }
 
+/// Every drawn shape box of an element, label excluded: its node shape plus,
+/// for a flow, its pipe boxes -- the same obstacles the metric charges labels
+/// and connectors against.
+fn shape_rects(element: &ViewElement) -> Vec<Rect> {
+    let mut rects: Vec<Rect> = node_shape_box(element).into_iter().collect();
+    if let ViewElement::Flow(f) = element {
+        rects.extend(pipe_rects(f));
+    }
+    rects
+}
+
+/// The uids a flow's pipe attaches to: a flow and those stocks/clouds touch by
+/// construction, so their footprints meeting is not an overlap.
+fn attached_uids(element: &ViewElement) -> Vec<i32> {
+    match element {
+        ViewElement::Flow(f) => f.points.iter().filter_map(|p| p.attached_to_uid).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// The label box an element currently occupies (its assigned side), or `None`
 /// for kinds with no scored label. An alias's label is its SOURCE element's
 /// name, resolved through `alias_names` (see `metrics::alias_source_names`); a
@@ -480,7 +500,7 @@ fn scale_all_positions(elements: &mut [ViewElement], s: f64) {
 /// Mirrors `layout::resnap_flow_endpoints` but operates directly on the
 /// element slice this module works with. Uses the renderer's stock dimensions
 /// (`diagram::constants`), the geometry attachment is judged against.
-fn resnap_flow_endpoints_to_stocks(elements: &mut [ViewElement]) {
+pub(crate) fn resnap_flow_endpoints_to_stocks(elements: &mut [ViewElement]) {
     use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
 
     let stocks: HashMap<i32, (f64, f64)> = elements
@@ -533,7 +553,7 @@ fn optimize_label_sides(elements: &mut [ViewElement], alias_names: &HashMap<i32,
     let obstacle_boxes: Vec<(usize, Rect)> = elements
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| node_shape_box(e).map(|r| (i, r)))
+        .flat_map(|(i, e)| shape_rects(e).into_iter().map(move |r| (i, r)))
         .collect();
 
     // The label box an element would occupy on `side`. Aliases resolve their
@@ -579,10 +599,7 @@ fn relax_positions(elements: &mut [ViewElement], alias_names: &HashMap<i32, Stri
         .iter()
         .enumerate()
         .filter_map(|(i, e)| {
-            let mut rects = Vec::with_capacity(2);
-            if let Some(shape) = node_shape_box(e) {
-                rects.push(shape);
-            }
+            let mut rects = shape_rects(e);
             if let Some(lbox) = current_label_box(e, alias_names) {
                 rects.push(lbox);
             }
@@ -616,23 +633,45 @@ fn relax_positions(elements: &mut [ViewElement], alias_names: &HashMap<i32, Stri
 /// read-only companion to `relax_positions` (which uses the same footprints), so
 /// the compaction search below can probe a candidate scale without mutating.
 fn layout_has_overlap(elements: &[ViewElement], alias_names: &HashMap<i32, String>) -> bool {
-    let items: Vec<Vec<Rect>> = elements
+    /// One element's footprint: its drawn shapes and its label, tagged so a
+    /// structural contact can be excused without excusing a label.
+    struct Item {
+        uid: i32,
+        attached: Vec<i32>,
+        rects: Vec<(bool, Rect)>,
+    }
+    let items: Vec<Item> = elements
         .iter()
         .filter_map(|e| {
-            let mut rects = Vec::with_capacity(2);
-            if let Some(shape) = node_shape_box(e) {
-                rects.push(shape);
+            let rects: Vec<(bool, Rect)> = shape_rects(e)
+                .into_iter()
+                .map(|r| (false, r))
+                .chain(current_label_box(e, alias_names).map(|r| (true, r)))
+                .collect();
+            if rects.is_empty() {
+                None
+            } else {
+                Some(Item {
+                    uid: e.get_uid(),
+                    attached: attached_uids(e),
+                    rects,
+                })
             }
-            if let Some(lbox) = current_label_box(e, alias_names) {
-                rects.push(lbox);
-            }
-            if rects.is_empty() { None } else { Some(rects) }
         })
         .collect();
     for i in 0..items.len() {
         for j in (i + 1)..items.len() {
-            for a in &items[i] {
-                for b in &items[j] {
+            let (a_item, b_item) = (&items[i], &items[j]);
+            // A flow's pipe meets the stock it attaches to by construction, so
+            // their SHAPES touching is not an overlap -- but either one's label
+            // landing on the other is.
+            let attached =
+                a_item.attached.contains(&b_item.uid) || b_item.attached.contains(&a_item.uid);
+            for (a_is_label, a) in &a_item.rects {
+                for (b_is_label, b) in &b_item.rects {
+                    if attached && !*a_is_label && !*b_is_label {
+                        continue;
+                    }
                     if separation_mtv(a, b, SEPARATION_MARGIN).is_some() {
                         return true;
                     }
@@ -1282,9 +1321,9 @@ mod tests {
         let mut min_y = f64::INFINITY;
         let mut max_y = f64::NEG_INFINITY;
         for e in elements {
-            for r in [node_shape_box(e), current_label_box(e, &names)]
+            for r in shape_rects(e)
                 .into_iter()
-                .flatten()
+                .chain(current_label_box(e, &names))
             {
                 min_x = min_x.min(r.left);
                 max_x = max_x.max(r.right);

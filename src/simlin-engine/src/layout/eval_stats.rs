@@ -18,7 +18,7 @@
 // The corpus sweep (Phase 3) is the imperative shell that fills these structs
 // from real layouts.
 
-use crate::layout::metrics::LayoutMetrics;
+use crate::layout::metrics::{LayoutMetrics, MetricWeights};
 
 /// Geometric mean of strictly-positive values: `exp(mean(ln(x)))`.
 ///
@@ -196,6 +196,112 @@ pub fn mann_whitney_u(a: &[f64], b: &[f64]) -> MannWhitney {
     };
 
     MannWhitney { u, u1, u2, p_value }
+}
+
+/// Largest number of nonzero pairs the signed-rank test evaluates exactly; above
+/// it the normal approximation is used. The exact null distribution is a
+/// dynamic program over the (doubled, integer) rank sums, `O(n^3)` work, which
+/// is instant for any realistic corpus and still cheap at this bound.
+const WILCOXON_EXACT_MAX_N: usize = 200;
+
+/// Two-sided p-value of the Wilcoxon signed-rank test over paired differences.
+///
+/// This is the aggregate test for a corpus comparison: each matched model
+/// contributes one paired difference (candidate vs baseline on the SAME model),
+/// so a consistent improvement across models whose absolute costs differ by
+/// orders of magnitude is detected. An unpaired rank test over the per-model
+/// medians cannot see it -- the between-model spread swamps any within-model
+/// change.
+///
+/// Zero differences carry no directional signal and are dropped (Wilcoxon's
+/// original treatment), so models a change does not touch never dilute the
+/// verdict. Tied |differences| take their average rank. For up to
+/// [`WILCOXON_EXACT_MAX_N`] nonzero pairs the p-value comes from the exact null
+/// distribution (every sign assignment equally likely); beyond that, from the
+/// normal approximation with tie correction.
+///
+/// Returns `1.0` (non-significant) when no nonzero difference remains; never
+/// NaN.
+pub fn wilcoxon_signed_rank(diffs: &[f64]) -> f64 {
+    let mut nonzero: Vec<f64> = diffs
+        .iter()
+        .copied()
+        .filter(|d| d.is_finite() && *d != 0.0)
+        .collect();
+    let n = nonzero.len();
+    if n == 0 {
+        return 1.0;
+    }
+    nonzero.sort_by(|a, b| {
+        a.abs()
+            .partial_cmp(&b.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Doubled average ranks are integers: a tie group spanning 1-based ranks
+    // i+1..=j averages (i+1+j)/2, and doubling it clears the half.
+    let mut doubled_ranks: Vec<usize> = vec![0; n];
+    let mut tie_term = 0.0;
+    let mut i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && nonzero[j].abs() == nonzero[i].abs() {
+            j += 1;
+        }
+        for rank in &mut doubled_ranks[i..j] {
+            *rank = i + 1 + j;
+        }
+        let t = (j - i) as f64;
+        tie_term += t * t * t - t;
+        i = j;
+    }
+    let w_plus: usize = nonzero
+        .iter()
+        .zip(&doubled_ranks)
+        .filter(|(d, _)| **d > 0.0)
+        .map(|(_, r)| *r)
+        .sum();
+
+    if n > WILCOXON_EXACT_MAX_N {
+        return wilcoxon_normal_p(n, w_plus, tie_term);
+    }
+    wilcoxon_exact_p(&doubled_ranks, w_plus)
+}
+
+/// Exact two-sided signed-rank p-value: the null distribution of the doubled
+/// W+ statistic, where each pair independently contributes its doubled rank
+/// with probability 1/2.
+fn wilcoxon_exact_p(doubled_ranks: &[usize], w_plus: usize) -> f64 {
+    let max_sum: usize = doubled_ranks.iter().sum();
+    let mut dist = vec![0.0_f64; max_sum + 1];
+    dist[0] = 1.0;
+    let mut reach = 0;
+    for &r in doubled_ranks {
+        for s in (0..=reach).rev() {
+            let mass = dist[s] * 0.5;
+            dist[s] = mass;
+            dist[s + r] += mass;
+        }
+        reach += r;
+    }
+    let lower: f64 = dist[..=w_plus].iter().sum();
+    let upper: f64 = dist[w_plus..].iter().sum();
+    (2.0 * lower.min(upper)).clamp(0.0, 1.0)
+}
+
+/// Normal-approximation two-sided signed-rank p-value for `n` nonzero pairs,
+/// the doubled statistic `w_plus_doubled`, and the tie term `sum(t^3 - t)` over
+/// tie groups; continuity-corrected.
+fn wilcoxon_normal_p(n: usize, w_plus_doubled: usize, tie_term: f64) -> f64 {
+    let nf = n as f64;
+    let mean = nf * (nf + 1.0) / 4.0;
+    let variance = nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0 - tie_term / 48.0;
+    if variance <= 0.0 {
+        return 1.0;
+    }
+    let w = w_plus_doubled as f64 / 2.0;
+    let z = ((w - mean).abs() - 0.5).max(0.0) / variance.sqrt();
+    (2.0 * (1.0 - phi(z))).clamp(0.0, 1.0)
 }
 
 /// Error function via the Abramowitz & Stegun 7.1.26 rational approximation
@@ -392,6 +498,36 @@ impl CorpusReport {
             aggregate_cost,
         }
     }
+
+    /// This report re-scored under `weights`: every sample's `weighted_cost` is
+    /// recomputed from its stored per-term metrics and every statistic is
+    /// re-derived (`production_seeds` as in [`ModelStats::from_samples`]).
+    ///
+    /// A report records costs under the weights in force when it was produced;
+    /// comparing it against a run under different weights would diff two
+    /// different objectives. Re-scoring both sides under one weight set makes a
+    /// weight change a pure re-weighting of the same layouts. A term the stored
+    /// report predates deserializes as `0` (its serde default), so a comparison
+    /// involving a newly added term is only meaningful once both sides carry it.
+    pub fn rescored(&self, weights: &MetricWeights, production_seeds: &[u64]) -> CorpusReport {
+        let per_model = self
+            .per_model
+            .iter()
+            .map(|stats| {
+                let samples = stats
+                    .samples
+                    .iter()
+                    .map(|s| MetricSample {
+                        seed: s.seed,
+                        metrics: s.metrics,
+                        weighted_cost: s.metrics.weighted_cost(weights),
+                    })
+                    .collect();
+                ModelStats::from_samples(stats.model.clone(), samples, production_seeds)
+            })
+            .collect();
+        CorpusReport::from_model_stats(per_model)
+    }
 }
 
 /// Per-model verdict from comparing a baseline against a candidate report.
@@ -432,8 +568,8 @@ pub struct Comparison {
     /// the matched per-model medians, or `0.0` when the baseline aggregate is
     /// `0`.
     pub aggregate_delta_ratio: f64,
-    /// Two-sided Mann-Whitney U p-value over the matched per-model medians (see
-    /// [`compare`] for why Mann-Whitney rather than a paired test).
+    /// Two-sided Wilcoxon signed-rank p-value over the matched models' paired
+    /// shifted-log ratios (see [`compare`]).
     pub aggregate_p_value: f64,
     /// `aggregate_p_value < SIGNIFICANCE_ALPHA` AND `|aggregate_delta_ratio| >=
     /// MIN_PRACTICAL_DELTA_RATIO`.
@@ -480,15 +616,11 @@ fn delta_ratio(baseline: f64, candidate: f64) -> f64 {
 /// Aggregate: `aggregate_delta_ratio` is the ratio of the candidate-side to
 /// baseline-side shifted geometric mean ([`geomean1p`]) of the matched
 /// per-model medians (so a `0` median is a neutral factor on either side, not a
-/// floored outlier). `aggregate_p_value` is
-/// `mann_whitney_u(baseline_medians, candidate_medians).p_value` over the
-/// matched per-model medians.
-///
-/// The aggregate significance test treats the two median vectors as
-/// independent samples (Mann-Whitney U), per the design. A paired test such as
-/// Wilcoxon signed-rank -- which would exploit the model-by-model pairing of
-/// the matched medians -- is a documented future refinement, not implemented
-/// here.
+/// floored outlier). `aggregate_p_value` is the [`wilcoxon_signed_rank`] test
+/// over the matched models' paired shifted-log ratios
+/// `ln(1 + candidate) - ln(1 + baseline)`: the pairing is what lets a
+/// consistent per-model change register when the models' absolute costs span
+/// orders of magnitude.
 ///
 /// On empty or fully-disjoint reports there are no matched models:
 /// `per_model` is empty, `aggregate_delta_ratio == 0.0`, and the aggregate is
@@ -540,7 +672,14 @@ pub fn compare(baseline: &CorpusReport, candidate: &CorpusReport) -> Comparison 
     let aggregate_delta_ratio =
         delta_ratio(geomean1p(&baseline_medians), geomean1p(&candidate_medians));
 
-    let aggregate_p_value = mann_whitney_u(&baseline_medians, &candidate_medians).p_value;
+    // Paired per-model differences on the same shifted-log scale the aggregate
+    // uses, so the test and the headline number agree about what "better" is.
+    let log_ratios: Vec<f64> = baseline_medians
+        .iter()
+        .zip(&candidate_medians)
+        .map(|(b, c)| c.ln_1p() - b.ln_1p())
+        .collect();
+    let aggregate_p_value = wilcoxon_signed_rank(&log_ratios);
 
     Comparison {
         per_model,
@@ -867,16 +1006,7 @@ mod tests {
     fn metrics_with_cost(cost: f64) -> LayoutMetrics {
         LayoutMetrics {
             node_overlap: cost,
-            node_connector_overlap: 0.0,
-            label_overlap: 0.0,
-            crossings: 0.0,
-            sprawl: 0.0,
-            edge_length_cv: 0.0,
-            aspect_penalty: 0.0,
-            chain_straightness: 0.0,
-            loop_compactness: 0.0,
-            flow_bends: 0.0,
-            loop_straightness: 0.0,
+            ..LayoutMetrics::default()
         }
     }
 
@@ -1255,6 +1385,148 @@ mod tests {
         assert!(!cmp.aggregate_significant);
     }
 
+    // --- Wilcoxon signed-rank (the paired aggregate test) ---
+
+    #[test]
+    fn test_wilcoxon_all_positive_matches_exact_tail() {
+        // Five all-positive differences: of the 2^5 equally likely sign
+        // assignments only the all-positive one reaches W+ = 15, so the
+        // one-sided tail is 1/32 and the two-sided p-value is 2/32.
+        let p = wilcoxon_signed_rank(&[0.1, 0.2, 0.3, 0.4, 0.5]);
+        assert!(close(p, 2.0 / 32.0), "{p}");
+        // Six: 2/64, below the 5% threshold.
+        let p = wilcoxon_signed_rank(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+        assert!(close(p, 2.0 / 64.0), "{p}");
+        assert!(p < SIGNIFICANCE_ALPHA);
+    }
+
+    #[test]
+    fn test_wilcoxon_symmetric_differences_are_nonsignificant() {
+        // Mirror-image differences put W+ at its null mean: p == 1.
+        let p = wilcoxon_signed_rank(&[0.1, -0.1, 0.2, -0.2, 0.3, -0.3]);
+        assert!(p > 0.9, "{p}");
+    }
+
+    #[test]
+    fn test_wilcoxon_drops_zero_differences() {
+        // Unchanged models carry no signal about direction: zeros are dropped,
+        // so padding with zeros leaves the verdict exactly unchanged.
+        let base = wilcoxon_signed_rank(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+        let padded = wilcoxon_signed_rank(&[0.0, 0.1, 0.0, 0.2, 0.3, 0.4, 0.0, 0.5, 0.6]);
+        assert!(close(base, padded), "{base} vs {padded}");
+    }
+
+    #[test]
+    fn test_wilcoxon_degenerate_input_is_nonsignificant() {
+        assert_eq!(wilcoxon_signed_rank(&[]), 1.0);
+        assert_eq!(wilcoxon_signed_rank(&[0.0, 0.0]), 1.0);
+        // One nonzero difference can never be significant (p = 2 * 1/2).
+        assert!(close(wilcoxon_signed_rank(&[3.0]), 1.0));
+    }
+
+    #[test]
+    fn test_wilcoxon_ties_use_average_ranks() {
+        // |d| all tied: every rank is the average, so the statistic depends only
+        // on how many are positive. Four positive of four: only one of 16
+        // assignments is as extreme -> two-sided 2/16.
+        let p = wilcoxon_signed_rank(&[0.5, 0.5, 0.5, 0.5]);
+        assert!(close(p, 2.0 / 16.0), "{p}");
+    }
+
+    #[test]
+    fn test_wilcoxon_normal_approximation_tracks_exact_distribution() {
+        // The large-n branch must agree with the exact distribution where both
+        // are computable: 30 untied pairs, doubled ranks 2, 4, ..., 60, at a
+        // spread of statistics from the center to the tail.
+        let doubled: Vec<usize> = (1..=30).map(|r| 2 * r).collect();
+        for w_plus in [465, 600, 700, 800, 880] {
+            let exact = wilcoxon_exact_p(&doubled, w_plus);
+            let approx = wilcoxon_normal_p(30, w_plus, 0.0);
+            assert!(
+                (exact - approx).abs() < 0.01,
+                "W+={} exact {exact} vs normal {approx}",
+                w_plus / 2
+            );
+        }
+    }
+
+    #[test]
+    fn test_compare_aggregate_is_paired_across_heterogeneous_models() {
+        // Six models whose costs span two orders of magnitude, each improved by
+        // ~20%. An unpaired test over the medians sees two overlapping clouds
+        // and cannot separate them; the paired signed-rank test sees six
+        // consistent improvements and must flag the aggregate.
+        let bases = [0.3, 1.0, 2.5, 8.0, 12.0, 30.0];
+        let baseline = CorpusReport::from_model_stats(
+            bases
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| model_stats_from_costs(&format!("m{i}"), &[(1, c)]))
+                .collect(),
+        );
+        let candidate = CorpusReport::from_model_stats(
+            bases
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| model_stats_from_costs(&format!("m{i}"), &[(1, c * 0.8)]))
+                .collect(),
+        );
+        let cmp = compare(&baseline, &candidate);
+        assert!(cmp.aggregate_delta_ratio < 0.0);
+        assert!(
+            cmp.aggregate_significant,
+            "six consistent 20% improvements must be a significant aggregate; p={}",
+            cmp.aggregate_p_value
+        );
+    }
+
+    #[test]
+    fn test_rescored_recomputes_costs_under_new_weights() {
+        // A baseline seeded under one weight set must be comparable after the
+        // weights change: rescoring recomputes each sample's cost from its
+        // stored per-term metrics and re-derives every statistic.
+        let mut m = metrics_with_cost(2.0); // node_overlap = 2
+        m.crossings = 1.0;
+        let samples = vec![
+            MetricSample {
+                seed: 1,
+                metrics: m,
+                weighted_cost: 3.0,
+            },
+            MetricSample {
+                seed: 2,
+                metrics: metrics_with_cost(4.0),
+                weighted_cost: 4.0,
+            },
+        ];
+        let report = CorpusReport::from_model_stats(vec![ModelStats::from_samples(
+            "m".into(),
+            samples,
+            &[1],
+        )]);
+        let weights = MetricWeights {
+            node_overlap: 1.0,
+            crossings: 10.0,
+            ..MetricWeights::zero()
+        };
+        let rescored = report.rescored(&weights, &[1]);
+        let stats = &rescored.per_model[0];
+        assert!(close(stats.samples[0].weighted_cost, 12.0));
+        assert!(close(stats.samples[1].weighted_cost, 4.0));
+        assert_eq!(
+            stats.best_seed, 2,
+            "the cheaper sample under the new weights"
+        );
+        assert!(
+            close(stats.best_of_k_cost, 12.0),
+            "only seed 1 is a production seed"
+        );
+        assert!(close(
+            rescored.aggregate_cost,
+            geomean1p(&[stats.median_cost])
+        ));
+    }
+
     #[test]
     fn test_compare_microscopic_delta_is_not_significant() {
         // Statistical significance is not practical significance: when every
@@ -1295,8 +1567,8 @@ mod tests {
         assert!(!cmp.aggregate_significant);
 
         // A REAL improvement on the same samples is still flagged per-model.
-        // (The AGGREGATE verdict runs Mann-Whitney over per-model medians --
-        // one sample per side here -- which can never separate, so only the
+        // (The AGGREGATE verdict is a signed-rank test over the matched models
+        // -- one pair here -- which can never reach significance, so only the
         // per-model verdict is meaningful for a single-model comparison.)
         let improved = CorpusReport::from_model_stats(vec![model_stats_from_costs(
             "m",

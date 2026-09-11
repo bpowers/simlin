@@ -303,15 +303,14 @@ fn test_select_best_layout_all_nan_keeps_earliest() {
 // Lowering a ceiling that no longer matches reality is fine; raising one to
 // paper over a real regression is not.
 //
-// Observed at seed 42 (2026-05-31), after the quiescence work and with the
-// sprawl compactness counterweight (0.1) in MetricWeights::default():
-// pop = 0.2023, chain = 0.4959, two_stock = 0.1373. (Each cost now includes
-// ~0.1-0.15 of sprawl-times-weight; the readability terms themselves are near
-// zero on these tiny models.) The regeneration procedure printed these via the
-// GUARD_REGEN lines this test emits.
-const GUARD_POP_COST_CEILING: f64 = 0.32;
-const GUARD_CHAIN_COST_CEILING: f64 = 0.17;
-const GUARD_TWO_STOCK_COST_CEILING: f64 = 0.25;
+// Observed at seed 42 with the rate-based metric and its calibrated weights:
+// pop = 0.5880, chain = 0.4498, two_stock = 0.4636, printed by the GUARD_REGEN
+// lines this test emits. Most of each cost is the gentle spacing and alignment
+// terms (sprawl, crowding, misalignment); the illegibility terms are near zero
+// on these tiny models.
+const GUARD_POP_COST_CEILING: f64 = 0.68;
+const GUARD_CHAIN_COST_CEILING: f64 = 0.52;
+const GUARD_TWO_STOCK_COST_CEILING: f64 = 0.54;
 
 /// Lay `project`'s `main` model out at the fixed seed 42 and return its
 /// calibrated `weighted_cost`. Seeding explicitly (rather than relying on the
