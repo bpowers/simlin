@@ -661,6 +661,23 @@ pub(crate) fn flow_invariant_violations(elements: &[ViewElement]) -> Vec<String>
             out.push(format!("{name}: valve ({}, {}) is off the pipe", f.x, f.y));
         }
     }
+    // A cloud drawn inside a stock's box reads as part of the stock.
+    for elem in elements {
+        let ViewElement::Cloud(c) = elem else {
+            continue;
+        };
+        for other in elements {
+            if let ViewElement::Stock(s) = other
+                && (c.x - s.x).abs() < HALF_W - EPS
+                && (c.y - s.y).abs() < HALF_H - EPS
+            {
+                out.push(format!(
+                    "cloud {} at ({}, {}) is inside stock {}",
+                    c.uid, c.x, c.y, s.name
+                ));
+            }
+        }
+    }
     out
 }
 

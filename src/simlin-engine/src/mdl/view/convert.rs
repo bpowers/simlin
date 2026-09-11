@@ -11,10 +11,11 @@ use crate::datamodel::{self, View, ViewElement, view_element};
 use std::collections::HashSet;
 
 use super::processing::{
-    EffectiveGhosts, PrimaryMap, angle_from_points, associate_variables,
-    build_attached_valve_flow_maps, compose_views, is_cloud_endpoint, resolve_flow_uid_for_valve,
-    xmile_angle_to_canvas,
+    EffectiveGhosts, FlowEnd, PipeTarget, PrimaryMap, angle_from_points, associate_variables,
+    build_attached_valve_flow_maps, compose_views, flow_valve, resolve_flow_ends,
+    resolve_flow_uid_for_valve, xmile_angle_to_canvas,
 };
+use super::routes::{PendingFlowRoute, RouteEnd, route_pending_flows};
 use super::types::{VensimComment, VensimElement, VensimVariable, VensimView};
 
 use crate::mdl::builtins::to_lower_space;
@@ -23,6 +24,10 @@ use crate::mdl::convert::VariableType;
 #[cfg(test)]
 #[path = "convert_flow_geometry_tests.rs"]
 mod flow_geometry_tests;
+
+#[cfg(test)]
+#[path = "convert_flow_resolution_tests.rs"]
+mod flow_resolution_tests;
 
 /// Build datamodel Views from parsed Vensim views.
 ///
@@ -64,7 +69,7 @@ pub fn build_views(
     let _offsets = compose_views(&mut views);
 
     // Track primary variable definitions and effective ghosts
-    let (primary_map, effective_ghosts) = associate_variables(&views);
+    let (primary_map, effective_ghosts) = associate_variables(&views, symbols);
 
     // Collect view UID offsets for cross-view alias resolution
     let view_offsets: Vec<i32> = views.iter().map(|v| v.uid_offset).collect();
@@ -73,6 +78,7 @@ pub fn build_views(
     // Track start positions for group geometry (matches compose_views logic)
     let is_multi_view = views.len() > 1;
     let mut result = Vec::with_capacity(views.len());
+    let mut pending_routes: Vec<PendingFlowRoute> = Vec::new();
     let start_x = 100;
     let mut start_y = 100;
 
@@ -93,6 +99,7 @@ pub fn build_views(
             start_x,
             start_y,
             use_lettered_polarity,
+            &mut pending_routes,
         ) {
             result.push(dm_view);
         }
@@ -108,12 +115,15 @@ pub fn build_views(
         result
     };
 
-    // Post-processing over the merged view. The sketch anchors pipe endpoints
-    // to element centers and draws stocks at the modeler's size, so the pipes
-    // are brought onto the 45x35 boxes every renderer draws (the shared rule
-    // the XMILE importer also runs), then UIDs are reassigned sequentially.
+    // Post-processing over the merged view, where every stock's center is
+    // known. The flow ends the sketch does not place are placed first
+    // (`routes`). The sketch anchors pipe endpoints to element centers and
+    // draws stocks at the modeler's size, so the pipes are then brought onto
+    // the 45x35 boxes every renderer draws (the shared rule the XMILE importer
+    // also runs), and UIDs are reassigned sequentially.
     for view in &mut result {
         let View::StockFlow(sf) = view;
+        route_pending_flows(&mut sf.elements, &pending_routes);
         crate::diagram::flow_geometry::normalize_flow_geometry(&mut sf.elements);
         let uid_map = reassign_uids_sequential(&mut sf.elements);
         if let Some(sketch_compat) = sf.sketch_compat.as_mut() {
@@ -240,19 +250,12 @@ fn convert_view(
     start_x: i32,
     start_y: i32,
     use_lettered_polarity: bool,
+    pending_routes: &mut Vec<PendingFlowRoute>,
 ) -> Option<View> {
     let mut elements = Vec::new();
     let mut link_sketch_compat = Vec::new();
     let uid_offset = view.uid_offset;
     let (valve_to_flow, flow_to_valve) = build_attached_valve_flow_maps(view);
-
-    // Track which comments are clouds (flow endpoints)
-    let mut cloud_comments: HashMap<i32, i32> = HashMap::new(); // comment_uid -> flow_uid
-    for (uid, _elem) in view.iter_with_uids() {
-        if let Some(flow_uid) = is_cloud_endpoint(uid, view, &valve_to_flow) {
-            cloud_comments.insert(uid, flow_uid);
-        }
-    }
 
     // If multi-view, add a group element for this view
     if is_multi_view {
@@ -260,13 +263,13 @@ fn convert_view(
         elements.push(group);
     }
 
-    // Two-phase conversion to avoid dangling cloud references:
-    // Phase 1: Convert variables, track emitted flow UIDs
-    // Phase 2: Create clouds only for flows that were actually emitted
-    let mut emitted_flow_uids: HashSet<i32> = HashSet::new();
-
-    // Deferred clouds: (local_uid, uid, comment, flow_uid_with_offset)
-    let mut deferred_clouds: Vec<(&VensimComment, i32, i32)> = Vec::new();
+    // A comment is a cloud exactly when an emitted flow's end attaches to it,
+    // so comments are converted after the variables have claimed theirs: the
+    // local uid of each claimed comment -> the owning flow's uid. A comment a
+    // pipe touches but no end uses (a ghost copy's pipe, or a pipe end the
+    // model's stock lists overrule) is not a cloud of anything.
+    let mut cloud_owners: HashMap<i32, i32> = HashMap::new();
+    let mut deferred_comments: Vec<(&VensimComment, i32, i32)> = Vec::new();
 
     for (local_uid, elem) in view.iter_with_uids() {
         let uid = uid_offset + local_uid;
@@ -284,10 +287,9 @@ fn convert_view(
                     uid_offset,
                     view_offsets,
                     &flow_to_valve,
+                    &mut cloud_owners,
+                    pending_routes,
                 ) {
-                    if matches!(&view_elem, ViewElement::Flow(_)) {
-                        emitted_flow_uids.insert(uid);
-                    }
                     elements.push(view_elem);
                 }
             }
@@ -295,11 +297,7 @@ fn convert_view(
                 // Valves are handled as part of flow conversion
             }
             VensimElement::Comment(comment) => {
-                if let Some(&flow_uid) = cloud_comments.get(&local_uid) {
-                    let flow_uid_with_offset = flow_uid + uid_offset;
-                    deferred_clouds.push((comment, uid, flow_uid_with_offset));
-                }
-                // Non-cloud comments are ignored
+                deferred_comments.push((comment, local_uid, uid));
             }
             VensimElement::Connector(conn) => {
                 if let Some((link, link_compat)) =
@@ -312,10 +310,9 @@ fn convert_view(
         }
     }
 
-    // Phase 2: Emit clouds only for flows that were actually emitted
-    for (comment, uid, flow_uid_with_offset) in deferred_clouds {
-        if emitted_flow_uids.contains(&flow_uid_with_offset) {
-            elements.push(convert_comment_as_cloud(comment, uid, flow_uid_with_offset));
+    for (comment, local_uid, uid) in deferred_comments {
+        if let Some(&flow_uid) = cloud_owners.get(&local_uid) {
+            elements.push(convert_comment_as_cloud(comment, uid, flow_uid));
         }
     }
 
@@ -402,6 +399,8 @@ fn convert_variable(
     uid_offset: i32,
     view_offsets: &[i32],
     flow_to_valve: &HashMap<i32, i32>,
+    cloud_owners: &mut HashMap<i32, i32>,
+    pending_routes: &mut Vec<PendingFlowRoute>,
 ) -> Option<ViewElement> {
     let canonical = to_lower_space(&var.name);
 
@@ -470,28 +469,30 @@ fn convert_variable(
             )),
         })),
         VariableType::Flow => {
-            // For flows, find the associated valve and compute flow points
-            let (flow_x, flow_y, points) =
-                compute_flow_data(var, view, uid_offset, symbols, flow_to_valve);
+            let (flow_x, flow_y, points) = compute_flow_data(
+                var,
+                uid,
+                view,
+                uid_offset,
+                symbols,
+                primary_map,
+                view_offsets,
+                flow_to_valve,
+                cloud_owners,
+                pending_routes,
+            );
 
             // compat holds the valve's dimensions; label_compat holds the label variable's
-            let valve_uid = flow_to_valve.get(&var.uid).copied().unwrap_or(var.uid - 1);
-            let valve_compat = if var.attached {
-                if let Some(VensimElement::Valve(valve)) = view.get(valve_uid) {
-                    Some(make_compat(
-                        valve.width,
-                        valve.height,
-                        valve.shape,
-                        valve.bits,
-                        Some(valve.name.clone()),
-                        &valve.tail,
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let valve_compat = flow_valve(var, view, flow_to_valve).map(|valve| {
+                make_compat(
+                    valve.width,
+                    valve.height,
+                    valve.shape,
+                    valve.bits,
+                    Some(valve.name.clone()),
+                    &valve.tail,
+                )
+            });
 
             Some(ViewElement::Flow(view_element::Flow {
                 name: xmile_name,
@@ -561,81 +562,115 @@ fn flow_label_side(
     }
 }
 
-/// Compute flow data including position and flow points.
+/// A flow's valve position and points.
 ///
-/// Returns (flow_x, flow_y, flow_points) where:
-/// - flow_x, flow_y: Position of the flow (from valve if attached, else from variable)
-/// - flow_points: Start and end points for the flow pipe with attached UIDs
-///
-/// Flow point computation searches for connectors from the valve to connected
-/// stocks/clouds and determines directionality by checking if this flow appears
-/// in the connected stock's inflows or outflows list.
+/// The valve is the flow's valve when it has one, else the label's position.
+/// The ends come from `processing::resolve_flow_ends`: when the sketch places
+/// both, the points are the pipe's, with the interior bends Vensim encodes as
+/// self-connectors on the valve; otherwise the points are left empty and the
+/// ends are recorded in `pending_routes`, to be placed once the views are
+/// merged (`routes::route_pending_flows`). A comment an end attaches to is
+/// claimed in `cloud_owners`.
+#[allow(clippy::too_many_arguments)]
 fn compute_flow_data(
     var: &VensimVariable,
+    flow_uid: i32,
     view: &VensimView,
     uid_offset: i32,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
+    primary_map: &PrimaryMap,
+    view_offsets: &[i32],
     flow_to_valve: &HashMap<i32, i32>,
+    cloud_owners: &mut HashMap<i32, i32>,
+    pending_routes: &mut Vec<PendingFlowRoute>,
 ) -> (i32, i32, Vec<view_element::FlowPoint>) {
-    // Look for valve at uid - 1 (typical Vensim layout)
-    // xmutil requires BOTH conditions:
-    // 1. Flow variable has attached=true (vele->Attached())
-    // 2. Preceding element is a valve (elements[local_uid - 1]->Type() == VALVE)
-    let valve_uid = flow_to_valve.get(&var.uid).copied().unwrap_or(var.uid - 1);
-    let (flow_x, flow_y) = if var.attached  // Flow must be attached
-        && let Some(VensimElement::Valve(valve)) = view.get(valve_uid)
-    {
-        // Use valve coordinates for flow element position
-        (valve.x, valve.y)
-    } else {
-        // Use flow variable coordinates
-        (var.x, var.y)
-    };
-
-    // Get the flow's canonical name for endpoint detection
+    let valve = flow_valve(var, view, flow_to_valve);
+    let (flow_x, flow_y) = valve.map_or((var.x, var.y), |v| (v.x, v.y));
     let canonical = to_lower_space(&var.name);
+    let ends = resolve_flow_ends(valve, view, &canonical, symbols);
 
-    // Compute flow points using the processing module's algorithm
-    // Pass the flow variable's coordinates for fallback (not valve's) per xmutil behavior
-    let endpoints = super::processing::compute_flow_points(
-        valve_uid, var.x, var.y, view, &canonical, symbols, uid_offset,
-    );
-
-    let mut points = vec![view_element::FlowPoint {
-        x: endpoints.from_x as f64,
-        y: endpoints.from_y as f64,
-        attached_to_uid: endpoints.from_uid,
-    }];
-
-    // Interior pipe bend points are encoded in MDL as self-connectors from the
-    // valve back to itself; emit them between the endpoints in connector order.
-    let mut bend_points: Vec<(i32, (i32, i32))> = view
-        .iter()
-        .filter_map(|elem| match elem {
-            VensimElement::Connector(conn)
-                if conn.from_uid == valve_uid && conn.to_uid == valve_uid =>
-            {
-                Some((conn.uid, conn.control_point))
+    // A stock end attaches to the stock's primary element, wherever the pipe
+    // was drawn (into a ghost of the stock included).
+    let stock_uid = |name: &str| -> Option<i32> {
+        primary_map
+            .get(name)
+            .map(|(view_idx, local)| view_offsets.get(*view_idx).copied().unwrap_or(0) + local)
+    };
+    let mut to_route = |end: FlowEnd| -> RouteEnd {
+        match end {
+            FlowEnd::Pipe {
+                x,
+                y,
+                target: PipeTarget::Stock(name),
+            } => stock_uid(&name).map_or(RouteEnd::Free, |uid| {
+                RouteEnd::Point(view_element::FlowPoint {
+                    x: x as f64,
+                    y: y as f64,
+                    attached_to_uid: Some(uid),
+                })
+            }),
+            FlowEnd::Pipe {
+                x,
+                y,
+                target: PipeTarget::Cloud(local_uid),
+            } => {
+                cloud_owners.insert(local_uid, flow_uid);
+                RouteEnd::Point(view_element::FlowPoint {
+                    x: x as f64,
+                    y: y as f64,
+                    attached_to_uid: Some(uid_offset + local_uid),
+                })
             }
-            _ => None,
-        })
-        .collect();
-    bend_points.sort_by_key(|(uid, _)| *uid);
-    for (_, (bend_x, bend_y)) in bend_points {
-        points.push(view_element::FlowPoint {
-            x: bend_x as f64,
-            y: bend_y as f64,
-            attached_to_uid: None,
-        });
+            FlowEnd::PipeAtUnlinkedStock { x, y, stock } => RouteEnd::CloudNearStock {
+                end: (x as f64, y as f64),
+                stock: (stock.0 as f64, stock.1 as f64),
+            },
+            FlowEnd::Stock(name) => stock_uid(&name).map_or(RouteEnd::Free, RouteEnd::Stock),
+            FlowEnd::Free => RouteEnd::Free,
+        }
+    };
+    let source = to_route(ends.source);
+    let sink = to_route(ends.sink);
+
+    match (source, sink) {
+        (RouteEnd::Point(first), RouteEnd::Point(last)) => {
+            let mut points = vec![first];
+            // Interior pipe bend points are encoded in MDL as self-connectors
+            // from the valve back to itself; emit them between the endpoints
+            // in connector order.
+            if let Some(valve) = valve {
+                let mut bend_points: Vec<(i32, (i32, i32))> = view
+                    .iter()
+                    .filter_map(|elem| match elem {
+                        VensimElement::Connector(conn)
+                            if conn.from_uid == valve.uid && conn.to_uid == valve.uid =>
+                        {
+                            Some((conn.uid, conn.control_point))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                bend_points.sort_by_key(|(uid, _)| *uid);
+                for (_, (bend_x, bend_y)) in bend_points {
+                    points.push(view_element::FlowPoint {
+                        x: bend_x as f64,
+                        y: bend_y as f64,
+                        attached_to_uid: None,
+                    });
+                }
+            }
+            points.push(last);
+            (flow_x, flow_y, points)
+        }
+        (source, sink) => {
+            pending_routes.push(PendingFlowRoute {
+                flow_uid,
+                source,
+                sink,
+            });
+            (flow_x, flow_y, Vec::new())
+        }
     }
-
-    points.push(view_element::FlowPoint {
-        x: endpoints.to_x as f64,
-        y: endpoints.to_y as f64,
-        attached_to_uid: endpoints.to_uid,
-    });
-
-    (flow_x, flow_y, points)
 }
 
 /// Convert a comment element that serves as a cloud (flow endpoint).
