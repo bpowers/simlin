@@ -57,8 +57,11 @@ pub(crate) const MIN_SINK_SEGMENT: f64 = FLOW_ARROWHEAD_RADIUS + 7.5;
 /// path is at least twice this long.
 pub(crate) const VALVE_CLAMP_MARGIN: f64 = 10.0;
 
-/// The segment minimum when the terminals crowd each other (G3 demands
-/// nothing then): long enough that no pass leaves a segment of no length.
+/// The segment minimum when the terminals crowd each other. G3 demands no
+/// minimum then, so no segment is short for the checker; this is only the
+/// shortest segment an attach arm builds, so that no arm leaves a segment of
+/// no length, and the length under which `collapse_short_segment` still
+/// removes a segment that keeps a stock end off its face.
 const CROWDED_MIN_SEGMENT: f64 = 1.0;
 
 /// How many passes a flow gets to reach a fixed point. A pass can leave what
@@ -87,13 +90,15 @@ pub(crate) fn clamp_to_face_span(v: f64, center: f64, half_extent: f64) -> f64 {
 /// terminals leave room -- the source body inflated by `MIN_SEGMENT` and the
 /// sink body inflated by `MIN_SINK_SEGMENT` do not overlap, a cloud counting
 /// as its point and an unattached end as no terminal at all -- and
-/// `CROWDED_MIN_SEGMENT` otherwise.
+/// `CROWDED_MIN_SEGMENT` otherwise. `room` records which: only with room does
+/// the checker hold a segment to a minimum.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy)]
 struct Minima {
     stub: f64,
     riser: f64,
     sink: f64,
+    room: bool,
 }
 
 impl Minima {
@@ -103,12 +108,14 @@ impl Minima {
                 stub: MIN_SEGMENT,
                 riser: MIN_SEGMENT,
                 sink: MIN_SINK_SEGMENT,
+                room: true,
             }
         } else {
             Minima {
                 stub: CROWDED_MIN_SEGMENT,
                 riser: CROWDED_MIN_SEGMENT,
                 sink: CROWDED_MIN_SEGMENT,
+                room: false,
             }
         }
     }
@@ -347,9 +354,10 @@ fn point_segment_distance(p: (f64, f64), a: &FlowPoint, b: &FlowPoint) -> f64 {
 ///
 /// The segment is `points[0..=1]` when `source`, `points[n-2..=n-1]` when
 /// `sink`, and the whole pipe when both (a two-point flow, whose two ends share
-/// one line). Works on a copy and commits only a result in which every
-/// processed endpoint is valid; an end segment that is diagonal, or whose ends
-/// ask for incompatible lines, is left as it was. The valve is read, never
+/// one line). Works on a copy, and commits the result unless it runs a segment
+/// through a terminal stock's body where the pipe had none; an end segment
+/// that is diagonal, or whose ends ask for incompatible lines, is left as it
+/// was. The valve is read, never
 /// moved: `project_valve_onto_pipe`, which runs after the pass, owns where it
 /// ends up.
 fn attach_end_segment(
@@ -439,22 +447,14 @@ fn attach_end_segment(
     let mut pts = points.clone();
     let valve_on_segment = point_segment_distance(valve, &pts[a], &pts[b]) <= EPS;
     if (new_line - line).abs() > EPS {
-        // Sliding the segment perpendicular to itself must not fold an interior
-        // neighbour's segment back over its far point, or leave it shorter than
-        // a riser: the collapse ignores a segment of no length, so a fold that
-        // left one would stay. A neighbour the slide would pull off axis
-        // (collinear, or of no length) has its far point on the old line, so
-        // this rejects it too; a diagonal neighbour stays diagonal, the
-        // producer's to resolve.
-        for other in [a.checked_sub(1), (b + 1 < n).then_some(b + 1)] {
-            let Some(other) = other else { continue };
-            let far = axis.cross(pts[other].x, pts[other].y);
-            if (far - line).signum() != (far - new_line).signum()
-                || (far - new_line).abs() < minima.riser - EPS
-            {
-                return;
-            }
-        }
+        // The slide moves the segment perpendicular to itself, so each
+        // interior neighbour lengthens or shortens along its own axis. Nothing
+        // is refused for what that does to a neighbour: one shortened under a
+        // riser is merged by the collapse, and one folded back over its far
+        // point is a spur the next pass's `simplify` removes. No neighbour is
+        // collinear with the segment or of no length, which a slide would pull
+        // off its axis: a pass starts from the simplified pipe. A diagonal
+        // neighbour stays diagonal, the producer's to resolve.
         axis.set_cross(&mut pts[a], new_line);
         axis.set_cross(&mut pts[b], new_line);
     }
@@ -550,20 +550,15 @@ fn attach_end_segment(
         }
     }
 
-    // The commit guard: every processed endpoint must be valid. The arms build
-    // valid endpoints on the inputs they are designed for, but where the two
-    // terminal bodies overlap an arm can land an end on one stock's face with
-    // its segment running through the other; such a result is not committed.
-    let last = pts.len() - 1;
-    for (enabled, idx, adj) in [(source, 0, 1), (sink, last, last - 1)] {
-        if !enabled {
-            continue;
-        }
-        if let Some(&stock) = pts[idx].attached_to_uid.and_then(|uid| stocks.get(&uid))
-            && !stock_endpoint_is_valid(&pts[idx], &pts[adj], stock)
-        {
-            return;
-        }
+    // The commit guard: no segment may newly run through a terminal stock's
+    // body. The arms build valid endpoints on the inputs they are designed
+    // for; where the two terminal bodies overlap, an arm can land an end on one
+    // stock's face with its segment running through the other, and a leg can
+    // drop into one stock's face across the other's body, and such a result is
+    // not committed. An end an arm leaves invalid is committed: the next pass
+    // tries that end again from the new geometry.
+    if introduces_a_body_crossing(&pts, points, stocks) {
+        return;
     }
     *points = pts;
 }
@@ -587,31 +582,39 @@ fn attach_ends(
     }
 }
 
-/// Drop repeated points and interior points that continue their segment in
-/// the same direction. A repeated endpoint keeps its attachment.
+/// Drop the points that draw no route: a repeated point (a repeated endpoint
+/// keeps its attachment), and an unattached interior point whose two segments
+/// lie on one line -- continuing onward, or turning back along the line, where
+/// the point is the tip of a spur drawn over itself and the route without the
+/// spur is the same route. A removal can leave the new last three points on
+/// one line or two points repeated, so the tail is examined again until
+/// nothing more drops.
 fn simplify(points: &mut Vec<FlowPoint>) {
     let mut out: Vec<FlowPoint> = Vec::with_capacity(points.len());
     for p in points.drain(..) {
-        if let Some(last) = out.last_mut()
-            && (last.x - p.x).abs() <= EPS
-            && (last.y - p.y).abs() <= EPS
-        {
-            if p.attached_to_uid.is_some() {
-                last.attached_to_uid = p.attached_to_uid;
-            }
-            continue;
-        }
-        if out.len() >= 2 {
-            let a = &out[out.len() - 2];
-            let b = &out[out.len() - 1];
-            let same_axis = Axis::of_segment(a, b).is_some()
-                && Axis::of_segment(a, b) == Axis::of_segment(b, &p);
-            let onward = (b.x - a.x) * (p.x - b.x) + (b.y - a.y) * (p.y - b.y) > 0.0;
-            if same_axis && onward && b.attached_to_uid.is_none() {
-                out.pop();
-            }
-        }
         out.push(p);
+        loop {
+            let n = out.len();
+            if n >= 2
+                && (out[n - 2].x - out[n - 1].x).abs() <= EPS
+                && (out[n - 2].y - out[n - 1].y).abs() <= EPS
+            {
+                if let Some(repeat) = out.pop()
+                    && repeat.attached_to_uid.is_some()
+                {
+                    out[n - 2].attached_to_uid = repeat.attached_to_uid;
+                }
+                continue;
+            }
+            if n >= 3 && out[n - 2].attached_to_uid.is_none() {
+                let axis = Axis::of_segment(&out[n - 3], &out[n - 2]);
+                if axis.is_some() && axis == Axis::of_segment(&out[n - 2], &out[n - 1]) {
+                    out.remove(n - 2);
+                    continue;
+                }
+            }
+            break;
+        }
     }
     *points = out;
 }
@@ -623,6 +626,13 @@ fn segment_length(a: &FlowPoint, b: &FlowPoint) -> f64 {
 /// Remove the first segment shorter than the minima allow, where the pipe can
 /// give it up; returns whether the pipe changed.
 ///
+/// A segment is short where the checker holds it to a minimum, which is only
+/// when the terminals leave room (`Minima::room`). With crowded terminals a
+/// segment under `CROWDED_MIN_SEGMENT` is removed only while a stock endpoint
+/// is invalid, where the segment is what keeps the attach arms from bringing
+/// that end onto its face; a pipe whose ends are valid is never moved for a
+/// segment the checker accepts.
+///
 /// - A short end segment: the end moves to the bend, so the next segment is
 ///   the end segment, and the attach arms bring a stock end onto its face.
 /// - A short riser between two parallel segments: the later run moves onto
@@ -631,9 +641,12 @@ fn segment_length(a: &FlowPoint, b: &FlowPoint) -> f64 {
 ///   valid stock slot where it was is preferred, so the free side of the pipe
 ///   gives way before an authored slot does.
 ///
-/// A candidate is committed only when every stock endpoint stays valid. A pipe
-/// of one segment is never short with room to spare: room means its terminals
-/// are further apart than `MIN_SEGMENT + MIN_SINK_SEGMENT`.
+/// A candidate is not committed when it runs a segment through the body of a
+/// stock it ends on where the pipe had none (G6). It need not leave every
+/// stock end valid: the next pass's attach step brings such an end onto its
+/// face, and requiring it would refuse routes the passes finish. A pipe of one
+/// segment is never short with room to spare: room means its terminals are
+/// further apart than `MIN_SEGMENT + MIN_SINK_SEGMENT`.
 fn collapse_short_segment(
     points: &mut Vec<FlowPoint>,
     valve: (f64, f64),
@@ -641,7 +654,7 @@ fn collapse_short_segment(
     minima: &Minima,
 ) -> bool {
     let n = points.len();
-    if n < 3 {
+    if n < 3 || (!minima.room && stock_ends_valid(points, stocks)) {
         return false;
     }
     let segments = n - 1;
@@ -696,7 +709,7 @@ fn collapse_short_segment(
             continue;
         }
         attach_ends(&mut pts, valve, stocks, minima);
-        if !stock_ends_valid(&pts, stocks) || pts == *points {
+        if pts == *points || introduces_a_body_crossing(&pts, points, stocks) {
             continue;
         }
         let last = pts.len() - 1;
@@ -718,6 +731,31 @@ fn collapse_short_segment(
     };
     *points = pts;
     true
+}
+
+/// Whether `candidate` runs a segment through the body of a stock it ends on
+/// where `original` ran none (G6). A step may keep a crossing the producer
+/// drew, but never adds one.
+fn introduces_a_body_crossing(
+    candidate: &[FlowPoint],
+    original: &[FlowPoint],
+    stocks: &HashMap<i32, (f64, f64)>,
+) -> bool {
+    crosses_an_endpoint_stock(candidate, stocks) && !crosses_an_endpoint_stock(original, stocks)
+}
+
+fn crosses_an_endpoint_stock(points: &[FlowPoint], stocks: &HashMap<i32, (f64, f64)>) -> bool {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return false;
+    };
+    [first, last]
+        .into_iter()
+        .filter_map(|p| p.attached_to_uid.and_then(|uid| stocks.get(&uid)))
+        .any(|&stock| {
+            points
+                .windows(2)
+                .any(|w| segment_enters_body(&w[0], &w[1], stock))
+        })
 }
 
 /// Straighten a two-point pipe whose producer wrote it slightly off axis
@@ -815,11 +853,12 @@ pub(crate) fn project_valve_onto_pipe(points: &[FlowPoint], valve: &mut (f64, f6
 ///
 /// Geometry that already satisfies them -- including an off-center slot a
 /// modeler chose on a face -- is not moved. Otherwise, per flow, until a pass
-/// changes nothing: a two-point pipe written off axis is straightened (and the
-/// straightening undone when the attach step cannot then bring its ends onto
-/// their stocks); each stock endpoint is brought onto its stock as `EndFix`
-/// describes; and a segment shorter than the minima allow is collapsed where
-/// the pipe can give it up (`collapse_short_segment`). Then an off-pipe valve,
+/// changes nothing: repeated and collinear points are dropped (`simplify`); a
+/// two-point pipe written off axis is straightened (and the straightening
+/// undone when the attach step cannot then bring its ends onto their stocks);
+/// each stock endpoint is brought onto its stock as `EndFix` describes; and a
+/// segment shorter than the minima allow is collapsed where the pipe can give
+/// it up (`collapse_short_segment`). Then an off-pipe valve,
 /// or one within the margin of an end, is projected onto the pipe, and each
 /// cloud an endpoint is attached to is recentered on that endpoint (clouds are
 /// created from a producer's raw endpoints, before any of this, so they are
@@ -863,6 +902,11 @@ pub(crate) fn normalize_flow_geometry_where(
         let mut valve = (f.x, f.y);
         for _ in 0..MAX_PASSES {
             let before = (f.points.clone(), valve);
+            let mut simplified = f.points.clone();
+            simplify(&mut simplified);
+            if simplified.len() >= 2 {
+                f.points = simplified;
+            }
             let minima = Minima::of(&f.points, &stocks);
             if straighten_two_point_pipe(&mut f.points, &mut valve) {
                 attach_ends(&mut f.points, valve, &stocks, &minima);
@@ -1116,11 +1160,11 @@ fn stock_endpoint_problem(p: &FlowPoint, q: &FlowPoint, stock: (f64, f64)) -> Op
     }
 }
 
-#[cfg(test)]
+/// Whether the axis-aligned segment `a`-`b` enters the open body of the stock
+/// centered at `stock`: its fixed coordinate strictly inside the body's span
+/// and its extent overlapping the other span. A diagonal segment is not
+/// judged here (the checker reports it separately, and no step builds one).
 fn segment_enters_body(a: &FlowPoint, b: &FlowPoint, stock: (f64, f64)) -> bool {
-    // Axis-aligned segments only (a diagonal is reported separately): a
-    // segment enters the open body when its fixed coordinate is strictly
-    // inside the body's span and its extent overlaps the other span.
     let (xmin, xmax) = (stock.0 - HALF_W + EPS, stock.0 + HALF_W - EPS);
     let (ymin, ymax) = (stock.1 - HALF_H + EPS, stock.1 + HALF_H - EPS);
     if (a.y - b.y).abs() <= EPS {

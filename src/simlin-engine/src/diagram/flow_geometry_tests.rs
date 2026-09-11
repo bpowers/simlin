@@ -4,10 +4,13 @@
 
 //! Every arm of `normalize_flow_geometry`: `EndFix::{Keep, Face, Leg, Jog}` on
 //! both axes and both ends, the line constraints that make a segment
-//! unsolvable, the slide's interior-neighbour guard, the collapse of a segment
-//! under the minima, straightening and its undo, valve projection by arc
-//! length, cloud recentering, and idempotence; and the checker's segment
-//! minima and valve margin.
+//! unsolvable, a slide's interior neighbours, `simplify` and the simplified
+//! pipe each pass starts from, the collapse of a segment under the minima
+//! (with room, and while crowded ends are invalid), the rule that no step adds
+//! a segment through a terminal stock's body, straightening and its undo,
+//! valve projection by arc length, cloud recentering, idempotence and identity
+//! on a view the checker accepts; and the checker's segment minima and valve
+//! margin.
 //!
 //! These build datamodel views by hand. That is the pass's contract: it takes
 //! any datamodel view, whatever produced it. What the importers actually hand
@@ -402,23 +405,26 @@ fn a_slide_moves_an_interior_neighbour_only_along_its_perpendicular_segment() {
         vec![(119.5, 117.5), (119.5, 160.0), (300.0, 160.0)]
     );
 
-    // A collinear neighbour would be pulled off its axis by the slide, so
-    // the segment stays as it was.
-    let original = vec![
-        pt(122.0, 117.5, Some(1)),
-        pt(122.0, 160.0, None),
-        pt(122.0, 200.0, None),
-        pt(300.0, 200.0, Some(3)),
-    ];
-    let mut elements = vec![
+    // A collinear interior point is dropped before the slide (a pass starts
+    // from the simplified pipe), so the neighbour the slide moves is the
+    // merged segment's far point and nothing is pulled off its axis.
+    let elements = normalized(vec![
         stock(1, 100.0, 100.0),
         cloud(3, 2, 300.0, 200.0),
-        flow(2, (200.0, 200.0), original.clone()),
-    ];
-    normalize_flow_geometry(&mut elements);
+        flow(
+            2,
+            (200.0, 200.0),
+            vec![
+                pt(122.0, 117.5, Some(1)),
+                pt(122.0, 160.0, None),
+                pt(122.0, 200.0, None),
+                pt(300.0, 200.0, Some(3)),
+            ],
+        ),
+    ]);
     assert_eq!(
         coords(the_flow(&elements)),
-        original.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()
+        vec![(119.5, 117.5), (119.5, 200.0), (300.0, 200.0)]
     );
 }
 
@@ -742,19 +748,24 @@ fn the_checker_reports_segment_minima_and_the_valve_margin() {
     );
 }
 
-/// `normalize_flow_geometry` is idempotent: a second pass changes nothing.
-/// Rows: a Z between two stocks whose 3px riser collapses and whose merged
-/// line then needs a slide into both clearance spans, so the geometry settles
-/// only over several passes; and a deterministic sweep over views of one or
-/// two stocks and one flow of each shape the producers hand the pass --
-/// two-point stock-to-cloud and stock-to-stock pipes, an L into a cloud, a Z
-/// between stocks -- with endpoints on, near, inside and far from their
-/// stocks.
+/// `normalize_flow_geometry` is idempotent -- a second pass changes nothing --
+/// and it leaves a view the checker accepts exactly as it is. Rows: a Z
+/// between two stocks whose 3px riser collapses and whose merged line then
+/// needs a slide into both clearance spans, so the geometry settles only over
+/// several passes; and a deterministic sweep over views of one or two stocks
+/// and one flow of each shape the producers hand the pass -- two-point
+/// stock-to-cloud and stock-to-stock pipes, an L into a cloud, a Z between
+/// stocks -- with endpoints on, near, inside and far from their stocks.
 #[test]
 fn normalization_is_idempotent() {
     fn twice_equals_once(elements: Vec<ViewElement>, label: &str) {
-        let mut once = elements;
+        let valid = flow_invariant_violations(&elements).is_empty();
+        let mut once = elements.clone();
         normalize_flow_geometry(&mut once);
+        assert!(
+            !valid || once == elements,
+            "{label}: a view the checker accepts moved from {elements:?} to {once:?}"
+        );
         let mut twice = once.clone();
         normalize_flow_geometry(&mut twice);
         assert!(
@@ -870,15 +881,13 @@ fn normalization_is_idempotent() {
     }
 }
 
-/// The slide's fold-back guard. A stock-to-cloud L whose first segment runs
-/// along the stock's bottom face: the Face arm needs the line 3px up, onto the
-/// cloud end's own row, where the slide would leave the L's riser of no length.
-/// The guard refuses that slide; the collapse then removes the 3px final
-/// segment and the attach arms bring the straight pipe onto the face. Without
-/// the guard the zero-length riser stays, since the collapse skips a segment
-/// of no length.
+/// A stock-to-cloud L whose first segment runs along the stock's bottom face:
+/// the Face arm needs the line 3px up, onto the cloud end's own row, where the
+/// slide leaves the L's riser of no length. The next pass starts from the
+/// simplified pipe, which drops the repeated point, and the straight pipe
+/// comes onto the right face.
 #[test]
-fn a_slide_that_would_fold_a_neighbour_is_refused() {
+fn a_slide_that_empties_a_neighbour_settles_on_the_next_pass() {
     let elements = normalized(vec![
         stock(1, 100.0, 100.0),
         cloud(11, 2, 197.0, 114.5),
@@ -898,15 +907,16 @@ fn a_slide_that_would_fold_a_neighbour_is_refused() {
     );
 }
 
-/// The commit guard (the validity check that ends `attach_end_segment`). Two
-/// overlapping stocks, s1 at (100, 100) and s3 at (95, 110.5), and a two-point
-/// pipe whose source end is off s1's faces: the Face arms would land that end
-/// on s1's left face with the segment running through s3's body. That result
-/// is not committed, so the pipe stays as the producer wrote it. Overlapping
-/// bodies leave G1-G5 to best effort (the design plan's G6 precondition), so
-/// this row pins what is not committed rather than a valid route.
+/// The commit guard that ends `attach_end_segment`. Two overlapping stocks, s1
+/// at (100, 100) and s3 at (95, 110.5), and a two-point pipe whose source end
+/// is off s1's faces: the Face arms would land that end on s1's left face with
+/// the segment running through s3's body, where the pipe ran through none.
+/// That result is not committed, so the pipe stays as the producer wrote it.
+/// Overlapping bodies leave G6 to best effort (the design plan's G6
+/// precondition), so this row pins what is not committed rather than a valid
+/// route.
 #[test]
-fn an_attach_whose_endpoint_would_be_invalid_is_not_committed() {
+fn an_attach_that_would_run_through_the_other_stock_is_not_committed() {
     let original = vec![pt(49.0, 100.0, Some(1)), pt(72.5, 100.0, Some(3))];
     let mut elements = vec![
         stock(1, 100.0, 100.0),
@@ -923,6 +933,398 @@ fn an_attach_whose_endpoint_would_be_invalid_is_not_committed() {
             .iter()
             .any(|v| v.contains("runs through an endpoint stock")),
         "no segment through a body is committed"
+    );
+}
+
+/// Rows, one per thing `simplify` drops or keeps: a repeated interior point;
+/// a repeated endpoint, whose attachment survives; an interior point that
+/// continues its segment onward; the tip of a spur, where the pipe turns back
+/// along its own line; a removal that exposes the next removal (a spur whose
+/// retraction leaves a repeated point, then a collinear one); and an attached
+/// interior point, which is not the pass's to drop.
+#[test]
+fn simplify_drops_what_draws_no_route() {
+    /// (label, points, the simplified points).
+    type Row = (&'static str, Vec<FlowPoint>, Vec<(f64, f64, Option<i32>)>);
+    let rows: Vec<Row> = vec![
+        (
+            "repeated interior point",
+            vec![
+                pt(0.0, 0.0, Some(1)),
+                pt(0.0, 50.0, None),
+                pt(0.0, 50.0, None),
+                pt(40.0, 50.0, Some(2)),
+            ],
+            vec![
+                (0.0, 0.0, Some(1)),
+                (0.0, 50.0, None),
+                (40.0, 50.0, Some(2)),
+            ],
+        ),
+        (
+            "repeated endpoint keeps its attachment",
+            vec![
+                pt(0.0, 0.0, Some(1)),
+                pt(0.0, 50.0, None),
+                pt(40.0, 50.0, None),
+                pt(40.0, 50.0, Some(2)),
+            ],
+            vec![
+                (0.0, 0.0, Some(1)),
+                (0.0, 50.0, None),
+                (40.0, 50.0, Some(2)),
+            ],
+        ),
+        (
+            "onward collinear point",
+            vec![
+                pt(0.0, 0.0, Some(1)),
+                pt(0.0, 20.0, None),
+                pt(0.0, 50.0, None),
+                pt(40.0, 50.0, Some(2)),
+            ],
+            vec![
+                (0.0, 0.0, Some(1)),
+                (0.0, 50.0, None),
+                (40.0, 50.0, Some(2)),
+            ],
+        ),
+        (
+            "a spur's tip",
+            vec![
+                pt(0.0, 0.0, Some(1)),
+                pt(0.0, 50.0, None),
+                pt(40.0, 50.0, None),
+                pt(20.0, 50.0, Some(2)),
+            ],
+            vec![
+                (0.0, 0.0, Some(1)),
+                (0.0, 50.0, None),
+                (20.0, 50.0, Some(2)),
+            ],
+        ),
+        (
+            "a removal exposes the next",
+            vec![
+                pt(0.0, 0.0, Some(1)),
+                pt(0.0, 50.0, None),
+                pt(40.0, 50.0, None),
+                pt(40.0, 60.0, None),
+                pt(40.0, 50.0, None),
+                pt(80.0, 50.0, Some(2)),
+            ],
+            vec![
+                (0.0, 0.0, Some(1)),
+                (0.0, 50.0, None),
+                (80.0, 50.0, Some(2)),
+            ],
+        ),
+        (
+            "an attached interior point stays",
+            vec![
+                pt(0.0, 0.0, Some(1)),
+                pt(0.0, 20.0, Some(9)),
+                pt(0.0, 50.0, Some(2)),
+            ],
+            vec![
+                (0.0, 0.0, Some(1)),
+                (0.0, 20.0, Some(9)),
+                (0.0, 50.0, Some(2)),
+            ],
+        ),
+    ];
+    for (label, mut points, expected) in rows {
+        simplify(&mut points);
+        let got: Vec<(f64, f64, Option<i32>)> = points
+            .iter()
+            .map(|p| (p.x, p.y, p.attached_to_uid))
+            .collect();
+        assert_eq!(got, expected, "{label}");
+    }
+}
+
+/// A U-turn whose 2px riser is under the minimum: collapsing the riser folds
+/// the pipe back along its own line, and the fold's tip is a spur drawn over
+/// itself, so the pipe settles without it -- a straight run from the source
+/// into an L to the sink -- rather than keeping two collinear segments.
+#[test]
+fn a_pipe_turning_back_along_its_own_line_settles_without_the_spur() {
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 413.5, 450.0),
+        flow(
+            2,
+            (14.0, 178.5),
+            vec![
+                pt(122.5, 105.0, Some(1)),
+                pt(122.5, 404.0, None),
+                pt(-81.0, 404.0, None),
+                pt(-81.0, 406.0, None),
+                pt(413.5, 406.0, Some(3)),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![
+            (119.5, 117.5),
+            (119.5, 404.0),
+            (413.5, 404.0),
+            (413.5, 432.5)
+        ]
+    );
+}
+
+/// A pass starts from the simplified pipe. A repeated interior point on a
+/// pipe that runs back over itself reads, unsimplified, as a zero-length
+/// segment between two collinear runs, and no arm can bring the ends on;
+/// simplified, it is a straight pipe whose ends enter the two facing faces.
+#[test]
+fn a_pass_starts_from_the_pipe_without_repeated_or_collinear_points() {
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 489.0, 112.0),
+        flow(
+            2,
+            (33.5, 100.0),
+            vec![
+                pt(52.5, 100.0, Some(1)),
+                pt(-121.0, 100.0, None),
+                pt(-121.0, 100.0, None),
+                pt(463.5, 100.0, Some(3)),
+            ],
+        ),
+    ]);
+    let f = the_flow(&elements);
+    assert_eq!(coords(f), vec![(122.5, 100.0), (466.5, 100.0)]);
+    assert_eq!((f.x, f.y), (132.5, 100.0));
+}
+
+/// Neither step commits a segment through the body of a stock the pipe ends
+/// on where the pipe had none. Rows: a collapse whose candidate would run the
+/// merged line through the sink's body, where the other candidate settles
+/// the pipe; an attach whose leg into the source would cross the sink, where
+/// the pipe settles through a longer route; a Z whose leg into its sink
+/// would drop through the source's body, which comes back with no crossing
+/// and no more violations than it had; and a pipe the producer drew up
+/// through its own source, whose steps keep that crossing on the way to a
+/// valid route, so the rule refuses only a crossing a step adds.
+#[test]
+fn a_collapse_or_attach_never_adds_a_body_crossing() {
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 179.5, -264.5),
+        flow(
+            2,
+            (-114.0, 268.5),
+            vec![
+                pt(111.5, 100.0, Some(1)),
+                pt(-12.5, 100.0, None),
+                pt(-12.5, 112.5, None),
+                pt(24.5, 112.5, None),
+                pt(24.5, 118.0, None),
+                pt(179.5, 118.0, Some(3)),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![
+            (77.5, 100.0),
+            (-12.5, 100.0),
+            (-12.5, 118.0),
+            (179.5, 118.0),
+            (179.5, -247.0)
+        ],
+        "collapse"
+    );
+
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 141.0, -22.5),
+        flow(
+            2,
+            (196.0, -56.25),
+            vec![
+                pt(118.5, -29.0, Some(3)),
+                pt(424.0, -29.0, None),
+                pt(424.0, -67.5, None),
+                pt(196.0, -67.5, None),
+                pt(196.0, -47.5, None),
+                pt(202.5, -47.5, Some(1)),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![
+            (163.5, -29.0),
+            (424.0, -29.0),
+            (424.0, -67.5),
+            (196.0, -67.5),
+            (196.0, 85.5),
+            (122.5, 85.5)
+        ],
+        "attach"
+    );
+
+    let mut elements = vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 16.0, 99.5),
+        flow(
+            2,
+            (79.0, 165.5),
+            vec![
+                pt(85.5, 117.5, Some(1)),
+                pt(85.5, 144.0, None),
+                pt(79.0, 144.0, None),
+                pt(79.0, 194.0, Some(3)),
+            ],
+        ),
+    ];
+    let before = flow_invariant_violations(&elements);
+    normalize_flow_geometry(&mut elements);
+    let after = flow_invariant_violations(&elements);
+    assert!(
+        !after
+            .iter()
+            .any(|v| v.contains("runs through an endpoint stock")),
+        "a Z into its sink: {after:?}"
+    );
+    assert!(
+        after.len() <= before.len(),
+        "a Z into its sink: {before:?} -> {after:?}"
+    );
+
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, -291.0, -131.5),
+        flow(
+            2,
+            (-241.5, -115.0),
+            vec![
+                pt(121.5, 100.0, Some(1)),
+                pt(121.5, -115.0, None),
+                pt(-331.0, -115.0, Some(3)),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![(119.5, 82.5), (119.5, -117.0), (-268.5, -117.0)],
+        "a pipe drawn through its own source"
+    );
+}
+
+/// A collapse candidate need not leave every stock end valid. The pipe climbs
+/// from its source, doubles back over the sink's body, and drops 9.5px, under
+/// a riser, to a sink end at the stock's center. The candidate that merges
+/// that riser still leaves the sink end at the center; the next passes bring
+/// it onto the bottom face and settle the pipe into an L. Requiring every end
+/// valid would refuse the candidate and keep the riser and the segments
+/// through the sink's body.
+#[test]
+fn a_collapse_may_leave_an_end_for_the_next_pass_to_attach() {
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 200.0, 179.0),
+        flow(
+            2,
+            (71.5, 100.0),
+            vec![
+                pt(84.5, 179.0, Some(3)),
+                pt(84.5, 90.5, None),
+                pt(41.0, 90.5, None),
+                pt(41.0, 100.0, None),
+                pt(100.0, 100.0, Some(1)),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![(177.5, 179.0), (84.5, 179.0), (84.5, 117.5)]
+    );
+}
+
+/// When the terminals crowd each other the checker demands no segment
+/// minimum, so a pipe it accepts is not moved for a short segment. Rows: an L
+/// from a stock's right face into a cloud 0.5 above the pipe, and a cloud
+/// stub 4.5 long into a 0.5px final segment on a stock's face.
+#[test]
+fn a_crowded_pipe_the_checker_accepts_is_left_as_it_is() {
+    /// (label, the view).
+    type Row = (&'static str, Vec<ViewElement>);
+    let rows: Vec<Row> = vec![
+        (
+            "an L into a cloud",
+            vec![
+                stock(1, 100.0, 100.0),
+                stock(4, 148.5, 133.0),
+                cloud(3, 2, 136.0, 94.0),
+                flow(
+                    2,
+                    (130.0, 94.5),
+                    vec![
+                        pt(122.5, 94.5, Some(1)),
+                        pt(136.0, 94.5, None),
+                        pt(136.0, 94.0, Some(3)),
+                    ],
+                ),
+            ],
+        ),
+        (
+            "a final segment of half a pixel",
+            vec![
+                stock(1, 100.0, 100.0),
+                stock(4, 62.0, 134.5),
+                cloud(3, 2, 123.0, 103.5),
+                flow(
+                    2,
+                    (123.0, 101.0),
+                    vec![
+                        pt(123.0, 103.5, Some(3)),
+                        pt(123.0, 99.0, None),
+                        pt(122.5, 99.0, Some(1)),
+                    ],
+                ),
+            ],
+        ),
+    ];
+    for (label, original) in rows {
+        assert_eq!(
+            flow_invariant_violations(&original),
+            Vec::<String>::new(),
+            "{label}: the checker accepts the input"
+        );
+        let mut elements = original.clone();
+        normalize_flow_geometry(&mut elements);
+        assert!(elements == original, "{label}: moved to {elements:?}");
+    }
+}
+
+/// With crowded terminals a segment shorter than `CROWDED_MIN_SEGMENT` is
+/// still collapsed while it keeps a stock end off its face. A 0.5px riser
+/// sits between the sink's run and a stub that ends at the stock's center;
+/// merging it lets the attach step bring that end onto the bottom face.
+#[test]
+fn a_crowded_segment_is_collapsed_to_bring_an_end_onto_its_face() {
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 87.0, 135.0),
+        flow(
+            2,
+            (112.25, 115.0),
+            vec![
+                pt(112.5, 135.0, Some(3)),
+                pt(112.5, 115.0, None),
+                pt(112.0, 115.0, None),
+                pt(112.0, 100.0, Some(1)),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![(109.5, 135.0), (112.5, 135.0), (112.5, 117.5)]
     );
 }
 
