@@ -1364,6 +1364,62 @@ mod tests {
             assert_eq!(primary.get("flow rate"), Some(&(0, 3)));
             assert!(ghosts.contains(&(0, 1)));
         }
+
+        /// Of two copies that each carry a valve (a rank tie), the one whose
+        /// pipe reaches more of the stocks the model links presents the flow,
+        /// even where the other copy's valve is nearer the stocks it leaves
+        /// unreached: every unreached side is a route the import must add.
+        /// Copy 3 pipes into `stock a` and leaves `stock b` about 447 from its
+        /// valve; copy 7 reaches neither, but its valve sits 150 from each,
+        /// 300 in all.
+        #[test]
+        fn a_copy_reaching_more_of_its_stocks_presents_the_flow_over_a_nearer_one() {
+            let symbols = symbols(vec![
+                ("stock a", stock(&[], &["flow rate"])),
+                ("stock b", stock(&["flow rate"], &[])),
+                (
+                    "flow rate",
+                    make_symbol_info(VariableType::Flow, vec![], vec![]),
+                ),
+            ]);
+            let view = view_of(vec![
+                valve(2, 0, 300),
+                variable(3, "Flow Rate", 0, 320, true, false),
+                valve(6, 250, 100),
+                variable(7, "Flow Rate", 250, 120, true, true),
+                variable(10, "Stock A", 100, 100, false, false),
+                variable(11, "Stock B", 400, 100, false, false),
+                connector(12, 2, 10, (50, 200)),
+            ]);
+            let (primary, ghosts) = associate_variables(&[view], &symbols);
+            assert_eq!(primary.get("flow rate"), Some(&(0, 3)));
+            assert!(!ghosts.contains(&(0, 3)));
+        }
+
+        /// Copies whose scores tie exactly leave the sketch's primary copy in
+        /// place, whichever the third pass meets first: copy 3, a ghost met
+        /// first, and copy 7, the primary, each carry a valve with no pipe,
+        /// 100 from the one stock the model links.
+        #[test]
+        fn of_copies_that_tie_exactly_the_sketchs_primary_presents_the_flow() {
+            let symbols = symbols(vec![
+                ("stock a", stock(&[], &["flow rate"])),
+                (
+                    "flow rate",
+                    make_symbol_info(VariableType::Flow, vec![], vec![]),
+                ),
+            ]);
+            let view = view_of(vec![
+                valve(2, 100, 0),
+                variable(3, "Flow Rate", 100, 20, true, true),
+                valve(6, 100, 200),
+                variable(7, "Flow Rate", 100, 220, true, false),
+                variable(10, "Stock A", 100, 100, false, false),
+            ]);
+            let (primary, ghosts) = associate_variables(&[view], &symbols);
+            assert_eq!(primary.get("flow rate"), Some(&(0, 7)));
+            assert!(!ghosts.contains(&(0, 7)));
+        }
     }
 
     #[test]
