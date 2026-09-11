@@ -4,8 +4,10 @@
 
 //! Every arm of `normalize_flow_geometry`: `EndFix::{Keep, Face, Leg, Jog}` on
 //! both axes and both ends, the line constraints that make a segment
-//! unsolvable, the slide's interior-neighbour guard, straightening, valve
-//! projection, and cloud recentering.
+//! unsolvable, the slide's interior-neighbour guard, the collapse of a segment
+//! under the minima, straightening and its undo, valve projection by arc
+//! length, cloud recentering, and idempotence; and the checker's segment
+//! minima and valve margin.
 //!
 //! These build datamodel views by hand. That is the pass's contract: it takes
 //! any datamodel view, whatever produced it. What the importers actually hand
@@ -13,7 +15,7 @@
 //! (`xmile::views::flow_geometry_tests`, `mdl::view::convert::flow_geometry_tests`).
 
 use super::*;
-use crate::datamodel::view_element::{Cloud, LabelSide, Stock};
+use crate::datamodel::view_element::{Cloud, Flow, LabelSide, Stock};
 
 fn stock(uid: i32, x: f64, y: f64) -> ViewElement {
     ViewElement::Stock(Stock {
@@ -144,9 +146,9 @@ fn face_snaps_an_endpoint_inside_the_clearance_span_along_its_line() {
 
 #[test]
 fn face_slides_a_line_in_the_corner_zone_and_carries_valve_and_cloud() {
-    // Line 16 below center: past the 14.5 clearance span but within
-    // MIN_SEGMENT_LENGTH of the 17.5 face line, so the pipe enters the side
-    // face: it slides up by 1.5, and the valve and the cloud move with it.
+    // Line 16 below center: past the 14.5 clearance span but within a stub
+    // (MIN_SEGMENT) of the 17.5 face line, so the pipe enters the side face:
+    // it slides up by 1.5, and the valve and the cloud move with it.
     let elements = normalized(vec![
         stock(1, 100.0, 100.0),
         cloud(3, 2, 250.0, 116.0),
@@ -231,16 +233,16 @@ fn leg_at_both_ends_routes_over_two_stocks() {
 }
 
 #[test]
-fn the_face_rule_takes_the_line_within_min_segment_length_of_the_face() {
-    // 20 below center: less than 17.5 + MIN_SEGMENT_LENGTH, so Face (slide to
-    // 14.5), not a 2.5px leg.
+fn the_face_rule_takes_the_line_within_a_stub_of_the_face() {
+    // 27 below center: less than 17.5 + MIN_SEGMENT, so Face (slide to 14.5),
+    // not a leg shorter than a stub.
     let elements = normalized(vec![
         stock(1, 100.0, 100.0),
-        cloud(3, 2, 250.0, 120.0),
+        cloud(3, 2, 250.0, 127.0),
         flow(
             2,
-            (180.0, 120.0),
-            vec![pt(100.0, 120.0, Some(1)), pt(250.0, 120.0, Some(3))],
+            (180.0, 127.0),
+            vec![pt(100.0, 127.0, Some(1)), pt(250.0, 127.0, Some(3))],
         ),
     ]);
     assert_eq!(
@@ -248,19 +250,19 @@ fn the_face_rule_takes_the_line_within_min_segment_length_of_the_face() {
         vec![(122.5, 114.5), (250.0, 114.5)]
     );
 
-    // 20.5 below center: exactly 17.5 + MIN_SEGMENT_LENGTH, so a 3px leg.
+    // 27.5 below center: exactly 17.5 + MIN_SEGMENT, so a stub-long leg.
     let elements = normalized(vec![
         stock(1, 100.0, 100.0),
-        cloud(3, 2, 250.0, 120.5),
+        cloud(3, 2, 250.0, 127.5),
         flow(
             2,
-            (180.0, 120.5),
-            vec![pt(100.0, 120.5, Some(1)), pt(250.0, 120.5, Some(3))],
+            (180.0, 127.5),
+            vec![pt(100.0, 127.5, Some(1)), pt(250.0, 127.5, Some(3))],
         ),
     ]);
     assert_eq!(
         coords(the_flow(&elements)),
-        vec![(100.0, 117.5), (100.0, 120.5), (250.0, 120.5)]
+        vec![(100.0, 117.5), (100.0, 127.5), (250.0, 127.5)]
     );
 }
 
@@ -285,13 +287,14 @@ fn two_stock_ends_share_one_line() {
 }
 
 /// A valid end pins the line; a Face end whose span excludes that line jogs
-/// to its own line just short of its face, rather than moving the modeler's
-/// valid slot. The step sits between the face and the valve.
+/// to its own line, stepping the end's minimum segment short of its face (a
+/// sink's for the sink, a stub's for the source), rather than moving the
+/// modeler's valid slot. The riser is at least `MIN_SEGMENT`.
 #[test]
 fn a_face_end_jogs_to_its_own_line_when_a_valid_slot_pins_the_other() {
     let elements = normalized(vec![
         stock(1, 100.0, 100.0),
-        stock(3, 400.0, 128.0),
+        stock(3, 400.0, 140.0),
         flow(
             2,
             (250.0, 110.0),
@@ -303,19 +306,20 @@ fn a_face_end_jogs_to_its_own_line_when_a_valid_slot_pins_the_other() {
         coords(f),
         vec![
             (122.5, 110.0),
-            (367.5, 110.0),
-            (367.5, 113.5),
-            (377.5, 113.5)
+            (362.0, 110.0),
+            (362.0, 125.5),
+            (377.5, 125.5)
         ]
     );
     assert_eq!((f.x, f.y), (250.0, 110.0));
 
-    // Two Face ends with disjoint spans ([85.5, 114.5] and [120.5, 149.5]):
+    // Two Face ends with disjoint spans ([85.5, 114.5] and [130.5, 159.5]):
     // the ends are tried source first, so the line takes the sink's span
-    // (116 -> 120.5, valve carried along) and the source jogs.
+    // (116 -> 130.5, valve carried along) and the source jogs a stub from its
+    // face.
     let elements = normalized(vec![
         stock(1, 100.0, 100.0),
-        stock(3, 400.0, 135.0),
+        stock(3, 400.0, 145.0),
         flow(
             2,
             (250.0, 116.0),
@@ -328,15 +332,15 @@ fn a_face_end_jogs_to_its_own_line_when_a_valid_slot_pins_the_other() {
         vec![
             (122.5, 114.5),
             (132.5, 114.5),
-            (132.5, 120.5),
-            (377.5, 120.5)
+            (132.5, 130.5),
+            (377.5, 130.5)
         ]
     );
-    assert_eq!((f.x, f.y), (250.0, 120.5));
+    assert_eq!((f.x, f.y), (250.0, 130.5));
 }
 
-/// A valid end pins the line, and the Face end's own line is within
-/// MIN_SEGMENT_LENGTH of it, so no jog is possible. As the last resort the
+/// A valid end pins the line, and the Face end's own line is within a riser
+/// (MIN_SEGMENT) of it, so no jog is possible. As the last resort the
 /// valid slot slides within its own clearance span by the least amount that
 /// lets the other end in, and stays valid.
 #[test]
@@ -358,7 +362,7 @@ fn a_valid_slot_gives_up_the_least_it_can_when_no_jog_fits() {
 }
 
 /// Two Face ends whose clearance spans are disjoint by less than
-/// MIN_SEGMENT_LENGTH ([85.5, 114.5] and [116, 145]): no shared line, no jog
+/// a riser, MIN_SEGMENT ([85.5, 114.5] and [116, 145]): no shared line, no jog
 /// long enough, and no valid slot to relax, so nothing moves.
 #[test]
 fn an_unsolvable_segment_is_left_unchanged() {
@@ -447,34 +451,64 @@ fn straightening_averages_the_dominant_axis_and_carries_the_valve() {
     assert_eq!((f.x, f.y), (52.0, 60.0));
 }
 
+/// Rows: off the pipe beyond an end; on the pipe within the margin of an end;
+/// on the pipe outside the margin; across a bend (the margin is arc length
+/// from the path's ends, not from a segment's); a path too short for the
+/// margin.
 #[test]
 fn an_off_pipe_valve_is_projected_with_a_margin() {
-    // Off the pipe and beyond its end: projected onto the segment and kept
-    // VALVE_MARGIN from the end.
-    let elements = normalized(vec![
-        cloud(3, 2, 0.0, 100.0),
-        cloud(4, 2, 100.0, 100.0),
-        flow(
-            2,
+    let straight = vec![pt(0.0, 100.0, Some(3)), pt(100.0, 100.0, Some(4))];
+    let bent = vec![
+        pt(0.0, 0.0, Some(3)),
+        pt(0.0, 100.0, None),
+        pt(30.0, 100.0, Some(4)),
+    ];
+    let short = vec![pt(0.0, 100.0, Some(3)), pt(15.0, 100.0, Some(4))];
+    /// (label, path, valve before, valve after).
+    type Row<'a> = (&'a str, &'a [FlowPoint], (f64, f64), (f64, f64));
+    let rows: [Row; 6] = [
+        (
+            "off the pipe beyond an end",
+            &straight,
             (130.0, 80.0),
-            vec![pt(0.0, 100.0, Some(3)), pt(100.0, 100.0, Some(4))],
+            (90.0, 100.0),
         ),
-    ]);
-    let f = the_flow(&elements);
-    assert_eq!((f.x, f.y), (90.0, 100.0));
-
-    // Already on the pipe, even close to an end: not moved.
-    let elements = normalized(vec![
-        cloud(3, 2, 0.0, 100.0),
-        cloud(4, 2, 100.0, 100.0),
-        flow(
-            2,
+        (
+            "on the pipe within the margin",
+            &straight,
             (3.0, 100.0),
-            vec![pt(0.0, 100.0, Some(3)), pt(100.0, 100.0, Some(4))],
+            (10.0, 100.0),
         ),
-    ]);
-    let f = the_flow(&elements);
-    assert_eq!((f.x, f.y), (3.0, 100.0));
+        (
+            "on the pipe outside the margin",
+            &straight,
+            (30.0, 100.0),
+            (30.0, 100.0),
+        ),
+        (
+            "near a bend, far from the ends",
+            &bent,
+            (0.0, 97.0),
+            (0.0, 97.0),
+        ),
+        (
+            "near the far end of a bent path",
+            &bent,
+            (27.0, 100.0),
+            (20.0, 100.0),
+        ),
+        (
+            "a path shorter than two margins",
+            &short,
+            (2.0, 100.0),
+            (2.0, 100.0),
+        ),
+    ];
+    for (label, points, valve, expected) in rows {
+        let mut v = valve;
+        project_valve_onto_pipe(points, &mut v);
+        assert_eq!(v, expected, "{label}");
+    }
 }
 
 #[test]
@@ -496,6 +530,343 @@ fn clouds_move_to_their_endpoints_and_nothing_else_moves_them() {
         })
         .unwrap();
     assert_eq!((c.x, c.y), (250.0, 100.0));
+}
+
+/// Rows, one per arm of `collapse_short_segment`: a short stub at a cloud end
+/// (the end moves to the bend); a short stub at a stock end (the end moves to
+/// the bend and the Face arm brings it onto the face); a short riser whose
+/// later run can move onto the earlier run's line; the same riser with the
+/// pipe reversed, where moving the later run would move a valid stock slot and
+/// the earlier (free) run moves instead.
+#[test]
+fn a_short_segment_collapses_where_the_pipe_can_give_it_up() {
+    let elements = normalized(vec![
+        stock(1, 300.0, 116.0),
+        cloud(3, 2, 0.0, 100.0),
+        flow(
+            2,
+            (150.0, 102.0),
+            vec![
+                pt(0.0, 100.0, Some(3)),
+                pt(0.0, 102.0, None),
+                pt(277.5, 102.0, Some(1)),
+            ],
+        ),
+    ]);
+    let f = the_flow(&elements);
+    assert_eq!(coords(f), vec![(0.0, 102.0), (277.5, 102.0)], "cloud stub");
+    assert_eq!((f.x, f.y), (150.0, 102.0), "cloud stub");
+
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        cloud(3, 2, 300.0, 120.0),
+        flow(
+            2,
+            (200.0, 120.0),
+            vec![
+                pt(100.0, 117.5, Some(1)),
+                pt(100.0, 120.0, None),
+                pt(300.0, 120.0, Some(3)),
+            ],
+        ),
+    ]);
+    let f = the_flow(&elements);
+    assert_eq!(
+        coords(f),
+        vec![(122.5, 114.5), (300.0, 114.5)],
+        "stock stub"
+    );
+    assert_eq!((f.x, f.y), (200.0, 114.5), "stock stub");
+
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 400.0, 100.0),
+        flow(
+            2,
+            (250.0, 101.0),
+            vec![
+                pt(122.5, 100.0, Some(1)),
+                pt(250.0, 100.0, None),
+                pt(250.0, 102.0, None),
+                pt(377.5, 102.0, Some(3)),
+            ],
+        ),
+    ]);
+    let f = the_flow(&elements);
+    assert_eq!(
+        coords(f),
+        vec![(122.5, 100.0), (377.5, 100.0)],
+        "riser, later run moves"
+    );
+    assert_eq!((f.x, f.y), (250.0, 100.0), "riser, later run moves");
+
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        cloud(3, 2, 400.0, 102.0),
+        flow(
+            2,
+            (300.0, 102.0),
+            vec![
+                pt(400.0, 102.0, Some(3)),
+                pt(250.0, 102.0, None),
+                pt(250.0, 100.0, None),
+                pt(122.5, 100.0, Some(1)),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![(400.0, 100.0), (122.5, 100.0)],
+        "riser, earlier run moves to keep the valid slot"
+    );
+}
+
+/// Stocks at (100, 100) and (300, 130): the straightened line (115) is outside
+/// both clearance spans by 0.5, no jog is a riser long, and no valid slot can
+/// give way, so the attach step cannot bring the ends on. The straightening is
+/// not committed either.
+#[test]
+fn a_straightening_the_attach_step_rejects_is_undone() {
+    let original = vec![pt(122.5, 108.0, Some(1)), pt(277.5, 122.0, Some(3))];
+    let mut elements = vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 300.0, 130.0),
+        flow(2, (200.0, 115.0), original.clone()),
+    ];
+    normalize_flow_geometry(&mut elements);
+    let f = the_flow(&elements);
+    assert_eq!(
+        coords(f),
+        original.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()
+    );
+    assert_eq!((f.x, f.y), (200.0, 115.0));
+}
+
+/// Rows, one per rule the checker adds beyond attachment: a zero-length
+/// segment, collinear segments, a short first, interior and final segment
+/// (with room), no minimum when the terminals crowd, and the valve's arc
+/// margin.
+#[test]
+fn the_checker_reports_segment_minima_and_the_valve_margin() {
+    let clouds_at =
+        |a: (f64, f64), b: (f64, f64)| vec![cloud(3, 2, a.0, a.1), cloud(4, 2, b.0, b.1)];
+    /// (label, points, valve, the message the checker must report).
+    type Row = (&'static str, Vec<FlowPoint>, (f64, f64), &'static str);
+    let rows: Vec<Row> = vec![
+        (
+            "zero length",
+            vec![
+                pt(0.0, 0.0, Some(3)),
+                pt(0.0, 0.0, None),
+                pt(100.0, 0.0, Some(4)),
+            ],
+            (50.0, 0.0),
+            "segment 0 has zero length",
+        ),
+        (
+            "collinear",
+            vec![
+                pt(0.0, 0.0, Some(3)),
+                pt(50.0, 0.0, None),
+                pt(100.0, 0.0, Some(4)),
+            ],
+            (25.0, 0.0),
+            "segments 0 and 1 are collinear",
+        ),
+        (
+            "short first segment",
+            vec![
+                pt(0.0, 0.0, Some(3)),
+                pt(0.0, 5.0, None),
+                pt(100.0, 5.0, Some(4)),
+            ],
+            (50.0, 5.0),
+            "first segment 0 is 5.00",
+        ),
+        (
+            "short interior segment",
+            vec![
+                pt(0.0, 0.0, Some(3)),
+                pt(50.0, 0.0, None),
+                pt(50.0, 5.0, None),
+                pt(100.0, 5.0, Some(4)),
+            ],
+            (25.0, 0.0),
+            "interior segment 1 is 5.00",
+        ),
+        (
+            "short final segment",
+            vec![
+                pt(0.0, 0.0, Some(3)),
+                pt(100.0, 0.0, None),
+                pt(100.0, 12.0, Some(4)),
+            ],
+            (50.0, 0.0),
+            "final segment 1 is 12.00",
+        ),
+        (
+            "valve margin",
+            vec![pt(0.0, 0.0, Some(3)), pt(100.0, 0.0, Some(4))],
+            (4.0, 0.0),
+            "valve 4.00 from an end of the path",
+        ),
+    ];
+    for (label, points, valve, message) in rows {
+        let last = points.last().map(|p| (p.x, p.y)).unwrap();
+        let mut elements = clouds_at((points[0].x, points[0].y), last);
+        elements.push(flow(2, valve, points));
+        let violations = flow_invariant_violations(&elements);
+        assert!(
+            violations.iter().any(|v| v.contains(message)),
+            "{label}: expected {message:?} in {violations:?}"
+        );
+    }
+
+    // Crowded terminals: two clouds 20 apart leave no room, so a 20px pipe
+    // with a 5px stub is not held to the minima.
+    let mut elements = clouds_at((0.0, 0.0), (15.0, 5.0));
+    elements.push(flow(
+        2,
+        (10.0, 5.0),
+        vec![
+            pt(0.0, 0.0, Some(3)),
+            pt(0.0, 5.0, None),
+            pt(15.0, 5.0, Some(4)),
+        ],
+    ));
+    assert!(
+        !flow_invariant_violations(&elements)
+            .iter()
+            .any(|v| v.contains("segment") && v.contains("under")),
+        "crowded terminals are not held to the minima"
+    );
+}
+
+/// `normalize_flow_geometry` is idempotent: a second pass changes nothing.
+/// Rows: the review's hand case (a Z whose first pass used to leave a 1.5px
+/// corner clearance for the second to fix), and a deterministic sweep over
+/// views of one or two stocks and one flow of each shape the producers hand
+/// the pass -- two-point stock-to-cloud and stock-to-stock pipes, an L into a
+/// cloud, a Z between stocks -- with endpoints on, near, inside and far from
+/// their stocks.
+#[test]
+fn normalization_is_idempotent() {
+    fn twice_equals_once(elements: Vec<ViewElement>, label: &str) {
+        let mut once = elements;
+        normalize_flow_geometry(&mut once);
+        let mut twice = once.clone();
+        normalize_flow_geometry(&mut twice);
+        assert!(
+            once == twice,
+            "{label}: a second pass moved {once:?} to {twice:?}"
+        );
+    }
+
+    twice_equals_once(
+        vec![
+            stock(1, 100.0, 100.0),
+            stock(3, 300.0, 96.0),
+            flow(
+                2,
+                (160.0, 116.0),
+                vec![
+                    pt(122.5, 116.0, Some(1)),
+                    pt(200.0, 116.0, None),
+                    pt(200.0, 113.0, None),
+                    pt(277.5, 113.0, Some(3)),
+                ],
+            ),
+        ],
+        "hand case",
+    );
+
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let half = |lo: f64, hi: f64, next: &mut dyn FnMut() -> u64| {
+        let unit = (next() % 1_000_000) as f64 / 1_000_000.0;
+        ((lo + unit * (hi - lo)) * 2.0).round() / 2.0
+    };
+    for case in 0..3000 {
+        let s1 = (100.0, 100.0);
+        let s2 = if next() % 4 == 0 {
+            (half(90.0, 140.0, &mut next), half(80.0, 130.0, &mut next))
+        } else {
+            (
+                half(-300.0, 500.0, &mut next),
+                half(-300.0, 500.0, &mut next),
+            )
+        };
+        let near = |s: (f64, f64), next: &mut dyn FnMut() -> u64| -> (f64, f64) {
+            let pick = next() % 4;
+            let mut h = |lo: f64, hi: f64| {
+                let unit = (next() % 1_000_000) as f64 / 1_000_000.0;
+                ((lo + unit * (hi - lo)) * 2.0).round() / 2.0
+            };
+            match pick {
+                0 => (s.0 + 22.5, h(s.1 - 17.5, s.1 + 17.5)),
+                1 => (h(s.0 - 22.5, s.0 + 22.5), s.1 + 17.5),
+                2 => (h(s.0 - 45.0, s.0 + 45.0), h(s.1 - 35.0, s.1 + 35.0)),
+                _ => (h(s.0 - 150.0, s.0 + 150.0), h(s.1 - 150.0, s.1 + 150.0)),
+            }
+        };
+        let p = near(s1, &mut next);
+        let (points, uses_s2) = match next() % 4 {
+            0 => {
+                let d = half(-250.0, 250.0, &mut next);
+                (
+                    vec![pt(p.0, p.1, Some(1)), pt(p.0 + d, p.1, Some(11))],
+                    false,
+                )
+            }
+            1 => {
+                let q = near(s2, &mut next);
+                (vec![pt(p.0, p.1, Some(1)), pt(q.0, p.1, Some(3))], true)
+            }
+            2 => {
+                let bx = half(-300.0, 500.0, &mut next);
+                let cy = half(-300.0, 500.0, &mut next);
+                (
+                    vec![
+                        pt(p.0, p.1, Some(1)),
+                        pt(bx, p.1, None),
+                        pt(bx, cy, Some(11)),
+                    ],
+                    false,
+                )
+            }
+            _ => {
+                let q = near(s2, &mut next);
+                let mx = half(-300.0, 500.0, &mut next);
+                (
+                    vec![
+                        pt(p.0, p.1, Some(1)),
+                        pt(mx, p.1, None),
+                        pt(mx, q.1, None),
+                        pt(q.0, q.1, Some(3)),
+                    ],
+                    true,
+                )
+            }
+        };
+        let valve = (
+            half(-300.0, 500.0, &mut next),
+            half(-300.0, 500.0, &mut next),
+        );
+        let mut elements = vec![stock(1, s1.0, s1.1)];
+        if uses_s2 {
+            elements.push(stock(3, s2.0, s2.1));
+        } else {
+            let end = points.last().unwrap();
+            elements.push(cloud(11, 2, end.x, end.y));
+        }
+        elements.push(flow(2, valve, points));
+        twice_equals_once(elements, &format!("case {case}"));
+    }
 }
 
 #[test]

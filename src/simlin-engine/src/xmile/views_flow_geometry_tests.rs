@@ -207,9 +207,10 @@ fn valid_geometry_including_off_center_slots_is_not_moved() {
 }
 
 /// `land_model.stmx` (Stella): corner and off-stock endpoints are brought
-/// onto faces, and `forest to agriculture`'s valid off-center source slot
-/// stays exactly where Stella put it while its corner sink jogs 3px into the
-/// sink's clearance span.
+/// onto faces. `forest to agriculture`'s corner sink needs a line 3px inside
+/// its clearance span from the source's valid off-center slot: a jog that
+/// short would be a riser under `MIN_SEGMENT`, so the valid slot gives the
+/// least it can -- the 3px, staying valid -- and the pipe runs straight.
 #[test]
 fn land_model_corner_endpoints_are_fixed_without_moving_valid_slots() {
     const LAND: &str = include_str!("../../../../test/land_model/land_model.stmx");
@@ -222,16 +223,8 @@ fn land_model_corner_endpoints_are_fixed_without_moving_valid_slots() {
 
     let f = flow(view, "forest to agriculture");
     let pts: Vec<(f64, f64)> = f.points.iter().map(|p| (p.x, p.y)).collect();
-    assert_eq!(
-        pts,
-        vec![
-            (618.5, 2055.5),
-            (817.5, 2055.5),
-            (817.5, 2052.5),
-            (827.5, 2052.5)
-        ]
-    );
-    assert_eq!((f.x, f.y), (723.0, 2055.5));
+    assert_eq!(pts, vec![(618.5, 2052.5), (827.5, 2052.5)]);
+    assert_eq!((f.x, f.y), (723.0, 2052.5));
 }
 
 /// A cloud is created at a 2-point flow's raw endpoint, and the importer then

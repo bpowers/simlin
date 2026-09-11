@@ -137,6 +137,68 @@ fn test_finish_flow_geometry_brings_a_valve_off_the_route_onto_it() {
     assert_eq!(flow_invariant_violations(&elements), Vec::<String>::new());
 }
 
+/// `finish_flow_geometry` on a pipe whose orthogonal route leaves a stub
+/// under `MIN_SEGMENT`: `aeei install_rate` in
+/// `test/metasd/FREE/FREE6/FREE6-original/free 6.mdl`, as `generate_best_layout`
+/// hands it to the finishing pass (seed 456, the seed that wins), captured
+/// unrounded. The cloud sits on a row 2.16px above the sink's clamped face
+/// slot, so the orthogonalizer's L rises 2.16px at the cloud before running
+/// into the stock; the stub collapses and the pipe runs straight. That model's
+/// placement takes tens of seconds on a debug build, so the capture stands in
+/// for it; the corpus measurement covers the whole model.
+#[test]
+fn test_finish_flow_geometry_collapses_a_stub_under_the_minimum() {
+    let (cloud_x, cloud_y) = (1208.8755575407895, 1768.5582441059819);
+    let sink = (1536.2478075407898, 1770.7188274393143);
+    let mut elements = vec![
+        ViewElement::Stock(view_element::Stock {
+            name: "embodied\\naeei".into(),
+            uid: 15,
+            x: 1558.7478075407898,
+            y: 1785.2188274393143,
+            label_side: LabelSide::Bottom,
+            compat: None,
+        }),
+        ViewElement::Flow(view_element::Flow {
+            name: "aeei\\ninstall_rate".into(),
+            uid: 16,
+            x: 1351.6805575407893,
+            y: cloud_y,
+            label_side: LabelSide::Top,
+            points: vec![
+                FlowPoint {
+                    x: cloud_x,
+                    y: cloud_y,
+                    attached_to_uid: Some(17),
+                },
+                FlowPoint {
+                    x: sink.0,
+                    y: sink.1,
+                    attached_to_uid: Some(15),
+                },
+            ],
+            compat: None,
+            label_compat: None,
+        }),
+        ViewElement::Cloud(view_element::Cloud {
+            uid: 17,
+            flow_uid: 16,
+            x: cloud_x,
+            y: cloud_y,
+            compat: None,
+        }),
+    ];
+    finish_flow_geometry(&mut elements, |_| true);
+    assert_eq!(flow_invariant_violations(&elements), Vec::<String>::new());
+    let ViewElement::Flow(f) = &elements[1] else {
+        unreachable!()
+    };
+    assert_eq!(
+        f.points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>(),
+        vec![(cloud_x, sink.1), sink]
+    );
+}
+
 /// Engine auto-layout holds the flow invariants end to end on a model whose
 /// layout puts stocks off each other's rows and columns: `leaky_conveyor.xmile`,
 /// whose leak flows ended on stock corners. This row pins the corner arm of
