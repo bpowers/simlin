@@ -1465,3 +1465,74 @@ fn test_reference_pair_population_human_beats_auto() {
 fn test_reference_pair_logistic_growth_human_beats_auto() {
     assert_human_beats_auto("logistic-growth");
 }
+
+// --- the label-side chooser's scene ---
+
+#[test]
+fn test_label_scene_cost_equals_a_full_scan() {
+    // `LabelScene::label_cost` visits only the nodes and connectors its grid
+    // says can reach the candidate label. It must charge exactly what a scan of
+    // the whole scene charges -- bit for bit, since the chooser compares costs
+    // with a tie tolerance. Rows: every label side of every named element in
+    // the shipped exemplar diagrams, against the other labels as drawn.
+    use crate::datamodel::view_element::LabelSide;
+    let weights = MetricWeights::default();
+    for dir in ["logistic-growth", "population", "fishbanks", "reliability"] {
+        let view = default_project_view(dir);
+        let scene = LabelScene::new(&view.elements);
+        let nodes = build_scene_nodes(&view.elements);
+        let connectors = collect_connector_geometry(&view.elements);
+        let drawn: HashMap<i32, Rect> = nodes
+            .iter()
+            .filter_map(|n| n.label.map(|l| (n.uid, l)))
+            .collect();
+        let label_of = |uid: i32| drawn.get(&uid).copied();
+        for elem in &view.elements {
+            for side in [
+                LabelSide::Top,
+                LabelSide::Bottom,
+                LabelSide::Left,
+                LabelSide::Right,
+            ] {
+                let Some(props) = element_label_props_for(elem, side) else {
+                    continue;
+                };
+                let lbl = label_bounds(&props);
+                let owner = elem.get_uid();
+                let indexed = scene.label_cost(owner, &lbl, label_of, &weights);
+
+                let own = nodes
+                    .iter()
+                    .find(|n| n.uid == owner)
+                    .expect("owner in scene");
+                let area = rect_area(&lbl);
+                let mut covered = 0.0;
+                let mut crowding = 0.0;
+                for other in nodes.iter().filter(|n| n.uid != owner) {
+                    let other_label = label_of(other.uid);
+                    covered += rect_overlap_area(&lbl, &other.shape);
+                    if let Some(ol) = &other_label {
+                        covered += rect_overlap_area(&lbl, ol);
+                    }
+                    if own.is_cloud || other.is_cloud {
+                        continue;
+                    }
+                    let (gap, _) = footprint_gap(own, Some(lbl), other, other_label);
+                    if gap < COMFORTABLE_CLEARANCE {
+                        crowding += (1.0 - gap / COMFORTABLE_CLEARANCE).powi(2);
+                    }
+                }
+                let labels = nodes.iter().filter(|n| n.label.is_some()).count();
+                let scanned = weights.label_overlap * covered.min(area) / area
+                    + weights.label_connector_overlap
+                        * label_strike_fraction(owner, &lbl, &connectors)
+                    + weights.crowding * (labels as f64 / nodes.len() as f64) * crowding;
+                assert_eq!(
+                    indexed.to_bits(),
+                    scanned.to_bits(),
+                    "{dir}: element {owner} side {side:?}: indexed {indexed} vs scanned {scanned}"
+                );
+            }
+        }
+    }
+}

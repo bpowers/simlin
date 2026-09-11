@@ -867,7 +867,11 @@ fn label_connector_overlap_term(
 /// How struck out the label box `lbl` of node `owner` is: the connector length
 /// through its (inset) text box relative to the box's smaller side, capped at
 /// 1.
-fn label_strike_fraction(owner: i32, lbl: &Rect, connectors: &[ConnectorGeometry]) -> f64 {
+fn label_strike_fraction<'a>(
+    owner: i32,
+    lbl: &Rect,
+    connectors: impl IntoIterator<Item = &'a ConnectorGeometry>,
+) -> f64 {
     let text = inset(lbl, LABEL_INSET);
     let side = common::rect_width(&text).min(common::rect_height(&text));
     if side <= 0.0 {
@@ -909,21 +913,57 @@ pub(crate) struct LabelScene {
     /// `labels / nodes`: converts a per-node crowding deficit into the same
     /// per-label units the label terms are charged in.
     crowding_scale: f64,
+    index_of_uid: HashMap<i32, usize>,
+    /// Each node by the region it can reach: its shape, grown by its label's
+    /// size on every side (a label may take any side) and the crowding
+    /// clearance.
+    node_grid: SceneGrid,
+    /// Each connector by its polyline's bounding box.
+    connector_grid: SceneGrid,
 }
 
 impl LabelScene {
     pub(crate) fn new(elements: &[ViewElement]) -> Self {
         let nodes = build_scene_nodes(elements);
+        let connectors = collect_connector_geometry(elements);
         let labels = nodes.iter().filter(|n| n.label.is_some()).count();
         let crowding_scale = if nodes.is_empty() {
             0.0
         } else {
             labels as f64 / nodes.len() as f64
         };
+        let mut node_grid = SceneGrid::default();
+        for (i, n) in nodes.iter().enumerate() {
+            let (w, h) = n.label.map_or((0.0, 0.0), |l| {
+                (common::rect_width(&l), common::rect_height(&l))
+            });
+            let reach = w.max(h) + REACH_PAD;
+            node_grid.insert(i, &grown(&n.shape, reach));
+        }
+        let mut connector_grid = SceneGrid::default();
+        for (i, c) in connectors.iter().enumerate() {
+            let bounds = c
+                .polyline
+                .iter()
+                .fold(None, |acc: Option<Rect>, p| {
+                    let point = Rect {
+                        left: p.x,
+                        top: p.y,
+                        right: p.x,
+                        bottom: p.y,
+                    };
+                    Some(acc.map_or(point, |r| merge_bounds(r, point)))
+                })
+                .expect("a connector has at least two points");
+            connector_grid.insert(i, &bounds);
+        }
         LabelScene {
-            connectors: collect_connector_geometry(elements),
+            index_of_uid: nodes.iter().enumerate().map(|(i, n)| (n.uid, i)).collect(),
             nodes,
+            connectors,
             crowding_scale,
+            node_grid,
+            connector_grid,
         }
     }
 
@@ -946,12 +986,24 @@ impl LabelScene {
         if area <= 0.0 {
             return 0.0;
         }
-        let Some(own) = self.nodes.iter().find(|n| n.uid == owner) else {
+        let Some(&own_index) = self.index_of_uid.get(&owner) else {
             return 0.0;
         };
+        let own = &self.nodes[own_index];
+        // Only nodes whose reach meets this label or the owner's own shape
+        // (every pair the crowding term can charge involves one of the two)
+        // can contribute; the rest add exact zeros. Visiting the candidates in
+        // index order keeps every sum bit-identical to a full scan.
+        let query = grown(&merge_bounds(*lbl, own.shape), COMFORTABLE_CLEARANCE);
         let mut covered = 0.0;
         let mut crowding = 0.0;
-        for other in self.nodes.iter().filter(|n| n.uid != owner) {
+        for other in self
+            .node_grid
+            .query(&query)
+            .into_iter()
+            .map(|i| &self.nodes[i])
+            .filter(|n| n.uid != owner)
+        {
             let other_label = label_of(other.uid);
             covered += rect_overlap_area(lbl, &other.shape);
             if let Some(ol) = &other_label {
@@ -965,10 +1017,65 @@ impl LabelScene {
                 crowding += (1.0 - gap / COMFORTABLE_CLEARANCE).powi(2);
             }
         }
+        let text = inset(lbl, LABEL_INSET);
+        let struck = self
+            .connector_grid
+            .query(&text)
+            .into_iter()
+            .map(|i| &self.connectors[i]);
         w.label_overlap * covered.min(area) / area
-            + w.label_connector_overlap * label_strike_fraction(owner, lbl, &self.connectors)
+            + w.label_connector_overlap * label_strike_fraction(owner, lbl, struck)
             + w.crowding * self.crowding_scale * crowding
     }
+}
+
+/// How far past a node's shape its reach extends beyond its label's size: the
+/// crowding clearance plus room for the label's offset from the shape.
+const REACH_PAD: f64 = 2.0 * COMFORTABLE_CLEARANCE;
+
+/// Cell size of [`SceneGrid`]: about a node with its label.
+const SCENE_GRID_CELL: f64 = 96.0;
+
+/// A uniform grid of item indices by the cells their rects cover.
+#[derive(Default)]
+struct SceneGrid {
+    cells: HashMap<(i64, i64), Vec<usize>>,
+}
+
+impl SceneGrid {
+    fn cell_range(r: &Rect) -> (std::ops::RangeInclusive<i64>, std::ops::RangeInclusive<i64>) {
+        let cell = |v: f64| (v / SCENE_GRID_CELL).floor() as i64;
+        (cell(r.left)..=cell(r.right), cell(r.top)..=cell(r.bottom))
+    }
+
+    fn insert(&mut self, index: usize, r: &Rect) {
+        let (xs, ys) = Self::cell_range(r);
+        for x in xs {
+            for y in ys.clone() {
+                self.cells.entry((x, y)).or_default().push(index);
+            }
+        }
+    }
+
+    /// Every item whose rect's cells meet `r`'s, each once, in index order.
+    fn query(&self, r: &Rect) -> Vec<usize> {
+        let (xs, ys) = Self::cell_range(r);
+        let mut out = Vec::new();
+        for x in xs {
+            for y in ys.clone() {
+                if let Some(items) = self.cells.get(&(x, y)) {
+                    out.extend_from_slice(items);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+fn grown(r: &Rect, d: f64) -> Rect {
+    inset(r, -d)
 }
 
 /// `crossings`: crossings per connector, on the drawn polylines.
