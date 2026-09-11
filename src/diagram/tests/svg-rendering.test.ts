@@ -11,7 +11,8 @@ import { init, reset } from '@simlin/engine/internal/wasm';
 import { simlin_project_open_xmile, simlin_project_render_svg } from '../../engine/src/internal/import-export';
 import { simlin_project_serialize_json, simlin_project_unref } from '../../engine/src/internal/project';
 import { SimlinJsonFormat } from '../../engine/src/internal/types';
-import { projectFromJson } from '@simlin/core/datamodel';
+import { Project, projectFromJson } from '@simlin/core/datamodel';
+import { AuxRadius } from '../drawing/default';
 import { renderSvgToString } from '../render-common';
 
 function loadXmile(relativePath: string): Uint8Array {
@@ -73,4 +74,32 @@ describe('SVG rendering cross-language comparison', () => {
       expect(rustSvg).toBe(tsSvg);
     });
   }
+
+  // The parity rows above cannot catch a bound both renderers leave out, so
+  // the viewBox is checked against the alias itself. alias1's alias sits above
+  // and left of every other node, which is where a viewBox bounded without
+  // aliases cuts it off.
+  it('holds an alias inside the static SVG viewBox', () => {
+    const projectPtr = simlin_project_open_xmile(loadXmile('test/alias1/alias1.stmx'));
+    let tsProject: Project;
+    try {
+      const jsonBytes = simlin_project_serialize_json(projectPtr, SimlinJsonFormat.Native);
+      tsProject = projectFromJson(JSON.parse(new TextDecoder().decode(jsonBytes)));
+    } finally {
+      simlin_project_unref(projectPtr);
+    }
+
+    const alias = tsProject.models.get('main')?.views[0]?.elements.find((element) => element.type === 'alias');
+    const [svg] = renderSvgToString(tsProject, 'main');
+    const viewBox = /viewBox="([^"]*)"/.exec(svg);
+    if (alias === undefined || viewBox === null) {
+      throw new Error('alias1 must hold an alias and render a viewBox');
+    }
+
+    const [left, top, width, height] = viewBox[1].split(' ').map(Number);
+    expect(left).toBeLessThanOrEqual(alias.x - AuxRadius);
+    expect(top).toBeLessThanOrEqual(alias.y - AuxRadius);
+    expect(left + width).toBeGreaterThanOrEqual(alias.x + AuxRadius);
+    expect(top + height).toBeGreaterThanOrEqual(alias.y + AuxRadius);
+  });
 });

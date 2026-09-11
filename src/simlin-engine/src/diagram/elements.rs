@@ -356,6 +356,19 @@ pub(crate) fn alias_geometry(
     }
 }
 
+/// The alias's drawn extent: its circle and its label, as the TS Canvas's
+/// `aliasBounds` measures it.
+pub fn alias_bounds(element: &view_element::Alias, alias_of_name: Option<&str>) -> Rect {
+    let g = alias_geometry(element, alias_of_name);
+    let circle = Rect {
+        top: g.circle.y - g.circle.r,
+        left: g.circle.x - g.circle.r,
+        right: g.circle.x + g.circle.r,
+        bottom: g.circle.y + g.circle.r,
+    };
+    element_with_label_bounds(circle, &g.label)
+}
+
 pub fn render_alias(element: &view_element::Alias, alias_of_name: Option<&str>) -> String {
     let g = alias_geometry(element, alias_of_name);
 

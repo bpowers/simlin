@@ -33,7 +33,7 @@ All coordinates are canvas (model) units, the same units the datamodel's view el
 ```
 
 - `version`: incremented on any change a version-1 consumer would misread. Consumers ignore unknown fields.
-- `contentBounds`: the union of the element bounds `render_svg` folds into its viewBox (groups, flows, stocks, clouds, modules and auxes, labels included; connectors and aliases excluded), before the SVG renderer's 10-unit padding. `null` for a view with nothing to draw. Use it for "fit to content".
+- `contentBounds`: the union of the element bounds `render_svg` folds into its viewBox (every drawn element but connectors, labels included), before the SVG renderer's 10-unit padding. `null` for a view with nothing to draw. Use it for "fit to content".
 - `elements`: in draw order. The order is the SVG renderer's: ascending layer, and within a layer the order elements appear in the view.
 
 ## Elements

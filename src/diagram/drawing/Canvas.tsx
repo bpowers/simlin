@@ -32,7 +32,7 @@ import {
 } from '@simlin/core/datamodel';
 import { canonicalize } from '@simlin/core/canonicalize';
 
-import { Alias, AliasProps } from './Alias';
+import { Alias, aliasBounds, AliasProps } from './Alias';
 import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
 import { isCloudOnSourceSide, isCloudOnSinkSide } from './cloud-utils';
@@ -119,17 +119,19 @@ const fauxCloudTarget: CloudViewElement = {
   ident: undefined,
 };
 
-// Pure bounds pass over the displayed elements, replacing the side-channel that
-// used to populate this.elementBounds while rendering each element. Mirrors the
-// per-type bounds calls in the element-rendering methods exactly: only cloud,
-// aux, stock, module, group, and flow contribute bounds (links and aliases do
-// not). Selection-update substitutions are applied first so drag-preview
+// Pure bounds pass over the displayed elements: every kind but a link folds in
+// its drawn box, label included, through the bounds function its renderer's
+// module exports. An alias's label shows its target's name, so the target is
+// looked up in `elementsByUid`. The engine's `resolve_view` folds the same
+// boxes (`tests/svg-rendering.test.ts` pins the two static renderers byte for
+// byte). Selection-update substitutions are applied first so drag-preview
 // geometry feeds the embedded-mode tight viewBox, matching what buildLayers
 // draws. Returns one entry per contributing element (undefined entries from
 // *Bounds are kept; calcViewBox skips them).
 function computeElementBounds(
   displayElements: readonly ViewElement[],
   selectionUpdates: ReadonlyMap<UID, ViewElement>,
+  elementsByUid: ReadonlyMap<UID, ViewElement>,
 ): Array<Rect | undefined> {
   const bounds: Array<Rect | undefined> = [];
   for (let element of displayElements) {
@@ -156,8 +158,13 @@ function computeElementBounds(
       case 'flow':
         bounds.push(flowBounds(element));
         break;
+      case 'alias': {
+        const aliasOf = elementsByUid.get(element.aliasOfUid) as NamedViewElement | undefined;
+        bounds.push(aliasBounds(element, aliasOf));
+        break;
+      }
       default:
-        // link, alias: no bounds contribution (matches original render path)
+        // link: a connector folds nothing into the bounds
         break;
     }
   }
@@ -2581,7 +2588,11 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
     // Compute initial diagram bounds via the explicit pure pass (no longer a
     // side effect of rendering each element).
-    const elementBounds = computeElementBounds(derived.displayElements, derived.selectionUpdates);
+    const elementBounds = computeElementBounds(
+      derived.displayElements,
+      derived.selectionUpdates,
+      derived.elementsByUid,
+    );
 
     let computedInitialBounds: ViewRect | undefined;
     const bounds = calcViewBox(elementBounds);
@@ -2764,7 +2775,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     // Bounds come from the derivation the just-committed render produced (same
     // pure pass the mount effect uses), so this reflects what is actually drawn.
     const derived = r.derived;
-    const bounds = calcViewBox(computeElementBounds(derived.displayElements, derived.selectionUpdates));
+    const bounds = calcViewBox(
+      computeElementBounds(derived.displayElements, derived.selectionUpdates, derived.elementsByUid),
+    );
     if (!bounds) {
       // Empty model: nothing to center against.
       return;
@@ -2875,7 +2888,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   if (embedded) {
     // For embedded/export mode, always calculate tight bounds from elements.
     // The stored view.viewBox represents the editor viewport, not diagram bounds.
-    const bounds = calcViewBox(computeElementBounds(displayElements, derived.selectionUpdates));
+    const bounds = calcViewBox(computeElementBounds(displayElements, derived.selectionUpdates, derived.elementsByUid));
     if (bounds) {
       const left = Math.floor(bounds.left) - 10;
       const top = Math.floor(bounds.top) - 10;

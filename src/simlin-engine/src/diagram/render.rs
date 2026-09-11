@@ -615,8 +615,9 @@ mod tests {
         // TS Canvas bounds do, or a name at the diagram's edge is clipped. One
         // row per labeled node kind the renderer bounds, each at the same spot
         // with its label below and the radii its renderer draws the label at
-        // (a flow needs two endpoints to be drawn at all). Aliases are
-        // deliberately unbounded, as on the TS Canvas.
+        // (a flow needs two endpoints to be drawn at all, and an alias's
+        // target sits far away, so only the alias's own box can hold its
+        // label).
         use crate::diagram::constants::{
             AUX_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
         };
@@ -658,6 +659,21 @@ mod tests {
                     label_side: LabelSide::Bottom,
                 })],
                 (MODULE_WIDTH / 2.0, MODULE_HEIGHT / 2.0),
+            ),
+            (
+                "alias",
+                vec![
+                    make_aux_ve(name, 1, 400.0, 400.0),
+                    ViewElement::Alias(view_element::Alias {
+                        uid: 2,
+                        alias_of_uid: 1,
+                        x: 100.0,
+                        y: 100.0,
+                        label_side: LabelSide::Bottom,
+                        compat: None,
+                    }),
+                ],
+                (AUX_RADIUS, AUX_RADIUS),
             ),
         ];
         for (kind, elements, (rw, rh)) in rows {

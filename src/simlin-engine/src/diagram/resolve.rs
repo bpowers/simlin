@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use crate::datamodel::{self, Equation, View, ViewElement, view_element};
 use crate::diagram::common::{Rect, calc_view_box};
 use crate::diagram::elements::{
-    aux_bounds, cloud_bounds, group_bounds, module_bounds, stock_bounds,
+    alias_bounds, aux_bounds, cloud_bounds, group_bounds, module_bounds, stock_bounds,
 };
 use crate::diagram::flow::flow_bounds;
 
@@ -71,11 +71,15 @@ impl ResolvedElement<'_> {
     }
 
     /// The box this element folds into the diagram's fit-to-content bounds.
-    /// Connectors and aliases fold nothing, matching the web canvas.
+    /// Connectors fold nothing, matching the web canvas.
     fn content_bounds(&self) -> Option<Rect> {
         match self {
             ResolvedElement::Group(group) => Some(group_bounds(group)),
-            ResolvedElement::Link { .. } | ResolvedElement::Alias { .. } => None,
+            ResolvedElement::Link { .. } => None,
+            ResolvedElement::Alias {
+                alias,
+                alias_of_name,
+            } => Some(alias_bounds(alias, *alias_of_name)),
             ResolvedElement::Flow { flow, .. } => Some(flow_bounds(flow)),
             ResolvedElement::Stock { stock, .. } => Some(stock_bounds(stock)),
             ResolvedElement::Cloud(cloud) => Some(cloud_bounds(cloud)),
