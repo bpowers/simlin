@@ -1328,6 +1328,73 @@ fn a_crowded_segment_is_collapsed_to_bring_an_end_onto_its_face() {
     );
 }
 
+/// The Face arm holds the segment an end leaves to that end's own minimum. A
+/// two-point pipe runs along s1's top face and past the top of s3, far below:
+/// s3's end drops a leg into its top face, and because the sink's arm runs
+/// first, the segment s1's end leaves as it enters its right face is a stub,
+/// 11.5px, held to `MIN_SEGMENT` rather than to the sink segment's
+/// `MIN_SINK_SEGMENT`.
+#[test]
+fn a_face_end_needs_only_the_minimum_of_the_segment_it_leaves() {
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 124.0, 282.0),
+        flow(
+            2,
+            (116.5, 5.5),
+            vec![pt(100.5, 82.5, Some(1)), pt(134.0, 82.5, Some(3))],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![(122.5, 85.5), (134.0, 85.5), (134.0, 264.5)]
+    );
+}
+
+/// A jog is not refused for where the valve sits. The diagonal pipe
+/// straightens onto a line inside s3's clearance span but under s1's, and s3's
+/// end is a valid slot that pins it, so s1's end jogs to its own line. The
+/// valve lies on the shared line behind s1's face; the jog's step is placed
+/// all the same, and the valve is projected onto the settled pipe.
+#[test]
+fn a_jog_does_not_step_around_the_valve() {
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 156.5, 94.0),
+        flow(
+            2,
+            (93.75, 82.5),
+            vec![pt(56.0, 71.0, Some(1)), pt(134.0, 94.5, Some(3))],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![(122.5, 85.5), (123.5, 85.5), (123.5, 82.75), (134.0, 82.75)]
+    );
+}
+
+/// A jog whose step would pass the adjacent point is refused. Two overlapping
+/// stocks and a vertical pipe through both: s1's end takes the line inside
+/// s1's clearance span, and s2's end, whose span excludes that line, would jog
+/// to its own line, stepping a stub short of s2's top face. That step lies
+/// beyond s1's end, so the route would pass it and double back over itself.
+/// No invariant names such a route, so the pipe is left as the producer drew
+/// it.
+#[test]
+fn a_jog_whose_step_would_double_back_is_refused() {
+    let original = vec![pt(122.5, 131.0, Some(2)), pt(122.5, 88.5, Some(1))];
+    let mut elements = vec![
+        stock(1, 100.0, 100.0),
+        stock(2, 140.0, 118.5),
+        flow(10, (-132.0, -140.0), original.clone()),
+    ];
+    normalize_flow_geometry(&mut elements);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        original.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn clamp_to_face_span_keeps_corner_clearance() {
     assert_eq!(clamp_to_face_span(100.0, 100.0, 22.5), 100.0);

@@ -357,12 +357,10 @@ fn point_segment_distance(p: (f64, f64), a: &FlowPoint, b: &FlowPoint) -> f64 {
 /// one line). Works on a copy, and commits the result unless it runs a segment
 /// through a terminal stock's body where the pipe had none; an end segment
 /// that is diagonal, or whose ends ask for incompatible lines, is left as it
-/// was. The valve is read, never
-/// moved: `project_valve_onto_pipe`, which runs after the pass, owns where it
-/// ends up.
+/// was. The valve is not read: `project_valve_onto_pipe`, which runs after
+/// the passes, owns where it ends up.
 fn attach_end_segment(
     points: &mut Vec<FlowPoint>,
-    valve: (f64, f64),
     stocks: &HashMap<i32, (f64, f64)>,
     minima: &Minima,
     source: bool,
@@ -445,7 +443,6 @@ fn attach_end_segment(
     };
 
     let mut pts = points.clone();
-    let valve_on_segment = point_segment_distance(valve, &pts[a], &pts[b]) <= EPS;
     if (new_line - line).abs() > EPS {
         // The slide moves the segment perpendicular to itself, so each
         // interior neighbour lengthens or shortens along its own axis. Nothing
@@ -465,8 +462,6 @@ fn attach_end_segment(
         let s_along = axis.along(end.stock.0, end.stock.1);
         let s_cross = axis.cross(end.stock.0, end.stock.1);
         let half_along = axis.half_along();
-        // A two-point pipe's one segment is the sink's, whichever end moves.
-        let face_min = if source && sink { minima.sink } else { end.min };
         match end.fix {
             EndFix::Keep => {}
             EndFix::Face => {
@@ -479,7 +474,13 @@ fn attach_end_segment(
                     return;
                 };
                 let face = s_along + side * half_along;
-                if side * (q_along - face) < face_min - EPS {
+                // The segment the end leaves is held to the end's own minimum.
+                // A two-point pipe's one segment is the sink's, but while the
+                // pipe stays two points room already puts its ends further
+                // apart than both minima, and where the sink's arm has inserted
+                // points first (ends are fixed highest index first) the source's
+                // segment is a stub.
+                if side * (q_along - face) < end.min - EPS {
                     return;
                 }
                 axis.set_along(&mut pts[end.idx], face);
@@ -514,24 +515,19 @@ fn attach_end_segment(
                     return;
                 };
                 let face = s_along + side * half_along;
-                // The step sits the end's minimum segment from the face, and
-                // what the shared line must keep beyond it -- the adjacent
-                // point, and the valve when it is on this segment -- stays at
-                // least a riser further on. No invariant names a step that
-                // passes the adjacent point and doubles back (crowded stocks
-                // give such inputs), so this guard is what keeps one out.
-                let mut near = q_along;
-                if valve_on_segment {
-                    let v_along = axis.along(valve.0, valve.1);
-                    if side * (v_along - face) < side * (near - face) {
-                        near = v_along;
-                    }
-                }
-                let offset = end.min;
-                if side * (near - face) < offset + minima.riser - EPS {
+                // The step sits the end's minimum segment from the face, and is
+                // refused only where it would pass the adjacent point and double
+                // back: no invariant names that route (crowded stocks give such
+                // inputs), so this guard is what keeps one out. A step that
+                // leaves the rest of the shared line under a riser is built:
+                // with room the collapse merges that run on a later pass, and
+                // with crowded terminals the checker demands no minimum of it.
+                // The valve is not a point the step must stay behind; it is
+                // projected onto the settled pipe.
+                if side * (q_along - face) < end.min - EPS {
                     return;
                 }
-                let step = face + side * offset;
+                let step = face + side * end.min;
                 let attached = pts[end.idx].attached_to_uid;
                 let on_line = axis.point(step, new_line, None);
                 let on_own = axis.point(step, own, None);
@@ -565,20 +561,15 @@ fn attach_end_segment(
 
 /// Bring both end segments of a pipe onto their stocks: the whole pipe at once
 /// for a two-point flow, whose ends share one line.
-fn attach_ends(
-    points: &mut Vec<FlowPoint>,
-    valve: (f64, f64),
-    stocks: &HashMap<i32, (f64, f64)>,
-    minima: &Minima,
-) {
+fn attach_ends(points: &mut Vec<FlowPoint>, stocks: &HashMap<i32, (f64, f64)>, minima: &Minima) {
     if points.len() < 2 {
         return;
     }
     if points.len() == 2 {
-        attach_end_segment(points, valve, stocks, minima, true, true);
+        attach_end_segment(points, stocks, minima, true, true);
     } else {
-        attach_end_segment(points, valve, stocks, minima, true, false);
-        attach_end_segment(points, valve, stocks, minima, false, true);
+        attach_end_segment(points, stocks, minima, true, false);
+        attach_end_segment(points, stocks, minima, false, true);
     }
 }
 
@@ -649,7 +640,6 @@ fn segment_length(a: &FlowPoint, b: &FlowPoint) -> f64 {
 /// further apart than `MIN_SEGMENT + MIN_SINK_SEGMENT`.
 fn collapse_short_segment(
     points: &mut Vec<FlowPoint>,
-    valve: (f64, f64),
     stocks: &HashMap<i32, (f64, f64)>,
     minima: &Minima,
 ) -> bool {
@@ -708,7 +698,7 @@ fn collapse_short_segment(
         if pts.len() < 2 {
             continue;
         }
-        attach_ends(&mut pts, valve, stocks, minima);
+        attach_ends(&mut pts, stocks, minima);
         if pts == *points || introduces_a_body_crossing(&pts, points, stocks) {
             continue;
         }
@@ -909,14 +899,14 @@ pub(crate) fn normalize_flow_geometry_where(
             }
             let minima = Minima::of(&f.points, &stocks);
             if straighten_two_point_pipe(&mut f.points, &mut valve) {
-                attach_ends(&mut f.points, valve, &stocks, &minima);
+                attach_ends(&mut f.points, &stocks, &minima);
                 if !stock_ends_valid(&f.points, &stocks) {
                     (f.points, valve) = before.clone();
                 }
             } else {
-                attach_ends(&mut f.points, valve, &stocks, &minima);
+                attach_ends(&mut f.points, &stocks, &minima);
             }
-            collapse_short_segment(&mut f.points, valve, &stocks, &minima);
+            collapse_short_segment(&mut f.points, &stocks, &minima);
             if (f.points.clone(), valve) == before {
                 break;
             }
