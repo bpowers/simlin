@@ -176,7 +176,9 @@ pub fn render_module(element: &view_element::Module) -> String {
     svg
 }
 
-pub fn module_bounds(element: &view_element::Module) -> Rect {
+/// The module's bare *shape* box (the rounded rect), WITHOUT its label. See
+/// `aux_shape_bounds` for why the label-free shape is exposed separately.
+pub(crate) fn module_shape_bounds(element: &view_element::Module) -> Rect {
     let cx = element.x;
     let cy = element.y;
     let w = MODULE_WIDTH;
@@ -187,6 +189,19 @@ pub fn module_bounds(element: &view_element::Module) -> Rect {
         right: cx + w / 2.0,
         bottom: cy + h / 2.0,
     }
+}
+
+/// The module's drawn extent: its shape and its label, as the TS Canvas's
+/// `moduleBounds` measures it.
+pub fn module_bounds(element: &view_element::Module) -> Rect {
+    let label_props = LabelProps::new(
+        element.x,
+        element.y,
+        element.label_side,
+        display_name(&element.name),
+    )
+    .with_radii(MODULE_WIDTH / 2.0, MODULE_HEIGHT / 2.0);
+    element_with_label_bounds(module_shape_bounds(element), &label_props)
 }
 
 // --- Cloud ---

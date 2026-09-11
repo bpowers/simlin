@@ -31,7 +31,9 @@ use crate::diagram::common::{
     segment_clip_interval_in_rect,
 };
 use crate::diagram::connector::{ARC_POLYLINE_SAMPLES, connector_polyline, get_visual_center};
-use crate::diagram::elements::{aux_shape_bounds, cloud_bounds, module_bounds, stock_shape_bounds};
+use crate::diagram::elements::{
+    aux_shape_bounds, cloud_bounds, module_shape_bounds, stock_shape_bounds,
+};
 use crate::diagram::label::{LabelProps, label_bounds};
 
 use super::annealing::segment_intersection;
@@ -393,7 +395,7 @@ pub(crate) fn node_shape_box(element: &ViewElement) -> Option<Rect> {
     match element {
         ViewElement::Aux(a) => Some(aux_shape_bounds(a)),
         ViewElement::Stock(s) => Some(stock_shape_bounds(s)),
-        ViewElement::Module(m) => Some(module_bounds(m)),
+        ViewElement::Module(m) => Some(module_shape_bounds(m)),
         ViewElement::Cloud(c) => Some(cloud_bounds(c)),
         ViewElement::Flow(f) => Some(circle_box(f.x, f.y, AUX_RADIUS)),
         ViewElement::Alias(a) => Some(alias_shape_box(a)),

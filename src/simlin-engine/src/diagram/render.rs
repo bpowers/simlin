@@ -691,6 +691,78 @@ mod tests {
     }
 
     #[test]
+    fn test_render_svg_view_box_holds_every_node_label() {
+        // The viewBox must hold each node's label as well as its shape, as the
+        // TS Canvas bounds do, or a name at the diagram's edge is clipped. One
+        // row per labeled node kind the renderer bounds, each at the same spot
+        // with its label below and the radii its renderer draws the label at
+        // (a flow needs two endpoints to be drawn at all). Aliases are
+        // deliberately unbounded, as on the TS Canvas.
+        use crate::diagram::constants::{
+            AUX_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
+        };
+        use crate::diagram::label::{LabelProps, label_bounds};
+        let name = "a fairly long name";
+        let rows: Vec<(&str, Vec<ViewElement>, (f64, f64))> = vec![
+            (
+                "aux",
+                vec![make_aux_ve(name, 1, 100.0, 100.0)],
+                (AUX_RADIUS, AUX_RADIUS),
+            ),
+            (
+                "flow",
+                vec![
+                    make_cloud_ve(2, 1, 40.0, 100.0),
+                    make_cloud_ve(3, 1, 160.0, 100.0),
+                    make_flow_ve(
+                        name,
+                        1,
+                        100.0,
+                        100.0,
+                        vec![(40.0, 100.0, Some(2)), (160.0, 100.0, Some(3))],
+                    ),
+                ],
+                (AUX_RADIUS, AUX_RADIUS),
+            ),
+            (
+                "stock",
+                vec![make_stock_ve(name, 1, 100.0, 100.0)],
+                (STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0),
+            ),
+            (
+                "module",
+                vec![ViewElement::Module(view_element::Module {
+                    name: name.to_string(),
+                    uid: 1,
+                    x: 100.0,
+                    y: 100.0,
+                    label_side: LabelSide::Bottom,
+                })],
+                (MODULE_WIDTH / 2.0, MODULE_HEIGHT / 2.0),
+            ),
+        ];
+        for (kind, elements, (rw, rh)) in rows {
+            let svg = render_svg(&make_simple_project(elements, vec![]), "main")
+                .unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+            let vb = view_box_of(&svg);
+            let label = label_bounds(
+                &LabelProps::new(100.0, 100.0, LabelSide::Bottom, name.to_string())
+                    .with_radii(rw, rh),
+            );
+            assert!(
+                vb[1] + vb[3] >= label.bottom
+                    && vb[0] <= label.left
+                    && vb[0] + vb[2] >= label.right,
+                "{kind}: viewBox {vb:?} must hold the label ({}, {})-({}, {})",
+                label.left,
+                label.top,
+                label.right,
+                label.bottom
+            );
+        }
+    }
+
+    #[test]
     fn test_render_svg_z_order() {
         // Verify z-ordering: groups (0) < connectors (2) < flows (3) < stocks/clouds (4) < aux (5)
         let elements = vec![
