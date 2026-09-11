@@ -143,6 +143,18 @@ impl Minima {
 }
 
 fn terminals_leave_room(points: &[FlowPoint], stocks: &HashMap<i32, (f64, f64)>) -> bool {
+    terminals_clear(points, stocks, MIN_SEGMENT, MIN_SINK_SEGMENT)
+}
+
+/// Whether the terminal bodies of `points` -- the source's inflated by
+/// `source_inflate`, the sink's by `sink_inflate` -- do not overlap, a cloud
+/// counting as its point and an unattached end as no terminal at all.
+fn terminals_clear(
+    points: &[FlowPoint],
+    stocks: &HashMap<i32, (f64, f64)>,
+    source_inflate: f64,
+    sink_inflate: f64,
+) -> bool {
     let (Some(first), Some(last)) = (points.first(), points.last()) else {
         return true;
     };
@@ -161,8 +173,8 @@ fn terminals_leave_room(points: &[FlowPoint], stocks: &HashMap<i32, (f64, f64)>)
             y + hh + inflate,
         )
     };
-    let a = body(first, MIN_SEGMENT);
-    let b = body(last, MIN_SINK_SEGMENT);
+    let a = body(first, source_inflate);
+    let b = body(last, sink_inflate);
     !(a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3)
 }
 
@@ -362,8 +374,9 @@ fn point_segment_distance(p: (f64, f64), a: &FlowPoint, b: &FlowPoint) -> f64 {
 ///
 /// The segment is `points[0..=1]` when `source`, `points[n-2..=n-1]` when
 /// `sink`, and the whole pipe when both (a two-point flow, whose two ends share
-/// one line). Works on a copy, and commits the result unless it runs a segment
-/// through a terminal stock's body where the pipe had none; an end segment
+/// one line). Works on a copy, and commits the result unless it runs more
+/// segments through the terminal stocks' bodies than the pipe did, where G6
+/// holds (`adds_a_body_crossing`); an end segment
 /// that is diagonal, or whose ends ask for incompatible lines, is left as it
 /// was. The valve is not read: `project_valve_onto_pipe`, which runs after
 /// the passes, owns where it ends up.
@@ -554,14 +567,12 @@ fn attach_end_segment(
         }
     }
 
-    // The commit guard: no segment may newly run through a terminal stock's
-    // body. The arms build valid endpoints on the inputs they are designed
-    // for; where the two terminal bodies overlap, an arm can land an end on one
-    // stock's face with its segment running through the other, and a leg can
-    // drop into one stock's face across the other's body, and such a result is
-    // not committed. An end an arm leaves invalid is committed: the next pass
-    // tries that end again from the new geometry.
-    if introduces_a_body_crossing(&pts, points, stocks) {
+    // The commit guard: where G6 holds, no step may add a segment through a
+    // terminal stock's body. A leg can drop into one stock's face across the
+    // other's body, and such a result is not committed. An end an arm leaves
+    // invalid is committed: the next pass tries that end again from the new
+    // geometry.
+    if adds_a_body_crossing(&pts, points, stocks) {
         return;
     }
     *points = pts;
@@ -640,8 +651,9 @@ fn segment_length(a: &FlowPoint, b: &FlowPoint) -> f64 {
 ///   valid stock slot where it was is preferred, so the free side of the pipe
 ///   gives way before an authored slot does.
 ///
-/// A candidate is not committed when it runs a segment through the body of a
-/// stock it ends on where the pipe had none (G6). It need not leave every
+/// A candidate is not committed when it runs more segments through the bodies
+/// of the stocks it ends on than the pipe did, where G6 holds
+/// (`adds_a_body_crossing`). It need not leave every
 /// stock end valid: the next pass's attach step brings such an end onto its
 /// face, and requiring it would refuse routes the passes finish. A pipe of one
 /// segment is never short with room to spare: room means its terminals are
@@ -707,7 +719,7 @@ fn collapse_short_segment(
             continue;
         }
         attach_ends(&mut pts, stocks, minima);
-        if pts == *points || introduces_a_body_crossing(&pts, points, stocks) {
+        if pts == *points || adds_a_body_crossing(&pts, points, stocks) {
             continue;
         }
         let last = pts.len() - 1;
@@ -731,29 +743,44 @@ fn collapse_short_segment(
     true
 }
 
-/// Whether `candidate` runs a segment through the body of a stock it ends on
-/// where `original` ran none (G6). A step may keep a crossing the producer
-/// drew, but never adds one.
-fn introduces_a_body_crossing(
+/// Whether `candidate` runs more segments through the bodies of the stocks it
+/// ends on than `original` does, where G6 demands no crossing at all: the two
+/// terminal bodies, each inflated by `MIN_SEGMENT`, do not overlap (the design
+/// plan's G6). Where they overlap, G6 is best effort while G1-G5 must still
+/// hold, so a step that brings the ends onto their faces is not refused for
+/// running through the other body. A step may keep the crossings a pipe has,
+/// but never adds to them.
+fn adds_a_body_crossing(
     candidate: &[FlowPoint],
     original: &[FlowPoint],
     stocks: &HashMap<i32, (f64, f64)>,
 ) -> bool {
-    crosses_an_endpoint_stock(candidate, stocks) && !crosses_an_endpoint_stock(original, stocks)
+    terminals_clear(original, stocks, MIN_SEGMENT, MIN_SEGMENT)
+        && body_crossings(candidate, stocks) > body_crossings(original, stocks)
 }
 
-fn crosses_an_endpoint_stock(points: &[FlowPoint], stocks: &HashMap<i32, (f64, f64)>) -> bool {
+/// How many (segment, terminal stock) pairs of `points` have the segment
+/// entering the stock's body; a stock both ends attach to counts once.
+fn body_crossings(points: &[FlowPoint], stocks: &HashMap<i32, (f64, f64)>) -> usize {
     let (Some(first), Some(last)) = (points.first(), points.last()) else {
-        return false;
+        return 0;
     };
-    [first, last]
+    let mut terminals: Vec<i32> = [first.attached_to_uid, last.attached_to_uid]
         .into_iter()
-        .filter_map(|p| p.attached_to_uid.and_then(|uid| stocks.get(&uid)))
-        .any(|&stock| {
+        .flatten()
+        .filter(|uid| stocks.contains_key(uid))
+        .collect();
+    terminals.dedup();
+    terminals
+        .iter()
+        .map(|uid| {
+            let stock = stocks[uid];
             points
                 .windows(2)
-                .any(|w| segment_enters_body(&w[0], &w[1], stock))
+                .filter(|w| segment_enters_body(&w[0], &w[1], stock))
+                .count()
         })
+        .sum()
 }
 
 /// Straighten a two-point pipe whose producer wrote it slightly off axis

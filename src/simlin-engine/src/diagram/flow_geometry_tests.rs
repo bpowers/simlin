@@ -907,33 +907,37 @@ fn a_slide_that_empties_a_neighbour_settles_on_the_next_pass() {
     );
 }
 
-/// The commit guard that ends `attach_end_segment`. Two overlapping stocks, s1
-/// at (100, 100) and s3 at (95, 110.5), and a two-point pipe whose source end
-/// is off s1's faces: the Face arms would land that end on s1's left face with
-/// the segment running through s3's body, where the pipe ran through none.
-/// That result is not committed, so the pipe stays as the producer wrote it.
-/// Overlapping bodies leave G6 to best effort (the design plan's G6
-/// precondition), so this row pins what is not committed rather than a valid
-/// route.
+/// Where the terminal bodies, each inflated by `MIN_SEGMENT`, overlap, the
+/// design plan leaves G6 best effort but still demands G1-G5, so no step is
+/// refused for running a segment through the other stock. Rows: a diagonal
+/// pipe between s1 and a stock 30px above it, both ends off their faces.
+/// Each settles with every end on its face; only crossings may remain.
 #[test]
-fn an_attach_that_would_run_through_the_other_stock_is_not_committed() {
-    let original = vec![pt(49.0, 100.0, Some(1)), pt(72.5, 100.0, Some(3))];
-    let mut elements = vec![
-        stock(1, 100.0, 100.0),
-        stock(3, 95.0, 110.5),
-        flow(2, (60.75, 100.0), original.clone()),
-    ];
-    normalize_flow_geometry(&mut elements);
-    assert_eq!(
-        coords(the_flow(&elements)),
-        original.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()
-    );
-    assert!(
-        !flow_invariant_violations(&elements)
-            .iter()
-            .any(|v| v.contains("runs through an endpoint stock")),
-        "no segment through a body is committed"
-    );
+fn between_overlapping_stocks_the_ends_attach_whatever_they_cross() {
+    /// (label, the second stock, the pipe, the valve).
+    type Row = (&'static str, (f64, f64), Vec<FlowPoint>, (f64, f64));
+    let rows: Vec<Row> = vec![(
+        "a diagonal pipe",
+        (101.5, 69.5),
+        vec![pt(77.5, 82.5, Some(1)), pt(-41.5, 190.5, Some(3))],
+        (14.75, 139.5),
+    )];
+    for (label, s3, points, valve) in rows {
+        let mut elements = vec![
+            stock(1, 100.0, 100.0),
+            stock(3, s3.0, s3.1),
+            flow(2, valve, points),
+        ];
+        normalize_flow_geometry(&mut elements);
+        let violations = flow_invariant_violations(&elements);
+        assert!(
+            violations
+                .iter()
+                .all(|v| v.contains("runs through an endpoint stock")),
+            "{label}: G1-G5 must hold: {violations:?} at {:?}",
+            coords(the_flow(&elements))
+        );
+    }
 }
 
 /// Rows, one per thing `simplify` drops or keeps: a repeated interior point;
@@ -1106,9 +1110,11 @@ fn a_pass_starts_from_the_pipe_without_repeated_or_collinear_points() {
 /// the pipe; an attach whose leg into the source would cross the sink, where
 /// the pipe settles through a longer route; a Z whose leg into its sink
 /// would drop through the source's body, which comes back with no crossing
-/// and no more violations than it had; and a pipe the producer drew up
-/// through its own source, whose steps keep that crossing on the way to a
-/// valid route, so the rule refuses only a crossing a step adds.
+/// and no more violations than it had; a pipe the producer drew up through its
+/// own source, whose steps keep that crossing on the way to a valid route, so
+/// the rule refuses only crossings a step adds; and a pipe already crossing its
+/// source's body, whose collapse would run two more segments through bodies,
+/// so a pipe that crosses may still not gain crossings.
 #[test]
 fn a_collapse_or_attach_never_adds_a_body_crossing() {
     let elements = normalized(vec![
@@ -1213,6 +1219,27 @@ fn a_collapse_or_attach_never_adds_a_body_crossing() {
         coords(the_flow(&elements)),
         vec![(119.5, 82.5), (119.5, -117.0), (-268.5, -117.0)],
         "a pipe drawn through its own source"
+    );
+
+    let elements = normalized(vec![
+        stock(1, 100.0, 100.0),
+        stock(3, 244.5, 109.5),
+        flow(
+            2,
+            (108.5, 111.75),
+            vec![
+                pt(122.5, 106.0, Some(1)),
+                pt(119.0, 106.0, None),
+                pt(119.0, 101.5, None),
+                pt(108.5, 101.5, None),
+                pt(108.5, 112.5, Some(3)),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        coords(the_flow(&elements)),
+        vec![(122.5, 101.5), (222.0, 101.5)],
+        "a pipe already crossing its source"
     );
 }
 
