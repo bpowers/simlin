@@ -2061,10 +2061,11 @@ fn test_incremental_add_waste_flow_goes_below() {
 }
 
 /// P2: When a chain flow is incrementally added to a stock that already has
-/// a cloud outflow on the right, the existing cloud flow should be rebuilt
-/// to exit from the bottom.
+/// a cloud outflow on the right, the existing cloud flow is a sibling the
+/// patch did not touch: it stays where it is, and the chain flow's end takes
+/// a free slot on the face instead of landing on it.
 #[test]
-fn test_incremental_add_chain_rebuilds_existing_cloud_flow() {
+fn test_incremental_add_chain_keeps_existing_cloud_flow() {
     use simlin_engine::datamodel;
     use simlin_engine::layout::incremental_layout;
     use simlin_engine::{ModelOperation, ModelPatch};
@@ -2219,63 +2220,45 @@ fn test_incremental_add_chain_rebuilds_existing_cloud_flow() {
     let new_view = incremental_layout(&old_view, &patched_project, MAIN_MODEL, &patch, None)
         .expect("incremental layout should succeed");
 
-    let new_stock_pos = new_view
-        .elements
-        .iter()
-        .find_map(|e| {
-            if let ViewElement::Stock(s) = e
-                && normalize(&s.name) == "stock_a"
-            {
-                Some((s.x, s.y))
-            } else {
-                None
-            }
-        })
-        .expect("stock_a in new view");
+    let flow_named = |view: &datamodel::StockFlow, name: &str| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) if normalize(&f.name) == name => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} in view"))
+    };
 
-    let new_waste_pos = new_view
-        .elements
-        .iter()
-        .find_map(|e| {
-            if let ViewElement::Flow(f) = e
-                && normalize(&f.name) == "waste_flow"
-            {
-                Some((f.x, f.y))
-            } else {
-                None
-            }
-        })
-        .expect("waste_flow in new view");
-
-    let new_chain_pos = new_view
-        .elements
-        .iter()
-        .find_map(|e| {
-            if let ViewElement::Flow(f) = e
-                && normalize(&f.name) == "chain_flow"
-            {
-                Some((f.x, f.y))
-            } else {
-                None
-            }
-        })
-        .expect("chain_flow in new view");
-
-    // Now waste_flow should have moved to the bottom (different y from stock)
+    // waste_flow is a sibling the patch did not touch: it comes back byte for
+    // byte, still on the right face.
+    let new_waste = flow_named(&new_view, "waste_flow");
     assert!(
-        new_waste_pos.1 > new_stock_pos.1 + 5.0,
-        "waste_flow y ({}) should now be below stock_a y ({}) after chain added",
-        new_waste_pos.1,
-        new_stock_pos.1,
+        new_waste == flow_named(&old_view, "waste_flow"),
+        "waste_flow must come back byte for byte when a chain flow is added beside it"
     );
 
-    // Chain and waste should not overlap
-    let dist = ((new_chain_pos.0 - new_waste_pos.0).powi(2)
-        + (new_chain_pos.1 - new_waste_pos.1).powi(2))
-    .sqrt();
+    // The chain flow's end on stock_a takes a free slot, never waste_flow's.
+    let stock_a_uid = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if normalize(&s.name) == "stock_a" => Some(s.uid),
+            _ => None,
+        })
+        .expect("stock_a in new view");
+    let end_on_stock_a = |f: &datamodel::view_element::Flow| {
+        f.points
+            .iter()
+            .find(|p| p.attached_to_uid == Some(stock_a_uid))
+            .map(|p| (p.x, p.y))
+            .expect("an end on stock_a")
+    };
+    let waste_end = end_on_stock_a(&new_waste);
+    let chain_end = end_on_stock_a(&flow_named(&new_view, "chain_flow"));
     assert!(
-        dist > 5.0,
-        "chain_flow and waste_flow should not overlap after incremental add (dist={dist})"
+        (waste_end.0 - chain_end.0).abs() > 1.0 || (waste_end.1 - chain_end.1).abs() > 1.0,
+        "chain_flow's end on stock_a {chain_end:?} must not land on waste_flow's {waste_end:?}"
     );
 }
 

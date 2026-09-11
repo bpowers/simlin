@@ -638,14 +638,20 @@ pub fn settle_new_elements(
     Ok(())
 }
 
-/// Re-snap stock-attached flow endpoints to stock edges after SFDP settlement.
+/// Re-snap the stock-attached endpoints of every flow `include` selects (by
+/// uid) to stock edges after SFDP settlement.
 ///
 /// SFDP may move flow valves while stocks stay pinned, causing the
 /// proportional point translation to detach endpoints from their stocks.
 /// This function restores each attached endpoint to the correct stock
 /// edge, using the flow valve position to determine which face of the
-/// stock rectangle the flow approaches from.
-pub fn resnap_flow_endpoints(state: &mut LayoutState, config: &LayoutConfig) {
+/// stock rectangle the flow approaches from. Incremental layout selects only
+/// the flows it creates: a preserved flow comes back byte for byte.
+pub fn resnap_flow_endpoints(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    include: impl Fn(i32) -> bool,
+) {
     let stock_positions: HashMap<i32, Position> = state
         .elements
         .iter()
@@ -659,7 +665,9 @@ pub fn resnap_flow_endpoints(state: &mut LayoutState, config: &LayoutConfig) {
     let half_h = config.stock_height / 2.0;
 
     for elem in &mut state.elements {
-        if let ViewElement::Flow(f) = elem {
+        if let ViewElement::Flow(f) = elem
+            && include(f.uid)
+        {
             let valve = Position::new(f.x, f.y);
             for pt in &mut f.points {
                 if let Some(attached_uid) = pt.attached_to_uid
@@ -1144,93 +1152,6 @@ fn existing_side_flow_faces(
     faces
 }
 
-/// Re-sort flows on each affected stock's sides by their existing
-/// attachment position rather than alphabetical ident.  This preserves
-/// the visual left-to-right (or top-to-bottom) ordering of imported or
-/// manually-edited flows when a sibling is added or removed.
-///
-/// Only affects flows that already have view elements in `state`;
-/// new flows without positions are placed last (sorted by ident among
-/// themselves).
-fn reorder_attachments_by_position(
-    attachments: &mut HashMap<String, FlowAttachment>,
-    state: &LayoutState,
-    affected_stocks: &HashSet<String>,
-    metadata: &ComputedMetadata,
-) {
-    for stock_ident in affected_stocks {
-        let stock_uid = match state.uid_manager.get_uid(stock_ident) {
-            Some(uid) => uid,
-            None => continue,
-        };
-
-        // Group flows on this stock by side, recording each flow's
-        // existing attachment position (x for Top/Bottom, y for Left/Right).
-        let mut by_side: HashMap<StockAttachSide, Vec<(String, f64)>> = HashMap::new();
-
-        for (flow_ident, att) in attachments.iter() {
-            let (from, to) = metadata.connected_stocks(flow_ident);
-            // Skip stock-to-stock flows: their attachment side depends on
-            // which stock classified them last, so including them would
-            // count them on the wrong side of one stock.
-            if from.is_some() && to.is_some() {
-                continue;
-            }
-            let connected =
-                from.is_some_and(|s| s == stock_ident) || to.is_some_and(|s| s == stock_ident);
-            if !connected {
-                continue;
-            }
-
-            let pos_key = state
-                .uid_manager
-                .get_uid(flow_ident)
-                .and_then(|uid| {
-                    state.elements.iter().find_map(|e| match e {
-                        ViewElement::Flow(f) if f.uid == uid => f
-                            .points
-                            .iter()
-                            .find(|pt| pt.attached_to_uid == Some(stock_uid))
-                            .map(|pt| match att.side {
-                                StockAttachSide::Bottom | StockAttachSide::Top => pt.x,
-                                StockAttachSide::Left | StockAttachSide::Right => pt.y,
-                            }),
-                        _ => None,
-                    })
-                })
-                .unwrap_or(f64::MAX); // new flows sort last
-
-            by_side
-                .entry(att.side)
-                .or_default()
-                .push((flow_ident.clone(), pos_key));
-        }
-
-        // Re-sort each side group by position and reassign offsets
-        for flows in by_side.values_mut() {
-            if flows.len() <= 1 {
-                continue;
-            }
-            flows.sort_by(|a, b| {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            let n = flows.len();
-            for (i, (flow_ident, _)) in flows.iter().enumerate() {
-                let offset = if n == 1 {
-                    0.5
-                } else {
-                    (i as f64 + 1.0) / (n as f64 + 1.0)
-                };
-                if let Some(att) = attachments.get_mut(flow_ident) {
-                    att.offset = offset;
-                }
-            }
-        }
-    }
-}
-
 /// Compute the valve position for a flow based on its attachment info and
 /// connected stock position.  Returns `None` if the flow has no attachment
 /// or the stock position is unknown, in which case the caller should fall
@@ -1248,25 +1169,6 @@ fn attachment_based_flow_position(
     let stock_uid = state.uid_manager.get_uid(stock_name)?;
     let stock_pos = state.positions.get(&stock_uid)?;
     Some(side_flow_valve_position(*stock_pos, *attachment, config))
-}
-
-/// Write `sides` back onto the named elements that carry those UIDs. Used by
-/// incremental layout after a flow is rebuilt with unchanged orientation
-/// (`create_flow_view_element` picks a default side) to reinstate the side
-/// the element had before the rebuild.
-fn restore_label_sides(state: &mut LayoutState, sides: &HashMap<i32, LabelSide>) {
-    for elem in &mut state.elements {
-        let Some(&side) = sides.get(&elem.get_uid()) else {
-            continue;
-        };
-        match elem {
-            ViewElement::Stock(s) => s.label_side = side,
-            ViewElement::Flow(f) => f.label_side = side,
-            ViewElement::Aux(a) => a.label_side = side,
-            ViewElement::Module(m) => m.label_side = side,
-            _ => {}
-        }
-    }
 }
 
 /// Assemble a [`datamodel::StockFlow`] from finalized layout state, copying
@@ -1583,22 +1485,44 @@ fn translate_view_element(elem: &mut ViewElement, dx: f64, dy: f64) {
 ///
 /// Contract for elements the patch did not touch: position AND
 /// `label_side` are returned byte-for-byte. A label side is chosen only
-/// for elements created in this pass -- new variables, kind-changed or
-/// endpoint-changed rebuilds, and flows whose pipe orientation flipped.
-/// A flow rebuilt merely to slide along the same stock face keeps its
-/// side. The optimizer never revisits an existing side, even when a
-/// connector added by this patch now crosses the label: hand placement
-/// wins, and the human (or a full relayout) can move it.
+/// for elements created in this pass -- new variables, kind-changed
+/// rebuilds, and flows rebuilt because their attachment changed. The
+/// optimizer never revisits an existing side, even when a connector added
+/// by this patch now crosses the label: hand placement wins, and the human
+/// (or a full relayout) can move it.
+///
+/// Flows: a flow is rebuilt only when the patch creates it or changes the
+/// flow's own attachment -- moves it to another stock, drops it from a
+/// stock's list (that end becomes a cloud), lists it on a stock at its cloud
+/// end (that end becomes the stock), deletes an attached stock, or changes
+/// an attached stock's kind -- because its stored endpoints then name the
+/// wrong element. A flow the patch names keeps its geometry (a rename changes
+/// only its name), and every other flow, a sibling of a flow added to or
+/// removed from the same stock included, comes back byte for byte -- points,
+/// valve, label side and clouds -- even where a fresh layout would draw it
+/// differently: re-spacing a face moves pipes a human placed. A created side
+/// flow takes a face its stock's drawn side flows leave free where there is
+/// one (`classify_flow_sides`). The endpoint snap, the free-slot placement
+/// (`face_slots`) and the finishing pass (`finish_flow_geometry`) run only on
+/// the flows this pass creates, so a created flow holds the flow invariants,
+/// its stock end takes the largest free gap on its face (a flow between two
+/// parallel faces takes one line where their free gaps overlap), and its
+/// cloud is kept off the other clouds. The one repair made to an untouched
+/// flow is wiring an endpoint the view left unattached to the flow's own
+/// cloud (`diff_clouds`), which moves nothing. `layout_flow_tests.rs`
+/// enumerates the arms.
 ///
 /// Composition:
 /// 1. Compute metadata for the post-patch model
 /// 2. Seed LayoutState from old view
-/// 3. Process deletions and renames from the patch
+/// 3. Process deletions and renames from the patch, and remove the
+///    elements whose kind or attachment changed so they are rebuilt
 /// 4. Identify new elements, compute initial positions
 /// 5. Create view elements and settle via pinned SFDP
-/// 6. Diff connectors/clouds, place labels for this pass's elements,
-///    apply loop curvature
-/// 7. Build StockFlow from final state
+/// 6. Settle the created flows' geometry (snap, free slot, finishing pass)
+/// 7. Diff connectors/clouds
+/// 8. Polish and declutter what this pass added, apply loop curvature
+/// 9. Build StockFlow from final state
 pub fn incremental_layout(
     old_view: &datamodel::StockFlow,
     project: &datamodel::Project,
@@ -1793,276 +1717,49 @@ pub fn incremental_layout(
     // Step 4: Identify new elements and compute initial positions
     let new_elements = state.identify_new_elements(model);
 
-    // Compute flow attachments for flows on stocks that are affected by
-    // flow additions, deletions, or connection changes.  This ensures
-    // preserved flows get reclassified when a sibling chain flow is
-    // added or removed.
+    // The face each new flow attaches on, from its stocks' current flow lists
+    // and the faces their drawn side flows already take. Only new flows read
+    // it: a preserved sibling keeps its face and slot, whatever the
+    // classification would give it now.
     let mut incr_flow_attachments: HashMap<String, FlowAttachment> = HashMap::new();
-    let mut affected_stocks: HashSet<String> = HashSet::new();
-
     for flow_ident in &new_elements.new_flows {
         let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
-        if let Some(stock) = from_stock {
-            affected_stocks.insert(stock.to_string());
-        }
-        if let Some(stock) = to_stock {
-            affected_stocks.insert(stock.to_string());
-        }
-    }
-
-    // Also mark stocks whose flow connections changed via the patch
-    // (e.g. when a chain flow is deleted, the stock loses a flow and
-    // remaining cloud flows may need reclassification from Bottom/Top
-    // back to Right/Left).
-    for op in &patch.ops {
-        if let crate::patch::ModelOperation::UpdateStockFlows { ident, .. } = op {
-            let canonical = canonicalize(ident).into_owned();
-            affected_stocks.insert(canonical);
-        }
-    }
-
-    // For deleted flows, find which stocks they were connected to in the
-    // old view. This handles patches that only emit DeleteVariable without
-    // UpdateStockFlows -- the remaining sibling flows still need to be
-    // reclassified.
-    // Build UID-to-ident map from the model's stock variables rather than
-    // from view element labels, since labels go through
-    // format_label_with_line_breaks and may not round-trip through
-    // canonicalize for quoted names like "a.b".
-    let stock_uid_to_ident: HashMap<i32, String> = model
-        .variables
-        .iter()
-        .filter_map(|v| {
-            if !matches!(v, datamodel::Variable::Stock(_)) {
-                return None;
+        for stock in [from_stock, to_stock].into_iter().flatten() {
+            let existing = existing_side_flow_faces(&state, &config, &metadata, stock);
+            if let Some(attachment) =
+                classify_flow_sides(stock, &metadata, &existing).remove(flow_ident)
+            {
+                incr_flow_attachments.insert(flow_ident.clone(), attachment);
             }
-            let canonical = canonicalize(v.get_ident()).into_owned();
-            state
-                .uid_manager
-                .get_uid(&canonical)
-                .map(|uid| (uid, canonical))
-        })
-        .collect();
-    for op in &patch.ops {
-        if let crate::patch::ModelOperation::DeleteVariable { ident } = op {
-            let canonical = canonicalize(ident).into_owned();
-            // Match by UID rather than display name: labels go through
-            // format_label_with_line_breaks which strips quoting, so
-            // canonicalizing the label back can produce a different ident
-            // for names like "a.b".
-            let deleted_uid = match state.uid_manager.get_uid(&canonical) {
-                Some(uid) => uid,
-                None => continue,
-            };
-            for elem in &old_view.elements {
-                if let ViewElement::Flow(f) = elem
-                    && f.uid == deleted_uid
-                {
-                    for pt in &f.points {
-                        if let Some(uid) = pt.attached_to_uid
-                            && let Some(stock_ident) = stock_uid_to_ident.get(&uid)
-                        {
-                            affected_stocks.insert(stock_ident.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // The faces the affected stocks' side flows are drawn on before the patch.
-    let mut existing_faces: HashMap<String, StockAttachSide> = HashMap::new();
-    for stock in &affected_stocks {
-        let existing = existing_side_flow_faces(&state, &config, &metadata, stock);
-        let sides = classify_flow_sides(stock, &metadata, &existing);
-        incr_flow_attachments.extend(sides);
-        existing_faces.extend(existing);
-    }
-
-    // Re-sort flows within each side group by existing position rather
-    // than alphabetical ident, so imported or manually-edited ordering
-    // is preserved when a sibling is added or removed.
-    reorder_attachments_by_position(
-        &mut incr_flow_attachments,
-        &state,
-        &affected_stocks,
-        &metadata,
-    );
-
-    // Check if any existing (preserved) flows need to change sides.
-    // If classify_flow_sides assigns Bottom/Top to a flow that is
-    // currently horizontal (or Right/Left to one that is vertical),
-    // delete and rebuild it so its geometry matches.
-    let mut flows_to_rebuild: Vec<String> = Vec::new();
-    // Label sides of flows rebuilt only to move along the same stock face:
-    // their pipe keeps its orientation, so the existing (possibly hand-placed)
-    // side stays valid and is restored after the rebuild. Flows whose
-    // orientation flips are rebuilt with a freshly chosen side instead.
-    let mut offset_rebuilt_label_sides: HashMap<String, LabelSide> = HashMap::new();
-    for (flow_ident, attachment) in &incr_flow_attachments {
-        // Skip flows that are new (they'll be created below)
-        if new_elements.new_flows.contains(flow_ident) {
-            continue;
-        }
-        // Skip stock-to-stock (chain) flows entirely: their pipe geometry
-        // is determined by both stock positions and ignores the attachment
-        // offset.  Rebuilding them via attachment_based_flow_position (which
-        // only knows one stock) would place the valve beside one stock
-        // instead of between the pair.
-        let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
-        if from_stock.is_some() && to_stock.is_some() {
-            continue;
-        }
-        // Check if this flow exists and has mismatched orientation or offset
-        if let Some(uid) = state.uid_manager.get_uid(flow_ident) {
-            let existing = state.elements.iter().find(|e| {
-                if let ViewElement::Flow(f) = e {
-                    f.uid == uid
-                } else {
-                    false
-                }
-            });
-            if let Some(ViewElement::Flow(f)) = existing {
-                let orientation = compute_flow_orientation(&f.points);
-                let needs_vertical = matches!(
-                    attachment.side,
-                    StockAttachSide::Bottom | StockAttachSide::Top
-                );
-                let is_vertical = matches!(orientation, FlowOrientation::Vertical);
-                if needs_vertical != is_vertical {
-                    flows_to_rebuild.push(flow_ident.clone());
-                } else if existing_faces
-                    .get(flow_ident)
-                    .is_some_and(|&side| side != attachment.side)
-                {
-                    // Moved to the opposite face (top <-> bottom, left <->
-                    // right): the pipe keeps its orientation, so the label
-                    // side stays valid.
-                    flows_to_rebuild.push(flow_ident.clone());
-                    offset_rebuilt_label_sides.insert(flow_ident.clone(), f.label_side);
-                } else {
-                    // Orientation matches but the offset may have changed
-                    // (e.g. a sibling was added/removed on the same face).
-                    let stock_name = from_stock.or(to_stock);
-                    if let Some(sn) = stock_name
-                        && let Some(stock_uid) = state.uid_manager.get_uid(sn)
-                        && let Some(&stock_pos) = state.positions.get(&stock_uid)
-                    {
-                        let (expected, current) = if needs_vertical {
-                            let exp = stock_pos.x - config.stock_width / 2.0
-                                + config.stock_width * attachment.offset;
-                            let cur = f
-                                .points
-                                .iter()
-                                .find(|pt| pt.attached_to_uid == Some(stock_uid))
-                                .map(|pt| pt.x);
-                            (exp, cur)
-                        } else {
-                            let exp = stock_pos.y - config.stock_height / 2.0
-                                + config.stock_height * attachment.offset;
-                            let cur = f
-                                .points
-                                .iter()
-                                .find(|pt| pt.attached_to_uid == Some(stock_uid))
-                                .map(|pt| pt.y);
-                            (exp, cur)
-                        };
-                        if let Some(c) = current
-                            && (c - expected).abs() > 0.5
-                        {
-                            flows_to_rebuild.push(flow_ident.clone());
-                            offset_rebuilt_label_sides.insert(flow_ident.clone(), f.label_side);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Save old positions before deletion so we have a fallback if
-    // attachment_based_flow_position can't resolve the stock UID
-    // (e.g. imported views with quoted identifiers).
-    let old_flow_positions: HashMap<String, Position> = flows_to_rebuild
-        .iter()
-        .filter_map(|ident| {
-            let uid = state.uid_manager.get_uid(ident)?;
-            state.positions.get(&uid).map(|&pos| (ident.clone(), pos))
-        })
-        .collect();
-
-    // Delete and rebuild flows that need to change orientation or offset
-    for flow_ident in &flows_to_rebuild {
-        let saved_display = state
-            .display_names
-            .get(&canonicalize(flow_ident).into_owned())
-            .cloned();
-        state.apply_deletion(flow_ident);
-        if let Some(display) = saved_display {
-            state
-                .display_names
-                .insert(canonicalize(flow_ident).into_owned(), display);
         }
     }
 
     // Every element still standing at this point survived the patch untouched
     // (or was merely renamed): it keeps its position, and a named one its label
     // side, for the rest of the pass. Whatever gets created from here on -- new
-    // variables, kind-changed or endpoint-changed rebuilds, orientation-flipped
-    // flows -- is absent from this snapshot, so `declutter_part` below chooses
-    // its side and may move it. Offset-only rebuilt flows are added back to the
-    // pinned sides explicitly because they were just deleted but keep their
-    // orientation.
+    // variables, kind-changed rebuilds, flows rebuilt because their attachment
+    // changed -- is absent from this snapshot, so `declutter_part` below chooses
+    // its side and may move it.
     let standing_uids: HashSet<i32> = state.elements.iter().map(ViewElement::get_uid).collect();
-    let mut pinned_label_sides: HashMap<i32, LabelSide> = state
+    let pinned_labels: HashSet<i32> = state
         .elements
         .iter()
-        .filter_map(|elem| match elem {
-            ViewElement::Stock(s) => Some((s.uid, s.label_side)),
-            ViewElement::Flow(f) => Some((f.uid, f.label_side)),
-            ViewElement::Aux(a) => Some((a.uid, a.label_side)),
-            ViewElement::Module(m) => Some((m.uid, m.label_side)),
-            _ => None,
+        .filter(|elem| {
+            matches!(
+                elem,
+                ViewElement::Stock(_)
+                    | ViewElement::Flow(_)
+                    | ViewElement::Aux(_)
+                    | ViewElement::Module(_)
+            )
         })
+        .map(ViewElement::get_uid)
         .collect();
-    for (flow_ident, side) in &offset_rebuilt_label_sides {
-        if let Some(uid) = state.uid_manager.get_uid(flow_ident) {
-            pinned_label_sides.insert(uid, *side);
-        }
-    }
-
-    // Compute positions for rebuilt flows based on their attachment info,
-    // falling back to the old position if the stock UID lookup fails.
-    for flow_ident in &flows_to_rebuild {
-        let pos = attachment_based_flow_position(
-            &state,
-            &config,
-            &metadata,
-            flow_ident,
-            &incr_flow_attachments,
-        )
-        .or_else(|| old_flow_positions.get(flow_ident).copied());
-        if let Some(pos) = pos {
-            let uid = state.get_or_alloc_uid(flow_ident);
-            create_flow_view_element(
-                &mut state,
-                &config,
-                &metadata,
-                flow_ident,
-                uid,
-                pos,
-                &incr_flow_attachments,
-            )?;
-        }
-    }
-
-    restore_label_sides(&mut state, &pinned_label_sides);
-    let needs_label_placement = |uid: i32| !pinned_label_sides.contains_key(&uid);
+    let needs_label_placement = |uid: i32| !pinned_labels.contains(&uid);
 
     if new_elements.is_empty() {
-        // No new elements and no settlement step, so rebuilt flows
-        // already have correct geometry from create_flow_view_element.
-        // Skip resnap entirely to avoid rewriting unrelated manual or
-        // imported flow endpoints elsewhere in the diagram.
+        // No new element, so no flow is created or rebuilt: every flow in the
+        // view is untouched, and none of the flow geometry passes runs.
         diff_connectors(&mut state, &metadata);
         diff_clouds(&mut state, &metadata);
         declutter::declutter_part(&mut state.elements, needs_label_placement, |_| false);
@@ -2070,6 +1767,10 @@ pub fn incremental_layout(
         validate_view_completeness(&state, model)?;
         return Ok(build_stock_flow_from_state(state, old_view));
     }
+
+    // Every flow this pass builds, whichever placement below lays it out: the
+    // flow geometry passes of step 6b run on these and on nothing else.
+    let created_flow_idents = new_elements.new_flows.clone();
 
     // Step 4b: chains the patch added whole are laid out as chains and set
     // down beside the diagram; the rest of what is new is placed generically.
@@ -2240,7 +1941,20 @@ pub fn incremental_layout(
         }
     }
 
-    resnap_flow_endpoints(&mut state, &config);
+    // Step 6b: Settle the geometry of the flows this pass created, and only
+    // those: an untouched flow comes back byte for byte, even where a fresh
+    // layout would draw it differently. Each created flow's stock ends snap
+    // onto the face its valve approaches and take the largest free gap on
+    // that face, so a created flow never lands on a preserved sibling; the
+    // pipe is then orthogonalized and brought to the flow invariants.
+    let created_flows: HashSet<i32> = created_flow_idents
+        .iter()
+        .filter_map(|ident| state.uid_manager.get_uid(ident))
+        .collect();
+    let is_created = |uid: i32| created_flows.contains(&uid);
+    resnap_flow_endpoints(&mut state, &config, is_created);
+    face_slots::place_created_flow_ends(&mut state.elements, &created_flows);
+    finish_flow_geometry(&mut state.elements, is_created);
 
     // Step 7: Diff connectors and clouds
     diff_connectors(&mut state, &metadata);
@@ -2268,10 +1982,6 @@ pub fn incremental_layout(
         }
     }
     apply_loop_curvature(&mut state, &config, model, &metadata);
-    // Guarantee flows stay orthogonal after re-snapping endpoints to moved
-    // stocks (only rewrites pipes that actually went diagonal; hand-routed
-    // orthogonal flows are left untouched).
-    orthogonal::orthogonalize_flow_pipes(&mut state.elements);
 
     validate_view_completeness(&state, model)?;
 

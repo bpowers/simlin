@@ -12,6 +12,7 @@ pub mod declutter;
 mod detect_ltm_loops;
 #[cfg(any(test, feature = "layout_eval"))]
 pub mod eval_stats;
+mod face_slots;
 pub mod graph;
 mod incremental;
 pub mod metadata;
@@ -2890,7 +2891,7 @@ pub fn fresh_layout(
     // Phase 5b: Settle flow geometry. This runs last (after declutter/normalize)
     // so nothing moves a stock, valve or cloud after it, and before scoring so
     // the metric sees the real pipe geometry.
-    finish_flow_geometry(&mut state.elements);
+    finish_flow_geometry(&mut state.elements, |_| true);
 
     // Phase 6: Apply feedback loop curvature
     apply_loop_curvature(&mut state, config, model, metadata);
@@ -2933,10 +2934,12 @@ pub fn fresh_layout(
 /// result. The orthogonalizer only routes between a pipe's two attached ends,
 /// leaving the valve and the clouds where placement put them, and placement
 /// positions those independently of the pipe; the normalization owns where
-/// they end up, as it does for imported views.
-fn finish_flow_geometry(elements: &mut [ViewElement]) {
-    orthogonal::orthogonalize_flow_pipes(elements);
-    crate::diagram::flow_geometry::normalize_flow_geometry(elements);
+/// they end up, as it does for imported views. `include` selects the flows (by
+/// uid) the pass may change: every flow in a fresh layout, and only the flows
+/// it creates in an incremental one.
+fn finish_flow_geometry(elements: &mut [ViewElement], include: impl Fn(i32) -> bool + Copy) {
+    orthogonal::orthogonalize_flow_pipes(elements, include);
+    crate::diagram::flow_geometry::normalize_flow_geometry_where(elements, include);
 }
 
 /// Copy free nodes' element coordinates back into `state.positions` after a

@@ -532,6 +532,17 @@ pub(crate) fn project_valve_onto_pipe(points: &[FlowPoint], valve: &mut (f64, f6
 /// Unattached endpoints and diagonal multi-point segments are left alone:
 /// the importer that produced them owns resolving them.
 pub(crate) fn normalize_flow_geometry(elements: &mut [ViewElement]) {
+    normalize_flow_geometry_where(elements, |_| true);
+}
+
+/// `normalize_flow_geometry` over only the flows `include` selects (by uid).
+/// Stocks and clouds are read from the whole view, but only the selected
+/// flows and the clouds their ends are attached to move: incremental layout
+/// normalizes the flows it creates and leaves every preserved flow as it was.
+pub(crate) fn normalize_flow_geometry_where(
+    elements: &mut [ViewElement],
+    include: impl Fn(i32) -> bool,
+) {
     let stocks: HashMap<i32, (f64, f64)> = elements
         .iter()
         .filter_map(|e| match e {
@@ -550,7 +561,7 @@ pub(crate) fn normalize_flow_geometry(elements: &mut [ViewElement]) {
     let mut cloud_centers: HashMap<i32, (f64, f64)> = HashMap::new();
     for elem in elements.iter_mut() {
         let ViewElement::Flow(f) = elem else { continue };
-        if f.points.len() < 2 {
+        if !include(f.uid) || f.points.len() < 2 {
             continue;
         }
         straighten_two_point_pipe(f);

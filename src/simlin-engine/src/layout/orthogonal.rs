@@ -15,9 +15,11 @@
 //!
 //! The pass is deliberately conservative and idempotent:
 //!
-//! * a pipe whose every segment is already axis-aligned is left untouched (so a
-//!   hand-routed flow preserved by the incremental path is never clobbered, and
-//!   re-running the pass is a no-op);
+//! * a pipe whose every segment is already axis-aligned is left untouched, so
+//!   re-running the pass is a no-op;
+//! * the caller chooses which flows the pass may rewrite (incremental layout
+//!   passes only the flows it creates, so a preserved hand-routed flow is never
+//!   clobbered, diagonal or not);
 //! * only pipes that actually contain a diagonal segment are rebuilt, and they
 //!   are rebuilt from their two *attached* endpoints (the faces the placement /
 //!   resnap passes already chose), inserting bends so each segment leaves its
@@ -25,8 +27,10 @@
 //!
 //! The valve (the flow's `(x, y)`) is left where the layout put it. For the
 //! common stock-to-stock case (both endpoints on left/right faces) the rebuilt
-//! `Z` route's middle segment passes through the valve column, so the valve
-//! still sits on the rendered pipe.
+//! `Z` route's middle segment passes through the valve column; any other route
+//! can miss the valve, and the normalization that follows this pass
+//! (`diagram::flow_geometry::normalize_flow_geometry`, the layout's finishing
+//! pass) owns bringing it onto the pipe.
 
 use std::collections::HashMap;
 
@@ -167,11 +171,17 @@ fn dedup_collinear(points: Vec<FlowPoint>) -> Vec<FlowPoint> {
     out
 }
 
-/// Rewrite every diagonal flow pipe in `elements` into axis-aligned segments.
+/// Rewrite the diagonal pipe of every flow `include` selects (by uid) into
+/// axis-aligned segments.
 ///
 /// Reads stock centers from `elements` (so it must run after positions are
-/// final). Flows whose pipes are already orthogonal are left untouched.
-pub(crate) fn orthogonalize_flow_pipes(elements: &mut [ViewElement]) {
+/// final). Flows whose pipes are already orthogonal are left untouched, and so
+/// is every flow `include` rejects: incremental layout passes only the flows
+/// it creates, because a preserved flow comes back byte for byte.
+pub(crate) fn orthogonalize_flow_pipes(
+    elements: &mut [ViewElement],
+    include: impl Fn(i32) -> bool,
+) {
     let stocks: HashMap<i32, (f64, f64)> = elements
         .iter()
         .filter_map(|e| match e {
@@ -182,7 +192,7 @@ pub(crate) fn orthogonalize_flow_pipes(elements: &mut [ViewElement]) {
 
     for elem in elements.iter_mut() {
         let ViewElement::Flow(f) = elem else { continue };
-        if f.points.len() < 2 || pipe_is_orthogonal(&f.points) {
+        if !include(f.uid) || f.points.len() < 2 || pipe_is_orthogonal(&f.points) {
             continue;
         }
 
@@ -298,7 +308,7 @@ mod tests {
             ),
         ];
         let before = flow_points(&elements[2]).to_vec();
-        orthogonalize_flow_pipes(&mut elements);
+        orthogonalize_flow_pipes(&mut elements, |_| true);
         assert_eq!(flow_points(&elements[2]), before.as_slice());
     }
 
@@ -321,7 +331,7 @@ mod tests {
                 ],
             ),
         ];
-        orthogonalize_flow_pipes(&mut elements);
+        orthogonalize_flow_pipes(&mut elements, |_| true);
         let pts = flow_points(&elements[2]);
         assert_orthogonal(pts);
         assert!(pts.len() >= 3, "expected a bend, got {} points", pts.len());
@@ -352,7 +362,7 @@ mod tests {
                 ],
             ),
         ];
-        orthogonalize_flow_pipes(&mut elements);
+        orthogonalize_flow_pipes(&mut elements, |_| true);
         let pts = flow_points(&elements[2]);
         assert_orthogonal(pts);
         assert_eq!(pts.len(), 3, "an L should have exactly one bend");
@@ -376,9 +386,9 @@ mod tests {
                 ],
             ),
         ];
-        orthogonalize_flow_pipes(&mut elements);
+        orthogonalize_flow_pipes(&mut elements, |_| true);
         let once = flow_points(&elements[2]).to_vec();
-        orthogonalize_flow_pipes(&mut elements);
+        orthogonalize_flow_pipes(&mut elements, |_| true);
         let twice = flow_points(&elements[2]).to_vec();
         assert_eq!(once, twice);
     }
@@ -398,7 +408,7 @@ mod tests {
                 vec![fp(100.0 + half_w, 100.0, Some(1)), fp(220.0, 180.0, None)],
             ),
         ];
-        orthogonalize_flow_pipes(&mut elements);
+        orthogonalize_flow_pipes(&mut elements, |_| true);
         let pts = flow_points(&elements[1]);
         assert_orthogonal(pts);
     }

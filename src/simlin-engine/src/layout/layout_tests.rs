@@ -4117,7 +4117,7 @@ fn test_resnap_preserves_stock_edge_position() {
     }));
     state.positions.insert(2, Position::new(300.0, 100.0));
 
-    resnap_flow_endpoints(&mut state, &config);
+    resnap_flow_endpoints(&mut state, &config, |_| true);
 
     let flow = state
         .elements
@@ -4199,7 +4199,7 @@ fn test_resnap_snaps_to_correct_face() {
     }));
     state.positions.insert(2, Position::new(200.0, 100.0));
 
-    resnap_flow_endpoints(&mut state, &config);
+    resnap_flow_endpoints(&mut state, &config, |_| true);
 
     let flow = state
         .elements
@@ -4280,7 +4280,7 @@ fn test_resnap_vertical_flow_snaps_to_bottom_edge() {
     }));
     state.positions.insert(2, Position::new(200.0, 250.0));
 
-    resnap_flow_endpoints(&mut state, &config);
+    resnap_flow_endpoints(&mut state, &config, |_| true);
 
     let flow = state
         .elements
@@ -5701,3 +5701,6 @@ mod flow_side_tests;
 
 #[path = "layout_flow_geometry_tests.rs"]
 mod flow_geometry_tests;
+
+#[path = "layout_flow_tests.rs"]
+mod flow_tests;

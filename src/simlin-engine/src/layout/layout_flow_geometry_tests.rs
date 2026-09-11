@@ -67,7 +67,7 @@ fn test_resnap_keeps_corner_clearance_on_both_approaches() {
             compat: None,
             label_compat: None,
         }));
-        resnap_flow_endpoints(&mut state, &config);
+        resnap_flow_endpoints(&mut state, &config, |_| true);
         let ViewElement::Flow(f) = &state.elements[1] else {
             unreachable!()
         };
@@ -133,7 +133,7 @@ fn test_finish_flow_geometry_brings_a_valve_off_the_route_onto_it() {
             compat: None,
         }),
     ];
-    finish_flow_geometry(&mut elements);
+    finish_flow_geometry(&mut elements, |_| true);
     assert_eq!(flow_invariant_violations(&elements), Vec::<String>::new());
 }
 
