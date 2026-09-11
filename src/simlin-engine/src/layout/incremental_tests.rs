@@ -154,3 +154,54 @@ fn new_parameters_are_decluttered_around_the_fixed_diagram() {
         assert_eq!(after.get(uid), Some(g), "element {uid} must stay put");
     }
 }
+
+#[test]
+fn chains_added_whole_are_laid_out_as_chains_beside_the_diagram() {
+    // An agent adds two whole stock-flow chains to a diagram in one edit: a
+    // two-stock capital chain and a one-stock pollution chain. Each must be
+    // drawn as a fresh layout draws a chain -- stocks in a row, pipes straight
+    // -- in free space, not piled onto the existing chain or each other.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("population", &["births"], &["deaths"])),
+        datamodel::Variable::Flow(flow("births", "population * 0.03")),
+        datamodel::Variable::Flow(flow("deaths", "population * 0.02")),
+    ]);
+    let base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let ops = vec![
+        ModelOperation::UpsertStock(stock("capital", &["investment"], &["retirement"])),
+        ModelOperation::UpsertStock(stock("retired capital", &["retirement"], &["scrapping"])),
+        ModelOperation::UpsertFlow(flow("investment", "10")),
+        ModelOperation::UpsertFlow(flow("retirement", "capital / 20")),
+        ModelOperation::UpsertFlow(flow("scrapping", "retired_capital / 5")),
+        ModelOperation::UpsertStock(stock("pollution", &["emissions"], &["absorption"])),
+        ModelOperation::UpsertFlow(flow("emissions", "capital * 0.1")),
+        ModelOperation::UpsertFlow(flow("absorption", "pollution / 10")),
+    ];
+    let (_, view) = sync(&project, &base, ops);
+
+    let m = compute_layout_metrics(&view, &LayoutConfig::default());
+    assert_eq!(m.node_overlap, 0.0, "no shape may cover another");
+    assert_eq!(m.label_overlap, 0.0, "no name may be covered");
+    assert_eq!(m.flow_bends, 0.0, "every pipe of a chain is straight");
+
+    let stock_y = |name: &str| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Stock(s) if canonicalize(&s.name) == name => Some(s.y),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} drawn"))
+    };
+    assert_eq!(
+        stock_y("capital"),
+        stock_y("retired_capital"),
+        "a chain's stocks share a row"
+    );
+
+    let before = geometry(&base);
+    let after = geometry(&view);
+    for (uid, g) in &before {
+        assert_eq!(after.get(uid), Some(g), "element {uid} must stay put");
+    }
+}

@@ -8,6 +8,7 @@
 //! changed, and diff the connectors and clouds.
 
 use super::*;
+use crate::diagram::common::{Rect as Bounds, merge_bounds};
 
 /// Compute initial positions for newly-added elements based on their
 /// dependency connections to existing elements.
@@ -1298,6 +1299,206 @@ pub(super) fn build_stock_flow_from_state(
     }
 }
 
+/// Room between a chain set down beside the diagram and the diagram itself:
+/// enough for a row of parameters between them.
+const NEW_CHAIN_GAP: f64 = 75.0;
+
+/// Lay out each chain the patch added whole -- every one of its stocks new --
+/// the way a fresh layout lays out a chain, and set it down in free space
+/// beside the existing diagram. Returns the idents of the stocks and flows it
+/// placed: the generic placement must not create them again, and settling must
+/// hold them still, since a chain whose parameters have not arrived yet only
+/// repels what is already drawn and the force pass would push it anywhere.
+///
+/// A chain goes below the diagram or to its right. When it reads from or feeds
+/// variables already drawn, it takes whichever side is nearer them; otherwise
+/// whichever keeps the whole diagram nearer square, preferring below -- a new
+/// row, the way modelers stack sectors.
+fn place_new_chains(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    metadata: &ComputedMetadata,
+    new_elements: &NewElements,
+) -> Result<HashSet<String>, String> {
+    let new_stocks: HashSet<&str> = new_elements.new_stocks.iter().map(String::as_str).collect();
+    let new_vars: HashSet<&str> = new_elements
+        .new_stocks
+        .iter()
+        .chain(&new_elements.new_flows)
+        .chain(&new_elements.new_auxes)
+        .chain(&new_elements.new_modules)
+        .map(String::as_str)
+        .collect();
+    let mut placed: HashSet<String> = HashSet::new();
+    for chain in &metadata.chains {
+        let whole = !chain.stocks.is_empty()
+            && chain.stocks.iter().all(|s| new_stocks.contains(s.as_str()));
+        if !whole {
+            continue;
+        }
+        let Some(diagram) = footprint_bounds(&state.elements) else {
+            continue;
+        };
+        let flows: Vec<String> = chain
+            .flows
+            .iter()
+            .filter(|f| new_vars.contains(f.as_str()))
+            .cloned()
+            .collect();
+        let first_created = state.elements.len();
+        layout_chain(
+            state,
+            config,
+            metadata,
+            &chain.stocks,
+            &flows,
+            Position::new(0.0, 0.0),
+        )?;
+        let Some(chain_box) = footprint_bounds(&state.elements[first_created..]) else {
+            continue;
+        };
+
+        let below = (
+            diagram.left - chain_box.left,
+            diagram.bottom + NEW_CHAIN_GAP - chain_box.top,
+        );
+        let right = (
+            diagram.right + NEW_CHAIN_GAP - chain_box.left,
+            diagram.top - chain_box.top,
+        );
+        let chain_vars: HashSet<&str> = chain.all_vars.iter().map(String::as_str).collect();
+        let neighbors: Vec<Position> = chain
+            .all_vars
+            .iter()
+            .flat_map(|var| {
+                metadata
+                    .dep_graph
+                    .get(var)
+                    .into_iter()
+                    .chain(metadata.reverse_dep_graph.get(var))
+                    .flatten()
+            })
+            .filter(|other| {
+                !chain_vars.contains(other.as_str()) && !new_vars.contains(other.as_str())
+            })
+            .filter_map(|other| {
+                let uid = state.uid_manager.get_uid(other)?;
+                state.positions.get(&uid).copied()
+            })
+            .collect();
+        let (dx, dy) = if neighbors.is_empty() {
+            let aspect = |(dx, dy): (f64, f64)| {
+                let union = merge_bounds(diagram, translated(&chain_box, dx, dy));
+                let (w, h) = (union.right - union.left, union.bottom - union.top);
+                w.max(h) / w.min(h).max(1.0)
+            };
+            if aspect(right) < aspect(below) - 1e-9 {
+                right
+            } else {
+                below
+            }
+        } else {
+            let n = neighbors.len() as f64;
+            let cx = neighbors.iter().map(|p| p.x).sum::<f64>() / n;
+            let cy = neighbors.iter().map(|p| p.y).sum::<f64>() / n;
+            let distance = |(dx, dy): (f64, f64)| {
+                let center_x = (chain_box.left + chain_box.right) / 2.0 + dx;
+                let center_y = (chain_box.top + chain_box.bottom) / 2.0 + dy;
+                (center_x - cx).hypot(center_y - cy)
+            };
+            if distance(right) < distance(below) - 1e-9 {
+                right
+            } else {
+                below
+            }
+        };
+
+        for elem in &mut state.elements[first_created..] {
+            translate_view_element(elem, dx, dy);
+            if let Some(pos) = state.positions.get_mut(&elem.get_uid()) {
+                *pos = Position::new(pos.x + dx, pos.y + dy);
+            }
+        }
+        placed.extend(chain.stocks.iter().cloned());
+        placed.extend(flows);
+    }
+    Ok(placed)
+}
+
+/// `idents` less the ones in `placed`.
+fn without(idents: Vec<String>, placed: &HashSet<String>) -> Vec<String> {
+    idents.into_iter().filter(|i| !placed.contains(i)).collect()
+}
+
+/// The union of what `elements` draw -- shapes, pipes, and labels at their
+/// current sides -- or `None` when they draw nothing.
+fn footprint_bounds(elements: &[ViewElement]) -> Option<Bounds> {
+    use crate::diagram::label::label_bounds;
+    use crate::layout::metrics::{element_label_props_for, node_shape_box, pipe_rects};
+    let mut rects: Vec<Bounds> = Vec::new();
+    for elem in elements {
+        rects.extend(node_shape_box(elem));
+        if let ViewElement::Flow(f) = elem {
+            rects.extend(pipe_rects(f));
+        }
+        let side = match elem {
+            ViewElement::Aux(a) => Some(a.label_side),
+            ViewElement::Stock(s) => Some(s.label_side),
+            ViewElement::Flow(f) => Some(f.label_side),
+            ViewElement::Module(m) => Some(m.label_side),
+            _ => None,
+        };
+        if let Some(props) = side.and_then(|side| element_label_props_for(elem, side)) {
+            rects.push(label_bounds(&props));
+        }
+    }
+    rects.into_iter().reduce(merge_bounds)
+}
+
+fn translated(r: &Bounds, dx: f64, dy: f64) -> Bounds {
+    Bounds {
+        left: r.left + dx,
+        top: r.top + dy,
+        right: r.right + dx,
+        bottom: r.bottom + dy,
+    }
+}
+
+/// Move a drawn element by `(dx, dy)`, a flow's pipe with it.
+fn translate_view_element(elem: &mut ViewElement, dx: f64, dy: f64) {
+    match elem {
+        ViewElement::Stock(s) => {
+            s.x += dx;
+            s.y += dy;
+        }
+        ViewElement::Flow(f) => {
+            f.x += dx;
+            f.y += dy;
+            for pt in &mut f.points {
+                pt.x += dx;
+                pt.y += dy;
+            }
+        }
+        ViewElement::Aux(a) => {
+            a.x += dx;
+            a.y += dy;
+        }
+        ViewElement::Module(m) => {
+            m.x += dx;
+            m.y += dy;
+        }
+        ViewElement::Cloud(c) => {
+            c.x += dx;
+            c.y += dy;
+        }
+        ViewElement::Alias(a) => {
+            a.x += dx;
+            a.y += dy;
+        }
+        ViewElement::Link(_) | ViewElement::Group(_) => {}
+    }
+}
+
 /// Apply a model patch incrementally to an existing diagram view,
 /// preserving existing element positions and only placing new or
 /// modified elements.
@@ -1795,6 +1996,16 @@ pub fn incremental_layout(
         validate_view_completeness(&state, model)?;
         return Ok(build_stock_flow_from_state(state, old_view));
     }
+
+    // Step 4b: chains the patch added whole are laid out as chains and set
+    // down beside the diagram; the rest of what is new is placed generically.
+    let placed_chain_vars = place_new_chains(&mut state, &config, &metadata, &new_elements)?;
+    let new_elements = NewElements {
+        new_stocks: without(new_elements.new_stocks, &placed_chain_vars),
+        new_flows: without(new_elements.new_flows, &placed_chain_vars),
+        new_auxes: new_elements.new_auxes,
+        new_modules: new_elements.new_modules,
+    };
 
     let initial_positions = compute_new_element_positions(&state, &metadata, &new_elements);
 
