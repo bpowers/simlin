@@ -31,14 +31,15 @@ use crate::diagram::common::{Rect, merge_bounds};
 use crate::diagram::label::label_bounds;
 
 use super::metrics::{
-    LabelScene, MetricWeights, alias_label_props_for, alias_source_names, element_label_props_for,
-    node_shape_box, pipe_rects,
+    COMFORTABLE_CLEARANCE, LabelScene, MetricWeights, alias_label_props_for, alias_source_names,
+    element_label_props_for, node_shape_box, pipe_rects,
 };
 
 /// Breathing room (logical units) enforced between any two element footprints
-/// after decluttering. Small enough to stay compact, large enough that adjacent
-/// boxes read as separate. ~half a label line-height.
-const SEPARATION_MARGIN: f64 = 6.0;
+/// after decluttering: the clearance below which the metric charges crowding,
+/// so the tightest arrangement the declutter (and its compaction) reaches is
+/// one the metric does not charge.
+const SEPARATION_MARGIN: f64 = COMFORTABLE_CLEARANCE;
 
 /// Fraction of each iteration's accumulated push that is applied. Below 1.0 to
 /// damp oscillation when a node is squeezed between several neighbors; the loop
@@ -857,6 +858,9 @@ pub fn declutter_view(elements: &mut [ViewElement]) {
     // any over-zoom the jam recovery above introduced). This drives `sprawl`
     // down toward hand-drawn density without ever reintroducing an overlap.
     compact_view(elements, &alias_names);
+    // The compaction moved everything closer; choose the sides again on the
+    // final geometry.
+    optimize_label_sides(elements, &alias_names);
 }
 
 /// Declutter part of a diagram around the rest, which stays exactly as it is:
@@ -1337,6 +1341,35 @@ mod tests {
             LabelSide::Bottom,
             "the new label leaves the struck side"
         );
+    }
+
+    #[test]
+    fn test_declutter_leaves_nothing_the_metric_charges_as_crowding() {
+        // Four auxes jammed into a tight cluster. The declutter separates and
+        // then compacts them; the tightest arrangement it may stop at is the
+        // metric's comfortable clearance, never closer.
+        use crate::layout::config::LayoutConfig;
+        use crate::layout::metrics::compute_layout_metrics;
+        let mut elements = vec![
+            aux_at(1, 100.0, 100.0, "first name"),
+            aux_at(2, 112.0, 104.0, "second name"),
+            aux_at(3, 96.0, 118.0, "third name"),
+            aux_at(4, 118.0, 122.0, "fourth name"),
+        ];
+        declutter_view(&mut elements);
+        let view = crate::datamodel::StockFlow {
+            name: None,
+            elements,
+            view_box: crate::datamodel::Rect::default(),
+            zoom: 1.0,
+            use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
+        };
+        let m = compute_layout_metrics(&view, &LayoutConfig::default());
+        assert_eq!(m.node_overlap, 0.0);
+        assert_eq!(m.label_overlap, 0.0);
+        assert!(m.crowding < 1e-9, "crowding {}", m.crowding);
     }
 
     // ── flow labels as side-choice obstacles ──
