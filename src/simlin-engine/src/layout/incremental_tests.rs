@@ -205,3 +205,50 @@ fn chains_added_whole_are_laid_out_as_chains_beside_the_diagram() {
         assert_eq!(after.get(uid), Some(g), "element {uid} must stay put");
     }
 }
+
+#[test]
+fn a_stock_added_to_a_drawn_chain_continues_its_row() {
+    // An agent extends a drawn chain: infected now drains into a new recovered
+    // stock. The new stock belongs one chain step past infected, in the same
+    // row, with a straight pipe between them -- not parked off to the side
+    // with a bent pipe reaching for it.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("susceptible", &[], &["infection"])),
+        datamodel::Variable::Stock(stock("infected", &["infection"], &[])),
+        datamodel::Variable::Flow(flow("infection", "susceptible * infected / 1000")),
+    ]);
+    let base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let ops = vec![
+        ModelOperation::UpsertStock(stock("infected", &["infection"], &["recovery"])),
+        ModelOperation::UpsertStock(stock("recovered", &["recovery"], &[])),
+        ModelOperation::UpsertFlow(flow("recovery", "infected / 10")),
+    ];
+    let (_, view) = sync(&project, &base, ops);
+
+    let m = compute_layout_metrics(&view, &LayoutConfig::default());
+    assert_eq!(m.node_overlap, 0.0, "no shape may cover another");
+    assert_eq!(m.flow_bends, 0.0, "the new pipe runs straight");
+
+    let stock_at = |name: &str| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Stock(s) if canonicalize(&s.name) == name => Some((s.x, s.y)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} drawn"))
+    };
+    let (infected_x, infected_y) = stock_at("infected");
+    let (recovered_x, recovered_y) = stock_at("recovered");
+    assert_eq!(recovered_y, infected_y, "the chain's row continues");
+    assert!(
+        recovered_x > infected_x,
+        "the downstream stock is to the right"
+    );
+
+    let before = geometry(&base);
+    let after = geometry(&view);
+    for (uid, g) in &before {
+        assert_eq!(after.get(uid), Some(g), "element {uid} must stay put");
+    }
+}

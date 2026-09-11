@@ -1425,6 +1425,78 @@ fn place_new_chains(
     Ok(placed)
 }
 
+/// Set each new stock that hangs off a drawn chain -- joined by a flow to a
+/// stock already drawn -- one chain step past that neighbor, in its row: right
+/// of the stock it drains, left of the stock it feeds, fanning vertically only
+/// past a stock or parameter already drawn there
+/// (`chain::find_free_stock_position`). A new stock reached only through other
+/// new stocks is placed from them in turn. Returns the idents of the stocks
+/// placed; a flow between two stocks that are now drawn takes the stock-pair
+/// valve position and is held there while the rest settles.
+fn place_chain_extensions(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    metadata: &ComputedMetadata,
+    new_stocks: &[String],
+) -> HashSet<String> {
+    let mut pending: HashSet<&str> = new_stocks.iter().map(String::as_str).collect();
+    let mut placed: HashSet<String> = HashSet::new();
+    let drawn_position = |state: &LayoutState, ident: &str| {
+        let uid = state.uid_manager.get_uid(ident)?;
+        state.positions.get(&uid).copied()
+    };
+    for chain in &metadata.chains {
+        loop {
+            let mut progress = false;
+            for flow in &chain.flows {
+                let (Some(from), Some(to)) = metadata.connected_stocks(flow) else {
+                    continue;
+                };
+                let step = config.stock_width + config.horizontal_spacing;
+                let (anchor, target, dx) =
+                    match (drawn_position(state, from), drawn_position(state, to)) {
+                        (Some(anchor), None) if pending.contains(to) => (anchor, to, step),
+                        (None, Some(anchor)) if pending.contains(from) => (anchor, from, -step),
+                        _ => continue,
+                    };
+                let occupied: Vec<Position> = state
+                    .elements
+                    .iter()
+                    .filter_map(|e| match e {
+                        ViewElement::Stock(s) => Some(Position::new(s.x, s.y)),
+                        ViewElement::Aux(a) => Some(Position::new(a.x, a.y)),
+                        ViewElement::Module(m) => Some(Position::new(m.x, m.y)),
+                        _ => None,
+                    })
+                    .collect();
+                let pos = chain::find_free_stock_position(
+                    Position::new(anchor.x + dx, anchor.y),
+                    &occupied,
+                    config,
+                );
+                let uid = state.get_or_alloc_uid(target);
+                let name = format_label_with_line_breaks(&state.display_name(target));
+                state.elements.push(ViewElement::Stock(view_element::Stock {
+                    name,
+                    uid,
+                    x: pos.x,
+                    y: pos.y,
+                    label_side: LabelSide::Bottom,
+                    compat: None,
+                }));
+                state.positions.insert(uid, pos);
+                pending.remove(target);
+                placed.insert(target.to_string());
+                progress = true;
+            }
+            if !progress {
+                break;
+            }
+        }
+    }
+    placed
+}
+
 /// `idents` less the ones in `placed`.
 fn without(idents: Vec<String>, placed: &HashSet<String>) -> Vec<String> {
     idents.into_iter().filter(|i| !placed.contains(i)).collect()
@@ -1999,7 +2071,13 @@ pub fn incremental_layout(
 
     // Step 4b: chains the patch added whole are laid out as chains and set
     // down beside the diagram; the rest of what is new is placed generically.
-    let placed_chain_vars = place_new_chains(&mut state, &config, &metadata, &new_elements)?;
+    let mut placed_chain_vars = place_new_chains(&mut state, &config, &metadata, &new_elements)?;
+    placed_chain_vars.extend(place_chain_extensions(
+        &mut state,
+        &config,
+        &metadata,
+        &without(new_elements.new_stocks.clone(), &placed_chain_vars),
+    ));
     let new_elements = NewElements {
         new_stocks: without(new_elements.new_stocks, &placed_chain_vars),
         new_flows: without(new_elements.new_flows, &placed_chain_vars),
