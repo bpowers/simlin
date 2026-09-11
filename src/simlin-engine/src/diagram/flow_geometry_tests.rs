@@ -1395,6 +1395,56 @@ fn a_jog_whose_step_would_double_back_is_refused() {
     );
 }
 
+/// Rows, one per arm of `settle_laid_out_valve`: a valve already
+/// `VALVE_CLAMP_MARGIN` inside its segment is not moved; a valve within the
+/// margin of its segment's end is clamped along that segment, as the editor
+/// clamps a dragged valve; a valve on a segment shorter than twice the margin
+/// moves to the middle of the longest segment (the first, on a tie); and a pipe
+/// whose every segment is that short leaves the valve where it is.
+#[test]
+fn a_laid_out_valve_keeps_the_margin_from_its_segments_ends() {
+    let z = vec![
+        pt(277.5, 115.25, Some(3)),
+        pt(200.0, 115.25, None),
+        pt(200.0, 95.0, None),
+        pt(122.5, 95.0, Some(1)),
+    ];
+    let z_short_riser = vec![
+        pt(277.5, 110.0, Some(3)),
+        pt(200.0, 110.0, None),
+        pt(200.0, 95.0, None),
+        pt(122.5, 95.0, Some(1)),
+    ];
+    let tiny = vec![
+        pt(0.0, 0.0, Some(3)),
+        pt(0.0, 8.0, None),
+        pt(6.0, 8.0, Some(4)),
+    ];
+    /// (label, path, valve before, valve after).
+    type Row<'a> = (&'a str, &'a [FlowPoint], (f64, f64), (f64, f64));
+    let rows: [Row; 4] = [
+        ("inside the margin", &z, (240.0, 115.25), (240.0, 115.25)),
+        (
+            "within the margin of a bend",
+            &z,
+            (200.0, 105.5),
+            (200.0, 105.25),
+        ),
+        (
+            "on a riser shorter than two margins",
+            &z_short_riser,
+            (200.0, 102.0),
+            (238.75, 110.0),
+        ),
+        ("every segment short", &tiny, (0.0, 4.0), (0.0, 4.0)),
+    ];
+    for (label, points, valve, expected) in rows {
+        let mut v = valve;
+        settle_laid_out_valve(points, &mut v);
+        assert_eq!(v, expected, "{label}");
+    }
+}
+
 #[test]
 fn clamp_to_face_span_keeps_corner_clearance() {
     assert_eq!(clamp_to_face_span(100.0, 100.0, 22.5), 100.0);

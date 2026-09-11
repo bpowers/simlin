@@ -37,7 +37,9 @@
 use super::*;
 use crate::datamodel::{self, view_element::Cloud};
 use crate::diagram::constants::CLOUD_RADIUS;
-use crate::diagram::flow_geometry::{CORNER_CLEARANCE, PIPE_SPACING, flow_invariant_violations};
+use crate::diagram::flow_geometry::{
+    CORNER_CLEARANCE, PIPE_SPACING, VALVE_CLAMP_MARGIN, flow_invariant_violations,
+};
 use crate::patch::{ModelOperation, ModelPatch};
 
 fn stock(ident: &str, inflows: &[&str], outflows: &[&str]) -> datamodel::Variable {
@@ -763,10 +765,13 @@ fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
 /// through the XMILE importer and incremental layout: the existing flow `f1`
 /// comes back byte for byte, the created flow holds the flow invariants, and
 /// each of its stock ends keeps `PIPE_SPACING` from `f1`'s end on the same
-/// face. Rows: stock B's offset below A across the range where the two faces'
+/// face, and its valve sits `VALVE_CLAMP_MARGIN` from the ends of its segment.
+/// Rows: stock B's offset below A across the range where the two faces'
 /// clearance spans overlap (0 to 29), with `f1`'s line at the ends and the
-/// middle of that overlap, plus the worst cases of the reviewed sweep (B 28
-/// below with `f1` at 114; 26 and 27 at 113; 27 at 114; 24 and 25 at 112).
+/// middle of that overlap; the worst cases of the reviewed sweep (B 28 below
+/// with `f1` at 114; 26 and 27 at 113; 27 at 114; 24 and 25 at 112); and Z
+/// routes whose riser the valve lands on within the margin of a bend (B 11
+/// below at 105, 15 at 110, 19 at 114).
 #[test]
 fn a_flow_created_between_offset_stocks_keeps_its_spacing() {
     const XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -800,6 +805,9 @@ fn a_flow_created_between_offset_stocks_keeps_its_spacing() {
         (27, 114),
         (24, 112),
         (25, 112),
+        (11, 105),
+        (15, 110),
+        (19, 114),
     ];
     for offset in [0, 1, 2, 10, 14, 20, 29] {
         let lo = (86 + offset).max(86);
@@ -852,6 +860,30 @@ fn a_flow_created_between_offset_stocks_keeps_its_spacing() {
         assert_preserved(old, &new, &["f1"], &row);
         assert_eq!(violations_of(&new, "back"), Vec::<String>::new(), "{row}");
         assert_slot_keeps_spacing(&new, "back", &row);
+        let back = find_flow(&new, "back").unwrap();
+        let on = back
+            .points
+            .windows(2)
+            .find(|w| {
+                let (a, b) = (&w[0], &w[1]);
+                let (lo_x, hi_x) = (a.x.min(b.x), a.x.max(b.x));
+                let (lo_y, hi_y) = (a.y.min(b.y), a.y.max(b.y));
+                back.x >= lo_x - 1e-6
+                    && back.x <= hi_x + 1e-6
+                    && back.y >= lo_y - 1e-6
+                    && back.y <= hi_y + 1e-6
+            })
+            .unwrap_or_else(|| panic!("{row}: back's valve is off its pipe"));
+        let len = (on[1].x - on[0].x).hypot(on[1].y - on[0].y);
+        let from_ends = (back.x - on[0].x)
+            .hypot(back.y - on[0].y)
+            .min((back.x - on[1].x).hypot(back.y - on[1].y));
+        assert!(
+            len < 2.0 * VALVE_CLAMP_MARGIN || from_ends >= VALVE_CLAMP_MARGIN - 1e-6,
+            "{row}: back's valve ({}, {}) is {from_ends} from an end of its {len}px segment",
+            back.x,
+            back.y
+        );
     }
 }
 

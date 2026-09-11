@@ -847,6 +847,57 @@ pub(crate) fn project_valve_onto_pipe(points: &[FlowPoint], valve: &mut (f64, f6
     *valve = point_at_arc(points, arc);
 }
 
+/// Keep a valve the layout placed `VALVE_CLAMP_MARGIN` from the ends of the
+/// segment it sits on, the margin the editor clamps a dragged valve to along
+/// its closest segment (`clampToSegment` in `src/diagram/drawing/Flow.tsx`):
+/// along that segment when it is at least twice the margin long, else at the
+/// middle of the longest segment (the first, on a tie) when that one is. A
+/// valve already clear is not moved, and a pipe whose every segment is too
+/// short keeps it. Only for valves the layout owns: an imported valve is held
+/// to the arc-length margin alone (`project_valve_onto_pipe`), which this
+/// never undoes, since both placements are at least the margin from the path's
+/// ends.
+pub(crate) fn settle_laid_out_valve(points: &[FlowPoint], valve: &mut (f64, f64)) {
+    let Some((i, _)) = points
+        .windows(2)
+        .enumerate()
+        .map(|(i, w)| (i, point_segment_distance(*valve, &w[0], &w[1])))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+    else {
+        return;
+    };
+    let (a, b) = (&points[i], &points[i + 1]);
+    let span = |p: f64, q: f64| (p.min(q) + VALVE_CLAMP_MARGIN, p.max(q) - VALVE_CLAMP_MARGIN);
+    if segment_length(a, b) >= 2.0 * VALVE_CLAMP_MARGIN {
+        let clamped = match Axis::of_segment(a, b) {
+            Some(Axis::Horizontal) => {
+                let (lo, hi) = span(a.x, b.x);
+                (valve.0.clamp(lo, hi), a.y)
+            }
+            Some(Axis::Vertical) => {
+                let (lo, hi) = span(a.y, b.y);
+                (a.x, valve.1.clamp(lo, hi))
+            }
+            None => return,
+        };
+        if (clamped.0 - valve.0).abs() > EPS || (clamped.1 - valve.1).abs() > EPS {
+            *valve = clamped;
+        }
+        return;
+    }
+    let mut longest: Option<(&FlowPoint, &FlowPoint)> = None;
+    for w in points.windows(2) {
+        if longest.is_none_or(|(p, q)| segment_length(&w[0], &w[1]) > segment_length(p, q) + EPS) {
+            longest = Some((&w[0], &w[1]));
+        }
+    }
+    if let Some((p, q)) = longest
+        && segment_length(p, q) >= 2.0 * VALVE_CLAMP_MARGIN
+    {
+        *valve = ((p.x + q.x) / 2.0, (p.y + q.y) / 2.0);
+    }
+}
+
 /// Bring every flow in an imported view to the invariants in the module docs.
 ///
 /// Geometry that already satisfies them -- including an off-center slot a

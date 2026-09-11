@@ -2936,12 +2936,23 @@ pub fn fresh_layout(
 /// result. The orthogonalizer only routes between a pipe's two attached ends,
 /// leaving the valve and the clouds where placement put them, and placement
 /// positions those independently of the pipe; the normalization owns where
-/// they end up, as it does for imported views. `include` selects the flows (by
-/// uid) the pass may change: every flow in a fresh layout, and only the flows
-/// it creates in an incremental one.
+/// they end up, as it does for imported views. The layout owns the valves of
+/// the flows it settles, so each is then kept off its segment's ends
+/// (`settle_laid_out_valve`), where the editor would clamp a dragged valve.
+/// `include` selects the flows (by uid) the pass may change: every flow in a
+/// fresh layout, and only the flows it creates in an incremental one.
 fn finish_flow_geometry(elements: &mut [ViewElement], include: impl Fn(i32) -> bool + Copy) {
     orthogonal::orthogonalize_flow_pipes(elements, include);
     crate::diagram::flow_geometry::normalize_flow_geometry_where(elements, include);
+    for element in elements.iter_mut() {
+        if let ViewElement::Flow(f) = element
+            && include(f.uid)
+        {
+            let mut valve = (f.x, f.y);
+            crate::diagram::flow_geometry::settle_laid_out_valve(&f.points, &mut valve);
+            (f.x, f.y) = valve;
+        }
+    }
 }
 
 /// Copy free nodes' element coordinates back into `state.positions` after a
