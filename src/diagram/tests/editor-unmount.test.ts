@@ -56,7 +56,6 @@ describe('Editor controller lifecycle', () => {
     // tests stay off WASM. dispose is the contract we assert on unmount.
     openSpy = rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     disposeSpy = rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
   });
 
   afterEach(() => {

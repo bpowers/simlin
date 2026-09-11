@@ -14,6 +14,10 @@
 //     corrupted/divergent project) must not crash the editor when the details
 //     panel opens; it degrades to no panel so the element can still be
 //     selected and keyboard-deleted (the repair path).
+//
+// A delete is a controller view edit (the rendered view with the selection
+// removed); which model ops it implies is view-model-sync's, tested there and
+// through the real engine in editor-engine-races.test.ts.
 
 import { describe, it, expect, beforeEach, afterEach, rs } from '@rstest/core';
 
@@ -150,13 +154,14 @@ function makeSnapshot(): ProjectSnapshot {
     modelName: 'main',
     projectVersion: 1,
     serverVersion: 1,
-    projectGeneration: 0,
     status: 'ok',
     cachedErrors: { simError: undefined, modelErrors: [], varErrors: new Map(), unitErrors: new Map() },
     data: new Map(),
     modelStack: [],
     canUndo: false,
     canRedo: false,
+    undoRedoQueued: false,
+    token: 0,
     navResetSeq: 0,
   } as unknown as ProjectSnapshot;
 }
@@ -184,30 +189,24 @@ function renderEditor(props: EditorProps = makeProps()): void {
     container = render(React.createElement(Editor, props)).container;
   });
   fireEvent.pointerDown(container.firstElementChild as HTMLElement);
+  fireEvent.pointerUp(container.firstElementChild as HTMLElement);
 }
 
 const toolSelected = (title: string): boolean => screen.getByLabelText(title).getAttribute('data-selected') === 'true';
 
 describe('Editor keyboard shortcuts', () => {
-  let applyPatchCalls: unknown[];
-  let updateViewCalls: StockFlowView[];
+  let viewEdits: Array<{ label: string; nextView: StockFlowView }>;
 
   beforeEach(() => {
     canvasProps = undefined;
-    applyPatchCalls = [];
-    updateViewCalls = [];
+    viewEdits = [];
     rs.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
     rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
     rs.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
-    rs.spyOn(ProjectController.prototype, 'getEngine').mockReturnValue({} as never);
-    rs.spyOn(ProjectController.prototype, 'applyPatchOrReportError').mockImplementation(async (patch) => {
-      applyPatchCalls.push(patch);
+    rs.spyOn(ProjectController.prototype, 'enqueueViewEdit').mockImplementation(async (edit) => {
+      viewEdits.push({ label: edit.label, nextView: edit.nextView });
       return true;
-    });
-    rs.spyOn(ProjectController.prototype, 'updateView').mockImplementation(async (view) => {
-      updateViewCalls.push(view);
     });
   });
 
@@ -221,7 +220,7 @@ describe('Editor keyboard shortcuts', () => {
     });
   }
 
-  it('Delete removes the selected element (deleteVariable op + view update)', async () => {
+  it('Delete enqueues a delete edit whose next view lacks the selected element, and clears the selection', async () => {
     renderEditor();
     selectUid(9);
 
@@ -229,12 +228,10 @@ describe('Editor keyboard shortcuts', () => {
       fireEvent.keyDown(document, { key: 'Delete' });
     });
 
-    expect(applyPatchCalls).toHaveLength(1);
-    expect(JSON.stringify(applyPatchCalls[0])).toContain('"deleteVariable"');
-    expect(JSON.stringify(applyPatchCalls[0])).toContain('some_var');
-    expect(updateViewCalls).toHaveLength(1);
-    expect(updateViewCalls[0].elements.some((el) => el.uid === 9)).toBe(false);
-    // The selection was cleared alongside.
+    expect(viewEdits).toHaveLength(1);
+    expect(viewEdits[0].label).toBe('delete');
+    expect(viewEdits[0].nextView.elements.some((el) => el.uid === 9)).toBe(false);
+    expect(viewEdits[0].nextView.elements.some((el) => el.uid === 10)).toBe(true);
     expect(canvasProps?.selection.size).toBe(0);
   });
 
@@ -246,7 +243,7 @@ describe('Editor keyboard shortcuts', () => {
       fireEvent.keyDown(document, { key: 'Backspace' });
     });
 
-    expect(updateViewCalls).toHaveLength(1);
+    expect(viewEdits).toHaveLength(1);
   });
 
   it('Delete with no selection is a no-op', async () => {
@@ -256,8 +253,7 @@ describe('Editor keyboard shortcuts', () => {
       fireEvent.keyDown(document, { key: 'Delete' });
     });
 
-    expect(applyPatchCalls).toHaveLength(0);
-    expect(updateViewCalls).toHaveLength(0);
+    expect(viewEdits).toHaveLength(0);
   });
 
   it('Delete in readOnlyMode is a no-op', async () => {
@@ -268,8 +264,7 @@ describe('Editor keyboard shortcuts', () => {
       fireEvent.keyDown(document, { key: 'Delete' });
     });
 
-    expect(applyPatchCalls).toHaveLength(0);
-    expect(updateViewCalls).toHaveLength(0);
+    expect(viewEdits).toHaveLength(0);
   });
 
   it('Delete typed in an editable field does not delete the selection', async () => {
@@ -282,7 +277,7 @@ describe('Editor keyboard shortcuts', () => {
       fireEvent.keyDown(input, { key: 'Delete' });
     });
 
-    expect(updateViewCalls).toHaveLength(0);
+    expect(viewEdits).toHaveLength(0);
     input.remove();
   });
 
@@ -307,10 +302,10 @@ describe('Editor keyboard shortcuts', () => {
   });
 
   it('the ghost element (variable missing from the model) can be selected and keyboard-deleted', async () => {
-    // Before the hardening, selecting the ghost with the details panel open
-    // crashed the whole editor in render (getOrThrow on the missing variable),
-    // which ALSO made the element undeletable (the panel is the only other
-    // delete affordance).
+    // Selecting the ghost with the details panel open must not crash the whole
+    // editor in render (getOrThrow on the missing variable), which would ALSO
+    // make the element undeletable (the panel is the only other delete
+    // affordance).
     renderEditor();
     selectUid(10);
 
@@ -324,13 +319,13 @@ describe('Editor keyboard shortcuts', () => {
     expect(canvasProps).toBeDefined();
     expect(screen.queryByTestId('variable-details')).toBeNull();
 
-    // The repair path: keyboard-delete the ghost. Its variable is missing, so
-    // no deleteVariable op is emitted -- but the view element must go.
+    // The repair path: keyboard-delete the ghost. The view element must go
+    // (the controller derives no deleteVariable, since no variable exists).
     await act(async () => {
       fireEvent.keyDown(document, { key: 'Delete' });
     });
-    expect(updateViewCalls).toHaveLength(1);
-    expect(updateViewCalls[0].elements.some((el) => el.uid === 10)).toBe(false);
+    expect(viewEdits).toHaveLength(1);
+    expect(viewEdits[0].nextView.elements.some((el) => el.uid === 10)).toBe(false);
   });
 
   it('the details panel still renders for a healthy variable', () => {
@@ -340,5 +335,17 @@ describe('Editor keyboard shortcuts', () => {
       canvasProps?.onShowVariableDetails();
     });
     expect(screen.queryByTestId('variable-details')).not.toBeNull();
+  });
+
+  it('tells the Canvas to ignore presses exactly while an undo or redo is queued', () => {
+    renderEditor();
+    expect(canvasProps?.pressesDisabled).toBe(false);
+
+    rs.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue({
+      ...makeSnapshot(),
+      undoRedoQueued: true,
+    } as ProjectSnapshot);
+    renderEditor();
+    expect(canvasProps?.pressesDisabled).toBe(true);
   });
 });

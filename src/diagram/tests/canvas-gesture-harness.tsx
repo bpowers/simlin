@@ -471,6 +471,10 @@ export interface HarnessOptions {
    * deliberately ignores a selection request.
    */
   autoCommitSelection?: boolean;
+  /** Forwarded to the Canvas prop of the same name (default: unset). */
+  pressesDisabled?: boolean;
+  /** Forwarded to the Canvas prop of the same name (default: unset, the Canvas allocates). */
+  newVariableName?: (base: string) => string;
 }
 
 export interface CanvasHarness {
@@ -536,6 +540,8 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
     version,
     selectedTool,
     selection,
+    pressesDisabled: opts.pressesDisabled,
+    newVariableName: opts.newVariableName,
     ...callbacks,
   });
 

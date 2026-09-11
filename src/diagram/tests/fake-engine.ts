@@ -4,9 +4,10 @@
 
 // A reusable in-memory fake of the engine `Project`/`Model`/`Run` surface the
 // ProjectController depends on (the `EngineApi` interface). It records applied
-// patches and dispose calls and lets tests script serialized outputs, errors,
-// simulatability, and sim-run results -- so the controller's async
-// coordination can be exercised without spinning up WASM or jsdom.
+// patches, dispose calls and the method-call sequence, and lets tests script
+// serialized outputs, errors, simulatability, sim-run results, patch failures,
+// and patch latency (a gate each applyPatch awaits) -- so the controller's
+// async coordination can be exercised without spinning up WASM or jsdom.
 
 import type { JsonProjectPatch, ErrorDetail } from '@simlin/engine';
 import type { EngineApi, EngineModelApi, EngineRunApi, ProjectControllerConfig } from '../project-controller';
@@ -29,6 +30,7 @@ export function validProjectJson(
     name?: string;
     extraModels?: ReadonlyArray<Record<string, unknown>>;
     mainViewElements?: ReadonlyArray<Record<string, unknown>>;
+    auxiliaries?: ReadonlyArray<Record<string, unknown>>;
     includeStdlib?: boolean;
   } = {},
 ): string {
@@ -38,7 +40,7 @@ export function validProjectJson(
       name: 'main',
       stocks: [],
       flows: [],
-      auxiliaries: [],
+      auxiliaries: overrides.auxiliaries ?? [],
       views: [{ elements: overrides.mainViewElements ?? [] }],
     },
     ...(overrides.extraModels ?? []),
@@ -67,15 +69,23 @@ export interface FakeEngineOptions {
   // stdlib model on the display path and omits it on the save path.
   json?: string | ((includeStdlib: boolean) => string);
   // The protobuf returned by serializeProtobuf(). Defaults to a 1-byte marker
-  // that increments on each call so updateProject() always sees a new snapshot.
+  // that increments on each call so every committed rebuild sees a new snapshot.
   protobuf?: Uint8Array | (() => Uint8Array);
   errors?: ErrorDetail[] | (() => ErrorDetail[]);
   simulatable?: boolean | (() => boolean);
-  // Scripts the sim run. When it throws, loadSim's LTM-fallback retries; supply
-  // a function that throws on the first call to exercise that path.
+  // Scripts the sim run. When it throws, the LTM fallback retries; supply a
+  // function that throws on the first call to exercise that path.
   run?: (overrides: Record<string, number>, options: { analyzeLtm?: boolean }) => EngineRunApi;
-  // Forces applyPatch to reject (the patch-failure path).
-  applyPatchThrows?: boolean | Error;
+  // Forces applyPatch to reject: always (true / an Error), or per patch (a
+  // function of the patch and its 0-based call index returning the error to
+  // throw, or undefined to accept).
+  applyPatchThrows?: boolean | Error | ((patch: JsonProjectPatch, index: number) => Error | undefined);
+  // Awaited by every applyPatch before it applies or throws: the latency a
+  // worker round trip adds, controllable per call.
+  applyPatchGate?: (patch: JsonProjectPatch, index: number) => Promise<void>;
+  // Called when a patch is accepted, after the gate: lets a test move the
+  // scripted serialization to the patched state.
+  onApplyPatch?: (patch: JsonProjectPatch) => void;
   // Scripts getModel().getIncomingLinks(varName) for the connector-sync check:
   // a per-ident dependency map, or a function. Unlisted idents yield []. When a
   // function throws, that variable is dropped from the connector check.
@@ -88,6 +98,11 @@ export interface FakeEngine extends EngineApi {
   readonly appliedPatches: ReadonlyArray<JsonProjectPatch>;
   readonly serializeProtobufCalls: number;
   readonly runCalls: ReadonlyArray<{ overrides: Record<string, number>; analyzeLtm: boolean | undefined }>;
+  // Every engine method entry, in order ('applyPatch', 'serializeJson:stdlib',
+  // 'serializeJson:save', 'serializeProtobuf', 'getErrors', ...).
+  readonly calls: ReadonlyArray<string>;
+  // The most engine calls observed in flight at once.
+  readonly maxConcurrentCalls: number;
   disposeCount: number;
 }
 
@@ -115,8 +130,27 @@ export function fakeRun(seriesByName: Record<string, number[]>): EngineRunApi {
 export function makeFakeEngine(options: FakeEngineOptions = {}): FakeEngine {
   const appliedPatches: JsonProjectPatch[] = [];
   const runCalls: Array<{ overrides: Record<string, number>; analyzeLtm: boolean | undefined }> = [];
+  const calls: string[] = [];
   let serializeProtobufCalls = 0;
   let protobufCounter = 100;
+  let patchIndex = 0;
+  let inFlight = 0;
+  let maxConcurrentCalls = 0;
+
+  // Every method counts itself in flight across its own awaits, so a test can
+  // assert the controller never overlaps two engine calls.
+  const tracked = async <T>(name: string, body: () => Promise<T>): Promise<T> => {
+    calls.push(name);
+    inFlight++;
+    maxConcurrentCalls = Math.max(maxConcurrentCalls, inFlight);
+    try {
+      // One macrotask of latency, so overlapping callers would actually overlap.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return await body();
+    } finally {
+      inFlight--;
+    }
+  };
 
   const resolveJson = (includeStdlib: boolean): string => {
     if (typeof options.json === 'function') {
@@ -146,65 +180,96 @@ export function makeFakeEngine(options: FakeEngineOptions = {}): FakeEngine {
   };
 
   const model: EngineModelApi = {
-    async run(
-      overrides: Record<string, number> = {},
-      runOptions: { analyzeLtm?: boolean } = {},
-    ): Promise<EngineRunApi> {
-      runCalls.push({ overrides, analyzeLtm: runOptions.analyzeLtm });
-      if (options.run) {
-        return options.run(overrides, runOptions);
-      }
-      return fakeRun({ time: [0, 1, 2], output: [1, 2, 3] });
+    run(overrides: Record<string, number> = {}, runOptions: { analyzeLtm?: boolean } = {}): Promise<EngineRunApi> {
+      return tracked('run', async () => {
+        runCalls.push({ overrides, analyzeLtm: runOptions.analyzeLtm });
+        if (options.run) {
+          return options.run(overrides, runOptions);
+        }
+        return fakeRun({ time: [0, 1, 2], output: [1, 2, 3] });
+      });
     },
-    async getIncomingLinks(varName: string): Promise<readonly string[]> {
-      return resolveIncomingLinks(varName);
+    getIncomingLinks(varName: string): Promise<readonly string[]> {
+      return tracked('getIncomingLinks', async () => resolveIncomingLinks(varName));
     },
   };
 
   const engine: FakeEngine = {
     appliedPatches,
     runCalls,
+    calls,
     disposeCount: 0,
     get serializeProtobufCalls() {
       return serializeProtobufCalls;
     },
-    async applyPatch(patch: JsonProjectPatch): Promise<ErrorDetail[]> {
-      if (options.applyPatchThrows) {
-        throw options.applyPatchThrows instanceof Error
-          ? options.applyPatchThrows
-          : Object.assign(new Error('patch rejected'), { code: 1, details: [] });
-      }
-      appliedPatches.push(patch);
-      return [];
+    get maxConcurrentCalls() {
+      return maxConcurrentCalls;
     },
-    async serializeProtobuf(): Promise<Uint8Array> {
-      serializeProtobufCalls++;
-      return resolveProtobuf();
+    applyPatch(patch: JsonProjectPatch): Promise<ErrorDetail[]> {
+      return tracked('applyPatch', async () => {
+        const index = patchIndex++;
+        await options.applyPatchGate?.(patch, index);
+        const throws = options.applyPatchThrows;
+        const error =
+          typeof throws === 'function'
+            ? throws(patch, index)
+            : throws
+              ? throws instanceof Error
+                ? throws
+                : Object.assign(new Error('patch rejected'), { code: 1, details: [] })
+              : undefined;
+        if (error !== undefined) {
+          throw error;
+        }
+        appliedPatches.push(patch);
+        options.onApplyPatch?.(patch);
+        return [];
+      });
     },
-    async serializeJson(_format?: unknown, includeStdlib?: boolean): Promise<string> {
-      return resolveJson(!!includeStdlib);
+    serializeProtobuf(): Promise<Uint8Array> {
+      return tracked('serializeProtobuf', async () => {
+        serializeProtobufCalls++;
+        return resolveProtobuf();
+      });
     },
-    async getErrors(): Promise<ErrorDetail[]> {
-      return resolveErrors();
+    serializeJson(_format?: unknown, includeStdlib?: boolean): Promise<string> {
+      return tracked(includeStdlib ? 'serializeJson:stdlib' : 'serializeJson:save', async () =>
+        resolveJson(!!includeStdlib),
+      );
     },
-    async isSimulatable(): Promise<boolean> {
-      return resolveSimulatable();
+    getErrors(): Promise<ErrorDetail[]> {
+      return tracked('getErrors', async () => resolveErrors());
     },
-    async mainModel(): Promise<EngineModelApi> {
-      return model;
+    isSimulatable(): Promise<boolean> {
+      return tracked('isSimulatable', async () => resolveSimulatable());
     },
-    async getModel(_modelName: string | null): Promise<EngineModelApi> {
-      if (options.getModelThrows) {
-        throw options.getModelThrows instanceof Error ? options.getModelThrows : new Error('getModel failed');
-      }
-      return model;
+    mainModel(): Promise<EngineModelApi> {
+      return tracked('mainModel', async () => model);
+    },
+    getModel(_modelName: string | null): Promise<EngineModelApi> {
+      return tracked('getModel', async () => {
+        if (options.getModelThrows) {
+          throw options.getModelThrows instanceof Error ? options.getModelThrows : new Error('getModel failed');
+        }
+        return model;
+      });
     },
     async dispose(): Promise<void> {
+      calls.push('dispose');
       engine.disposeCount++;
     },
   };
 
   return engine;
+}
+
+/** A gate a test opens by hand: `gate.wait` is what applyPatchGate awaits. */
+export function makeGate(): { wait: () => Promise<void>; open: () => void } {
+  let resolve: () => void = () => {};
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { wait: () => promise, open: () => resolve() };
 }
 
 /**
@@ -221,6 +286,7 @@ export function makeControllerConfig(opts: {
   engine?: FakeEngine;
   engines?: FakeEngine[];
   openThrows?: boolean | Error;
+  now?: () => number;
   save?: (
     project: { format: 'protobuf'; data: Uint8Array } | { format: 'json'; data: string },
     currVersion: number,
@@ -230,11 +296,13 @@ export function makeControllerConfig(opts: {
   errors: Error[];
   saves: Array<{ project: { format: string; data: unknown }; currVersion: number }>;
   openedEngines: FakeEngine[];
+  openedWith: Uint8Array[];
 } {
   const format = opts.format ?? 'protobuf';
   const errors: Error[] = [];
   const saves: Array<{ project: { format: string; data: unknown }; currVersion: number }> = [];
   const openedEngines: FakeEngine[] = [];
+  const openedWith: Uint8Array[] = [];
 
   const queue: FakeEngine[] = opts.engines ? [...opts.engines] : [];
   const singleEngine = opts.engine;
@@ -254,7 +322,10 @@ export function makeControllerConfig(opts: {
       format === 'protobuf'
         ? { format: 'protobuf', data: (opts.initialData as Uint8Array | undefined) ?? new Uint8Array([1]) }
         : { format: 'json', data: (opts.initialData as string | undefined) ?? validProjectJson() },
-    openProtobuf: () => nextEngine(),
+    openProtobuf: (data) => {
+      openedWith.push(data);
+      return nextEngine();
+    },
     openJson: () => nextEngine(),
     save:
       opts.save ??
@@ -265,9 +336,10 @@ export function makeControllerConfig(opts: {
     onError: (err) => {
       errors.push(err);
     },
+    now: opts.now,
   };
 
-  return { config, errors, saves, openedEngines };
+  return { config, errors, saves, openedEngines, openedWith };
 }
 
 function defined<T>(value: T | undefined): T {

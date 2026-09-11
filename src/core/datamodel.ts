@@ -1240,7 +1240,11 @@ export function auxViewElementFromJson(json: JsonAuxiliaryViewElement, auxVar?: 
     var: auxVar?.type === 'aux' ? auxVar : undefined,
     x: json.x,
     y: json.y,
-    labelSide: (json.labelSide ?? 'right') as LabelSide,
+    // An absent side is Center, as the engine reads it (json.rs
+    // label_side_from_string) and as every other element kind here defaults:
+    // any other default rewrites the stored side the first time a view is
+    // upserted, and draws a label the Rust renderer places at the center.
+    labelSide: (json.labelSide ?? 'center') as LabelSide,
     isZeroRadius: false,
   };
 }

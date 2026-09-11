@@ -5,10 +5,10 @@
 // Regression tests for the create-flow name-edit crash (issue #820 / the
 // getElementByUid crash surfaced during the #819 review).
 //
-// When a just-drawn flow's attach patch fails, the host (Editor) does not
-// commit the flow into the view, yet the Canvas has already handed off to the
-// just-created-flow name edit. Its `props.selection` then references a flow
-// that is not in the view. The render already tolerates that (it resolves the
+// When a just-drawn flow's attach patch fails, the host (Editor) rolls the
+// optimistic view back to the committed one, which has no such flow, yet the
+// Canvas has already handed off to the just-created-flow name edit. Its
+// `props.selection` then references a flow that is not in the view. The render already tolerates that (it resolves the
 // editing element through the NON-throwing tryGetElementByUid and skips the
 // editor), but `handleEditingNameDone` used the THROWING getElementByUid, so
 // any path that fired it against the phantom selection -- notably the deferred

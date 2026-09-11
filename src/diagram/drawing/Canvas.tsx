@@ -246,7 +246,10 @@ export interface CanvasProps {
   version: number;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined;
   selection: ReadonlySet<UID>;
-  onRenameVariable: (oldName: string, newName: string) => void;
+  // Returns an error message when the host refuses the name (it names another
+  // variable or a pending create); the inline name editor then stays open and
+  // shows it, and nothing is committed.
+  onRenameVariable: (oldName: string, newName: string) => string | undefined | void;
   onSetSelection: (selected: ReadonlySet<UID>) => void;
   onMoveSelection: (position: Point, arcPoint?: Point, segmentIndex?: number) => void;
   onMoveFlow: (
@@ -259,12 +262,22 @@ export interface CanvasProps {
   ) => void;
   onMoveLabel: (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => void;
   onAttachLink: (link: LinkViewElement, newTarget: string) => void;
-  onCreateVariable: (element: ViewElement) => void;
+  // Returns an error message when the host refuses the name, as onRenameVariable.
+  onCreateVariable: (element: ViewElement) => string | undefined | void;
   onClearSelectedTool: () => void;
   onDeleteSelection: () => void;
   onShowVariableDetails: () => void;
   onViewBoxChange: (viewBox: ViewRect, zoom: number) => void;
   onDrillIntoModule: (moduleIdent: string, targetModelName: string) => void;
+  // Allocates the default name of a new element ("New Variable", "New
+  // Variable 1", ...). The host allocates against everything that exists once
+  // its pending edits land; `props.model` lacks pending creates, so two quick
+  // creates allocating from it both got the same name. Absent (static and test
+  // hosts), the Canvas allocates against `props.model`.
+  newVariableName?: (base: string) => string;
+  // Presses start no gesture: the host has an undo or redo queued, and a
+  // gesture planned on the view it is about to replace could not commit.
+  pressesDisabled?: boolean;
 }
 
 // UID -> element lookup for resolving connector ends. Module-level pure function
@@ -442,6 +455,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   const [svgSize, setSvgSize] = React.useState<Readonly<{ width: number; height: number }> | undefined>(undefined);
   const [inCreation, setInCreation] = React.useState<ViewElement | undefined>(undefined);
   const [inCreationCloud, setInCreationCloud] = React.useState<CloudViewElement | undefined>(undefined);
+  // The host's refusal of the name the inline editor tried to commit; shown in
+  // the editor, cleared by typing or by the editor closing.
+  const [nameError, setNameError] = React.useState<string | undefined>(undefined);
 
   // initialBounds is written in the mount effect and only read there; keep the
   // setter referenced to avoid an unused-var lint while preserving the field.
@@ -571,6 +587,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     setDragSelectionPoint(reset.dragSelectionPoint);
     setInCreation(reset.inCreation);
     setInCreationCloud(reset.inCreationCloud);
+    setNameError(undefined);
   };
 
   // Offset/zoom resolve from the live viewport while a gesture is in flight,
@@ -728,6 +745,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   };
 
   const getNewVariableName = (base: string): string => {
+    const allocate = latest.current.props.newVariableName;
+    if (allocate !== undefined) {
+      return allocate(base);
+    }
     const variables = latest.current.props.model.variables;
     if (!variables.has(canonicalize(base))) {
       return base;
@@ -1675,6 +1696,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     e.preventDefault();
     e.stopPropagation();
 
+    if (latest.current.props.pressesDisabled) {
+      return;
+    }
+
     // A new press interrupts an in-flight momentum coast. The live viewport is
     // preserved: a pan or pinch started by this press inherits it (via
     // panBaseOffset / the pinch reference reads) and commits the combined result
@@ -1908,6 +1933,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   };
 
   const handleLabelDrag = (uid: number, e: React.PointerEvent<SVGElement>): void => {
+    if (latest.current.props.pressesDisabled) {
+      return;
+    }
     r.pointerId = e.pointerId;
 
     const selectionSet = new Set([uid]);
@@ -1954,7 +1982,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     segmentIndex?: number,
     isSource?: boolean,
   ): void => {
-    if (latest.current.props.embedded) {
+    if (latest.current.props.embedded || latest.current.props.pressesDisabled) {
       return;
     }
 
@@ -2151,6 +2179,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
   const handleEditingNameChange = (value: Descendant[]): void => {
     setEditingName(value);
+    setNameError(undefined);
   };
 
   const handleEditingNameDone = (isCancel: boolean): void => {
@@ -2200,13 +2229,17 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
     const oldName = displayName(defined((element as NamedViewElement).name));
 
-    if (uid === inCreationUid) {
-      // Names persist line breaks as literal backslash-n (see displayName);
-      // the rename path encodes in rename-ops.ts (buildVariableRenameOps),
-      // the create path here.
-      latest.current.props.onCreateVariable({ ...element, name: encodeNameNewlines(newName) } as ViewElement);
-    } else {
-      latest.current.props.onRenameVariable(oldName, newName);
+    // Names persist line breaks as literal backslash-n (see displayName); the
+    // rename path encodes in rename-ops.ts (relabelVariable), the create path
+    // here. A refused name keeps the editor open with the host's message, so
+    // the user can pick another name without losing the element.
+    const refusal =
+      uid === inCreationUid
+        ? latest.current.props.onCreateVariable({ ...element, name: encodeNameNewlines(newName) } as ViewElement)
+        : latest.current.props.onRenameVariable(oldName, newName);
+    if (typeof refusal === 'string') {
+      setNameError(refusal);
+      return;
     }
 
     clearPointerState();
@@ -2877,6 +2910,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         rh={rh * zoom}
         zoom={zoom}
         value={defined(editingName)}
+        error={nameError}
         onChange={handleEditingNameChange}
         onDone={handleEditingNameDone}
       />

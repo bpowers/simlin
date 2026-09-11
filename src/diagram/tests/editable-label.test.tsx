@@ -59,6 +59,30 @@ function renderLabel(): { editable: Element; onDone: Mock; onChange: Mock } {
   return { editable: editable as Element, onDone, onChange };
 }
 
+describe('EditableLabel placement', () => {
+  // A centered label (an absent stored side) is drawn over the element by Label,
+  // so the inline editor sits there too: centered horizontally on the element.
+  // 'some name' is 9 characters: width (9 * 6 + 10) * zoom = 64, so the left
+  // edge is cx - 32.
+  it('centers the editor on the element for a center side', () => {
+    const { container } = render(
+      <EditableLabel
+        uid={1}
+        cx={100}
+        cy={100}
+        side="center"
+        rw={9}
+        rh={9}
+        zoom={1}
+        value={plainDeserialize('label', 'some name')}
+        onChange={rs.fn()}
+        onDone={rs.fn()}
+      />,
+    );
+    expect((container.firstElementChild as HTMLElement).style.left).toBe('68px');
+  });
+});
+
 describe('EditableLabel key handling', () => {
   it('commits on plain Enter and prevents the default line-break insertion', () => {
     const { editable, onDone } = renderLabel();

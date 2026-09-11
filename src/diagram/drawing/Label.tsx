@@ -82,9 +82,10 @@ function labelLayout(props: LabelPropsFull): LabelLayout {
       className = 'start'; // right
       textY = y - (12 + (lines.length - 1) * 14) / 2 - 3;
       break;
-    default:
-      // FIXME
-      console.log('unknown label case ' + side);
+    case 'center':
+      // Centered on the element: the initial values, as the Rust renderer
+      // (diagram/label.rs label_layout) places it.
+      break;
   }
 
   return {
@@ -135,9 +136,10 @@ export function labelBounds(props: LabelProps): Rect {
       left = x;
       textY = y - (12 + (lines.length - 1) * 14) / 2 - 3;
       break;
-    default:
-      // FIXME
-      console.log('unknown label case ' + side);
+    case 'center':
+      // As the Rust renderer's label_bounds: centered horizontally on the text.
+      left = textX - editorWidth / 2;
+      break;
   }
 
   textY = Math.round(textY);

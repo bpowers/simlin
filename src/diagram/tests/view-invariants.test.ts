@@ -16,7 +16,8 @@ import { describe, it, expect, beforeAll } from '@rstest/core';
 import type { JsonModel, JsonProject, JsonStock, JsonViewElement } from '@simlin/engine';
 import { modelFromJson, projectFromJson, type Model, type UID } from '@simlin/core/datamodel';
 
-import { buildVariableRenameOps } from '../rename-ops';
+import { relabelVariable } from '../rename-ops';
+import { buildEditOps } from '../view-model-sync';
 import { describeWithEngine, editorModel, loadEngine, mainModel, type EngineModule } from './support/engine';
 import {
   ALL_VIEW_ARMS,
@@ -668,9 +669,10 @@ describe('M2 delta semantics', () => {
   });
 });
 
-// Renames through the path the Editor takes (`buildVariableRenameOps` ->
-// `applyPatch` with the controller's options -> serializeJson -> projectFromJson),
-// so the list rewrite being excluded is the one the engine produces.
+// Renames through the path the Editor takes (`relabelVariable` -> the
+// controller's `buildEditOps` -> `applyPatch` with the controller's options ->
+// serializeJson -> projectFromJson), so the list rewrite being excluded is the
+// one the engine produces.
 describeWithEngine('M2 renames through the engine rename path', () => {
   let engine: EngineModule;
 
@@ -691,8 +693,8 @@ describeWithEngine('M2 renames through the engine rename path', () => {
     const project = await engine.Project.openJson(JSON.stringify(projectJson));
     try {
       const base = await editorModel(project);
-      const { ops } = buildVariableRenameOps(base.views[0], oldName, newName);
-      await project.applyPatch({ models: [{ name: 'main', ops: [...ops] }] }, { allowErrors: true });
+      const ops = buildEditOps(base, base.views[0], relabelVariable(base.views[0], oldName, newName));
+      await project.applyPatch({ models: [{ name: 'main', ops }] }, { allowErrors: true });
       const serialized = JSON.parse(await project.serializeJson()) as JsonProject;
       adjust(serialized.models.find((m) => m.name === 'main')!);
       return { base: fromModel(base), next: fromModel(mainModel(projectFromJson(serialized).models)) };

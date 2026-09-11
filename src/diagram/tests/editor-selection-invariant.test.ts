@@ -92,7 +92,6 @@ function makeSnapshot(): ProjectSnapshot {
     project,
     projectVersion: 1,
     serverVersion: 1,
-    projectGeneration: 0,
     status: 'ok',
     cachedErrors: { simError: undefined, modelErrors: [], varErrors: new Map(), unitErrors: new Map() },
     data: new Map(),
@@ -163,13 +162,9 @@ describe('Editor empty-selection invariant (issue #529)', () => {
     rs.spyOn(ProjectController.prototype, 'subscribe').mockImplementation(() => () => {});
     rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
-    // The delete/create handlers bail if the engine hasn't opened; the mocked
-    // openInitialProject never opens one, so stub getEngine truthy and stub the
-    // patch/view methods the handlers await so they proceed to their setState.
-    rs.spyOn(ProjectController.prototype, 'getEngine').mockReturnValue({} as never);
-    rs.spyOn(ProjectController.prototype, 'applyPatchOrReportError').mockResolvedValue(true);
-    rs.spyOn(ProjectController.prototype, 'updateView').mockResolvedValue(undefined);
+    // The delete/create handlers enqueue a view edit; the mocked
+    // openInitialProject never opens an engine, so stub the enqueue.
+    rs.spyOn(ProjectController.prototype, 'enqueueViewEdit').mockResolvedValue(true);
   });
 
   afterEach(() => {

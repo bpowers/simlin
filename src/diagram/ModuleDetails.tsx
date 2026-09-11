@@ -25,6 +25,14 @@ import {
   updateReferenceSrc,
 } from './module-wiring';
 import { plainDeserialize, plainSerialize } from './drawing/common';
+import {
+  basesAfterFailedSubmission,
+  draftText,
+  fallBackOnFailedPending,
+  pendingTexts,
+  type DraftFields,
+  type PendingSubmission,
+} from './VariableDetails';
 import type { CustomEditor } from './drawing/SlateEditor';
 
 import type { Module, ModuleReference, Project, Variable, ViewElement } from '@simlin/core/datamodel';
@@ -38,7 +46,12 @@ interface ModuleDetailsProps {
   currentModelName: string;
   onDelete: (ident: string) => void;
   onModelReferenceChange: (ident: string, newModelName: string) => void;
-  onUnitsDocsChange: (ident: string, newUnits: string | undefined, newDocs: string | undefined) => void;
+  // May resolve whether the submission landed (see draftText in VariableDetails).
+  onUnitsDocsChange: (
+    ident: string,
+    newUnits: string | undefined,
+    newDocs: string | undefined,
+  ) => Promise<boolean> | void;
   onDrillIntoModule: (moduleIdent: string, targetModelName: string) => void;
   onCreateModel: (moduleName: string) => void;
   onDuplicateModel: (moduleIdent: string, sourceModelName: string) => void;
@@ -49,6 +62,14 @@ interface ModuleDetailsProps {
   // without add/remove, the units/docs fields are non-editable, and the
   // module-delete affordance is hidden.
   readOnly?: boolean;
+  // Registers the units/docs draft commit with the host; see the same prop on
+  // VariableDetails.
+  registerDraftFlush?: (flush: () => boolean) => () => void;
+  // Reports whether units or docs hold a draft; see the same prop on VariableDetails.
+  onDraftStateChange?: (hasDraft: boolean) => void;
+  // The host's latest pending submission for this element; see the same prop on
+  // VariableDetails.
+  pendingSubmission?: PendingSubmission;
 }
 
 export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
@@ -68,21 +89,23 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
 
   // Seed the Slate editors and their contents from props exactly once per mount
   // (lazy useState initializers), mirroring the old constructor. The Editor keys
-  // this panel on projectGeneration, so a content change remounts the panel and
-  // re-seeds it -- there is deliberately NO prop-sync effect here, which would
-  // fight that keyed-remount invariant (see diagram/CLAUDE.md "Details panels are
-  // keyed by projectGeneration").
+  // this panel on the module's committed editable content, so a landed edit to
+  // it remounts the panel and re-seeds it -- there is deliberately NO prop-sync
+  // effect here, which would fight that keyed-remount invariant (see
+  // diagram/CLAUDE.md "Details panels are keyed by the selected variable's
+  // committed content").
   const [unitsEditor] = React.useState<CustomEditor>(
     () => withHistory(withReact(createEditor())) as unknown as CustomEditor,
   );
+  const pendingAtMount = React.useRef(props.pendingSubmission);
   const [unitsContents, setUnitsContents] = React.useState<Descendant[]>(() =>
-    plainDeserialize('equation', variable.units),
+    plainDeserialize('equation', pendingAtMount.current?.units?.text ?? variable.units),
   );
   const [notesEditor] = React.useState<CustomEditor>(
     () => withHistory(withReact(createEditor())) as unknown as CustomEditor,
   );
   const [notesContents, setNotesContents] = React.useState<Descendant[]>(() =>
-    plainDeserialize('equation', variable.documentation),
+    plainDeserialize('equation', pendingAtMount.current?.docs?.text ?? variable.documentation),
   );
 
   const handleDelete = (): void => {
@@ -112,17 +135,57 @@ export function ModuleDetails(props: ModuleDetailsProps): React.ReactElement {
     setNotesContents(value);
   };
 
-  const handleUnitDocsSave = (): void => {
-    const newUnits = plainSerialize(unitsContents);
-    const newDocs = plainSerialize(notesContents);
+  // The texts the fields were seeded with, and what this panel last submitted
+  // for each; a field's draft is as VariableDetails defines it (draftText).
+  const [seeded] = React.useState(() => ({ units: variable.units, docs: variable.documentation }));
+  const [submitted, setSubmitted] = React.useState<Partial<Record<keyof DraftFields<string>, string>>>(() =>
+    pendingTexts(pendingAtMount.current),
+  );
+  const committedRef = React.useRef<DraftFields<string>>({ equation: '', units: '', docs: '' });
+  committedRef.current = { equation: '', units: variable.units, docs: variable.documentation };
+  const alive = React.useRef(true);
+  React.useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  React.useEffect(() => fallBackOnFailedPending(pendingAtMount.current, alive, committedRef, setSubmitted), []);
+  const unitsDraft = draftText(plainSerialize(unitsContents), submitted.units ?? seeded.units);
+  const docsDraft = draftText(plainSerialize(notesContents), submitted.docs ?? seeded.docs);
+  // Independent of readOnly (see VariableDetails).
+  const hasDraft = unitsDraft !== undefined || docsDraft !== undefined;
+  const onDraftStateChange = props.onDraftStateChange;
+  React.useEffect(() => {
+    onDraftStateChange?.(hasDraft);
+  }, [hasDraft, onDraftStateChange]);
+  React.useEffect(() => () => onDraftStateChange?.(false), [onDraftStateChange]);
 
-    const unitsChanged = variable.units !== newUnits;
-    const docsChanged = variable.documentation !== newDocs;
-
-    if (unitsChanged || docsChanged) {
-      onUnitsDocsChange(variable.ident, unitsChanged ? newUnits : undefined, docsChanged ? newDocs : undefined);
+  // True when a draft was submitted.
+  const handleUnitDocsSave = (): boolean => {
+    if (readOnly || !hasDraft) {
+      return false;
     }
+    const submission = { units: unitsDraft, docs: docsDraft };
+    setSubmitted((prev) => ({
+      ...prev,
+      ...(submission.units !== undefined ? { units: submission.units } : {}),
+      ...(submission.docs !== undefined ? { docs: submission.docs } : {}),
+    }));
+    const landed = onUnitsDocsChange(variable.ident, submission.units, submission.docs);
+    void landed?.then((ok) => {
+      if (!ok && alive.current) {
+        setSubmitted((prev) => basesAfterFailedSubmission(prev, submission, committedRef.current));
+      }
+    });
+    return true;
   };
+
+  // The flush the host calls before a canvas press (see VariableDetails).
+  const saveRef = React.useRef(handleUnitDocsSave);
+  saveRef.current = handleUnitDocsSave;
+  const registerDraftFlush = props.registerDraftFlush;
+  React.useEffect(() => registerDraftFlush?.(() => saveRef.current()), [registerDraftFlush]);
 
   const renderModelRefSelector = (): React.ReactNode => {
     const { projectModels, stdlibModels } = getAvailableModels(project, currentModelName);

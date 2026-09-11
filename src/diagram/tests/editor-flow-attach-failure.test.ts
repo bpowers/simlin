@@ -2,21 +2,18 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// Issue #820: a failed flow-attach patch must not silently discard the drawn
-// flow. handleFlowAttach used to early-return when the model-level patch failed,
-// leaving the drawn flow uncommitted -- so the flow the user just drew vanished
-// (the only feedback a transient toast) AND the just-created-flow name edit was
-// left selecting a flow that was not in the view (the getElementByUid crash).
+// A failed flow-attach patch ROLLS BACK the drawn flow: the model and the
+// diagram never disagree. The drawn flow renders at once (optimistically), the
+// patch is rejected, and the rendered view returns to the committed one, which
+// has no flow; the failure is reported once. (Committing the view anyway, the
+// earlier policy for issue #820, saved a diagram whose flow names no variable.)
 //
-// The fix commits the optimistic view regardless of patch success, matching the
-// sibling handlers (handleCreateVariable / handleSelectionDelete): the drawn
-// flow stays on the canvas (and stays a real, selectable element), while the
-// engine error still surfaces via the toast.
-//
-// This drives the real Editor + a real ProjectController wired to a fake engine
-// scripted to reject every applyPatch (the corrupt-project failure mode). Canvas
-// is mocked to a null renderer that captures the props (notably onMoveFlow =
-// handleFlowAttach) so the flow-attach can be invoked directly.
+// This drives the real Editor and a real ProjectController wired to a fake
+// engine that holds each patch behind a gate (the worker round trip) and then
+// rejects it. Canvas is mocked to a null renderer that captures its props, so
+// onMoveFlow (handleFlowAttach) can be invoked directly. What the Canvas does
+// with a selection naming the rolled-back flow is pinned in
+// canvas-gestures-flow-attach-failure.test.tsx.
 
 import { describe, it, expect, afterEach, rs } from '@rstest/core';
 
@@ -27,10 +24,8 @@ import type { FlowViewElement, StockFlowView, ViewElement } from '@simlin/core/d
 import { Project as EngineProject } from '@simlin/engine';
 import { inCreationCloudUid, fauxCloudTargetUid } from '../drawing/creation-sentinels';
 
-import { makeFakeEngine, validProjectJson } from './fake-engine';
+import { makeFakeEngine, makeGate, validProjectJson } from './fake-engine';
 
-// Capture the props the Editor hands to Canvas so a test can invoke onMoveFlow
-// (handleFlowAttach) directly and read back the committed view/selection.
 let capturedCanvasProps: Record<string, unknown> | undefined;
 rs.mock('../drawing/Canvas', () => ({
   __esModule: true,
@@ -54,8 +49,8 @@ function makeProps(overrides: Partial<EditorProps> = {}): EditorProps {
   } as EditorProps;
 }
 
-async function flushTimers(): Promise<void> {
-  for (let i = 0; i < 5; i++) {
+async function flushUntil(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !condition(); i++) {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
@@ -84,59 +79,59 @@ function inCreationFlow(): FlowViewElement {
   };
 }
 
-describe('Editor flow-attach patch failure (issue #820)', () => {
+function renderedView(): StockFlowView {
+  return capturedCanvasProps!.view as StockFlowView;
+}
+
+function flows(view: StockFlowView): FlowViewElement[] {
+  return view.elements.filter((e: ViewElement): e is FlowViewElement => e.type === 'flow');
+}
+
+describe('Editor flow-attach patch failure', () => {
   afterEach(() => {
     rs.restoreAllMocks();
     capturedCanvasProps = undefined;
   });
 
-  it('preserves the drawn flow (and selects a real element) when the attach patch fails', async () => {
-    // A fake engine that rejects every applyPatch models the corrupt-project
-    // failure mode the issue was observed against.
-    const engine = makeFakeEngine({ applyPatchThrows: true, json: validProjectJson() });
+  it('renders the drawn flow at once, then rolls it back and reports once when the patch fails', async () => {
+    const gate = makeGate();
+    const engine = makeFakeEngine({
+      applyPatchThrows: true,
+      applyPatchGate: () => gate.wait(),
+      json: validProjectJson(),
+    });
     rs.spyOn(EngineProject, 'openJson').mockResolvedValue(engine as unknown as EngineProject);
+    rs.spyOn(console, 'error').mockImplementation(() => {});
 
     act(() => {
       render(React.createElement(Editor, makeProps()));
     });
-    await flushTimers();
-
-    const props = capturedCanvasProps;
-    if (!props) {
-      throw new Error('Editor never rendered Canvas');
-    }
-    const onMoveFlow = props.onMoveFlow as (
+    await flushUntil(() => capturedCanvasProps?.view !== undefined);
+    const onMoveFlow = capturedCanvasProps!.onMoveFlow as (
       flow: FlowViewElement,
       targetUid: number,
       delta: { x: number; y: number },
       fauxTargetCenter: { x: number; y: number } | undefined,
       inCreation: boolean,
       isSourceAttach?: boolean,
-    ) => Promise<void>;
+    ) => void;
 
-    await act(async () => {
-      await onMoveFlow(inCreationFlow(), 0, { x: -100, y: 0 }, { x: 300, y: 200 }, true, false);
+    act(() => {
+      onMoveFlow(inCreationFlow(), 0, { x: -100, y: 0 }, { x: 300, y: 200 }, true, false);
     });
-    await flushTimers();
+    // Optimistic: the flow renders before the patch lands.
+    expect(flows(renderedView())).toHaveLength(1);
+    const drawn = flows(renderedView())[0];
+    expect((capturedCanvasProps!.selection as ReadonlySet<number>).has(drawn.uid)).toBe(true);
 
-    // The committed view must contain the drawn flow -- it was NOT discarded.
-    const committedView = capturedCanvasProps!.view as StockFlowView;
-    const flows = committedView.elements.filter((e: ViewElement): e is FlowViewElement => e.type === 'flow');
-    expect(flows).toHaveLength(1);
-    const flow = flows[0];
+    gate.open();
+    await flushUntil(() => flows(renderedView()).length === 0);
 
-    // The flow carries a real (committed, non-sentinel) uid.
-    expect(flow.uid).toBeGreaterThan(0);
-
-    // The selection references that real, in-view element -- no phantom that a
-    // later name-edit commit would dereference and crash on.
-    const selection = capturedCanvasProps!.selection as ReadonlySet<number>;
-    expect(selection.has(flow.uid)).toBe(true);
-    expect(committedView.elements.some((e: ViewElement) => e.uid === flow.uid)).toBe(true);
-
-    // The failure is NOT swallowed: the controller's onError surfaces the engine
-    // error as a toast (the non-silent feedback the preserve-the-flow UX relies
-    // on). The fake engine rejects with message 'patch rejected'.
-    expect(screen.getAllByText('patch rejected').length).toBeGreaterThan(0);
+    // Rolled back: the rendered view is the committed one -- no flow, no clouds.
+    expect(flows(renderedView())).toHaveLength(0);
+    expect(renderedView().elements.filter((e) => e.type === 'cloud')).toHaveLength(0);
+    expect(engine.appliedPatches).toHaveLength(0);
+    // Reported once, naming no discarded edits (there were none).
+    expect(screen.getAllByText('patch rejected')).toHaveLength(1);
   });
 });

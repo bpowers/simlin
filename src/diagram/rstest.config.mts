@@ -19,7 +19,6 @@ const NODE_ENV_TESTS = [
   'tests/hosted-web-editor-delete.test.ts',
   'tests/hosted-web-editor-load-errors.test.ts',
   'tests/hosted-web-editor-save.test.ts',
-  'tests/merge-live-view.test.ts',
   'tests/module-creation.test.ts',
   'tests/module-details-utils.test.ts',
   'tests/module-navigation.test.ts',

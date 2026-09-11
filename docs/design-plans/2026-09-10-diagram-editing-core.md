@@ -158,11 +158,12 @@ dimension compatibility of attachments.
 ```
 drawing/Canvas.tsx          shell: pointer capture, coordinates, viewport physics,
                             one `activeGesture` value, renders planGesture(...).elements
-gesture-planner.ts          pure: classifyPress, planGesture, planDelete
+gesture-planner.ts          pure: classifyPress, planGesture
+plan-delete.ts              pure: planDelete
 flow-geometry/              pure: geometry (units, boxes), terminal (face attachment),
                             validity (G2-G6), path (normalize, valve, slideValve),
                             route (route/routeEnd), offset-segment, heal; index re-exports
-view-model-sync.ts          pure: per-flow-end stock ops, created/deleted variable ops
+view-model-sync.ts          pure: renames, per-flow-end stock ops, created/deleted variable ops
 Editor.tsx                  one gesture commit handler + details/module/sim-spec edits,
                             all expressed as controller edits
 project-controller.ts       committed + pending[] per model, state token, one executor
@@ -321,7 +322,9 @@ Semantics:
   invariants and the semantic rules: a flow's source and sink are different stocks,
   and the target's stock variable exists.
 
-`planDelete(view, selection)` removes the selected elements, links touching them,
+`planDelete(view, selection)` (in its own module, `plan-delete.ts`, because the delete
+path is keyboard- and panel-driven rather than a pointer gesture) removes the selected
+elements, links touching them,
 aliases of them, and clouds of deleted flows; flow endpoints on deleted stocks become
 clouds at the endpoint; a selected cloud whose flow survives is ignored.
 
@@ -333,15 +336,28 @@ is wrong) fails the item like any other engine error.
 ### view-model-sync.ts
 
 `buildEditOps(committedModel, baseView, nextView)`, evaluated at dequeue against the
-committed model produced by the previous edit item of that model:
+committed model produced by the previous edit item of that model. Every ident it uses is
+derived from an element's `name` (canonicalized), never from the element's `ident`
+field, which a caller-built element need not keep in step; a view planned on a pending
+rename then resolves against the committed model the rename produced.
 
+- **Renames**: a named element whose uid survives with a different `name` emits
+  `renameVariable` from the committed ident to the new name as typed. The rename edit's
+  next view is the rendered view with that element relabeled; nothing else carries the
+  rename, so a combined rename and reattach needs no special path. Stock list entries
+  echoed by the stock/flow ops are carried through the rename.
 - **Stock/flow delta**, per flow element whose source (sink) attachment differs between
   base and next: remove the flow from the old stock's outflows (inflows) and add it to
   the new stock's, deduped. Only existing flow variables and existing stock variables
   are touched, and stocks deleted by the same edit are excluded (deleting a stock needs
   no list cleanup); no other entry of any list changes. One `updateStockFlows` per
   touched stock, carrying both full lists from the committed model with the deltas
-  applied.
+  applied. "Existing" means present in the committed model or created by this same edit
+  (a drawn flow between two stocks is listed in both). The echoed lists omit entries
+  naming variables this edit deletes, because the patch applies `deleteVariable` first
+  and the engine strips a deleted flow from every list; echoing it would re-add it. A
+  stock whose lists come out unchanged (attaching onto a stock that already lists the
+  flow) gets no op.
 - **Created variables**: upserts for named elements present in next and absent in base.
 - **Deleted variables**: `deleteVariable` for named elements removed in next whose
   variable exists in the committed model and has no remaining element.
@@ -368,6 +384,13 @@ Rendered view for model M = the next view of the last pending item targeting M (
 committed M), with `viewport` for M overlaid. `applyOptimisticView`, `preserveLiveView`
 and `adoptPatchedViews` are replaced by this rule. Connector errors are computed on the
 rendered view (the engine's per-variable incoming links plus the rendered connectors).
+Every rendered element's `ident` is its name's (a create or rename sets it, and a rename
+matches elements by name, so renaming an element whose rename or create is pending finds
+it). While a pending view renames a committed variable, the rendered model names that
+variable by its new ident, with its committed content, errors and connector dependencies,
+so the canvas, the details panel and name allocation see the model the queued edits will
+produce. A model-only edit resolves its variable at dequeue through the element: the uid
+it was enqueued for, on the committed view.
 
 Executor: one serialized async loop; every engine call runs inside an item, and no
 engine reference is held across an await outside one. Two item classes:
@@ -386,20 +409,46 @@ engine reference is held across an await outside one. Two item classes:
   sustained stream of slow edits cannot starve saving. A burst of edits costs one sim run
   and one save.
 
-Failure of edit item k (engine error or stale token): truncate `pending` from k (every
-later edit was planned on k's optimistic view), bump `token` (which aborts live gestures,
-E5), render `committed`, report one error naming how many later edits were discarded.
+Failure of view edit item k (engine error or stale token): truncate every later edit with a
+next view and every later undo/redo (each was planned on k's optimistic view), bump
+`token` (which aborts live gestures, E5; a stale-token drop does not bump again), render
+`committed`, report one error naming how many later edits were discarded. Model-only edits
+survive truncation: they derive their payload from committed state at dequeue, so an
+unrelated failure does not invalidate them, and discarding one would silently lose the
+user's typed text. One that targets a variable a discarded edit would have created fails
+naturally at dequeue and reports its own error. A failed model-only edit only reports:
+no edit was planned on it, so nothing is truncated and `token` does not move; an undo
+queued behind it for the draft it carried is discarded with it. A patch that applied but
+could not be read back resyncs `committed` before its fate is decided (its next view keeps
+rendering meanwhile): a successful re-read means it landed; a reopen of the snapshot at
+the history cursor means it failed, and it fails after the swap, so edits planned on it
+during the reopen are truncated too; a failed reopen latches engine-unavailable -- the
+queue settles, every later request is refused quietly, and the host shows one persistent
+notice offering a reload.
 Undo/redo are edit-class items; the UI and the keyboard shortcut are disabled while
 `pending` is non-empty or a gesture is live, the Canvas ignores new presses while an
-undo/redo item is queued, and landing bumps `token`.
+undo/redo item is queued, a view edit enqueued while one is queued is refused quietly, and
+landing bumps `token`. An Undo press with a details-panel draft submits the draft and
+queues the undo behind its edit, so the undo takes the draft back; a Redo press queues
+the redo first and submits the draft behind it, so the draft lands on the redone project.
+A create or rename refused while an undo is queued returns a message, keeping the name
+editor open.
 Navigation need not wait for the queue; its viewport restore is a viewport item for the
 target model.
 
 Details panel drafts: any canvas press first flushes an open panel draft (the panel
 commits synchronously, enqueueing its edit ahead of the gesture), because a canvas press
-does not blur the panel editor. Panels are keyed on the selected variable's committed
-content (plus the read-only flag), not on a global generation, so an unrelated edit item
-landing while the user types does not remount the panel and discard the draft.
+does not blur the panel editor. Panels are keyed on the selected element and its variable's
+committed content (plus the read-only flag and a counter that moves only when an undo/redo
+lands), not on a global generation, so an unrelated edit item landing while the user types
+does not remount the panel and discard the draft; and while the panel holds a draft its key
+is held, so an edit landing on this variable (a rename rewriting its equation, the draft's
+own flushed edit while more text is typed) does not either. A field holds a draft when its
+text differs from its base -- what the panel last submitted for it, or its seeded text -- and
+only drafts are submitted: an untouched field is never echoed, and a field changed back
+while its edit is in flight holds the panel so that edit cannot land over it. A submission
+that does not land stops being the base. While an undo/redo is queued the panels render
+read-only.
 
 Engine defense in depth: stock inflow/outflow lists are deduped after canonicalization
 for every op that sets them (`updateStockFlows`, `upsertStock`), so a duplicate can never

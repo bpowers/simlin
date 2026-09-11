@@ -1,7 +1,17 @@
 .editableLabel {
-  font-family: "Roboto", "Open Sans", "Arial", sans-serif;
+  font-family: 'Roboto', 'Open Sans', 'Arial', sans-serif;
   font-weight: 300;
   text-anchor: middle;
   white-space: nowrap;
   vertical-align: middle;
+}
+
+.nameError {
+  color: var(--color-error);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  white-space: normal;
+  text-align: left;
+  padding: 2px 4px;
 }

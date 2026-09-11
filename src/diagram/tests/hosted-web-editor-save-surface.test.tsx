@@ -264,12 +264,12 @@ describe('HostedWebEditor save-failure surface', () => {
     // The end-to-end #958 scenario, driving a REAL ProjectController against
     // the shell's onSave (wired exactly as Editor.tsx's makeController does).
     // The session expires at server version 5, the user keeps editing (>100
-    // content edits -- enough that the fractional render-cache key crosses the
-    // next integer), then re-authenticates. The retry save must carry 5 -- the
-    // version the server actually holds -- not a locally-drifted 6, which
-    // would bogus-409 into the dead-end conflict banner (defeating the #928
-    // session-expiry rescue) or, if another session had committed 6, silently
-    // overwrite that session's save.
+    // unsaved content edits, each advancing the render-cache key), then
+    // re-authenticates. The retry save must carry 5 -- the version the server
+    // actually holds -- not a locally-drifted value, which would bogus-409
+    // into the dead-end conflict banner (defeating the #928 session-expiry
+    // rescue) or, on a version collision, silently overwrite another
+    // session's save.
     let signedIn = false;
     let serverVersion = 5;
     const postVersions: number[] = [];
@@ -306,22 +306,25 @@ describe('HostedWebEditor save-failure surface', () => {
       await controller.openInitialProject();
     });
 
+    // A content edit: the fake engine serializes fresh bytes after each patch,
+    // so every landed edit records history and requests a save.
+    const edit = (): Promise<boolean> =>
+      controller.enqueueModelEdit({ label: 'edit', buildPatch: () => ({ models: [] }) });
+
     // The signed-out stretch: every autosave 401s while the edits pile up.
     await act(async () => {
       for (let i = 0; i < 110; i++) {
-        await controller.updateProject(new Uint8Array([1, i]));
+        await edit();
       }
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await controller.whenIdle();
     });
     expect(screen.getByRole('alert').textContent).toMatch(/session expired/i);
 
     // Re-auth, then one more edit triggers the retry save.
     signedIn = true;
     await act(async () => {
-      await controller.updateProject(new Uint8Array([2, 0]));
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await edit();
+      await controller.whenIdle();
     });
 
     expect(postVersions[postVersions.length - 1]).toBe(5);

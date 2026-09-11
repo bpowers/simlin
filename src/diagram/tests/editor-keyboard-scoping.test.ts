@@ -126,7 +126,6 @@ function makeSnapshot(): ProjectSnapshot {
     modelName: 'main',
     projectVersion: 1,
     serverVersion: 1,
-    projectGeneration: 0,
     status: 'ok',
     cachedErrors: { simError: undefined, modelErrors: [], varErrors: new Map(), unitErrors: new Map() },
     data: new Map(),
@@ -166,27 +165,25 @@ describe('Editor keyboard scoping across instances', () => {
   // prototype-level spy (undoRedo) was invoked on.
   let controllers: ProjectController[];
   let undoRedoCalls: Array<{ controller: ProjectController; kind: string }>;
-  let updateViewCalls: Array<{ controller: ProjectController; view: StockFlowView }>;
+  let viewEditCalls: Array<{ controller: ProjectController; view: StockFlowView }>;
 
   beforeEach(() => {
     controllers = [];
     undoRedoCalls = [];
-    updateViewCalls = [];
+    viewEditCalls = [];
     rs.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
     rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
     rs.spyOn(ProjectController.prototype, 'subscribe').mockImplementation(function (this: ProjectController) {
       controllers.push(this);
       return () => {};
     });
-    rs.spyOn(ProjectController.prototype, 'getEngine').mockReturnValue({} as never);
-    rs.spyOn(ProjectController.prototype, 'applyPatchOrReportError').mockResolvedValue(true);
-    rs.spyOn(ProjectController.prototype, 'updateView').mockImplementation(async function (
+    rs.spyOn(ProjectController.prototype, 'enqueueViewEdit').mockImplementation(async function (
       this: ProjectController,
-      view: StockFlowView,
+      edit: { nextView: StockFlowView },
     ) {
-      updateViewCalls.push({ controller: this, view });
+      viewEditCalls.push({ controller: this, view: edit.nextView });
+      return true;
     });
     rs.spyOn(ProjectController.prototype, 'undoRedo').mockImplementation(function (
       this: ProjectController,
@@ -240,6 +237,7 @@ describe('Editor keyboard scoping across instances', () => {
   function pressInside(inst: Instance): void {
     act(() => {
       fireEvent.pointerDown(inst.root);
+      fireEvent.pointerUp(inst.root);
     });
   }
 
@@ -259,7 +257,7 @@ describe('Editor keyboard scoping across instances', () => {
 
     await pressKey(document.body, { key: 'Delete' });
 
-    expect(updateViewCalls.map((c) => c.controller)).toEqual([b.controller]);
+    expect(viewEditCalls.map((c) => c.controller)).toEqual([b.controller]);
     expect(b.canvas().selection.size).toBe(0);
     expect(a.canvas().selection.has(9)).toBe(true);
   });
@@ -290,7 +288,7 @@ describe('Editor keyboard scoping across instances', () => {
     // document -> window, so it names B and never A.
     await pressKey(b.root, { key: 'Delete' });
 
-    expect(updateViewCalls.map((c) => c.controller)).toEqual([b.controller]);
+    expect(viewEditCalls.map((c) => c.controller)).toEqual([b.controller]);
     expect(b.canvas().selection.size).toBe(0);
     expect(a.canvas().selection.has(9)).toBe(true);
   });
@@ -326,7 +324,7 @@ describe('Editor keyboard scoping across instances', () => {
     await pressKey(document.body, { key: 'Delete' });
     await pressKey(document, { key: 'z', ctrlKey: true });
 
-    expect(updateViewCalls).toEqual([]);
+    expect(viewEditCalls).toEqual([]);
     expect(undoRedoCalls).toEqual([]);
     expect(a.canvas().selection.has(9)).toBe(true);
     expect(b.canvas().selection.has(9)).toBe(true);
@@ -345,7 +343,7 @@ describe('Editor keyboard scoping across instances', () => {
     await pressKey(outside, { key: 'z', ctrlKey: true });
     outside.remove();
 
-    expect(updateViewCalls).toEqual([]);
+    expect(viewEditCalls).toEqual([]);
     expect(undoRedoCalls).toEqual([]);
     expect(a.canvas().selection.has(9)).toBe(true);
   });
@@ -361,7 +359,7 @@ describe('Editor keyboard scoping across instances', () => {
     await pressKey(input, { key: 'z', ctrlKey: true });
     input.remove();
 
-    expect(updateViewCalls).toEqual([]);
+    expect(viewEditCalls).toEqual([]);
     expect(undoRedoCalls).toEqual([]);
   });
 
@@ -466,5 +464,80 @@ describe('Editor keyboard scoping across instances', () => {
 
     await pressKey(document.body, { key: 'Escape' });
     expect(a.canvas().selection.size).toBe(0);
+  });
+
+  it('undo is refused while a press inside the editor is held (a live gesture), and allowed after release', async () => {
+    const a = mountEditor();
+    act(() => {
+      fireEvent.pointerDown(a.root);
+    });
+    await pressKey(document.body, { key: 'z', ctrlKey: true });
+    expect(undoRedoCalls).toEqual([]);
+
+    act(() => {
+      fireEvent.pointerUp(a.root);
+    });
+    await pressKey(document.body, { key: 'z', ctrlKey: true });
+    expect(undoRedoCalls).toEqual([{ controller: a.controller, kind: 'undo' }]);
+
+    // A cancelled press releases too.
+    act(() => {
+      fireEvent.pointerDown(a.root);
+      fireEvent.pointerCancel(a.root);
+    });
+    await pressKey(document.body, { key: 'z', ctrlKey: true });
+    expect(undoRedoCalls).toHaveLength(2);
+
+    // So does a press released over the host page, outside the editor...
+    act(() => {
+      fireEvent.pointerDown(a.root);
+      fireEvent.pointerUp(document.body);
+    });
+    await pressKey(document.body, { key: 'z', ctrlKey: true });
+    expect(undoRedoCalls).toHaveLength(3);
+
+    // ...and one released outside the browser window, which loses focus...
+    act(() => {
+      fireEvent.pointerDown(a.root);
+      window.dispatchEvent(new Event('blur'));
+    });
+    await pressKey(document.body, { key: 'z', ctrlKey: true });
+    expect(undoRedoCalls).toHaveLength(4);
+
+    // ...and one whose context menu swallowed its pointerup.
+    act(() => {
+      fireEvent.pointerDown(a.root);
+      fireEvent.contextMenu(a.root);
+    });
+    await pressKey(document.body, { key: 'z', ctrlKey: true });
+    expect(undoRedoCalls).toHaveLength(5);
+  });
+
+  it('unmounting removes every window listener the Editor added to release a press', () => {
+    const added: Array<[string, unknown, unknown]> = [];
+    const removed: Array<[string, unknown, unknown]> = [];
+    const realAdd = window.addEventListener.bind(window);
+    const realRemove = window.removeEventListener.bind(window);
+    rs.spyOn(window, 'addEventListener').mockImplementation(
+      (type: string, fn: EventListenerOrEventListenerObject, opts?: boolean | AddEventListenerOptions) => {
+        added.push([type, fn, opts]);
+        realAdd(type, fn, opts);
+      },
+    );
+    rs.spyOn(window, 'removeEventListener').mockImplementation(
+      (type: string, fn: EventListenerOrEventListenerObject, opts?: boolean | EventListenerOptions) => {
+        removed.push([type, fn, opts]);
+        realRemove(type, fn, opts);
+      },
+    );
+    const a = mountEditor();
+    const releases = added.filter(([type]) => ['pointerup', 'pointercancel', 'contextmenu', 'blur'].includes(type));
+    expect(releases.map(([type]) => type).sort()).toEqual(['blur', 'contextmenu', 'pointercancel', 'pointerup']);
+    act(() => {
+      a.result.unmount();
+    });
+    for (const [type, fn, opts] of releases) {
+      expect(removed.some(([t, f, o]) => t === type && f === fn && o === opts)).toBe(true);
+    }
   });
 });

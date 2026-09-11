@@ -18,6 +18,9 @@ interface EditingLabelProps extends CommonLabelProps {
   onChange: (value: Descendant[]) => void;
   onDone: (isCancel: boolean) => void;
   zoom: number;
+  // Why the last commit was refused (e.g. the name is taken). Rendered below
+  // the text as an alert; the editor stays open so the user can fix the name.
+  error?: string;
 }
 
 export const EditableLabel = React.memo(function EditableLabel(props: EditingLabelProps): React.ReactElement {
@@ -115,9 +118,10 @@ export const EditableLabel = React.memo(function EditableLabel(props: EditingLab
       left = x;
       textY = y - (fontSize + (lines.length - 1) * 14 * zoom) / 2 - 3;
       break;
-    default:
-      // FIXME
-      console.log('unknown label case ' + side);
+    case 'center':
+      // Over the element, where Label draws a centered label.
+      left = textX - editorWidth / 2;
+      break;
   }
 
   textY = Math.round(textY);
@@ -143,8 +147,18 @@ export const EditableLabel = React.memo(function EditableLabel(props: EditingLab
       onPointerUp={handlePointerUpDown}
     >
       <Slate editor={editor} initialValue={value} onChange={handleChange}>
-        <Editable autoFocus={true} onKeyDown={handleKeyDown} onKeyUp={handleKeyPress} />
+        <Editable
+          autoFocus={true}
+          onKeyDown={handleKeyDown}
+          onKeyUp={handleKeyPress}
+          aria-invalid={props.error !== undefined || undefined}
+        />
       </Slate>
+      {props.error !== undefined && (
+        <div className={styles.nameError} role="alert">
+          {props.error}
+        </div>
+      )}
     </div>
   );
 });

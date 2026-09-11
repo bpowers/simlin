@@ -2,10 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { describe, test, expect, rs } from '@rstest/core';
+import { describe, test, expect, beforeAll, rs } from '@rstest/core';
 
 import * as React from 'react';
-import { render, fireEvent, screen } from '@testing-library/react';
+import { act, render, fireEvent, screen } from '@testing-library/react';
+import { Editor as SlateEditor, Transforms } from 'slate';
+import { ELEMENT_TO_NODE } from 'slate-dom';
 
 import { ModuleDetails } from '../ModuleDetails';
 import type { Module, Aux, Stock, Model, Project, ViewElement } from '@simlin/core/datamodel';
@@ -134,6 +136,198 @@ function defaultCallbacks() {
 }
 
 // -- Tests --
+
+describe('ModuleDetails drafts', () => {
+  beforeAll(() => {
+    // jsdom lacks isContentEditable and Range geometry, which slate-react reads.
+    Object.defineProperty(HTMLElement.prototype, 'isContentEditable', {
+      configurable: true,
+      get(this: HTMLElement): boolean {
+        return this.getAttribute('contenteditable') === 'true';
+      },
+    });
+    if (!('getBoundingClientRect' in Range.prototype)) {
+      const zero = () =>
+        ({ x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0, toJSON() {} }) as DOMRect;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (Range.prototype as any).getBoundingClientRect = zero;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (Range.prototype as any).getClientRects = () =>
+        ({ length: 0, item: () => null, [Symbol.iterator]: function* () {} }) as unknown as DOMRectList;
+    }
+  });
+
+  // The units field, then the documentation field.
+  function slateEditors(container: HTMLElement): SlateEditor[] {
+    return Array.from(container.querySelectorAll('[data-slate-editor="true"]')).map(
+      (el) => ELEMENT_TO_NODE.get(el as HTMLElement) as unknown as SlateEditor,
+    );
+  }
+
+  async function append(editor: SlateEditor, text: string): Promise<void> {
+    await act(async () => {
+      Transforms.insertText(editor, text, { at: SlateEditor.end(editor, []) });
+      editor.onChange();
+      await Promise.resolve();
+    });
+  }
+
+  test('reports a draft, and a flush submits only the field holding it; a submission that does not land can be submitted again', async () => {
+    const variable = makeModule('hares_mod', 'hares', { units: 'people', documentation: 'docs' });
+    const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('population')])]);
+    const callbacks = defaultCallbacks();
+    let landed = false;
+    callbacks.onUnitsDocsChange.mockImplementation(async () => landed);
+    const draftStates: boolean[] = [];
+    let flush: (() => boolean) | undefined;
+    const { container } = render(
+      <ModuleDetails
+        variable={variable}
+        viewElement={makeViewElement('hares_mod')}
+        project={project}
+        currentModelName="main"
+        registerDraftFlush={(f) => {
+          flush = f;
+          return () => {};
+        }}
+        onDraftStateChange={(hasDraft) => draftStates.push(hasDraft)}
+        {...callbacks}
+      />,
+    );
+    const [units] = slateEditors(container);
+    await append(units, ' per year');
+    expect(draftStates[draftStates.length - 1]).toBe(true);
+
+    let submitted = false;
+    await act(async () => {
+      submitted = flush!();
+      await Promise.resolve();
+    });
+    expect(submitted).toBe(true);
+    // The documentation field was never touched, so it is not echoed.
+    expect(callbacks.onUnitsDocsChange).toHaveBeenLastCalledWith('hares_mod', 'people per year', undefined);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The submission settled as not landed, so the text is a draft again.
+    expect(draftStates[draftStates.length - 1]).toBe(true);
+    landed = true;
+    await act(async () => {
+      submitted = flush!();
+      await Promise.resolve();
+    });
+    expect(submitted).toBe(true);
+    expect(callbacks.onUnitsDocsChange).toHaveBeenCalledTimes(2);
+  });
+
+  function deferred(): { promise: Promise<boolean>; resolve: (ok: boolean) => void } {
+    let resolve!: (ok: boolean) => void;
+    const promise = new Promise<boolean>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  async function removeLast(editor: SlateEditor, count: number): Promise<void> {
+    await act(async () => {
+      Transforms.delete(editor, { at: SlateEditor.end(editor, []), distance: count, unit: 'character', reverse: true });
+      editor.onChange();
+      await Promise.resolve();
+    });
+  }
+
+  function mountPanel(variable: Module, onUnitsDocsChange: (...args: unknown[]) => Promise<boolean>) {
+    const project = makeProject([makeModel('main', [variable]), makeModel('hares', [makeAux('population')])]);
+    const callbacks = { ...defaultCallbacks(), onUnitsDocsChange: rs.fn(onUnitsDocsChange) };
+    const draftStates: boolean[] = [];
+    let flush: (() => boolean) | undefined;
+    const props = {
+      viewElement: makeViewElement('hares_mod'),
+      project,
+      currentModelName: 'main',
+      registerDraftFlush: (f: () => boolean) => {
+        flush = f;
+        return () => {};
+      },
+      onDraftStateChange: (hasDraft: boolean) => draftStates.push(hasDraft),
+      ...callbacks,
+    };
+    const result = render(<ModuleDetails variable={variable} {...props} />);
+    return {
+      result,
+      callbacks,
+      draftStates,
+      hasDraft: () => draftStates[draftStates.length - 1],
+      flush: async () => {
+        let submitted = false;
+        await act(async () => {
+          submitted = flush!();
+          await Promise.resolve();
+        });
+        return submitted;
+      },
+      rerender: (next: Module) => result.rerender(<ModuleDetails variable={next} {...props} />),
+    };
+  }
+
+  test("a field changed back to its seeded text after a submission is a draft (the submission is the field's base)", async () => {
+    const pending = deferred();
+    const panel = mountPanel(makeModule('hares_mod', 'hares', { units: 'people' }), () => pending.promise);
+    const [units] = slateEditors(panel.result.container);
+    await append(units, ' per year');
+    expect(await panel.flush()).toBe(true);
+    expect(panel.hasDraft()).toBe(false);
+    // While the edit is in flight, back to what the field was seeded with.
+    await removeLast(units, ' per year'.length);
+    expect(panel.hasDraft()).toBe(true);
+    expect(await panel.flush()).toBe(true);
+    expect(panel.callbacks.onUnitsDocsChange).toHaveBeenLastCalledWith('hares_mod', 'people', undefined);
+  });
+
+  test('a failed submission falls back to the committed text, not the seeded one', async () => {
+    // Seeded '', then 'X' landed; the user clears the field and that fails.
+    let landed = true;
+    const panel = mountPanel(makeModule('hares_mod', 'hares', { units: '' }), async () => landed);
+    const [units] = slateEditors(panel.result.container);
+    await append(units, 'X');
+    expect(await panel.flush()).toBe(true);
+    await act(async () => {
+      panel.rerender(makeModule('hares_mod', 'hares', { units: 'X' }));
+      await Promise.resolve();
+    });
+    expect(panel.hasDraft()).toBe(false);
+    await removeLast(units, 1);
+    landed = false;
+    expect(await panel.flush()).toBe(true);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // Committed is still 'X', so the cleared field stays a draft to retry.
+    expect(panel.hasDraft()).toBe(true);
+  });
+
+  test("a submission failing after a newer one for the same field leaves the newer one as the field's base", async () => {
+    const first = deferred();
+    const second = deferred();
+    const outcomes = [first.promise, second.promise];
+    const panel = mountPanel(makeModule('hares_mod', 'hares', { units: 'people' }), () => outcomes.shift()!);
+    const [units] = slateEditors(panel.result.container);
+    await append(units, ' per year');
+    expect(await panel.flush()).toBe(true);
+    await append(units, '!');
+    expect(await panel.flush()).toBe(true);
+    expect(panel.hasDraft()).toBe(false);
+    await act(async () => {
+      first.resolve(false);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The newer submission is still pending and is still the base: no draft.
+    expect(panel.hasDraft()).toBe(false);
+  });
+});
 
 describe('ModuleDetails', () => {
   // AC2.1: Selecting a module shows ModuleDetails panel
