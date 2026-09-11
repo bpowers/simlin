@@ -2244,11 +2244,12 @@ pub fn incremental_layout(
     diff_connectors(&mut state, &metadata);
     diff_clouds(&mut state, &metadata);
 
-    // Step 8: Polish. Elements created in this pass get their label sides
-    // chosen by what the metric charges, and the new free-floating ones step
-    // off whatever they landed on. Pinned elements keep their positions and
+    // Step 8: Polish. The new free-floating elements step off crossings and
+    // off whatever they landed on, and elements created in this pass get their
+    // label sides chosen by what the metric charges. Pinned elements keep their positions and
     // sides even if a new connector now runs through a label (hand placement
     // wins; the human can move it).
+    polish::polish_crossings_for(&mut state.elements, |uid| !standing_uids.contains(&uid));
     declutter::declutter_part(&mut state.elements, needs_label_placement, |uid| {
         !standing_uids.contains(&uid)
     });

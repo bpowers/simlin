@@ -134,3 +134,22 @@ fn a_parameter_never_steps_onto_another_shape() {
         "the parameter stays put"
     );
 }
+
+#[test]
+fn only_the_nodes_it_may_move_move() {
+    // The crossed X of the first test, with only the left parameter free to
+    // move: it uncrosses the links alone, and the right parameter stays put.
+    let elements = vec![
+        stock(1, "left stock", 0.0, 0.0),
+        stock(2, "right stock", 200.0, 0.0),
+        aux(3, "left parameter", 200.0, 120.0),
+        aux(4, "right parameter", 0.0, 120.0),
+        link(10, 3, 1),
+        link(11, 4, 2),
+    ];
+    let mut polished = elements.clone();
+    polish_crossings_for(&mut polished, |uid| uid == 3);
+    assert_eq!(count_view_crossings(&view_of(polished.clone())), 0);
+    assert_ne!(position(&polished, 3), position(&elements, 3));
+    assert_eq!(position(&polished, 4), position(&elements, 4));
+}

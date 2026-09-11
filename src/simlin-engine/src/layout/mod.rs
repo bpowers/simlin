@@ -2865,11 +2865,6 @@ pub fn fresh_layout(
     let rerouted = generate_ghosts(&mut state, config, metadata);
     build_connectors(&mut state, model, metadata, &rerouted)?;
 
-    // Phase 3b: Move free nodes off crossings where a nearby spot uncrosses
-    // their connectors, on the drawn connector geometry.
-    polish::polish_crossings(&mut state.elements);
-    sync_free_node_positions(&mut state);
-
     // Phase 4: Apply optimal label placement
     optimize_labels(&mut state, model, metadata);
 
@@ -2880,6 +2875,12 @@ pub fn fresh_layout(
     // deterministically.
     if config.declutter {
         declutter::declutter_view(&mut state.elements);
+        // Phase 4c: Move free nodes off crossings where a nearby spot charges
+        // less, on the settled geometry and label sides, then choose the sides
+        // again around wherever they went.
+        polish::polish_crossings(&mut state.elements);
+        declutter::declutter_part(&mut state.elements, |_| true, |_| false);
+        sync_free_node_positions(&mut state);
     }
 
     // Phase 5: Normalize coordinates

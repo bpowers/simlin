@@ -68,11 +68,11 @@ const LONG_CONNECTOR_FACTOR: f64 = 3.0;
 /// How far inside a label box a connector must pass to be charged as crossing
 /// the text: `label_bounds` pads the text horizontally, and a line grazing
 /// that padding does not obscure anything.
-const LABEL_INSET: f64 = 2.0;
+pub(crate) const LABEL_INSET: f64 = 2.0;
 
 /// How much of a line through a name counts when the line is the name's own
 /// node's link (see `label_connector_overlap`).
-const OWN_LINK_STRIKE_FACTOR: f64 = 0.5;
+pub(crate) const OWN_LINK_STRIKE_FACTOR: f64 = 0.5;
 
 /// Two node centers within this distance on one axis share a row or column.
 const ALIGN_TOLERANCE: f64 = 3.0;
