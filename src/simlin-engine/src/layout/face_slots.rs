@@ -462,8 +462,9 @@ mod tests {
     /// fallback would not choose over the lower end); the target of a tie of
     /// gaps is the one nearest the preferred position, then the lower; a target
     /// equidistant from two clear positions takes the lower; no clear position
-    /// at all gives the position farthest from the occupants; an occupant
-    /// beyond the span constrains nothing inside it.
+    /// at all gives the position farthest from the occupants, at a span end or
+    /// at the midpoint between two occupants; an occupant beyond the span
+    /// constrains nothing inside it.
     #[test]
     fn slot_on_face_rows() {
         let face = (-19.5, 19.5);
@@ -476,7 +477,7 @@ mod tests {
             &'static [f64],
             f64,
         );
-        let rows: [Row; 9] = [
+        let rows: [Row; 10] = [
             ("empty face", face, &[], 5.0, &[PIPE_SPACING], 0.0),
             (
                 "one occupant, target above",
@@ -533,6 +534,14 @@ mod tests {
                 0.0,
                 &[PIPE_SPACING],
                 -19.5,
+            ),
+            (
+                "no clear position: the midpoint between two occupants",
+                face,
+                &[-15.0, 15.0],
+                0.0,
+                &[30.0],
+                0.0,
             ),
             (
                 "an occupant beyond the span",
@@ -822,6 +831,30 @@ mod tests {
                 (150.0 + 4.0 * CLOUD_RADIUS, 100.0 + CLOUD_RADIUS)
             ],
             "a cloud end is pushed a cloud's width at a time until no cloud overlaps it"
+        );
+
+        // Stocks 1 at (100, 100) and 3 at (300, 100): only stock 3's left face
+        // carries an end (a cloud flow entering it at y = 100) and stock 1's
+        // right face is empty, so only the second face constrains the line.
+        let mut elements = vec![
+            stock(1, 100.0, 100.0),
+            stock(3, 300.0, 100.0),
+            flow(
+                21,
+                (240.0, 100.0),
+                &[(200.0, 100.0, Some(95)), (277.5, 100.0, Some(3))],
+            ),
+            flow(
+                22,
+                (200.0, 100.0),
+                &[(122.5, 100.0, Some(1)), (277.5, 100.0, Some(3))],
+            ),
+        ];
+        place_created_flow_ends(&mut elements, &HashSet::from([22]));
+        assert_eq!(
+            coords(flow_of(&elements, 22)),
+            vec![(122.5, 90.0), (277.5, 90.0)],
+            "a joint line keeps the spacing from the second face's occupant"
         );
     }
 }
