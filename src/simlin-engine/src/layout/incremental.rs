@@ -1729,13 +1729,15 @@ pub fn incremental_layout(
         }
     }
 
-    // Every named element still standing at this point survived the patch
-    // untouched (or was merely renamed): its label side is pinned for the rest
-    // of the pass. Whatever gets created from here on -- new variables,
-    // kind-changed or endpoint-changed rebuilds, orientation-flipped flows --
-    // is absent from this snapshot and has its side chosen by
-    // `optimize_labels_for` below. Offset-only rebuilt flows are added back
-    // explicitly because they were just deleted but keep their orientation.
+    // Every element still standing at this point survived the patch untouched
+    // (or was merely renamed): it keeps its position, and a named one its label
+    // side, for the rest of the pass. Whatever gets created from here on -- new
+    // variables, kind-changed or endpoint-changed rebuilds, orientation-flipped
+    // flows -- is absent from this snapshot, so `declutter_part` below chooses
+    // its side and may move it. Offset-only rebuilt flows are added back to the
+    // pinned sides explicitly because they were just deleted but keep their
+    // orientation.
+    let standing_uids: HashSet<i32> = state.elements.iter().map(ViewElement::get_uid).collect();
     let mut pinned_label_sides: HashMap<i32, LabelSide> = state
         .elements
         .iter()
@@ -1788,7 +1790,7 @@ pub fn incremental_layout(
         // imported flow endpoints elsewhere in the diagram.
         diff_connectors(&mut state, &metadata);
         diff_clouds(&mut state, &metadata);
-        optimize_labels_for(&mut state, model, &metadata, needs_label_placement);
+        declutter::declutter_part(&mut state.elements, needs_label_placement, |_| false);
         apply_loop_curvature(&mut state, &config, model, &metadata);
         validate_view_completeness(&state, model)?;
         return Ok(build_stock_flow_from_state(state, old_view));
@@ -1953,10 +1955,26 @@ pub fn incremental_layout(
     diff_connectors(&mut state, &metadata);
     diff_clouds(&mut state, &metadata);
 
-    // Step 8: Polish. Only elements created in this pass get a label side
-    // chosen; pinned elements keep theirs even if a new connector now runs
-    // through the label (hand placement wins; the human can move it).
-    optimize_labels_for(&mut state, model, &metadata, needs_label_placement);
+    // Step 8: Polish. Elements created in this pass get their label sides
+    // chosen by what the metric charges, and the new free-floating ones step
+    // off whatever they landed on. Pinned elements keep their positions and
+    // sides even if a new connector now runs through a label (hand placement
+    // wins; the human can move it).
+    declutter::declutter_part(&mut state.elements, needs_label_placement, |uid| {
+        !standing_uids.contains(&uid)
+    });
+    // The decluttered free-floating elements' positions, for the loop arcs.
+    for elem in &state.elements {
+        let (uid, x, y) = match elem {
+            ViewElement::Aux(a) => (a.uid, a.x, a.y),
+            ViewElement::Module(m) => (m.uid, m.x, m.y),
+            ViewElement::Alias(a) => (a.uid, a.x, a.y),
+            _ => continue,
+        };
+        if let Some(pos) = state.positions.get_mut(&uid) {
+            *pos = Position::new(x, y);
+        }
+    }
     apply_loop_curvature(&mut state, &config, model, &metadata);
     // Guarantee flows stay orthogonal after re-snapping endpoints to moved
     // stocks (only rewrites pipes that actually went diagonal; hand-routed
@@ -1968,3 +1986,7 @@ pub fn incremental_layout(
     // Step 9: Build StockFlow
     Ok(build_stock_flow_from_state(state, old_view))
 }
+
+#[cfg(test)]
+#[path = "incremental_tests.rs"]
+mod tests;

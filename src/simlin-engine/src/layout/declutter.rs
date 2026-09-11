@@ -537,6 +537,16 @@ pub(crate) fn resnap_flow_endpoints_to_stocks(elements: &mut [ViewElement]) {
 /// pipes -- so a name moves off a line running through it as readily as off a
 /// shape. Mutates `elements`.
 fn optimize_label_sides(elements: &mut [ViewElement], alias_names: &HashMap<i32, String>) {
+    optimize_label_sides_for(elements, alias_names, |_| true);
+}
+
+/// [`optimize_label_sides`] for the elements whose uid `resides` accepts; every
+/// other label keeps its side and counts against the chosen ones as it is.
+fn optimize_label_sides_for(
+    elements: &mut [ViewElement],
+    alias_names: &HashMap<i32, String>,
+    resides: impl Fn(i32) -> bool,
+) {
     let scene = LabelScene::new(elements);
     let weights = MetricWeights::default();
 
@@ -553,7 +563,7 @@ fn optimize_label_sides(elements: &mut [ViewElement], alias_names: &HashMap<i32,
     let labels: Vec<LabelOptions> = elements
         .iter()
         .enumerate()
-        .filter(|(_, e)| relabels(e))
+        .filter(|(_, e)| relabels(e) && resides(e.get_uid()))
         .filter_map(|(i, e)| {
             let options: Vec<(LabelSide, Rect)> = candidate_sides(e)
                 .iter()
@@ -567,14 +577,22 @@ fn optimize_label_sides(elements: &mut [ViewElement], alias_names: &HashMap<i32,
         })
         .collect();
 
-    // Every labeled kind is re-sided here, so another node's current label is
-    // always the one the chooser has picked for it.
+    // Another node's current label: the side chosen so far when the chooser is
+    // placing it, its drawn side otherwise.
     let uids: Vec<i32> = elements.iter().map(ViewElement::get_uid).collect();
     let id_of_uid: HashMap<i32, usize> = uids.iter().enumerate().map(|(i, &u)| (u, i)).collect();
+    let placing: std::collections::HashSet<usize> = labels.iter().map(|l| l.id).collect();
+    let drawn: HashMap<i32, Rect> = elements
+        .iter()
+        .filter_map(|e| current_label_box(e, alias_names).map(|r| (e.get_uid(), r)))
+        .collect();
     let chosen = choose_label_sides(
         &labels,
         |id, lbox, label_of| {
-            let current = |uid: i32| id_of_uid.get(&uid).and_then(|&other| label_of(other));
+            let current = |uid: i32| match id_of_uid.get(&uid) {
+                Some(other) if placing.contains(other) => label_of(*other),
+                _ => drawn.get(&uid).copied(),
+            };
             scene.label_cost(uids[id], lbox, current, &weights)
         },
         LABEL_SIDE_ROUNDS,
@@ -590,6 +608,16 @@ fn optimize_label_sides(elements: &mut [ViewElement], alias_names: &HashMap<i32,
 /// cleared); `false` means the layout jammed and the caller should open it up.
 /// Mutates `elements`.
 fn relax_positions(elements: &mut [ViewElement], alias_names: &HashMap<i32, String>) -> bool {
+    relax_positions_for(elements, alias_names, |_| true)
+}
+
+/// [`relax_positions`] moving only the `is_movable` elements whose uid `moves`
+/// accepts; everything else is an obstacle.
+fn relax_positions_for(
+    elements: &mut [ViewElement],
+    alias_names: &HashMap<i32, String>,
+    moves: impl Fn(i32) -> bool,
+) -> bool {
     let items: Vec<Footprint> = elements
         .iter()
         .enumerate()
@@ -604,7 +632,7 @@ fn relax_positions(elements: &mut [ViewElement], alias_names: &HashMap<i32, Stri
                 Some(Footprint {
                     id: i,
                     rects,
-                    movable: is_movable(e),
+                    movable: is_movable(e) && moves(e.get_uid()),
                 })
             }
         })
@@ -776,6 +804,27 @@ pub fn declutter_view(elements: &mut [ViewElement]) {
     // any over-zoom the jam recovery above introduced). This drives `sprawl`
     // down toward hand-drawn density without ever reintroducing an overlap.
     compact_view(elements, &alias_names);
+}
+
+/// Declutter part of a diagram around the rest, which stays exactly as it is:
+/// choose label sides for the elements whose uid `resides` accepts, and push
+/// the footprints of the free-floating elements `moves` accepts off everything
+/// else. Nothing else changes -- no element outside the two sets moves or
+/// changes sides, and there is no zoom and no compaction, which would move
+/// them all -- so the incremental layout can polish what a patch added without
+/// disturbing what was already drawn.
+pub fn declutter_part(
+    elements: &mut [ViewElement],
+    resides: impl Fn(i32) -> bool,
+    moves: impl Fn(i32) -> bool,
+) {
+    if elements.len() < 2 {
+        return;
+    }
+    let alias_names = alias_source_names(elements);
+    optimize_label_sides_for(elements, &alias_names, &resides);
+    relax_positions_for(elements, &alias_names, &moves);
+    optimize_label_sides_for(elements, &alias_names, &resides);
 }
 
 #[cfg(test)]
@@ -1079,6 +1128,69 @@ mod tests {
             a.label_side,
             LabelSide::Bottom,
             "the label must leave the side where it crowds a neighbor"
+        );
+    }
+
+    #[test]
+    fn test_declutter_part_moves_only_the_elements_it_may_move() {
+        // An existing aux (#1) and a new one (#2) drawn on the same spot. Only
+        // the new one may move, so it alone steps off; the existing one keeps
+        // its position and label side exactly.
+        let mut elements = vec![
+            aux_at(1, 100.0, 100.0, "existing name"),
+            aux_at(2, 100.0, 100.0, "new name"),
+        ];
+        let before = elements[0].clone();
+
+        declutter_part(&mut elements, |uid| uid == 2, |uid| uid == 2);
+
+        assert!(
+            elements[0] == before,
+            "the existing aux must keep its position and label side"
+        );
+        let alias_names = HashMap::new();
+        assert!(
+            !layout_has_overlap(&elements, &alias_names),
+            "the new aux must end clear of the existing one"
+        );
+    }
+
+    #[test]
+    fn test_declutter_part_resides_only_the_labels_it_may_reside() {
+        // A link strikes through the Bottom labels of two auxes: #1 existing,
+        // #4 new. Only the new label may change sides.
+        let existing = aux_at(1, 200.0, 0.0, "a fairly long name");
+        let bottom = current_label_box(&existing, &HashMap::new()).expect("aux label");
+        let y = (bottom.top + bottom.bottom) / 2.0;
+        let mut elements = vec![
+            existing,
+            aux_at(2, -300.0, y, "a"),
+            aux_at(3, 900.0, y, "b"),
+            aux_at(4, 500.0, 0.0, "another long name"),
+            ViewElement::Link(crate::datamodel::view_element::Link {
+                uid: 10,
+                from_uid: 2,
+                to_uid: 3,
+                shape: crate::datamodel::view_element::LinkShape::Straight,
+                polarity: None,
+            }),
+        ];
+
+        declutter_part(&mut elements, |uid| uid == 4, |_| false);
+
+        let side = |i: usize| match &elements[i] {
+            ViewElement::Aux(a) => a.label_side,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            side(0),
+            LabelSide::Bottom,
+            "an existing label keeps its side"
+        );
+        assert_ne!(
+            side(3),
+            LabelSide::Bottom,
+            "the new label leaves the struck side"
         );
     }
 

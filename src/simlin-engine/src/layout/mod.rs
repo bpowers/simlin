@@ -2371,22 +2371,9 @@ fn calculate_allowed_label_sides_for_stock(
 }
 
 /// Apply optimal label placement based on connector angles to every named
-/// element. This is the full-layout pass; incremental layout uses
-/// [`optimize_labels_for`] so it never rewrites a pre-existing element's side.
+/// element: the fresh layout's first guess, which the declutter pass then
+/// refines against the metric.
 fn optimize_labels(state: &mut LayoutState, model: &datamodel::Model, metadata: &ComputedMetadata) {
-    optimize_labels_for(state, model, metadata, |_| true);
-}
-
-/// Apply optimal label placement to the named elements whose UID satisfies
-/// `should_place`. Elements it rejects keep their current `label_side`
-/// untouched, even though their positions still inform the placement of the
-/// elements it accepts (connector angles are computed from all positions).
-fn optimize_labels_for(
-    state: &mut LayoutState,
-    model: &datamodel::Model,
-    metadata: &ComputedMetadata,
-    should_place: impl Fn(i32) -> bool,
-) {
     let uid_to_ident: HashMap<i32, String> = model
         .variables
         .iter()
@@ -2409,7 +2396,6 @@ fn optimize_labels_for(
         .elements
         .iter()
         .enumerate()
-        .filter(|(_, elem)| should_place(elem.get_uid()))
         .filter_map(|(i, elem)| match elem {
             ViewElement::Stock(stock) => {
                 let ident = uid_to_ident.get(&stock.uid)?;
