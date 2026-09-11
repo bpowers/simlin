@@ -743,12 +743,13 @@ fn the_checker_reports_segment_minima_and_the_valve_margin() {
 }
 
 /// `normalize_flow_geometry` is idempotent: a second pass changes nothing.
-/// Rows: the review's hand case (a Z whose first pass used to leave a 1.5px
-/// corner clearance for the second to fix), and a deterministic sweep over
-/// views of one or two stocks and one flow of each shape the producers hand
-/// the pass -- two-point stock-to-cloud and stock-to-stock pipes, an L into a
-/// cloud, a Z between stocks -- with endpoints on, near, inside and far from
-/// their stocks.
+/// Rows: a Z between two stocks whose 3px riser collapses and whose merged
+/// line then needs a slide into both clearance spans, so the geometry settles
+/// only over several passes; and a deterministic sweep over views of one or
+/// two stocks and one flow of each shape the producers hand the pass --
+/// two-point stock-to-cloud and stock-to-stock pipes, an L into a cloud, a Z
+/// between stocks -- with endpoints on, near, inside and far from their
+/// stocks.
 #[test]
 fn normalization_is_idempotent() {
     fn twice_equals_once(elements: Vec<ViewElement>, label: &str) {
@@ -777,7 +778,7 @@ fn normalization_is_idempotent() {
                 ],
             ),
         ],
-        "hand case",
+        "a Z settled over several passes",
     );
 
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -875,8 +876,7 @@ fn normalization_is_idempotent() {
 /// The guard refuses that slide; the collapse then removes the 3px final
 /// segment and the attach arms bring the straight pipe onto the face. Without
 /// the guard the zero-length riser stays, since the collapse skips a segment
-/// of no length. Found by a differential over 40,000 generated views, where it
-/// was the first input whose unguarded result the checker rejects.
+/// of no length.
 #[test]
 fn a_slide_that_would_fold_a_neighbour_is_refused() {
     let elements = normalized(vec![
@@ -904,8 +904,7 @@ fn a_slide_that_would_fold_a_neighbour_is_refused() {
 /// on s1's left face with the segment running through s3's body. That result
 /// is not committed, so the pipe stays as the producer wrote it. Overlapping
 /// bodies leave G1-G5 to best effort (the design plan's G6 precondition), so
-/// this row pins what is not committed rather than a valid route. Found by the
-/// same differential.
+/// this row pins what is not committed rather than a valid route.
 #[test]
 fn an_attach_whose_endpoint_would_be_invalid_is_not_committed() {
     let original = vec![pt(49.0, 100.0, Some(1)), pt(72.5, 100.0, Some(3))];
