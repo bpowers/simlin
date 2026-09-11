@@ -20,6 +20,10 @@ use super::types::{VensimComment, VensimElement, VensimVariable, VensimView};
 use crate::mdl::builtins::to_lower_space;
 use crate::mdl::convert::VariableType;
 
+#[cfg(test)]
+#[path = "convert_flow_geometry_tests.rs"]
+mod flow_geometry_tests;
+
 /// Build datamodel Views from parsed Vensim views.
 ///
 /// This function:
@@ -104,15 +108,13 @@ pub fn build_views(
         result
     };
 
-    // Post-processing: adjust flow points to stock edges and reassign sequential UIDs.
-    // This matches the XMILE path's normalize() sequence:
-    //   1. assign_uids() — sequential UIDs
-    //   2. fixup_clouds() — sets pt.uid on flow points
-    //   3. fixup_flow_takeoffs() — adjusts flow point coords to stock edges
-    // We do steps 3 then 1 (flow points already have attached_to_uid from compute_flow_points).
+    // Post-processing over the merged view. The sketch anchors pipe endpoints
+    // to element centers and draws stocks at the modeler's size, so the pipes
+    // are brought onto the 45x35 boxes every renderer draws (the shared rule
+    // the XMILE importer also runs), then UIDs are reassigned sequentially.
     for view in &mut result {
         let View::StockFlow(sf) = view;
-        fixup_flow_takeoffs(&mut sf.elements);
+        crate::diagram::flow_geometry::normalize_flow_geometry(&mut sf.elements);
         let uid_map = reassign_uids_sequential(&mut sf.elements);
         if let Some(sketch_compat) = sf.sketch_compat.as_mut() {
             remap_sketch_compat_uids(sketch_compat, &uid_map);
@@ -120,95 +122,6 @@ pub fn build_views(
     }
 
     result
-}
-
-// Stock dimensions matching the XMILE constants in xmile.rs
-const STOCK_WIDTH: f64 = 45.0;
-const STOCK_HEIGHT: f64 = 35.0;
-
-/// Adjust flow point coordinates from stock centers to stock edges.
-///
-/// Matches the XMILE path's `fixup_flow_takeoffs()` in xmile.rs.
-/// When a flow point is attached to a stock, the coordinate is snapped
-/// to the nearest edge of the stock rectangle rather than its center.
-fn fixup_flow_takeoffs(elements: &mut [ViewElement]) {
-    // Collect stock positions by UID
-    let stocks: HashMap<i32, (f64, f64)> = elements
-        .iter()
-        .filter_map(|e| {
-            if let ViewElement::Stock(s) = e {
-                Some((s.uid, (s.x, s.y)))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for elem in elements.iter_mut() {
-        if let ViewElement::Flow(flow) = elem {
-            if flow.points.len() < 2 {
-                continue;
-            }
-            let source = flow
-                .points
-                .first()
-                .cloned()
-                .unwrap_or(view_element::FlowPoint {
-                    x: 0.0,
-                    y: 0.0,
-                    attached_to_uid: None,
-                });
-            let sink = flow
-                .points
-                .last()
-                .cloned()
-                .unwrap_or(view_element::FlowPoint {
-                    x: 0.0,
-                    y: 0.0,
-                    attached_to_uid: None,
-                });
-
-            // Adjust source point if attached to a stock
-            if let Some(stock_uid) = source.attached_to_uid
-                && let Some(&(sx, sy)) = stocks.get(&stock_uid)
-            {
-                adjust_takeoff_point(&mut flow.points[0], sx, sy, &sink);
-            }
-
-            // Adjust sink point if attached to a stock
-            if let Some(stock_uid) = sink.attached_to_uid
-                && let Some(&(sx, sy)) = stocks.get(&stock_uid)
-            {
-                let last_idx = flow.points.len() - 1;
-                adjust_takeoff_point(&mut flow.points[last_idx], sx, sy, &source);
-            }
-        }
-    }
-}
-
-/// Snap a flow point to the nearest edge of its attached stock.
-///
-/// `sx, sy` is the stock center. `other` is the flow point at the other end.
-/// The point is moved to the stock edge facing the other endpoint.
-fn adjust_takeoff_point(
-    pt: &mut view_element::FlowPoint,
-    sx: f64,
-    sy: f64,
-    other: &view_element::FlowPoint,
-) {
-    if other.x > sx + STOCK_WIDTH / 2.0 && (other.y - sy).abs() < STOCK_HEIGHT / 2.0 {
-        // Other point is to the right
-        pt.x = sx + STOCK_WIDTH / 2.0;
-    } else if other.x < sx - STOCK_WIDTH / 2.0 && (other.y - sy).abs() < STOCK_HEIGHT / 2.0 {
-        // Other point is to the left
-        pt.x = sx - STOCK_WIDTH / 2.0;
-    } else if other.y < sy - STOCK_HEIGHT / 2.0 && (other.x - sx).abs() < STOCK_WIDTH / 2.0 {
-        // Other point is above
-        pt.y = sy - STOCK_HEIGHT / 2.0;
-    } else if other.y > sy + STOCK_HEIGHT / 2.0 && (other.x - sx).abs() < STOCK_WIDTH / 2.0 {
-        // Other point is below
-        pt.y = sy + STOCK_HEIGHT / 2.0;
-    }
 }
 
 /// Reassign UIDs sequentially starting from 1 and update all cross-references.

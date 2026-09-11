@@ -10,7 +10,7 @@
 //! These build datamodel views by hand. That is the pass's contract: it takes
 //! any datamodel view, whatever produced it. What the importers actually hand
 //! it is pinned separately, through the production readers on corpus files
-//! (`xmile::views::flow_geometry_tests`).
+//! (`xmile::views::flow_geometry_tests`, `mdl::view::convert::flow_geometry_tests`).
 
 use super::*;
 use crate::datamodel::view_element::{Cloud, LabelSide, Stock};
@@ -335,16 +335,38 @@ fn a_face_end_jogs_to_its_own_line_when_a_valid_slot_pins_the_other() {
     assert_eq!((f.x, f.y), (250.0, 120.5));
 }
 
-/// A valid end pins the line; a Face end whose own line is within
-/// MIN_SEGMENT_LENGTH of it cannot jog either (the step would be degenerate),
-/// so the segment is left as it was rather than moving the valid slot.
+/// A valid end pins the line, and the Face end's own line is within
+/// MIN_SEGMENT_LENGTH of it, so no jog is possible. As the last resort the
+/// valid slot slides within its own clearance span by the least amount that
+/// lets the other end in, and stays valid.
 #[test]
-fn a_pinned_line_the_other_end_cannot_reach_is_left_unchanged() {
-    let original = vec![pt(122.5, 110.0, Some(1)), pt(377.5, 110.0, Some(3))];
+fn a_valid_slot_gives_up_the_least_it_can_when_no_jog_fits() {
+    // Source valid 4.5 from its right corner (dx = 15); the sink sits 2.5
+    // from a corner and needs x >= 305.5 on a segment pinned at 305.
+    let elements = normalized(vec![
+        stock(1, 320.0, 945.0),
+        stock(3, 325.0, 595.0),
+        flow(
+            2,
+            (305.0, 755.0),
+            vec![pt(305.0, 927.5, Some(1)), pt(305.0, 612.5, Some(3))],
+        ),
+    ]);
+    let f = the_flow(&elements);
+    assert_eq!(coords(f), vec![(305.5, 927.5), (305.5, 612.5)]);
+    assert_eq!((f.x, f.y), (305.5, 755.0));
+}
+
+/// Two Face ends whose clearance spans are disjoint by less than
+/// MIN_SEGMENT_LENGTH ([85.5, 114.5] and [116, 145]): no shared line, no jog
+/// long enough, and no valid slot to relax, so nothing moves.
+#[test]
+fn an_unsolvable_segment_is_left_unchanged() {
+    let original = vec![pt(100.0, 115.0, Some(1)), pt(400.0, 115.0, Some(3))];
     let mut elements = vec![
         stock(1, 100.0, 100.0),
-        stock(3, 400.0, 127.0),
-        flow(2, (250.0, 110.0), original.clone()),
+        stock(3, 400.0, 130.5),
+        flow(2, (250.0, 115.0), original.clone()),
     ];
     normalize_flow_geometry(&mut elements);
     assert_eq!(

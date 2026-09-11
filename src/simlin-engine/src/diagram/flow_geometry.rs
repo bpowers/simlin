@@ -170,7 +170,10 @@ fn stock_endpoint_is_valid(p: &FlowPoint, q: &FlowPoint, stock: (f64, f64)) -> b
 /// How an end segment's stock endpoint is brought onto the stock.
 #[derive(Clone, Copy, PartialEq)]
 enum EndFix {
-    /// Already valid: the endpoint pins the segment's line where it is.
+    /// Already valid: the endpoint pins the segment's line where it is. Only
+    /// when neither a shared line nor a jog can bring the segment's other end
+    /// in does it give ground, sliding the least it can within its own
+    /// clearance span, where it stays valid.
     Keep,
     /// The line passes within `MIN_SEGMENT_LENGTH` of the face it approaches,
     /// so the pipe enters that face: the line slides into the face's
@@ -189,9 +192,17 @@ enum EndFix {
 }
 
 /// The lines every `Keep` and `Face` end of a segment can live with, except
-/// the end at `skip`. `Leg` ends constrain nothing here: they only need the
-/// line to stay clear of their stock, which is checked separately.
-fn shared_line_span(ends: &[StockEnd], axis: Axis, line: f64, skip: Option<usize>) -> (f64, f64) {
+/// the end at `skip`. A `Keep` end pins the line where it is, or, with
+/// `relax_valid`, accepts any line in its own clearance span (it stays valid
+/// there). `Leg` ends constrain nothing here: they only need the line to stay
+/// clear of their stock, which is checked separately.
+fn shared_line_span(
+    ends: &[StockEnd],
+    axis: Axis,
+    line: f64,
+    skip: Option<usize>,
+    relax_valid: bool,
+) -> (f64, f64) {
     let reach = axis.half_cross() - CORNER_CLEARANCE;
     let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
     for (i, end) in ends.iter().enumerate() {
@@ -200,11 +211,11 @@ fn shared_line_span(ends: &[StockEnd], axis: Axis, line: f64, skip: Option<usize
         }
         let s_cross = axis.cross(end.stock.0, end.stock.1);
         match end.fix {
-            EndFix::Keep => {
+            EndFix::Keep if !relax_valid => {
                 lo = lo.max(line);
                 hi = hi.min(line);
             }
-            EndFix::Face => {
+            EndFix::Keep | EndFix::Face => {
                 lo = lo.max(s_cross - reach);
                 hi = hi.min(s_cross + reach);
             }
@@ -279,19 +290,21 @@ fn attach_end_segment(
         return;
     }
 
-    let (lo, hi) = shared_line_span(&ends, axis, line, None);
+    // In order of preference: one line every end lives with (valid slots
+    // pinned); a jog for one `Face` end, keeping the others' line; and, when
+    // no jog is long enough, the least slide of a valid slot within its own
+    // clearance span. The last moves authored geometry, so it comes last.
+    let (lo, hi) = shared_line_span(&ends, axis, line, None, false);
     let new_line = if lo <= hi + EPS {
         line.clamp(lo, hi.max(lo))
     } else {
-        // No single line serves every end: one `Face` end jogs to its own
-        // line, if the others agree on one and the step is long enough.
         let reach = half_cross - CORNER_CLEARANCE;
         let mut jog = None;
         for (i, end) in ends.iter().enumerate() {
             if end.fix != EndFix::Face {
                 continue;
             }
-            let (olo, ohi) = shared_line_span(&ends, axis, line, Some(i));
+            let (olo, ohi) = shared_line_span(&ends, axis, line, Some(i), false);
             if olo > ohi + EPS {
                 continue;
             }
@@ -303,11 +316,16 @@ fn attach_end_segment(
                 break;
             }
         }
-        let Some((i, shared, own)) = jog else {
-            return;
-        };
-        ends[i].fix = EndFix::Jog(own);
-        shared
+        if let Some((i, shared, own)) = jog {
+            ends[i].fix = EndFix::Jog(own);
+            shared
+        } else {
+            let (rlo, rhi) = shared_line_span(&ends, axis, line, None, true);
+            if rlo > rhi + EPS {
+                return;
+            }
+            line.clamp(rlo, rhi.max(rlo))
+        }
     };
     let leg_clear = ends.iter().filter(|e| e.fix == EndFix::Leg).all(|e| {
         (new_line - axis.cross(e.stock.0, e.stock.1)).abs() >= half_cross + MIN_SEGMENT_LENGTH - EPS

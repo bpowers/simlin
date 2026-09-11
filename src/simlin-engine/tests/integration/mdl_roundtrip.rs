@@ -1319,6 +1319,40 @@ fn normalize_influence_connectors(view: &SketchView) -> Result<Vec<String>, Stri
     Ok(connectors)
 }
 
+/// mark2 flows whose Vensim geometry does not satisfy the flow invariants on
+/// the 45x35 stock box every Simlin renderer draws, so the importer moves
+/// their valve or cloud (`diagram::flow_geometry::normalize_flow_geometry`)
+/// and the written records cannot carry the source coordinates. AC1.3
+/// compares these records with coordinates removed, and requires the full
+/// comparison to still differ, so an entry that stops being needed fails.
+const AC1_3_NORMALIZED_FLOWS: &[(&str, &str)] = &[
+    // The cloud comment sits 3px off the pipe's line; the cloud is centered
+    // on the pipe's end.
+    ("1 housing", "homes sold"),
+    // The pipe enters Vensim's 90x65 `risk taking behavior` box 19 below its
+    // center, past the 45x35 box's bottom face; it slides 4.5 up onto the
+    // right face, carrying the valve and the cloud.
+    ("2 investments", "change in risk taking behavior"),
+];
+
+/// A normalized flow-block record with the element's `x`/`y` blanked, for the
+/// flows in `AC1_3_NORMALIZED_FLOWS`.
+fn without_coordinates(record: &str) -> String {
+    let Some((kind, rest)) = record.split_once(':') else {
+        return record.to_owned();
+    };
+    if kind != "valve" && kind != "cloud" {
+        return record.to_owned();
+    }
+    let mut fields: Vec<&str> = rest.split(',').collect();
+    for idx in [2, 3] {
+        if let Some(field) = fields.get_mut(idx) {
+            *field = "_";
+        }
+    }
+    format!("{kind}:{}", fields.join(","))
+}
+
 /// Verify mark2.mdl format roundtrip: parse, write, and compare the
 /// output against the original at the per-view-element level.
 ///
@@ -1421,7 +1455,28 @@ fn mdl_format_roundtrip() {
                         let actual = actual_blocks
                             .get(flow_name)
                             .expect("actual flow block by name");
-                        if let Some(diff) = diff_multiset(expected, actual) {
+                        let normalized = AC1_3_NORMALIZED_FLOWS
+                            .iter()
+                            .any(|(view, flow)| orig.name == *view && flow_name == flow);
+                        if normalized {
+                            if diff_multiset(expected, actual).is_none() {
+                                failures.push(format!(
+                                    "AC1.3: view[{i}] ({:?}) flow block {:?} now round-trips \
+                                     exactly -- remove it from AC1_3_NORMALIZED_FLOWS",
+                                    orig.name, flow_name
+                                ));
+                            }
+                            let strip = |records: &[String]| -> Vec<String> {
+                                records.iter().map(|r| without_coordinates(r)).collect()
+                            };
+                            if let Some(diff) = diff_multiset(&strip(expected), &strip(actual)) {
+                                failures.push(format!(
+                                    "AC1.3: view[{i}] ({:?}) normalized flow block {:?} \
+                                     differs beyond coordinates: {diff}",
+                                    orig.name, flow_name
+                                ));
+                            }
+                        } else if let Some(diff) = diff_multiset(expected, actual) {
                             failures.push(format!(
                                 "AC1.3: view[{i}] ({:?}) flow block {:?} differs: {diff}",
                                 orig.name, flow_name
@@ -1685,7 +1740,6 @@ const EXPECTED_NON_IDEMPOTENT: &[&str] = &[
     "test/test-models/tests/subscripted_round/test_subscripted_round.mdl",
     "test/test-models/tests/subscripted_xidz/test_subscripted_xidz.mdl",
     "test/test-models/tests/xidz_zidz/xidz_zidz.mdl",
-    "test/test-models/tests/zeroled_decimals/test_zeroled_decimals.mdl",
     // CRLF free-text accumulation (GH #849). The free-text sanitization choke
     // point (`mdl::writer::sanitize_free_text`) normalizes embedded carriage
     // returns, so the fixtures whose ONLY non-idempotence was CR accumulation
