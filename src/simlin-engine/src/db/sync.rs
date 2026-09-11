@@ -415,7 +415,9 @@ struct SourceVariableFields {
 impl SourceVariableFields {
     fn from_datamodel(var: &datamodel::Variable, owner_model: &str) -> Self {
         let (inflows, outflows) = match var {
-            datamodel::Variable::Stock(s) => (s.inflows.clone(), s.outflows.clone()),
+            datamodel::Variable::Stock(s) => {
+                (distinct_flows(&s.inflows), distinct_flows(&s.outflows))
+            }
             _ => (Vec::new(), Vec::new()),
         };
         let (module_refs, referenced_model_name) = match var {
@@ -457,6 +459,26 @@ impl SourceVariableFields {
     }
 }
 
+/// A stock's inflow or outflow list as the salsa inputs carry it: each flow's
+/// first occurrence, judged by canonical name, in list order.
+///
+/// The list is a set whose order is priority (XMILE 1.0 section 4.2,
+/// `docs/reference/xmile-v1.0.html`: "the set of inflows and/or outflows",
+/// multiple inflows "in inflow-priority order"), so a repeated entry names no
+/// second member, and the first occurrence keeps the priority the file gave
+/// the flow. The compiler sums each list into the stock's update, so a repeat
+/// that reached it would integrate the flow twice. A file can carry a repeat
+/// (the readers store what it says), which is why this extraction -- the one
+/// every sync reads -- is where the set is taken.
+fn distinct_flows(flows: &[String]) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    flows
+        .iter()
+        .filter(|flow| seen.insert(crate::canonicalize(flow).into_owned()))
+        .cloned()
+        .collect()
+}
+
 fn source_variable_from_datamodel(
     db: &SimlinDb,
     var: &datamodel::Variable,
@@ -480,6 +502,10 @@ fn source_variable_from_datamodel(
         f.compat,
     )
 }
+
+#[cfg(test)]
+#[path = "sync_flow_list_tests.rs"]
+mod flow_list_tests;
 
 // ── Incremental sync ───────────────────────────────────────────────────
 

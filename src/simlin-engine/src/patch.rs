@@ -174,14 +174,23 @@ fn canonicalize_ident(ident: &mut String) {
 // those fields.
 
 fn canonicalize_stock_references(stock: &mut datamodel::Stock) {
-    for inflow in stock.inflows.iter_mut() {
-        canonicalize_ident(inflow);
-    }
-    stock.inflows.sort_unstable();
-    for outflow in stock.outflows.iter_mut() {
-        canonicalize_ident(outflow);
-    }
-    stock.outflows.sort_unstable();
+    stock.inflows = canonical_flow_list(&stock.inflows);
+    stock.outflows = canonical_flow_list(&stock.outflows);
+}
+
+/// The stored form of a stock's inflow or outflow list, for every op that sets
+/// one: canonical idents, sorted, each flow once. The list is a set (XMILE 1.0
+/// section 4.2, "the set of inflows and/or outflows"), so `"Flow A"` and
+/// `"flow_a"` are one member, and the compiler sums the list into the stock's
+/// update, where a stored repeat would integrate the flow twice.
+fn canonical_flow_list(flows: &[String]) -> Vec<String> {
+    let mut list: Vec<String> = flows
+        .iter()
+        .map(|flow| canonicalize(flow).into_owned())
+        .collect();
+    list.sort_unstable();
+    list.dedup();
+    list
 }
 
 fn canonicalize_module_references(module: &mut datamodel::Module) {
@@ -329,16 +338,8 @@ fn apply_update_stock_flows(
             )
         })?;
 
-    stock.inflows = inflows
-        .iter()
-        .map(|s| canonicalize(s).into_owned())
-        .collect();
-    stock.outflows = outflows
-        .iter()
-        .map(|s| canonicalize(s).into_owned())
-        .collect();
-    stock.inflows.sort_unstable();
-    stock.outflows.sort_unstable();
+    stock.inflows = canonical_flow_list(inflows);
+    stock.outflows = canonical_flow_list(outflows);
 
     Ok(())
 }
@@ -1957,6 +1958,105 @@ mod tests {
 
         let err = apply_patch(&mut project, patch).unwrap_err();
         assert_eq!(err.code, ErrorCode::DoesNotExist);
+    }
+
+    /// Both ops that set a stock's flow lists store each flow once, judged
+    /// after canonicalization (`"Flow A"` and `"flow_a"` name one flow). The
+    /// compiler sums a stock's lists, so a stored duplicate would integrate the
+    /// flow twice.
+    #[test]
+    fn every_op_that_sets_stock_flow_lists_stores_each_flow_once() {
+        let base = TestProject::new("test")
+            .flow("flow_a", "1", None)
+            .flow("drain", "1", None)
+            .stock("population", "0", &[], &[], None)
+            .build_datamodel();
+
+        let update = ModelOperation::UpdateStockFlows {
+            ident: "population".to_string(),
+            inflows: vec![
+                "Flow A".to_string(),
+                "flow_a".to_string(),
+                "flow_a".to_string(),
+            ],
+            outflows: vec!["drain".to_string(), "Drain".to_string()],
+        };
+        let upsert = ModelOperation::UpsertStock(datamodel::Stock {
+            ident: "population".to_string(),
+            equation: Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["flow_a".to_string(), "Flow_A".to_string()],
+            outflows: vec!["Drain".to_string(), "drain".to_string()],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        });
+
+        for (label, op) in [("updateStockFlows", update), ("upsertStock", upsert)] {
+            let mut project = base.clone();
+            let patch = ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![op],
+                }],
+            };
+            apply_patch(&mut project, patch).unwrap();
+            match project
+                .get_model("main")
+                .unwrap()
+                .get_variable("population")
+                .unwrap()
+            {
+                Variable::Stock(stock) => {
+                    assert_eq!(stock.inflows, vec!["flow_a".to_string()], "{label}");
+                    assert_eq!(stock.outflows, vec!["drain".to_string()], "{label}");
+                }
+                _ => panic!("{label}: expected stock"),
+            }
+        }
+    }
+
+    /// Deduplication does not turn an upsert into a merge: a later upsert's
+    /// lists replace the earlier ones outright.
+    #[test]
+    fn upsert_stock_still_replaces_flow_lists_outright() {
+        let mut project = TestProject::new("test")
+            .flow("flow_a", "1", None)
+            .flow("flow_b", "1", None)
+            .stock("population", "0", &["flow_a", "flow_a"], &[], None)
+            .build_datamodel();
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::UpsertStock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["flow_b".to_string(), "flow_b".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                })],
+            }],
+        };
+        apply_patch(&mut project, patch).unwrap();
+        match project
+            .get_model("main")
+            .unwrap()
+            .get_variable("population")
+            .unwrap()
+        {
+            Variable::Stock(stock) => {
+                assert_eq!(stock.inflows, vec!["flow_b".to_string()]);
+                assert!(stock.outflows.is_empty());
+            }
+            _ => panic!("expected stock"),
+        }
     }
 
     #[test]
