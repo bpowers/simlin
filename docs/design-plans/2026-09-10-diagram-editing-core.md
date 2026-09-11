@@ -159,63 +159,100 @@ dimension compatibility of attachments.
 drawing/Canvas.tsx          shell: pointer capture, coordinates, viewport physics,
                             one `activeGesture` value, renders planGesture(...).elements
 gesture-planner.ts          pure: classifyPress, planGesture, planDelete
-flow-geometry.ts            pure: terminals, route/routeEnd, offsetSegment, valve, heal
+flow-geometry/              pure: geometry (units, boxes), terminal (face attachment),
+                            validity (G2-G6), path (normalize, valve, slideValve),
+                            route (route/routeEnd), offset-segment, heal; index re-exports
 view-model-sync.ts          pure: per-flow-end stock ops, created/deleted variable ops
 Editor.tsx                  one gesture commit handler + details/module/sim-spec edits,
                             all expressed as controller edits
 project-controller.ts       committed + pending[] per model, state token, one executor
 ```
 
-### flow-geometry.ts
+### flow-geometry/
 
-Positions are absolute model coordinates, never inverted deltas.
+Positions are absolute model coordinates, never inverted deltas. Every operation
+reads the gesture's base flow, never a previous frame, and returns the base geometry
+unchanged when a terminal or coordinate is not finite.
 
-- **Terminal**: `{ kind: 'stock'; stock; face?; offset? }` or `{ kind: 'free'; point }`
-  (a cloud or the pointer). One function owns face attachment -- the valid face points
-  within the face extent minus `CORNER_CLEARANCE`, the outward direction, and the
-  stub/riser shapes that reach a face -- and both `route`'s candidates and
-  `offsetSegment`'s tail re-solve use it. `face`/`offset` carry the BASE flow's
-  attachment (stickiness is defined against the gesture's base view, so it needs no
-  previous frame).
-- **heal(flow, terminals)**: idempotent, identity on a valid flow. Order: attach
-  endpoints to their terminals (a cloud is moved onto the endpoint rather than the
-  pipe onto the cloud; an off-face stock endpoint is re-pinned to the nearest valid
-  face point), then snap slightly-diagonal segments by dominant axis, then normalize.
+- **Terminal**: `{ kind: 'stock'; stock; face?; offset? }` or `{ kind: 'free'; point;
+  cloud? }` (a cloud or the pointer). One module owns face attachment -- the valid face
+  points within the face extent minus `CORNER_CLEARANCE`, the outward direction, and
+  the stub tip (`plane + sign * minimum`) -- and `route`'s candidates, `routeEnd`'s
+  pinned terminal, `offsetSegment`'s tail re-solve and `heal`'s re-pin all use it.
+  `face`/`offset` carry the BASE flow's attachment (stickiness is defined against the
+  gesture's base view, so it needs no previous frame). A corner endpoint belongs to
+  the face its adjacent segment leaves perpendicular to. `occupied` (other endpoints on
+  the terminal stocks, for the slot preference) is in the frame's coordinates: a
+  planner moving a stock moves the endpoints on it too.
+- **heal(flow, terminals, { stocks })**: idempotent, identity on a valid flow. Order:
+  attach endpoints to their terminals (a cloud is moved onto the endpoint rather than
+  the pipe onto the cloud, and out of any stock in `stocks` along its segment; an
+  off-face stock endpoint is re-pinned to the nearest valid face point, a corner
+  endpoint clamped along the face its adjacent segment is perpendicular to), then snap
+  slightly-diagonal segments by dominant axis, then normalize, then re-route from the
+  moved terminals only if the result still violates G2-G6.
 - **route(source, sink, ctx)**: the minimal orthogonal polyline between two terminals.
-  Candidate faces per stock terminal x shapes (straight, L, Z, and 3-bend tails when a
-  preserved segment forces them). Ordering: validity (G3-G6) -> stickiness (base face
-  kept if it has a valid candidate within one bend of the best) -> bends -> axis change
-  -> length. A face other than the base face must pass validity with an extra
-  `MIN_SEGMENT` margin (pure-function hysteresis against jitter at a validity boundary).
-  Total: if no candidate is valid, relax G6 only (the precondition in G6); a route is
-  always returned.
+  Candidate faces per stock terminal x shapes (straight, L, Z). Interior holds are
+  candidates owned by the port pair: the base corners clamped into the pair's band
+  between its stub tips, a minimum riser either side of a point port, the band's
+  midpoint, then stub tips and body clearances. Ordering: validity (G3-G6) -> not
+  crossing a terminal body (G6's best effort when the bodies overlap is a preference,
+  not no constraint) -> stickiness (base face kept if it has a candidate within one
+  bend of the best; stickiness is the only base-face preference, since a pure function
+  has no previous frame for hysteresis) -> bends -> axis change -> length (within
+  `GEOMETRY_EPSILON`, a tie). When nothing simpler is valid, a U detour and then 3-4
+  bends are tried (clouds a pixel off each other's line, or a stock over its own cloud,
+  have no valid straight, L or Z). Total: if no candidate is valid, the least severe
+  fault wins (G6 before G3 before structure); a route is always returned.
 - **routeEnd(flow, end, terminal, ctx)**: re-route one end with a preserved prefix.
-  Try preserving k interior corners counted from the FIXED end, k = K..0 (K = all but
-  the corner adjacent to the re-routed end); the first k with a valid tail wins. At
-  k = 0 the fixed terminal stays pinned to its face and offset; only if that is still
-  invalid is it released to `route`.
-- **offsetSegment(flow, segmentIndex, coordinate, terminals)**: move one segment
-  perpendicular to itself. The coordinate is first clamped to the feasible interval
-  (no body crossing, stubs >= `MIN_SEGMENT`). Adjacent corners follow. At a terminal
-  end the tail is re-solved: a cloud moves with the segment; a stock endpoint sits at
-  `clamp(coordinate, face extent minus CORNER_CLEARANCE)`. While the coordinate is
-  within `MIN_SEGMENT` beyond that extent the segment stays at the extent; beyond that a
-  stub plus a riser connects the endpoint to the segment, each at least `MIN_SEGMENT`
-(the final segment at the sink end at least `MIN_SINK_SEGMENT`)
-  (a documented E3 transition, so G3 holds). A tail of the form endpoint -> stub
-  (<= `MIN_SEGMENT` + eps, perpendicular) -> riser is recognized as re-solvable when the
-  dragged segment follows the riser, so dragging a bracket back collapses it to
-  straight and stubs never accumulate. A straight flow between aligned stocks slides
-  within the faces first and becomes a bracket beyond them.
+  Try preserving k interior corners counted from the FIXED end, k = K..1 (K = all but
+  the corner adjacent to the re-routed end), then k = 0 with the fixed terminal pinned
+  to its face and offset (no detours), and only then release to `route`. A candidate is
+  accepted only if it is valid, crosses no terminal body, and meets every G3 minimum
+  even where G3 excuses them. A preserved tail may not give the path more bends or
+  more U turns than the base had (preserving corners keeps a shape; a tail that grows
+  it is a detour that releasing replaces), nor run back over a preserved segment
+  within `MIN_SEGMENT`; tails may take up to 3 bends when those budgets allow.
+- **offsetSegment(flow, segmentIndex, coordinate, terminals, { stocks })**: move one
+  segment perpendicular to itself. The coordinate is first resolved against the
+  adjacent segments jointly, as the nearest coordinate where every stock stub keeps its
+  minimum and every adjacent riser or cloud segment is at least its minimum or
+  collapsed to zero (so a short riser collapses within half a minimum and is pushed out
+  otherwise). If the path would still cross a terminal body or put a cloud inside a
+  stock, the nearest valid coordinate on either side of the obstacle is taken (the
+  segment follows the pointer to the obstacle and jumps across once the far side is
+  nearer). Adjacent corners follow. At a terminal end the tail is re-solved: a cloud
+  moves with the segment; a stock endpoint sits at `clamp(coordinate, face extent minus
+  CORNER_CLEARANCE)`. While the coordinate is within `MIN_SEGMENT` beyond that extent
+  the segment stays at the extent; beyond that a stub plus a riser connects the
+  endpoint to the segment, each at least `MIN_SEGMENT` (the final segment at the sink
+  end at least `MIN_SINK_SEGMENT`) (a documented E3 transition, so G3 holds). A tail of
+  the form endpoint -> stub (at most the end's minimum, perpendicular) -> riser is
+  recognized as re-solvable when the dragged segment follows the riser, so dragging a
+  bracket back collapses it to straight and stubs never accumulate. A straight flow
+  between aligned stocks slides within the faces first and becomes a bracket beyond
+  them.
 - **translate(flow, delta)**: both terminals move by the same delta.
 - **Valve policy**: the valve is an arc-length position measured from the fixed end
   (from the source for operations with no fixed end). Routing preserves that distance,
   clamped to the new path length; `slideValve` moves it by the pointer delta projected
-  along the path (keeping the grab offset, crossing corners); `offsetSegment` preserves
-  the valve's arc-length distance from the terminal on the valve's side of the dragged
-  segment (from the dragged segment's start when the valve is on it).
-  `VALVE_CLAMP_MARGIN` is applied once, at the end.
+  along the path as straight-line pointer travel from the press (keeping the grab
+  offset, crossing corners, and lagging the pointer at a corner by design);
+  `offsetSegment` keeps the valve's coordinate along its own segment while that
+  segment survives (clamped into its new span), and moves it to the nearest point of
+  the new path when its segment is removed. `VALVE_CLAMP_MARGIN` is applied once, at
+  the end.
 - **normalize**: remove zero-length and collinear interior points.
+- **Documented transitions a drag shows**: dragging a cloud perpendicular off a
+  straight stock flow slides the endpoint along its face while nothing pinned is valid,
+  then returns the endpoint to its base offset when the pinned Z becomes valid (at
+  `MIN_SEGMENT`), then becomes an L (at `MIN_SINK_SEGMENT`); an endpoint that started
+  off-center steps at 5, 10 and 16px accordingly. The accepted pinned routes occupy
+  regions of pointer positions whose edges are G3 minima, so a region two minima bound
+  has a corner, and a pointer path clipping that corner flip-flops (A -> B -> A over a
+  few px). A cloud circling its stock does so in a band of radii just past each corner's
+  distance (for a top-face source, r in [44.2, 45.7) through the pinned Z's corner). A
+  pure function with no previous frame cannot avoid this; the sweeps pin those bands.
 
 ### gesture-planner.ts
 
@@ -418,10 +455,11 @@ tests, hashed snapshot), iterate, commit.
 
 1. Test support: invariant checkers, generator.
 2. `flow-geometry.ts` with exhaustive and fuzz tests (not yet wired).
-3. `gesture-planner.ts`, `view-model-sync.ts` with tests (not yet wired).
-4. Controller executor: committed + pending[] per model, token, item classes, undo
-   gating; every Editor handler (including details panel, modules, sim specs, rename)
-   migrated to controller edits while the Canvas still uses the old geometry.
+3. `gesture-planner.ts` with tests (not yet wired).
+4. `view-model-sync.ts` and the controller executor: committed + pending[] per model,
+   token, item classes, undo gating; every Editor handler (including details panel,
+   modules, sim specs, rename) migrated to controller edits while the Canvas still uses
+   the old geometry. Independent of phases 2-3, so it runs in a parallel worktree.
 5. Canvas and Editor gestures rewired onto the planner; old routing,
    `group-movement.ts`, `flow-attach.ts` removed; harness fidelity; gesture and
    Editor+engine tests.
