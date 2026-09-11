@@ -390,7 +390,7 @@ pub(super) struct ActivityGraph {
     ///
     /// Bit 0 is carried but never satisfies the enumerator's activity test
     /// (the `head & !1u64` mask in [`enumerate_active_circuits`]): step 0
-    /// (`TIME = INITIAL_TIME`) is every link-score equation's own first-step
+    /// (`TIME <= INITIAL_TIME`) is every link-score equation's own first-step
     /// guard arm, which every generator (`ltm_augment::link_score_guard_form_with_numerator`
     /// and its module-composite twin) emits as the literal constant `0`, so a
     /// cycle active only there is not a scorable loop. In today's production

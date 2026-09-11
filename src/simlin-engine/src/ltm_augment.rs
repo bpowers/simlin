@@ -7,7 +7,7 @@
 //! This module generates synthetic variables for Loops That Matter (LTM) analysis.
 //! The generated equations use the intrinsic two-argument `PREVIOUS(value, initial)`
 //! function. Every score reads one step of history, so the first-timestep guard
-//! is expressed explicitly with `TIME = INITIAL_TIME` and every score's first
+//! is expressed explicitly with `TIME <= INITIAL_TIME` and every score's first
 //! value is at the step after the start.
 
 use crate::ast::{Expr0, IndexExpr0, print_eqn};
@@ -421,7 +421,7 @@ fn other_dep_verdict(
 /// residual `ltm_augment_zero_slot` documents; the clock does not join it.)
 /// In a LIVE reference's index the frozen clock takes the un-lagged read as
 /// its first-DT value like every other index freeze ([`freeze_at_previous`]).
-/// The guard form's own `TIME = INITIAL_TIME` arm is outside the partial and
+/// The guard form's own `TIME <= INITIAL_TIME` arm is outside the partial and
 /// reads the clock live.
 ///
 /// `ctx.iter_ctx` carries the GH #511 iterated-dimension context (the live
@@ -3366,13 +3366,34 @@ fn link_score_guard_form_with_numerator(
     // the partial, and the per-step evaluation cost.
     let target_diff = format!("({target_ref} - PREVIOUS({target_ref}))");
     let source_diff = format!("({source_ref} - PREVIOUS({source_ref}))");
-    // Equation equality is approximate. ABS(delta) <= 0 tests exact zero
-    // without imposing a unit-dependent epsilon, and stays false for NaN so
-    // an undefined score keeps propagating instead of becoming a zero.
+    link_score_guard(
+        target_ref,
+        source_ref,
+        &format!("SAFEDIV({numerator}, ABS({target_diff}), 0) * SIGN({source_diff})"),
+    )
+}
+
+/// The guard every link-score generator wraps its score in: `0` at the first
+/// evaluation, `0` when the target or the source did not change over the last
+/// dt step (an inactive link, Eq. 1 of Schoenberg et al. 2020), and `score`
+/// otherwise. `target_ref` and `source_ref` are pre-formatted reference
+/// expressions, spelled exactly as `score` reads them.
+///
+/// Keep this the only spelling of the guard. Equation `=` is approximate
+/// (`float::approx_eq`: within `f64::EPSILON`, or within 4 ULPs), so
+/// `(delta) = 0` zeroes every step of a model whose values are small, and
+/// `TIME <= INITIAL_TIME` zeroes the steps whose time lies within a few ULPs of
+/// the start: scores that change with the model's units or time scale. Both
+/// comparisons are exact instead. The VM and the wasm backend start the clock
+/// at exactly the start time and only advance it, so `TIME <= INITIAL_TIME` is
+/// the first evaluation; `ABS(delta) <= 0` is an exact zero that stays false
+/// for NaN, so an undefined score propagates rather than becoming 0.
+pub(crate) fn link_score_guard(target_ref: &str, source_ref: &str, score: &str) -> String {
     format!(
-        "if (TIME = INITIAL_TIME) then 0 \
-         else if (ABS({target_diff}) <= 0) OR (ABS({source_diff}) <= 0) then 0 \
-         else SAFEDIV({numerator}, ABS({target_diff}), 0) * SIGN({source_diff})"
+        "if (TIME <= INITIAL_TIME) then 0 \
+         else if (ABS(({target_ref} - PREVIOUS({target_ref}))) <= 0) OR \
+         (ABS(({source_ref} - PREVIOUS({source_ref}))) <= 0) then 0 \
+         else {score}"
     )
 }
 
@@ -3783,7 +3804,7 @@ fn generate_auxiliary_to_auxiliary_equation(
 /// exact source slice the partial isolates (`arr[PREVIOUS(idx)]`,
 /// `pop[NYC,*]`) wrapped in `SUM(...)`: `SUM` of a single element is the
 /// identity, `SUM` of a slice is scalar, and the result feeds only the
-/// SIGN factor and the `=0` zero-guard (both sign/zero-only), so using
+/// SIGN factor and the zero-change guard (both sign/zero-only), so using
 /// `SUM` in place of the reducer's own algebra is harmless. If the
 /// transform left no live reference (the source vanished from the
 /// equation -- a parse failure is now reported as a `PartialEquationError`
@@ -5762,17 +5783,12 @@ fn build_element_reducer_link_score(
         }
     };
 
-    // Standard link score formula wrapping the partial equation, in the
-    // single-numerator form (see `link_score_guard_form` for the algebra):
-    // the partial appears once instead of twice.
-    format!(
-        "if \
-            (TIME = INITIAL_TIME) \
-            then 0 \
-            else if \
-                (ABS(({target_ref} - PREVIOUS({target_ref}))) <= 0) OR (ABS(({source_elem} - PREVIOUS({source_elem}))) <= 0) \
-                then 0 \
-                else SAFEDIV(({partial_eq} - PREVIOUS({target_ref})), ABS(({target_ref} - PREVIOUS({target_ref}))), 0) * SIGN(({source_elem} - PREVIOUS({source_elem})))"
+    // The changed-first numerator in the standard guard form (see
+    // `link_score_guard_form_with_numerator` for the algebra).
+    link_score_guard_form_with_numerator(
+        &format!("({partial_eq} - PREVIOUS({target_ref}))"),
+        target_ref,
+        &source_elem,
     )
 }
 

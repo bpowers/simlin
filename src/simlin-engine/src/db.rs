@@ -688,13 +688,10 @@ pub struct LtmVariablesResult {
 pub(super) fn black_box_unit_transfer_equation(from_ref: &str, to_ref: &str) -> String {
     let from_q = crate::ltm_augment::quote_ident(from_ref);
     let to_q = crate::ltm_augment::quote_ident(to_ref);
-    format!(
-        "if (TIME = INITIAL_TIME) then 0 \
-         else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
-                 (({from_q} - PREVIOUS({from_q})) = 0) \
-              then 0 \
-         else (SIGN({to_q} - PREVIOUS({to_q})) * \
-               SIGN({from_q} - PREVIOUS({from_q})))"
+    crate::ltm_augment::link_score_guard(
+        &to_q,
+        &from_q,
+        &format!("(SIGN({to_q} - PREVIOUS({to_q})) * SIGN({from_q} - PREVIOUS({from_q})))"),
     )
 }
 

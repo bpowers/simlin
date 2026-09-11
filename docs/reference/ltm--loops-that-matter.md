@@ -417,7 +417,7 @@ score 1 for all net-flow-to-stock links. Both produce identical results.
 > `[t - dt, t]` window as every other link score in the model: a loop's link scores all
 > describe one interval, the score is the same whether the stock's flows are written
 > separately or as one net flow, and it is defined from the first step after the start like
-> every other link (0 at `TIME = INITIAL_TIME`).
+> every other link (0 at `TIME <= INITIAL_TIME`).
 >
 > **Time labeling, for every link score.** Simlin labels the score computed over
 > `[t - dt, t]` with `t` (its reading of `PREVIOUS`). Stella labels the score computed over

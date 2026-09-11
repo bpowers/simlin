@@ -465,7 +465,7 @@ fn test_stock_to_flow_link_score_handles_apply_to_all() {
          but got: {equation_text}",
     );
     assert!(
-        !equation_text.starts_with("if (TIME = INITIAL_TIME) then 0 else if")
+        !equation_text.starts_with("if (TIME <= INITIAL_TIME) then 0 else if")
             || equation_text.contains("population"),
         "link score equation should not use a trivial '0' partial equation"
     );
@@ -1630,7 +1630,7 @@ fn pinned_double_lag_residual_is_not_a_structural_zero() {
         .map(f64::from_bits)
         .collect();
 
-    // The first two steps are the guard form's own warm-up (TIME = INITIAL_TIME,
+    // The first two steps are the guard form's own warm-up (TIME <= INITIAL_TIME,
     // then the first live step), so the residual starts at index 2.
     assert!(
         series.len() >= 6,

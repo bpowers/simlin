@@ -1388,7 +1388,7 @@ pub(super) struct FallbackOutcome {
 
 /// Run the fallback over every saved step, returning the candidate cycles.
 ///
-/// Step 0 is skipped: every link score's `TIME = INITIAL_TIME` guard arm
+/// Step 0 is skipped: every link score's `TIME <= INITIAL_TIME` guard arm
 /// emits it as the literal constant `0` (not a genuine score --
 /// `ltm_augment::link_score_guard_form_with_numerator`), the same
 /// `1..step_count` window the enumerator uses.

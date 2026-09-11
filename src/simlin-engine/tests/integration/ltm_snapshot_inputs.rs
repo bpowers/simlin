@@ -240,3 +240,133 @@ fn element_reducer_scores_are_invariant_to_the_units_scale() {
         }
     }
 }
+
+/// `main`: `s -> m -> growth -> s`, where `m`'s output ignores its input
+/// (`out = scale * (1 + TIME)`). A module with an input->output pathway
+/// exposes a composite for the port instead, so only a pathway-less module
+/// reaches the magnitude-1 black-box unit transfer for `s -> m`: the third
+/// link-score generator beside the ceteris-paribus guard form and the element
+/// reducer (the two tests above).
+fn black_box_loop_project(scale: f64) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel;
+
+    let aux = |ident: &str, equation: &str, can_be_module_input: bool| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar(equation.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input,
+                ..datamodel::Compat::default()
+            },
+        })
+    };
+    let mut project = TestProject::new("scaled_black_box")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .stock("s", &scale.to_string(), &["growth"], &[], None)
+        .flow("growth", "0.1 * m.out", None)
+        .build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "m".to_string(),
+            model_name: "independent".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![datamodel::ModuleReference {
+                src: "s".to_string(),
+                dst: "m.input_val".to_string(),
+            }],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+    project.models.push(datamodel::Model {
+        name: "independent".to_string(),
+        sim_specs: None,
+        variables: vec![
+            aux("input_val", "0", true),
+            aux("out", &format!("{scale} * (1 + TIME)"), false),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    project
+}
+
+#[test]
+fn black_box_module_scores_are_invariant_to_the_units_scale() {
+    use simlin_engine::db::{SimlinDb, model_ltm_variables, sync_from_datamodel_incremental};
+
+    for scale in [1.0, 1e-18] {
+        let project = black_box_loop_project(scale);
+        // The value assertions below cannot tell the black box from a
+        // composite that also scores 1, so pin which generator ran.
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+        let black_box = ltm
+            .vars
+            .iter()
+            .find(|v| v.name == score_key("s", "m"))
+            .expect("s -> m must be scored");
+        let text = black_box.equation.source_text();
+        assert!(
+            text.contains("SIGN(") && !text.contains("SAFEDIV") && !text.contains("composite"),
+            "s -> m must be the black-box unit transfer: {text}"
+        );
+
+        let run = ltm_run(&project, false);
+        assert!(run.diagnostics.is_empty(), "{:?}", run.diagnostics);
+        for (source, target) in [("s", "m"), ("m", "growth"), ("growth", "s")] {
+            assert_eq!(
+                ltm_series(&run.results, &score_key(source, target), 0),
+                vec![0.0, 1.0, 1.0, 1.0],
+                "scale {scale}: {source} -> {target}"
+            );
+        }
+        let loop_id = run.loop_through("growth");
+        assert_eq!(
+            ltm_series(
+                &run.results,
+                &format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{loop_id}"),
+                0
+            ),
+            vec![0.0, 1.0, 1.0, 1.0],
+            "scale {scale}: the loop through the black box"
+        );
+    }
+}
+
+/// The first-step guard compares the clock with the start time exactly, so a
+/// step is scored however close its time is to the start. Two time scales
+/// straddle both arms of equation equality's tolerance: times within
+/// `f64::EPSILON` of a zero start, and times a few ULPs past a large start.
+/// Every generator shares one guard builder
+/// (`ltm_augment::link_score_guard`), so the ordinary loop pins it for all.
+#[test]
+fn first_step_guard_is_invariant_to_the_time_scale() {
+    // Powers of two keep every accumulated TIME exact.
+    for (start, dt) in [(0.0, 2f64.powi(-53)), (2f64.powi(30), 2f64.powi(-22))] {
+        let project = TestProject::new("time_scaled_loop")
+            .with_sim_time(start, start + 5.0 * dt, dt)
+            .stock("s", "1", &["growth"], &[], None)
+            .flow("growth", &format!("0.1 * s / {}", dt), None)
+            .build_datamodel();
+        let run = ltm_run(&project, false);
+        assert_eq!(ltm_series(&run.results, "time", 0)[1], start + dt);
+        for (source, target) in [("s", "growth"), ("growth", "s")] {
+            assert_eq!(
+                ltm_series(&run.results, &score_key(source, target), 0),
+                vec![0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                "start {start}, dt {dt}: {source} -> {target}"
+            );
+        }
+    }
+}

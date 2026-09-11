@@ -193,11 +193,13 @@ const RI_BELT_N_SLATS: u32 = 1;
 /// (the wasm blob plus its [`WasmLayout`]), through the salsa incremental
 /// pipeline and [`compile_simulation`].
 ///
-/// This is the entry point `libsimlin` uses across the FFI boundary
-/// (`simlin_model_compile_to_wasm`): it works from a datamodel alone, with no
-/// `Vm`/`SimlinSim`, returning both the blob and the name->offset layout. An
-/// incremental-compile failure or an unsupported construct surfaces as
-/// [`WasmGenError`] (the FFI maps it to a `SimlinError`, never a panic).
+/// A one-shot compile from a datamodel alone, in a database this call owns and
+/// drops, with no `Vm`/`SimlinSim`, returning both the blob and the
+/// name->offset layout. A host that keeps a project database compiles through
+/// that database instead, so an unchanged model reuses its queries
+/// (`simlin_model_compile_to_wasm` does, then calls
+/// [`compile_simulation_with_plans`]). An incremental-compile failure or an
+/// unsupported construct surfaces as [`WasmGenError`].
 ///
 /// A CONVEYOR or QUEUE model routes through the shared special-stock dispatch
 /// ([`crate::queue_compile::compile_sim`]) -- the same one the VM takes -- so the

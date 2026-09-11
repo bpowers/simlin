@@ -864,7 +864,7 @@ fn test_generate_stddev_equation() {
     );
     assert_eq!(
         eq,
-        "if (TIME = INITIAL_TIME) then 0 else if (ABS((total - PREVIOUS(total))) <= 0) OR (ABS((s[d1] - PREVIOUS(s[d1]))) <= 0) then 0 else SAFEDIV((sqrt((((s[d1] - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d2]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d3]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2)) / 3) - PREVIOUS(total)), ABS((total - PREVIOUS(total))), 0) * SIGN((s[d1] - PREVIOUS(s[d1])))"
+        "if (TIME <= INITIAL_TIME) then 0 else if (ABS((total - PREVIOUS(total))) <= 0) OR (ABS((s[d1] - PREVIOUS(s[d1]))) <= 0) then 0 else SAFEDIV((sqrt((((s[d1] - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d2]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d3]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2)) / 3) - PREVIOUS(total)), ABS((total - PREVIOUS(total))), 0) * SIGN((s[d1] - PREVIOUS(s[d1])))"
     );
     // The live source element drives the partial; the other elements
     // are frozen at PREVIOUS.
@@ -1160,7 +1160,7 @@ fn test_generate_nested_reducer_uses_delta_ratio() {
         "should not use algebraic shortcut for nested reducer: {eq}"
     );
     // Should still have the standard link score wrapping
-    assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+    assert!(eq.contains("TIME <= INITIAL_TIME"), "equation: {eq}");
     assert!(eq.contains("SAFEDIV("), "equation: {eq}");
     // The partial equation uses target directly (delta-ratio approach)
     assert!(
@@ -1184,7 +1184,7 @@ fn test_generate_link_score_wrapping() {
         None,
     );
     // Should have initial time guard
-    assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+    assert!(eq.contains("TIME <= INITIAL_TIME"), "equation: {eq}");
     // Should have zero-change guards
     assert!(
         eq.contains("ABS((tgt - PREVIOUS(tgt))) <= 0"),
@@ -1815,7 +1815,7 @@ fn test_generate_reduced_nested_uses_delta_ratio() {
         eq.contains("(row_agg[a] - PREVIOUS(row_agg[a]))"),
         "should use the row element in the delta-ratio: {eq}"
     );
-    assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+    assert!(eq.contains("TIME <= INITIAL_TIME"), "equation: {eq}");
 }
 
 #[test]
@@ -1842,7 +1842,7 @@ fn test_generate_full_reduce_unchanged_after_refactor() {
     // stable (the explicit-string assertion below catches regressions).
     assert_eq!(
         scalar_eq,
-        "if (TIME = INITIAL_TIME) then 0 else if (ABS((total_pop - PREVIOUS(total_pop))) <= 0) OR (ABS((population[nyc] - PREVIOUS(population[nyc]))) <= 0) then 0 else SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), ABS((total_pop - PREVIOUS(total_pop))), 0) * SIGN((population[nyc] - PREVIOUS(population[nyc])))"
+        "if (TIME <= INITIAL_TIME) then 0 else if (ABS((total_pop - PREVIOUS(total_pop))) <= 0) OR (ABS((population[nyc] - PREVIOUS(population[nyc]))) <= 0) then 0 else SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), ABS((total_pop - PREVIOUS(total_pop))), 0) * SIGN((population[nyc] - PREVIOUS(population[nyc])))"
     );
 }
 
@@ -4132,7 +4132,7 @@ fn flow_to_stock_scalar_inflow_is_the_net_flow_partial() {
     assert_eq!(
         &*arm.text,
         format!(
-            "if (TIME = INITIAL_TIME) then 0 else if (ABS(({net} - PREVIOUS({net}))) <= 0) OR \
+            "if (TIME <= INITIAL_TIME) then 0 else if (ABS(({net} - PREVIOUS({net}))) <= 0) OR \
              (ABS((births - PREVIOUS(births))) <= 0) then 0 else SAFEDIV((births - \
              PREVIOUS(births)), ABS(({net} - PREVIOUS({net}))), 0) * SIGN((births - \
              PREVIOUS(births)))"
@@ -4165,7 +4165,7 @@ fn flow_to_stock_arrayed_inflow_subscripts_flow_and_net() {
     assert_eq!(
         &*arm.text,
         format!(
-            "if (TIME = INITIAL_TIME) then 0 else if (ABS(({net} - PREVIOUS({net}))) <= 0) OR \
+            "if (TIME <= INITIAL_TIME) then 0 else if (ABS(({net} - PREVIOUS({net}))) <= 0) OR \
              (ABS((growth[region] - PREVIOUS(growth[region]))) <= 0) then 0 else \
              SAFEDIV((growth[region] - PREVIOUS(growth[region])), ABS(({net} - \
              PREVIOUS({net}))), 0) * SIGN((growth[region] - PREVIOUS(growth[region])))"
@@ -4234,7 +4234,7 @@ fn flow_to_stock_flow_over_other_dims_or_scalar_is_spelled_bare() {
         assert_eq!(
             &*arm.text,
             format!(
-                "if (TIME = INITIAL_TIME) then 0 else if (ABS(({net} - PREVIOUS({net}))) <= 0) OR \
+                "if (TIME <= INITIAL_TIME) then 0 else if (ABS(({net} - PREVIOUS({net}))) <= 0) OR \
                  (ABS(({name} - PREVIOUS({name}))) <= 0) then 0 else SAFEDIV(({name} - \
                  PREVIOUS({name})), ABS(({net} - PREVIOUS({net}))), 0) * SIGN(({name} - \
                  PREVIOUS({name})))"
@@ -4805,7 +4805,7 @@ fn test_generate_scalar_feeder_to_agg_equation_freezes_only_feeder() {
     );
     // Standard guard structure: initial-step zero, zero-delta zero, SAFEDIV.
     assert!(
-        eq.starts_with("if (TIME = INITIAL_TIME) then 0"),
+        eq.starts_with("if (TIME <= INITIAL_TIME) then 0"),
         "got: {eq}"
     );
     assert!(eq.contains("SAFEDIV("), "got: {eq}");
@@ -4832,7 +4832,7 @@ fn test_generate_iterated_feeder_to_agg_equation_pins_slot_and_freezes_feeder() 
     .expect("the feeder occurrence freezes");
     assert_eq!(
         eq,
-        "if (TIME = INITIAL_TIME) then 0 else if (ABS((growth[d1\u{B7}r1] - \
+        "if (TIME <= INITIAL_TIME) then 0 else if (ABS((growth[d1\u{B7}r1] - \
          PREVIOUS(growth[d1\u{B7}r1]))) <= 0) OR (ABS((frac[d1\u{B7}r1] - \
          PREVIOUS(frac[d1\u{B7}r1]))) <= 0) then 0 else \
          SAFEDIV((growth[d1\u{B7}r1] - (sum(matrix[d1\u{B7}r1, *] * \
@@ -5398,7 +5398,7 @@ fn shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source() {
     .unwrap();
     assert_eq!(
         text,
-        "if (TIME = INITIAL_TIME) then 0 \
+        "if (TIME <= INITIAL_TIME) then 0 \
          else if (ABS((growth - PREVIOUS(growth))) <= 0) OR (ABS((frac - PREVIOUS(frac))) <= 0) then 0 \
          else SAFEDIV((growth - (sum(matrix[d1, *] * PREVIOUS(frac)))), \
          ABS((growth - PREVIOUS(growth))), 0) * SIGN((frac - PREVIOUS(frac)))"
@@ -5438,7 +5438,7 @@ fn shaped_guard_form_changed_last_keeps_the_clock_live() {
     .unwrap();
     assert_eq!(
         text,
-        "if (TIME = INITIAL_TIME) then 0 \
+        "if (TIME <= INITIAL_TIME) then 0 \
          else if (ABS((growth - PREVIOUS(growth))) <= 0) OR (ABS((frac - PREVIOUS(frac))) <= 0) then 0 \
          else SAFEDIV((growth - (sum(matrix[d1, *] * PREVIOUS(frac)) + time())), \
          ABS((growth - PREVIOUS(growth))), 0) * SIGN((frac - PREVIOUS(frac)))"
@@ -5485,7 +5485,7 @@ fn shaped_guard_form_keeps_changed_first_when_freezable() {
     assert_eq!(
         text,
         format!(
-            "if (TIME = INITIAL_TIME) then 0 \
+            "if (TIME <= INITIAL_TIME) then 0 \
              else if (ABS((share - PREVIOUS(share))) <= 0) OR (ABS((population - PREVIOUS(population))) <= 0) then 0 \
              else SAFEDIV((({expected_partial}) - PREVIOUS(share)), \
              ABS((share - PREVIOUS(share))), 0) * SIGN((population - PREVIOUS(population)))"

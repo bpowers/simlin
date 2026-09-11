@@ -311,19 +311,25 @@ For a link from `x` to `z` where `z = f(x, y, ...)`:
    modules: the `eqn` field holds the original text like `SMTH1(x, 5)` while
    the AST holds the expanded form like `$⁚s⁚0⁚smth1·output`).
 2. Compute the dependency set from the AST via `identifier_set()`.
-3. Build the ceteris-paribus partial equation using `build_partial_equation()`,
-   which parses the equation into an `Expr0` AST, recursively walks the tree
-   wrapping variable references in `PREVIOUS()` for all dependencies except `x`
-   (`wrap_non_matching_in_previous`), and prints the result back to equation text. This
+3. Build the ceteris-paribus partial equation using `build_partial_equation_shaped()`,
+   which recursively walks the `Expr0` tree wrapping variable references in
+   `PREVIOUS()` for all dependencies except `x` (`wrap_non_matching_in_previous`),
+   and prints the result back to equation text. This
    AST-based approach avoids the pitfalls of text-based replacement (e.g.,
    replacing `x` inside `x_rate`, or corrupting function names like `MAX`).
 4. The link score is:
    ```
-   if (TIME = INITIAL_TIME) then 0
-   else if ((z - PREVIOUS(z)) = 0) OR ((x - PREVIOUS(x)) = 0) then 0
-   else ABS(SAFEDIV((partial_eq - PREVIOUS(z)), (z - PREVIOUS(z)), 0))
-      * SIGN(SAFEDIV((partial_eq - PREVIOUS(z)), (x - PREVIOUS(x)), 0))
+   if (TIME <= INITIAL_TIME) then 0
+   else if (ABS((z - PREVIOUS(z))) <= 0) OR (ABS((x - PREVIOUS(x))) <= 0) then 0
+   else SAFEDIV(((partial_eq) - PREVIOUS(z)), ABS((z - PREVIOUS(z))), 0)
+      * SIGN((x - PREVIOUS(x)))
    ```
+   `|N/Δz| * sign(N/Δx)` is written `SAFEDIV(N, |Δz|, 0) * sign(Δx)`, so the
+   partial appears once. Every generator (this form, the flow-to-stock and
+   element-reducer scores, and the black-box module transfer) wraps its score
+   in one guard, `link_score_guard`. Both of its comparisons are exact:
+   equation `=` is approximate, and an approximate zero-change or first-step
+   test would make a score depend on the model's units or time scale.
 
 ### Flow-to-Stock Links
 
@@ -343,9 +349,9 @@ outflow -- so the emitted equation is the standard guard form with that
 numerator:
 
 ```
-if (TIME = INITIAL_TIME) then 0
-else if ((net - PREVIOUS(net)) = 0) OR ((flow - PREVIOUS(flow)) = 0) then 0
-else SAFEDIV(+/-(flow - PREVIOUS(flow)), ABS(net - PREVIOUS(net)), 0) * SIGN(flow - PREVIOUS(flow))
+if (TIME <= INITIAL_TIME) then 0
+else if (ABS((net - PREVIOUS(net))) <= 0) OR (ABS((flow - PREVIOUS(flow))) <= 0) then 0
+else SAFEDIV(+/-(flow - PREVIOUS(flow)), ABS((net - PREVIOUS(net))), 0) * SIGN((flow - PREVIOUS(flow)))
 ```
 
 which evaluates to `sign * |Δflow / Δnet|`: the 2023 paper's Eq. 3 (its
@@ -357,7 +363,7 @@ Polarity is structural: inflows +1, outflows -1. Both deltas are read over
 all describe one interval, the score is the same whether a stock's flows are
 written separately or as one net flow, and no `dt` appears (an isolated loop
 scores exactly `+/-1` at every `dt`, `tests/integration/ltm_dt_invariance.rs`).
-Like every other score it is 0 at `TIME = INITIAL_TIME` and defined from the
+Like every other score it is 0 at `TIME <= INITIAL_TIME` and defined from the
 first step after the start. The net aux is LTM machinery, not a causal node:
 the causal graph keeps its `flow -> stock` edges, and the aux appears in no
 loop and no link.
@@ -975,7 +981,7 @@ edge:
 they cannot disagree about which cycles exist: a value is active when it is
 finite and nonzero, or infinite (a divergent link is real signal); only NaN and
 an exact zero are inactive. Step 0 is excluded from union membership and masked
-out of every activity test: every link-score equation's `TIME = INITIAL_TIME`
+out of every activity test: every link-score equation's `TIME <= INITIAL_TIME`
 guard arm is emitted as the literal constant `0`, so a cycle "active" only there
 is not a scorable loop. Self-edges are dropped at build time -- an elementary
 cycle never repeats a node, so a self-edge can neither be nor extend one, and a
@@ -2150,7 +2156,7 @@ cases remain deliberate carve-outs:
 5. **PREVIOUS is intrinsic**: The `PREVIOUS()` function used in link score
    equations is compiled as an intrinsic two-argument builtin. Unary syntax is
    desugared to `PREVIOUS(x, 0)`. LTM first-timestep behavior is handled
-   explicitly with `TIME = INITIAL_TIME`.
+   explicitly with `TIME <= INITIAL_TIME`.
 
 6. **Relative loop score formula and timing**: The implementation computes
    `loop_score / sum_of_abs_scores` with explicit division-by-zero protection

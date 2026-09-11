@@ -1531,7 +1531,7 @@ fn agg_nested_reducer_partial_scores_full_attribution() {
     // because `pop` is a stock fed by `growth > 0`, so both `agg` and `growth`
     // increase every step. 1.0 is full attribution, which is the right answer:
     // `agg` is the only changing driver of `growth`. The first saved step is 0
-    // by the score's own `TIME = INITIAL_TIME` guard.
+    // by the score's own `TIME <= INITIAL_TIME` guard.
     //
     // Every wrong reading lands somewhere else: a failed or stubbed fragment
     // reads a constant 0, and freezing the whole declined outer reducer (the

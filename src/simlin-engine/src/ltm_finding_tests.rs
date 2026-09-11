@@ -1837,7 +1837,7 @@ fn two_circuit_universe(weak_sibling: bool) -> UniverseStats {
 
 /// The one retention survivor of the `two_circuit_universe` fixture, as the
 /// `FoundLoop` materialization would build it: zero at step 0 (every link
-/// score's `TIME = INITIAL_TIME` arm) and the product 1.0 at step 1.
+/// score's `TIME <= INITIAL_TIME` arm) and the product 1.0 at step 1.
 fn universe_survivor_loop() -> FoundLoop {
     make_found_loop_with_scores(
         &[("a", "b"), ("b", "a")],
@@ -2536,7 +2536,7 @@ fn discovery_graph_stats_reports_structure_and_scores() {
         // step 0: `sample_steps` below (`&[1, 2]`) never asks for it, so its
         // value is never read either way. NaN here (rather than the literal
         // `0` production actually emits for every link score at
-        // `TIME = INITIAL_TIME`) is a sentinel: an accidental read would
+        // `TIME <= INITIAL_TIME`) is a sentinel: an accidental read would
         // propagate loudly instead of silently matching a plausible score.
         f64::NAN,
         f64::NAN,
