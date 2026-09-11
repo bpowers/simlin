@@ -65,6 +65,7 @@ use crate::common::canonicalize;
 use crate::datamodel;
 use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
 use crate::datamodel::{Rect, ViewElement};
+use crate::diagram::flow_geometry::clamp_to_face_span;
 use crate::ltm_dominance::{FeedbackLoop, LoopPolarity, PartitionSurface};
 
 /// A queued element during chain layout BFS traversal.
@@ -791,12 +792,12 @@ fn create_flow_view_element(
                 if half_h * dx.abs() >= half_w * dy.abs() {
                     FlowPoint {
                         x: stock_pos.x + dx.signum() * half_w,
-                        y: pos.y.clamp(stock_pos.y - half_h, stock_pos.y + half_h),
+                        y: clamp_to_face_span(pos.y, stock_pos.y, half_h),
                         attached_to_uid: Some(stock_uid),
                     }
                 } else {
                     FlowPoint {
-                        x: pos.x.clamp(stock_pos.x - half_w, stock_pos.x + half_w),
+                        x: clamp_to_face_span(pos.x, stock_pos.x, half_w),
                         y: stock_pos.y + dy.signum() * half_h,
                         attached_to_uid: Some(stock_uid),
                     }
@@ -2886,12 +2887,10 @@ pub fn fresh_layout(
     // Phase 5: Normalize coordinates
     normalize_coordinates(&mut state.elements, DIAGRAM_ORIGIN_MARGIN);
 
-    // Phase 5b: Orthogonalize flow pipes. Placement positions stocks freely, so
-    // a flow between two stocks offset in both axes would render as a diagonal;
-    // SD convention draws flows with horizontal/vertical segments only. This
-    // runs last (after declutter/normalize) so nothing re-diagonalizes it, and
-    // before scoring so the metric sees the real pipe geometry.
-    orthogonal::orthogonalize_flow_pipes(&mut state.elements);
+    // Phase 5b: Settle flow geometry. This runs last (after declutter/normalize)
+    // so nothing moves a stock, valve or cloud after it, and before scoring so
+    // the metric sees the real pipe geometry.
+    finish_flow_geometry(&mut state.elements);
 
     // Phase 6: Apply feedback loop curvature
     apply_loop_curvature(&mut state, config, model, metadata);
@@ -2925,6 +2924,19 @@ pub fn fresh_layout(
         font: None,
         sketch_compat: None,
     })
+}
+
+/// The last word on flow geometry in a layout pass: every diagonal pipe is
+/// rewritten into axis-aligned segments (placement positions stocks freely, so
+/// a flow between two stocks offset in both axes would render as a diagonal),
+/// then the flow invariants (`diagram::flow_geometry`) are established on the
+/// result. The orthogonalizer only routes between a pipe's two attached ends,
+/// leaving the valve and the clouds where placement put them, and placement
+/// positions those independently of the pipe; the normalization owns where
+/// they end up, as it does for imported views.
+fn finish_flow_geometry(elements: &mut [ViewElement]) {
+    orthogonal::orthogonalize_flow_pipes(elements);
+    crate::diagram::flow_geometry::normalize_flow_geometry(elements);
 }
 
 /// Copy free nodes' element coordinates back into `state.positions` after a

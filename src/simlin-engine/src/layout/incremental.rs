@@ -673,14 +673,16 @@ pub fn resnap_flow_endpoints(state: &mut LayoutState, config: &LayoutConfig) {
                     if half_h * dx.abs() >= half_w * dy.abs() {
                         // Horizontal approach: snap to left or right edge.
                         // Preserve the y position (may be off-center for
-                        // multi-flow sides), clamped to stock bounds.
+                        // multi-flow sides), clamped into the face's span
+                        // with corner clearance.
                         pt.x = stock_pos.x + dx.signum() * half_w;
-                        pt.y = pt.y.clamp(stock_pos.y - half_h, stock_pos.y + half_h);
+                        pt.y = clamp_to_face_span(pt.y, stock_pos.y, half_h);
                     } else {
                         // Vertical approach: snap to top or bottom edge.
                         // Preserve the x position (may be off-center for
-                        // multi-flow sides), clamped to stock bounds.
-                        pt.x = pt.x.clamp(stock_pos.x - half_w, stock_pos.x + half_w);
+                        // multi-flow sides), clamped into the face's span
+                        // with corner clearance.
+                        pt.x = clamp_to_face_span(pt.x, stock_pos.x, half_w);
                         pt.y = stock_pos.y + dy.signum() * half_h;
                     }
                 }

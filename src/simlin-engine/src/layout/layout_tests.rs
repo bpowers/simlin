@@ -5698,3 +5698,6 @@ mod label_tests;
 
 #[path = "layout_flow_side_tests.rs"]
 mod flow_side_tests;
+
+#[path = "layout_flow_geometry_tests.rs"]
+mod flow_geometry_tests;

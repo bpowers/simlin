@@ -573,12 +573,13 @@ pub(crate) fn resnap_flow_endpoints_to_stocks(elements: &mut [ViewElement]) {
             let dy = valve.1 - sy;
             if half_h * dx.abs() >= half_w * dy.abs() {
                 // Horizontal approach: snap to the left or right edge,
-                // preserving the (clamped) y position.
+                // preserving the y position within the face's span with
+                // corner clearance.
                 pt.x = sx + dx.signum() * half_w;
-                pt.y = pt.y.clamp(sy - half_h, sy + half_h);
+                pt.y = crate::diagram::flow_geometry::clamp_to_face_span(pt.y, sy, half_h);
             } else {
                 // Vertical approach: snap to the top or bottom edge.
-                pt.x = pt.x.clamp(sx - half_w, sx + half_w);
+                pt.x = crate::diagram::flow_geometry::clamp_to_face_span(pt.x, sx, half_w);
                 pt.y = sy + dy.signum() * half_h;
             }
         }

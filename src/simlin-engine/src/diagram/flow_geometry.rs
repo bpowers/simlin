@@ -21,9 +21,10 @@
 //! - a cloud endpoint equals the cloud's center;
 //! - the valve (the flow's `x`, `y`) lies on the pipe.
 //!
-//! `normalize_flow_geometry` is the one pass the importers run to establish
-//! them, and `clamp_to_face_span` is the one statement of the corner clearance
-//! the layout's endpoint placement also reads.
+//! `normalize_flow_geometry` is the one pass that establishes them, run by the
+//! importers and as the layout's finishing pass, and `clamp_to_face_span` is
+//! the one statement of the corner clearance the layout's endpoint placement
+//! also reads.
 
 use std::collections::{HashMap, HashSet};
 
@@ -491,7 +492,7 @@ fn straighten_two_point_pipe(flow: &mut Flow) {
 
 /// Move an off-pipe valve to the nearest point of the pipe, kept
 /// `VALVE_MARGIN` from that segment's ends when the segment is long enough.
-fn project_valve_onto_pipe(points: &[FlowPoint], valve: &mut (f64, f64)) {
+pub(crate) fn project_valve_onto_pipe(points: &[FlowPoint], valve: &mut (f64, f64)) {
     let Some((i, d)) = points
         .windows(2)
         .enumerate()
