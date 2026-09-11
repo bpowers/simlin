@@ -103,12 +103,13 @@ pub struct LayoutMetrics {
     /// causal connection.
     pub node_connector_overlap: f64,
     /// Mean over labels of the fraction of each label box covered by other
-    /// labels, other nodes' shapes, and other flows' pipes (capped at 1).
+    /// labels and other nodes' shapes (capped at 1).
     pub label_overlap: f64,
-    /// Mean over labels of how much link polyline passes through the label's
-    /// text box, relative to the box's smaller side (capped at 1): a line
-    /// through a name strikes it out. The label's own node's links count at
-    /// `OWN_LINK_STRIKE_FACTOR`.
+    /// Mean over labels of how much connector -- link or flow pipe -- passes
+    /// through the label's text box, relative to the box's smaller side (capped
+    /// at 1): a line through a name strikes it out, however thin. The label's
+    /// own node's links count at `OWN_LINK_STRIKE_FACTOR`; a flow's own pipe
+    /// never strikes its name.
     #[serde(default)]
     pub label_connector_overlap: f64,
     /// Edge crossings per connector.
@@ -550,10 +551,10 @@ impl SceneNode {
     }
 }
 
-fn build_scene_nodes(view: &datamodel::StockFlow) -> Vec<SceneNode> {
-    let alias_names = alias_source_names(&view.elements);
+fn build_scene_nodes(elements: &[ViewElement]) -> Vec<SceneNode> {
+    let alias_names = alias_source_names(elements);
     let not_arrayed = |_: &str| false;
-    view.elements
+    elements
         .iter()
         .filter_map(|e| {
             let shape = node_shape_box(e)?;
@@ -597,7 +598,11 @@ enum ConnectorKind {
 /// uids (so overlap terms skip them) and the polyline the renderer draws.
 struct ConnectorGeometry {
     kind: ConnectorKind,
+    /// A link's two endpoints; a pipe's flow and the stocks and clouds it
+    /// attaches to.
     incident_uids: HashSet<i32>,
+    /// The flow a pipe belongs to; `None` for a link.
+    flow_uid: Option<i32>,
     /// Always at least two points (connectors that draw nothing are omitted).
     polyline: Vec<Point>,
     length: f64,
@@ -636,13 +641,13 @@ fn polyline_length(points: &[Point]) -> f64 {
 /// Collect the drawn geometry of every connector that draws something. Links
 /// use the shared `connector_polyline` (the exact geometry the renderer draws
 /// and `build_view_segments` counts); flows use their point polyline.
-fn collect_connector_geometry(view: &datamodel::StockFlow) -> Vec<ConnectorGeometry> {
+fn collect_connector_geometry(elements: &[ViewElement]) -> Vec<ConnectorGeometry> {
     let uid_elements: HashMap<i32, &ViewElement> =
-        view.elements.iter().map(|e| (e.get_uid(), e)).collect();
+        elements.iter().map(|e| (e.get_uid(), e)).collect();
     let not_arrayed = |_: &str| false;
 
     let mut out = Vec::new();
-    for elem in &view.elements {
+    for elem in elements {
         match elem {
             ViewElement::Link(link) => {
                 let (Some(&from), Some(&to)) = (
@@ -659,6 +664,7 @@ fn collect_connector_geometry(view: &datamodel::StockFlow) -> Vec<ConnectorGeome
                 out.push(ConnectorGeometry {
                     kind: ConnectorKind::Link,
                     incident_uids: HashSet::from([link.from_uid, link.to_uid]),
+                    flow_uid: None,
                     length: polyline_length(&polyline),
                     polyline,
                 });
@@ -677,6 +683,7 @@ fn collect_connector_geometry(view: &datamodel::StockFlow) -> Vec<ConnectorGeome
                 out.push(ConnectorGeometry {
                     kind: ConnectorKind::Pipe,
                     incident_uids,
+                    flow_uid: Some(flow.uid),
                     length: polyline_length(&polyline),
                     polyline,
                 });
@@ -794,8 +801,11 @@ fn node_connector_overlap_term(
     inside / total_length
 }
 
-/// `label_overlap`: mean covered fraction of each label box by other labels,
-/// other nodes' shapes, and other flows' pipes.
+/// `label_overlap`: mean covered fraction of each label box by other labels
+/// and other nodes' shapes. A pipe through a label is not coverage but a line
+/// through the name, charged by `label_connector_overlap`: counting its 4px
+/// band by area would make a pipe through a name several times cheaper than a
+/// hairline link through it.
 fn label_overlap_term(nodes: &[SceneNode], sink: &mut DefectSink) -> f64 {
     let labeled: Vec<&SceneNode> = nodes.iter().filter(|n| n.label.is_some()).collect();
     if labeled.is_empty() {
@@ -817,9 +827,6 @@ fn label_overlap_term(nodes: &[SceneNode], sink: &mut DefectSink) -> f64 {
             if let Some(other) = b.label {
                 covered += rect_overlap_area(&lbl, &other);
             }
-            for r in &b.pipe {
-                covered += rect_overlap_area(&lbl, r);
-            }
         }
         let fraction = covered.min(area) / area;
         if fraction > 0.0 {
@@ -830,8 +837,8 @@ fn label_overlap_term(nodes: &[SceneNode], sink: &mut DefectSink) -> f64 {
     total / labeled.len() as f64
 }
 
-/// `label_connector_overlap`: mean over labels of the link length through the
-/// label's text box relative to the box's smaller side.
+/// `label_connector_overlap`: mean over labels of the connector length (links
+/// and pipes) through the label's text box relative to the box's smaller side.
 fn label_connector_overlap_term(
     nodes: &[SceneNode],
     connectors: &[ConnectorGeometry],
@@ -846,37 +853,120 @@ fn label_connector_overlap_term(
     }
     let mut total = 0.0;
     for (owner, lbl) in &labels {
-        let text = inset(lbl, LABEL_INSET);
-        let side = common::rect_width(&text).min(common::rect_height(&text));
-        if side <= 0.0 {
-            continue;
-        }
-        let mut through = 0.0;
-        for c in connectors.iter().filter(|c| c.kind == ConnectorKind::Link) {
-            // A link into or out of the labeled node at least points at (or
-            // leaves from) that name, the way a modeler draws an arrow to a
-            // variable, so it strikes the name out half as badly as a line
-            // passing through on its way somewhere else.
-            let factor = if c.incident_uids.contains(owner) {
-                OWN_LINK_STRIKE_FACTOR
-            } else {
-                1.0
-            };
-            for seg in c.polyline.windows(2) {
-                if let Some((t0, t1)) = segment_clip_interval_in_rect(&seg[0], &seg[1], &text) {
-                    let seg_len =
-                        ((seg[1].x - seg[0].x).powi(2) + (seg[1].y - seg[0].y).powi(2)).sqrt();
-                    through += factor * (t1 - t0) * seg_len;
-                }
-            }
-        }
-        let fraction = (through / side).min(1.0);
+        let fraction = label_strike_fraction(*owner, lbl, connectors);
         if fraction > 0.0 {
             sink.push(DefectKind::LabelCrossed, *lbl, fraction);
         }
         total += fraction;
     }
     total / labels.len() as f64
+}
+
+/// How struck out the label box `lbl` of node `owner` is: the connector length
+/// through its (inset) text box relative to the box's smaller side, capped at
+/// 1.
+fn label_strike_fraction(owner: i32, lbl: &Rect, connectors: &[ConnectorGeometry]) -> f64 {
+    let text = inset(lbl, LABEL_INSET);
+    let side = common::rect_width(&text).min(common::rect_height(&text));
+    if side <= 0.0 {
+        return 0.0;
+    }
+    let mut through = 0.0;
+    for c in connectors {
+        let factor = match c.kind {
+            // A link into or out of the labeled node at least points at (or
+            // leaves from) that name, the way a modeler draws an arrow to a
+            // variable, so it strikes the name out half as badly as a line
+            // passing through on its way somewhere else.
+            ConnectorKind::Link if c.incident_uids.contains(&owner) => OWN_LINK_STRIKE_FACTOR,
+            ConnectorKind::Link => 1.0,
+            // A flow's name sits beside its own pipe. Every other pipe through
+            // a name -- one entering the named stock through the face the name
+            // sits on included -- writes over it.
+            ConnectorKind::Pipe if c.flow_uid == Some(owner) => continue,
+            ConnectorKind::Pipe => 1.0,
+        };
+        for seg in c.polyline.windows(2) {
+            if let Some((t0, t1)) = segment_clip_interval_in_rect(&seg[0], &seg[1], &text) {
+                let seg_len =
+                    ((seg[1].x - seg[0].x).powi(2) + (seg[1].y - seg[0].y).powi(2)).sqrt();
+                through += factor * (t1 - t0) * seg_len;
+            }
+        }
+    }
+    (through / side).min(1.0)
+}
+
+/// The drawn scene of a view, for a label-side chooser that must charge a
+/// candidate label box as the metric would. Shapes and connectors stay put
+/// while sides are chosen; the other labels' boxes are whatever the chooser
+/// has picked so far, so they are supplied per call.
+pub(crate) struct LabelScene {
+    nodes: Vec<SceneNode>,
+    connectors: Vec<ConnectorGeometry>,
+    /// `labels / nodes`: converts a per-node crowding deficit into the same
+    /// per-label units the label terms are charged in.
+    crowding_scale: f64,
+}
+
+impl LabelScene {
+    pub(crate) fn new(elements: &[ViewElement]) -> Self {
+        let nodes = build_scene_nodes(elements);
+        let labels = nodes.iter().filter(|n| n.label.is_some()).count();
+        let crowding_scale = if nodes.is_empty() {
+            0.0
+        } else {
+            labels as f64 / nodes.len() as f64
+        };
+        LabelScene {
+            connectors: collect_connector_geometry(elements),
+            nodes,
+            crowding_scale,
+        }
+    }
+
+    /// What the metric charges node `owner` for wearing the label box `lbl`,
+    /// in per-label units: `w.label_overlap` times the fraction of the box
+    /// covered by other nodes' shapes and labels, `w.label_connector_overlap`
+    /// times its strike fraction, and `w.crowding` times the clearance deficit
+    /// of every pair `owner` forms with another node. `label_of(uid)` is
+    /// another node's current label box. The part of the cost that does not
+    /// depend on `lbl` is the same for every side, so only differences
+    /// between sides mean anything.
+    pub(crate) fn label_cost(
+        &self,
+        owner: i32,
+        lbl: &Rect,
+        label_of: impl Fn(i32) -> Option<Rect>,
+        w: &MetricWeights,
+    ) -> f64 {
+        let area = rect_area(lbl);
+        if area <= 0.0 {
+            return 0.0;
+        }
+        let Some(own) = self.nodes.iter().find(|n| n.uid == owner) else {
+            return 0.0;
+        };
+        let mut covered = 0.0;
+        let mut crowding = 0.0;
+        for other in self.nodes.iter().filter(|n| n.uid != owner) {
+            let other_label = label_of(other.uid);
+            covered += rect_overlap_area(lbl, &other.shape);
+            if let Some(ol) = &other_label {
+                covered += rect_overlap_area(lbl, ol);
+            }
+            if own.is_cloud || other.is_cloud {
+                continue;
+            }
+            let (gap, _) = footprint_gap(own, Some(*lbl), other, other_label);
+            if gap < COMFORTABLE_CLEARANCE {
+                crowding += (1.0 - gap / COMFORTABLE_CLEARANCE).powi(2);
+            }
+        }
+        w.label_overlap * covered.min(area) / area
+            + w.label_connector_overlap * label_strike_fraction(owner, lbl, &self.connectors)
+            + w.crowding * self.crowding_scale * crowding
+    }
 }
 
 /// `crossings`: crossings per connector, on the drawn polylines.
@@ -950,13 +1040,6 @@ fn crowding_term(
     } else {
         short / links.len() as f64
     };
-    // (is_label, rect) for each node's shape and label.
-    let footprint = |n: &SceneNode| -> Vec<(bool, Rect)> {
-        let mut rects = vec![(false, n.shape)];
-        rects.extend(n.label.map(|l| (true, l)));
-        rects
-    };
-    let footprints: Vec<Vec<(bool, Rect)>> = nodes.iter().map(footprint).collect();
     let boxes: Vec<Rect> = nodes.iter().map(SceneNode::footprint_box).collect();
     let mut total = 0.0;
     for i in 0..nodes.len() {
@@ -968,24 +1051,8 @@ fn crowding_term(
             if rect_gap(&boxes[i], &boxes[j]) >= COMFORTABLE_CLEARANCE {
                 continue;
             }
-            // A flow's valve sits a fixed short pipe away from the stock or
-            // cloud it attaches to by construction: their SHAPES being close is
-            // structure, but either one's label crowding the other is not.
-            let attached = nodes[i].attached_to(&nodes[j]);
-            let mut gap = f64::INFINITY;
-            let mut closest = (boxes[i], boxes[j]);
-            for &(a_is_label, a) in &footprints[i] {
-                for &(b_is_label, b) in &footprints[j] {
-                    if attached && !a_is_label && !b_is_label {
-                        continue;
-                    }
-                    let g = rect_gap(&a, &b);
-                    if g < gap {
-                        gap = g;
-                        closest = (a, b);
-                    }
-                }
-            }
+            let (gap, closest) =
+                footprint_gap(&nodes[i], nodes[i].label, &nodes[j], nodes[j].label);
             if gap < COMFORTABLE_CLEARANCE {
                 let deficit = (1.0 - gap / COMFORTABLE_CLEARANCE).powi(2);
                 total += deficit;
@@ -998,6 +1065,37 @@ fn crowding_term(
         }
     }
     total / nodes.len() as f64 + short_rate
+}
+
+/// The clearance between two nodes' footprints -- each one's shape and its
+/// label box `*_label` -- as `crowding` measures it, with the two rects that
+/// realize it. A flow's valve sits a fixed short pipe away from the stock or
+/// cloud it attaches to by construction: their SHAPES being close is structure,
+/// but either one's label crowding the other is not.
+fn footprint_gap(
+    a: &SceneNode,
+    a_label: Option<Rect>,
+    b: &SceneNode,
+    b_label: Option<Rect>,
+) -> (f64, (Rect, Rect)) {
+    let attached = a.attached_to(b);
+    let a_rects = [Some((false, a.shape)), a_label.map(|l| (true, l))];
+    let b_rects = [Some((false, b.shape)), b_label.map(|l| (true, l))];
+    let mut gap = f64::INFINITY;
+    let mut closest = (a.shape, b.shape);
+    for &(a_is_label, ra) in a_rects.iter().flatten() {
+        for &(b_is_label, rb) in b_rects.iter().flatten() {
+            if attached && !a_is_label && !b_is_label {
+                continue;
+            }
+            let g = rect_gap(&ra, &rb);
+            if g < gap {
+                gap = g;
+                closest = (ra, rb);
+            }
+        }
+    }
+    (gap, closest)
 }
 
 /// `long_connectors`: mean excess of each link over `LONG_CONNECTOR_FACTOR`
@@ -1088,8 +1186,8 @@ pub fn analyze_layout(view: &datamodel::StockFlow) -> LayoutAnalysis {
 }
 
 fn analyze(view: &datamodel::StockFlow, sink: &mut DefectSink) -> LayoutMetrics {
-    let nodes = build_scene_nodes(view);
-    let connectors = collect_connector_geometry(view);
+    let nodes = build_scene_nodes(&view.elements);
+    let connectors = collect_connector_geometry(&view.elements);
 
     let node_overlap = node_overlap_term(&nodes, sink);
     let node_connector_overlap = node_connector_overlap_term(&nodes, &connectors, sink);

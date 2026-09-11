@@ -4,18 +4,17 @@
 
 // pattern: Functional Core (geometry) + thin imperative shell (view mutation)
 //
-// The layout-quality cost is dominated by `label_overlap`: auto-layout places
-// nodes as near-points and ignores that each node carries a label box often far
-// larger than the node itself, so labels pile onto neighbors and onto node
-// shapes. That overlap is ALSO the entire source of seed-to-seed variance --
-// crossings are already near-optimal and low-variance, but where labels land is
-// pure luck. This module makes the good outcome deterministic: it (1) picks each
-// label's side to minimize its overlap with the rest of the diagram and (2)
-// pushes overlapping element footprints (shape + label boxes) apart with a
-// minimal-displacement, deterministic relaxation. Both operate on the EXACT
-// geometry `layout::metrics` scores (`node_shape_box` / `element_label_props_for`
-// + `label_bounds`), so reducing the boxes' overlap here reduces the metric by
-// construction.
+// Auto-layout places nodes as near-points and ignores that each node carries a
+// label box often far larger than the node itself, so labels pile onto
+// neighbors and node shapes, and lines run through names. Where labels land is
+// also the main source of seed-to-seed variance. This module makes the good
+// outcome deterministic: it (1) picks each label's side by what the metric
+// charges for that label there -- covered by shapes and other labels, struck
+// by links and pipes (`metrics::LabelScene`) -- and (2) pushes overlapping
+// element footprints (shape + label boxes) apart with a minimal-displacement,
+// deterministic relaxation. Both operate on the EXACT geometry `layout::metrics`
+// scores (`node_shape_box` / `element_label_props_for` + `label_bounds`), so
+// what they remove is what the metric counts.
 //
 // "Minimal displacement" is the key property: the relaxation only ever pushes
 // boxes the small distance needed to separate them (plus a fixed breathing
@@ -28,11 +27,12 @@ use std::collections::HashMap;
 
 use crate::datamodel::ViewElement;
 use crate::datamodel::view_element::LabelSide;
-use crate::diagram::common::{Rect, rect_overlap_area};
+use crate::diagram::common::Rect;
 use crate::diagram::label::label_bounds;
 
 use super::metrics::{
-    alias_label_props_for, alias_source_names, element_label_props_for, node_shape_box, pipe_rects,
+    LabelScene, MetricWeights, alias_label_props_for, alias_source_names, element_label_props_for,
+    node_shape_box, pipe_rects,
 };
 
 /// Breathing room (logical units) enforced between any two element footprints
@@ -217,61 +217,54 @@ pub struct LabelOptions {
     pub options: Vec<(LabelSide, Rect)>,
 }
 
-/// Greedily choose each label's side to minimize the area of its label box
-/// covered by (a) every OTHER element's shape box and (b) every OTHER label's
-/// currently-chosen box. Mirrors the metric's `label_overlap` numerator (a
-/// label is never charged against its own shape). Iterates `rounds` passes so a
-/// choice can react to its neighbors' choices; ties keep the earlier (preferred)
-/// side. Deterministic. PURE.
-///
-/// `shape_boxes` is `(owner_id, shape)` for every element with a shape box;
-/// entries whose `owner_id` equals the label's `id` are skipped.
+/// Greedily choose each label's side to minimize `cost(id, box, label_of)`,
+/// where `label_of(other_id)` is another label's currently-chosen box (`None`
+/// for the label itself and for ids with no options). Iterates `rounds` passes
+/// so a choice can react to its neighbors' choices; ties keep the earlier
+/// (preferred) side. Deterministic. PURE.
 pub fn choose_label_sides(
     labels: &[LabelOptions],
-    shape_boxes: &[(usize, Rect)],
+    cost: impl Fn(usize, &Rect, &dyn Fn(usize) -> Option<Rect>) -> f64,
     rounds: usize,
 ) -> HashMap<usize, LabelSide> {
     // Start each label on its first (preferred) option.
     let mut chosen: HashMap<usize, usize> = labels
         .iter()
-        .filter(|l| !l.options.is_empty())
-        .map(|l| (l.id, 0usize))
+        .enumerate()
+        .filter(|(_, l)| !l.options.is_empty())
+        .map(|(li, _)| (li, 0usize))
         .collect();
-
-    let label_box = |l: &LabelOptions, idx: usize| -> Rect { l.options[idx].1 };
+    let index_of: HashMap<usize, usize> = labels
+        .iter()
+        .enumerate()
+        .map(|(li, l)| (l.id, li))
+        .collect();
 
     for _ in 0..rounds {
         let mut changed = false;
-        for l in labels {
+        for (li, l) in labels.iter().enumerate() {
             if l.options.is_empty() {
                 continue;
             }
+            let label_of = |id: usize| -> Option<Rect> {
+                let &oi = index_of.get(&id)?;
+                if oi == li {
+                    return None;
+                }
+                chosen.get(&oi).map(|&idx| labels[oi].options[idx].1)
+            };
             let mut best_idx = 0usize;
             let mut best_cost = f64::INFINITY;
             for (idx, (_side, lbox)) in l.options.iter().enumerate() {
-                let mut cost = 0.0;
-                for (owner, shape) in shape_boxes {
-                    if *owner == l.id {
-                        continue; // never charged against own shape
-                    }
-                    cost += rect_overlap_area(lbox, shape);
-                }
-                for other in labels {
-                    if other.id == l.id {
-                        continue;
-                    }
-                    if let Some(&oi) = chosen.get(&other.id) {
-                        cost += rect_overlap_area(lbox, &label_box(other, oi));
-                    }
-                }
+                let c = cost(l.id, lbox, &label_of);
                 // Strictly-less keeps the earlier (preferred) side on ties.
-                if cost < best_cost - 1e-9 {
-                    best_cost = cost;
+                if c < best_cost - 1e-9 {
+                    best_cost = c;
                     best_idx = idx;
                 }
             }
-            if chosen.get(&l.id) != Some(&best_idx) {
-                chosen.insert(l.id, best_idx);
+            if chosen.get(&li) != Some(&best_idx) {
+                chosen.insert(li, best_idx);
                 changed = true;
             }
         }
@@ -282,12 +275,7 @@ pub fn choose_label_sides(
 
     chosen
         .into_iter()
-        .map(|(id, idx)| {
-            (
-                id,
-                labels[labels.iter().position(|l| l.id == id).unwrap()].options[idx].0,
-            )
-        })
+        .map(|(li, idx)| (labels[li].id, labels[li].options[idx].0))
         .collect()
 }
 
@@ -409,8 +397,8 @@ fn translate_element(element: &mut ViewElement, dx: f64, dy: f64) {
 }
 
 /// Every drawn shape box of an element, label excluded: its node shape plus,
-/// for a flow, its pipe boxes -- the same obstacles the metric charges labels
-/// and connectors against.
+/// for a flow, its pipe boxes -- what the relaxation keeps other footprints
+/// off, since the metric charges a label or connector on any of them.
 fn shape_rects(element: &ViewElement) -> Vec<Rect> {
     let mut rects: Vec<Rect> = node_shape_box(element).into_iter().collect();
     if let ViewElement::Flow(f) = element {
@@ -544,17 +532,13 @@ pub(crate) fn resnap_flow_endpoints_to_stocks(elements: &mut [ViewElement]) {
 }
 
 /// Re-choose label sides (for `relabels` kinds) on the current geometry, writing
-/// the chosen sides back. Mutates `elements`.
+/// the chosen sides back: each side is charged what the metric would charge
+/// the label there -- covered by shapes and other labels, struck by links and
+/// pipes -- so a name moves off a line running through it as readily as off a
+/// shape. Mutates `elements`.
 fn optimize_label_sides(elements: &mut [ViewElement], alias_names: &HashMap<i32, String>) {
-    // Every element's shape box is an obstacle. Flow and alias labels need no
-    // separate obstacle entry: both are relabel-able (`relabels` includes
-    // them), so their label boxes participate as labels and are automatically
-    // avoided by every other label.
-    let obstacle_boxes: Vec<(usize, Rect)> = elements
-        .iter()
-        .enumerate()
-        .flat_map(|(i, e)| shape_rects(e).into_iter().map(move |r| (i, r)))
-        .collect();
+    let scene = LabelScene::new(elements);
+    let weights = MetricWeights::default();
 
     // The label box an element would occupy on `side`. Aliases resolve their
     // label text through their source element's name.
@@ -583,7 +567,18 @@ fn optimize_label_sides(elements: &mut [ViewElement], alias_names: &HashMap<i32,
         })
         .collect();
 
-    let chosen = choose_label_sides(&labels, &obstacle_boxes, LABEL_SIDE_ROUNDS);
+    // Every labeled kind is re-sided here, so another node's current label is
+    // always the one the chooser has picked for it.
+    let uids: Vec<i32> = elements.iter().map(ViewElement::get_uid).collect();
+    let id_of_uid: HashMap<i32, usize> = uids.iter().enumerate().map(|(i, &u)| (u, i)).collect();
+    let chosen = choose_label_sides(
+        &labels,
+        |id, lbox, label_of| {
+            let current = |uid: i32| id_of_uid.get(&uid).and_then(|&other| label_of(other));
+            scene.label_cost(uids[id], lbox, current, &weights)
+        },
+        LABEL_SIDE_ROUNDS,
+    );
     for (id, side) in chosen {
         set_label_side(&mut elements[id], side);
     }
@@ -786,6 +781,7 @@ pub fn declutter_view(elements: &mut [ViewElement]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagram::common::{rect_area, rect_overlap_area};
 
     fn rect(left: f64, top: f64, right: f64, bottom: f64) -> Rect {
         Rect {
@@ -972,8 +968,10 @@ mod tests {
                 (LabelSide::Top, rect(-5.0, -20.0, 5.0, -11.0)),  // clear
             ],
         }];
-        let shape_boxes = vec![(1usize, blocker)];
-        let chosen = choose_label_sides(&labels, &shape_boxes, 3);
+        let cost = |_: usize, r: &Rect, _: &dyn Fn(usize) -> Option<Rect>| {
+            rect_overlap_area(r, &blocker) / rect_area(r)
+        };
+        let chosen = choose_label_sides(&labels, cost, 3);
         assert_eq!(chosen.get(&0), Some(&LabelSide::Top));
     }
 
@@ -987,7 +985,7 @@ mod tests {
                 (LabelSide::Top, rect(0.0, -20.0, 10.0, -10.0)),
             ],
         }];
-        let chosen = choose_label_sides(&labels, &[], 3);
+        let chosen = choose_label_sides(&labels, |_, _, _| 0.0, 3);
         assert_eq!(chosen.get(&0), Some(&LabelSide::Bottom));
     }
 
@@ -1011,12 +1009,76 @@ mod tests {
                 ],
             },
         ];
-        let chosen = choose_label_sides(&labels, &[], 3);
+        // Each label is charged its overlap with the other's current box.
+        let cost = |id: usize, r: &Rect, label_of: &dyn Fn(usize) -> Option<Rect>| {
+            label_of(1 - id).map_or(0.0, |other| rect_overlap_area(r, &other))
+        };
+        let chosen = choose_label_sides(&labels, cost, 3);
         let s0 = chosen[&0];
         let s1 = chosen[&1];
         assert!(
             s0 != s1,
             "the two colliding labels should end up on different sides, got {s0:?}/{s1:?}"
+        );
+    }
+
+    #[test]
+    fn test_label_side_moves_off_a_link_through_it() {
+        // A link runs straight through where aux #1's preferred Bottom label
+        // sits, on its way between two auxes far to either side. Nothing
+        // covers that label, so only a chooser that charges a line through a
+        // name -- as the metric does -- moves it off the link.
+        let target = aux_at(1, 200.0, 0.0, "a fairly long name");
+        let bottom = current_label_box(&target, &HashMap::new()).expect("aux label");
+        let y = (bottom.top + bottom.bottom) / 2.0;
+        let mut elements = vec![
+            target,
+            aux_at(2, -200.0, y, "a"),
+            aux_at(3, 600.0, y, "b"),
+            ViewElement::Link(crate::datamodel::view_element::Link {
+                uid: 10,
+                from_uid: 2,
+                to_uid: 3,
+                shape: crate::datamodel::view_element::LinkShape::Straight,
+                polarity: None,
+            }),
+        ];
+
+        optimize_label_sides(&mut elements, &HashMap::new());
+
+        let ViewElement::Aux(a) = &elements[0] else {
+            unreachable!()
+        };
+        assert_ne!(
+            a.label_side,
+            LabelSide::Bottom,
+            "the label must leave the side a link strikes through"
+        );
+    }
+
+    #[test]
+    fn test_label_side_moves_away_from_a_crowding_neighbor() {
+        // Aux #2 sits just below where aux #1's preferred Bottom label goes:
+        // nothing overlaps, but the name would jam against the neighbor's
+        // circle, which the metric charges as crowding. The chooser must
+        // charge it too and put the name elsewhere.
+        use crate::diagram::constants::AUX_RADIUS;
+        let target = aux_at(1, 0.0, 0.0, "name");
+        let bottom = current_label_box(&target, &HashMap::new()).expect("aux label");
+        let mut elements = vec![
+            target,
+            aux_at(2, 0.0, bottom.bottom + 3.0 + AUX_RADIUS, "n"),
+        ];
+
+        optimize_label_sides(&mut elements, &HashMap::new());
+
+        let ViewElement::Aux(a) = &elements[0] else {
+            unreachable!()
+        };
+        assert_ne!(
+            a.label_side,
+            LabelSide::Bottom,
+            "the label must leave the side where it crowds a neighbor"
         );
     }
 

@@ -177,10 +177,11 @@ fn test_flow_valve_is_scored_at_its_drawn_radius() {
 }
 
 #[test]
-fn test_pipe_through_a_label_obscures_it_but_own_pipe_does_not() {
+fn test_pipe_through_a_label_strikes_it_but_own_pipe_does_not() {
     // A horizontal pipe (flow #1, valve far to the right) runs straight through
-    // aux #2's Bottom label. That pipe obscures the label; the flow's own label
-    // is never charged against its own pipe.
+    // aux #2's Bottom label: a line through the name, struck out exactly as a
+    // link through it would be, not a thin band of covered area. The flow's own
+    // label is never charged against its own pipe.
     let a = aux(2, "a fairly long name", 200.0, 100.0);
     let lbl = label_box(&a);
     let pipe_y = (lbl.top + lbl.bottom) / 2.0;
@@ -194,14 +195,48 @@ fn test_pipe_through_a_label_obscures_it_but_own_pipe_does_not() {
         a,
     ]);
     let m = compute_layout_metrics(&view, &cfg());
-    let covered = (2.0 * PIPE_HALF_WIDTH) / common::rect_height(&lbl);
-    // Two labels in the view: the aux's (covered by the pipe band) and the
-    // flow's own (clear of anything).
+    // Two labels in the view: the aux's (fully struck: the run through the
+    // text far exceeds its height) and the flow's own (clear of anything).
     assert!(
-        close(m.label_overlap, covered / 2.0),
-        "label_overlap {} expected {}",
-        m.label_overlap,
-        covered / 2.0
+        close(m.label_connector_overlap, 1.0 / 2.0),
+        "label_connector_overlap {}",
+        m.label_connector_overlap
+    );
+    assert_eq!(
+        m.label_overlap, 0.0,
+        "a pipe strikes a name; it covers no area"
+    );
+}
+
+#[test]
+fn test_a_pipe_into_a_stock_through_the_stocks_name_strikes_it() {
+    // An inflow arrives from above into stock #1 whose name sits on top: the
+    // pipe runs down through the name. Unlike a node's own link, which at
+    // least points at the name, a pipe along the face's normal simply writes
+    // over it, so it counts in full. Two labels -> a rate of 1/2.
+    let s = ViewElement::Stock(view_element::Stock {
+        name: "a long stock name".to_string(),
+        uid: 1,
+        x: 200.0,
+        y: 200.0,
+        label_side: LabelSide::Top,
+        compat: None,
+    });
+    let top = 200.0 - crate::diagram::constants::STOCK_HEIGHT / 2.0;
+    let view = make_view(vec![
+        s,
+        flow_with_points(
+            2,
+            "f",
+            (500.0, 60.0),
+            vec![(200.0, 0.0, None), (200.0, top, Some(1))],
+        ),
+    ]);
+    let m = compute_layout_metrics(&view, &cfg());
+    assert!(
+        close(m.label_connector_overlap, 1.0 / 2.0),
+        "label_connector_overlap {}",
+        m.label_connector_overlap
     );
 }
 
@@ -417,7 +452,7 @@ fn test_node_connector_overlap_through_third_node() {
         straight_link(10, 1, 2),
     ]);
     let m = compute_layout_metrics(&view, &cfg());
-    let connectors = collect_connector_geometry(&view);
+    let connectors = collect_connector_geometry(&view.elements);
     assert_eq!(connectors.len(), 1);
     let c = &connectors[0];
     let stock_box = node_shape_box(&stock(3, "s", 200.0, 0.0)).unwrap();
@@ -519,7 +554,7 @@ fn test_node_connector_overlap_union_of_overlapping_boxes() {
         straight_link(10, 1, 2),
     ]);
     let m = compute_layout_metrics(&view, &cfg());
-    let connectors = collect_connector_geometry(&view);
+    let connectors = collect_connector_geometry(&view.elements);
     let c = &connectors[0];
     let boxes = [node_shape_box(&s3).unwrap(), node_shape_box(&s4).unwrap()];
     let union_len: f64 = c
@@ -730,7 +765,7 @@ fn test_a_link_too_short_to_show_its_arrow_is_crowding() {
         straight_link(10, 1, 2),
     ]);
     let m = compute_layout_metrics(&view, &cfg());
-    let connectors = collect_connector_geometry(&view);
+    let connectors = collect_connector_geometry(&view.elements);
     let visible = connectors[0].length;
     assert!(
         visible < MIN_VISIBLE_LINK,
@@ -860,7 +895,7 @@ fn test_aspect_penalty_thin_box_positive() {
     let view = make_view(vec![aux(1, "a", 0.0, 0.0), aux(2, "b", 0.0, 1000.0)]);
     let m = compute_layout_metrics(&view, &cfg());
     assert!(m.aspect_penalty > 0.0);
-    let boxes: Vec<Rect> = build_scene_nodes(&view)
+    let boxes: Vec<Rect> = build_scene_nodes(&view.elements)
         .iter()
         .map(SceneNode::footprint_box)
         .collect();

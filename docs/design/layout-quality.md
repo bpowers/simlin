@@ -22,8 +22,10 @@ shapes at their drawn size (a flow valve is the 9px circle `render_flow` draws),
 flow pipes as 4px-thick segments, links as the exact polylines
 `diagram::connector` draws (arcs sampled along their circle), and labels at the
 boxes `diagram::label` measures. The declutter pass (`layout/declutter.rs`)
-avoids the same obstacles the metric charges -- node shapes and pipes -- so what
-the optimizer removes is what the score counts.
+avoids the same obstacles the metric charges: it pushes apart the footprints
+the metric finds overlapping, and chooses each label's side by the metric's own
+charge for that label (`metrics::LabelScene`), so what the optimizer removes is
+what the score counts.
 
 ### Terms
 
@@ -36,9 +38,9 @@ not dominated by the largest models.
 | term | measures | weight |
 |---|---|---|
 | `node_overlap` | mean covered fraction of each node's shape by other shapes | 3.5 |
-| `label_overlap` | mean covered fraction of each label by other labels, shapes, and other flows' pipes | 3.5 |
+| `label_overlap` | mean covered fraction of each label by other labels and shapes | 3.5 |
 | `node_connector_overlap` | fraction of connector length under non-incident shapes or pipes (a false causal link) | 2.0 |
-| `label_connector_overlap` | mean over labels of link length through the text, relative to the box's smaller side; a node's own links count half | 1.5 |
+| `label_connector_overlap` | mean over labels of connector length -- links and other flows' pipes -- through the text, relative to the box's smaller side; a node's own links count half | 1.5 |
 | `crossings` | connector crossings per connector | 1.0 |
 | `crowding` | clearance deficits `(1 - gap/8px)^2` between non-cloud footprints per node, plus links too short to show their arrow per link | 1.0 |
 | `long_connectors` | mean excess of links beyond 3x the median link length | 0.5 |
