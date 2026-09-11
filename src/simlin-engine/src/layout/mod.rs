@@ -2937,19 +2937,36 @@ pub fn fresh_layout(
 /// leaving the valve and the clouds where placement put them, and placement
 /// positions those independently of the pipe; the normalization owns where
 /// they end up, as it does for imported views. The layout owns the valves of
-/// the flows it settles, so each is then kept off its segment's ends
-/// (`settle_laid_out_valve`), where the editor would clamp a dragged valve.
-/// `include` selects the flows (by uid) the pass may change: every flow in a
-/// fresh layout, and only the flows it creates in an incremental one.
+/// the flows it settles, so each is then kept off its segment's ends, where the
+/// editor would clamp a dragged valve, and off every other flow's pipe
+/// (`settle_laid_out_valve`). The route itself is not chosen around siblings:
+/// a created flow between two stocks whose slots `face_slots` put on opposite
+/// sides of a sibling's line is routed as a Z that crosses the sibling, as
+/// every route between the two faces that stays between the stocks must, and
+/// only its valve is kept off the sibling. `include` selects the flows (by
+/// uid) the pass may change: every flow in a fresh layout, and only the flows
+/// it creates in an incremental one.
 fn finish_flow_geometry(elements: &mut [ViewElement], include: impl Fn(i32) -> bool + Copy) {
     orthogonal::orthogonalize_flow_pipes(elements, include);
     crate::diagram::flow_geometry::normalize_flow_geometry_where(elements, include);
+    let pipes: Vec<(i32, Vec<FlowPoint>)> = elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Flow(f) => Some((f.uid, f.points.clone())),
+            _ => None,
+        })
+        .collect();
     for element in elements.iter_mut() {
         if let ViewElement::Flow(f) = element
             && include(f.uid)
         {
+            let others: Vec<&[FlowPoint]> = pipes
+                .iter()
+                .filter(|(uid, _)| *uid != f.uid)
+                .map(|(_, points)| points.as_slice())
+                .collect();
             let mut valve = (f.x, f.y);
-            crate::diagram::flow_geometry::settle_laid_out_valve(&f.points, &mut valve);
+            crate::diagram::flow_geometry::settle_laid_out_valve(&f.points, &mut valve, &others);
             (f.x, f.y) = valve;
         }
     }

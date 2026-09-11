@@ -874,17 +874,26 @@ pub(crate) fn project_valve_onto_pipe(points: &[FlowPoint], valve: &mut (f64, f6
     *valve = point_at_arc(points, arc);
 }
 
-/// Keep a valve the layout placed `VALVE_CLAMP_MARGIN` from the ends of the
-/// segment it sits on, the margin the editor clamps a dragged valve to along
-/// its closest segment (`clampToSegment` in `src/diagram/drawing/Flow.tsx`):
-/// along that segment when it is at least twice the margin long, else at the
-/// middle of the longest segment (the first, on a tie) when that one is. A
-/// valve already clear is not moved, and a pipe whose every segment is too
-/// short keeps it. Only for valves the layout owns: an imported valve is held
-/// to the arc-length margin alone (`project_valve_onto_pipe`), which this
-/// never undoes, since both placements are at least the margin from the path's
-/// ends.
-pub(crate) fn settle_laid_out_valve(points: &[FlowPoint], valve: &mut (f64, f64)) {
+/// Keep a valve the layout placed where the editor would leave it and clear of
+/// the other flows' pipes: at least `VALVE_CLAMP_MARGIN` from the ends of the
+/// segment it sits on (the margin `clampToSegment` in
+/// `src/diagram/drawing/Flow.tsx` clamps a dragged valve to along its closest
+/// segment), and at least `VALVE_CLAMP_MARGIN` from every pipe in
+/// `other_pipes`. A valve that already satisfies both is not moved. Otherwise
+/// it moves to the nearest position of the pipe that does (the earlier segment
+/// on a tie). Where no segment has one -- every long-enough segment runs within
+/// the margin of another pipe -- it keeps the segment margin alone: clamped
+/// along its own segment when that one is at least twice the margin long, else
+/// at the middle of the longest segment (the first, on a tie) when that one
+/// is, and left where it is when every segment is too short. Only for valves
+/// the layout owns: an imported valve is held to the arc-length margin alone
+/// (`project_valve_onto_pipe`), which this never undoes, since every placement
+/// here is at least the margin from the path's ends.
+pub(crate) fn settle_laid_out_valve(
+    points: &[FlowPoint],
+    valve: &mut (f64, f64),
+    other_pipes: &[&[FlowPoint]],
+) {
     let Some((i, _)) = points
         .windows(2)
         .enumerate()
@@ -893,6 +902,64 @@ pub(crate) fn settle_laid_out_valve(points: &[FlowPoint], valve: &mut (f64, f64)
     else {
         return;
     };
+    let clear_of_others = |p: (f64, f64)| {
+        other_pipes.iter().all(|pipe| {
+            pipe.windows(2)
+                .all(|w| point_segment_distance(p, &w[0], &w[1]) >= VALVE_CLAMP_MARGIN - EPS)
+        })
+    };
+    {
+        let (a, b) = (&points[i], &points[i + 1]);
+        if point_segment_distance(*valve, a, b) <= EPS
+            && segment_length(a, b) >= 2.0 * VALVE_CLAMP_MARGIN
+            && (valve.0 - a.x).hypot(valve.1 - a.y) >= VALVE_CLAMP_MARGIN - EPS
+            && (valve.0 - b.x).hypot(valve.1 - b.y) >= VALVE_CLAMP_MARGIN - EPS
+            && clear_of_others(*valve)
+        {
+            return;
+        }
+    }
+
+    // The positions of each long-enough segment keeping both margins, as
+    // intervals of arc length along it; the one nearest the valve wins.
+    let mut best: Option<((f64, f64), f64)> = None;
+    for w in points.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        let len = segment_length(a, b);
+        if len < 2.0 * VALVE_CLAMP_MARGIN {
+            continue;
+        }
+        let u = ((b.x - a.x) / len, (b.y - a.y) / len);
+        let mut intervals = vec![(VALVE_CLAMP_MARGIN, len - VALVE_CLAMP_MARGIN)];
+        for pipe in other_pipes {
+            for o in pipe.windows(2) {
+                let Some((lo, hi)) =
+                    capsule_crossing((a.x, a.y), u, &o[0], &o[1], VALVE_CLAMP_MARGIN)
+                else {
+                    continue;
+                };
+                intervals = intervals
+                    .into_iter()
+                    .flat_map(|(p, q)| [(p, q.min(lo)), (p.max(hi), q)])
+                    .filter(|&(p, q)| q >= p - EPS)
+                    .collect();
+            }
+        }
+        let t_valve = ((valve.0 - a.x) * u.0 + (valve.1 - a.y) * u.1).clamp(0.0, len);
+        for (p, q) in intervals {
+            let t = t_valve.clamp(p, q.max(p));
+            let at = (a.x + u.0 * t, a.y + u.1 * t);
+            let d = (at.0 - valve.0).hypot(at.1 - valve.1);
+            if best.is_none_or(|(_, bd)| d < bd - EPS) {
+                best = Some((at, d));
+            }
+        }
+    }
+    if let Some((at, _)) = best {
+        *valve = at;
+        return;
+    }
+
     let (a, b) = (&points[i], &points[i + 1]);
     let span = |p: f64, q: f64| (p.min(q) + VALVE_CLAMP_MARGIN, p.max(q) - VALVE_CLAMP_MARGIN);
     if segment_length(a, b) >= 2.0 * VALVE_CLAMP_MARGIN {
@@ -923,6 +990,59 @@ pub(crate) fn settle_laid_out_valve(points: &[FlowPoint], valve: &mut (f64, f64)
     {
         *valve = ((p.x + q.x) / 2.0, (p.y + q.y) / 2.0);
     }
+}
+
+/// The open interval of arc length `t` for which the point `origin + t * u`
+/// (`u` a unit vector) lies within `radius` of the segment `q`-`r`, or `None`
+/// when the line never comes that close. The points within `radius` of a
+/// segment form a convex capsule -- two disks joined by a rectangle -- so the
+/// line meets it in one interval, spanning its meetings with the two disks and
+/// the rectangle.
+fn capsule_crossing(
+    origin: (f64, f64),
+    u: (f64, f64),
+    q: &FlowPoint,
+    r: &FlowPoint,
+    radius: f64,
+) -> Option<(f64, f64)> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    let mut take = |p: f64, s: f64| {
+        if s > p {
+            lo = lo.min(p);
+            hi = hi.max(s);
+        }
+    };
+    for c in [(q.x, q.y), (r.x, r.y)] {
+        // |origin + t u - c|^2 < radius^2
+        let (dx, dy) = (origin.0 - c.0, origin.1 - c.1);
+        let b = dx * u.0 + dy * u.1;
+        let disc = b * b - (dx * dx + dy * dy - radius * radius);
+        if disc > 0.0 {
+            take(-b - disc.sqrt(), -b + disc.sqrt());
+        }
+    }
+    let len = (r.x - q.x).hypot(r.y - q.y);
+    if len > EPS {
+        let v = ((r.x - q.x) / len, (r.y - q.y) / len);
+        let n = (-v.1, v.0);
+        let (dx, dy) = (origin.0 - q.x, origin.1 - q.y);
+        // `lo_bound < c0 + t c1 < hi_bound`, an interval of `t`.
+        let band = |c0: f64, c1: f64, lo_bound: f64, hi_bound: f64| -> Option<(f64, f64)> {
+            if c1.abs() <= EPS {
+                (c0 > lo_bound && c0 < hi_bound).then_some((f64::NEG_INFINITY, f64::INFINITY))
+            } else {
+                let (t0, t1) = ((lo_bound - c0) / c1, (hi_bound - c0) / c1);
+                Some((t0.min(t1), t0.max(t1)))
+            }
+        };
+        let across = band(n.0 * dx + n.1 * dy, n.0 * u.0 + n.1 * u.1, -radius, radius);
+        let along = band(v.0 * dx + v.1 * dy, v.0 * u.0 + v.1 * u.1, 0.0, len);
+        if let (Some((p0, s0)), Some((p1, s1))) = (across, along) {
+            take(p0.max(p1), s0.min(s1));
+        }
+    }
+    (hi > lo).then_some((lo, hi))
 }
 
 /// Bring every flow in an imported view to the invariants in the module docs.

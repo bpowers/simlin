@@ -1426,8 +1426,13 @@ fn a_jog_whose_step_would_double_back_is_refused() {
 /// `VALVE_CLAMP_MARGIN` inside its segment is not moved; a valve within the
 /// margin of its segment's end is clamped along that segment, as the editor
 /// clamps a dragged valve; a valve on a segment shorter than twice the margin
-/// moves to the middle of the longest segment (the first, on a tie); and a pipe
-/// whose every segment is that short leaves the valve where it is.
+/// moves to the nearest position of a longer segment; a pipe whose every
+/// segment is that short leaves the valve where it is; a valve on a sibling's
+/// pipe moves to the nearest position clear of both the sibling and its
+/// segment's ends (the earlier segment on a tie); a valve clear of the sibling
+/// is not moved; and where a sibling runs within the margin of every position,
+/// the valve keeps the segment margin alone -- clamped along its own segment,
+/// or at the longest segment's middle when its own is short.
 #[test]
 fn a_laid_out_valve_keeps_the_margin_from_its_segments_ends() {
     let z = vec![
@@ -1447,27 +1452,81 @@ fn a_laid_out_valve_keeps_the_margin_from_its_segments_ends() {
         pt(0.0, 8.0, None),
         pt(6.0, 8.0, Some(4)),
     ];
-    /// (label, path, valve before, valve after).
-    type Row<'a> = (&'a str, &'a [FlowPoint], (f64, f64), (f64, f64));
-    let rows: [Row; 4] = [
-        ("inside the margin", &z, (240.0, 115.25), (240.0, 115.25)),
+    // A Z between offset stocks crossing a sibling straight between them at
+    // y = 110, and a long pipe with a sibling running 5px beside it end to end.
+    let crossing_z = vec![
+        pt(277.5, 122.25, Some(3)),
+        pt(200.0, 122.25, None),
+        pt(200.0, 97.75, None),
+        pt(122.5, 97.75, Some(1)),
+    ];
+    let sibling: &[FlowPoint] = &[pt(122.5, 110.0, Some(1)), pt(277.5, 110.0, Some(3))];
+    let straight = vec![pt(0.0, 0.0, Some(3)), pt(0.0, 100.0, Some(4))];
+    let beside: &[FlowPoint] = &[pt(5.0, -50.0, Some(5)), pt(5.0, 150.0, Some(6))];
+    let between_runs: &[FlowPoint] = &[pt(100.0, 103.0, Some(5)), pt(300.0, 103.0, Some(6))];
+    /// (label, path, other pipes, valve before, valve after).
+    type Row<'a> = (
+        &'a str,
+        &'a [FlowPoint],
+        Vec<&'a [FlowPoint]>,
+        (f64, f64),
+        (f64, f64),
+    );
+    let rows: [Row; 8] = [
+        (
+            "inside the margin",
+            &z,
+            vec![],
+            (240.0, 115.25),
+            (240.0, 115.25),
+        ),
         (
             "within the margin of a bend",
             &z,
+            vec![],
             (200.0, 105.5),
             (200.0, 105.25),
         ),
         (
-            "on a riser shorter than two margins",
+            "on a riser shorter than two margins: the nearest position of a longer segment",
             &z_short_riser,
+            vec![],
+            (200.0, 102.0),
+            (190.0, 95.0),
+        ),
+        (
+            "on a short riser, every longer segment beside a sibling: the longest one's middle",
+            &z_short_riser,
+            vec![between_runs],
             (200.0, 102.0),
             (238.75, 110.0),
         ),
-        ("every segment short", &tiny, (0.0, 4.0), (0.0, 4.0)),
+        ("every segment short", &tiny, vec![], (0.0, 4.0), (0.0, 4.0)),
+        (
+            "on a sibling's pipe: the nearest position clear of it",
+            &crossing_z,
+            vec![sibling],
+            (200.0, 110.0),
+            (210.0, 122.25),
+        ),
+        (
+            "clear of the sibling and the segment's ends",
+            &crossing_z,
+            vec![sibling],
+            (240.0, 122.25),
+            (240.0, 122.25),
+        ),
+        (
+            "no position clear of the sibling: the segment margin alone",
+            &straight,
+            vec![beside],
+            (0.0, 3.0),
+            (0.0, 10.0),
+        ),
     ];
-    for (label, points, valve, expected) in rows {
+    for (label, points, others, valve, expected) in rows {
         let mut v = valve;
-        settle_laid_out_valve(points, &mut v);
+        settle_laid_out_valve(points, &mut v, &others);
         assert_eq!(v, expected, "{label}");
     }
 }

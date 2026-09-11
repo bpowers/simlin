@@ -765,13 +765,15 @@ fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
 /// through the XMILE importer and incremental layout: the existing flow `f1`
 /// comes back byte for byte, the created flow holds the flow invariants, and
 /// each of its stock ends keeps `PIPE_SPACING` from `f1`'s end on the same
-/// face, and its valve sits `VALVE_CLAMP_MARGIN` from the ends of its segment.
-/// Rows: stock B's offset below A across the range where the two faces'
-/// clearance spans overlap (0 to 29), with `f1`'s line at the ends and the
-/// middle of that overlap; the worst cases of the reviewed sweep (B 28 below
-/// with `f1` at 114; 26 and 27 at 113; 27 at 114; 24 and 25 at 112); and Z
-/// routes whose riser the valve lands on within the margin of a bend (B 11
-/// below at 105, 15 at 110, 19 at 114).
+/// face, and its valve sits `VALVE_CLAMP_MARGIN` from the ends of its segment
+/// and from `f1`'s pipe. Rows: stock B's offset below A across the range where
+/// the two faces' clearance spans overlap (0 to 29), with `f1`'s line at the
+/// ends and the middle of that overlap; offsets where the overlap is a sliver
+/// within a spacing of `f1`'s ends, so no joint line keeps the spacing and each
+/// end takes its own slot (B 28 below with `f1` at 114; 26 and 27 at 113; 27 at
+/// 114; 24 and 25 at 112); and Z routes crossing `f1` whose valve the finishing
+/// pass would otherwise leave on the riser near a bend or on `f1` (B 11 below
+/// at 105, 15 at 110, 19 at 114).
 #[test]
 fn a_flow_created_between_offset_stocks_keeps_its_spacing() {
     const XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -884,23 +886,48 @@ fn a_flow_created_between_offset_stocks_keeps_its_spacing() {
             back.x,
             back.y
         );
+        let f1 = find_flow(&new, "f1").unwrap();
+        let (a, b) = (&f1.points[0], &f1.points[f1.points.len() - 1]);
+        let (lo_x, hi_x) = (a.x.min(b.x), a.x.max(b.x));
+        let off_f1 = (back.x - back.x.clamp(lo_x, hi_x)).hypot(back.y - a.y);
+        assert!(
+            off_f1 >= VALVE_CLAMP_MARGIN - 1e-6,
+            "{row}: back's valve ({}, {}) is {off_f1} from f1's pipe",
+            back.x,
+            back.y
+        );
     }
 }
 
-/// The old view breaks the invariants on both flows the patch does not touch,
+/// The old view breaks the invariants on every flow the patch does not touch,
 /// in each way a pass could "repair": waste_a's valve is off its pipe and its
-/// stock end is off stock_a's faces (the endpoint snap), and chain_flow's pipe
-/// is diagonal (the orthogonalizer). Stored geometry like that -- a hand edit,
+/// stock end is off stock_a's faces (the endpoint snap), chain_flow's pipe is
+/// diagonal (the orthogonalizer), and waste_b's valve sits on its pipe 4px from
+/// an end (the laid-out valve settle). Stored geometry like that -- a hand edit,
 /// or a view saved before the invariants held -- is exactly what no pass may
 /// move on a flow the patch did not touch, with a new element (the settle
 /// path, which runs the snap and the finishing pass) and without one (the
 /// early-return path).
 #[test]
 fn a_flow_the_patch_does_not_touch_is_preserved() {
-    let base = chain_and_waste();
+    let base = project_of(vec![
+        stock("stock_a", &[], &["chain_flow", "waste_a"]),
+        stock("stock_b", &["chain_flow"], &["waste_b"]),
+        datamodel::Variable::Flow(flow("chain_flow", "10")),
+        datamodel::Variable::Flow(flow("waste_a", "stock_a * leak_rate")),
+        datamodel::Variable::Flow(flow("waste_b", "1")),
+        datamodel::Variable::Aux(aux("leak_rate", "0.1")),
+    ]);
     let mut old = generate_layout(&base, TEST_MODEL, None).expect("initial layout");
     let stock_a_uid = stock_named(&old, "stock_a").uid;
     for e in &mut old.elements {
+        if let ViewElement::Flow(f) = e
+            && canonicalize(&f.name) == "waste_b"
+        {
+            let (a, b) = (&f.points[0], &f.points[1]);
+            let len = (b.x - a.x).hypot(b.y - a.y);
+            (f.x, f.y) = (a.x + (b.x - a.x) * 4.0 / len, a.y + (b.y - a.y) * 4.0 / len);
+        }
         if let ViewElement::Flow(f) = e
             && canonicalize(&f.name) == "waste_a"
         {
@@ -931,6 +958,12 @@ fn a_flow_the_patch_does_not_touch_is_preserved() {
             .any(|v| v.contains("diagonal")),
         "fixture: chain_flow's pipe is diagonal"
     );
+    assert!(
+        violations_of(&old, "waste_b")
+            .iter()
+            .any(|v| v.contains("from an end of the path")),
+        "fixture: waste_b's valve is on its pipe within the margin of an end"
+    );
 
     let new = incremental(
         &base,
@@ -950,7 +983,7 @@ fn a_flow_the_patch_does_not_touch_is_preserved() {
     assert_preserved(
         &old,
         &new,
-        &["waste_a", "chain_flow"],
+        &["waste_a", "chain_flow", "waste_b"],
         "a new unrelated element",
     );
 
@@ -971,7 +1004,7 @@ fn a_flow_the_patch_does_not_touch_is_preserved() {
     assert_preserved(
         &old,
         &new,
-        &["waste_a", "chain_flow"],
+        &["waste_a", "chain_flow", "waste_b"],
         "an unrelated edit, no new element",
     );
 }
