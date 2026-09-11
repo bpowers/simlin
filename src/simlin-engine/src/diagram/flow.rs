@@ -6,19 +6,57 @@ use std::f64::consts::PI;
 
 use crate::datamodel::ViewElement;
 use crate::datamodel::view_element;
-use crate::diagram::arrowhead::{ArrowheadType, render_arrowhead};
-use crate::diagram::common::{Rect, display_name, js_format_number, merge_bounds};
+use crate::diagram::arrowhead::{
+    ArrowheadGeometry, ArrowheadType, arrowhead_geometry, render_arrowhead_geometry,
+};
+use crate::diagram::common::{
+    Circle, Frame, Point, Rect, arrayed_offsets, display_name, js_format_number, merge_bounds,
+    svg_circle,
+};
 use crate::diagram::constants::*;
 use crate::diagram::label::{LabelProps, label_bounds, render_label};
 
-pub fn render_flow(element: &view_element::Flow, sink: &ViewElement, is_arrayed: bool) -> String {
+/// How far the pipe's last vertex backs off from the arrowhead tip, along the
+/// final segment's cardinal direction, so the pipe ends under the arrowhead
+/// rather than poking through its point.
+const PIPE_FINAL_ADJUST: f64 = 7.5;
+
+/// Everything a drawn flow is made of. `render_flow` prints it and the scene
+/// display list reads it, so the two cannot place a flow differently.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+pub(crate) struct FlowGeometry {
+    /// The pipe's vertices: the view's points with a cloud sink's retraction
+    /// and the arrowhead adjustment applied to the last one.
+    pub pipe: Vec<Point>,
+    /// The arrowhead, anchored at the retracted last point.
+    pub arrowhead: ArrowheadGeometry,
+    /// The valve circles, back to front.
+    pub valves: Vec<Circle>,
+    pub label: LabelProps,
+    /// The box the web canvas draws the flow's sparkline in (`Flow.tsx`):
+    /// the valve's inner square. The static SVG has no simulation results
+    /// and draws no sparkline.
+    pub sparkline: Frame,
+}
+
+/// The drawn geometry of `element` flowing into `sink`, or `None` for a flow
+/// with fewer than two points, which draws nothing.
+pub(crate) fn flow_geometry(
+    element: &view_element::Flow,
+    sink: &ViewElement,
+    is_arrayed: bool,
+) -> Option<FlowGeometry> {
+    if element.points.len() < 2 {
+        return None;
+    }
     let arrayed_offset = if is_arrayed { ARRAYED_OFFSET } else { 0.0 };
 
-    let mut pts: Vec<(f64, f64)> = element.points.iter().map(|p| (p.x, p.y)).collect();
-
-    if pts.len() < 2 {
-        return String::new();
-    }
+    let mut pts: Vec<Point> = element
+        .points
+        .iter()
+        .map(|p| Point { x: p.x, y: p.y })
+        .collect();
+    let last_idx = pts.len() - 1;
 
     // If sink is a Cloud, pull the last point back by CLOUD_RADIUS along the
     // final segment's direction so the arrowhead lands on the cloud's edge.
@@ -27,79 +65,102 @@ pub fn render_flow(element: &view_element::Flow, sink: &ViewElement, is_arrayed:
     // diagonal segment by sqrt(2)*CLOUD_RADIUS. A zero-length final segment
     // is left unchanged.
     if let ViewElement::Cloud(_) = sink {
-        let last_idx = pts.len() - 1;
-        let (x, y) = pts[last_idx];
-        let (prev_x, prev_y) = pts[last_idx - 1];
+        let Point { x, y } = pts[last_idx];
+        let Point {
+            x: prev_x,
+            y: prev_y,
+        } = pts[last_idx - 1];
         let dx = x - prev_x;
         let dy = y - prev_y;
         let len = (dx * dx + dy * dy).sqrt();
         if len > 0.0 {
-            pts[last_idx].0 = x - (CLOUD_RADIUS * dx) / len;
-            pts[last_idx].1 = y - (CLOUD_RADIUS * dy) / len;
+            pts[last_idx].x = x - (CLOUD_RADIUS * dx) / len;
+            pts[last_idx].y = y - (CLOUD_RADIUS * dy) / len;
         }
     }
 
-    let final_adjust = 7.5;
-    let mut spath = String::new();
-    let mut arrow_theta: f64 = 0.0;
+    let tip = pts[last_idx];
 
-    for j in 0..pts.len() {
-        let (mut x, mut y) = pts[j];
-        if j == pts.len() - 1 {
-            // Walk back past coincident points: a degenerate (zero-length)
-            // final segment must not read as "pointing right" via
-            // atan2(0, 0) == 0 (matches the TypeScript renderer).
-            let mut theta_opt: Option<f64> = None;
-            for i in (0..j).rev() {
-                let (px, py) = pts[i];
-                let dx = x - px;
-                let dy = y - py;
-                if dx != 0.0 || dy != 0.0 {
-                    let mut theta = dy.atan2(dx) * 180.0 / PI;
-                    if theta < 0.0 {
-                        theta += 360.0;
-                    }
-                    theta_opt = Some(theta);
-                    break;
-                }
+    // Walk back past coincident points: a degenerate (zero-length) final
+    // segment must not read as "pointing right" via atan2(0, 0) == 0
+    // (matches the TypeScript renderer).
+    let mut theta_opt: Option<f64> = None;
+    for i in (0..last_idx).rev() {
+        let p = pts[i];
+        let dx = tip.x - p.x;
+        let dy = tip.y - p.y;
+        if dx != 0.0 || dy != 0.0 {
+            let mut theta = dy.atan2(dx) * 180.0 / PI;
+            if theta < 0.0 {
+                theta += 360.0;
             }
-
-            if let Some(theta) = theta_opt {
-                if !(45.0..315.0).contains(&theta) {
-                    x -= final_adjust;
-                    arrow_theta = 0.0;
-                } else if (45.0..135.0).contains(&theta) {
-                    y -= final_adjust;
-                    arrow_theta = 90.0;
-                } else if (135.0..225.0).contains(&theta) {
-                    x += final_adjust;
-                    arrow_theta = 180.0;
-                } else {
-                    y += final_adjust;
-                    arrow_theta = 270.0;
-                }
-            } else {
-                arrow_theta = 0.0;
-            }
+            theta_opt = Some(theta);
+            break;
         }
-
-        let prefix = if j == 0 { "M" } else { "L" };
-        spath.push_str(&format!(
-            "{}{},{}",
-            prefix,
-            js_format_number(x),
-            js_format_number(y)
-        ));
     }
+
+    let mut pipe = pts;
+    let arrow_theta = match theta_opt {
+        Some(theta) if !(45.0..315.0).contains(&theta) => {
+            pipe[last_idx].x -= PIPE_FINAL_ADJUST;
+            0.0
+        }
+        Some(theta) if (45.0..135.0).contains(&theta) => {
+            pipe[last_idx].y -= PIPE_FINAL_ADJUST;
+            90.0
+        }
+        Some(theta) if (135.0..225.0).contains(&theta) => {
+            pipe[last_idx].x += PIPE_FINAL_ADJUST;
+            180.0
+        }
+        Some(_) => {
+            pipe[last_idx].y += PIPE_FINAL_ADJUST;
+            270.0
+        }
+        None => 0.0,
+    };
 
     let cx = element.x;
     let cy = element.y;
     let r = AUX_RADIUS; // visual valve radius
 
-    let last_pt = pts[pts.len() - 1];
+    Some(FlowGeometry {
+        pipe,
+        arrowhead: arrowhead_geometry(tip.x, tip.y, arrow_theta, FLOW_ARROWHEAD_RADIUS),
+        valves: arrayed_offsets(is_arrayed)
+            .iter()
+            .map(|offset| Circle {
+                x: cx + offset,
+                y: cy + offset,
+                r,
+            })
+            .collect(),
+        label: LabelProps::new(cx, cy, element.label_side, display_name(&element.name))
+            .with_radii(r + arrayed_offset, r + arrayed_offset),
+        sparkline: Frame {
+            x: cx - arrayed_offset + 1.0 - r / 2.0,
+            y: cy - arrayed_offset + 1.0 - r / 2.0,
+            width: r - 2.0,
+            height: r - 2.0,
+        },
+    })
+}
 
-    let label_props = LabelProps::new(cx, cy, element.label_side, display_name(&element.name))
-        .with_radii(r + arrayed_offset, r + arrayed_offset);
+pub fn render_flow(element: &view_element::Flow, sink: &ViewElement, is_arrayed: bool) -> String {
+    let Some(g) = flow_geometry(element, sink, is_arrayed) else {
+        return String::new();
+    };
+
+    let mut spath = String::new();
+    for (j, p) in g.pipe.iter().enumerate() {
+        let prefix = if j == 0 { "M" } else { "L" };
+        spath.push_str(&format!(
+            "{}{},{}",
+            prefix,
+            js_format_number(p.x),
+            js_format_number(p.y)
+        ));
+    }
 
     let mut svg = String::new();
     svg.push_str("<g class=\"simlin-flow\">");
@@ -112,12 +173,8 @@ pub fn render_flow(element: &view_element::Flow, sink: &ViewElement, is_arrayed:
 
     // No sourceHitArea rect in embedded/export mode
 
-    // Arrowhead
-    svg.push_str(&render_arrowhead(
-        last_pt.0,
-        last_pt.1,
-        arrow_theta,
-        FLOW_ARROWHEAD_RADIUS,
+    svg.push_str(&render_arrowhead_geometry(
+        &g.arrowhead,
         ArrowheadType::Flow,
     ));
 
@@ -129,28 +186,13 @@ pub fn render_flow(element: &view_element::Flow, sink: &ViewElement, is_arrayed:
 
     // Valve circles
     svg.push_str("<g>");
-    if is_arrayed {
-        for offset in [arrayed_offset, 0.0, -arrayed_offset] {
-            svg.push_str(&format!(
-                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\"></circle>",
-                js_format_number(cx + offset),
-                js_format_number(cy + offset),
-                js_format_number(r)
-            ));
-        }
-    } else {
-        svg.push_str(&format!(
-            "<circle cx=\"{}\" cy=\"{}\" r=\"{}\"></circle>",
-            js_format_number(cx),
-            js_format_number(cy),
-            js_format_number(r)
-        ));
+    for valve in &g.valves {
+        svg.push_str(&svg_circle(valve));
     }
-    // TODO(sparklines): render sparkline here when simulation results are available
     svg.push_str("</g>");
 
     // Label
-    svg.push_str(&render_label(&label_props));
+    svg.push_str(&render_label(&g.label));
 
     svg.push_str("</g>");
     svg
@@ -341,5 +383,6 @@ mod tests {
 
         let svg = render_flow(&flow, &sink, false);
         assert!(svg.is_empty());
+        assert!(flow_geometry(&flow, &sink, false).is_none());
     }
 }

@@ -2,16 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
-
-use crate::datamodel::{self, Equation, View, ViewElement};
-use crate::diagram::common::{Rect, calc_view_box};
+use crate::datamodel;
 use crate::diagram::connector::render_connector;
 use crate::diagram::elements::{
-    aux_bounds, cloud_bounds, group_bounds, module_bounds, render_alias, render_aux, render_cloud,
-    render_group, render_module, render_stock, stock_bounds,
+    render_alias, render_aux, render_cloud, render_group, render_module, render_stock,
 };
-use crate::diagram::flow::{flow_bounds, render_flow};
+use crate::diagram::flow::render_flow;
+use crate::diagram::resolve::{ResolvedElement, resolve_view};
 
 // Keep in sync with the TypeScript source of truth: src/diagram/drawing/render-styles.ts
 const RENDER_STYLES: &str = r#"
@@ -222,122 +219,11 @@ path.simlin-arrowhead-bg {
 }
 "#;
 
-const Z_MAX: usize = 6;
-
-fn is_arrayed(model: &datamodel::Model, name: &str) -> bool {
-    model
-        .get_variable(name)
-        .and_then(|v| v.get_equation())
-        .map(|eq| matches!(eq, Equation::ApplyToAll(..) | Equation::Arrayed(..)))
-        .unwrap_or(false)
-}
-
 pub fn render_svg(project: &datamodel::Project, model_name: &str) -> Result<String, String> {
-    let model = project
-        .get_model(model_name)
-        .ok_or_else(|| format!("model '{}' not found", model_name))?;
+    let view = resolve_view(project, model_name)?;
+    let is_arrayed_fn = |name: &str| -> bool { view.is_arrayed(name) };
 
-    let stock_flow = model
-        .views
-        .first()
-        .map(|v| match v {
-            View::StockFlow(sf) => sf,
-        })
-        .ok_or_else(|| "no stock-flow view found".to_string())?;
-
-    let uid_to_element: HashMap<i32, &ViewElement> = stock_flow
-        .elements
-        .iter()
-        .map(|e| (e.get_uid(), e))
-        .collect();
-
-    let is_arrayed_fn = |name: &str| -> bool { is_arrayed(model, name) };
-
-    // Sort elements into z-layers and render
-    let mut z_layers: Vec<Vec<String>> = vec![Vec::new(); Z_MAX];
-    let mut bounds: Vec<Option<Rect>> = Vec::new();
-
-    for element in &stock_flow.elements {
-        let (svg_fragment, element_bounds, z_order) = match element {
-            ViewElement::Group(group) => {
-                let svg = render_group(group);
-                let b = group_bounds(group);
-                (svg, Some(b), 0)
-            }
-            ViewElement::Link(link) => {
-                let from = uid_to_element.get(&link.from_uid);
-                let to = uid_to_element.get(&link.to_uid);
-                if let (Some(from), Some(to)) = (from, to) {
-                    let svg = render_connector(link, from, to, &is_arrayed_fn);
-                    // Connector bounds intentionally NOT collected
-                    (svg, None, 2)
-                } else {
-                    continue;
-                }
-            }
-            ViewElement::Flow(flow) => {
-                if flow.points.len() < 2 {
-                    continue;
-                }
-                let source_uid = flow.points.first().and_then(|p| p.attached_to_uid);
-                let sink_uid = flow.points.last().and_then(|p| p.attached_to_uid);
-                if let (Some(source_uid), Some(sink_uid)) = (source_uid, sink_uid) {
-                    if !uid_to_element.contains_key(&source_uid) {
-                        continue;
-                    }
-                    if let Some(sink) = uid_to_element.get(&sink_uid) {
-                        let arrayed = is_arrayed(model, &flow.name);
-                        let svg = render_flow(flow, sink, arrayed);
-                        let b = flow_bounds(flow);
-                        (svg, Some(b), 3)
-                    } else {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-            ViewElement::Stock(stock) => {
-                let arrayed = is_arrayed(model, &stock.name);
-                let svg = render_stock(stock, arrayed);
-                let b = stock_bounds(stock);
-                (svg, Some(b), 4)
-            }
-            ViewElement::Cloud(cloud) => {
-                let svg = render_cloud(cloud);
-                let b = cloud_bounds(cloud);
-                (svg, Some(b), 4)
-            }
-            ViewElement::Module(module) => {
-                let svg = render_module(module);
-                let b = module_bounds(module);
-                (svg, Some(b), 4)
-            }
-            ViewElement::Aux(aux) => {
-                let arrayed = is_arrayed(model, &aux.name);
-                let svg = render_aux(aux, arrayed);
-                let b = aux_bounds(aux);
-                (svg, Some(b), 5)
-            }
-            ViewElement::Alias(alias) => {
-                let alias_of_name = uid_to_element
-                    .get(&alias.alias_of_uid)
-                    .and_then(|e| e.get_name());
-                let svg = render_alias(alias, alias_of_name);
-                // Alias bounds intentionally NOT collected (matches TS Canvas)
-                (svg, None, 5)
-            }
-        };
-
-        if !svg_fragment.is_empty() {
-            z_layers[z_order].push(svg_fragment);
-        }
-        bounds.push(element_bounds);
-    }
-
-    let view_box = calc_view_box(&bounds);
-
-    let (vb_str, width, height) = if let Some(vb) = view_box {
+    let (vb_str, width, height) = if let Some(vb) = view.content_bounds {
         let left = vb.left.floor() as i64 - 10;
         let top = vb.top.floor() as i64 - 10;
         let width = (vb.right - left as f64).ceil() as i64 + 10;
@@ -371,10 +257,27 @@ pub fn render_svg(project: &datamodel::Project, model_name: &str) -> Result<Stri
     svg.push_str("</defs>");
     svg.push_str("<g>");
 
-    for layer in &z_layers {
-        for fragment in layer {
-            svg.push_str(fragment);
-        }
+    for element in &view.elements {
+        let fragment = match element {
+            ResolvedElement::Group(group) => render_group(group),
+            ResolvedElement::Link { link, from, to } => {
+                render_connector(link, from, to, &is_arrayed_fn)
+            }
+            ResolvedElement::Flow {
+                flow,
+                sink,
+                is_arrayed,
+            } => render_flow(flow, sink, *is_arrayed),
+            ResolvedElement::Stock { stock, is_arrayed } => render_stock(stock, *is_arrayed),
+            ResolvedElement::Cloud(cloud) => render_cloud(cloud),
+            ResolvedElement::Module(module) => render_module(module),
+            ResolvedElement::Aux { aux, is_arrayed } => render_aux(aux, *is_arrayed),
+            ResolvedElement::Alias {
+                alias,
+                alias_of_name,
+            } => render_alias(alias, *alias_of_name),
+        };
+        svg.push_str(&fragment);
     }
 
     svg.push_str("</g>");
@@ -389,8 +292,24 @@ mod tests {
     use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
     use crate::datamodel::{
         Aux as AuxVar, Equation, Flow as FlowVar, SimSpecs, Stock as StockVar, StockFlow, Variable,
-        View,
+        View, ViewElement,
     };
+
+    /// The scene reports group labels at `GROUP_LABEL_FONT_WEIGHT`; the SVG
+    /// states the same weight in its stylesheet text, so the two must agree.
+    #[test]
+    fn group_label_weight_matches_the_group_text_style_rule() {
+        let start = RENDER_STYLES.find(".simlin-group text").unwrap();
+        let end = start + RENDER_STYLES[start..].find('}').unwrap();
+        let rule = &RENDER_STYLES[start..end];
+        assert!(
+            rule.contains(&format!(
+                "font-weight: {};",
+                crate::diagram::constants::GROUP_LABEL_FONT_WEIGHT
+            )),
+            "the group text rule states a different weight: {rule}"
+        );
+    }
 
     fn make_simple_project(
         elements: Vec<ViewElement>,

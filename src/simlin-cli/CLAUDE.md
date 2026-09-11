@@ -19,11 +19,14 @@ Uses [clap](https://docs.rs/clap) derive API. Each subcommand declares exactly t
 | `simulate` | Simulate a model, print TSV results | `--no-output`, `--ltm` |
 | `convert` | Convert between XMILE, Vensim MDL, protobuf | `--to <FORMAT>`, `--model-only`, `--output` |
 | `equations` | Print model equations as LaTeX | `--output` |
+| `render` | Render a model's stored stock-and-flow view as an SVG document or as scene display-list JSON | `--to <svg\|scene>`, `--model`, `--output` |
 | `debug` | Compare simulation with a reference run | `--reference FILE`, `--ltm` |
 | `gen-stdlib` | Generate Rust stdlib code | `--stdlib-dir`, `--output` |
 | `vdf-dump` | Pretty-print VDF file contents | positional `PATH` |
 
-Commands that read model files (`simulate`, `convert`, `equations`, `debug`) share `InputArgs` via `#[command(flatten)]`:
+`render` writes what `simlin_project_render_svg` / `simlin_project_render_scene` return, for the view the file holds: a model without a view is refused rather than laid out, so the output always describes the diagram on disk (the FFI entry points lay out a viewless model transiently).
+
+Commands that read model files (`simulate`, `convert`, `equations`, `render`, `debug`) share `InputArgs` via `#[command(flatten)]`:
 - Positional `PATH` (optional for `simulate`, reads stdin)
 - `--format <xmile|vensim|protobuf|systems>` -- auto-detected from file extension when omitted (`.mdl` -> vensim, `.pb`/`.bin` -> protobuf, `.txt` -> systems, everything else -> xmile). Systems format output shows only non-infinite stocks in declaration order.
 

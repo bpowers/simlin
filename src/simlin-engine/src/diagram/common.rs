@@ -4,6 +4,9 @@
 
 use std::f64::consts::PI;
 
+use crate::diagram::constants::ARRAYED_OFFSET;
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq)]
 pub struct Rect {
     pub top: f64,
@@ -12,17 +15,66 @@ pub struct Rect {
     pub bottom: f64,
 }
 
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq)]
 pub struct Circle {
     pub x: f64,
     pub y: f64,
     pub r: f64,
+}
+
+/// A positioned axis-aligned box: a drawn rectangle, or the slot a sparkline
+/// is drawn into.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq)]
+pub struct Frame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The offsets at which an element's stacked copies are drawn, back to front.
+///
+/// An arrayed stock, aux or flow valve draws three copies -- the web canvas's
+/// `x + arrayedOffset`, `x`, `x - arrayedOffset`, in that order -- and a scalar
+/// one draws once, unshifted.
+pub(crate) fn arrayed_offsets(is_arrayed: bool) -> &'static [f64] {
+    if is_arrayed {
+        &[ARRAYED_OFFSET, 0.0, -ARRAYED_OFFSET]
+    } else {
+        &[0.0]
+    }
+}
+
+/// `p` rotated `degrees` about `center`, exactly as SVG's
+/// `rotate(degrees, cx, cy)` transforms it: positive degrees turn clockwise on
+/// a y-down canvas.
+pub(crate) fn rotate_about(p: Point, center: Point, degrees: f64) -> Point {
+    let theta = deg_to_rad(degrees);
+    let (sin, cos) = (theta.sin(), theta.cos());
+    let (dx, dy) = (p.x - center.x, p.y - center.y);
+    Point {
+        x: center.x + dx * cos - dy * sin,
+        y: center.y + dx * sin + dy * cos,
+    }
+}
+
+/// An SVG `<circle>` element for `c`.
+pub(crate) fn svg_circle(c: &Circle) -> String {
+    format!(
+        "<circle cx=\"{}\" cy=\"{}\" r=\"{}\"></circle>",
+        js_format_number(c.x),
+        js_format_number(c.y),
+        js_format_number(c.r)
+    )
 }
 
 /// Replaces `\\n` with newline and `_` with space, matching the TS displayName
@@ -437,6 +489,25 @@ mod tests {
         assert_eq!(square(3.0), 9.0);
         assert_eq!(square(0.0), 0.0);
         assert_eq!(square(-2.0), 4.0);
+    }
+
+    #[test]
+    fn rotate_about_turns_clockwise_on_a_y_down_canvas() {
+        let center = Point { x: 10.0, y: 20.0 };
+        // (+1, 0) from the center turned 90 degrees points down (+y).
+        let p = rotate_about(Point { x: 11.0, y: 20.0 }, center, 90.0);
+        assert!((p.x - 10.0).abs() < 1e-12 && (p.y - 21.0).abs() < 1e-12);
+        // The center itself never moves.
+        assert_eq!(rotate_about(center, center, 37.0), center);
+    }
+
+    #[test]
+    fn arrayed_offsets_stack_back_to_front() {
+        assert_eq!(arrayed_offsets(false), &[0.0]);
+        assert_eq!(
+            arrayed_offsets(true),
+            &[ARRAYED_OFFSET, 0.0, -ARRAYED_OFFSET]
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! Serialization FFI functions.
 //!
 //! Functions for serializing projects to protobuf, JSON, XMILE, Vensim MDL,
-//! systems, SVG, and PNG formats. The memory for the output buffers is allocated via
+//! systems, SVG, PNG, and scene formats. The memory for the output buffers is allocated via
 //! `simlin_malloc` so that callers free it with `simlin_free`.
 
 use prost::Message;
@@ -514,30 +514,26 @@ fn datamodel_with_generated_layout(
     Ok(Some(with_layout))
 }
 
-/// Render a project model's diagram as SVG
-///
-/// Renders the stock-and-flow diagram for the named model to a standalone
-/// SVG document (UTF-8 encoded). The output includes embedded CSS styles
-/// and is suitable for display or export.
-///
-/// A model without a stock-and-flow view (e.g. one built programmatically
-/// through the patch API) is rendered with an automatically generated
-/// layout; the generated view is transient and not persisted.
-///
-/// Caller must free output with `simlin_free`.
+/// The body every `simlin_project_render_*` entry point shares: validate the
+/// output pointers, the project and the model name; lay out a model with no
+/// stock-and-flow view (transiently, `datamodel_with_generated_layout`); run
+/// `render` over the datamodel and the model name; and return its bytes in a
+/// `simlin_malloc` buffer. `what` names the output in error messages. One
+/// body, so the renderings cannot disagree about which inputs they refuse or
+/// which models they lay out.
 ///
 /// # Safety
-/// - `project` must be a valid pointer to a SimlinProject
-/// - `model_name` must be a valid null-terminated UTF-8 string
-/// - `out_buffer` and `out_len` must be valid pointers
-/// - `out_error` may be null
-#[no_mangle]
-pub unsafe extern "C" fn simlin_project_render_svg(
+/// The contract of the entry points that call it: `project` must be a valid
+/// pointer to a SimlinProject, `model_name` a valid null-terminated UTF-8
+/// string, `out_buffer` and `out_len` valid pointers; `out_error` may be null.
+unsafe fn render_model_to_buffer(
     project: *mut SimlinProject,
     model_name: *const c_char,
     out_buffer: *mut *mut u8,
     out_len: *mut usize,
     out_error: *mut *mut SimlinError,
+    what: &str,
+    render: impl FnOnce(&engine::datamodel::Project, &str) -> Result<Vec<u8>, String>,
 ) {
     clear_out_error(out_error);
     if out_buffer.is_null() || out_len.is_null() {
@@ -596,9 +592,8 @@ pub unsafe extern "C" fn simlin_project_render_svg(
         }
     };
     let render_target = laid_out.as_ref().unwrap_or(&datamodel_locked);
-    match simlin_engine::diagram::render_svg(render_target, model_name_str) {
-        Ok(svg_str) => {
-            let bytes = svg_str.into_bytes();
+    match render(render_target, model_name_str) {
+        Ok(bytes) => {
             let len = bytes.len();
 
             let buf = simlin_malloc(len);
@@ -606,7 +601,7 @@ pub unsafe extern "C" fn simlin_project_render_svg(
                 store_error(
                     out_error,
                     SimlinError::new(SimlinErrorCode::Generic)
-                        .with_message("allocation failed while rendering SVG"),
+                        .with_message(format!("allocation failed while rendering {what}")),
                 );
                 return;
             }
@@ -620,10 +615,92 @@ pub unsafe extern "C" fn simlin_project_render_svg(
             store_error(
                 out_error,
                 SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message(format!("failed to render SVG: {err}")),
+                    .with_message(format!("failed to render {what}: {err}")),
             );
         }
     }
+}
+
+/// Render a project model's diagram as SVG
+///
+/// Renders the stock-and-flow diagram for the named model to a standalone
+/// SVG document (UTF-8 encoded). The output includes embedded CSS styles
+/// and is suitable for display or export.
+///
+/// A model without a stock-and-flow view (e.g. one built programmatically
+/// through the patch API) is rendered with an automatically generated
+/// layout; the generated view is transient and not persisted.
+///
+/// Caller must free output with `simlin_free`.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `model_name` must be a valid null-terminated UTF-8 string
+/// - `out_buffer` and `out_len` must be valid pointers
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_render_svg(
+    project: *mut SimlinProject,
+    model_name: *const c_char,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    render_model_to_buffer(
+        project,
+        model_name,
+        out_buffer,
+        out_len,
+        out_error,
+        "SVG",
+        |datamodel, model_name| {
+            simlin_engine::diagram::render_svg(datamodel, model_name).map(String::into_bytes)
+        },
+    );
+}
+
+/// Render a project model's diagram as a scene display list
+///
+/// Returns the stock-and-flow diagram for the named model as a
+/// resolution-independent display list, UTF-8 JSON: each drawn element's
+/// shapes (rectangles, circles, and paths of move, line, cubic and close
+/// commands), label lines and sparkline slot, in draw order, with every SVG
+/// arc converted to cubics and every SVG transform applied. The geometry is
+/// the geometry `simlin_project_render_svg` draws; `docs/design/diagram-scene.md`
+/// is the format's contract.
+///
+/// A model without a stock-and-flow view (e.g. one built programmatically
+/// through the patch API) is rendered with an automatically generated
+/// layout; the generated view is transient and not persisted.
+///
+/// Caller must free output with `simlin_free`.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `model_name` must be a valid null-terminated UTF-8 string
+/// - `out_buffer` and `out_len` must be valid pointers
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_render_scene(
+    project: *mut SimlinProject,
+    model_name: *const c_char,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    render_model_to_buffer(
+        project,
+        model_name,
+        out_buffer,
+        out_len,
+        out_error,
+        "scene",
+        |datamodel, model_name| {
+            simlin_engine::diagram::build_scene(datamodel, model_name)
+                .and_then(|scene| scene.to_json())
+                .map(String::into_bytes)
+        },
+    );
 }
 
 /// Render a project model's diagram as a PNG image
@@ -661,93 +738,20 @@ pub unsafe extern "C" fn simlin_project_render_png(
     out_len: *mut usize,
     out_error: *mut *mut SimlinError,
 ) {
-    clear_out_error(out_error);
-    if out_buffer.is_null() || out_len.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("output pointers must not be NULL"),
-        );
-        return;
-    }
-
-    *out_buffer = ptr::null_mut();
-    *out_len = 0;
-
-    let proj = ffi_try!(out_error, require_project(project));
-
-    if model_name.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("model name pointer must not be NULL"),
-        );
-        return;
-    }
-
-    let model_name_str = match CStr::from_ptr(model_name).to_str() {
-        Ok(s) if !s.is_empty() => s,
-        Ok(_) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message("model name must not be empty"),
-            );
-            return;
-        }
-        Err(_) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message("model name is not valid UTF-8"),
-            );
-            return;
-        }
-    };
-
     let opts = simlin_engine::diagram::PngRenderOpts {
         width: if width > 0 { Some(width) } else { None },
         height: if height > 0 { Some(height) } else { None },
     };
-
-    let datamodel_locked = proj.datamodel.lock().unwrap();
-    let laid_out = match datamodel_with_generated_layout(proj, &datamodel_locked, model_name_str) {
-        Ok(l) => l,
-        Err(msg) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message(format!("failed to lay out diagram: {msg}")),
-            );
-            return;
-        }
-    };
-    let render_target = laid_out.as_ref().unwrap_or(&datamodel_locked);
-    match simlin_engine::diagram::render_png(render_target, model_name_str, &opts) {
-        Ok(png_bytes) => {
-            let len = png_bytes.len();
-
-            let buf = simlin_malloc(len);
-            if buf.is_null() {
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic)
-                        .with_message("allocation failed while rendering PNG"),
-                );
-                return;
-            }
-
-            std::ptr::copy_nonoverlapping(png_bytes.as_ptr(), buf, len);
-
-            *out_buffer = buf;
-            *out_len = len;
-        }
-        Err(err) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message(format!("failed to render PNG: {err}")),
-            );
-        }
-    }
+    render_model_to_buffer(
+        project,
+        model_name,
+        out_buffer,
+        out_len,
+        out_error,
+        "PNG",
+        |datamodel, model_name| {
+            simlin_engine::diagram::render_png(datamodel, model_name, &opts)
+                .map_err(|err| err.to_string())
+        },
+    );
 }

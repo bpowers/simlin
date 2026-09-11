@@ -9,10 +9,18 @@ pub mod constants;
 pub(crate) mod elements;
 pub(crate) mod flow;
 pub(crate) mod label;
+mod path;
 mod render;
 #[cfg(feature = "png_render")]
 mod render_png;
+mod resolve;
+mod scene;
 
 pub use render::render_svg;
 #[cfg(feature = "png_render")]
 pub use render_png::{PngRenderOpts, render_png, svg_to_png};
+pub use scene::{
+    LabelPaint, SCENE_VERSION, Scene, SceneBounds, SceneCircle, SceneElement, SceneElementKind,
+    SceneLabel, SceneLabelLine, ScenePaint, ScenePath, SceneRectangle, SceneShape, SceneTextAnchor,
+    SparklineSlot, TextBaseline, build_scene,
+};

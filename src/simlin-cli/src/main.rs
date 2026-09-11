@@ -104,6 +104,24 @@ enum Command {
         output: Option<PathBuf>,
     },
 
+    /// Render a model's stored stock-and-flow view
+    Render {
+        #[command(flatten)]
+        input: InputArgs,
+
+        /// Output format (defaults to SVG)
+        #[arg(long, value_enum, default_value_t = RenderFormat::Svg)]
+        to: RenderFormat,
+
+        /// Name of the model whose view is rendered
+        #[arg(long, default_value = "main")]
+        model: String,
+
+        /// Output file path (defaults to stdout)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+
     /// Compare simulation output with a reference run
     Debug {
         #[command(flatten)]
@@ -161,6 +179,36 @@ enum OutputFormat {
     Protobuf,
     Xmile,
     Mdl,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum RenderFormat {
+    /// The standalone SVG document `simlin_project_render_svg` produces
+    Svg,
+    /// The scene display list `simlin_project_render_scene` produces, as JSON
+    Scene,
+}
+
+/// The bytes `render` writes for a model's stored view.
+///
+/// Renders the view the project carries; a model without one is refused by
+/// the renderer rather than laid out here, so the output always describes
+/// the diagram the file on disk holds.
+///
+/// pattern: Functional Core
+fn render_diagram(
+    project: &DatamodelProject,
+    model_name: &str,
+    format: &RenderFormat,
+) -> StdResult<Vec<u8>, String> {
+    match format {
+        RenderFormat::Svg => {
+            simlin_engine::diagram::render_svg(project, model_name).map(String::into_bytes)
+        }
+        RenderFormat::Scene => simlin_engine::diagram::build_scene(project, model_name)
+            .and_then(|scene| scene.to_json())
+            .map(String::into_bytes),
+    }
 }
 
 /// Infer input format from file extension, falling back to XMILE.
@@ -795,6 +843,19 @@ fn main() {
             let (project, _) = open_model(&input);
             print_equations(&project, output);
         }
+        Command::Render {
+            input,
+            to,
+            model,
+            output,
+        } => {
+            let (project, _) = open_model(&input);
+            let buf = render_diagram(&project, &model, &to)
+                .unwrap_or_else(|err| die!("error rendering model '{}': {}", model, err));
+            let output_path = output.unwrap_or_else(|| PathBuf::from("/dev/stdout"));
+            let mut output_file = File::create(&output_path).unwrap();
+            output_file.write_all(&buf).unwrap();
+        }
         Command::Debug {
             input,
             reference,
@@ -842,6 +903,69 @@ mod open_model_tests {
             read_model_file(&present.to_string_lossy()).unwrap(),
             b"<xmile/>"
         );
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    fn teacup() -> DatamodelProject {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/test-models/samples/teacup/teacup_w_diagram.xmile"
+        );
+        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        open_xmile(&mut BufReader::new(bytes.as_slice()))
+            .unwrap_or_else(|e| panic!("failed to parse {path}: {e}"))
+    }
+
+    /// Every format: the rows come from the format enumeration, and the match
+    /// has no wildcard arm, so a new format does not compile without one.
+    fn every_format() -> [RenderFormat; 2] {
+        [RenderFormat::Svg, RenderFormat::Scene]
+    }
+
+    /// `render` writes what the libsimlin entry point of the same name
+    /// returns: the SVG document, or the scene as its contract's JSON (the
+    /// `version` key first, camelCase keys).
+    #[test]
+    fn render_writes_each_format_as_its_ffi_twin_returns_it() {
+        let project = teacup();
+        for format in every_format() {
+            let bytes = render_diagram(&project, "main", &format)
+                .unwrap_or_else(|e| panic!("{format:?}: {e}"));
+            let text = String::from_utf8(bytes).expect("both formats are UTF-8");
+            match format {
+                RenderFormat::Svg => {
+                    assert!(text.starts_with("<svg "), "{text}");
+                    assert_eq!(
+                        text,
+                        simlin_engine::diagram::render_svg(&project, "main").unwrap()
+                    );
+                }
+                RenderFormat::Scene => {
+                    assert!(
+                        text.starts_with("{\"version\":1,\"modelName\":\"main\","),
+                        "{}",
+                        &text[..text.len().min(80)]
+                    );
+                    assert!(text.contains("\"contentBounds\":{"));
+                }
+            }
+        }
+    }
+
+    /// A model the project does not hold is refused in every format, with
+    /// the renderer's reason.
+    #[test]
+    fn render_refuses_a_missing_model_in_every_format() {
+        let project = teacup();
+        for format in every_format() {
+            let err = render_diagram(&project, "absent", &format)
+                .expect_err("a missing model is refused");
+            assert!(err.contains("not found"), "{format:?}: {err}");
+        }
     }
 }
 

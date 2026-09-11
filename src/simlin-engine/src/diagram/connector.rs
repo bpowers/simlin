@@ -6,7 +6,9 @@ use std::f64::consts::PI;
 
 use crate::datamodel::ViewElement;
 use crate::datamodel::view_element::{self, LinkShape};
-use crate::diagram::arrowhead::{ArrowheadType, render_arrowhead};
+use crate::diagram::arrowhead::{
+    ArrowheadGeometry, ArrowheadType, arrowhead_geometry, render_arrowhead_geometry,
+};
 use crate::diagram::common::{
     Circle, Point, deg_to_rad, escape_xml_attr, is_inf, is_zero, js_format_number, rad_to_deg,
     square,
@@ -289,33 +291,56 @@ pub(crate) fn arc_circle(
     })
 }
 
-fn render_straight_line(
-    _element: &view_element::Link,
+/// A straight connector's drawn geometry: the segment between the two
+/// elements' boundaries along the bearing of their centers, and that bearing
+/// in degrees for the arrowhead.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy)]
+pub(crate) struct StraightGeometry {
+    pub start: Point,
+    pub end: Point,
+    pub arrow_theta: f64,
+}
+
+impl StraightGeometry {
+    /// The arrowhead at the segment's end.
+    pub(crate) fn arrowhead(&self) -> ArrowheadGeometry {
+        arrowhead_geometry(self.end.x, self.end.y, self.arrow_theta, ARROWHEAD_RADIUS)
+    }
+}
+
+pub(crate) fn straight_geometry(
     from: &ViewElement,
     to: &ViewElement,
-    is_to_stock: bool,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
-) -> String {
+) -> StraightGeometry {
     let from_visual = get_visual_center(from, is_arrayed_fn);
     let to_visual = get_visual_center(to, is_arrayed_fn);
     let theta = (to_visual.1 - from_visual.1).atan2(to_visual.0 - from_visual.0);
-    let start = intersect_element_straight(from, theta, is_arrayed_fn);
-    let end = intersect_element_straight(to, opposite_theta(theta), is_arrayed_fn);
+    StraightGeometry {
+        start: intersect_element_straight(from, theta, is_arrayed_fn),
+        end: intersect_element_straight(to, opposite_theta(theta), is_arrayed_fn),
+        arrow_theta: rad_to_deg(theta),
+    }
+}
 
-    let arrow_theta = rad_to_deg(theta);
-    let path = format!(
-        "M{},{}L{},{}",
-        js_format_number(start.x),
-        js_format_number(start.y),
-        js_format_number(end.x),
-        js_format_number(end.y)
-    );
-
-    let connector_class = if is_to_stock {
+/// The SVG class a connector's visible path carries.
+fn connector_class(dashed: bool) -> &'static str {
+    if dashed {
         "simlin-connector simlin-connector-dashed"
     } else {
         "simlin-connector"
-    };
+    }
+}
+
+fn render_straight_line(g: &StraightGeometry, dashed: bool) -> String {
+    let path = format!(
+        "M{},{}L{},{}",
+        js_format_number(g.start.x),
+        js_format_number(g.start.y),
+        js_format_number(g.end.x),
+        js_format_number(g.end.y)
+    );
 
     let mut svg = String::new();
     svg.push_str("<g>");
@@ -326,13 +351,10 @@ fn render_straight_line(
     svg.push_str(&format!(
         "<path d=\"{}\" class=\"{}\"></path>",
         escape_xml_attr(&path),
-        connector_class
+        connector_class(dashed)
     ));
-    svg.push_str(&render_arrowhead(
-        end.x,
-        end.y,
-        arrow_theta,
-        ARROWHEAD_RADIUS,
+    svg.push_str(&render_arrowhead_geometry(
+        &g.arrowhead(),
         ArrowheadType::Connector,
     ));
     svg.push_str("</g>");
@@ -344,22 +366,30 @@ fn render_straight_line(
 /// raw f64 (no pre-rounding): rounding happens only at the `js_format_number`
 /// boundary in `render_arc`, so the SVG string stays byte-for-byte identical
 /// to the pre-factor-out code (and to the TypeScript renderer).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy)]
-struct ArcGeometry {
+pub(crate) struct ArcGeometry {
     /// SVG path start (= `from_visual`, the source element center).
-    start: Point,
+    pub start: Point,
     /// SVG path end (= `to_visual`, the target element center).
-    arc_end: Point,
+    pub arc_end: Point,
     /// Arc center and radius.
-    circ: Circle,
+    pub circ: Circle,
     /// SVG large-arc-flag.
-    sweep: bool,
+    pub sweep: bool,
     /// SVG sweep-flag.
-    inv: bool,
+    pub inv: bool,
     /// Arrowhead anchor point on the target element boundary.
-    end: Point,
+    pub end: Point,
     /// Final arrowhead rotation in degrees (already adjusted for `inv`).
-    arrow_theta: f64,
+    pub arrow_theta: f64,
+}
+
+impl ArcGeometry {
+    /// The arrowhead where the arc meets the target element.
+    pub(crate) fn arrowhead(&self) -> ArrowheadGeometry {
+        arrowhead_geometry(self.end.x, self.end.y, self.arrow_theta, ARROWHEAD_RADIUS)
+    }
 }
 
 /// Compute the drawn-arc geometry for a connector. Returns `None` in the two
@@ -494,32 +524,48 @@ pub(crate) fn connector_polyline(
     is_arrayed_fn: &dyn Fn(&str) -> bool,
     arc_samples: usize,
 ) -> Vec<Point> {
-    if is_straight_line(element, from, to, is_arrayed_fn) {
-        let from_visual = get_visual_center(from, is_arrayed_fn);
-        let to_visual = get_visual_center(to, is_arrayed_fn);
-        let theta = (to_visual.1 - from_visual.1).atan2(to_visual.0 - from_visual.0);
-        let start = intersect_element_straight(from, theta, is_arrayed_fn);
-        let end = intersect_element_straight(to, opposite_theta(theta), is_arrayed_fn);
-        return vec![start, end];
-    }
-    match arc_geometry(element, from, to, is_arrayed_fn) {
-        None => Vec::new(), // MultiPoint or degenerate arc: renderer draws nothing
-        Some(g) => sample_arc(&g, arc_samples),
+    match connector_geometry(element, from, to, is_arrayed_fn) {
+        ConnectorGeometry::Straight(g) => vec![g.start, g.end],
+        ConnectorGeometry::Arc(g) => sample_arc(&g, arc_samples),
+        // MultiPoint or degenerate arc: renderer draws nothing
+        ConnectorGeometry::Undrawable => Vec::new(),
     }
 }
 
-fn render_arc(
+/// How a connector is drawn: straight, as an arc, or not at all (a
+/// `MultiPoint` link, or an arc whose circle cannot be constructed). This is
+/// the one statement of that choice; `render_connector`, the scene, and
+/// `connector_polyline` all read it.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+pub(crate) enum ConnectorGeometry {
+    Straight(StraightGeometry),
+    Arc(ArcGeometry),
+    Undrawable,
+}
+
+pub(crate) fn connector_geometry(
     element: &view_element::Link,
     from: &ViewElement,
     to: &ViewElement,
-    is_to_stock: bool,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
-) -> String {
-    let g = match arc_geometry(element, from, to, is_arrayed_fn) {
-        Some(g) => g,
-        None => return "<g></g>".to_string(),
-    };
+) -> ConnectorGeometry {
+    if is_straight_line(element, from, to, is_arrayed_fn) {
+        ConnectorGeometry::Straight(straight_geometry(from, to, is_arrayed_fn))
+    } else {
+        match arc_geometry(element, from, to, is_arrayed_fn) {
+            Some(g) => ConnectorGeometry::Arc(g),
+            None => ConnectorGeometry::Undrawable,
+        }
+    }
+}
 
+/// A connector into a stock is drawn dashed, as the web canvas's
+/// `isDashed: to.type === 'stock'` draws it.
+pub(crate) fn connector_is_dashed(to: &ViewElement) -> bool {
+    matches!(to, ViewElement::Stock(_))
+}
+
+fn render_arc(g: &ArcGeometry, dashed: bool) -> String {
     let path = format!(
         "M{},{}A{},{} 0 {},{} {},{}",
         js_format_number(g.start.x),
@@ -532,12 +578,6 @@ fn render_arc(
         js_format_number(g.arc_end.y)
     );
 
-    let connector_class = if is_to_stock {
-        "simlin-connector simlin-connector-dashed"
-    } else {
-        "simlin-connector"
-    };
-
     let mut svg = String::new();
     svg.push_str("<g>");
     svg.push_str(&format!(
@@ -547,13 +587,10 @@ fn render_arc(
     svg.push_str(&format!(
         "<path d=\"{}\" class=\"{}\"></path>",
         escape_xml_attr(&path),
-        connector_class
+        connector_class(dashed)
     ));
-    svg.push_str(&render_arrowhead(
-        g.end.x,
-        g.end.y,
-        g.arrow_theta,
-        ARROWHEAD_RADIUS,
+    svg.push_str(&render_arrowhead_geometry(
+        &g.arrowhead(),
         ArrowheadType::Connector,
     ));
     svg.push_str("</g>");
@@ -566,12 +603,11 @@ pub fn render_connector(
     to: &ViewElement,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
 ) -> String {
-    let is_to_stock = matches!(to, ViewElement::Stock(_));
-
-    if is_straight_line(element, from, to, is_arrayed_fn) {
-        render_straight_line(element, from, to, is_to_stock, is_arrayed_fn)
-    } else {
-        render_arc(element, from, to, is_to_stock, is_arrayed_fn)
+    let dashed = connector_is_dashed(to);
+    match connector_geometry(element, from, to, is_arrayed_fn) {
+        ConnectorGeometry::Straight(g) => render_straight_line(&g, dashed),
+        ConnectorGeometry::Arc(g) => render_arc(&g, dashed),
+        ConnectorGeometry::Undrawable => "<g></g>".to_string(),
     }
 }
 

@@ -1623,6 +1623,33 @@ void simlin_project_render_svg(SimlinProject *project,
                                uintptr_t *out_len,
                                SimlinError **out_error);
 
+// Render a project model's diagram as a scene display list
+//
+// Returns the stock-and-flow diagram for the named model as a
+// resolution-independent display list, UTF-8 JSON: each drawn element's
+// shapes (rectangles, circles, and paths of move, line, cubic and close
+// commands), label lines and sparkline slot, in draw order, with every SVG
+// arc converted to cubics and every SVG transform applied. The geometry is
+// the geometry `simlin_project_render_svg` draws; `docs/design/diagram-scene.md`
+// is the format's contract.
+//
+// A model without a stock-and-flow view (e.g. one built programmatically
+// through the patch API) is rendered with an automatically generated
+// layout; the generated view is transient and not persisted.
+//
+// Caller must free output with `simlin_free`.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `model_name` must be a valid null-terminated UTF-8 string
+// - `out_buffer` and `out_len` must be valid pointers
+// - `out_error` may be null
+void simlin_project_render_scene(SimlinProject *project,
+                                 const char *model_name,
+                                 uint8_t **out_buffer,
+                                 uintptr_t *out_len,
+                                 SimlinError **out_error);
+
 // Render a project model's diagram as a PNG image
 //
 // Renders the stock-and-flow diagram for the named model to a PNG image.

@@ -18,6 +18,14 @@ pub const CLOUD_WIDTH: f64 = 55.0;
 pub const STRAIGHT_LINE_MAX: f64 = 6.0; // degrees
 pub const LINE_SPACING: f64 = 14.0;
 pub const LABEL_PADDING: f64 = 4.0;
+/// Every diagram label's font size, and so the `1em` a label's first line
+/// advances by.
+pub const LABEL_FONT_SIZE: f64 = 12.0;
+/// The weight element labels are drawn with (Roboto Light).
+pub const LABEL_FONT_WEIGHT: u32 = 300;
+/// The weight a group (sector) label is drawn with: the `.simlin-group text`
+/// rule of the renderer's styles, which `render::tests` pins to this value.
+pub const GROUP_LABEL_FONT_WEIGHT: u32 = 500;
 pub const GROUP_RADIUS: f64 = 8.0;
 pub const GROUP_LABEL_PADDING: f64 = 8.0;
 pub const ARRAYED_OFFSET: f64 = 3.0;
