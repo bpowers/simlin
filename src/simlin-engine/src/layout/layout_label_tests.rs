@@ -438,37 +438,40 @@ fn incremental_layout_preserves_label_side_across_rename() {
     }
 }
 
-/// Fixture: stock_a -> chain_flow -> stock_b plus stock_a -> waste_a -> cloud.
-/// Adding waste_b moves waste_a along the bottom face (offset 0.5 -> 1/3),
-/// which rebuilds waste_a's geometry without changing its orientation.
+/// Fixture: stock_a -> chain_flow -> stock_b plus side outflows waste_a (the
+/// bottom face) and waste_b (the top face). Adding waste_c, with no free face
+/// left, puts it beside waste_a on the bottom face and moves waste_a along
+/// that face (offset 0.5 -> 1/3), which rebuilds waste_a's geometry without
+/// changing its orientation.
 fn side_flow_project() -> datamodel::Project {
     test_project(model_with(vec![
-        scalar_stock("stock_a", &[], &["chain_flow", "waste_a"]),
+        scalar_stock("stock_a", &[], &["chain_flow", "waste_a", "waste_b"]),
         scalar_stock("stock_b", &["chain_flow"], &[]),
         scalar_flow("chain_flow", "10"),
         scalar_flow("waste_a", "3"),
+        scalar_flow("waste_b", "2"),
     ]))
 }
 
-fn add_waste_b(project: &datamodel::Project) -> (datamodel::Project, crate::patch::ModelPatch) {
+fn add_waste_c(project: &datamodel::Project) -> (datamodel::Project, crate::patch::ModelPatch) {
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
     for var in &mut model.variables {
         if let datamodel::Variable::Stock(s) = var
             && s.ident == "stock_a"
         {
-            s.outflows.push("waste_b".to_string());
+            s.outflows.push("waste_c".to_string());
         }
     }
-    let waste_b = scalar_flow("waste_b", "2");
-    model.variables.push(waste_b.clone());
-    let datamodel::Variable::Flow(waste_b) = waste_b else {
+    let waste_c = scalar_flow("waste_c", "1");
+    model.variables.push(waste_c.clone());
+    let datamodel::Variable::Flow(waste_c) = waste_c else {
         unreachable!()
     };
     let patch = crate::patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::patch::ModelOperation::UpsertFlow(waste_b),
+            crate::patch::ModelOperation::UpsertFlow(waste_c),
             crate::patch::ModelOperation::UpdateStockFlows {
                 ident: "stock_a".to_string(),
                 inflows: vec![],
@@ -476,6 +479,7 @@ fn add_waste_b(project: &datamodel::Project) -> (datamodel::Project, crate::patc
                     "chain_flow".to_string(),
                     "waste_a".to_string(),
                     "waste_b".to_string(),
+                    "waste_c".to_string(),
                 ],
             },
         ],
@@ -487,7 +491,7 @@ fn add_waste_b(project: &datamodel::Project) -> (datamodel::Project, crate::patc
 fn rebuilt_flow_with_unchanged_orientation_keeps_label_side() {
     let project = side_flow_project();
     let base_view = generate_layout(&project, TEST_MODEL, None).expect("initial layout");
-    let (patched, patch) = add_waste_b(&project);
+    let (patched, patch) = add_waste_c(&project);
 
     let old_waste_a = find_flow(&base_view, "waste_a");
     assert!(

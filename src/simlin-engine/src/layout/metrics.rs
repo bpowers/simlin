@@ -4,18 +4,26 @@
 
 // pattern: Functional Core
 //
-// The layout quality core. Every term here is computed purely from a
-// `datamodel::StockFlow` (and the `LayoutConfig` parameter, kept for
-// forward-compatibility with the design's optimizer signature). All geometry
-// comes from the same `diagram` helpers the SVG renderer uses and from
-// `layout::build_view_segments`, so a layout's quality score can never disagree
-// with the geometry the renderer draws or with `count_view_crossings`.
+// The layout quality core. Every term is computed purely from a
+// `datamodel::StockFlow`, over the SCENE the renderer draws: node shapes at
+// their drawn size (a flow valve is the 9px circle `render_flow` draws, not
+// its smaller bounds box), flow pipes as 4px-thick segments, connectors as the
+// exact polylines `diagram::connector` draws, and labels at the boxes
+// `diagram::label` measures. A layout's score therefore can never disagree
+// with what the picture shows.
+//
+// Every defect term is a RATE -- a mean over the elements, labels, or
+// connectors it concerns -- so a model's cost does not grow with its size, the
+// trade-off between terms is the same for a 10-variable model as for a
+// 300-variable one, and the corpus aggregate is not dominated by the largest
+// models. `analyze_layout` additionally reports each defect's location, so the
+// eval harness can draw what the metric sees over the rendered diagram.
 //
 // There is NO I/O in this module: it takes data, computes scalars, returns
-// them. That makes every term trivially testable with hand-computed expected
-// values (see the inline tests below).
+// them. That makes every term testable with hand-computed expected values (see
+// `metrics_tests.rs`).
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::datamodel::{self, ViewElement};
 use crate::diagram::common::{
@@ -24,109 +32,154 @@ use crate::diagram::common::{
 };
 use crate::diagram::connector::{ARC_POLYLINE_SAMPLES, connector_polyline, get_visual_center};
 use crate::diagram::elements::{
-    aux_bounds, aux_shape_bounds, cloud_bounds, module_bounds, stock_bounds, stock_shape_bounds,
+    aux_shape_bounds, cloud_bounds, module_shape_bounds, stock_shape_bounds,
 };
-use crate::diagram::flow::{flow_bounds, flow_shape_bounds};
 use crate::diagram::label::{LabelProps, label_bounds};
 
-use super::annealing::count_crossings;
+use super::annealing::segment_intersection;
 use super::build_view_segments;
 use super::config::LayoutConfig;
 
 /// Upper bound of the target aspect-ratio band. A view whose bounding-box
 /// aspect ratio (long side / short side, always >= 1) is at or below this value
-/// is "well-proportioned" and incurs no `aspect_penalty`. 16:9 is a generous
-/// band that comfortably contains the conventional 4:3 diagram proportions
-/// while still penalizing pathologically thin (e.g. 1x10) layouts.
+/// is "well-proportioned" and incurs no `aspect_penalty`.
 pub const TARGET_AR_MAX: f64 = 16.0 / 9.0;
+
+/// Half the drawn width of a flow pipe: the renderer strokes the pipe's outer
+/// path 4px wide.
+pub(crate) const PIPE_HALF_WIDTH: f64 = 2.0;
+
+/// The gap between two element footprints (shape or label boxes) below which
+/// they read as jammed together: enough air that two labels, or a label and a
+/// neighbor's shape, read as separate marks. Hand-drawn diagrams routinely
+/// leave less than a text line between neighbors, so the threshold sits well
+/// under one line's height and the deficit is squared, charging marks that
+/// nearly touch far more than ones that are merely snug.
+pub(crate) const COMFORTABLE_CLEARANCE: f64 = 8.0;
+
+/// A link whose drawn length outside its two endpoint shapes is below this
+/// cannot show its arrowhead's direction and reads as the nodes touching.
+const MIN_VISIBLE_LINK: f64 = 20.0;
+
+/// A link longer than this many times the view's median link length reads as
+/// a line across the diagram rather than a local connection.
+const LONG_CONNECTOR_FACTOR: f64 = 3.0;
+
+/// How far inside a label box a connector must pass to be charged as crossing
+/// the text: `label_bounds` pads the text horizontally, and a line grazing
+/// that padding does not obscure anything.
+pub(crate) const LABEL_INSET: f64 = 2.0;
+
+/// How much of a line through a name counts when the line is the name's own
+/// node's link (see `label_connector_overlap`).
+pub(crate) const OWN_LINK_STRIKE_FACTOR: f64 = 0.5;
+
+/// Two node centers within this distance on one axis share a row or column.
+const ALIGN_TOLERANCE: f64 = 3.0;
+
+/// How far apart two nodes may be and still count as aligned with each other:
+/// alignment is a local reading aid, not a property of distant nodes that
+/// happen to share a coordinate.
+const ALIGN_REACH: f64 = 300.0;
 
 /// One quality cost per aesthetic concern, with `0.0` always meaning "ideal".
 ///
-/// Most terms are scale-free by construction (ratios of like quantities), so
-/// they are comparable across models of different absolute coordinate scale.
-/// Three terms are *intentionally* sensitive to the absolute coordinate scale
-/// relative to the universal fixed node-box size (`node_overlap`,
-/// `label_overlap`, `sprawl`): a model whose nodes are packed tightly against
-/// the fixed pixel size of a stock/aux box should score differently from one
-/// spread far apart, and that sensitivity is what makes those terms meaningful
-/// across models. See the AC1.8 scoping note in the Phase 1 plan.
+/// The defect terms are rates (means over the things they concern), so they
+/// are comparable across models of different size. Several terms are
+/// intentionally sensitive to absolute coordinate scale relative to the fixed
+/// pixel size of shapes and labels (`node_overlap`, `label_overlap`,
+/// `crowding`, `sprawl`): packing nodes tightly against those fixed sizes is
+/// exactly what they measure.
 ///
 /// `Serialize`/`Deserialize` let the layout-quality eval sweep
-/// (`examples/layout_eval.rs`) emit the per-term breakdown into its
-/// `metrics.json` artifact and round-trip the committed baseline report back
-/// from JSON for the baseline diff; the struct is pure data (every field a
-/// plain `f64`), so the derives carry no behavior.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+/// (`examples/layout_eval/`) emit the per-term breakdown into its artifacts
+/// and read a stored report back for comparison. Terms added after a report
+/// was written deserialize as `0.0`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayoutMetrics {
-    /// Sum of pairwise node *shape*-box overlap area (label-free), normalized
-    /// by total shape-box area. Measures shapes overlapping shapes; label
-    /// collisions are charged by `label_overlap` instead.
+    /// Mean over nodes of the fraction of each node's drawn shape covered by
+    /// other nodes' shapes (capped at 1 per node).
     pub node_overlap: f64,
-    /// Fraction of total connector length that passes through non-incident
-    /// node *shape* boxes (label-free). A connector under a node shape reads as
-    /// a false causal connection; a connector under only a label is not
-    /// charged here.
+    /// Fraction of total connector length that passes under a non-incident
+    /// node shape or flow pipe: a connector under a shape reads as a false
+    /// causal connection.
     pub node_connector_overlap: f64,
-    /// Sum over labeled elements of each label's *obscured fraction*: the area
-    /// of the label box covered by any other label box or any other element's
-    /// bare shape box, capped at the label's own area and divided by it (so each
-    /// term is in [0,1]). 0 = no label obscured. Per-label so a small overlap
-    /// registers at its true obscuration fraction rather than being diluted by
-    /// the corpus's total label area.
+    /// Mean over labels of the fraction of each label box covered by other
+    /// labels and other nodes' shapes (capped at 1).
     pub label_overlap: f64,
-    /// Edge crossings normalized by connector count.
+    /// Mean over labels of how much connector -- link or flow pipe -- passes
+    /// through the label's text box, relative to the box's smaller side (capped
+    /// at 1): a line through a name strikes it out, however thin. The label's
+    /// own node's links count at `OWN_LINK_STRIKE_FACTOR`; a flow's own pipe
+    /// never strikes its name.
+    #[serde(default)]
+    pub label_connector_overlap: f64,
+    /// Edge crossings per connector.
     pub crossings: f64,
+    /// Mean over nodes of the clearance deficit to their neighbors -- for each
+    /// pair of nodes whose footprints (shape and label boxes) come closer than
+    /// `COMFORTABLE_CLEARANCE`, `(1 - gap/clearance)^2` -- plus the mean over
+    /// links of the same deficit for links whose visible length is below
+    /// `MIN_VISIBLE_LINK`. The counterweight to `sprawl`: without it, the
+    /// cheapest layout is the most crowded one that does not quite overlap.
+    #[serde(default)]
+    pub crowding: f64,
     /// Mean connector length relative to the characteristic node size.
     pub sprawl: f64,
+    /// Mean over links of how far each exceeds `LONG_CONNECTOR_FACTOR` times
+    /// the median link length, in multiples of that threshold: a parameter
+    /// parked across the diagram from its consumer.
+    #[serde(default)]
+    pub long_connectors: f64,
     /// Coefficient of variation (stddev/mean) of connector lengths.
     pub edge_length_cv: f64,
     /// How far the view bounding-box aspect ratio exceeds the target band.
     pub aspect_penalty: f64,
-    /// Reserved; computed in a future rung. Always 0.0, weight 0.
-    pub chain_straightness: f64,
+    /// Fraction of nodes that share neither a row nor a column (within
+    /// `ALIGN_TOLERANCE`) with any node within `ALIGN_REACH`.
+    #[serde(default)]
+    pub misalignment: f64,
     /// Mean isoperimetric penalty `1 - Q` over the view's feedback cycles
     /// (`Q = 4*PI*Area / Perimeter^2` of each loop's node-center polygon,
     /// clamped to [0,1]). 0.0 = clean, well-spread loops (circles); higher =
     /// collapsed/collinear loops. 0.0 when the view has no cycle of >= 3 nodes.
-    /// Computed and reported now; weight stays 0 until Phase 4 calibration.
     pub loop_compactness: f64,
     /// Mean number of right-angle bends per flow pipe (a straight pipe has 0, an
     /// `L` has 1, a `Z` has 2). Flows are orthogonalized before scoring, so this
     /// rewards placements where the two stocks a flow connects are naturally
-    /// aligned (a straight pipe, 0 bends) over diagonally-offset stocks that
-    /// require an `L`/`Z` detour. 0.0 when the view has no flows.
+    /// aligned over diagonally-offset stocks that require an `L`/`Z` detour.
     #[serde(default)]
     pub flow_bends: f64,
     /// Mean bow shortfall over the causal connectors that participate in a
     /// feedback loop: 0.0 = every loop connector is drawn with at least the
     /// target curvature (the loop reads as a visible circle), 1.0 = loop
-    /// connectors are straight (the loop collapses to a zig-zag). A Goodhart
-    /// guard complementing `loop_compactness` (which scores node arrangement, not
-    /// the drawn connector curvature). 0.0 when there is no loop connector.
+    /// connectors are straight (the loop collapses to a zig-zag).
     #[serde(default)]
     pub loop_straightness: f64,
 }
 
 /// Per-term weights for the scalar an optimizer minimizes.
 ///
-/// `MetricWeights::default()` holds the calibrated production weights committed
-/// in Phase 4 (see the failure-mode rationale on the `Default` impl below).
-///
-/// `Serialize`/`Deserialize` let the layout-quality eval sweep
-/// (`examples/layout_eval.rs`) record the weight set it used in its
-/// `metrics.json` artifact and read it back when round-tripping the committed
-/// baseline report; the struct is pure data (every field a plain `f64`), so the
-/// derives carry no behavior.
+/// `MetricWeights::default()` holds the calibrated production weights (see the
+/// rationale on the `Default` impl). Weights a stored report predates
+/// deserialize as `0.0`.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MetricWeights {
     pub node_overlap: f64,
     pub node_connector_overlap: f64,
     pub label_overlap: f64,
+    #[serde(default)]
+    pub label_connector_overlap: f64,
     pub crossings: f64,
+    #[serde(default)]
+    pub crowding: f64,
     pub sprawl: f64,
+    #[serde(default)]
+    pub long_connectors: f64,
     pub edge_length_cv: f64,
     pub aspect_penalty: f64,
-    pub chain_straightness: f64,
+    #[serde(default)]
+    pub misalignment: f64,
     pub loop_compactness: f64,
     #[serde(default)]
     pub flow_bends: f64,
@@ -135,61 +188,72 @@ pub struct MetricWeights {
 }
 
 impl Default for MetricWeights {
-    /// The calibrated production weights, from the Phase 3 contact-sheet
-    /// calibration with explicit user sign-off (2026-05-23).
+    /// The calibrated production weights.
     ///
-    /// Failure-mode rationale -- readability >> compactness:
-    ///   * The dominant concerns all carry weight 1.0: node-shape overlap
-    ///     (`node_overlap`), connectors passing under node shapes
-    ///     (`node_connector_overlap`), obscured labels (`label_overlap`), and
-    ///     edge `crossings`. These are the things that make a diagram unreadable
-    ///     or assert false causal connections, so they dominate the cost.
-    ///   * `sprawl` is a GENTLE compactness counterweight (0.1). The readability
-    ///     terms above can be driven to zero just by spreading a diagram out
-    ///     (labels are a fixed pixel size, so enough spacing always separates
-    ///     them), and nothing else here resists that -- `crossings` and
-    ///     `node_connector_overlap` are scale-invariant and `aspect_penalty` is
-    ///     off. Without a counterweight, "lower cost" can mean "merely bigger",
-    ///     and any optimizer driving this metric (best-of-k seed selection, a
-    ///     declutter pass, metric-driven annealing) would prefer endlessly
-    ///     inflated, unviewable layouts. A small `sprawl` weight makes spreading
-    ///     past the point where labels separate strictly costly, so the cost has
-    ///     a finite optimum at "spread just enough". It is kept far below the
-    ///     readability terms (readability >> compactness still holds): at a
-    ///     healthy spread `sprawl` is ~1, contributing ~0.1 -- enough to break
-    ///     ties toward compactness and deter inflation, not enough to pull a
-    ///     layout back into label collisions.
-    ///   * `edge_length_cv` and `aspect_penalty` stay 0.0: even edge lengths are
-    ///     not a goal, and aspect-ratio penalties actively punished good wide
-    ///     layouts during calibration.
-    ///   * `loop_compactness` is a low 0.25: it gently REWARDS drawing feedback
-    ///     loops as visible circles (a readability aid), but must never dominate
-    ///     the overlap/crossings family, so it stays well below 1.0.
-    ///   * `flow_bends` is a low 0.15: flows are always orthogonalized, so this
-    ///     never repairs a defect -- it only nudges the optimizer toward
-    ///     placements where a flow's two stocks line up (a clean straight pipe)
-    ///     instead of an `L`/`Z` detour. A convention aid like
-    ///     `loop_compactness`, kept well below the readability family.
-    ///   * `loop_straightness` is a low 0.1: a Goodhart guard that keeps feedback
-    ///     loops drawn as visible curves. `apply_loop_curvature` curves loop
-    ///     connectors deterministically so a healthy layout scores ~0 here; the
-    ///     weight exists so the metric can never reward flattening a loop back
-    ///     into a zig-zag. Below the readability family by construction.
-    ///   * `chain_straightness` stays 0.0: it is reserved (not yet computed), so
-    ///     it carries no weight.
+    /// Every defect term is a rate, so a weight is the cost of that defect
+    /// affecting EVERY element it concerns; a single defect in a model of `n`
+    /// elements costs `weight / n`. The weights encode how much one instance of
+    /// each defect hurts relative to the others:
+    ///   * Illegibility dominates. A node covering a node, a label covered by
+    ///     something, a connector under a shape (a false causal link), and a
+    ///     line through a name each destroy information outright.
+    ///   * A crossing costs less than an obscured label (the reader can follow
+    ///     a line across another) but more than mild crowding.
+    ///   * `crowding` and `sprawl` pull in opposite directions and together set
+    ///     the finite optimum spacing: spread until neighbors have air, no
+    ///     further.
+    ///   * `long_connectors` charges the one parameter parked across the
+    ///     diagram, which the mean-length `sprawl` barely registers.
+    ///   * Loop and flow conventions (`loop_compactness`, `flow_bends`,
+    ///     `loop_straightness`) and alignment (`misalignment`) are gentle
+    ///     nudges toward how modelers draw.
+    ///   * `edge_length_cv` and `aspect_penalty` are reported for diagnosis and
+    ///     carry no weight.
+    ///
+    /// Calibrated against the eval harness's judged pairs (every taste-battery
+    /// degradation of the corpus references and production layouts, plus
+    /// visual reference-vs-production judgments): a log-space fit anchored at
+    /// `crossings = 1` moved these by under 15%, so the values are rounded
+    /// priors the data confirms rather than a fit to a handful of models.
     fn default() -> Self {
         MetricWeights {
-            node_overlap: 1.0,
-            node_connector_overlap: 1.0,
-            label_overlap: 1.0,
+            node_overlap: 3.5,
+            node_connector_overlap: 2.0,
+            label_overlap: 3.5,
+            label_connector_overlap: 1.5,
             crossings: 1.0,
-            sprawl: 0.2,
+            crowding: 1.0,
+            sprawl: 0.25,
+            long_connectors: 0.5,
             edge_length_cv: 0.0,
             aspect_penalty: 0.0,
-            chain_straightness: 0.0,
+            misalignment: 0.1,
             loop_compactness: 0.4,
             flow_bends: 0.15,
             loop_straightness: 0.1,
+        }
+    }
+}
+
+impl MetricWeights {
+    /// Every weight zero: the base for isolating one or a few terms
+    /// (`MetricWeights { crossings: 1.0, ..MetricWeights::zero() }`).
+    pub const fn zero() -> Self {
+        MetricWeights {
+            node_overlap: 0.0,
+            node_connector_overlap: 0.0,
+            label_overlap: 0.0,
+            label_connector_overlap: 0.0,
+            crossings: 0.0,
+            crowding: 0.0,
+            sprawl: 0.0,
+            long_connectors: 0.0,
+            edge_length_cv: 0.0,
+            aspect_penalty: 0.0,
+            misalignment: 0.0,
+            loop_compactness: 0.0,
+            flow_bends: 0.0,
+            loop_straightness: 0.0,
         }
     }
 }
@@ -200,124 +264,178 @@ impl LayoutMetrics {
         self.node_overlap * w.node_overlap
             + self.node_connector_overlap * w.node_connector_overlap
             + self.label_overlap * w.label_overlap
+            + self.label_connector_overlap * w.label_connector_overlap
             + self.crossings * w.crossings
+            + self.crowding * w.crowding
             + self.sprawl * w.sprawl
+            + self.long_connectors * w.long_connectors
             + self.edge_length_cv * w.edge_length_cv
             + self.aspect_penalty * w.aspect_penalty
-            + self.chain_straightness * w.chain_straightness
+            + self.misalignment * w.misalignment
             + self.loop_compactness * w.loop_compactness
             + self.flow_bends * w.flow_bends
             + self.loop_straightness * w.loop_straightness
     }
-}
 
-/// The drawn geometry of one connector (Link or Flow): its incident node uids
-/// (so node-connector-overlap can skip them) and the polyline the renderer
-/// draws. Built once and reused by every connector-derived term so they all see
-/// the same geometry.
-struct ConnectorGeometry {
-    /// Element uids the connector is attached to and must not be charged for
-    /// passing through (its own endpoints).
-    incident_uids: HashSet<i32>,
-    /// The drawn polyline. Always has at least two points (connectors that draw
-    /// nothing -- e.g. MultiPoint links -- are not collected at all).
-    polyline: Vec<Point>,
-    /// Total polyline length.
-    length: f64,
-}
-
-/// Total length of the UNION of parameter intervals `[t0, t1]` (each `t` in
-/// [0,1]), counting each covered sub-length once. Sorts by start then sweep-
-/// merges, so overlapping/adjacent intervals collapse. The next interval merges
-/// when its start is `<= ` the current end (no epsilon needed; equality is
-/// tolerated as adjacency). Mutates `intervals` (sorts in place); empty input
-/// yields 0.0. Order-independent in its result. PURE.
-fn merged_interval_length(intervals: &mut [(f64, f64)]) -> f64 {
-    if intervals.is_empty() {
-        return 0.0;
+    /// `(name, value)` for every term, in a stable display order.
+    pub fn terms(&self) -> [(&'static str, f64); 14] {
+        [
+            ("node_overlap", self.node_overlap),
+            ("node_connector_overlap", self.node_connector_overlap),
+            ("label_overlap", self.label_overlap),
+            ("label_connector_overlap", self.label_connector_overlap),
+            ("crossings", self.crossings),
+            ("crowding", self.crowding),
+            ("sprawl", self.sprawl),
+            ("long_connectors", self.long_connectors),
+            ("edge_length_cv", self.edge_length_cv),
+            ("aspect_penalty", self.aspect_penalty),
+            ("misalignment", self.misalignment),
+            ("loop_compactness", self.loop_compactness),
+            ("flow_bends", self.flow_bends),
+            ("loop_straightness", self.loop_straightness),
+        ]
     }
-    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let mut total = 0.0;
-    let mut cur = intervals[0];
-    for &(t0, t1) in &intervals[1..] {
-        if t0 <= cur.1 {
-            // Overlapping or adjacent: extend the current run.
-            cur.1 = cur.1.max(t1);
-        } else {
-            total += cur.1 - cur.0;
-            cur = (t0, t1);
+}
+
+impl MetricWeights {
+    /// `(name, weight)` for every weight, in the same order as
+    /// [`LayoutMetrics::terms`].
+    pub fn terms(&self) -> [(&'static str, f64); 14] {
+        [
+            ("node_overlap", self.node_overlap),
+            ("node_connector_overlap", self.node_connector_overlap),
+            ("label_overlap", self.label_overlap),
+            ("label_connector_overlap", self.label_connector_overlap),
+            ("crossings", self.crossings),
+            ("crowding", self.crowding),
+            ("sprawl", self.sprawl),
+            ("long_connectors", self.long_connectors),
+            ("edge_length_cv", self.edge_length_cv),
+            ("aspect_penalty", self.aspect_penalty),
+            ("misalignment", self.misalignment),
+            ("loop_compactness", self.loop_compactness),
+            ("flow_bends", self.flow_bends),
+            ("loop_straightness", self.loop_straightness),
+        ]
+    }
+}
+
+/// What kind of defect a [`Defect`] marks, one per defect term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefectKind {
+    NodeOverlap,
+    ConnectorThroughNode,
+    LabelObscured,
+    LabelCrossed,
+    Crossing,
+    Crowded,
+    LongConnector,
+}
+
+/// One defect the metric charged, located on the diagram: the region it
+/// concerns (`[left, top, right, bottom]`; a point is a zero-size region) and
+/// its severity in the term's own units (a covered fraction, a clearance
+/// deficit, an excess ratio).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Defect {
+    pub kind: DefectKind,
+    pub region: [f64; 4],
+    pub severity: f64,
+}
+
+/// The metrics of a view together with every defect behind them.
+pub struct LayoutAnalysis {
+    pub metrics: LayoutMetrics,
+    pub defects: Vec<Defect>,
+}
+
+/// Where defects go while the terms are computed: nowhere (the hot path an
+/// optimizer runs) or into a list (the eval harness's overlays). One code path
+/// computes both, so the overlay can never disagree with the score.
+struct DefectSink {
+    defects: Option<Vec<Defect>>,
+}
+
+impl DefectSink {
+    fn push(&mut self, kind: DefectKind, region: Rect, severity: f64) {
+        if let Some(d) = &mut self.defects {
+            d.push(Defect {
+                kind,
+                region: [region.left, region.top, region.right, region.bottom],
+                severity,
+            });
         }
     }
-    total += cur.1 - cur.0;
-    total
-}
 
-/// Polyline length: sum of segment lengths.
-fn polyline_length(points: &[Point]) -> f64 {
-    points
-        .windows(2)
-        .map(|w| {
-            let dx = w[1].x - w[0].x;
-            let dy = w[1].y - w[0].y;
-            (dx * dx + dy * dy).sqrt()
-        })
-        .sum()
-}
-
-/// Resolve the node box for an element that has one (everything except links,
-/// groups, and aliases). An ALIAS's box needs its source element's name (the
-/// label it renders), which a single-element function cannot resolve --
-/// `compute_layout_metrics` handles aliases at the view level via
-/// `alias_source_names` + `alias_node_box`.
-fn node_box(element: &ViewElement) -> Option<Rect> {
-    match element {
-        ViewElement::Aux(a) => Some(aux_bounds(a)),
-        ViewElement::Stock(s) => Some(stock_bounds(s)),
-        ViewElement::Module(m) => Some(module_bounds(m)),
-        ViewElement::Cloud(c) => Some(cloud_bounds(c)),
-        ViewElement::Flow(f) => Some(flow_bounds(f)),
-        ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => None,
+    fn push_point(&mut self, kind: DefectKind, p: Point, severity: f64) {
+        self.push(
+            kind,
+            Rect {
+                left: p.x,
+                top: p.y,
+                right: p.x,
+                bottom: p.y,
+            },
+            severity,
+        );
     }
 }
 
-/// The element's bare *shape* box, WITHOUT its own label, for the same set of
-/// elements as `node_box`. `aux_bounds`/`stock_bounds`/`flow_bounds` merge each
-/// element's own label into the returned box; the label-vs-node term of
-/// `label_overlap` must use the label-free shape so a label-vs-label overlap is
-/// not also charged via the other node's label-merged box (a double-count).
-/// `module_bounds`/`cloud_bounds` already exclude the label (modules render a
-/// label that their bounds omit; clouds render none), so they are their own
-/// shape box.
+// --- the drawn scene -----------------------------------------------------------
+
+/// The element's primary drawn *shape* box, WITHOUT its label: the circle or
+/// rectangle the renderer draws for it. A flow's shape is its valve circle
+/// (`render_flow` draws radius `AUX_RADIUS`); its pipe is separate geometry
+/// ([`pipe_rects`]). An alias draws an aux-sized circle. Links and groups have
+/// no shape.
 pub(crate) fn node_shape_box(element: &ViewElement) -> Option<Rect> {
+    use crate::diagram::constants::AUX_RADIUS;
     match element {
         ViewElement::Aux(a) => Some(aux_shape_bounds(a)),
         ViewElement::Stock(s) => Some(stock_shape_bounds(s)),
-        ViewElement::Module(m) => Some(module_bounds(m)),
+        ViewElement::Module(m) => Some(module_shape_bounds(m)),
         ViewElement::Cloud(c) => Some(cloud_bounds(c)),
-        ViewElement::Flow(f) => Some(flow_shape_bounds(f)),
-        // An alias renders an aux-sized circle (see `render_alias`); its shape
-        // box needs no name resolution.
+        ViewElement::Flow(f) => Some(circle_box(f.x, f.y, AUX_RADIUS)),
         ViewElement::Alias(a) => Some(alias_shape_box(a)),
         ViewElement::Link(_) | ViewElement::Group(_) => None,
     }
+}
+
+fn circle_box(cx: f64, cy: f64, r: f64) -> Rect {
+    Rect {
+        left: cx - r,
+        right: cx + r,
+        top: cy - r,
+        bottom: cy + r,
+    }
+}
+
+/// A flow's pipe as drawn: one box per segment, inflated by the stroke's half
+/// width, so the pipe covers what it visibly covers. An axis-aligned segment
+/// (the orthogonalized pipes the layout produces) is covered exactly.
+pub(crate) fn pipe_rects(flow: &datamodel::view_element::Flow) -> Vec<Rect> {
+    flow.points
+        .windows(2)
+        .map(|w| Rect {
+            left: w[0].x.min(w[1].x) - PIPE_HALF_WIDTH,
+            right: w[0].x.max(w[1].x) + PIPE_HALF_WIDTH,
+            top: w[0].y.min(w[1].y) - PIPE_HALF_WIDTH,
+            bottom: w[0].y.max(w[1].y) + PIPE_HALF_WIDTH,
+        })
+        .collect()
 }
 
 /// The bare shape box of an alias: the aux-radius circle `render_alias` draws,
 /// centered on the alias position.
 pub(crate) fn alias_shape_box(alias: &crate::datamodel::view_element::Alias) -> Rect {
     use crate::diagram::constants::AUX_RADIUS;
-    Rect {
-        left: alias.x - AUX_RADIUS,
-        right: alias.x + AUX_RADIUS,
-        top: alias.y - AUX_RADIUS,
-        bottom: alias.y + AUX_RADIUS,
-    }
+    circle_box(alias.x, alias.y, AUX_RADIUS)
 }
 
 /// The label an alias renders: its SOURCE element's display name (resolved
-/// through `alias_of_uid`), positioned like an aux label. Returns `None` when
-/// the source uid resolves to nothing (a dangling alias renders the circle but
-/// no meaningful label is derivable).
+/// through `alias_of_uid`), positioned like an aux label.
 pub(crate) fn alias_label_props_for(
     alias: &crate::datamodel::view_element::Alias,
     source_name: &str,
@@ -330,10 +448,8 @@ pub(crate) fn alias_label_props_for(
 
 /// Map each alias uid in `elements` to its source element's name. Aliases whose
 /// `alias_of_uid` does not resolve to a named element are omitted (dangling).
-pub(crate) fn alias_source_names(
-    elements: &[ViewElement],
-) -> std::collections::HashMap<i32, String> {
-    let names: std::collections::HashMap<i32, &str> = elements
+pub(crate) fn alias_source_names(elements: &[ViewElement]) -> HashMap<i32, String> {
+    let names: HashMap<i32, &str> = elements
         .iter()
         .filter_map(|e| e.get_name().map(|n| (e.get_uid(), n)))
         .collect();
@@ -349,9 +465,10 @@ pub(crate) fn alias_source_names(
 }
 
 /// Build a `LabelProps` for a labeled element placed on `side`, matching the
-/// renderer's label geometry (center, display name, and the element's radii).
-/// Only elements that render a label return `Some`. The radii match the
-/// per-element `with_radii` calls in `diagram::elements`/`diagram::flow`.
+/// renderer's label geometry (center, display name, and the radii the element
+/// renders its label with). Only elements that render their own name return
+/// `Some`; an alias's label needs its source's name (see
+/// [`alias_label_props_for`]).
 ///
 /// Exposed `pub(crate)` so the declutter pass (`layout::declutter`) can probe
 /// the label box an element *would* occupy on an alternative side, scoring
@@ -361,7 +478,7 @@ pub(crate) fn element_label_props_for(
     side: crate::datamodel::view_element::LabelSide,
 ) -> Option<LabelProps> {
     use crate::diagram::constants::{
-        AUX_RADIUS, FLOW_VALVE_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
+        AUX_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
     };
     match element {
         ViewElement::Aux(a) => Some(
@@ -376,14 +493,11 @@ pub(crate) fn element_label_props_for(
             LabelProps::new(m.x, m.y, side, display_name(&m.name))
                 .with_radii(MODULE_WIDTH / 2.0, MODULE_HEIGHT / 2.0),
         ),
+        // `render_flow` places a flow's label around the valve's drawn radius.
         ViewElement::Flow(f) => Some(
             LabelProps::new(f.x, f.y, side, display_name(&f.name))
-                .with_radii(FLOW_VALVE_RADIUS, FLOW_VALVE_RADIUS),
+                .with_radii(AUX_RADIUS, AUX_RADIUS),
         ),
-        // Aliases do render a label, but they have no `*_bounds` helper and are
-        // excluded from node bounds to match the renderer's view box; we keep
-        // the label-set consistent with the node-box set by also excluding
-        // their labels. Links/Clouds/Groups render no element label.
         ViewElement::Alias(_)
         | ViewElement::Link(_)
         | ViewElement::Cloud(_)
@@ -391,43 +505,151 @@ pub(crate) fn element_label_props_for(
     }
 }
 
-/// The element's own current label side, or `None` for kinds the metric does
-/// not score a label for (the same set `element_label_props_for` returns `Some`
-/// for).
+/// The element's own current label side, or `None` for kinds that render no
+/// label of their own name (the set `element_label_props_for` returns `Some`
+/// for, plus aliases).
 fn element_label_side(element: &ViewElement) -> Option<crate::datamodel::view_element::LabelSide> {
     match element {
         ViewElement::Aux(a) => Some(a.label_side),
         ViewElement::Stock(s) => Some(s.label_side),
         ViewElement::Module(m) => Some(m.label_side),
         ViewElement::Flow(f) => Some(f.label_side),
-        ViewElement::Alias(_)
-        | ViewElement::Link(_)
-        | ViewElement::Cloud(_)
-        | ViewElement::Group(_) => None,
+        ViewElement::Alias(a) => Some(a.label_side),
+        ViewElement::Link(_) | ViewElement::Cloud(_) | ViewElement::Group(_) => None,
     }
 }
 
-/// Build a `LabelProps` for a labeled element on its *current* label side.
-fn element_label_props(element: &ViewElement) -> Option<LabelProps> {
-    element_label_props_for(element, element_label_side(element)?)
+/// One node of the drawn scene.
+struct SceneNode {
+    uid: i32,
+    shape: Rect,
+    label: Option<Rect>,
+    /// A flow's pipe boxes; empty for every other node.
+    pipe: Vec<Rect>,
+    /// The uids a flow's pipe attaches to (stocks, clouds); empty otherwise.
+    attached: Vec<i32>,
+    /// The renderer's visual center.
+    center: Point,
+    /// A cloud is a flow's decorative source or sink: a light mark whose
+    /// proximity to anything is not crowding (landing ON something is still
+    /// an overlap).
+    is_cloud: bool,
 }
 
-/// Collect the drawn geometry of every connector (Link or Flow) that draws
-/// something. Links use the shared `connector_polyline` (the exact geometry the
-/// renderer draws and `build_view_segments` counts); flows use their point
-/// polyline. Connectors that draw nothing (MultiPoint links, degenerate arcs,
-/// flows with fewer than two points) are omitted entirely.
-fn collect_connector_geometry(view: &datamodel::StockFlow) -> Vec<ConnectorGeometry> {
-    let mut uid_elements = std::collections::HashMap::new();
-    for elem in &view.elements {
-        uid_elements.insert(elem.get_uid(), elem);
+impl SceneNode {
+    /// Whether this node and `other` are joined by construction (a flow and the
+    /// stock or cloud its pipe attaches to), so their adjacency is not a
+    /// layout defect.
+    fn attached_to(&self, other: &SceneNode) -> bool {
+        self.attached.contains(&other.uid) || other.attached.contains(&self.uid)
     }
-    // Center-based, deterministic: nothing is treated as arrayed (matches
-    // `build_view_segments`).
+
+    /// The label-merged box: shape and label together.
+    fn footprint_box(&self) -> Rect {
+        match self.label {
+            Some(l) => merge_bounds(self.shape, l),
+            None => self.shape,
+        }
+    }
+}
+
+fn build_scene_nodes(elements: &[ViewElement]) -> Vec<SceneNode> {
+    let alias_names = alias_source_names(elements);
+    let not_arrayed = |_: &str| false;
+    elements
+        .iter()
+        .filter_map(|e| {
+            let shape = node_shape_box(e)?;
+            let label = match e {
+                ViewElement::Alias(a) => alias_names
+                    .get(&a.uid)
+                    .map(|name| label_bounds(&alias_label_props_for(a, name, a.label_side))),
+                _ => element_label_side(e)
+                    .and_then(|side| element_label_props_for(e, side))
+                    .map(|props| label_bounds(&props)),
+            };
+            let (pipe, attached) = match e {
+                ViewElement::Flow(f) => (
+                    pipe_rects(f),
+                    f.points.iter().filter_map(|p| p.attached_to_uid).collect(),
+                ),
+                _ => (Vec::new(), Vec::new()),
+            };
+            let (cx, cy) = get_visual_center(e, &not_arrayed);
+            Some(SceneNode {
+                uid: e.get_uid(),
+                shape,
+                label,
+                pipe,
+                attached,
+                center: Point { x: cx, y: cy },
+                is_cloud: matches!(e, ViewElement::Cloud(_)),
+            })
+        })
+        .collect()
+}
+
+/// Whether a connector is a causal link or a flow pipe.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectorKind {
+    Link,
+    Pipe,
+}
+
+/// The drawn geometry of one connector (Link or Flow pipe): its incident node
+/// uids (so overlap terms skip them) and the polyline the renderer draws.
+struct ConnectorGeometry {
+    kind: ConnectorKind,
+    /// A link's two endpoints; a pipe's flow and the stocks and clouds it
+    /// attaches to.
+    incident_uids: HashSet<i32>,
+    /// The flow a pipe belongs to; `None` for a link.
+    flow_uid: Option<i32>,
+    /// Always at least two points (connectors that draw nothing are omitted).
+    polyline: Vec<Point>,
+    length: f64,
+}
+
+/// Total length of the UNION of parameter intervals `[t0, t1]` (each `t` in
+/// [0,1]), counting each covered sub-length once. Mutates `intervals` (sorts in
+/// place); empty input yields 0.0.
+fn merged_interval_length(intervals: &mut [(f64, f64)]) -> f64 {
+    if intervals.is_empty() {
+        return 0.0;
+    }
+    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut total = 0.0;
+    let mut cur = intervals[0];
+    for &(t0, t1) in &intervals[1..] {
+        if t0 <= cur.1 {
+            cur.1 = cur.1.max(t1);
+        } else {
+            total += cur.1 - cur.0;
+            cur = (t0, t1);
+        }
+    }
+    total += cur.1 - cur.0;
+    total
+}
+
+/// Polyline length: sum of segment lengths.
+fn polyline_length(points: &[Point]) -> f64 {
+    points
+        .windows(2)
+        .map(|w| ((w[1].x - w[0].x).powi(2) + (w[1].y - w[0].y).powi(2)).sqrt())
+        .sum()
+}
+
+/// Collect the drawn geometry of every connector that draws something. Links
+/// use the shared `connector_polyline` (the exact geometry the renderer draws
+/// and `build_view_segments` counts); flows use their point polyline.
+fn collect_connector_geometry(elements: &[ViewElement]) -> Vec<ConnectorGeometry> {
+    let uid_elements: HashMap<i32, &ViewElement> =
+        elements.iter().map(|e| (e.get_uid(), e)).collect();
     let not_arrayed = |_: &str| false;
 
     let mut out = Vec::new();
-    for elem in &view.elements {
+    for elem in elements {
         match elem {
             ViewElement::Link(link) => {
                 let (Some(&from), Some(&to)) = (
@@ -441,14 +663,12 @@ fn collect_connector_geometry(view: &datamodel::StockFlow) -> Vec<ConnectorGeome
                 if polyline.len() < 2 {
                     continue;
                 }
-                let length = polyline_length(&polyline);
-                let mut incident_uids = HashSet::new();
-                incident_uids.insert(link.from_uid);
-                incident_uids.insert(link.to_uid);
                 out.push(ConnectorGeometry {
-                    incident_uids,
+                    kind: ConnectorKind::Link,
+                    incident_uids: HashSet::from([link.from_uid, link.to_uid]),
+                    flow_uid: None,
+                    length: polyline_length(&polyline),
                     polyline,
-                    length,
                 });
             }
             ViewElement::Flow(flow) => {
@@ -460,26 +680,726 @@ fn collect_connector_geometry(view: &datamodel::StockFlow) -> Vec<ConnectorGeome
                     .iter()
                     .map(|p| Point { x: p.x, y: p.y })
                     .collect();
-                let length = polyline_length(&polyline);
-                // A flow is incident on its own valve plus any element its
-                // points attach to (the stock/cloud at each end).
-                let mut incident_uids = HashSet::new();
-                incident_uids.insert(flow.uid);
-                for p in &flow.points {
-                    if let Some(uid) = p.attached_to_uid {
-                        incident_uids.insert(uid);
-                    }
-                }
+                let mut incident_uids = HashSet::from([flow.uid]);
+                incident_uids.extend(flow.points.iter().filter_map(|p| p.attached_to_uid));
                 out.push(ConnectorGeometry {
+                    kind: ConnectorKind::Pipe,
                     incident_uids,
+                    flow_uid: Some(flow.uid),
+                    length: polyline_length(&polyline),
                     polyline,
-                    length,
                 });
             }
             _ => {}
         }
     }
     out
+}
+
+/// Separation distance between two rects (0 when they touch or overlap).
+fn rect_gap(a: &Rect, b: &Rect) -> f64 {
+    let dx = (a.left - b.right).max(b.left - a.right).max(0.0);
+    let dy = (a.top - b.bottom).max(b.top - a.bottom).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn rect_intersection(a: &Rect, b: &Rect) -> Rect {
+    Rect {
+        left: a.left.max(b.left),
+        top: a.top.max(b.top),
+        right: a.right.min(b.right),
+        bottom: a.bottom.min(b.bottom),
+    }
+}
+
+fn inset(r: &Rect, d: f64) -> Rect {
+    Rect {
+        left: r.left + d,
+        top: r.top + d,
+        right: r.right - d,
+        bottom: r.bottom - d,
+    }
+}
+
+// --- the defect terms ------------------------------------------------------------
+
+/// `node_overlap`: mean covered fraction of each node's shape.
+fn node_overlap_term(nodes: &[SceneNode], sink: &mut DefectSink) -> f64 {
+    if nodes.is_empty() {
+        return 0.0;
+    }
+    let mut total = 0.0;
+    for (i, a) in nodes.iter().enumerate() {
+        let area = rect_area(&a.shape);
+        if area <= 0.0 {
+            continue;
+        }
+        let mut covered = 0.0;
+        for (j, b) in nodes.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let o = rect_overlap_area(&a.shape, &b.shape);
+            if o > 0.0 {
+                covered += o;
+                if i < j {
+                    sink.push(
+                        DefectKind::NodeOverlap,
+                        rect_intersection(&a.shape, &b.shape),
+                        o / area.min(rect_area(&b.shape)).max(1e-9),
+                    );
+                }
+            }
+        }
+        total += covered.min(area) / area;
+    }
+    total / nodes.len() as f64
+}
+
+/// `node_connector_overlap`: fraction of connector length under non-incident
+/// node shapes and pipes, each covered sub-length counted once.
+fn node_connector_overlap_term(
+    nodes: &[SceneNode],
+    connectors: &[ConnectorGeometry],
+    sink: &mut DefectSink,
+) -> f64 {
+    let total_length: f64 = connectors.iter().map(|c| c.length).sum();
+    if total_length <= 0.0 {
+        return 0.0;
+    }
+    // Obstacles: every node's shape, and every flow's pipe boxes (a link run
+    // along a pipe is as misleading as one under a shape). Each obstacle is
+    // owned by a node uid for the incidence check.
+    let mut obstacles: Vec<(i32, Rect)> = Vec::new();
+    for n in nodes {
+        obstacles.push((n.uid, n.shape));
+        obstacles.extend(n.pipe.iter().map(|r| (n.uid, *r)));
+    }
+    let mut inside = 0.0;
+    for c in connectors {
+        // Length of this connector under each obstacle, for the defect report.
+        let mut per_obstacle: BTreeMap<usize, f64> = BTreeMap::new();
+        for seg in c.polyline.windows(2) {
+            let seg_len = ((seg[1].x - seg[0].x).powi(2) + (seg[1].y - seg[0].y).powi(2)).sqrt();
+            if seg_len == 0.0 {
+                continue;
+            }
+            let mut intervals: Vec<(f64, f64)> = Vec::new();
+            for (k, (uid, rect)) in obstacles.iter().enumerate() {
+                if c.incident_uids.contains(uid) {
+                    continue;
+                }
+                if let Some(iv) = segment_clip_interval_in_rect(&seg[0], &seg[1], rect) {
+                    intervals.push(iv);
+                    *per_obstacle.entry(k).or_default() += (iv.1 - iv.0) * seg_len;
+                }
+            }
+            inside += merged_interval_length(&mut intervals) * seg_len;
+        }
+        for (k, length) in per_obstacle {
+            sink.push(DefectKind::ConnectorThroughNode, obstacles[k].1, length);
+        }
+    }
+    inside / total_length
+}
+
+/// `label_overlap`: mean covered fraction of each label box by other labels
+/// and other nodes' shapes. A pipe through a label is not coverage but a line
+/// through the name, charged by `label_connector_overlap`: counting its 4px
+/// band by area would make a pipe through a name several times cheaper than a
+/// hairline link through it.
+fn label_overlap_term(nodes: &[SceneNode], sink: &mut DefectSink) -> f64 {
+    let labeled: Vec<&SceneNode> = nodes.iter().filter(|n| n.label.is_some()).collect();
+    if labeled.is_empty() {
+        return 0.0;
+    }
+    let mut total = 0.0;
+    for a in &labeled {
+        let lbl = a.label.expect("filtered to labeled nodes");
+        let area = rect_area(&lbl);
+        if area <= 0.0 {
+            continue;
+        }
+        let mut covered = 0.0;
+        for b in nodes {
+            if b.uid == a.uid {
+                continue;
+            }
+            covered += rect_overlap_area(&lbl, &b.shape);
+            if let Some(other) = b.label {
+                covered += rect_overlap_area(&lbl, &other);
+            }
+        }
+        let fraction = covered.min(area) / area;
+        if fraction > 0.0 {
+            sink.push(DefectKind::LabelObscured, lbl, fraction);
+        }
+        total += fraction;
+    }
+    total / labeled.len() as f64
+}
+
+/// `label_connector_overlap`: mean over labels of the connector length (links
+/// and pipes) through the label's text box relative to the box's smaller side.
+fn label_connector_overlap_term(
+    nodes: &[SceneNode],
+    connectors: &[ConnectorGeometry],
+    sink: &mut DefectSink,
+) -> f64 {
+    let labels: Vec<(i32, Rect)> = nodes
+        .iter()
+        .filter_map(|n| n.label.map(|l| (n.uid, l)))
+        .collect();
+    if labels.is_empty() {
+        return 0.0;
+    }
+    let mut total = 0.0;
+    for (owner, lbl) in &labels {
+        let fraction = label_strike_fraction(*owner, lbl, connectors);
+        if fraction > 0.0 {
+            sink.push(DefectKind::LabelCrossed, *lbl, fraction);
+        }
+        total += fraction;
+    }
+    total / labels.len() as f64
+}
+
+/// How struck out the label box `lbl` of node `owner` is: the connector length
+/// through its (inset) text box relative to the box's smaller side, capped at
+/// 1.
+fn label_strike_fraction<'a>(
+    owner: i32,
+    lbl: &Rect,
+    connectors: impl IntoIterator<Item = &'a ConnectorGeometry>,
+) -> f64 {
+    let text = inset(lbl, LABEL_INSET);
+    let side = common::rect_width(&text).min(common::rect_height(&text));
+    if side <= 0.0 {
+        return 0.0;
+    }
+    let mut through = 0.0;
+    for c in connectors {
+        let factor = match c.kind {
+            // A link into or out of the labeled node at least points at (or
+            // leaves from) that name, the way a modeler draws an arrow to a
+            // variable, so it strikes the name out half as badly as a line
+            // passing through on its way somewhere else.
+            ConnectorKind::Link if c.incident_uids.contains(&owner) => OWN_LINK_STRIKE_FACTOR,
+            ConnectorKind::Link => 1.0,
+            // A flow's name sits beside its own pipe. Every other pipe through
+            // a name -- one entering the named stock through the face the name
+            // sits on included -- writes over it.
+            ConnectorKind::Pipe if c.flow_uid == Some(owner) => continue,
+            ConnectorKind::Pipe => 1.0,
+        };
+        for seg in c.polyline.windows(2) {
+            if let Some((t0, t1)) = segment_clip_interval_in_rect(&seg[0], &seg[1], &text) {
+                let seg_len =
+                    ((seg[1].x - seg[0].x).powi(2) + (seg[1].y - seg[0].y).powi(2)).sqrt();
+                through += factor * (t1 - t0) * seg_len;
+            }
+        }
+    }
+    (through / side).min(1.0)
+}
+
+/// The drawn scene of a view, for a label-side chooser that must charge a
+/// candidate label box as the metric would. Shapes and connectors stay put
+/// while sides are chosen; the other labels' boxes are whatever the chooser
+/// has picked so far, so they are supplied per call.
+pub(crate) struct LabelScene {
+    nodes: Vec<SceneNode>,
+    connectors: Vec<ConnectorGeometry>,
+    /// `labels / nodes`: converts a per-node crowding deficit into the same
+    /// per-label units the label terms are charged in.
+    crowding_scale: f64,
+    index_of_uid: HashMap<i32, usize>,
+    /// Each node by the region it can reach: its shape, grown by its label's
+    /// size on every side (a label may take any side) and the crowding
+    /// clearance.
+    node_grid: SceneGrid,
+    /// Each connector by its polyline's bounding box.
+    connector_grid: SceneGrid,
+}
+
+impl LabelScene {
+    pub(crate) fn new(elements: &[ViewElement]) -> Self {
+        let nodes = build_scene_nodes(elements);
+        let connectors = collect_connector_geometry(elements);
+        let labels = nodes.iter().filter(|n| n.label.is_some()).count();
+        let crowding_scale = if nodes.is_empty() {
+            0.0
+        } else {
+            labels as f64 / nodes.len() as f64
+        };
+        let mut node_grid = SceneGrid::default();
+        for (i, n) in nodes.iter().enumerate() {
+            let (w, h) = n.label.map_or((0.0, 0.0), |l| {
+                (common::rect_width(&l), common::rect_height(&l))
+            });
+            let reach = w.max(h) + REACH_PAD;
+            node_grid.insert(i, &grown(&n.shape, reach));
+        }
+        let mut connector_grid = SceneGrid::default();
+        for (i, c) in connectors.iter().enumerate() {
+            let bounds = c
+                .polyline
+                .iter()
+                .fold(None, |acc: Option<Rect>, p| {
+                    let point = Rect {
+                        left: p.x,
+                        top: p.y,
+                        right: p.x,
+                        bottom: p.y,
+                    };
+                    Some(acc.map_or(point, |r| merge_bounds(r, point)))
+                })
+                .expect("a connector has at least two points");
+            connector_grid.insert(i, &bounds);
+        }
+        LabelScene {
+            index_of_uid: nodes.iter().enumerate().map(|(i, n)| (n.uid, i)).collect(),
+            nodes,
+            connectors,
+            crowding_scale,
+            node_grid,
+            connector_grid,
+        }
+    }
+
+    /// What the metric charges node `owner` for wearing the label box `lbl`,
+    /// in per-label units: `w.label_overlap` times the fraction of the box
+    /// covered by other nodes' shapes and labels, `w.label_connector_overlap`
+    /// times its strike fraction, and `w.crowding` times the clearance deficit
+    /// of every pair `owner` forms with another node. `label_of(uid)` is
+    /// another node's current label box. The part of the cost that does not
+    /// depend on `lbl` is the same for every side, so only differences
+    /// between sides mean anything.
+    pub(crate) fn label_cost(
+        &self,
+        owner: i32,
+        lbl: &Rect,
+        label_of: impl Fn(i32) -> Option<Rect>,
+        w: &MetricWeights,
+    ) -> f64 {
+        let area = rect_area(lbl);
+        if area <= 0.0 {
+            return 0.0;
+        }
+        let Some(&own_index) = self.index_of_uid.get(&owner) else {
+            return 0.0;
+        };
+        let own = &self.nodes[own_index];
+        // Only nodes whose reach meets this label or the owner's own shape
+        // (every pair the crowding term can charge involves one of the two)
+        // can contribute; the rest add exact zeros. Visiting the candidates in
+        // index order keeps every sum bit-identical to a full scan.
+        let query = grown(&merge_bounds(*lbl, own.shape), COMFORTABLE_CLEARANCE);
+        let mut covered = 0.0;
+        let mut crowding = 0.0;
+        for other in self
+            .node_grid
+            .query(&query)
+            .into_iter()
+            .map(|i| &self.nodes[i])
+            .filter(|n| n.uid != owner)
+        {
+            let other_label = label_of(other.uid);
+            covered += rect_overlap_area(lbl, &other.shape);
+            if let Some(ol) = &other_label {
+                covered += rect_overlap_area(lbl, ol);
+            }
+            if own.is_cloud || other.is_cloud {
+                continue;
+            }
+            let (gap, _) = footprint_gap(own, Some(*lbl), other, other_label);
+            if gap < COMFORTABLE_CLEARANCE {
+                crowding += (1.0 - gap / COMFORTABLE_CLEARANCE).powi(2);
+            }
+        }
+        let text = inset(lbl, LABEL_INSET);
+        let struck = self
+            .connector_grid
+            .query(&text)
+            .into_iter()
+            .map(|i| &self.connectors[i]);
+        w.label_overlap * covered.min(area) / area
+            + w.label_connector_overlap * label_strike_fraction(owner, lbl, struck)
+            + w.crowding * self.crowding_scale * crowding
+    }
+}
+
+/// How far past a node's shape its reach extends beyond its label's size: the
+/// crowding clearance plus room for the label's offset from the shape.
+const REACH_PAD: f64 = 2.0 * COMFORTABLE_CLEARANCE;
+
+/// Cell size of [`SceneGrid`]: about a node with its label.
+const SCENE_GRID_CELL: f64 = 96.0;
+
+/// A uniform grid of item indices by the cells their rects cover.
+#[derive(Default)]
+struct SceneGrid {
+    cells: HashMap<(i64, i64), Vec<usize>>,
+}
+
+impl SceneGrid {
+    fn cell_range(r: &Rect) -> (std::ops::RangeInclusive<i64>, std::ops::RangeInclusive<i64>) {
+        let cell = |v: f64| (v / SCENE_GRID_CELL).floor() as i64;
+        (cell(r.left)..=cell(r.right), cell(r.top)..=cell(r.bottom))
+    }
+
+    fn insert(&mut self, index: usize, r: &Rect) {
+        let (xs, ys) = Self::cell_range(r);
+        for x in xs {
+            for y in ys.clone() {
+                self.cells.entry((x, y)).or_default().push(index);
+            }
+        }
+    }
+
+    /// Every item whose rect's cells meet `r`'s, each once, in index order.
+    fn query(&self, r: &Rect) -> Vec<usize> {
+        let (xs, ys) = Self::cell_range(r);
+        let mut out = Vec::new();
+        for x in xs {
+            for y in ys.clone() {
+                if let Some(items) = self.cells.get(&(x, y)) {
+                    out.extend_from_slice(items);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+fn grown(r: &Rect, d: f64) -> Rect {
+    inset(r, -d)
+}
+
+/// `crossings`: crossings per connector, on the drawn polylines.
+fn crossings_term(
+    view: &datamodel::StockFlow,
+    connector_count: usize,
+    sink: &mut DefectSink,
+) -> f64 {
+    if connector_count == 0 {
+        return 0.0;
+    }
+    let segments = build_view_segments(view);
+    let mut count = 0usize;
+    for i in 0..segments.len() {
+        for j in (i + 1)..segments.len() {
+            if let Some(p) = segment_intersection(&segments[i], &segments[j]) {
+                count += 1;
+                sink.push_point(DefectKind::Crossing, Point { x: p.x, y: p.y }, 1.0);
+            }
+        }
+    }
+    count as f64 / connector_count as f64
+}
+
+/// `crowding`: the mean clearance deficit per node over pairs of non-cloud
+/// nodes whose footprints come closer than `COMFORTABLE_CLEARANCE`, plus the
+/// mean deficit per link over links whose visible length (outside both
+/// endpoint shapes) falls below `MIN_VISIBLE_LINK`.
+fn crowding_term(
+    nodes: &[SceneNode],
+    connectors: &[ConnectorGeometry],
+    sink: &mut DefectSink,
+) -> f64 {
+    if nodes.len() < 2 {
+        return 0.0;
+    }
+    let shapes: HashMap<i32, Rect> = nodes.iter().map(|n| (n.uid, n.shape)).collect();
+    let links: Vec<&ConnectorGeometry> = connectors
+        .iter()
+        .filter(|c| c.kind == ConnectorKind::Link)
+        .collect();
+    let mut short = 0.0;
+    for c in &links {
+        let hidden: f64 = c
+            .incident_uids
+            .iter()
+            .filter_map(|uid| shapes.get(uid))
+            .map(|shape| {
+                c.polyline
+                    .windows(2)
+                    .filter_map(|seg| {
+                        segment_clip_interval_in_rect(&seg[0], &seg[1], shape).map(|(t0, t1)| {
+                            (t1 - t0)
+                                * ((seg[1].x - seg[0].x).powi(2) + (seg[1].y - seg[0].y).powi(2))
+                                    .sqrt()
+                        })
+                    })
+                    .sum::<f64>()
+            })
+            .sum();
+        let visible = (c.length - hidden).max(0.0);
+        if visible < MIN_VISIBLE_LINK {
+            let deficit = (1.0 - visible / MIN_VISIBLE_LINK).powi(2);
+            short += deficit;
+            let mid = c.polyline[c.polyline.len() / 2];
+            sink.push_point(DefectKind::Crowded, mid, deficit);
+        }
+    }
+    let short_rate = if links.is_empty() {
+        0.0
+    } else {
+        short / links.len() as f64
+    };
+    let boxes: Vec<Rect> = nodes.iter().map(SceneNode::footprint_box).collect();
+    let mut total = 0.0;
+    for i in 0..nodes.len() {
+        for j in (i + 1)..nodes.len() {
+            if nodes[i].is_cloud || nodes[j].is_cloud {
+                continue;
+            }
+            // Cheap reject: the merged boxes are already comfortably apart.
+            if rect_gap(&boxes[i], &boxes[j]) >= COMFORTABLE_CLEARANCE {
+                continue;
+            }
+            let (gap, closest) =
+                footprint_gap(&nodes[i], nodes[i].label, &nodes[j], nodes[j].label);
+            if gap < COMFORTABLE_CLEARANCE {
+                let deficit = (1.0 - gap / COMFORTABLE_CLEARANCE).powi(2);
+                total += deficit;
+                sink.push(
+                    DefectKind::Crowded,
+                    merge_bounds(closest.0, closest.1),
+                    deficit,
+                );
+            }
+        }
+    }
+    total / nodes.len() as f64 + short_rate
+}
+
+/// The clearance between two nodes' footprints -- each one's shape and its
+/// label box `*_label` -- as `crowding` measures it, with the two rects that
+/// realize it. A flow's valve sits a fixed short pipe away from the stock or
+/// cloud it attaches to by construction: their SHAPES being close is structure,
+/// but either one's label crowding the other is not.
+fn footprint_gap(
+    a: &SceneNode,
+    a_label: Option<Rect>,
+    b: &SceneNode,
+    b_label: Option<Rect>,
+) -> (f64, (Rect, Rect)) {
+    let attached = a.attached_to(b);
+    let a_rects = [Some((false, a.shape)), a_label.map(|l| (true, l))];
+    let b_rects = [Some((false, b.shape)), b_label.map(|l| (true, l))];
+    let mut gap = f64::INFINITY;
+    let mut closest = (a.shape, b.shape);
+    for &(a_is_label, ra) in a_rects.iter().flatten() {
+        for &(b_is_label, rb) in b_rects.iter().flatten() {
+            if attached && !a_is_label && !b_is_label {
+                continue;
+            }
+            let g = rect_gap(&ra, &rb);
+            if g < gap {
+                gap = g;
+                closest = (ra, rb);
+            }
+        }
+    }
+    (gap, closest)
+}
+
+/// `long_connectors`: mean excess of each link over `LONG_CONNECTOR_FACTOR`
+/// times the median link length.
+fn long_connectors_term(connectors: &[ConnectorGeometry], sink: &mut DefectSink) -> f64 {
+    let links: Vec<&ConnectorGeometry> = connectors
+        .iter()
+        .filter(|c| c.kind == ConnectorKind::Link)
+        .collect();
+    if links.len() < 2 {
+        return 0.0;
+    }
+    let mut lengths: Vec<f64> = links.iter().map(|c| c.length).collect();
+    lengths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = lengths.len() / 2;
+    let median = if lengths.len().is_multiple_of(2) {
+        (lengths[mid - 1] + lengths[mid]) / 2.0
+    } else {
+        lengths[mid]
+    };
+    let threshold = LONG_CONNECTOR_FACTOR * median.max(1.0);
+    let mut total = 0.0;
+    for c in &links {
+        let excess = (c.length / threshold - 1.0).max(0.0);
+        if excess > 0.0 {
+            total += excess;
+            let mid_point = c.polyline[c.polyline.len() / 2];
+            sink.push_point(DefectKind::LongConnector, mid_point, excess);
+        }
+    }
+    total / links.len() as f64
+}
+
+/// `misalignment`: fraction of nodes sharing no row or column with a nearby
+/// node.
+fn misalignment_term(nodes: &[SceneNode]) -> f64 {
+    if nodes.len() < 2 {
+        return 0.0;
+    }
+    let aligned = nodes
+        .iter()
+        .filter(|a| {
+            nodes.iter().any(|b| {
+                if a.uid == b.uid {
+                    return false;
+                }
+                let dx = (a.center.x - b.center.x).abs();
+                let dy = (a.center.y - b.center.y).abs();
+                (dx <= ALIGN_TOLERANCE && dy <= ALIGN_REACH)
+                    || (dy <= ALIGN_TOLERANCE && dx <= ALIGN_REACH)
+            })
+        })
+        .count();
+    1.0 - aligned as f64 / nodes.len() as f64
+}
+
+/// Union of rects, or `None` for an empty set.
+fn view_bounding_box(boxes: &[Rect]) -> Option<Rect> {
+    let mut iter = boxes.iter();
+    let first = *iter.next()?;
+    Some(iter.fold(first, |acc, r| merge_bounds(acc, *r)))
+}
+
+/// Compute the layout quality metrics for a completed view.
+///
+/// PURE: takes data, returns scalars, performs no I/O. The `_config` parameter
+/// is kept for the optimizer-facing signature; all geometry comes from the
+/// `diagram` helpers (fixed pixel element sizes). Every term is finite: each
+/// division guards a zero denominator by returning 0.
+pub fn compute_layout_metrics(
+    view: &datamodel::StockFlow,
+    _config: &LayoutConfig,
+) -> LayoutMetrics {
+    analyze(view, &mut DefectSink { defects: None })
+}
+
+/// The metrics of `view` plus every defect behind them, located on the diagram.
+/// Computed by the same code as [`compute_layout_metrics`].
+pub fn analyze_layout(view: &datamodel::StockFlow) -> LayoutAnalysis {
+    let mut sink = DefectSink {
+        defects: Some(Vec::new()),
+    };
+    let metrics = analyze(view, &mut sink);
+    LayoutAnalysis {
+        metrics,
+        defects: sink.defects.unwrap_or_default(),
+    }
+}
+
+fn analyze(view: &datamodel::StockFlow, sink: &mut DefectSink) -> LayoutMetrics {
+    let nodes = build_scene_nodes(&view.elements);
+    let connectors = collect_connector_geometry(&view.elements);
+
+    let node_overlap = node_overlap_term(&nodes, sink);
+    let node_connector_overlap = node_connector_overlap_term(&nodes, &connectors, sink);
+    let label_overlap = label_overlap_term(&nodes, sink);
+    let label_connector_overlap = label_connector_overlap_term(&nodes, &connectors, sink);
+    let crossings = crossings_term(view, connectors.len(), sink);
+    let crowding = crowding_term(&nodes, &connectors, sink);
+    let long_connectors = long_connectors_term(&connectors, sink);
+    let misalignment = misalignment_term(&nodes);
+
+    let footprints: Vec<Rect> = nodes.iter().map(SceneNode::footprint_box).collect();
+    let total_connector_length: f64 = connectors.iter().map(|c| c.length).sum();
+
+    // --- sprawl ---
+    let sprawl = if !connectors.is_empty() && !footprints.is_empty() {
+        let mean_connector_length = total_connector_length / connectors.len() as f64;
+        let characteristic_node_size = footprints
+            .iter()
+            .map(|r| {
+                let w = common::rect_width(r);
+                let h = common::rect_height(r);
+                (w * w + h * h).sqrt()
+            })
+            .sum::<f64>()
+            / footprints.len() as f64;
+        if characteristic_node_size > 0.0 {
+            mean_connector_length / characteristic_node_size
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // --- edge_length_cv ---
+    let edge_length_cv = if connectors.len() >= 2 {
+        let n = connectors.len() as f64;
+        let mean = total_connector_length / n;
+        if mean > 0.0 {
+            let variance = connectors
+                .iter()
+                .map(|c| (c.length - mean).powi(2))
+                .sum::<f64>()
+                / n;
+            variance.sqrt() / mean
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // --- aspect_penalty: long side over short side, beyond the target band ---
+    let aspect_penalty = match view_bounding_box(&footprints) {
+        Some(bbox) => {
+            let w = common::rect_width(&bbox);
+            let h = common::rect_height(&bbox);
+            let (long, short) = if w >= h { (w, h) } else { (h, w) };
+            if short <= 0.0 {
+                0.0
+            } else {
+                (long / short - TARGET_AR_MAX).max(0.0)
+            }
+        }
+        None => 0.0,
+    };
+
+    let loop_compactness = compute_loop_compactness(view);
+    let loop_straightness = compute_loop_straightness(view);
+
+    // --- flow_bends (mean right-angle bends per flow pipe) ---
+    let flow_bends = {
+        let mut total_bends = 0usize;
+        let mut flow_count = 0usize;
+        for e in &view.elements {
+            if let ViewElement::Flow(f) = e {
+                flow_count += 1;
+                total_bends += crate::layout::orthogonal::flow_bend_count(&f.points);
+            }
+        }
+        if flow_count > 0 {
+            total_bends as f64 / flow_count as f64
+        } else {
+            0.0
+        }
+    };
+
+    LayoutMetrics {
+        node_overlap,
+        node_connector_overlap,
+        label_overlap,
+        label_connector_overlap,
+        crossings,
+        crowding,
+        sprawl,
+        long_connectors,
+        edge_length_cv,
+        aspect_penalty,
+        misalignment,
+        loop_compactness,
+        flow_bends,
+        loop_straightness,
+    }
 }
 
 // --- loop_compactness (isoperimetric feedback-loop quality) -----------------
@@ -876,2115 +1796,6 @@ fn compute_loop_straightness(view: &datamodel::StockFlow) -> f64 {
     }
 }
 
-/// Compute the layout quality metrics for a completed view.
-///
-/// PURE: takes data, returns scalars, performs no I/O. The `_config` parameter
-/// is kept to match the design's optimizer-facing signature and for forward
-/// compatibility; the box geometry is sourced entirely from the `diagram`
-/// helpers (which use fixed pixel element sizes), so the config is presently
-/// unused. Every term is guaranteed finite (each division guards a zero
-/// denominator by returning 0), so empty and single-element views yield
-/// all-zero, NaN-free metrics.
-pub fn compute_layout_metrics(
-    view: &datamodel::StockFlow,
-    _config: &LayoutConfig,
-) -> LayoutMetrics {
-    // --- node boxes (with their owning element for incidence checks) ---
-    //
-    // Two box sets, used by different terms:
-    //   * `node_boxes` is the LABEL-MERGED box (`node_box`): each element's own
-    //     label unioned into its shape. The view's visual extent and its
-    //     characteristic node size both include labels, so `sprawl` and
-    //     `aspect_penalty` use this set.
-    //   * `node_shape_boxes` is the bare SHAPE box (`node_shape_box`):
-    //     label-free. `node_overlap` and `node_connector_overlap` use this set
-    //     so they measure exactly what the user cares about -- node SHAPES
-    //     overlapping other node shapes, and a connector passing under a node
-    //     SHAPE (a false-causal-connection at a glance). A connector passing
-    //     only under a node's LABEL is mild noise (labels are semi-transparent
-    //     and no connector terminates on one) and must NOT be charged here;
-    //     label collisions are the province of `label_overlap`.
-    // Aliases render an aux circle + their source element's label; resolve
-    // those names once so aliases are charged like any other node (an
-    // invisible alias would let alias generation game the score).
-    let alias_names = alias_source_names(&view.elements);
-    let alias_node_box = |a: &crate::datamodel::view_element::Alias| -> Rect {
-        let shape = alias_shape_box(a);
-        match alias_names.get(&a.uid) {
-            Some(name) => {
-                let props = alias_label_props_for(a, name, a.label_side);
-                merge_bounds(shape, label_bounds(&props))
-            }
-            // Dangling alias: the circle still renders; no label.
-            None => shape,
-        }
-    };
-
-    let node_boxes: Vec<(i32, Rect)> = view
-        .elements
-        .iter()
-        .filter_map(|e| match e {
-            ViewElement::Alias(a) => Some((a.uid, alias_node_box(a))),
-            _ => node_box(e).map(|r| (e.get_uid(), r)),
-        })
-        .collect();
-    let node_shape_boxes: Vec<(i32, Rect)> = view
-        .elements
-        .iter()
-        .filter_map(|e| node_shape_box(e).map(|r| (e.get_uid(), r)))
-        .collect();
-
-    // --- node_overlap (bare shape boxes, normalized by total shape-box area) ---
-    let total_shape_area: f64 = node_shape_boxes.iter().map(|(_, r)| rect_area(r)).sum();
-    let node_overlap = if total_shape_area > 0.0 {
-        let mut overlap = 0.0;
-        for i in 0..node_shape_boxes.len() {
-            for j in (i + 1)..node_shape_boxes.len() {
-                overlap += rect_overlap_area(&node_shape_boxes[i].1, &node_shape_boxes[j].1);
-            }
-        }
-        overlap / total_shape_area
-    } else {
-        0.0
-    };
-
-    // --- connector geometry (shared by several terms) ---
-    let connectors = collect_connector_geometry(view);
-    let total_connector_length: f64 = connectors.iter().map(|c| c.length).sum();
-
-    // --- node_connector_overlap (length inside non-incident shape boxes) ---
-    //
-    // Documented as a "fraction of total connector length", so each physical
-    // sub-length of connector covered by ANY non-incident node shape box must be
-    // counted AT MOST ONCE. Summing the per-box clipped length double-counts the
-    // region where two non-incident boxes overlap, which can push the normalized
-    // value above 1.0 (overlapping shape boxes are common -- a Flow's shape box is
-    // its whole-pipe bounding box, which frequently overlaps stocks/auxes/other
-    // flows). Instead, for EACH segment we collect the clip intervals over all
-    // non-incident boxes and UNION them (merge overlapping/adjacent intervals)
-    // before summing, so each covered sub-length contributes once and the term is
-    // a true fraction in [0, 1]. The per-segment merge result is order-independent,
-    // so this is deterministic regardless of `node_shape_boxes` iteration order.
-    let node_connector_overlap = if total_connector_length > 0.0 {
-        let mut inside = 0.0;
-        for c in &connectors {
-            for seg in c.polyline.windows(2) {
-                let dx = seg[1].x - seg[0].x;
-                let dy = seg[1].y - seg[0].y;
-                let seg_len = (dx * dx + dy * dy).sqrt();
-                if seg_len == 0.0 {
-                    continue; // degenerate segment covers no length
-                }
-                // Clip interval [t0, t1] of this segment within each non-incident
-                // box, in segment-parameter space (t in [0,1]).
-                let mut intervals: Vec<(f64, f64)> = Vec::new();
-                for (uid, rect) in &node_shape_boxes {
-                    if c.incident_uids.contains(uid) {
-                        continue; // skip the connector's own endpoints
-                    }
-                    if let Some(iv) = segment_clip_interval_in_rect(&seg[0], &seg[1], rect) {
-                        intervals.push(iv);
-                    }
-                }
-                inside += merged_interval_length(&mut intervals) * seg_len;
-            }
-        }
-        inside / total_connector_length
-    } else {
-        0.0
-    };
-
-    // --- label_overlap (per-label obscuration) ---
-    //
-    // For each labeled element L, measure how much of its label box B_L is
-    // covered (obscured) by OTHER drawn geometry, then SUM each label's obscured
-    // fraction. This is per-label rather than a single corpus-wide ratio: a
-    // small-but-readability-killing overlap (e.g. a node circle clipping the last
-    // two characters of a short label) registers at its true obscuration
-    // fraction instead of being diluted to ~0 by the corpus's total label area
-    // (the prior `sum_of_overlaps / total_label_area` definition under-counted
-    // exactly this case).
-    //
-    // The coverers of B_L are (a) any OTHER label box and (b) any OTHER element's
-    // bare *shape* box (`node_shape_box`, NOT the label-merged `node_box`):
-    //   * A label is never charged against its OWN element's shape box. By
-    //     construction a label sits adjacent to (and within the merged bounds of)
-    //     its own element, so charging it there would always add a constant that
-    //     is not a real collision.
-    //   * Comparing against the bare shape box (not the label-merged box) keeps
-    //     "label lands on another label" and "label lands on another node's
-    //     shape" cleanly separate -- the merged box unions that node's own label,
-    //     which would re-count the label-vs-label coverage already captured by
-    //     the label-box term.
-    //
-    // A pixel-exact union of all coverers is unnecessary: the covered area is
-    // approximated by the SUM of individual overlap areas, capped at area(B_L) so
-    // a label's obscured fraction stays in [0,1] even when coverers overlap each
-    // other. This is a monotone proxy (more/larger overlaps never decrease the
-    // fraction). A mutual label-label collision is charged from BOTH labels'
-    // perspectives -- intended, since both are unreadable. Guards area(B_L) == 0
-    // (degenerate label) by skipping it, so the term is always finite.
-    let label_boxes: Vec<(i32, Rect)> = view
-        .elements
-        .iter()
-        .filter_map(|e| match e {
-            ViewElement::Alias(a) => alias_names.get(&a.uid).map(|name| {
-                let props = alias_label_props_for(a, name, a.label_side);
-                (a.uid, label_bounds(&props))
-            }),
-            _ => element_label_props(e).map(|props| (e.get_uid(), label_bounds(&props))),
-        })
-        .collect();
-    // `node_shape_boxes` is computed once above (shared with node_overlap and
-    // node_connector_overlap).
-    let mut label_overlap = 0.0;
-    for (lbl_uid, lbl) in &label_boxes {
-        let lbl_area = rect_area(lbl);
-        if lbl_area <= 0.0 {
-            continue; // degenerate label box: no NaN, contributes nothing
-        }
-        let mut covered = 0.0;
-        // Covered by every OTHER label box.
-        for (other_uid, other) in &label_boxes {
-            if other_uid == lbl_uid {
-                continue;
-            }
-            covered += rect_overlap_area(lbl, other);
-        }
-        // Covered by every OTHER element's bare shape box.
-        for (node_uid, node) in &node_shape_boxes {
-            if node_uid == lbl_uid {
-                continue;
-            }
-            covered += rect_overlap_area(lbl, node);
-        }
-        // Cap the (possibly over-counted) covered area at the label's own area
-        // so the obscured fraction is in [0,1].
-        let obscured_fraction = (covered.min(lbl_area)) / lbl_area;
-        label_overlap += obscured_fraction;
-    }
-
-    // --- crossings ---
-    let connector_count = connectors.len();
-    let crossings = if connector_count > 0 {
-        count_crossings(&build_view_segments(view)) as f64 / connector_count as f64
-    } else {
-        0.0
-    };
-
-    // --- sprawl ---
-    let sprawl = if !connectors.is_empty() && !node_boxes.is_empty() {
-        let mean_connector_length = total_connector_length / connectors.len() as f64;
-        let characteristic_node_size = node_boxes
-            .iter()
-            .map(|(_, r)| {
-                let w = common::rect_width(r);
-                let h = common::rect_height(r);
-                (w * w + h * h).sqrt()
-            })
-            .sum::<f64>()
-            / node_boxes.len() as f64;
-        if characteristic_node_size > 0.0 {
-            mean_connector_length / characteristic_node_size
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
-
-    // --- edge_length_cv ---
-    let edge_length_cv = if connectors.len() >= 2 {
-        let n = connectors.len() as f64;
-        let mean = total_connector_length / n;
-        if mean > 0.0 {
-            let variance = connectors
-                .iter()
-                .map(|c| {
-                    let d = c.length - mean;
-                    d * d
-                })
-                .sum::<f64>()
-                / n; // population variance
-            variance.sqrt() / mean
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
-
-    // --- aspect_penalty ---
-    // Bounding box over node boxes (union). The aspect ratio is the long side
-    // over the short side (always >= 1); we penalize the amount by which it
-    // exceeds the target band. Chosen formula: `ar - TARGET_AR_MAX` (a plain
-    // unit-of-ratio overshoot). Documented here and matched in the AC1.5 test.
-    let aspect_penalty = match view_bounding_box(&node_boxes) {
-        Some(bbox) => {
-            let w = common::rect_width(&bbox);
-            let h = common::rect_height(&bbox);
-            let (long, short) = if w >= h { (w, h) } else { (h, w) };
-            if short <= 0.0 {
-                0.0
-            } else {
-                let ar = long / short;
-                (ar - TARGET_AR_MAX).max(0.0)
-            }
-        }
-        None => 0.0,
-    };
-
-    // --- loop_compactness (isoperimetric feedback-loop quality) ---
-    let loop_compactness = compute_loop_compactness(view);
-
-    // --- loop_straightness (loop connectors drawn as visible curves) ---
-    let loop_straightness = compute_loop_straightness(view);
-
-    // --- flow_bends (mean right-angle bends per flow pipe) ---
-    let flow_bends = {
-        let mut total_bends = 0usize;
-        let mut flow_count = 0usize;
-        for e in &view.elements {
-            if let ViewElement::Flow(f) = e {
-                flow_count += 1;
-                total_bends += crate::layout::orthogonal::flow_bend_count(&f.points);
-            }
-        }
-        if flow_count > 0 {
-            total_bends as f64 / flow_count as f64
-        } else {
-            0.0
-        }
-    };
-
-    LayoutMetrics {
-        node_overlap,
-        node_connector_overlap,
-        label_overlap,
-        crossings,
-        sprawl,
-        edge_length_cv,
-        aspect_penalty,
-        // reserved; computed in a future rung
-        chain_straightness: 0.0,
-        loop_compactness,
-        flow_bends,
-        loop_straightness,
-    }
-}
-
-/// Union of the node boxes, or `None` if there are no node boxes.
-fn view_bounding_box(node_boxes: &[(i32, Rect)]) -> Option<Rect> {
-    let mut iter = node_boxes.iter();
-    let first = iter.next()?.1;
-    Some(iter.fold(first, |acc, (_, r)| merge_bounds(acc, *r)))
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::datamodel::view_element::{self, LabelSide, LinkShape};
-    // `segment_length_in_rect` is the simple single-box clip; the AC1.3 tests and
-    // the union tests use it as an independent reference oracle to cross-check the
-    // production union path (which composes `segment_clip_interval_in_rect`).
-    use crate::diagram::common::segment_length_in_rect;
-    use crate::diagram::constants::STOCK_WIDTH;
-    use proptest::prelude::*;
-
-    // --- fixture helpers ---
-
-    fn stock(uid: i32, name: &str, x: f64, y: f64) -> ViewElement {
-        ViewElement::Stock(view_element::Stock {
-            name: name.to_string(),
-            uid,
-            x,
-            y,
-            label_side: LabelSide::Bottom,
-            compat: None,
-        })
-    }
-
-    fn aux(uid: i32, name: &str, x: f64, y: f64) -> ViewElement {
-        ViewElement::Aux(view_element::Aux {
-            name: name.to_string(),
-            uid,
-            x,
-            y,
-            label_side: LabelSide::Bottom,
-            compat: None,
-        })
-    }
-
-    /// A cloud at `(x, y)`. A cloud is a positioned node with a bare shape box
-    /// (`cloud_bounds`, a 27x27 square: CLOUD_RADIUS = 13.5) and NO rendered
-    /// label, so it is the cleanest "obscuring shape" fixture for label_overlap.
-    fn cloud(uid: i32, x: f64, y: f64) -> ViewElement {
-        ViewElement::Cloud(view_element::Cloud {
-            uid,
-            flow_uid: -1,
-            x,
-            y,
-            compat: None,
-        })
-    }
-
-    fn straight_link(uid: i32, from_uid: i32, to_uid: i32) -> ViewElement {
-        ViewElement::Link(view_element::Link {
-            uid,
-            from_uid,
-            to_uid,
-            shape: LinkShape::Straight,
-            polarity: None,
-        })
-    }
-
-    fn arc_link(uid: i32, from_uid: i32, to_uid: i32, angle: f64) -> ViewElement {
-        ViewElement::Link(view_element::Link {
-            uid,
-            from_uid,
-            to_uid,
-            shape: LinkShape::Arc(angle),
-            polarity: None,
-        })
-    }
-
-    /// A flow valve at `(x, y)` with a two-point polyline whose endpoints attach
-    /// to `from_uid` and `to_uid` (a stock--flow--stock segment). The point
-    /// coordinates are irrelevant to `loop_compactness` (which uses node-box
-    /// centers, not flow points), so they are placed at the valve.
-    fn flow_between(
-        uid: i32,
-        name: &str,
-        x: f64,
-        y: f64,
-        from_uid: i32,
-        to_uid: i32,
-    ) -> ViewElement {
-        ViewElement::Flow(view_element::Flow {
-            name: name.to_string(),
-            uid,
-            x,
-            y,
-            label_side: LabelSide::Bottom,
-            points: vec![
-                view_element::FlowPoint {
-                    x,
-                    y,
-                    attached_to_uid: Some(from_uid),
-                },
-                view_element::FlowPoint {
-                    x,
-                    y,
-                    attached_to_uid: Some(to_uid),
-                },
-            ],
-            compat: None,
-            label_compat: None,
-        })
-    }
-
-    fn make_view(elements: Vec<ViewElement>) -> datamodel::StockFlow {
-        datamodel::StockFlow {
-            name: None,
-            elements,
-            view_box: datamodel::Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 1000.0,
-                height: 1000.0,
-            },
-            zoom: 1.0,
-            use_lettered_polarity: false,
-            font: None,
-            sketch_compat: None,
-        }
-    }
-
-    fn cfg() -> LayoutConfig {
-        LayoutConfig::default()
-    }
-
-    /// An alias (ghost) of the element with uid `alias_of_uid`, at `(x, y)`.
-    /// Renders as an aux-sized circle labeled with the SOURCE element's name.
-    fn alias_of(uid: i32, alias_of_uid: i32, x: f64, y: f64) -> ViewElement {
-        ViewElement::Alias(view_element::Alias {
-            uid,
-            alias_of_uid,
-            x,
-            y,
-            label_side: LabelSide::Bottom,
-            compat: None,
-        })
-    }
-
-    // --- alias scoring ---
-    //
-    // An alias renders as an aux-sized circle plus its source element's label;
-    // the metric must charge it like any other node. If aliases were invisible
-    // (the pre-rung-4 state), alias GENERATION could game the score: ghosts
-    // could pile on top of anything for free.
-
-    #[test]
-    fn test_alias_node_overlap_charged() {
-        // An alias stacked exactly on an aux vs the same alias far away: the
-        // stacked layout must score strictly worse on node_overlap.
-        let stacked = make_view(vec![
-            aux(1, "source variable", 100.0, 100.0),
-            aux(2, "another aux", 300.0, 100.0),
-            alias_of(3, 1, 300.0, 100.0),
-        ]);
-        let apart = make_view(vec![
-            aux(1, "source variable", 100.0, 100.0),
-            aux(2, "another aux", 300.0, 100.0),
-            alias_of(3, 1, 600.0, 100.0),
-        ]);
-        let m_stacked = compute_layout_metrics(&stacked, &cfg());
-        let m_apart = compute_layout_metrics(&apart, &cfg());
-        assert!(
-            m_stacked.node_overlap > m_apart.node_overlap,
-            "an alias stacked on a node must be charged: stacked {} vs apart {}",
-            m_stacked.node_overlap,
-            m_apart.node_overlap,
-        );
-        assert!(
-            m_apart.node_overlap.abs() < 1e-9,
-            "the far-apart alias layout has no overlap to charge"
-        );
-    }
-
-    #[test]
-    fn test_alias_label_sized_by_source_name() {
-        // The alias's label box is the SOURCE element's name. Two layouts with
-        // identical geometry, differing only in the source's name length: the
-        // long-named source's alias label must collide with a nearby aux's
-        // label while the short-named one's must not.
-        let dx = 80.0;
-        let long_name = make_view(vec![
-            aux(1, "an extremely long variable name here", 100.0, 600.0),
-            aux(2, "consumer", 300.0, 100.0),
-            alias_of(3, 1, 300.0 + dx, 100.0),
-        ]);
-        let short_name = make_view(vec![
-            aux(1, "x", 100.0, 600.0),
-            aux(2, "consumer", 300.0, 100.0),
-            alias_of(3, 1, 300.0 + dx, 100.0),
-        ]);
-        let m_long = compute_layout_metrics(&long_name, &cfg());
-        let m_short = compute_layout_metrics(&short_name, &cfg());
-        assert!(
-            m_long.label_overlap > m_short.label_overlap,
-            "a long source name must widen the alias label and collide: long {} vs short {}",
-            m_long.label_overlap,
-            m_short.label_overlap,
-        );
-    }
-
-    #[test]
-    fn test_alias_with_dangling_source_is_ignored() {
-        // An alias whose alias_of_uid resolves to nothing (corrupt/partial
-        // view) must not panic and must not be charged a label.
-        let view = make_view(vec![
-            aux(1, "real aux", 100.0, 100.0),
-            alias_of(2, 999, 100.0, 100.0),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-        // The dangling alias still has a SHAPE (it renders a circle), so
-        // node_overlap is charged; but no label can be derived for it.
-        assert!(m.node_overlap > 0.0, "the alias circle still overlaps");
-        assert!(m.label_overlap.is_finite());
-    }
-
-    #[test]
-    fn test_alias_extends_view_bounding_box() {
-        // A far-flung alias must extend the layout's bounding box (it is a
-        // drawn element), which shows up in the aspect_penalty/sprawl inputs.
-        // Compare a compact two-aux view against the same view plus an alias
-        // parked far to the right: the bounding box must widen.
-        let compact = make_view(vec![
-            aux(1, "a", 100.0, 100.0),
-            aux(2, "b", 300.0, 100.0),
-            straight_link(10, 1, 2),
-        ]);
-        let with_far_alias = make_view(vec![
-            aux(1, "a", 100.0, 100.0),
-            aux(2, "b", 300.0, 100.0),
-            straight_link(10, 1, 2),
-            alias_of(3, 1, 2000.0, 100.0),
-        ]);
-        let m_compact = compute_layout_metrics(&compact, &cfg());
-        let m_far = compute_layout_metrics(&with_far_alias, &cfg());
-        assert!(
-            m_far.aspect_penalty > m_compact.aspect_penalty,
-            "a far-flung alias must widen the bounding box and trip the aspect \
-             penalty: with {} vs without {}",
-            m_far.aspect_penalty,
-            m_compact.aspect_penalty,
-        );
-    }
-
-    /// Scale every coordinate of a view by `s` (element centers and any
-    /// flow/connector points). Used by the AC1.8 scale-invariance test.
-    fn scale_view(view: &datamodel::StockFlow, s: f64) -> datamodel::StockFlow {
-        let elements = view
-            .elements
-            .iter()
-            .map(|e| match e {
-                ViewElement::Aux(a) => ViewElement::Aux(view_element::Aux {
-                    x: a.x * s,
-                    y: a.y * s,
-                    ..a.clone()
-                }),
-                ViewElement::Stock(st) => ViewElement::Stock(view_element::Stock {
-                    x: st.x * s,
-                    y: st.y * s,
-                    ..st.clone()
-                }),
-                ViewElement::Flow(f) => ViewElement::Flow(view_element::Flow {
-                    x: f.x * s,
-                    y: f.y * s,
-                    points: f
-                        .points
-                        .iter()
-                        .map(|p| view_element::FlowPoint {
-                            x: p.x * s,
-                            y: p.y * s,
-                            attached_to_uid: p.attached_to_uid,
-                        })
-                        .collect(),
-                    ..f.clone()
-                }),
-                ViewElement::Module(m) => ViewElement::Module(view_element::Module {
-                    x: m.x * s,
-                    y: m.y * s,
-                    ..m.clone()
-                }),
-                ViewElement::Cloud(c) => ViewElement::Cloud(view_element::Cloud {
-                    x: c.x * s,
-                    y: c.y * s,
-                    ..c.clone()
-                }),
-                ViewElement::Alias(a) => ViewElement::Alias(view_element::Alias {
-                    x: a.x * s,
-                    y: a.y * s,
-                    ..a.clone()
-                }),
-                other => other.clone(),
-            })
-            .collect();
-        datamodel::StockFlow {
-            elements,
-            ..view.clone()
-        }
-    }
-
-    // --- AC1.1: node_overlap equals known overlap / total node area ---
-
-    #[test]
-    fn test_node_overlap_known_overlap_fraction() {
-        // Two stocks (45x35) whose centers are 20px apart horizontally and at
-        // the same y. node_overlap is computed on the bare SHAPE boxes (not the
-        // label-merged boxes), so the expected value comes from
-        // `stock_shape_bounds` and is normalized by the total SHAPE-box area.
-        let s1 = stock(1, "a", 100.0, 100.0);
-        let s2 = stock(2, "b", 120.0, 100.0);
-        let view = make_view(vec![s1.clone(), s2.clone()]);
-
-        let m = compute_layout_metrics(&view, &cfg());
-
-        // Expected: compute directly from the two bare shape boxes the renderer
-        // draws (the rects, label-free).
-        let b1 = node_shape_box(&s1).unwrap();
-        let b2 = node_shape_box(&s2).unwrap();
-        let expected_overlap = rect_overlap_area(&b1, &b2);
-        let expected_total = rect_area(&b1) + rect_area(&b2);
-        assert!(expected_overlap > 0.0, "fixture must actually overlap");
-        let expected = expected_overlap / expected_total;
-        assert!(
-            (m.node_overlap - expected).abs() < 1e-9,
-            "node_overlap {} != expected {}",
-            m.node_overlap,
-            expected
-        );
-    }
-
-    #[test]
-    fn test_node_overlap_simple_hand_computed() {
-        // Two stocks with exactly one stock-width of horizontal center
-        // separation. node_overlap is a sum over the bare SHAPE boxes, so only
-        // the rects matter (labels are irrelevant to this term now).
-        let s1 = stock(1, "a", 0.0, 0.0);
-        let s2 = stock(2, "b", STOCK_WIDTH, 0.0); // centers exactly one width apart
-        let view = make_view(vec![s1, s2]);
-        let m = compute_layout_metrics(&view, &cfg());
-        // Centers one full width apart -> the 45-wide shape boxes just touch in
-        // x (right edge of #1 at +22.5, left edge of #2 at +22.5): zero shape
-        // overlap. So node_overlap == 0.
-        assert_eq!(m.node_overlap, 0.0);
-    }
-
-    // --- AC1.2: pairwise-disjoint nodes => node_overlap == 0 ---
-
-    #[test]
-    fn test_node_overlap_disjoint_is_zero() {
-        let view = make_view(vec![
-            stock(1, "a", 0.0, 0.0),
-            stock(2, "b", 500.0, 500.0),
-            aux(3, "c", 1000.0, 0.0),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_eq!(m.node_overlap, 0.0);
-    }
-
-    // node_overlap is computed on the bare SHAPE boxes, NOT the label-merged
-    // boxes. The user cares about node shapes overlapping other node shapes;
-    // a label landing on another node's shape (or another label) is the
-    // province of `label_overlap`. This test distinguishes the two regimes and
-    // would FAIL against the prior label-merged-box implementation.
-
-    #[test]
-    fn test_node_overlap_labels_overlap_shapes_disjoint_is_zero() {
-        // Two `LabelSide::Bottom` auxes named "samename" (8 chars), 40px apart
-        // horizontally at the same y -- the same fixture as the label_overlap
-        // double-count regression test:
-        //   aux1 @ (0,0):  shape [-9,9]x[-9,9],   label [-29,29]x[13,27]
-        //   aux2 @ (40,0): shape [31,49]x[-9,9],  label [11,69]x[13,27]
-        // The SHAPE boxes are disjoint (9 < 31), so node_overlap == 0. The
-        // LABEL boxes overlap, but that collision belongs to label_overlap, not
-        // node_overlap. Under the old label-merged boxes node_overlap would be
-        // > 0 (the merged boxes [-29,29]x[-9,27] and [11,69]x[-9,27] overlap),
-        // so this assertion pins the new shape-only behavior.
-        let view = make_view(vec![
-            aux(1, "samename", 0.0, 0.0),
-            aux(2, "samename", 40.0, 0.0),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_eq!(
-            m.node_overlap, 0.0,
-            "node_overlap must ignore label-only overlap (shapes are disjoint)"
-        );
-        // Sanity: the label collision IS captured by label_overlap, confirming
-        // the overlap was not simply lost.
-        assert!(
-            m.label_overlap > 0.0,
-            "the label-vs-label overlap must still be charged by label_overlap"
-        );
-    }
-
-    // --- AC1.3: node_connector_overlap ---
-
-    #[test]
-    fn test_node_connector_overlap_through_third_node() {
-        // Connector from aux #1 (far left) to aux #2 (far right), passing
-        // horizontally through a stock #3 sitting on the line at the middle.
-        let a = aux(1, "a", 0.0, 0.0);
-        let b = aux(2, "b", 400.0, 0.0);
-        let mid = stock(3, "s", 200.0, 0.0);
-        let link = straight_link(10, 1, 2);
-        let view = make_view(vec![a, b, mid, link]);
-
-        let m = compute_layout_metrics(&view, &cfg());
-        assert!(
-            m.node_connector_overlap > 0.0,
-            "connector passing through a non-incident stock must contribute"
-        );
-
-        // Expected = clipped length inside the stock SHAPE box / total polyline
-        // len. node_connector_overlap charges against the bare shape box, not
-        // the label-merged box. (The connector is horizontal at y=0, so the
-        // clipped length happens to be identical to the label-merged box here;
-        // the SHAPE box is the contract regardless.)
-        let connectors = collect_connector_geometry(&view);
-        assert_eq!(connectors.len(), 1);
-        let c = &connectors[0];
-        let stock_box = node_shape_box(&stock(3, "s", 200.0, 0.0)).unwrap();
-        let mut inside = 0.0;
-        for seg in c.polyline.windows(2) {
-            inside += segment_length_in_rect(&seg[0], &seg[1], &stock_box);
-        }
-        let expected = inside / c.length;
-        assert!(
-            (m.node_connector_overlap - expected).abs() < 1e-9,
-            "got {} expected {}",
-            m.node_connector_overlap,
-            expected
-        );
-    }
-
-    #[test]
-    fn test_node_connector_overlap_avoids_all_is_zero() {
-        // Connector between two auxes with a third node well off the line.
-        let a = aux(1, "a", 0.0, 0.0);
-        let b = aux(2, "b", 400.0, 0.0);
-        let off = stock(3, "s", 200.0, 500.0);
-        let link = straight_link(10, 1, 2);
-        let view = make_view(vec![a, b, off, link]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_eq!(m.node_connector_overlap, 0.0);
-    }
-
-    // node_connector_overlap charges a connector for the length it spends
-    // inside a non-incident node's bare SHAPE box, NOT its label-merged box.
-    // The user reads a connector passing under a node SHAPE as a false causal
-    // connection (high priority); a connector passing only under a node's LABEL
-    // is mild noise (labels are semi-transparent, no connector starts/ends on a
-    // label) and must NOT be charged. These two tests pin that distinction; the
-    // first would FAIL against the prior label-merged-box implementation.
-
-    #[test]
-    fn test_node_connector_overlap_under_label_only_is_zero() {
-        // Connector from aux #1 (0,0) to aux #2 (400,0): a horizontal line at
-        // y=0 (clipped to the 9px aux radii, so drawn x in [9, 391]). A
-        // non-incident `LabelSide::Bottom` stock #3 named "s" (1 char) is placed
-        // ABOVE the line so its SHAPE box clears y=0 but its label (which hangs
-        // BELOW the shape) reaches down across y=0:
-        //   stock #3 @ (200,-25):
-        //     shape box  x [177.5, 222.5], y [-42.5, -7.5]   (does NOT cross 0)
-        //     label box  x [192, 208],     y [-3.5, 10.5]    (DOES cross 0)
-        // The connector at y=0 passes through the label band but never enters
-        // the shape box, so node_connector_overlap == 0. Under the old
-        // label-merged box (which unions the label, y [-42.5, 10.5]) the line
-        // WOULD be charged, so this assertion is the load-bearing distinction.
-        let a = aux(1, "a", 0.0, 0.0);
-        let b = aux(2, "b", 400.0, 0.0);
-        let label_only = stock(3, "s", 200.0, -25.0);
-        let link = straight_link(10, 1, 2);
-        let view = make_view(vec![a, b, label_only, link]);
-
-        // Confirm the fixture geometry is what we claim before asserting on the
-        // metric: shape box clears the line, merged box does not.
-        let shape = node_shape_box(&stock(3, "s", 200.0, -25.0)).unwrap();
-        let merged = node_box(&stock(3, "s", 200.0, -25.0)).unwrap();
-        assert!(
-            shape.bottom < 0.0,
-            "shape box must clear the connector line (bottom {} < 0)",
-            shape.bottom
-        );
-        assert!(
-            merged.bottom > 0.0,
-            "merged box must cross the connector line via the label (bottom {} > 0)",
-            merged.bottom
-        );
-
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_eq!(
-            m.node_connector_overlap, 0.0,
-            "a connector passing only under a node's LABEL must not be charged"
-        );
-    }
-
-    #[test]
-    fn test_node_connector_overlap_under_shape_is_positive() {
-        // Same connector, but the non-incident stock sits ON the line so the
-        // connector crosses its SHAPE box -- the false-causal-connection case
-        // the user cares about. node_connector_overlap > 0.
-        let a = aux(1, "a", 0.0, 0.0);
-        let b = aux(2, "b", 400.0, 0.0);
-        let on_line = stock(3, "s", 200.0, 0.0);
-        let link = straight_link(10, 1, 2);
-        let view = make_view(vec![a, b, on_line, link]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert!(
-            m.node_connector_overlap > 0.0,
-            "a connector passing under a node SHAPE must be charged"
-        );
-    }
-
-    // node_connector_overlap is documented as a "fraction of total connector
-    // length", so it must count each physical sub-length of connector covered by
-    // ANY non-incident node shape box AT MOST ONCE. When two non-incident shape
-    // boxes overlap, the prior implementation summed the per-box clipped lengths,
-    // double-counting the connector segment that lies in the overlap region; the
-    // normalized value could then exceed 1.0 and over-inflate weighted_cost. The
-    // correct value is the UNION length covered by (box A OR box B) over the total
-    // connector length. These two tests pin the union contract.
-
-    /// Length of segment p0->p1 covered by the UNION of `rects` (each physical
-    /// sub-length counted once). Independent reference implementation used by the
-    /// union tests: collect each rect's Liang-Barsky clip interval, merge, sum.
-    fn union_segment_length_in_rects(p0: &Point, p1: &Point, rects: &[Rect]) -> f64 {
-        let seg_len = {
-            let dx = p1.x - p0.x;
-            let dy = p1.y - p0.y;
-            (dx * dx + dy * dy).sqrt()
-        };
-        if seg_len == 0.0 {
-            return 0.0;
-        }
-        let mut intervals: Vec<(f64, f64)> = Vec::new();
-        for r in rects {
-            // Recover [t0, t1] from segment_length_in_rect's reported length: the
-            // tests use axis-aligned horizontal segments, so the clipped length is
-            // an exact multiple of seg_len. We instead build intervals from the
-            // covered length by reconstructing endpoints via the rect bounds for a
-            // horizontal segment at constant y (the only geometry these tests use).
-            let covered = segment_length_in_rect(p0, p1, r);
-            if covered <= 0.0 {
-                continue;
-            }
-            // For a horizontal segment (y constant) inside [left,right], the
-            // covered x-range is [max(min_x,left), min(max_x,right)]. Convert to t.
-            let (xa, xb) = (p0.x.min(p1.x), p0.x.max(p1.x));
-            let lo_x = xa.max(r.left);
-            let hi_x = xb.min(r.right);
-            let span = p1.x - p0.x;
-            let t_lo = ((lo_x - p0.x) / span).clamp(0.0, 1.0);
-            let t_hi = ((hi_x - p0.x) / span).clamp(0.0, 1.0);
-            let (t0, t1) = if t_lo <= t_hi {
-                (t_lo, t_hi)
-            } else {
-                (t_hi, t_lo)
-            };
-            intervals.push((t0, t1));
-        }
-        intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        let mut total = 0.0;
-        let mut cur: Option<(f64, f64)> = None;
-        for (t0, t1) in intervals {
-            match cur {
-                None => cur = Some((t0, t1)),
-                Some((c0, c1)) => {
-                    if t0 <= c1 {
-                        cur = Some((c0, c1.max(t1)));
-                    } else {
-                        total += c1 - c0;
-                        cur = Some((t0, t1));
-                    }
-                }
-            }
-        }
-        if let Some((c0, c1)) = cur {
-            total += c1 - c0;
-        }
-        total * seg_len
-    }
-
-    #[test]
-    fn test_node_connector_overlap_union_of_overlapping_boxes() {
-        // A horizontal Link between aux #1 (0,0) and aux #2 (400,0) at y=0. Two
-        // NON-incident stocks straddle the line AND overlap each other:
-        //   stock #3 @ (200,0): shape x [177.5, 222.5]
-        //   stock #4 @ (210,0): shape x [187.5, 232.5]
-        // Their shape boxes overlap in x [187.5, 222.5]. The OLD code charged the
-        // connector for box A (length 45) PLUS box B (length 45) = 90, but the
-        // physical connector length under (A OR B) is the union x [177.5, 232.5]
-        // = 55. The new metric must equal union/total, and the old sum/total
-        // strictly exceeds it.
-        let a = aux(1, "a", 0.0, 0.0);
-        let b = aux(2, "b", 400.0, 0.0);
-        let s3 = stock(3, "s3", 200.0, 0.0);
-        let s4 = stock(4, "s4", 210.0, 0.0);
-        let link = straight_link(10, 1, 2);
-        let view = make_view(vec![a, b, s3.clone(), s4.clone(), link]);
-
-        let m = compute_layout_metrics(&view, &cfg());
-
-        let connectors = collect_connector_geometry(&view);
-        assert_eq!(connectors.len(), 1);
-        let c = &connectors[0];
-        let box3 = node_shape_box(&s3).unwrap();
-        let box4 = node_shape_box(&s4).unwrap();
-
-        // Independent union reference and the old (double-counting) sum.
-        let mut union_len = 0.0;
-        let mut old_sum_len = 0.0;
-        for seg in c.polyline.windows(2) {
-            union_len += union_segment_length_in_rects(&seg[0], &seg[1], &[box3, box4]);
-            old_sum_len += segment_length_in_rect(&seg[0], &seg[1], &box3)
-                + segment_length_in_rect(&seg[0], &seg[1], &box4);
-        }
-        let expected = union_len / c.length;
-        let old_value = old_sum_len / c.length;
-
-        // The fixture must actually overlap so the old sum strictly exceeds the
-        // union (otherwise the test proves nothing).
-        assert!(
-            old_value > expected + 1e-9,
-            "fixture must double-count: old {old_value} should exceed union {expected}"
-        );
-        assert!(
-            (m.node_connector_overlap - expected).abs() < 1e-9,
-            "node_connector_overlap must equal the union fraction: got {} expected {} \
-             (old double-counted value was {})",
-            m.node_connector_overlap,
-            expected,
-            old_value
-        );
-        assert!(
-            m.node_connector_overlap <= 1.0,
-            "node_connector_overlap is a fraction and must be <= 1.0, got {}",
-            m.node_connector_overlap
-        );
-    }
-
-    #[test]
-    fn test_node_connector_overlap_coincident_boxes_counted_once() {
-        // Starker variant: a connector sub-length fully inside TWO COINCIDENT
-        // non-incident boxes is counted ONCE, not twice. Two stocks at the same
-        // position (200,0) each fully contain the connector segment x [177.5,
-        // 222.5]. The OLD code would count that length twice (~2x); the union
-        // counts it once. We also build the fixture so the total connector length
-        // is small enough that the OLD value EXCEEDS 1.0 -- impossible for a
-        // documented fraction. Auxes are placed close in (x 180 and 220) so the
-        // drawn connector is short and lies entirely within the coincident boxes.
-        let a = aux(1, "a", 180.0, 0.0);
-        let b = aux(2, "b", 220.0, 0.0);
-        let s3 = stock(3, "s3", 200.0, 0.0);
-        let s4 = stock(4, "s4", 200.0, 0.0);
-        let link = straight_link(10, 1, 2);
-        let view = make_view(vec![a, b, s3.clone(), s4.clone(), link]);
-
-        let m = compute_layout_metrics(&view, &cfg());
-
-        let connectors = collect_connector_geometry(&view);
-        assert_eq!(connectors.len(), 1);
-        let c = &connectors[0];
-        let box3 = node_shape_box(&s3).unwrap();
-        let box4 = node_shape_box(&s4).unwrap();
-
-        let mut union_len = 0.0;
-        let mut old_sum_len = 0.0;
-        for seg in c.polyline.windows(2) {
-            union_len += union_segment_length_in_rects(&seg[0], &seg[1], &[box3, box4]);
-            old_sum_len += segment_length_in_rect(&seg[0], &seg[1], &box3)
-                + segment_length_in_rect(&seg[0], &seg[1], &box4);
-        }
-        let expected = union_len / c.length;
-        let old_value = old_sum_len / c.length;
-
-        // With two coincident boxes both covering the whole drawn connector, the
-        // union fraction is 1.0 and the old value is ~2.0 (> 1.0, impossible for a
-        // fraction).
-        assert!(
-            old_value > 1.0,
-            "coincident-box fixture must drive the OLD value above 1.0 (got {old_value})"
-        );
-        assert!(
-            (expected - 1.0).abs() < 1e-9,
-            "union of two coincident boxes covering the whole connector is the full \
-             length (fraction 1.0), got {expected}"
-        );
-        assert!(
-            (m.node_connector_overlap - expected).abs() < 1e-9,
-            "coincident non-incident boxes must be counted once: got {} expected {} \
-             (old double-counted value was {})",
-            m.node_connector_overlap,
-            expected,
-            old_value
-        );
-        assert!(
-            m.node_connector_overlap <= 1.0 + 1e-9,
-            "node_connector_overlap is a fraction and must be <= 1.0, got {}",
-            m.node_connector_overlap
-        );
-    }
-
-    // --- AC1.4: label_overlap (per-label obscuration) ---
-    //
-    // label_overlap is the SUM over labeled elements of each label's obscured
-    // fraction: the area of the label box covered by any OTHER label box or any
-    // OTHER element's bare shape box, capped at the label's own area and divided
-    // by it (so each term is in [0,1]). 0 = no label obscured. A small overlap
-    // registers at its true per-label obscuration fraction rather than being
-    // diluted by the corpus's total label area (the old area/total definition's
-    // under-counting; see `test_label_overlap_small_clip_is_sensitive`).
-
-    #[test]
-    fn test_label_overlap_overlapping_labels() {
-        // Two auxes at the same position -> their labels (Bottom) coincide
-        // exactly. Each label is fully covered by the other (capped at its own
-        // area), so each obscured fraction is 1.0 and the sum is 2.0.
-        let view = make_view(vec![
-            aux(1, "samename", 100.0, 100.0),
-            aux(2, "samename", 100.0, 100.0),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert!(
-            (m.label_overlap - 2.0).abs() < 1e-9,
-            "two coincident labels are each fully obscured: expected 2.0, got {}",
-            m.label_overlap
-        );
-    }
-
-    #[test]
-    fn test_label_overlap_disjoint_is_zero() {
-        // Two auxes far apart -> no label is covered by anything. Sum of
-        // obscured fractions is 0.0.
-        let view = make_view(vec![aux(1, "a", 0.0, 0.0), aux(2, "b", 1000.0, 1000.0)]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_eq!(m.label_overlap, 0.0);
-    }
-
-    #[test]
-    fn test_label_overlap_counts_label_pair_exactly_once() {
-        // The Phase-1 double-count guard, restated for per-label obscuration: a
-        // label is never charged against its OWN element's shape box, and a
-        // label-vs-label collision is counted from each label's own perspective
-        // (both labels are unreadable -- that is intended), not via the other
-        // node's label-merged bounds.
-        //
-        // Fixture: two `LabelSide::Bottom` auxes named "samename" (8 chars).
-        //   AUX_RADIUS = 9; label editor width = 8*6 + 10 = 58, height = 14.
-        //   With Bottom labels, label top = cy + 9 + LABEL_PADDING(4) = cy + 13,
-        //   bottom = cy + 27, left = cx - 29, right = cx + 29.
-        //
-        // Place them 40px apart horizontally, same y:
-        //   aux1 @ (0,0): shape [-9,9]x[-9,9],  label [-29,29]x[13,27]
-        //   aux2 @ (40,0): shape [31,49]x[-9,9], label [11,69]x[13,27]
-        //
-        // SHAPE boxes do NOT overlap (9 < 31), and each label clears the OTHER
-        // aux's bare shape box entirely (label y [13,27] vs shape y [-9,9]). The
-        // LABELS overlap by x:[11,29]=18, y:[13,27]=14 -> 252. Each label box has
-        // area 58*14 = 812 and is covered only by the other label (252 < 812, no
-        // cap), so each obscured fraction is 252/812 and the sum is 504/812.
-        let view = make_view(vec![
-            aux(1, "samename", 0.0, 0.0),
-            aux(2, "samename", 40.0, 0.0),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-
-        let label_area = 58.0 * 14.0; // 812.0
-        let overlap = 18.0 * 14.0; // 252.0, the single label-label intersection
-        let expected = (overlap / label_area) + (overlap / label_area); // 504/812
-        assert!(
-            (m.label_overlap - expected).abs() < 1e-9,
-            "per-label obscuration should sum each label's fraction once: got {} expected {}",
-            m.label_overlap,
-            expected
-        );
-    }
-
-    #[test]
-    fn test_label_overlap_never_charged_against_own_shape() {
-        // A single labeled aux: its Bottom label sits adjacent to (and partly
-        // within the merged bounds of) its OWN shape. A label is never charged
-        // against its own element's shape, and there is no other element, so the
-        // obscured fraction is 0 and label_overlap is exactly 0.0.
-        let view = make_view(vec![aux(1, "samename", 0.0, 0.0)]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_eq!(
-            m.label_overlap, 0.0,
-            "a label must never be charged against its own element's shape box"
-        );
-    }
-
-    #[test]
-    fn test_label_overlap_small_clip_is_sensitive() {
-        // A small node SHAPE clipping a few characters of a short label must
-        // register at its true per-label obscuration fraction, NOT be diluted to
-        // ~0 by the corpus's total label area (the old area/total under-count).
-        //
-        // L: aux "ab" (2 chars) @ (0,0), Bottom label.
-        //   editor_width = 2*6 + 10 = 22, height 14 -> label area 308.
-        //   label box: left -11, right 11, top 13, bottom 27.
-        // O: a cloud (no label) @ (18, 20). cloud_bounds (CLOUD_RADIUS 13.5):
-        //   x [4.5, 31.5], y [6.5, 33.5].
-        //   Overlap with L's label: x [4.5,11]=6.5, y [13,27]=14 -> 91.
-        //   obscured_fraction(L) = 91/308 ~= 0.2955; the cloud has no label, so
-        //   the sum is exactly 91/308.
-        // Plus 15 far-apart auxes with long (20-char) labels: each label area
-        //   20*6+10 = 130 wide * 14 = 1820, none overlapping anything. They add
-        //   nothing to the per-label SUM (obscured fraction 0 each) but bloat the
-        //   OLD denominator (total label area), so the OLD area/total score for
-        //   the same clip collapses to ~0.003 -- the under-count this fixes.
-        let mut elements = vec![aux(1, "ab", 0.0, 0.0), cloud(2, 18.0, 20.0)];
-        for k in 0..15 {
-            // Far apart on a 1000px grid so nothing overlaps; 20-char names.
-            elements.push(aux(
-                100 + k,
-                "abcdefghijklmnopqrst",
-                3000.0 + f64::from(k) * 1000.0,
-                3000.0,
-            ));
-        }
-        let view = make_view(elements);
-        let m = compute_layout_metrics(&view, &cfg());
-
-        let label_area = 22.0 * 14.0; // 308.0
-        let clip_area = 6.5 * 14.0; // 91.0
-        let expected = clip_area / label_area; // ~0.2955
-        assert!(
-            (m.label_overlap - expected).abs() < 1e-9,
-            "small clip must score its per-label obscuration fraction: got {} expected {}",
-            m.label_overlap,
-            expected
-        );
-        assert!(
-            m.label_overlap > 0.1,
-            "a readability-killing clip must register clearly (> 0.1), got {}",
-            m.label_overlap
-        );
-
-        // Confirm the OLD area/total definition would have under-counted this to
-        // near-zero: the same clip area divided by the corpus total label area.
-        let total_label_area = label_area + 15.0 * (130.0 * 14.0); // 308 + 27300
-        let old_score = clip_area / total_label_area; // ~0.0033
-        assert!(
-            old_score < 0.01,
-            "fixture must demonstrate the old under-count (< 0.01), got {}",
-            old_score
-        );
-        assert!(
-            m.label_overlap > old_score * 50.0,
-            "new per-label score {} must be far larger than the old {}",
-            m.label_overlap,
-            old_score
-        );
-    }
-
-    // --- AC1.5: aspect_penalty ---
-
-    #[test]
-    fn test_aspect_penalty_thin_box_positive() {
-        // Two auxes stacked far apart vertically and close horizontally -> the
-        // node bounding box is tall and thin (ar >> target), so penalty > 0.
-        let view = make_view(vec![aux(1, "a", 0.0, 0.0), aux(2, "b", 0.0, 1000.0)]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert!(
-            m.aspect_penalty > 0.0,
-            "a tall thin bbox must be penalized, got {}",
-            m.aspect_penalty
-        );
-
-        // Verify it equals exactly `ar - TARGET_AR_MAX` for the computed bbox.
-        let node_boxes: Vec<(i32, Rect)> = view
-            .elements
-            .iter()
-            .filter_map(|e| node_box(e).map(|r| (e.get_uid(), r)))
-            .collect();
-        let bbox = view_bounding_box(&node_boxes).unwrap();
-        let w = common::rect_width(&bbox);
-        let h = common::rect_height(&bbox);
-        let (long, short) = if w >= h { (w, h) } else { (h, w) };
-        let expected = (long / short - TARGET_AR_MAX).max(0.0);
-        assert!((m.aspect_penalty - expected).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_aspect_penalty_balanced_box_zero() {
-        // Four auxes placed so the bounding box is ~4:3 (well inside the 16:9
-        // band) -> zero penalty. Width 400, height 300 between centers; the
-        // fixed node radii add a small symmetric margin that keeps ar < 16/9.
-        let view = make_view(vec![
-            aux(1, "a", 0.0, 0.0),
-            aux(2, "b", 400.0, 0.0),
-            aux(3, "c", 0.0, 300.0),
-            aux(4, "d", 400.0, 300.0),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-
-        // Confirm the bbox aspect ratio really is inside the band for this
-        // fixture, then assert the penalty is exactly zero.
-        let node_boxes: Vec<(i32, Rect)> = view
-            .elements
-            .iter()
-            .filter_map(|e| node_box(e).map(|r| (e.get_uid(), r)))
-            .collect();
-        let bbox = view_bounding_box(&node_boxes).unwrap();
-        let w = common::rect_width(&bbox);
-        let h = common::rect_height(&bbox);
-        let ar = w.max(h) / w.min(h);
-        assert!(ar <= TARGET_AR_MAX, "fixture bbox ar {} not in band", ar);
-        assert_eq!(m.aspect_penalty, 0.0);
-    }
-
-    // --- AC1.6: weighted_cost is the exact linear combination ---
-
-    #[test]
-    fn test_weighted_cost_exact_linear_combination() {
-        let m = LayoutMetrics {
-            node_overlap: 1.5,
-            node_connector_overlap: 2.0,
-            label_overlap: 0.5,
-            crossings: 3.0,
-            sprawl: 4.0,
-            edge_length_cv: 0.25,
-            aspect_penalty: 6.0,
-            chain_straightness: 7.0,
-            loop_compactness: 8.0,
-            flow_bends: 9.0,
-            loop_straightness: 11.0,
-        };
-        let w = MetricWeights {
-            node_overlap: 10.0,
-            node_connector_overlap: 20.0,
-            label_overlap: 30.0,
-            crossings: 40.0,
-            sprawl: 50.0,
-            edge_length_cv: 60.0,
-            aspect_penalty: 70.0,
-            chain_straightness: 80.0,
-            loop_compactness: 90.0,
-            flow_bends: 100.0,
-            loop_straightness: 110.0,
-        };
-        let expected = 1.5 * 10.0
-            + 2.0 * 20.0
-            + 0.5 * 30.0
-            + 3.0 * 40.0
-            + 4.0 * 50.0
-            + 0.25 * 60.0
-            + 6.0 * 70.0
-            + 7.0 * 80.0
-            + 8.0 * 90.0
-            + 9.0 * 100.0
-            + 11.0 * 110.0;
-        assert!((m.weighted_cost(&w) - expected).abs() < 1e-9);
-    }
-
-    // --- AC5.1: the committed calibrated default expresses readability dominance ---
-    //
-    // The Phase-1 placeholder default was all-zeros (so a pre-calibration
-    // `weighted_cost` was inert). Phase 4 commits real, user-signed-off weights
-    // (2026-05-23), so the default is no longer all-zeros and `weighted_cost`
-    // under it is now meaningful. This test pins the DOMINANCE ORDERING the
-    // committed weights encode -- relationships rather than magic numbers, so it
-    // documents the intent and survives minor retuning -- and re-confirms that
-    // `weighted_cost` applies the default exactly as Σ wᵢ·termᵢ. It replaces the
-    // old "default is all-zeros so cost is inert" assertion, which is no longer
-    // true by design.
-
-    #[test]
-    fn test_default_weights_readability_dominant_ordering() {
-        let w = MetricWeights::default();
-
-        // The dominant "overlap + crossings" family: each term that hurts
-        // readability (shapes overlapping shapes, connectors under shapes, labels
-        // obscured, edges crossing) must outweigh every compactness/aspect term.
-        let dominant = [
-            w.node_overlap,
-            w.node_connector_overlap,
-            w.label_overlap,
-            w.crossings,
-        ];
-        let compactness = [w.sprawl, w.edge_length_cv, w.aspect_penalty];
-        for &d in &dominant {
-            for &c in &compactness {
-                assert!(
-                    d > c,
-                    "every readability term ({d}) must strictly exceed every \
-                     compactness/aspect term ({c})"
-                );
-            }
-        }
-
-        // `sprawl` is a GENTLE compactness counterweight: strictly positive (so
-        // unbounded inflation is penalized and the cost has a finite optimum at
-        // "spread just enough"), but far below the dominant readability family
-        // (checked by the dominant>compactness loop above), so readability still
-        // wins decisively over compactness.
-        assert!(
-            w.sprawl > 0.0,
-            "sprawl must be a positive compactness counterweight, got {}",
-            w.sprawl
-        );
-        assert!(
-            w.sprawl < 0.5 * w.label_overlap,
-            "sprawl ({}) must stay well below the readability terms ({})",
-            w.sprawl,
-            w.label_overlap
-        );
-        // Edge-length uniformity and aspect ratio remain non-goals.
-        assert_eq!(
-            w.edge_length_cv, 0.0,
-            "edge-length uniformity is not a goal"
-        );
-        assert_eq!(w.aspect_penalty, 0.0, "aspect ratio is not a goal");
-
-        // chain_straightness is reserved (not yet computed), so it carries no
-        // weight.
-        assert_eq!(
-            w.chain_straightness, 0.0,
-            "chain_straightness is reserved and must stay zero"
-        );
-
-        // loop_compactness rewards visible feedback-loop circles, but only as a
-        // gentle nudge: a low, non-dominant weight strictly between zero and the
-        // dominant family.
-        assert!(
-            w.loop_compactness > 0.0,
-            "loop_compactness should gently reward visible loops, got {}",
-            w.loop_compactness
-        );
-        assert!(
-            w.loop_compactness < w.node_overlap,
-            "loop_compactness ({}) must stay below the dominant node_overlap ({})",
-            w.loop_compactness,
-            w.node_overlap
-        );
-
-        // flow_bends nudges toward straight pipes (aligned stocks), a convention
-        // aid: positive but well below the dominant family.
-        assert!(
-            w.flow_bends > 0.0,
-            "flow_bends should nudge toward straight flows, got {}",
-            w.flow_bends
-        );
-        assert!(
-            w.flow_bends < w.node_overlap,
-            "flow_bends ({}) must stay below the dominant node_overlap ({})",
-            w.flow_bends,
-            w.node_overlap
-        );
-
-        // loop_straightness is a Goodhart guard for loop curvature: positive but
-        // well below the dominant family.
-        assert!(
-            w.loop_straightness > 0.0,
-            "loop_straightness should guard loop curvature, got {}",
-            w.loop_straightness
-        );
-        assert!(
-            w.loop_straightness < w.node_overlap,
-            "loop_straightness ({}) must stay below the dominant node_overlap ({})",
-            w.loop_straightness,
-            w.node_overlap
-        );
-
-        // `weighted_cost` under the default is still the exact linear combination
-        // (the default is now meaningful, not inert): verify against an explicit
-        // Σ wᵢ·termᵢ over a hand-set metrics value.
-        let m = LayoutMetrics {
-            node_overlap: 0.3,
-            node_connector_overlap: 0.1,
-            label_overlap: 0.7,
-            crossings: 2.0,
-            sprawl: 5.0,
-            edge_length_cv: 0.4,
-            aspect_penalty: 1.5,
-            chain_straightness: 0.0,
-            loop_compactness: 0.8,
-            flow_bends: 1.0,
-            loop_straightness: 0.6,
-        };
-        let expected = m.node_overlap * w.node_overlap
-            + m.node_connector_overlap * w.node_connector_overlap
-            + m.label_overlap * w.label_overlap
-            + m.crossings * w.crossings
-            + m.sprawl * w.sprawl
-            + m.edge_length_cv * w.edge_length_cv
-            + m.aspect_penalty * w.aspect_penalty
-            + m.chain_straightness * w.chain_straightness
-            + m.loop_compactness * w.loop_compactness
-            + m.flow_bends * w.flow_bends
-            + m.loop_straightness * w.loop_straightness;
-        assert!(
-            (m.weighted_cost(&w) - expected).abs() < 1e-12,
-            "weighted_cost under the default must equal Σ wᵢ·termᵢ: got {} expected {}",
-            m.weighted_cost(&w),
-            expected
-        );
-    }
-
-    // --- AC1.7: empty / single-element views are all-zero and finite ---
-
-    fn assert_all_finite(m: &LayoutMetrics) {
-        assert!(m.node_overlap.is_finite());
-        assert!(m.node_connector_overlap.is_finite());
-        assert!(m.label_overlap.is_finite());
-        assert!(m.crossings.is_finite());
-        assert!(m.sprawl.is_finite());
-        assert!(m.edge_length_cv.is_finite());
-        assert!(m.aspect_penalty.is_finite());
-        assert!(m.chain_straightness.is_finite());
-        assert!(m.loop_compactness.is_finite());
-        assert!(m.flow_bends.is_finite());
-        assert!(m.loop_straightness.is_finite());
-    }
-
-    fn assert_all_zero(m: &LayoutMetrics) {
-        assert_eq!(m.node_overlap, 0.0);
-        assert_eq!(m.node_connector_overlap, 0.0);
-        assert_eq!(m.label_overlap, 0.0);
-        assert_eq!(m.crossings, 0.0);
-        assert_eq!(m.sprawl, 0.0);
-        assert_eq!(m.edge_length_cv, 0.0);
-        assert_eq!(m.aspect_penalty, 0.0);
-        assert_eq!(m.chain_straightness, 0.0);
-        assert_eq!(m.loop_compactness, 0.0);
-        assert_eq!(m.flow_bends, 0.0);
-        assert_eq!(m.loop_straightness, 0.0);
-    }
-
-    #[test]
-    fn test_empty_view_all_zero_finite() {
-        let view = make_view(vec![]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_all_finite(&m);
-        assert_all_zero(&m);
-    }
-
-    #[test]
-    fn test_single_element_view_all_zero_finite() {
-        let view = make_view(vec![aux(1, "only", 100.0, 100.0)]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_all_finite(&m);
-        // A single node has no overlaps, no connectors, and a degenerate (zero
-        // short-side? no -- a real box) bounding box. Its aspect ratio is the
-        // single aux box's own ar, which for a square-ish aux box is ~1 (inside
-        // the band), so aspect_penalty is 0; all connector terms are 0.
-        assert_eq!(m.node_overlap, 0.0);
-        assert_eq!(m.node_connector_overlap, 0.0);
-        assert_eq!(m.crossings, 0.0);
-        assert_eq!(m.sprawl, 0.0);
-        assert_eq!(m.edge_length_cv, 0.0);
-    }
-
-    // --- AC1.8 (scoped): scale invariance under uniform coordinate scaling ---
-    //
-    // SCOPING (correction to the AC1.8 plan note, 2026-05-22): the plan listed
-    // `node_connector_overlap`, `crossings`, `edge_length_cv`, and
-    // `aspect_penalty` as scale-free. After implementing the metric against the
-    // ACTUAL renderer geometry (the design's load-bearing invariant: metrics
-    // are computed on the same geometry the renderer draws), only `crossings`
-    // is exactly scale-invariant -- and even then only for crossings that lie
-    // INTERIOR to both connectors, away from the fixed-size node boundaries the
-    // polylines are clipped to (a crossing grazing a node boundary near a
-    // segment endpoint can flip; see the detailed note at the assertion below).
-    // This fixture's crossing is at the center of the square the two links form,
-    // squarely in that interior regime. The reason the other terms are not
-    // exactly invariant is the same fixed-pixel element geometry the plan
-    // already cites for node_overlap/label_overlap/sprawl, and it propagates
-    // further than the plan anticipated:
-    //
-    //   * Connectors are clipped to fixed-radius element boundaries, so a
-    //     straight link's drawn length is `s*center_dist - r_from - r_to`
-    //     (AFFINE in `s`, not linear). Hence `edge_length_cv = stddev/mean` of
-    //     those affine lengths is only ASYMPTOTICALLY invariant (the fixed
-    //     offset shrinks relative to the scaled spread), not exactly.
-    //   * `node_connector_overlap` divides an inside-fixed-box overlap length
-    //     (which does NOT scale) by total connector length (which does), so it
-    //     shrinks like ~1/s -- scale-SENSITIVE, like `sprawl`.
-    //   * The view bounding box is `union(fixed boxes around scaled centers)`,
-    //     so its width/height are each `s*span + fixed_box_size`; the aspect
-    //     ratio is therefore only asymptotically invariant.
-    //
-    // The principled resolution keeps renderer-faithful geometry (the whole
-    // point of the phase) and accepts that only the topological `crossings`
-    // term is exactly scale-invariant. This test asserts that exactly, and
-    // additionally pins the documented scale-SENSITIVITY of
-    // `node_connector_overlap` (clean ~1/s) so the scoping is non-vacuous. The
-    // mismatch with the plan's term list is surfaced in the executor report and
-    // tracked for the calibration phase.
-    //
-    // The fixture has zero node-overlap and zero label-overlap so those
-    // scale-sensitive area terms are trivially 0 before and after scaling.
-    #[test]
-    fn test_scale_invariance_of_scale_free_terms() {
-        // A small connected, well-separated view: three auxes and two stocks,
-        // far enough apart that there is no node-overlap and no label-overlap,
-        // with two straight links (one of which passes through a non-incident
-        // node so node_connector_overlap is nonzero and meaningful).
-        let view = make_view(vec![
-            aux(1, "a", 0.0, 0.0),
-            aux(2, "b", 400.0, 0.0),
-            stock(3, "s", 200.0, 0.0), // on the a->b line: nonzero conn overlap
-            aux(4, "c", 0.0, 300.0),
-            stock(5, "t", 400.0, 320.0),
-            straight_link(10, 1, 2), // passes through stock #3
-            straight_link(11, 4, 5),
-        ]);
-
-        let base = compute_layout_metrics(&view, &cfg());
-        // Sanity: the fixture must have zero node/label overlap (so the
-        // scale-sensitive area terms are trivially scale-equal) and a nonzero
-        // conn-overlap (so the documented scale-SENSITIVITY check is
-        // non-vacuous).
-        assert_eq!(base.node_overlap, 0.0, "fixture must have no node overlap");
-        assert_eq!(
-            base.label_overlap, 0.0,
-            "fixture must have no label overlap"
-        );
-        assert!(
-            base.node_connector_overlap > 0.0,
-            "fixture must have a connector through a non-incident node"
-        );
-
-        let s = 3.0;
-        let scaled = compute_layout_metrics(&scale_view(&view, s), &cfg());
-
-        // The one exactly scale-invariant term here: edge crossings.
-        //
-        // Crossings are NOT *universally* scale-invariant. A crossing is counted
-        // on the drawn polylines, which are clipped to the same fixed-pixel node
-        // boxes (the connector endpoints sit on element boundaries that do not
-        // scale). A crossing that merely grazes a node boundary near a segment
-        // endpoint can therefore appear or disappear under uniform scale.
-        // Crossings that lie comfortably INTERIOR to both connectors (away from
-        // those fixed-size boundaries) are exactly preserved, because the
-        // interior of each polyline is an exact affine image of itself under
-        // uniform scale and an intersection of two segments is invariant under a
-        // shared affine map. This fixture's crossing is at the center of the
-        // square the two links form -- maximally far from every node box -- so
-        // it is squarely in the scale-invariant interior regime and the count is
-        // preserved exactly.
-        assert!(
-            (scaled.crossings - base.crossings).abs() < 1e-9,
-            "crossings not scale-invariant: {} vs {}",
-            scaled.crossings,
-            base.crossings
-        );
-
-        // Documented scale-SENSITIVITY of node_connector_overlap: with
-        // fixed-size node boxes, scaling the coordinates by `s` leaves the
-        // inside-box overlap length essentially unchanged (the box and the
-        // line's center crossing are fixed) while total connector length grows
-        // with `s`, so the ratio strictly DECREASES under up-scaling. (It does
-        // not drop by exactly 1/s because the denominator -- connector length
-        // clipped to fixed-radius element boundaries -- is affine in `s`, not
-        // linear; we assert the robust direction rather than a brittle factor.)
-        assert!(
-            scaled.node_connector_overlap < base.node_connector_overlap,
-            "node_connector_overlap should DROP under up-scaling (fixed boxes): \
-             scaled {} should be < base {}",
-            scaled.node_connector_overlap,
-            base.node_connector_overlap
-        );
-    }
-
-    // --- Property test: node_overlap is symmetric under element shuffle ---
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
-
-        /// node_overlap is a sum over unordered element pairs, so it must be
-        /// invariant under any permutation of the element list.
-        #[test]
-        fn prop_node_overlap_shuffle_invariant(
-            // four stocks at small integer-ish coordinates so some overlap and
-            // some don't; coordinates kept modest to stay fast.
-            xs in prop::collection::vec(-50.0f64..50.0, 4),
-            ys in prop::collection::vec(-50.0f64..50.0, 4),
-            perm in prop::sample::subsequence(vec![0usize, 1, 2, 3], 4),
-        ) {
-            let elems: Vec<ViewElement> = (0..4)
-                .map(|i| stock(i as i32 + 1, "n", xs[i], ys[i]))
-                .collect();
-
-            let base = compute_layout_metrics(&make_view(elems.clone()), &cfg());
-
-            // `perm` is a random ordering of [0,1,2,3]; reorder accordingly.
-            let shuffled: Vec<ViewElement> = perm.iter().map(|&i| elems[i].clone()).collect();
-            let other = compute_layout_metrics(&make_view(shuffled), &cfg());
-
-            prop_assert!(
-                (base.node_overlap - other.node_overlap).abs() < 1e-9,
-                "node_overlap changed under shuffle: {} vs {}",
-                base.node_overlap,
-                other.node_overlap
-            );
-        }
-    }
-
-    // --- loop_compactness (isoperimetric loop quality) ---
-
-    /// The center of a node's bare shape box (which is symmetric about the
-    /// element position, so this is the element center). Mirrors the centers the
-    /// metric uses to build each loop polygon.
-    fn shape_center(e: &ViewElement) -> Point {
-        let r = node_shape_box(e).unwrap();
-        Point {
-            x: (r.left + r.right) / 2.0,
-            y: (r.top + r.bottom) / 2.0,
-        }
-    }
-
-    /// Hand-computed isoperimetric penalty `1 - Q` for a polygon over the given
-    /// centers in order (shoelace area, summed-edge perimeter, Q clamped to
-    /// [0,1]). The test's independent oracle for `loop_compactness`.
-    fn expected_loop_penalty(centers: &[Point]) -> f64 {
-        let n = centers.len();
-        let mut area2 = 0.0;
-        let mut perim = 0.0;
-        for i in 0..n {
-            let a = centers[i];
-            let b = centers[(i + 1) % n];
-            area2 += a.x * b.y - b.x * a.y;
-            let dx = b.x - a.x;
-            let dy = b.y - a.y;
-            perim += (dx * dx + dy * dy).sqrt();
-        }
-        let area = area2.abs() / 2.0;
-        let q = (4.0 * std::f64::consts::PI * area / (perim * perim)).clamp(0.0, 1.0);
-        1.0 - q
-    }
-
-    #[test]
-    fn test_loop_compactness_circle_loop_near_zero() {
-        // Eight stocks placed on a circle of radius 300, wired into a directed
-        // 8-cycle by links 1->2->...->8->1. A well-spread loop reads as a clean
-        // circle, so its isoperimetric quotient Q is close to 1 and the penalty
-        // (1 - Q) is small.
-        let n: i32 = 8;
-        let radius = 300.0;
-        let mut elements: Vec<ViewElement> = Vec::new();
-        let mut centers: Vec<Point> = Vec::new();
-        for i in 0..n {
-            let theta = 2.0 * std::f64::consts::PI * f64::from(i) / f64::from(n);
-            let x = radius * theta.cos();
-            let y = radius * theta.sin();
-            let e = stock(i + 1, "n", x, y);
-            centers.push(shape_center(&e));
-            elements.push(e);
-        }
-        for i in 0..n {
-            let from = i + 1;
-            let to = (i + 1) % n + 1;
-            elements.push(straight_link(100 + i, from, to));
-        }
-        let view = make_view(elements);
-        let m = compute_layout_metrics(&view, &cfg());
-
-        let expected = expected_loop_penalty(&centers);
-        assert!(
-            (m.loop_compactness - expected).abs() < 1e-9,
-            "loop_compactness {} != hand-computed penalty {}",
-            m.loop_compactness,
-            expected
-        );
-        // A regular octagon's penalty is ~0.05 -- "near 0" (a clean circle).
-        assert!(
-            m.loop_compactness < 0.1,
-            "a well-spread circular loop should score near 0, got {}",
-            m.loop_compactness
-        );
-    }
-
-    #[test]
-    fn test_loop_compactness_collapsed_loop_higher() {
-        // The SAME directed 8-cycle, but the nodes are squished onto a nearly
-        // straight line (a collapsed/collinear loop). The polygon area shrinks
-        // toward zero while the perimeter stays large, so Q -> 0 and the penalty
-        // (1 - Q) -> 1: clearly higher than the circular placement.
-        let n: i32 = 8;
-        let mut elements: Vec<ViewElement> = Vec::new();
-        let mut centers: Vec<Point> = Vec::new();
-        for i in 0..n {
-            // Spread along x, with a tiny alternating y wobble so the polygon is
-            // non-degenerate (nonzero perimeter) but nearly collinear.
-            let x = f64::from(i) * 100.0;
-            let y = if i % 2 == 0 { 0.0 } else { 1.0 };
-            let e = stock(i + 1, "n", x, y);
-            centers.push(shape_center(&e));
-            elements.push(e);
-        }
-        for i in 0..n {
-            let from = i + 1;
-            let to = (i + 1) % n + 1;
-            elements.push(straight_link(100 + i, from, to));
-        }
-        let view = make_view(elements);
-        let m = compute_layout_metrics(&view, &cfg());
-
-        let expected = expected_loop_penalty(&centers);
-        assert!(
-            (m.loop_compactness - expected).abs() < 1e-9,
-            "loop_compactness {} != hand-computed penalty {}",
-            m.loop_compactness,
-            expected
-        );
-        // A nearly-collinear loop scores near 1 (squished).
-        assert!(
-            m.loop_compactness > 0.9,
-            "a collapsed/collinear loop should score near 1, got {}",
-            m.loop_compactness
-        );
-    }
-
-    #[test]
-    fn test_loop_compactness_no_cycle_is_zero() {
-        // A pure chain a -> b -> c (no feedback) has no directed cycle, so there
-        // is nothing to score: loop_compactness == 0.0.
-        let view = make_view(vec![
-            aux(1, "a", 0.0, 0.0),
-            aux(2, "b", 200.0, 0.0),
-            aux(3, "c", 400.0, 0.0),
-            straight_link(10, 1, 2),
-            straight_link(11, 2, 3),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_eq!(m.loop_compactness, 0.0);
-    }
-
-    // --- loop_straightness (loop connectors drawn as visible curves) ---
-
-    /// A square 4-node loop wired with STRAIGHT links scores high
-    /// loop_straightness: the loop's causal connectors are drawn as flat chords,
-    /// so the loop reads as a zig-zag, not a circle.
-    #[test]
-    fn test_loop_straightness_straight_loop_is_high() {
-        let view = make_view(vec![
-            aux(1, "a", 0.0, 0.0),
-            aux(2, "b", 300.0, 0.0),
-            aux(3, "c", 300.0, 300.0),
-            aux(4, "d", 0.0, 300.0),
-            straight_link(11, 1, 2),
-            straight_link(12, 2, 3),
-            straight_link(13, 3, 4),
-            straight_link(14, 4, 1),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert!(
-            m.loop_straightness > 0.9,
-            "a loop drawn with straight chords should score near 1, got {}",
-            m.loop_straightness
-        );
-    }
-
-    /// The SAME square loop wired with ARC links that bow well outward scores
-    /// near zero: every loop connector is drawn as a visible curve.
-    #[test]
-    fn test_loop_straightness_curved_loop_is_low() {
-        // 45deg takeoff arcs bow ~0.2 (a quarter-circle), above the target bow.
-        let view = make_view(vec![
-            aux(1, "a", 0.0, 0.0),
-            aux(2, "b", 300.0, 0.0),
-            aux(3, "c", 300.0, 300.0),
-            aux(4, "d", 0.0, 300.0),
-            arc_link(11, 1, 2, 45.0),
-            arc_link(12, 2, 3, 45.0),
-            arc_link(13, 3, 4, 45.0),
-            arc_link(14, 4, 1, 45.0),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert!(
-            m.loop_straightness < m.loop_compactness.max(0.5),
-            "a curved loop should score lower loop_straightness than a straight one"
-        );
-        assert!(
-            m.loop_straightness < 0.5,
-            "a loop drawn with well-bowed arcs should score low, got {}",
-            m.loop_straightness
-        );
-    }
-
-    /// A pure chain (no cycle) has no loop connector, so loop_straightness is 0.
-    #[test]
-    fn test_loop_straightness_no_loop_is_zero() {
-        let view = make_view(vec![
-            aux(1, "a", 0.0, 0.0),
-            aux(2, "b", 200.0, 0.0),
-            aux(3, "c", 400.0, 0.0),
-            straight_link(10, 1, 2),
-            straight_link(11, 2, 3),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_eq!(m.loop_straightness, 0.0);
-    }
-
-    #[test]
-    fn test_loop_compactness_two_node_mutual_pair_is_zero() {
-        // A 2-node mutual pair (a -> b -> a) is a cycle, but two points form no
-        // polygon (fewer than 3 distinct nodes), so it contributes nothing.
-        let view = make_view(vec![
-            aux(1, "a", 0.0, 0.0),
-            aux(2, "b", 200.0, 0.0),
-            straight_link(10, 1, 2),
-            straight_link(11, 2, 1),
-        ]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert_eq!(m.loop_compactness, 0.0);
-    }
-
-    #[test]
-    fn test_loop_compactness_flow_feedback_path_is_a_cycle() {
-        // A stock--flow--stock feedback path must enter the loop graph: stock #1
-        // and stock #2 connected by flow #3 (so #1 -> #3 -> #2), plus a link
-        // #2 -> #1 closing the loop. The cycle is {#1, #3, #2}: three distinct
-        // positioned nodes -> a real polygon -> a positive penalty.
-        let s1 = stock(1, "a", 0.0, 0.0);
-        let s2 = stock(2, "b", 300.0, 0.0);
-        let f = flow_between(3, "f", 150.0, 200.0, 1, 2);
-        let link = straight_link(10, 2, 1);
-        let view = make_view(vec![s1, s2, f, link]);
-        let m = compute_layout_metrics(&view, &cfg());
-        assert!(
-            m.loop_compactness > 0.0,
-            "a stock--flow--stock feedback path must form a scored loop, got {}",
-            m.loop_compactness
-        );
-    }
-
-    /// A stock--flow--stock loop whose flow has an extra pipe point placed far
-    /// from the valve, plus a closing link. The flow valve sits at `valve`; an
-    /// interior pipe point at `bend` (between the two attached endpoints) bends
-    /// the drawn pipe. `loop_compactness` must score the loop on the flow's
-    /// VALVE (its visual center), NOT on `flow_shape_bounds`' pipe-extent bbox
-    /// center, so the result must depend only on `valve` -- never on `bend`.
-    fn bent_flow_loop_view(valve: Point, bend: Point) -> datamodel::StockFlow {
-        let s1 = stock(1, "a", 0.0, 0.0);
-        let s2 = stock(2, "b", 300.0, 0.0);
-        let f = ViewElement::Flow(view_element::Flow {
-            name: "f".to_string(),
-            uid: 3,
-            x: valve.x,
-            y: valve.y,
-            label_side: LabelSide::Bottom,
-            points: vec![
-                view_element::FlowPoint {
-                    x: 0.0,
-                    y: 0.0,
-                    attached_to_uid: Some(1),
-                },
-                // An interior pipe point that bends the drawn pipe and stretches
-                // `flow_shape_bounds`' bbox, but is NOT the valve.
-                view_element::FlowPoint {
-                    x: bend.x,
-                    y: bend.y,
-                    attached_to_uid: None,
-                },
-                view_element::FlowPoint {
-                    x: 300.0,
-                    y: 0.0,
-                    attached_to_uid: Some(2),
-                },
-            ],
-            compat: None,
-            label_compat: None,
-        });
-        let link = straight_link(10, 2, 1);
-        make_view(vec![s1, s2, f, link])
-    }
-
-    #[test]
-    fn test_loop_compactness_scored_on_flow_valve_not_pipe_extent() {
-        // The loop vertex for a flow must be its VALVE (the renderer's visual
-        // center), not the center of `flow_shape_bounds` (which unions the valve
-        // box with every pipe point). Extending the pipe with a far interior
-        // point moves the pipe-extent bbox center but leaves the valve fixed, so
-        // `loop_compactness` -- which scores the feedback-loop polygon -- must be
-        // UNCHANGED. On the buggy (shape-box-midpoint) implementation it changes.
-        let valve = Point { x: 150.0, y: 200.0 };
-
-        // A pipe bend near the valve vs. one stretched far away. The valve is
-        // identical in both, so the loop polygon (stock--valve--stock) is too.
-        let near = compute_layout_metrics(
-            &bent_flow_loop_view(valve, Point { x: 150.0, y: 210.0 }),
-            &cfg(),
-        );
-        let far = compute_layout_metrics(
-            &bent_flow_loop_view(
-                valve,
-                Point {
-                    x: 150.0,
-                    y: 2000.0,
-                },
-            ),
-            &cfg(),
-        );
-
-        assert!(
-            near.loop_compactness > 0.0,
-            "fixture must form a real (positive-penalty) loop, got {}",
-            near.loop_compactness
-        );
-        assert!(
-            (near.loop_compactness - far.loop_compactness).abs() < 1e-12,
-            "loop_compactness must score the flow VALVE, not the pipe-extent bbox \
-             center: stretching the pipe changed it from {} to {}",
-            near.loop_compactness,
-            far.loop_compactness
-        );
-
-        // Non-vacuous guard: MOVING the valve (with the same pipe bend) DOES
-        // change the loop polygon, so the metric is not trivially constant.
-        let moved_valve = compute_layout_metrics(
-            &bent_flow_loop_view(Point { x: 150.0, y: 400.0 }, Point { x: 150.0, y: 210.0 }),
-            &cfg(),
-        );
-        assert!(
-            (near.loop_compactness - moved_valve.loop_compactness).abs() > 1e-9,
-            "moving the valve must change loop_compactness (test is not trivially \
-             constant): {} vs {}",
-            near.loop_compactness,
-            moved_valve.loop_compactness
-        );
-    }
-
-    #[test]
-    fn test_loop_compactness_deterministic_under_shuffle() {
-        // loop_compactness is a mean over cycles, each computed from node-box
-        // centers in cycle order. It must be invariant to the order elements
-        // appear in the view's element list.
-        let n: i32 = 6;
-        let radius = 250.0;
-        let mut elements: Vec<ViewElement> = Vec::new();
-        for i in 0..n {
-            let theta = 2.0 * std::f64::consts::PI * f64::from(i) / f64::from(n);
-            elements.push(stock(
-                i + 1,
-                "n",
-                radius * theta.cos(),
-                radius * theta.sin(),
-            ));
-        }
-        for i in 0..n {
-            let from = i + 1;
-            let to = (i + 1) % n + 1;
-            elements.push(straight_link(100 + i, from, to));
-        }
-        let base = compute_layout_metrics(&make_view(elements.clone()), &cfg());
-
-        // Reverse the element order (links before nodes, nodes reversed); the
-        // graph and its cycles are unchanged.
-        let mut shuffled = elements.clone();
-        shuffled.reverse();
-        let other = compute_layout_metrics(&make_view(shuffled), &cfg());
-
-        assert!(
-            (base.loop_compactness - other.loop_compactness).abs() < 1e-12,
-            "loop_compactness changed under element shuffle: {} vs {}",
-            base.loop_compactness,
-            other.loop_compactness
-        );
-        assert!(base.loop_compactness > 0.0);
-    }
-
-    // --- AC5.2: human-vs-auto reference-pair ordering under the committed weights ---
-    //
-    // The committed `MetricWeights::default()` must agree with the user's visual
-    // taste: on the agreed reference pairs the SHIPPED, hand-authored ("human")
-    // layout must score a lower `weighted_cost` than a machine-generated
-    // ("auto") layout of the SAME model. This is the objective validation of the
-    // calibration (Phase 4, AC5.2): if the metric and the weights did not agree
-    // with human taste on an obvious pair, the metric or the pair would be wrong.
-    //
-    // Construction (b) -- "human view vs generated layout" (design glossary): the
-    // four `default_projects` models each ship a hand-authored main view. We
-    // score that as-loaded view (human) and a fixed-seed `generate_layout_with_config`
-    // layout (auto) of the same model, and assert `human < auto`.
-    //
-    // Determinism + budget: layout is deterministic per seed (fix #633), so ONE
-    // fixed seed (not `generate_best_layout`'s multi-seed search) makes the test
-    // reproducible AND fast. The four default_projects are small (<= 42
-    // elements), so a single layout generation each is well under the per-test
-    // budget.
-    //
-    // Anchors: reliability, fishbanks, population, dp(logistic-growth). These all
-    // flip the right way under the committed weights (verified during
-    // calibration). `sir` is deliberately NOT a human<auto anchor -- its shipped
-    // reference genuinely obscures more labels than the auto layout, so the
-    // metric correctly prefers the auto; that direction is pinned separately by
-    // `test_sir_auto_beats_reference_under_default_weights` so the asymmetry is
-    // documented rather than silently dropped.
-
-    /// A fixed annealing seed for the auto layout. Any single fixed seed makes the
-    /// test deterministic; 42 matches the convention used elsewhere in the layout
-    /// config.
-    const REF_PAIR_SEED: u64 = 42;
-
-    /// Load a `default_projects` XMILE model by directory name, resolving the path
-    /// against `CARGO_MANIFEST_DIR` (= `src/simlin-engine`) like the layout
-    /// integration tests. Panics with a clear message on any I/O or parse failure
-    /// (a missing fixture is a test-environment bug, not a metric result).
-    fn load_default_project(dir: &str) -> datamodel::Project {
-        let path = format!(
-            "{}/../../default_projects/{}/model.xmile",
-            env!("CARGO_MANIFEST_DIR"),
-            dir
-        );
-        let file =
-            std::fs::File::open(&path).unwrap_or_else(|e| panic!("failed to open {path}: {e}"));
-        let mut reader = std::io::BufReader::new(file);
-        crate::compat::open_xmile(&mut reader)
-            .unwrap_or_else(|e| panic!("failed to parse {path}: {e:?}"))
-    }
-
-    /// The model's as-loaded, hand-authored main `StockFlow` view (the "human"
-    /// reference). Panics if the model has no such view -- every chosen anchor
-    /// ships one, so its absence is a fixture regression.
-    fn human_view(project: &datamodel::Project) -> datamodel::StockFlow {
-        let model = project
-            .get_model("main")
-            .expect("anchor model must have a 'main' model");
-        match model.views.first() {
-            Some(datamodel::View::StockFlow(sf)) if !sf.elements.is_empty() => sf.clone(),
-            _ => panic!("anchor model must ship a non-empty hand-authored main view"),
-        }
-    }
-
-    /// `weighted_cost` of the shipped human layout under the committed default
-    /// weights.
-    fn human_cost(project: &datamodel::Project) -> f64 {
-        let view = human_view(project);
-        compute_layout_metrics(&view, &LayoutConfig::default())
-            .weighted_cost(&MetricWeights::default())
-    }
-
-    /// `weighted_cost` of a single fixed-seed generated layout under the committed
-    /// default weights. Deterministic per seed, so the score is reproducible.
-    fn auto_cost(project: &datamodel::Project) -> f64 {
-        let cfg = LayoutConfig {
-            annealing_random_seed: REF_PAIR_SEED,
-            ..LayoutConfig::default()
-        };
-        let view = crate::layout::generate_layout_with_config(project, "main", cfg.clone(), None)
-            .expect("auto layout generation must succeed for the anchor model");
-        compute_layout_metrics(&view, &cfg).weighted_cost(&MetricWeights::default())
-    }
-
-    /// Assert the human reference beats the auto layout for one anchor model,
-    /// naming the model and both costs on failure (so a calibration regression is
-    /// immediately legible).
-    fn assert_human_beats_auto(dir: &str) {
-        let project = load_default_project(dir);
-        let human = human_cost(&project);
-        let auto = auto_cost(&project);
-        assert!(
-            human < auto,
-            "reference pair {dir}: expected human_cost ({human}) < auto_cost ({auto}) \
-             under MetricWeights::default()"
-        );
-    }
-
-    #[test]
-    fn test_reference_pair_reliability_human_beats_auto() {
-        assert_human_beats_auto("reliability");
-    }
-
-    #[test]
-    fn test_reference_pair_fishbanks_human_beats_auto() {
-        assert_human_beats_auto("fishbanks");
-    }
-
-    // Population is a MARGINAL taste anchor: under the committed default weights
-    // its human cost (~0.0521) beats auto (~0.0533) by only ~2.3%, far thinner
-    // than the other anchors (reliability ~8.5%, fishbanks ~12%,
-    // logistic-growth ~58%). The layout is deterministic per seed, so the
-    // assertion is not flaky -- but if it ever fails it should be read as
-    // "population sits near the boundary" rather than necessarily a real metric
-    // regression. The robust signal lives in reliability/fishbanks/logistic-growth.
-    #[test]
-    fn test_reference_pair_population_human_beats_auto() {
-        assert_human_beats_auto("population");
-    }
-
-    #[test]
-    fn test_reference_pair_dp_logistic_growth_human_beats_auto() {
-        assert_human_beats_auto("logistic-growth");
-    }
-
-    #[test]
-    fn test_sir_auto_beats_reference_under_default_weights() {
-        // The documented NON-anchor: SIR's shipped reference obscures more labels
-        // than the auto layout, so the metric correctly prefers the auto. This
-        // pins that direction so the asymmetry (why SIR is excluded from the
-        // human<auto anchors) is recorded rather than silently assumed.
-        let path = format!(
-            "{}/../../test/test-models/samples/SIR/SIR.stmx",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let file =
-            std::fs::File::open(&path).unwrap_or_else(|e| panic!("failed to open {path}: {e}"));
-        let mut reader = std::io::BufReader::new(file);
-        let project = crate::compat::open_xmile(&mut reader)
-            .unwrap_or_else(|e| panic!("failed to parse {path}: {e:?}"));
-
-        let human = human_cost(&project);
-        let auto = auto_cost(&project);
-        assert!(
-            auto < human,
-            "sir is a documented non-anchor: expected auto_cost ({auto}) < human_cost ({human}) \
-             under MetricWeights::default() (its reference obscures more labels than the auto)"
-        );
-    }
-}
+#[path = "metrics_tests.rs"]
+mod tests;

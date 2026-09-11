@@ -1930,10 +1930,11 @@ fn test_incremental_new_side_flow_valve_on_pipe() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_incremental_add_second_side_flow_redistributes_offsets() {
+fn test_incremental_add_second_side_flow_takes_its_own_face() {
     // Start with: stock_a -> chain_flow -> stock_b, stock_a -> waste_a -> cloud
-    // Then add waste_b. Both waste_a and waste_b should have distinct offsets
-    // on the bottom face (1/3 and 2/3, not both at 0.5).
+    // Then add waste_b. waste_a keeps its bottom face untouched; waste_b takes
+    // the free top face instead of squeezing onto the bottom face beside it,
+    // where the two valves would overlap.
     let initial_model = datamodel::Model {
         name: TEST_MODEL.to_string(),
         sim_specs: None,
@@ -2093,25 +2094,26 @@ fn test_incremental_add_second_side_flow_redistributes_offsets() {
         })
         .expect("waste_b in new view");
 
-    // Both flows should have distinct x-positions (different offsets on bottom face)
-    let attach_a_x = new_waste_a.points[0].x;
-    let attach_b_x = new_waste_b.points[0].x;
-    assert!(
-        (attach_a_x - attach_b_x).abs() > 1.0,
-        "waste_a attach x ({}) and waste_b attach x ({}) should differ after redistribution",
-        attach_a_x,
-        attach_b_x,
+    // waste_a is untouched: same pipe, same valve.
+    assert_eq!(
+        new_waste_a.points, old_waste_a.points,
+        "waste_a must keep its pipe when a sibling is added"
     );
+    assert!((new_waste_a.x - old_waste_a.x).abs() < 1e-9);
+    assert!((new_waste_a.y - old_waste_a.y).abs() < 1e-9);
 
-    // waste_a (alphabetically first) should be at offset 1/3, not 0.5 anymore.
-    // With stock_width=45, the expected attach for 1/3 is stock_x - 22.5 + 45 * 1/3 = stock_x - 7.5
-    let config = LayoutConfig::default();
-    let expected_a_x = new_stock_a.x - config.stock_width / 2.0 + config.stock_width * (1.0 / 3.0);
+    // waste_b leaves from the top face, on the opposite side of the stock.
     assert!(
-        (attach_a_x - expected_a_x).abs() < 1.0,
-        "waste_a should be at 1/3 offset ({}) but attach x is ({})",
-        expected_a_x,
-        attach_a_x,
+        new_waste_b.y < new_stock_a.y - 5.0,
+        "waste_b valve y ({}) should be above stock_a y ({})",
+        new_waste_b.y,
+        new_stock_a.y,
+    );
+    let valve_gap =
+        ((new_waste_a.x - new_waste_b.x).powi(2) + (new_waste_a.y - new_waste_b.y).powi(2)).sqrt();
+    assert!(
+        valve_gap > 2.0 * crate::diagram::constants::AUX_RADIUS,
+        "the two valves must not overlap: {valve_gap}"
     );
 }
 
@@ -2550,11 +2552,12 @@ fn test_incremental_chain_flow_seeded_between_stocks() {
 
 #[test]
 fn test_incremental_redistribute_preserves_visual_order() {
-    // Construct a view where waste_b is visually LEFT of waste_a on the
-    // bottom face (non-alphabetical order). Adding waste_c should not
-    // swap waste_a and waste_b.
+    // Three side outflows beside a chain flow: waste_a and waste_c share the
+    // bottom face (waste_b holds the top). Construct a view where waste_c is
+    // visually LEFT of waste_a (non-alphabetical order). Adding waste_d, which
+    // reclassifies every flow on the stock, must not swap waste_a and waste_c.
 
-    // First, build an initial model with chain + waste_a + waste_b
+    // First, build an initial model with chain + waste_a + waste_b + waste_c
     let initial_model = datamodel::Model {
         name: TEST_MODEL.to_string(),
         sim_specs: None,
@@ -2569,6 +2572,7 @@ fn test_incremental_redistribute_preserves_visual_order() {
                     "chain_flow".to_string(),
                     "waste_a".to_string(),
                     "waste_b".to_string(),
+                    "waste_c".to_string(),
                 ],
                 compat: datamodel::Compat::default(),
                 ai_state: None,
@@ -2615,6 +2619,16 @@ fn test_incremental_redistribute_preserves_visual_order() {
                 ai_state: None,
                 uid: None,
             }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_c".to_string(),
+                equation: datamodel::Equation::Scalar("1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
         ],
         views: Vec::new(),
         loop_metadata: Vec::new(),
@@ -2624,8 +2638,8 @@ fn test_incremental_redistribute_preserves_visual_order() {
     let initial_project = test_project(initial_model);
     let base_view = generate_layout(&initial_project, TEST_MODEL, None).expect("base layout");
 
-    // Manually swap waste_a and waste_b attachment points to create
-    // non-alphabetical positional ordering (waste_b to the left).
+    // Manually swap waste_a and waste_c attachment points to create
+    // non-alphabetical positional ordering (waste_c to the left).
     let mut swapped_view = base_view.clone();
     let wa_attach_x = swapped_view
         .elements
@@ -2637,30 +2651,30 @@ fn test_incremental_redistribute_preserves_visual_order() {
             _ => None,
         })
         .expect("waste_a attach x");
-    let wb_attach_x = swapped_view
+    let wc_attach_x = swapped_view
         .elements
         .iter()
         .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_b" => {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
                 f.points.first().map(|p| p.x)
             }
             _ => None,
         })
-        .expect("waste_b attach x");
+        .expect("waste_c attach x");
 
     // Swap the x positions of waste_a and waste_b (valve and pipe points)
     for elem in &mut swapped_view.elements {
         match elem {
             ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => {
-                f.x += wb_attach_x - wa_attach_x;
+                f.x += wc_attach_x - wa_attach_x;
                 for pt in &mut f.points {
-                    pt.x += wb_attach_x - wa_attach_x;
+                    pt.x += wc_attach_x - wa_attach_x;
                 }
             }
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_b" => {
-                f.x += wa_attach_x - wb_attach_x;
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
+                f.x += wa_attach_x - wc_attach_x;
                 for pt in &mut f.points {
-                    pt.x += wa_attach_x - wb_attach_x;
+                    pt.x += wa_attach_x - wc_attach_x;
                 }
             }
             _ => {}
@@ -2678,37 +2692,37 @@ fn test_incremental_redistribute_preserves_visual_order() {
             _ => None,
         })
         .unwrap();
-    let swapped_wb_x = swapped_view
+    let swapped_wc_x = swapped_view
         .elements
         .iter()
         .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_b" => {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
                 f.points.first().map(|p| p.x)
             }
             _ => None,
         })
         .unwrap();
     assert!(
-        swapped_wb_x < swapped_wa_x,
-        "precondition: waste_b ({}) should be left of waste_a ({})",
-        swapped_wb_x,
+        swapped_wc_x < swapped_wa_x,
+        "precondition: waste_c ({}) should be left of waste_a ({})",
+        swapped_wc_x,
         swapped_wa_x,
     );
 
-    // Now add waste_c
+    // Now add waste_d
     let mut patched_project = initial_project.clone();
     let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
     for var in &mut model.variables {
         if let datamodel::Variable::Stock(s) = var
             && s.ident == "stock_a"
         {
-            s.outflows.push("waste_c".to_string());
+            s.outflows.push("waste_d".to_string());
         }
     }
     model
         .variables
         .push(datamodel::Variable::Flow(datamodel::Flow {
-            ident: "waste_c".to_string(),
+            ident: "waste_d".to_string(),
             equation: datamodel::Equation::Scalar("1".to_string()),
             documentation: String::new(),
             units: None,
@@ -2722,7 +2736,7 @@ fn test_incremental_redistribute_preserves_visual_order() {
         name: TEST_MODEL.to_string(),
         ops: vec![
             crate::patch::ModelOperation::UpsertFlow(datamodel::Flow {
-                ident: "waste_c".to_string(),
+                ident: "waste_d".to_string(),
                 equation: datamodel::Equation::Scalar("1".to_string()),
                 documentation: String::new(),
                 units: None,
@@ -2739,6 +2753,7 @@ fn test_incremental_redistribute_preserves_visual_order() {
                     "waste_a".to_string(),
                     "waste_b".to_string(),
                     "waste_c".to_string(),
+                    "waste_d".to_string(),
                 ],
             },
         ],
@@ -2747,7 +2762,7 @@ fn test_incremental_redistribute_preserves_visual_order() {
     let new_view = incremental_layout(&swapped_view, &patched_project, TEST_MODEL, &patch, None)
         .expect("incremental layout");
 
-    // After redistribution, waste_b should still be to the left of waste_a
+    // After redistribution, waste_c should still be to the left of waste_a
     let new_wa_x = new_view
         .elements
         .iter()
@@ -2758,21 +2773,21 @@ fn test_incremental_redistribute_preserves_visual_order() {
             _ => None,
         })
         .expect("waste_a in new view");
-    let new_wb_x = new_view
+    let new_wc_x = new_view
         .elements
         .iter()
         .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_b" => {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
                 f.points.first().map(|p| p.x)
             }
             _ => None,
         })
-        .expect("waste_b in new view");
+        .expect("waste_c in new view");
 
     assert!(
-        new_wb_x < new_wa_x,
-        "waste_b ({}) should remain left of waste_a ({}) after adding waste_c",
-        new_wb_x,
+        new_wc_x < new_wa_x,
+        "waste_c ({}) should remain left of waste_a ({}) after adding waste_d",
+        new_wc_x,
         new_wa_x,
     );
 }
@@ -2904,8 +2919,9 @@ fn test_incremental_delete_flow_without_update_stock_flows() {
 
 #[test]
 fn test_layout_two_horizontal_cloud_outflows_spaced() {
-    // Stock with 2 cloud outflows and no chain flow -- both go Right
-    // but should be at different y positions.
+    // Stock with 2 cloud outflows and no chain flow: the first leaves the
+    // right face, the second drops out of the bottom face, so the valves
+    // do not collide.
     let model = datamodel::Model {
         name: TEST_MODEL.to_string(),
         sim_specs: None,
@@ -2953,15 +2969,19 @@ fn test_layout_two_horizontal_cloud_outflows_spaced() {
     let f1 = find_flow(&result, "f1").expect("f1");
     let f2 = find_flow(&result, "f2").expect("f2");
 
-    // Both should be to the right of the stock (horizontal)
     let stock = find_stock(&result, "a").expect("stock a");
-    assert!(f1.x > stock.x, "f1 should be right of stock");
-    assert!(f2.x > stock.x, "f2 should be right of stock");
+    assert!(
+        f1.x > stock.x + 5.0 && (f1.y - stock.y).abs() < 1.0,
+        "f1 should leave the right face"
+    );
+    assert!(
+        f2.y > stock.y + 5.0 && (f2.x - stock.x).abs() < 1.0,
+        "f2 should leave the bottom face"
+    );
 
-    // Their y-positions should differ (distributed along right edge)
     let dist = ((f1.x - f2.x).powi(2) + (f1.y - f2.y).powi(2)).sqrt();
     assert!(
-        dist > 1.0,
+        dist > 2.0 * crate::diagram::constants::AUX_RADIUS,
         "f1 ({}, {}) and f2 ({}, {}) should not overlap (dist={})",
         f1.x,
         f1.y,

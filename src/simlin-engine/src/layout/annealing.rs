@@ -49,13 +49,21 @@ pub struct FlowTemplate {
 /// Segments sharing an endpoint (same from_node or to_node) are NOT considered crossing.
 /// Parallel/collinear segments are NOT considered crossing.
 pub fn do_segments_intersect(s1: &LineSegment, s2: &LineSegment) -> bool {
+    segment_intersection(s1, s2).is_some()
+}
+
+/// The point where two segments cross, under the crossing rules of
+/// [`do_segments_intersect`] (the one owner of those rules): `None` for
+/// segments sharing an endpoint node, parallel or collinear segments, and
+/// segments whose lines meet outside either span.
+pub fn segment_intersection(s1: &LineSegment, s2: &LineSegment) -> Option<Position> {
     // Adjacent edges (sharing any endpoint node) don't count as crossing
     if s1.from_node == s2.from_node
         || s1.from_node == s2.to_node
         || s1.to_node == s2.from_node
         || s1.to_node == s2.to_node
     {
-        return false;
+        return None;
     }
 
     // Direction vectors for each segment
@@ -65,7 +73,7 @@ pub fn do_segments_intersect(s1: &LineSegment, s2: &LineSegment) -> bool {
     // Cross product of direction vectors gives the denominator
     let denom = d1.cross_2d(d2);
     if denom.abs() < 1e-10 {
-        return false; // Parallel or collinear
+        return None; // Parallel or collinear
     }
 
     // Vector from s1.start to s2.start
@@ -76,7 +84,8 @@ pub fn do_segments_intersect(s1: &LineSegment, s2: &LineSegment) -> bool {
     let u = w.cross_2d(d1) / denom;
 
     // Segments intersect if both parameters are in [0, 1]
-    (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u))
+        .then(|| Position::new(s1.start.x + t * d1.x, s1.start.y + t * d1.y))
 }
 
 /// Count the number of edge crossings among a set of line segments.
