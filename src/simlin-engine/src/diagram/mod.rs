@@ -8,6 +8,7 @@ pub(crate) mod connector;
 pub mod constants;
 pub(crate) mod elements;
 pub(crate) mod flow;
+pub(crate) mod flow_geometry;
 pub(crate) mod label;
 mod path;
 mod render;

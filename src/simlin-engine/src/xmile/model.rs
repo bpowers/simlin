@@ -511,7 +511,10 @@ impl From<Model> for datamodel::Model {
             .map(|v| {
                 let mut v = v;
                 v.normalize(&model);
-                datamodel::View::from(v)
+                let mut view = datamodel::View::from(v);
+                let datamodel::View::StockFlow(sf) = &mut view;
+                crate::diagram::flow_geometry::normalize_flow_geometry(&mut sf.elements);
+                view
             })
             .collect();
         let groups: Vec<datamodel::ModelGroup> = model

@@ -13,9 +13,7 @@ use crate::datamodel::{Rect, ViewElement};
 use crate::xmile::model::Model;
 use crate::xmile::variables::Var;
 use crate::xmile::view_element::LinkEnd;
-use crate::xmile::{
-    STOCK_HEIGHT, STOCK_WIDTH, ToXml, XmlWriter, write_tag_end, write_tag_start_with_attrs,
-};
+use crate::xmile::{ToXml, XmlWriter, write_tag_end, write_tag_start_with_attrs};
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Copy, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -45,8 +43,8 @@ pub mod view_element {
     use crate::datamodel::StockFlow;
     use crate::datamodel::view_element::LinkShape;
     use crate::xmile::{
-        STOCK_HEIGHT, STOCK_WIDTH, ToXml, XmlWriter, write_tag, write_tag_end, write_tag_start,
-        write_tag_start_with_attrs, write_tag_text, write_tag_with_attrs,
+        ToXml, XmlWriter, write_tag, write_tag_end, write_tag_start, write_tag_start_with_attrs,
+        write_tag_text, write_tag_with_attrs,
     };
     use quick_xml::Writer;
     use serde::{Deserialize, Deserializer, Serialize};
@@ -347,21 +345,6 @@ pub mod view_element {
         }
     }
 
-    impl Stock {
-        pub fn is_right(&self, pt: &Point) -> bool {
-            pt.x > self.x + STOCK_WIDTH / 2.0 && (pt.y - self.y).abs() < STOCK_HEIGHT / 2.0
-        }
-        pub fn is_left(&self, pt: &Point) -> bool {
-            pt.x < self.x + STOCK_WIDTH / 2.0 && (pt.y - self.y).abs() < STOCK_HEIGHT / 2.0
-        }
-        pub fn is_above(&self, pt: &Point) -> bool {
-            pt.y < self.y + STOCK_HEIGHT / 2.0 && (pt.x - self.x).abs() < STOCK_WIDTH / 2.0
-        }
-        pub fn is_below(&self, pt: &Point) -> bool {
-            pt.y > self.y + STOCK_HEIGHT / 2.0 && (pt.x - self.x).abs() < STOCK_WIDTH / 2.0
-        }
-    }
-
     impl From<Stock> for datamodel::view_element::Stock {
         fn from(v: Stock) -> Self {
             let x = match v.width {
@@ -512,49 +495,24 @@ pub mod view_element {
         }
     }
 
-    fn is_horizontal(points: &[datamodel::view_element::FlowPoint]) -> bool {
-        if points.len() > 2 {
-            return false;
-        }
-        let start = &points[0];
-        let end = &points[1];
-        let dx = (end.x - start.x).abs();
-        let dy = (end.y - start.y).abs();
-
-        dx > dy
-    }
-
+    /// A plain field conversion: the pipe's geometry is brought to the
+    /// flow invariants over the whole converted view
+    /// (`diagram::flow_geometry::normalize_flow_geometry`), where the stocks'
+    /// centers and the clouds are known.
     impl From<Flow> for datamodel::view_element::Flow {
         fn from(v: Flow) -> Self {
-            // position of the flow valve
-            let mut cx = v.x;
-            let mut cy = v.y;
-            let mut points: Vec<_> = v
+            let points: Vec<_> = v
                 .points
                 .unwrap_or_default()
                 .points
                 .into_iter()
                 .map(datamodel::view_element::FlowPoint::from)
                 .collect();
-            // Vensim imports don't actually enforce horizontal or vertical lines are straight
-            if points.len() == 2 {
-                if is_horizontal(&points) {
-                    let new_y = (points[0].y + points[1].y) / 2.0;
-                    points[0].y = new_y;
-                    points[1].y = new_y;
-                    cy = new_y;
-                } else {
-                    let new_x = (points[0].x + points[1].x) / 2.0;
-                    points[0].x = new_x;
-                    points[1].x = new_x;
-                    cx = new_x;
-                }
-            }
             datamodel::view_element::Flow {
                 name: v.name,
                 uid: v.uid.unwrap_or(-1),
-                x: cx,
-                y: cy,
+                x: v.x,
+                y: v.y,
                 label_side: datamodel::view_element::LabelSide::from(
                     v.label_side.unwrap_or(LabelSide::Bottom),
                 ),
@@ -611,96 +569,6 @@ pub mod view_element {
             let actual = datamodel::view_element::Flow::from(Flow::from(expected.clone()));
             assert_eq!(expected, actual);
         }
-
-        let input_v = datamodel::view_element::Flow {
-            name: "from_vensim_v".to_string(),
-            uid: 76,
-            x: 2.0,
-            y: 5.0,
-            label_side: datamodel::view_element::LabelSide::Bottom,
-            points: vec![
-                datamodel::view_element::FlowPoint {
-                    x: 1.0,
-                    y: 1.0,
-                    attached_to_uid: None,
-                },
-                datamodel::view_element::FlowPoint {
-                    x: 3.0,
-                    y: 9.0,
-                    attached_to_uid: None,
-                },
-            ],
-            compat: None,
-            label_compat: None,
-        };
-        let expected_v = datamodel::view_element::Flow {
-            name: "from_vensim_v".to_string(),
-            uid: 76,
-            x: 2.0,
-            y: 5.0,
-            label_side: datamodel::view_element::LabelSide::Bottom,
-            points: vec![
-                datamodel::view_element::FlowPoint {
-                    x: 2.0,
-                    y: 1.0,
-                    attached_to_uid: None,
-                },
-                datamodel::view_element::FlowPoint {
-                    x: 2.0,
-                    y: 9.0,
-                    attached_to_uid: None,
-                },
-            ],
-            compat: None,
-            label_compat: None,
-        };
-        let actual_v = datamodel::view_element::Flow::from(Flow::from(input_v));
-        assert_eq!(expected_v, actual_v);
-
-        let input_h = datamodel::view_element::Flow {
-            name: "from_vensim_h".to_string(),
-            uid: 76,
-            x: 5.0,
-            y: 2.0,
-            label_side: datamodel::view_element::LabelSide::Bottom,
-            points: vec![
-                datamodel::view_element::FlowPoint {
-                    x: 1.0,
-                    y: 1.0,
-                    attached_to_uid: None,
-                },
-                datamodel::view_element::FlowPoint {
-                    x: 9.0,
-                    y: 3.0,
-                    attached_to_uid: None,
-                },
-            ],
-            compat: None,
-            label_compat: None,
-        };
-        let expected_h = datamodel::view_element::Flow {
-            name: "from_vensim_h".to_string(),
-            uid: 76,
-            x: 5.0,
-            y: 2.0,
-            label_side: datamodel::view_element::LabelSide::Bottom,
-            points: vec![
-                datamodel::view_element::FlowPoint {
-                    x: 1.0,
-                    y: 2.0,
-                    attached_to_uid: None,
-                },
-                datamodel::view_element::FlowPoint {
-                    x: 9.0,
-                    y: 2.0,
-                    attached_to_uid: None,
-                },
-            ],
-            compat: None,
-            label_compat: None,
-        };
-        let actual_h = datamodel::view_element::Flow::from(Flow::from(input_h));
-        assert_eq!(expected_h, actual_h);
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -2058,63 +1926,20 @@ impl View {
         self.objects.append(&mut clouds);
     }
 
-    fn fixup_flow_takeoffs(&mut self) {
-        let stocks: HashMap<_, _> = self
-            .objects
-            .iter()
-            .filter(|vo| matches!(vo, ViewObject::Stock(_)))
-            .cloned()
-            .map(|vo| (vo.uid().unwrap(), vo))
-            .collect();
-        let maybe_fixup_takeoff = |pt1: &mut view_element::Point, pt2: &view_element::Point| {
-            if let Some(source_uid) = pt1.uid
-                && let Some(ViewObject::Stock(stock)) = stocks.get(&source_uid)
-            {
-                if stock.is_right(pt2) {
-                    pt1.x = stock.x + STOCK_WIDTH / 2.0;
-                } else if stock.is_left(pt2) {
-                    pt1.x = stock.x - STOCK_WIDTH / 2.0;
-                } else if stock.is_above(pt2) {
-                    pt1.y = stock.y - STOCK_HEIGHT / 2.0;
-                } else if stock.is_below(pt2) {
-                    pt1.y = stock.y + STOCK_HEIGHT / 2.0;
-                }
-            }
-        };
-
-        for view_object in self.objects.iter_mut() {
-            if let ViewObject::Flow(flow) = view_object {
-                if flow.points.is_none() || flow.points.as_ref().unwrap().points.len() != 2 {
-                    continue;
-                }
-                let source_point = flow
-                    .points
-                    .as_ref()
-                    .unwrap()
-                    .points
-                    .first()
-                    .unwrap()
-                    .clone();
-                let sink_point = flow.points.as_ref().unwrap().points.last().unwrap().clone();
-                maybe_fixup_takeoff(
-                    flow.points.as_mut().unwrap().points.first_mut().unwrap(),
-                    &sink_point,
-                );
-                maybe_fixup_takeoff(
-                    flow.points.as_mut().unwrap().points.last_mut().unwrap(),
-                    &source_point,
-                );
-            }
-        }
-    }
-
+    /// Assign uids and attach every flow endpoint to its stock (from the
+    /// model's inflow/outflow lists) or to a newly created cloud.
+    ///
+    /// This is the view's topology only. Geometry is fixed after conversion
+    /// to the datamodel (`diagram::flow_geometry::normalize_flow_geometry`):
+    /// a stock written with `width`/`height` carries its top-left corner here
+    /// and only becomes a center in that conversion, so no face can be judged
+    /// on these objects.
     pub(crate) fn normalize(&mut self, model: &Model) {
         if self.kind.unwrap_or(ViewType::StockFlow) != ViewType::StockFlow {
             return;
         }
         let uid_map = self.assign_uids();
         self.fixup_clouds(model, &uid_map);
-        self.fixup_flow_takeoffs();
     }
 }
 
@@ -2296,6 +2121,10 @@ fn test_view_roundtrip() {
         assert_eq!(expected, actual);
     }
 }
+
+#[cfg(test)]
+#[path = "views_flow_geometry_tests.rs"]
+mod flow_geometry_tests;
 
 /// The `<view zoom="...">` unit contract. XMILE spec section 5.1
 /// (`docs/reference/xmile-v1.0.html`, "Views"): "Views may also have an
