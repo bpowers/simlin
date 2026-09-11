@@ -417,11 +417,91 @@ pub struct Stock {
     pub equation: Equation,
     pub documentation: String,
     pub units: Option<String>,
+    /// The inflows as the producer wrote them. A list can repeat a flow (a
+    /// file with a repeated `<inflow>` is stored as written); every reader
+    /// that decides what the model does reads the set through
+    /// [`distinct_stock_flows`].
     pub inflows: Vec<String>,
+    /// The outflows as the producer wrote them; see `inflows`.
     pub outflows: Vec<String>,
     pub ai_state: Option<AiState>,
     pub uid: Option<i32>,
     pub compat: Compat,
+}
+
+/// A stock's inflow or outflow list as the set the engine integrates, and the
+/// flows the list repeats.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Default)]
+pub struct DistinctFlows {
+    /// Each flow's first occurrence, judged after canonicalization, in list
+    /// order, spelled as written.
+    pub flows: Vec<String>,
+    /// The canonical name of every flow the list names more than once, each
+    /// once, in the order their first repeat appears.
+    pub repeated: Vec<String>,
+}
+
+/// The one statement of how the engine reads a stock's inflow or outflow list:
+/// each flow counts once, at its first occurrence. The readers that decide
+/// what the model does -- the salsa sync (`db::sync`), the special-stock
+/// build before expansion (`queue_compile::build_compiled`), the layout's
+/// stock-flow metadata and the MDL writer's `INTEG` -- read the set through
+/// this, and the sync keeps `repeated` so a model whose list repeats a flow is
+/// warned about (`ErrorCode::RepeatedStockFlow`), since taking the set changes
+/// what a naive sum over the list would integrate.
+///
+/// This is the engine's rule, unverified against Stella or Vensim. XMILE 1.0
+/// section 4.2 (`docs/reference/xmile-v1.0.html`, "Stocks") never addresses a
+/// repeated tag; its whole statement on the list is "The set of inflows
+/// and/or outflows is NOT REQUIRED. If there are multiple inflows, they appear
+/// with multiple tags in inflow-priority order (if the order of inflow to the
+/// stock is important)." Calling the list a set, with each flow holding one
+/// priority, is what the rule leans on.
+pub fn distinct_stock_flows(flows: &[String]) -> DistinctFlows {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut result = DistinctFlows::default();
+    for flow in flows {
+        let canonical = canonicalize(flow).into_owned();
+        if seen.contains(&canonical) {
+            if !result.repeated.contains(&canonical) {
+                result.repeated.push(canonical);
+            }
+        } else {
+            seen.insert(canonical);
+            result.flows.push(flow.clone());
+        }
+    }
+    result
+}
+
+impl Project {
+    /// The project with every stock's inflow and outflow lists replaced by
+    /// their sets ([`distinct_stock_flows`]), borrowed when no list repeats a
+    /// flow. For a reader that walks the datamodel's lists wholesale, taken
+    /// before any of it reads them.
+    pub fn with_distinct_stock_flows(&self) -> std::borrow::Cow<'_, Project> {
+        let repeats = |flows: &[String]| !distinct_stock_flows(flows).repeated.is_empty();
+        let any_repeat = self.models.iter().any(|m| {
+            m.variables.iter().any(|v| match v {
+                Variable::Stock(s) => repeats(&s.inflows) || repeats(&s.outflows),
+                _ => false,
+            })
+        });
+        if !any_repeat {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut project = self.clone();
+        for model in &mut project.models {
+            for var in &mut model.variables {
+                if let Variable::Stock(s) = var {
+                    s.inflows = distinct_stock_flows(&s.inflows).flows;
+                    s.outflows = distinct_stock_flows(&s.outflows).flows;
+                }
+            }
+        }
+        std::borrow::Cow::Owned(project)
+    }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]

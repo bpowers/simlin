@@ -3259,13 +3259,15 @@ pub fn compute_metadata(
                     uid_to_ident.insert(uid, stock_ident.clone());
                 }
 
-                let inflows: Vec<String> = stock
-                    .inflows
+                // The sets the model integrates: a repeated entry is one flow
+                // with one pipe (`datamodel::distinct_stock_flows`).
+                let inflows: Vec<String> = datamodel::distinct_stock_flows(&stock.inflows)
+                    .flows
                     .iter()
                     .map(|f| canonicalize(f).into_owned())
                     .collect();
-                let outflows: Vec<String> = stock
-                    .outflows
+                let outflows: Vec<String> = datamodel::distinct_stock_flows(&stock.outflows)
+                    .flows
                     .iter()
                     .map(|f| canonicalize(f).into_owned())
                     .collect();

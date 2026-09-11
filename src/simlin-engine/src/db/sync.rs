@@ -401,6 +401,8 @@ struct SourceVariableFields {
     gf: Option<datamodel::GraphicalFunction>,
     inflows: Vec<String>,
     outflows: Vec<String>,
+    repeated_inflows: Vec<String>,
+    repeated_outflows: Vec<String>,
     module_refs: Vec<datamodel::ModuleReference>,
     /// A `Module` variable's referenced target model; empty for every other
     /// kind (NOT the owning model, which is `owner_model`).
@@ -414,11 +416,15 @@ struct SourceVariableFields {
 
 impl SourceVariableFields {
     fn from_datamodel(var: &datamodel::Variable, owner_model: &str) -> Self {
+        // The sets the compiler integrates, and what the lists repeat, for the
+        // `RepeatedStockFlow` advisory. Every salsa reader of a stock's flows
+        // reads these inputs, so this is where the set is taken for them.
         let (inflows, outflows) = match var {
-            datamodel::Variable::Stock(s) => {
-                (distinct_flows(&s.inflows), distinct_flows(&s.outflows))
-            }
-            _ => (Vec::new(), Vec::new()),
+            datamodel::Variable::Stock(s) => (
+                datamodel::distinct_stock_flows(&s.inflows),
+                datamodel::distinct_stock_flows(&s.outflows),
+            ),
+            _ => Default::default(),
         };
         let (module_refs, referenced_model_name) = match var {
             datamodel::Variable::Module(m) => (m.references.clone(), m.model_name.clone()),
@@ -437,8 +443,10 @@ impl SourceVariableFields {
                 datamodel::Variable::Aux(a) => a.gf.clone(),
                 _ => None,
             },
-            inflows,
-            outflows,
+            inflows: inflows.flows,
+            outflows: outflows.flows,
+            repeated_inflows: inflows.repeated,
+            repeated_outflows: outflows.repeated,
             module_refs,
             referenced_model_name,
             owner_model: owner_model.to_string(),
@@ -459,26 +467,6 @@ impl SourceVariableFields {
     }
 }
 
-/// A stock's inflow or outflow list as the salsa inputs carry it: each flow's
-/// first occurrence, judged by canonical name, in list order.
-///
-/// The list is a set whose order is priority (XMILE 1.0 section 4.2,
-/// `docs/reference/xmile-v1.0.html`: "the set of inflows and/or outflows",
-/// multiple inflows "in inflow-priority order"), so a repeated entry names no
-/// second member, and the first occurrence keeps the priority the file gave
-/// the flow. The compiler sums each list into the stock's update, so a repeat
-/// that reached it would integrate the flow twice. A file can carry a repeat
-/// (the readers store what it says), which is why this extraction -- the one
-/// every sync reads -- is where the set is taken.
-fn distinct_flows(flows: &[String]) -> Vec<String> {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    flows
-        .iter()
-        .filter(|flow| seen.insert(crate::canonicalize(flow).into_owned()))
-        .cloned()
-        .collect()
-}
-
 fn source_variable_from_datamodel(
     db: &SimlinDb,
     var: &datamodel::Variable,
@@ -494,6 +482,8 @@ fn source_variable_from_datamodel(
         f.gf,
         f.inflows,
         f.outflows,
+        f.repeated_inflows,
+        f.repeated_outflows,
         f.module_refs,
         f.referenced_model_name,
         f.owner_model,
@@ -546,6 +536,12 @@ fn update_source_variable(
     }
     if *source_var.outflows(&*db) != f.outflows {
         source_var.set_outflows(db).to(f.outflows);
+    }
+    if *source_var.repeated_inflows(&*db) != f.repeated_inflows {
+        source_var.set_repeated_inflows(db).to(f.repeated_inflows);
+    }
+    if *source_var.repeated_outflows(&*db) != f.repeated_outflows {
+        source_var.set_repeated_outflows(db).to(f.repeated_outflows);
     }
     if *source_var.module_refs(&*db) != f.module_refs {
         source_var.set_module_refs(db).to(f.module_refs);

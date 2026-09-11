@@ -1967,14 +1967,18 @@ fn write_stock_variable(
     ctx: &WriterContext,
     warnings: &mut Vec<ExportWarning>,
 ) {
+    // The sets the engine integrates (`datamodel::distinct_stock_flows`): a
+    // repeat written into the INTEG would make Vensim integrate the flow twice.
+    let inflows = datamodel::distinct_stock_flows(&stock.inflows).flows;
+    let outflows = datamodel::distinct_stock_flows(&stock.outflows).flows;
     let mut net_flow = String::new();
-    for (i, inflow) in stock.inflows.iter().enumerate() {
+    for (i, inflow) in inflows.iter().enumerate() {
         if i > 0 {
             net_flow.push('+');
         }
         net_flow.push_str(&format_mdl_ident(inflow));
     }
-    for outflow in &stock.outflows {
+    for outflow in &outflows {
         net_flow.push('-');
         net_flow.push_str(&format_mdl_ident(outflow));
     }

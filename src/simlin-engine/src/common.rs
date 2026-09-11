@@ -495,6 +495,12 @@ pub enum ErrorCode {
     /// Warning naming the queue, mirroring `ConveyorLtmDegraded`
     /// (docs/design/queues.md §10.5).
     QueueLtmDegraded,
+    /// A stock's inflow or outflow list names one flow more than once. The
+    /// engine integrates each flow once (`datamodel::distinct_stock_flows`,
+    /// the engine's rule, unverified against Stella and Vensim), so the
+    /// simulated model is not a naive sum over the list as written. Emitted
+    /// as a Warning naming the stock and the repeated flows.
+    RepeatedStockFlow,
     /// A conveyor stock is defined in a model that is NOT the main model -- a
     /// module-referenced sub-model, or a model defined but never instantiated.
     /// Conveyor expansion (`conveyor_compile::expand_conveyors`) rewrites only the
@@ -716,6 +722,7 @@ impl fmt::Display for ErrorCode {
             QueueDrivenFlowRead => "queue_driven_flow_read",
             QueueOverflowNotOnQueue => "queue_overflow_not_on_queue",
             QueueLtmDegraded => "queue_ltm_degraded",
+            RepeatedStockFlow => "repeated_stock_flow",
             ConveyorInSubmodelUnsupported => "conveyor_in_submodel_unsupported",
             QueueInSubmodelUnsupported => "queue_in_submodel_unsupported",
             QueueSecondaryOutflowToConveyor => "queue_secondary_outflow_to_conveyor",

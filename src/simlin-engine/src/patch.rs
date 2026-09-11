@@ -179,17 +179,17 @@ fn canonicalize_stock_references(stock: &mut datamodel::Stock) {
 }
 
 /// The stored form of a stock's inflow or outflow list, for every op that sets
-/// one: canonical idents, sorted, each flow once. The list is a set (XMILE 1.0
-/// section 4.2, "the set of inflows and/or outflows"), so `"Flow A"` and
-/// `"flow_a"` are one member, and the compiler sums the list into the stock's
-/// update, where a stored repeat would integrate the flow twice.
+/// one: the set the engine integrates (`datamodel::distinct_stock_flows`, so
+/// `"Flow A"` and `"flow_a"` are one member), as canonical idents, sorted.
+/// Storing the set keeps a patch from writing a repeat the sync would then
+/// have to warn about.
 fn canonical_flow_list(flows: &[String]) -> Vec<String> {
-    let mut list: Vec<String> = flows
+    let mut list: Vec<String> = datamodel::distinct_stock_flows(flows)
+        .flows
         .iter()
         .map(|flow| canonicalize(flow).into_owned())
         .collect();
     list.sort_unstable();
-    list.dedup();
     list
 }
 

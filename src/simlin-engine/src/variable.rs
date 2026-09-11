@@ -1035,6 +1035,10 @@ impl VariableSource<'_> {
     }
 }
 
+/// A borrowed view over a datamodel variable, for the test builders' parses.
+/// It carries a stock's lists as written; production parses read the salsa
+/// inputs (`db::variable_source`), which carry the sets
+/// (`datamodel::distinct_stock_flows`).
 impl<'a> From<&'a datamodel::Variable> for VariableSource<'a> {
     fn from(v: &'a datamodel::Variable) -> Self {
         const NO_NAMES: &[String] = &[];

@@ -231,6 +231,14 @@ pub struct SourceVariable {
     pub inflows: Vec<String>,
     #[returns(ref)]
     pub outflows: Vec<String>,
+    /// The canonical names of the flows the datamodel's inflow list repeats
+    /// (`inflows` holds the set, `datamodel::distinct_stock_flows`), read only
+    /// by the `RepeatedStockFlow` advisory.
+    #[returns(ref)]
+    pub repeated_inflows: Vec<String>,
+    /// As `repeated_inflows`, for the outflow list.
+    #[returns(ref)]
+    pub repeated_outflows: Vec<String>,
     #[returns(ref)]
     pub module_refs: Vec<datamodel::ModuleReference>,
     /// A `Module` variable's referenced target model; empty for every other

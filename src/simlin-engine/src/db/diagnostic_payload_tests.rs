@@ -988,6 +988,22 @@ fn every_warning_family_is_emitted_once_across_revisions() {
             guards: no_guards,
             matches: |d| d.is(DiagnosticCategory::Model, ErrorCode::UnfilledEquation),
         },
+        Family {
+            name: "advisory: a stock list that repeats a flow",
+            child: || {
+                as_child(
+                    TestProject::new("repeat")
+                        .flow("f", "1", None)
+                        .stock("s", "0", &["f", "f"], &[], None)
+                        .build_datamodel(),
+                )
+            },
+            probe: "s",
+            wiring: &[],
+            discovery: false,
+            guards: no_guards,
+            matches: |d| d.is(DiagnosticCategory::Model, ErrorCode::RepeatedStockFlow),
+        },
     ];
 
     /// How many models reach the child, and how.

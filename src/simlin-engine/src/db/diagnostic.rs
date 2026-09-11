@@ -153,6 +153,13 @@ pub fn model_all_diagnostics(
     // failure like a duplicate macro name, not a partial-result advisory.
     emit_duplicate_variable_diagnostics(db, model);
 
+    // A stock whose inflow or outflow list names a flow more than once: the
+    // sync took the set (`datamodel::distinct_stock_flows`), so the model
+    // simulated is not a naive sum over the list the file wrote. An advisory,
+    // not an error -- the set is the engine's reading -- emitted from this
+    // per-model owner, which `collect_all_diagnostics` drains once per model.
+    emit_repeated_stock_flow_warnings(db, model);
+
     let source_vars = model.variables(db);
 
     // Trigger compile_var_fragment for each variable. This is a superset
@@ -390,6 +397,53 @@ fn emit_duplicate_variable_diagnostics(db: &dyn Db, model: SourceModel) {
             error: DiagnosticError::Model(Error::new(
                 ErrorKind::Model,
                 ErrorCode::DuplicateVariable,
+                Some(msg),
+            )),
+        }
+        .accumulate(db);
+    }
+}
+
+/// One `RepeatedStockFlow` `Warning` per stock in `model` whose inflow or
+/// outflow list names a flow more than once, naming the repeated flows.
+/// Stocks are visited in sorted-name order so the rows accumulate
+/// deterministically. Carried as a `Model` error with the specific code, so
+/// the advisory never makes the project look non-simulatable.
+fn emit_repeated_stock_flow_warnings(db: &dyn Db, model: SourceModel) {
+    use crate::common::{ErrorCode, ErrorKind};
+
+    let mut stocks: Vec<&SourceVariable> = model
+        .variables(db)
+        .values()
+        .filter(|sv| !sv.repeated_inflows(db).is_empty() || !sv.repeated_outflows(db).is_empty())
+        .collect();
+    stocks.sort_unstable_by_key(|sv| sv.ident(db));
+
+    let model_name = model.name(db);
+    for sv in stocks {
+        let name = sv.ident(db);
+        let mut lists = Vec::new();
+        for (noun, repeated) in [
+            ("inflow", sv.repeated_inflows(db)),
+            ("outflow", sv.repeated_outflows(db)),
+        ] {
+            if !repeated.is_empty() {
+                let flows: Vec<String> = repeated.iter().map(|f| format!("'{f}'")).collect();
+                lists.push(format!("{noun} list repeats {}", flows.join(", ")));
+            }
+        }
+        let msg = format!(
+            "stock '{name}': its {}; each flow is integrated once",
+            lists.join(" and its ")
+        );
+        Diagnostic {
+            model: model_name.clone(),
+            variable: Some(name.clone()),
+            owner: None,
+            severity: DiagnosticSeverity::Warning,
+            error: DiagnosticError::Model(Error::new(
+                ErrorKind::Model,
+                ErrorCode::RepeatedStockFlow,
                 Some(msg),
             )),
         }
