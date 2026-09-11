@@ -226,3 +226,50 @@ fn a_pipe_whose_model_stock_is_elsewhere_is_routed_to_it() {
     assert_eq!(end_attachment(view, f, &f.points[0]), None);
     assert_every_flow_resolved(&project, "Query_file");
 }
+
+/// Two pipe-carrying copies tie on rank. `thyroid-2008-d.mdl` draws
+/// `T3 absorption` with a valve twice: in `Gut/Dosage` its pipe drains
+/// `Gut T3 dissolved` into nothing, in `THR D&E` it fills `4 Plasma T3` from a
+/// cloud. Each copy reaches one of the two stocks the model links and leaves
+/// the other to a route from its valve; the `THR D&E` copy's valve is the
+/// nearer to the stock it leaves unreached, so it presents the flow and the
+/// other copy becomes an alias.
+#[test]
+fn of_two_pipe_carrying_copies_the_one_nearest_its_unreached_stock_presents_the_flow() {
+    const THYROID: &str =
+        include_str!("../../../../../test/metasd/thyroid-dynamics/thyroid-2008-d.mdl");
+    let project = open_vensim(THYROID).expect("thyroid imports");
+    let view = main_view(&project);
+    let f = flow(view, "T3_absorption");
+    assert_eq!(
+        end_attachment(view, f, &f.points[0]),
+        Some("gut_t3_dissolved".to_string())
+    );
+    assert_eq!(
+        end_attachment(view, f, f.points.last().unwrap()),
+        Some("4_plasma_t3".to_string())
+    );
+    let stock_at = |ident: &str| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Stock(s) if canonicalize(&s.name) == ident => Some((s.x, s.y)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("stock {ident} in view"))
+    };
+    let from_valve = |p: (f64, f64)| (p.0 - f.x).hypot(p.1 - f.y);
+    assert!(
+        from_valve(stock_at("4_plasma_t3")) < from_valve(stock_at("gut_t3_dissolved")),
+        "the THR D&E copy, whose pipe fills 4 Plasma T3, presents the flow: valve ({}, {})",
+        f.x,
+        f.y
+    );
+    assert!(
+        view.elements
+            .iter()
+            .any(|e| matches!(e, ViewElement::Alias(a) if a.alias_of_uid == f.uid)),
+        "the Gut/Dosage copy becomes an alias of the flow"
+    );
+    assert_every_flow_resolved(&project, "thyroid-2008-d");
+}

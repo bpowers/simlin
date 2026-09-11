@@ -623,6 +623,74 @@ fn flow_copy_rank(
     u8::from(links_its_stock)
 }
 
+/// How the third pass of [`associate_variables`] compares the copies of a
+/// flow, best first: the higher `flow_copy_rank`; then the fewer sides whose
+/// model-linked stock the copy's pipe does not reach; then the least total
+/// distance from the copy's valve (a bare label's own position) to the
+/// primary records of those unreached stocks. An unreached side is routed from
+/// the valve to its stock after the views merge (`routes`), so the nearest
+/// copy is the one with the shortest route. `thyroid-2008-d.mdl` draws
+/// `T3 absorption` with a valve twice, each copy's pipe reaching one of the
+/// two stocks the model links: rank alone ties them.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy)]
+struct CopyScore {
+    rank: u8,
+    unreached: usize,
+    distance: f64,
+}
+
+impl CopyScore {
+    fn better_than(&self, other: &CopyScore) -> bool {
+        if self.rank != other.rank {
+            return self.rank > other.rank;
+        }
+        if self.unreached != other.unreached {
+            return self.unreached < other.unreached;
+        }
+        self.distance < other.distance - 1e-9
+    }
+}
+
+fn copy_score(
+    views: &[VensimView],
+    view: &VensimView,
+    var: &VensimVariable,
+    flow_to_valve: &HashMap<i32, i32>,
+    flow_name: &str,
+    symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
+    primary_map: &PrimaryMap,
+) -> CopyScore {
+    let rank = flow_copy_rank(view, var, flow_to_valve, flow_name, symbols);
+    let valve = flow_valve(var, view, flow_to_valve);
+    let at = valve.map_or((var.x, var.y), |v| (v.x, v.y));
+    let ends = resolve_flow_ends(valve, view, flow_name, symbols);
+    let mut unreached = 0;
+    let mut distance = 0.0;
+    for end in [&ends.source, &ends.sink] {
+        let FlowEnd::Stock(name) = end else {
+            continue;
+        };
+        unreached += 1;
+        // Coordinates are comparable across views: `compose_views` has already
+        // laid every view out in the merged diagram's space.
+        let stock_at = primary_map.get(name).and_then(|&(view_idx, uid)| {
+            match views.get(view_idx)?.get(uid) {
+                Some(VensimElement::Variable(v)) => Some((v.x, v.y)),
+                _ => None,
+            }
+        });
+        if let Some((x, y)) = stock_at {
+            distance += f64::from(x - at.0).hypot(f64::from(y - at.1));
+        }
+    }
+    CopyScore {
+        rank,
+        unreached,
+        distance,
+    }
+}
+
 /// Track which view contains the primary definition of each variable.
 pub type PrimaryMap = HashMap<String, (usize, i32)>; // name -> (view_idx, uid)
 
@@ -645,8 +713,10 @@ pub type EffectiveGhosts = std::collections::HashSet<(usize, i32)>;
 /// sketch's primary bit does not follow the pipe: a flow's primary record can
 /// be a bare label while its valve and pipe are drawn on a ghost copy in
 /// another view (`free 6.mdl`, `C-LEARN v77 for Vensim.mdl`). The best-ranked
-/// copy (`flow_copy_rank`) presents the flow, the displaced primary becomes an
-/// effective ghost, and a tie keeps the xmutil primary.
+/// copy (`CopyScore`: rank, then the pipe reaching more of the stocks the model
+/// links, then the valve nearest the stocks it does not reach) presents the
+/// flow, the displaced primary becomes an effective ghost, and an exact tie
+/// keeps the xmutil primary.
 pub fn associate_variables(
     views: &[VensimView],
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
@@ -699,8 +769,8 @@ pub fn associate_variables(
     }
 
     // Third pass: the copy of each flow that presents it.
-    let mut ranks: HashMap<(usize, i32), u8> = HashMap::new();
-    let mut best: HashMap<String, (u8, usize, i32)> = HashMap::new();
+    let mut scores: HashMap<(usize, i32), CopyScore> = HashMap::new();
+    let mut best: HashMap<String, (CopyScore, usize, i32)> = HashMap::new();
     for (view_idx, view) in views.iter().enumerate() {
         let (_, flow_to_valve) = build_attached_valve_flow_maps(view);
         for (uid, elem) in view.iter_with_uids() {
@@ -714,18 +784,33 @@ pub fn associate_variables(
             {
                 continue;
             }
-            let rank = flow_copy_rank(view, var, &flow_to_valve, &canonical, symbols);
-            ranks.insert((view_idx, uid), rank);
-            if best.get(&canonical).is_none_or(|(r, _, _)| rank > *r) {
-                best.insert(canonical, (rank, view_idx, uid));
+            let score = copy_score(
+                views,
+                view,
+                var,
+                &flow_to_valve,
+                &canonical,
+                symbols,
+                &primary_map,
+            );
+            scores.insert((view_idx, uid), score);
+            if best
+                .get(&canonical)
+                .is_none_or(|(b, _, _)| score.better_than(b))
+            {
+                best.insert(canonical, (score, view_idx, uid));
             }
         }
     }
-    for (canonical, (rank, view_idx, uid)) in best {
+    for (canonical, (score, view_idx, uid)) in best {
         let Some(&primary) = primary_map.get(&canonical) else {
             continue;
         };
-        if primary == (view_idx, uid) || rank <= ranks.get(&primary).copied().unwrap_or(0) {
+        if primary == (view_idx, uid)
+            || scores
+                .get(&primary)
+                .is_some_and(|primary_score| !score.better_than(primary_score))
+        {
             continue;
         }
         effective_ghosts.insert(primary);
