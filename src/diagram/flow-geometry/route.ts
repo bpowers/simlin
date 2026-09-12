@@ -177,6 +177,8 @@ interface Search {
   readonly minSource: number;
   readonly minSink: number;
   readonly terminals: Terminals;
+  /** Stocks besides the terminals no segment may pass through (see pathQuality). */
+  readonly obstacles: readonly XY[];
   /** Turns a generated path into the flow's full path (routeEnd prepends or appends a preserved prefix). */
   readonly assemble: (path: XY[]) => XY[];
   /** Candidates a caller refuses outright (a tail folding back over its preserved prefix). */
@@ -224,7 +226,8 @@ function dedupe(values: readonly number[]): number[] {
  * the L the cloud reaches with the least change, and a tail leaves a preserved
  * corner by exactly a minimum riser, so these rank ahead of a pair's midpoint.
  * `pools` follows the midpoint: point coordinates, stub tips, and clearances
- * around each terminal body.
+ * around each terminal and obstacle body (a route can only go around a body
+ * whose clearance is a hold it can take).
  */
 function buildPools(search: Omit<Search, 'pools' | 'pointPools' | 'baseHolds'>): Pick<Search, 'pools' | 'pointPools'> {
   const pool = (axis: Axis): { point: number[]; rest: number[] } => {
@@ -243,12 +246,14 @@ function buildPools(search: Omit<Search, 'pools' | 'pointPools' | 'baseHolds'>):
         }
       }
     }
-    for (const t of [search.terminals.source, search.terminals.sink]) {
-      if (t.kind === 'stock') {
-        const body = stockBody(t.stock);
-        rest.push(axis === 'x' ? body.minX - MIN_SEGMENT : body.minY - MIN_SEGMENT);
-        rest.push(axis === 'x' ? body.maxX + MIN_SEGMENT : body.maxY + MIN_SEGMENT);
-      }
+    const bodies: readonly XY[] = [
+      ...[search.terminals.source, search.terminals.sink].flatMap((t): XY[] => (t.kind === 'stock' ? [t.stock] : [])),
+      ...search.obstacles,
+    ];
+    for (const center of bodies) {
+      const body = stockBody(center);
+      rest.push(axis === 'x' ? body.minX - MIN_SEGMENT : body.minY - MIN_SEGMENT);
+      rest.push(axis === 'x' ? body.maxX + MIN_SEGMENT : body.maxY + MIN_SEGMENT);
     }
     return { point: dedupe(point), rest: dedupe(rest) };
   };
@@ -470,7 +475,7 @@ function emit(search: Search, P: Port, Q: Port, path: XY[], bends: number, out: 
   if (search.baseLastAxis !== undefined && segmentAxisOf(points[n - 2], points[n - 1]) !== search.baseLastAxis) {
     axisChange++;
   }
-  const quality = pathQuality(points, search.terminals);
+  const quality = pathQuality(points, search.terminals, undefined, search.obstacles);
   out.push({
     points,
     bends,
@@ -578,6 +583,7 @@ export function routeBetween(
   base: readonly XY[],
   occupied: readonly XY[],
   detours = true,
+  obstacles: readonly XY[] = [],
 ): XY[] {
   const partial = {
     sources: portsOf(terminals.source, pinned.source, occupied),
@@ -585,6 +591,7 @@ export function routeBetween(
     minSource: MIN_SEGMENT,
     minSink: MIN_SINK_SEGMENT,
     terminals,
+    obstacles,
     assemble: (path: XY[]) => path,
     refuse: () => false,
     ...endAxes(base),
@@ -610,6 +617,11 @@ export interface RouteContext {
    * endpoints on it too before passing them.
    */
   readonly occupied?: readonly XY[];
+  /**
+   * Stocks the route may not pass through although they are not its terminals:
+   * the stocks the flow was attached to when the gesture started.
+   */
+  readonly obstacles?: readonly XY[];
 }
 
 /**
@@ -627,7 +639,14 @@ export function route(source: Terminal, sink: Terminal, ctx: RouteContext): Flow
   }
   const terminals = { source, sink };
   const from = ctx.valveFrom ?? 'source';
-  const points = routeBetween(terminals, { source: false, sink: false }, ctx.flow.points, ctx.occupied ?? []);
+  const points = routeBetween(
+    terminals,
+    { source: false, sink: false },
+    ctx.flow.points,
+    ctx.occupied ?? [],
+    true,
+    ctx.obstacles ?? [],
+  );
   const valve = placeValve(points, from, valveDistance(ctx.flow.points, ctx.flow, from));
   return withGeometry(ctx.flow, points, valve, terminals);
 }
@@ -637,6 +656,12 @@ export interface RouteEndContext {
   readonly fixed: Terminal;
   /** Other flows' endpoints on the terminal stocks, in this frame's coordinates (see RouteContext). */
   readonly occupied?: readonly XY[];
+  /**
+   * Stocks the flow may not pass through although they are not its terminals:
+   * the stock the moving end was attached to when the gesture started, which a
+   * preserved corner on its old face's line would otherwise run straight through.
+   */
+  readonly obstacles?: readonly XY[];
 }
 
 /**
@@ -650,7 +675,8 @@ export interface RouteEndContext {
  * and a tail that grows it is a detour, which releasing to fewer preserved
  * corners replaces. Then k = 0 with the fixed terminal pinned to its base face
  * and offset, and only if that is still invalid or crossing is the flow
- * released to `route`.
+ * released to `route`. Every attempt treats a path through `ctx.obstacles` as it
+ * treats a path through a terminal body.
  *
  * The valve keeps its arc-length distance from the fixed end. A non-finite
  * terminal returns the base flow unchanged.
@@ -663,15 +689,16 @@ export function routeEnd(flow: FlowViewElement, end: FlowEnd, terminal: Terminal
     end === 'source' ? { source: terminal, sink: ctx.fixed } : { source: ctx.fixed, sink: terminal };
   const fixedEnd: FlowEnd = end === 'source' ? 'sink' : 'source';
   const occupied = ctx.occupied ?? [];
+  const obstacles = ctx.obstacles ?? [];
   const base = distinctPath(flow.points) ? normalize(flow.points) : flow.points;
   const acceptable = (points: readonly XY[]): boolean => {
-    const quality = pathQuality(points, terminals);
+    const quality = pathQuality(points, terminals, undefined, obstacles);
     return quality.fault === FAULT_NONE && !quality.crossing && !quality.short;
   };
   let points: XY[] | undefined;
   if (distinctPath(base)) {
     for (let k = Math.max(0, base.length - 3); k >= 1 && points === undefined; k--) {
-      const tail = preservedTail(base, end, k, terminals, occupied);
+      const tail = preservedTail(base, end, k, terminals, occupied, obstacles);
       points = tail !== undefined && acceptable(tail) ? tail : undefined;
     }
   }
@@ -684,19 +711,22 @@ export function routeEnd(flow: FlowViewElement, end: FlowEnd, terminal: Terminal
       base,
       occupied,
       false,
+      obstacles,
     );
-    // Of `acceptable`'s clauses, the crossing one never fires here: a pinned search
-    // generates no detours and at most two bends, so a valid winner is a straight,
-    // L or same-direction Z, monotone in both axes. It leaves the fixed face
-    // outward and enters the moving terminal's face inward, so it stays outside
-    // both bodies. The clause acts on preserved tails ("a tail crossing its stock
-    // is refused even where G6 excuses the crossing" in flow-geometry-route.test.ts).
+    // Of `acceptable`'s clauses, a terminal crossing never fires here: a pinned
+    // search generates no detours and at most two bends, so a valid winner is a
+    // straight, L or same-direction Z, monotone in both axes. It leaves the fixed
+    // face outward and enters the moving terminal's face inward, so it stays
+    // outside both bodies. The clause acts on preserved tails ("a tail crossing
+    // its stock is refused even where G6 excuses the crossing" in
+    // flow-geometry-route.test.ts) and on an obstacle a monotone path can still
+    // pass through, which releases the flow to the full search below.
     if (pinned.length > 0 && acceptable(pinned)) {
       points = pinned;
     }
   }
   if (points === undefined) {
-    points = routeBetween(terminals, { source: false, sink: false }, base, occupied);
+    points = routeBetween(terminals, { source: false, sink: false }, base, occupied, true, obstacles);
   }
   const valve = placeValve(points, fixedEnd, valveDistance(flow.points, flow, fixedEnd));
   return withGeometry(flow, points, valve, terminals);
@@ -708,6 +738,7 @@ function preservedTail(
   k: number,
   terminals: Terminals,
   occupied: readonly XY[],
+  obstacles: readonly XY[],
 ): XY[] | undefined {
   const n = base.length;
   const moving = end === 'source' ? terminals.source : terminals.sink;
@@ -729,6 +760,7 @@ function preservedTail(
       minSource: MIN_SEGMENT,
       minSink: MIN_SINK_SEGMENT,
       terminals,
+      obstacles,
       assemble: (path) => [...prefix.slice(0, k), ...path],
       refuse,
       ...endAxes(base),
@@ -747,6 +779,7 @@ function preservedTail(
       minSource: MIN_SEGMENT,
       minSink: MIN_SEGMENT,
       terminals,
+      obstacles,
       assemble: (path) => [...path, ...prefix.slice(1)],
       refuse,
       ...endAxes(base),
@@ -756,7 +789,9 @@ function preservedTail(
     };
   }
   const points = search({ ...partial, ...buildPools(partial) });
-  return points.length > 0 && pathQuality(points, terminals).fault === FAULT_NONE ? points : undefined;
+  return points.length > 0 && pathQuality(points, terminals, undefined, obstacles).fault === FAULT_NONE
+    ? points
+    : undefined;
 }
 
 /**

@@ -350,6 +350,12 @@ Resolutions made while implementing (the module is `src/diagram/gesture-planner/
   gesture's threshold belongs to `Label`, so the planner applies none to it.
 - Module double-click (drill-in) is classified before `pressesDisabled`: navigation is
   not an edit.
+- No routed segment passes through a stock the flow was attached to in the base view,
+  including one an end has just left (a real-browser repro detached a sink from a
+  stock and kept the old face's line straight through it). Routing takes those stocks
+  as obstacles that rank and fault exactly like terminal bodies.
+- Escape during a live gesture cancels it: the preview returns to the published view
+  and the release commits nothing.
 - A pointercancel or a lost release on a pan settles the viewport it reached.
 - Flows render identically while moving and at rest (no retracted-arrow or hidden-grip
   variants), so the last preview frame equals the committed frame.

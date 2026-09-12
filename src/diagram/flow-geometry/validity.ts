@@ -80,9 +80,17 @@ export interface PathQuality {
 /**
  * Classify a path against its terminals. `stocks` are the view's stocks a free
  * endpoint must not sit inside (G6's cloud clause); the terminal stocks are
- * always checked.
+ * always checked. `obstacles` are stocks no segment may pass through even though
+ * they are not terminals: the stocks the flow was attached to when the gesture
+ * started, which an end may just have left. A path through one ranks and faults
+ * exactly like a path through a terminal body.
  */
-export function pathQuality(points: readonly XY[], terminals: Terminals, stocks?: readonly XY[]): PathQuality {
+export function pathQuality(
+  points: readonly XY[],
+  terminals: Terminals,
+  stocks?: readonly XY[],
+  obstacles?: readonly XY[],
+): PathQuality {
   const n = points.length;
   const structure = { fault: FAULT_STRUCTURE, crossing: false, short: false };
   if (n < 2 || !points.every(isFiniteXY)) {
@@ -126,7 +134,7 @@ export function pathQuality(points: readonly XY[], terminals: Terminals, stocks?
       return structure;
     }
   }
-  const crossing = crossesBodies(points, terminals, stocks);
+  const crossing = crossesBodies(points, terminals, stocks, obstacles);
   let short = false;
   for (let i = 0; i < n - 1 && !short; i++) {
     const minimum = i === n - 2 ? MIN_SINK_SEGMENT : MIN_SEGMENT;
@@ -138,13 +146,19 @@ export function pathQuality(points: readonly XY[], terminals: Terminals, stocks?
   return { fault: crossing && bodiesApart(terminals) ? FAULT_CROSSING : FAULT_NONE, crossing, short };
 }
 
-function crossesBodies(points: readonly XY[], terminals: Terminals, stocks: readonly XY[] | undefined): boolean {
+function crossesBodies(
+  points: readonly XY[],
+  terminals: Terminals,
+  stocks: readonly XY[] | undefined,
+  obstacles: readonly XY[] | undefined,
+): boolean {
   const n = points.length;
-  for (const t of [terminals.source, terminals.sink]) {
-    if (t.kind !== 'stock') {
-      continue;
-    }
-    const body = stockBody(t.stock);
+  const bodies: readonly XY[] = [
+    ...[terminals.source, terminals.sink].flatMap((t): XY[] => (t.kind === 'stock' ? [t.stock] : [])),
+    ...(obstacles ?? []),
+  ];
+  for (const center of bodies) {
+    const body = stockBody(center);
     for (let i = 0; i < n - 1; i++) {
       if (segmentThroughBox(points[i], points[i + 1], body)) {
         return true;
@@ -172,8 +186,15 @@ function crossesBodies(points: readonly XY[], terminals: Terminals, stocks: read
 /**
  * Classify a flow's path against its terminals (G2-G6). The planner uses this to
  * decide whether committing onto a target yields a view that holds the
- * invariants; `stocks` extends G6's cloud clause to the rest of the view.
+ * invariants; `stocks` extends G6's cloud clause to the rest of the view, and
+ * `obstacles` its segment clause to the stocks the flow was attached to when the
+ * gesture started (see pathQuality).
  */
-export function flowFault(flow: FlowViewElement, terminals: Terminals, stocks?: readonly XY[]): RouteFault {
-  return FAULT_NAMES[pathQuality(flow.points, terminals, stocks).fault];
+export function flowFault(
+  flow: FlowViewElement,
+  terminals: Terminals,
+  stocks?: readonly XY[],
+  obstacles?: readonly XY[],
+): RouteFault {
+  return FAULT_NAMES[pathQuality(flow.points, terminals, stocks, obstacles).fault];
 }

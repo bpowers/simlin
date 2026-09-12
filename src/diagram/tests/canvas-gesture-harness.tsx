@@ -506,7 +506,9 @@ export interface CanvasHarness {
    * with it replaces them (a republish carrying sim series or error annotations).
    */
   setProps: (
-    next: Partial<Pick<CanvasProps, 'selection' | 'selectedTool' | 'view' | 'model' | 'token' | 'readOnly'>>,
+    next: Partial<
+      Pick<CanvasProps, 'selection' | 'selectedTool' | 'view' | 'model' | 'token' | 'readOnly' | 'pressesDisabled'>
+    >,
   ) => void;
   /** The view the Canvas currently renders from (after any applied commits). */
   view: () => StockFlowView;
@@ -562,6 +564,7 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
   let currentModel = model;
   let token = opts.token ?? 0;
   let readOnly = opts.readOnly;
+  let pressesDisabled = opts.pressesDisabled;
 
   const buildProps = (): CanvasProps => ({
     embedded: opts.embedded ?? false,
@@ -573,7 +576,7 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
     token,
     selectedTool,
     selection,
-    pressesDisabled: opts.pressesDisabled,
+    pressesDisabled,
     newVariableName: opts.newVariableName,
     ...callbacks,
   });
@@ -619,8 +622,13 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
   const svg = result.container.querySelector('svg') as SVGSVGElement;
 
   const setProps = (
-    next: Partial<Pick<CanvasProps, 'selection' | 'selectedTool' | 'view' | 'model' | 'token' | 'readOnly'>>,
+    next: Partial<
+      Pick<CanvasProps, 'selection' | 'selectedTool' | 'view' | 'model' | 'token' | 'readOnly' | 'pressesDisabled'>
+    >,
   ): void => {
+    if ('pressesDisabled' in next) {
+      pressesDisabled = next.pressesDisabled;
+    }
     if ('selection' in next && next.selection !== undefined) {
       selection = next.selection;
     }

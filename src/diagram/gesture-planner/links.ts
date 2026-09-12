@@ -82,8 +82,10 @@ export function planCreateLink(input: PlanInput, fromUid: UID): GesturePlan {
     multiPoint: undefined,
     isStraight: false,
     polarity: undefined,
-    x: 0,
-    y: 0,
+    // A link has no position; NaN is what the datamodel reads it back as, so the
+    // pending view and the landed one agree.
+    x: NaN,
+    y: NaN,
     isZeroRadius: false,
     ident: undefined,
   };

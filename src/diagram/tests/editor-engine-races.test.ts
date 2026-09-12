@@ -75,7 +75,7 @@ import { Project as EngineProject, type JsonProject, type JsonProjectPatch } fro
 
 import { ProjectController } from '../project-controller';
 import type { CanvasProps } from '../drawing/Canvas';
-import { planGesture, type Gesture } from '../gesture-planner';
+import { planGesture, sameGeometry, type Gesture } from '../gesture-planner';
 import { describeWithEngine, loadEngine, mainModel, type EngineModule } from './support/engine';
 import {
   checkKindAgreement,
@@ -1441,5 +1441,64 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
     persisted = await rawElement(7);
     expect(persisted.element.labelSide).toBeUndefined();
     expect((await rawElement(1)).element.labelSide).toBe('top');
+  });
+
+  it('ED4: a drawn flow keeps the details panel closed until it is named, landed or not', async () => {
+    const m = await mount(projectJson(baseModel()));
+    select([1]);
+    act(() => {
+      canvasProps!.onShowVariableDetails();
+    });
+    expect(document.querySelector('.unitsEditor')).not.toBeNull();
+    act(() => {
+      release({ kind: 'createFlow', from: 'empty' }, { x: 600, y: 500 }, { x: 720, y: 500 });
+    });
+    expect(canvasProps!.selection.size).toBe(1);
+    expect(document.querySelector('.unitsEditor')).toBeNull();
+    await m.settle();
+    expect((await m.engineModel()).variables.get('new_flow')?.type).toBe('flow');
+    expect(document.querySelector('.unitsEditor')).toBeNull();
+  });
+
+  it('ED2: a commit carries its press token, so once another edit moves the token it is refused', async () => {
+    const m = await mount(projectJson(baseModel()));
+    const pressToken = canvasProps!.token;
+    const pressView = canvasProps!.view;
+    // A failing edit rolls back, moving the token; the rendered geometry returns
+    // to what the press saw, so only the token tells the commit is stale.
+    m.armPatchFailure();
+    act(() => {
+      moveLabel(7, 'top');
+    });
+    await m.settle();
+    expect(canvasProps!.token).not.toBe(pressToken);
+    expect(sameGeometry(pressView, canvasProps!.view)).toBe(true);
+
+    const p = canvasProps!;
+    const plan = planGesture({
+      view: pressView,
+      variables: p.model.variables,
+      selection: new Set([1]),
+      gesture: { kind: 'label', uid: 1 },
+      press: { x: 100, y: 60 },
+      current: { x: 100, y: 60 },
+      zoom: 1,
+      pointerType: 'mouse',
+      readOnly: false,
+      names: p.newVariableName!,
+    });
+    expect(plan.commit).toBe('edit');
+    act(() => {
+      p.onCommitGesture({
+        label: plan.label,
+        elements: plan.elements,
+        nextUid: plan.nextUid,
+        selection: plan.selection,
+        token: pressToken,
+        baseView: p.view,
+      });
+    });
+    await m.settle();
+    expect(labelSideOf(await m.engineModel(), 1)).not.toBe('top');
   });
 });

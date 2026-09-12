@@ -13,17 +13,20 @@
 // What this establishes: each gesture's plan at one pointer position, E1 (a
 // click previews and commits nothing), E6 (an invalid drop commits nothing), and
 // that committed geometry holds G1-G8/M3 for these scenes. What it does not:
-// continuity across frames and generated scenes (gesture-planner-fuzz.test.ts),
-// the Canvas rendering the plan and committing it (canvas-gestures-*.test.tsx),
-// or M1/M2 after the engine applies the edit (editor-gestures-engine.test.ts).
+// the same properties over generated scenes (gesture-planner-fuzz.test.ts),
+// continuity between frames (the geometry core's sweeps; nothing here or in the
+// fuzz suite compares consecutive frames), the Canvas rendering the plan and
+// committing it (canvas-gestures-*.test.tsx), or M1/M2 after the engine applies
+// the edit (editor-gestures-engine.test.ts).
 
 import { describe, it, expect } from '@rstest/core';
 
 import type { FlowViewElement, LinkViewElement, UID } from '@simlin/core/datamodel';
 
 import { planGesture, type Gesture, type GesturePlan } from '../gesture-planner';
-import { GESTURE_KINDS } from '../gesture-planner/types';
+import { GESTURE_KINDS, type PressGesture } from '../gesture-planner/types';
 import { StockHeight, StockWidth } from '../drawing/default';
+import { PIPE_SPACING } from '../flow-geometry';
 import { buildEditOps } from '../view-model-sync';
 import {
   aux,
@@ -505,6 +508,201 @@ describe('planGesture audit repros and pinned behaviors', () => {
         }
       });
     }
+  });
+
+  // No routed segment may pass through a stock the flow was attached to when the
+  // gesture started, including one an end has just left. Rows cover each gesture
+  // that routes a flow away from or around such a stock. The scene is the real-
+  // browser repro: births runs from a cloud down and right into Population's left
+  // face, and routeEnd once kept the corner on the old face's line and ran the
+  // detached end straight through Population's body.
+  describe('a routed flow never passes through a stock it was attached to', () => {
+    const births = (): Scene =>
+      scene([
+        stock(1, 'Population', 200, 230),
+        cloud(2, 3, 60, 150),
+        flow(3, 'births', { x: 120, y: 230 }, [
+          [60, 150, 2],
+          [60, 230],
+          [177.5, 230, 1],
+        ]),
+        stock(4, 'Other', 420, 230),
+      ]);
+    // Whether a segment passes through the open interior of the stock at `c`.
+    const through = (points: readonly Pt[], c: Pt): boolean => {
+      const box = {
+        minX: c.x - StockWidth / 2,
+        maxX: c.x + StockWidth / 2,
+        minY: c.y - StockHeight / 2,
+        maxY: c.y + StockHeight / 2,
+      };
+      const e = 1e-6;
+      return points.slice(1).some((b, i) => {
+        const a = points[i];
+        if (Math.abs(a.y - b.y) <= e) {
+          const span = Math.min(Math.max(a.x, b.x), box.maxX) - Math.max(Math.min(a.x, b.x), box.minX);
+          return a.y > box.minY + e && a.y < box.maxY - e && span > e;
+        }
+        const span = Math.min(Math.max(a.y, b.y), box.maxY) - Math.max(Math.min(a.y, b.y), box.minY);
+        return a.x > box.minX + e && a.x < box.maxX - e && span > e;
+      });
+    };
+    const ROWS: ReadonlyArray<{
+      name: string;
+      gesture: PressGesture;
+      selection: number[];
+      press: Pt;
+      current: Pt;
+      /** Where the stock the flow must stay out of sits in the planned frame. */
+      stockAt: Pt;
+      sinkOn?: number;
+    }> = [
+      {
+        name: 'detach: births` sink dragged from Population into empty space beyond it',
+        gesture: { kind: 'flowEndpoint', flow: 3, end: 'sink' },
+        selection: [3],
+        press: { x: 177.5, y: 230 },
+        current: { x: 363, y: 230 },
+        stockAt: { x: 200, y: 230 },
+      },
+      {
+        name: 'reattach: births` sink dropped onto another stock beyond Population',
+        gesture: { kind: 'flowEndpoint', flow: 3, end: 'sink' },
+        selection: [3],
+        press: { x: 177.5, y: 230 },
+        current: { x: 420, y: 230 },
+        stockAt: { x: 200, y: 230 },
+        sinkOn: 4,
+      },
+      {
+        name: 'stock move: Population moved past births` source cloud',
+        gesture: { kind: 'moveSelection' },
+        selection: [1],
+        press: { x: 200, y: 230 },
+        current: { x: -40, y: 230 },
+        stockAt: { x: -40, y: 230 },
+        sinkOn: 1,
+      },
+      {
+        name: 'create: a flow drawn from Population back past its own far side',
+        gesture: { kind: 'createFlow', from: { stock: 1 } },
+        selection: [],
+        press: { x: 215, y: 230 },
+        current: { x: 0, y: 300 },
+        stockAt: { x: 200, y: 230 },
+      },
+      {
+        name: 'offset: births` last segment dragged down within Population`s height',
+        gesture: { kind: 'offsetSegment', flow: 3, segmentIndex: 1 },
+        selection: [3],
+        press: { x: 120, y: 230 },
+        current: { x: 120, y: 242 },
+        stockAt: { x: 200, y: 230 },
+        sinkOn: 1,
+      },
+    ];
+    for (const row of ROWS) {
+      it(row.name, () => {
+        const s = births();
+        const p = planGesture(planInput(s, row.gesture, row.press, row.current, { selection: new Set(row.selection) }));
+        expect(p.commit).toBe('edit');
+        expect(committedReport(s, p)).toBe('');
+        const routed = p.elements.find(
+          (e): e is FlowViewElement => e.type === 'flow' && (e.uid === 3 || e.uid === s.view.nextUid),
+        )!;
+        const f =
+          row.gesture.kind === 'createFlow'
+            ? p.elements.find((e): e is FlowViewElement => e.type === 'flow' && e.uid === s.view.nextUid)!
+            : routed;
+        expect(through(f.points, row.stockAt)).toBe(false);
+        if (row.sinkOn !== undefined) {
+          expect(f.points[f.points.length - 1].attachedToUid).toBe(row.sinkOn);
+        }
+      });
+    }
+  });
+
+  // The slot preference reaches production: a flow newly landing on a stock face
+  // that already holds an endpoint takes a slot at least PIPE_SPACING from it.
+  // Each row asserts the two endpoints really share the face, so the spacing
+  // clause is exercised rather than satisfied by a different face.
+  describe('a flow landing on an occupied face keeps its spacing', () => {
+    // f: A (1) -> B (2) into B's left face center; g: cloud (5) -> cloud (6) left
+    // of B and below f. Routed onto B, g enters the left face; with no occupied
+    // slots it would land on f's endpoint.
+    const occupied = (): Scene =>
+      scene([
+        stock(1, 'A', 100, 100),
+        stock(2, 'B', 400, 100),
+        flow(3, 'f', { x: 250, y: 100 }, [
+          [122.5, 100, 1],
+          [377.5, 100, 2],
+        ]),
+        cloud(5, 4, 300, 130),
+        cloud(6, 4, 340, 130),
+        flow(4, 'g', { x: 320, y: 130 }, [
+          [300, 130, 5],
+          [340, 130, 6],
+        ]),
+      ]);
+    const sinkOf = (p: GesturePlan, uid: number): Pt => {
+      const f = elementOf(p, uid) as FlowViewElement;
+      return f.points[f.points.length - 1];
+    };
+    it('OCC2: a sink dropped onto the stock', () => {
+      const s = occupied();
+      const p = planGesture(
+        planInput(
+          s,
+          { kind: 'flowEndpoint', flow: 4, end: 'sink' },
+          { x: 340, y: 130 },
+          { x: 400, y: 100 },
+          { selection: new Set([4]) },
+        ),
+      );
+      expect(p.commit).toBe('edit');
+      const g = sinkOf(p, 4);
+      expect(g.x).toBe(377.5);
+      expect(Math.abs(g.y - 100)).toBeGreaterThanOrEqual(PIPE_SPACING);
+      expect(committedReport(s, p)).toBe('');
+    });
+    it('OCC3: a flow drawn onto the stock', () => {
+      const s = occupied();
+      const p = planGesture(
+        planInput(s, { kind: 'createFlow', from: 'empty' }, { x: 300, y: 130 }, { x: 400, y: 100 }),
+      );
+      expect(p.commit).toBe('edit');
+      const g = sinkOf(p, s.view.nextUid);
+      expect(g.x).toBe(377.5);
+      expect(Math.abs(g.y - 100)).toBeGreaterThanOrEqual(PIPE_SPACING);
+      expect(committedReport(s, p)).toBe('');
+    });
+    it('OCC1: a moved stock whose two flows come to share a face', () => {
+      // S leaves g1 from its bottom face and g2 from its right face; moved far up
+      // and right, g2 re-routes onto the bottom face g1 already holds.
+      const s = scene([
+        stock(1, 'S', 100, 100),
+        cloud(11, 21, 100, 300),
+        cloud(12, 22, 300, 100),
+        flow(21, 'g1', { x: 100, y: 200 }, [
+          [100, 117.5, 1],
+          [100, 300, 11],
+        ]),
+        flow(22, 'g2', { x: 200, y: 100 }, [
+          [122.5, 100, 1],
+          [300, 100, 12],
+        ]),
+      ]);
+      const p = planGesture(
+        planInput(s, { kind: 'moveSelection' }, { x: 100, y: 100 }, { x: 420, y: -120 }, { selection: new Set([1]) }),
+      );
+      expect(p.commit).toBe('edit');
+      const ends = [21, 22].map((uid) => (elementOf(p, uid) as FlowViewElement).points[0]);
+      const sameFace = Math.abs(ends[0].y - ends[1].y) < 1e-6 || Math.abs(ends[0].x - ends[1].x) < 1e-6;
+      expect(sameFace).toBe(true);
+      expect(Math.hypot(ends[0].x - ends[1].x, ends[0].y - ends[1].y)).toBeGreaterThanOrEqual(PIPE_SPACING);
+      expect(committedReport(s, p)).toBe('');
+    });
   });
 
   it('Vensim fallback flows: routing a flow with unattached ends attaches each to a new cloud', () => {

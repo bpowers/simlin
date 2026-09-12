@@ -26,7 +26,12 @@ function nearOptional(a: number | undefined, b: number | undefined): boolean {
  * view it renders, and a rename reaches the canvas as its own republish.
  */
 function sameReadFields(a: ViewElement, b: ViewElement): boolean {
-  if (a.type !== b.type || !near(a.x, b.x) || !near(a.y, b.y)) {
+  if (a.type !== b.type) {
+    return false;
+  }
+  // A link has no position of its own: the datamodel reads its x/y as NaN, and
+  // nothing draws or routes through them, so only its ends and arc are read.
+  if (a.type !== 'link' && (!near(a.x, b.x) || !near(a.y, b.y))) {
     return false;
   }
   switch (a.type) {

@@ -21,8 +21,8 @@ import { describe, it, expect } from '@rstest/core';
 
 import { isNamedViewElement, type StockFlowView, type ViewElement } from '@simlin/core/datamodel';
 
-import { sameGeometry } from '../gesture-planner';
-import { aux, cloud, flow, link, scene, stock } from './support/gesture-fixtures';
+import { planGesture, sameGeometry } from '../gesture-planner';
+import { aux, cloud, flow, link, linkedAuxes, planInput, scene, stock } from './support/gesture-fixtures';
 
 function everyKind(): StockFlowView {
   return scene([
@@ -200,6 +200,25 @@ describe('sameGeometry: benign republishes keep a live gesture', () => {
   it('error annotations updating', () => {
     const errors = [{ start: 0, end: 1, code: 'unknown_dependency' }];
     expect(sameGeometry(base, annotateVars(base, { errors, unitErrors: errors }))).toBe(true);
+  });
+
+  it('M-1: a link the planner created, landing as the datamodel reads it (x/y NaN, isStraight re-derived)', () => {
+    const s = linkedAuxes();
+    const p = planGesture(planInput(s, { kind: 'createLink', from: 12 }, { x: 300, y: 450 }, { x: 100, y: 300 }));
+    expect(p.commit).toBe('edit');
+    const pending = { ...s.view, elements: p.elements, nextUid: p.nextUid };
+    const landed = {
+      ...pending,
+      elements: pending.elements.map((el) =>
+        el.type === 'link' && el.uid === p.nextUid - 1
+          ? ({ ...el, x: NaN, y: NaN, isStraight: true } as ViewElement)
+          : el,
+      ),
+    };
+    expect(sameGeometry(pending, landed)).toBe(true);
+    // Whatever a producer stores as a link's position, nothing reads it.
+    const zeroed = edit(landed, p.nextUid - 1, (e) => ({ ...e, x: 0, y: 0 }) as ViewElement);
+    expect(sameGeometry(landed, zeroed)).toBe(true);
   });
 
   it('a real change to any element aborts, including one a gesture on another element never reads', () => {

@@ -1093,11 +1093,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   };
 
   // Carry out what classifyPress decided a press does.
-  const applyPress = (
-    outcome: PressOutcome,
-    e: React.MouseEvent<Element>,
-    captureTarget: Element | undefined,
-  ): void => {
+  const applyPress = (outcome: PressOutcome, e: React.MouseEvent<Element>, capture: boolean): void => {
     const p = latest.current.props;
     switch (outcome.kind) {
       case 'ignore':
@@ -1139,8 +1135,12 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
           const offset = getCanvasOffset();
           r.panBaseOffset = { x: offset.x, y: offset.y };
           trackPosition(offset.x, offset.y);
-        } else {
-          captureTarget?.setPointerCapture(pe.pointerId);
+        } else if (capture) {
+          // Capture on the svg root, never the pressed node: a plan can remove the
+          // pressed element from the preview (a valid drop deletes the dragged
+          // cloud), which releases a capture it held, and a release over chrome
+          // would then be lost.
+          svgRef.current?.querySelector('svg')?.setPointerCapture(pe.pointerId);
         }
         const at = modelPoint(pe.clientX, pe.clientY);
         setGesture({
@@ -1164,7 +1164,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // preserved, so a pan or pinch this press starts inherits it and commits the
   // combined result, while any other press lets interruptCoast's deferred
   // commit persist it.
-  const pressPointer = (hit: PressHit, e: React.PointerEvent<SVGElement>, captureTarget: Element | undefined): void => {
+  const pressPointer = (hit: PressHit, e: React.PointerEvent<SVGElement>): void => {
     const pointers = r.activePointers.size + (r.activePointers.has(e.pointerId) ? 0 : 1);
     const outcome = classifyPress(pressInput(hit, e, pointers));
     if (outcome.kind === 'ignore') {
@@ -1172,7 +1172,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
     interruptCoast();
     trackPointer(e);
-    applyPress(outcome, e, captureTarget);
+    applyPress(outcome, e, true);
   };
 
   const moveGesture = (g: ActiveGesture, e: React.PointerEvent<SVGElement>): void => {
@@ -1231,7 +1231,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
     e.preventDefault();
     e.stopPropagation();
-    pressPointer({ kind: 'canvas' }, e, e.target as Element);
+    pressPointer({ kind: 'canvas' }, e);
   };
 
   const handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
@@ -1252,6 +1252,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       return;
     }
     if (isLostRelease(e.pointerType, e.buttons)) {
+      // The release never came, so forget the pointer too: a later press would
+      // count it, and a single touch would start a pinch.
+      r.activePointers.delete(e.pointerId);
       cancelGesture();
       return;
     }
@@ -1311,27 +1314,29 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // A label dragged past the label component's own click threshold starts a
   // label gesture on that first move. Its later moves and its release bubble to
   // the svg's handlers, which update and finish the gesture like any other.
-  const handleLabelDrag = (uid: number, e: React.PointerEvent<SVGElement>): void => {
+  // The label holds its own pointer capture (Label.tsx), so a label gesture
+  // captures nothing more.
+  const labelDragImpl = (uid: number, e: React.PointerEvent<SVGElement>): void => {
     if (latest.current.props.embedded || r.gesture !== undefined) {
       return;
     }
-    applyPress(classifyPress(pressInput({ kind: 'labelDrag', uid }, e, 1)), e, undefined);
+    applyPress(classifyPress(pressInput({ kind: 'labelDrag', uid }, e, 1)), e, false);
   };
 
   const handleEditingEnd = (e: React.PointerEvent<HTMLDivElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    applyPress(classifyPress(pressInput({ kind: 'nameEditor' }, e, 1)), e, undefined);
+    applyPress(classifyPress(pressInput({ kind: 'nameEditor' }, e, 1)), e, false);
   };
 
-  const handleEditConnector = (element: ViewElement, e: React.PointerEvent<SVGElement>, isArrowhead: boolean): void => {
-    handleSetSelection(element, e, false, isArrowhead);
+  const editConnectorImpl = (element: ViewElement, e: React.PointerEvent<SVGElement>, isArrowhead: boolean): void => {
+    setSelectionImpl(element, e, false, isArrowhead);
   };
 
   // Called from the element components' press handlers: a body, arrowhead or
   // source-grip press with a pointer, or a label's double-click (isText), which
   // carries no pointer and starts no drag.
-  const handleSetSelection = (
+  const setSelectionImpl = (
     element: ViewElement,
     e: React.PointerEvent<SVGElement>,
     isText?: boolean,
@@ -1342,11 +1347,11 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       return;
     }
     if (isText) {
-      applyPress(classifyPress(pressInput({ kind: 'labelDoubleClick', uid: element.uid }, e, 1)), e, undefined);
+      applyPress(classifyPress(pressInput({ kind: 'labelDoubleClick', uid: element.uid }, e, 1)), e, false);
       return;
     }
     const part = isArrowhead ? 'arrowhead' : isSource ? 'source' : 'body';
-    pressPointer({ kind: 'element', uid: element.uid, part }, e, e.target as Element);
+    pressPointer({ kind: 'element', uid: element.uid, part }, e);
   };
 
   const handleEditingNameChange = (value: Descendant[]): void => {
@@ -1403,7 +1408,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     endNameEdit();
   };
 
-  const handleModuleDoubleClick = (element: ModuleViewElement): void => {
+  const moduleDoubleClickImpl = (element: ModuleViewElement): void => {
     if (classifyPress(pressInput({ kind: 'moduleDoubleClick', uid: element.uid }, NO_POINTER, 1)).kind !== 'drill') {
       return;
     }
@@ -1413,6 +1418,36 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
     latest.current.props.onDrillIntoModule(element.ident, variable.modelName);
   };
+
+  // The element components are memo'd, so the callbacks handed to them keep one
+  // identity for the Canvas's life and dispatch to this render's implementation.
+  // Otherwise every drag frame would re-render every element on the canvas.
+  const impls = { setSelectionImpl, labelDragImpl, editConnectorImpl, moduleDoubleClickImpl };
+  const handlers = React.useRef(impls);
+  handlers.current = impls;
+  const handleSetSelection = React.useCallback(
+    (
+      element: ViewElement,
+      e: React.PointerEvent<SVGElement>,
+      isText?: boolean,
+      isArrowhead?: boolean,
+      isSource?: boolean,
+    ): void => handlers.current.setSelectionImpl(element, e, isText, isArrowhead, isSource),
+    [],
+  );
+  const handleLabelDrag = React.useCallback(
+    (uid: number, e: React.PointerEvent<SVGElement>): void => handlers.current.labelDragImpl(uid, e),
+    [],
+  );
+  const handleEditConnector = React.useCallback(
+    (element: ViewElement, e: React.PointerEvent<SVGElement>, isArrowhead: boolean): void =>
+      handlers.current.editConnectorImpl(element, e, isArrowhead),
+    [],
+  );
+  const handleModuleDoubleClick = React.useCallback(
+    (element: ModuleViewElement): void => handlers.current.moduleDoubleClickImpl(element),
+    [],
+  );
 
   // ---- Element-rendering helpers (read r.derived; never mutate caches) -----
 
@@ -1717,6 +1752,15 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       svg.addEventListener('gestureend', handleGestureEnd, { passive: false });
     }
 
+    // Escape abandons a live gesture: the preview returns to the published view
+    // and the release, when it comes, finds nothing to commit.
+    const handleEscape = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && r.gesture !== undefined) {
+        cancelGesture();
+      }
+    };
+    window.addEventListener('keydown', handleEscape);
+
     const svgWidth = svgElement.clientWidth;
     const svgHeight = svgElement.clientHeight;
 
@@ -1799,6 +1843,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         r.svgObserver.disconnect();
         r.svgObserver = undefined;
       }
+      window.removeEventListener('keydown', handleEscape);
       const teardownSvg = svgRef.current?.querySelector('svg');
       if (teardownSvg) {
         teardownSvg.removeEventListener('wheel', handleNativeWheel);
@@ -1897,6 +1942,19 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       endGesture();
     }
   }, [props.view, props.token]);
+
+  // ---- A name editor whose element is gone closes quietly -----------------
+  // A refused or rolled-back flow create leaves the editor naming a uid the view
+  // no longer holds. It closes without settling a selection, so the overlay does
+  // not linger inert and a later tool change has nothing to commit. A draft (an
+  // element the view never held) is exempt.
+  React.useEffect(() => {
+    const edit = r.nameEdit;
+    if (edit !== undefined && edit.draft === undefined && !props.view.elements.some((el) => el.uid === edit.uid)) {
+      setNameEdit(undefined);
+      setNameError(undefined);
+    }
+  }, [props.view, nameEdit]);
 
   // ---- Render -------------------------------------------------------------
 
