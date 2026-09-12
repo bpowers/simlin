@@ -40,7 +40,7 @@ import { render, act, fireEvent, waitFor } from '@testing-library/react';
 import { Editor, Transforms } from 'slate';
 import { HistoryEditor } from 'slate-history';
 import { ELEMENT_TO_NODE } from 'slate-dom';
-import { VariableDetails } from '../VariableDetails';
+import { VariableDetails, type PendingSubmission } from '../VariableDetails';
 import { Aux, AuxViewElement, EquationError, ErrorCode } from '@simlin/core/datamodel';
 
 function makeAux(ident: string, equation: string, overrides: Partial<Aux> = {}): Aux {
@@ -85,8 +85,16 @@ interface Harness {
   onEquationChange: Mock;
 }
 
-function renderDetails(variable: Aux): Harness {
-  const onEquationChange = rs.fn();
+interface DetailsOptions {
+  // What each submission's edit resolves to; undefined models a host that
+  // reports nothing.
+  readonly landed?: () => Promise<boolean>;
+  readonly pendingSubmission?: PendingSubmission;
+  readonly onDraftStateChange?: (hasDraft: boolean) => void;
+}
+
+function renderDetails(variable: Aux, options: DetailsOptions = {}): Harness {
+  const onEquationChange = rs.fn(() => options.landed?.());
   const { container } = render(
     <VariableDetails
       variable={variable}
@@ -96,10 +104,14 @@ function renderDetails(variable: Aux): Harness {
       onTableChange={noop}
       activeTab={0}
       onActiveTabChange={noop}
+      pendingSubmission={options.pendingSubmission}
+      onDraftStateChange={options.onDraftStateChange}
     />,
   );
   return { container, onEquationChange };
 }
+
+const neverLands = (): Promise<boolean> => new Promise<boolean>(() => {});
 
 // The Slate editor instance backing a rendered Editable, reachable through
 // slate-dom's element->node map. Driving edits through it (rather than fake
@@ -394,5 +406,90 @@ describe('VariableDetails discard (Cancel / Escape)', () => {
     expect(container.querySelector('.eqnPreview')).not.toBeNull();
     expect(onEquationChange).toHaveBeenCalledTimes(1);
     expect(onEquationChange).toHaveBeenCalledWith('x', 'a + bZ', undefined, undefined);
+  });
+});
+
+// Cancel puts each field back to its base (see draftText). The rows derive from
+// the base's arms: the seeded text (the rows above: nothing was submitted), this
+// panel's own submission while it is pending, a pending submission the panel
+// mounted with, and a submission that did not land (the base falls back to the
+// committed text).
+describe('VariableDetails Cancel restores the base, not the committed text', () => {
+  async function blurAway(container: HTMLElement): Promise<void> {
+    await act(async () => {
+      fireEvent.blur(container.querySelector('.eqnEditor') as Element, { relatedTarget: null });
+      await Promise.resolve();
+    });
+  }
+
+  async function pressCancel(container: HTMLElement): Promise<void> {
+    const cancel = buttonByText(container, 'Cancel');
+    await act(async () => {
+      fireEvent.blur(container.querySelector('.eqnEditor') as Element, { relatedTarget: cancel });
+      fireEvent.click(cancel);
+      await Promise.resolve();
+    });
+  }
+
+  function eqnText(container: HTMLElement): string {
+    return (container.querySelector('.eqnEditor') as HTMLElement).textContent ?? '';
+  }
+
+  it("after this panel's own save is submitted but not landed, Cancel shows the saved text and nothing re-submits", async () => {
+    const draftStates: boolean[] = [];
+    const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }), {
+      landed: neverLands,
+      onDraftStateChange: (hasDraft) => draftStates.push(hasDraft),
+    });
+    await appendText(container, editorFor(container, '.eqnEditor'), 'Z');
+    await blurAway(container);
+    expect(onEquationChange).toHaveBeenCalledTimes(1);
+    expect(onEquationChange).toHaveBeenLastCalledWith('x', 'a + bZ', undefined, undefined);
+
+    await appendText(container, editorFor(container, '.eqnEditor'), 'Q');
+    await pressCancel(container);
+
+    expect(eqnText(container)).toBe('a + bZ');
+    expect(buttonByText(container, 'Cancel').disabled).toBe(true);
+    expect(draftStates[draftStates.length - 1]).toBe(false);
+    // A later blur or canvas flush finds no draft, so the committed 'a + b' is
+    // never submitted over the pending save.
+    await blurAway(container);
+    expect(onEquationChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('a panel mounted with a pending submission cancels back to that submission', async () => {
+    const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }), {
+      pendingSubmission: { equation: { text: 'a + bZ', landed: neverLands() } },
+    });
+    expect(eqnText(container)).toBe('a + bZ');
+    await appendText(container, editorFor(container, '.eqnEditor'), 'Q');
+    await pressCancel(container);
+
+    expect(eqnText(container)).toBe('a + bZ');
+    expect(buttonByText(container, 'Cancel').disabled).toBe(true);
+    await blurAway(container);
+    expect(onEquationChange).not.toHaveBeenCalled();
+  });
+
+  it('once a submission settles as not landed, Cancel shows the committed text again', async () => {
+    const { container, onEquationChange } = renderDetails(makeAux('x', 'a + b', { errors: forceEditorOpen }), {
+      landed: () => Promise.resolve(false),
+    });
+    await appendText(container, editorFor(container, '.eqnEditor'), 'Z');
+    await blurAway(container);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onEquationChange).toHaveBeenCalledTimes(1);
+
+    await appendText(container, editorFor(container, '.eqnEditor'), 'Q');
+    await pressCancel(container);
+
+    expect(eqnText(container)).toBe('a + b');
+    expect(buttonByText(container, 'Cancel').disabled).toBe(true);
+    await blurAway(container);
+    expect(onEquationChange).toHaveBeenCalledTimes(1);
   });
 });

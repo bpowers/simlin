@@ -75,6 +75,16 @@ export interface SimError {
   readonly details: string | undefined;
 }
 
+// An engine advisory about a variable that is not a unit error: a
+// Warning-severity diagnostic (for example a stock whose flow list repeats a
+// flow). The variable still simulates, so a warning never stands in for its
+// results. `details` is the engine's reason; the code is often the wire
+// `Generic`, which says nothing on its own.
+export interface VariableWarning {
+  readonly code: ErrorCode;
+  readonly details: string | undefined;
+}
+
 // A sketch-hygiene issue: the sketch connectors for a variable have drifted out
 // of sync with its equation. `missingConnector` -- the equation references
 // `ident` but no connector is drawn from it; `staleConnector` -- a connector is
@@ -592,6 +602,9 @@ export interface Stock {
   // Optional so the many Variable literals that predate this feature stay valid;
   // absent and undefined are equivalent ("no connector issues").
   readonly connectorErrors?: readonly ConnectorError[] | undefined;
+  // Engine advisories that are not unit errors, attached by the diagram layer.
+  // Optional like connectorErrors; absent and undefined are equivalent.
+  readonly warnings?: readonly VariableWarning[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -626,6 +639,9 @@ export interface Flow {
   // Optional so the many Variable literals that predate this feature stay valid;
   // absent and undefined are equivalent ("no connector issues").
   readonly connectorErrors?: readonly ConnectorError[] | undefined;
+  // Engine advisories that are not unit errors, attached by the diagram layer.
+  // Optional like connectorErrors; absent and undefined are equivalent.
+  readonly warnings?: readonly VariableWarning[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -652,6 +668,9 @@ export interface Aux {
   // Optional so the many Variable literals that predate this feature stay valid;
   // absent and undefined are equivalent ("no connector issues").
   readonly connectorErrors?: readonly ConnectorError[] | undefined;
+  // Engine advisories that are not unit errors, attached by the diagram layer.
+  // Optional like connectorErrors; absent and undefined are equivalent.
+  readonly warnings?: readonly VariableWarning[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -691,6 +710,9 @@ export interface Module {
   // Optional so the many Variable literals that predate this feature stay valid;
   // absent and undefined are equivalent ("no connector issues").
   readonly connectorErrors?: readonly ConnectorError[] | undefined;
+  // Engine advisories that are not unit errors, attached by the diagram layer.
+  // Optional like connectorErrors; absent and undefined are equivalent.
+  readonly warnings?: readonly VariableWarning[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -702,11 +724,13 @@ export function variableIsArrayed(v: Variable): boolean {
 }
 
 export function variableHasError(v: Variable): boolean {
-  // Includes non-fatal warnings (unit errors, sketch-connector drift), matching
-  // how the diagram surfaces every variable problem with the same indicator.
-  // Simulatability is decided separately (engine.isSimulatable), so a
-  // connector-only warning never blocks a run.
-  return v.errors !== undefined || v.unitErrors !== undefined || v.connectorErrors !== undefined;
+  // Includes non-fatal warnings (unit errors, sketch-connector drift, engine
+  // advisories), matching how the diagram surfaces every variable problem with
+  // the same indicator. Simulatability is decided separately
+  // (engine.isSimulatable), so a warning never blocks a run.
+  return (
+    v.errors !== undefined || v.unitErrors !== undefined || v.connectorErrors !== undefined || v.warnings !== undefined
+  );
 }
 
 export function variableGf(v: Variable): GraphicalFunction | undefined {

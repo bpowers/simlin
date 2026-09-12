@@ -402,14 +402,6 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   // embeds on one page can each show a details panel.
   const fieldIdPrefix = React.useId();
 
-  // The original (props-derived) document for each field. These seed the editors
-  // on mount and are what the discard path (Cancel/Escape) restores, so the
-  // seeding and the revert stay in lockstep. The error/warning underline is not
-  // part of the document: it is decorated from props (fieldDecorate).
-  const initialEquationContents = (): CustomElement[] => descendantsFromString(scalarEquationFor(variable));
-  const initialUnitsContents = (): CustomElement[] => descendantsFromString(variable.units);
-  const initialNotesContents = (): CustomElement[] => descendantsFromString(variable.documentation);
-
   // Seed the Slate editors and their contents from props exactly once per mount
   // (lazy useState initializers), mirroring the old constructor. The Editor keys
   // this panel on the variable's committed editable content, so a landed edit to
@@ -569,15 +561,20 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
     setNotesContents(equation);
   };
 
-  // Discard every in-progress edit and restore the original documents. Both the
-  // React state (which drives the preview and the Save/Cancel enabled state) and
-  // the live Slate documents (uncontrolled after mount) must be reset, or the
-  // visible editors would keep showing the abandoned text. Shared by the Cancel
-  // button and the Escape key.
+  // Discard every draft: each field goes back to its base -- what this panel
+  // last submitted for it while that submission stands, else the text it was
+  // seeded with (see draftText) -- so no field holds a draft afterwards and the
+  // host's hold on the panel releases. Restoring the committed text instead
+  // would make a field whose submission has not landed yet differ from its
+  // base, and the next blur or canvas press would submit the committed text over
+  // the pending save. Both the React state (which drives the preview and the
+  // Save/Cancel enabled state) and the live Slate documents (uncontrolled after
+  // mount) must be reset, or the visible editors would keep showing the
+  // abandoned text. Shared by the Cancel button and the Escape key.
   const handleEquationCancel = (): void => {
-    const equation = initialEquationContents();
-    const units = initialUnitsContents();
-    const notes = initialNotesContents();
+    const equation = descendantsFromString(submitted.equation ?? seeded.equation);
+    const units = descendantsFromString(submitted.units ?? seeded.units);
+    const notes = descendantsFromString(submitted.docs ?? seeded.docs);
     resetEditorDocument(equationEditor, equation);
     resetEditorDocument(unitsEditor, units);
     resetEditorDocument(notesEditor, notes);
@@ -684,10 +681,6 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   };
 
   const renderEquation = (): React.ReactElement => {
-    const initialEquation = scalarEquationFor(variable);
-    const initialUnits = variable.units;
-    const initialDocs = variable.documentation;
-
     const data: Readonly<Array<Series>> | undefined = variable.data;
 
     let yMin = 0;
@@ -716,11 +709,8 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
     yMin = Math.floor(yMin);
     yMax = Math.ceil(yMax);
 
-    // enable saving and canceling if the equation has changed
-    const equationActionsEnabled =
-      initialEquation !== stringFromDescendants(equationContents) ||
-      initialUnits !== stringFromDescendants(unitsContents) ||
-      initialDocs !== stringFromDescendants(notesContents);
+    // Save and Cancel act on drafts, so they are enabled exactly while one exists.
+    const equationActionsEnabled = hasDraft;
 
     const detailsView = variableDetailsView(variable);
     // Unit errors are non-fatal warnings: the variable still simulates and has
@@ -759,6 +749,14 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
       </div>
     ));
 
+    // Engine advisories are non-fatal too. Their code is often the wire
+    // Generic, so the details are the message.
+    const advisories = detailsView.warnings.map((warning, i) => (
+      <div key={`advisory-${i}`} className={styles.errorList}>
+        warning: {warning.details ?? errorCodeDescription(warning.code)}
+      </div>
+    ));
+
     let chartOrErrors;
     if (!detailsView.showChart) {
       // Equation/compile errors mean the variable produced no valid data, so
@@ -768,13 +766,14 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
           error: {errorCodeDescription(error.code)}
         </div>
       ));
-      chartOrErrors = [...errorList, ...unitWarnings, ...connectorWarnings];
+      chartOrErrors = [...errorList, ...unitWarnings, ...connectorWarnings, ...advisories];
     } else {
       chartOrErrors = (
         <>
           <LineChart height={300} series={chartSeries} yDomain={[yMin, yMax]} tooltipFormatter={formatValue} />
           {unitWarnings}
           {connectorWarnings}
+          {advisories}
         </>
       );
     }

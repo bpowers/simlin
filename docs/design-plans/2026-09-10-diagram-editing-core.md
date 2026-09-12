@@ -320,7 +320,9 @@ Semantics:
   aborts.
 - A target is valid exactly when committing onto it yields a view holding the
   invariants and the semantic rules: a flow's source and sink are different stocks,
-  and the target's stock variable exists.
+  and the target's stock variable exists in the rendered model, which holds the
+  variable of every create still queued (the create lands before the gesture's
+  edit is built) and none for an orphan element.
 
 Resolutions made while implementing (the module is `src/diagram/gesture-planner/`):
 

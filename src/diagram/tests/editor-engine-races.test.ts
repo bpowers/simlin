@@ -501,6 +501,22 @@ function pressDelete(): void {
   });
 }
 
+function newStock(name: string, x: number, y: number): ViewElement {
+  return {
+    type: 'stock',
+    uid: -2,
+    name,
+    ident: canonicalize(name),
+    var: undefined,
+    x,
+    y,
+    labelSide: 'bottom',
+    isZeroRadius: false,
+    inflows: [],
+    outflows: [],
+  };
+}
+
 function newAux(name: string, x: number, y: number): ViewElement {
   return {
     type: 'aux',
@@ -676,6 +692,27 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
     const model = await expectConsistent(m);
     expect(model.variables.get(canonicalize(first))?.type).toBe('aux');
     expect(model.variables.get(canonicalize(second))?.type).toBe('aux');
+  });
+
+  it('a flow drawn onto a stock whose create is still in flight attaches, and the stock lists it', async () => {
+    const m = await mount(projectJson(baseModel()));
+    act(() => {
+      canvasProps!.onCreateVariable(newStock('Reservoir', 600, 300));
+    });
+    const reservoir = m.view().elements.find((el) => nameOf(el) === 'Reservoir')!;
+    // release() fails the row unless the planner commits the drop.
+    act(() => {
+      release({ kind: 'createFlow', from: { stock: 1 } }, m.element(1), reservoir);
+    });
+    await m.settle();
+    const model = await expectConsistent(m);
+    const drawn = model.views[0].elements.find(
+      (el): el is FlowViewElement =>
+        el.type === 'flow' && el.points[el.points.length - 1].attachedToUid === reservoir.uid,
+    );
+    expect(drawn).toBeDefined();
+    expect(stockLists(model, 'reservoir').inflows).toEqual([canonicalize(drawn!.name)]);
+    expect(stockLists(model, 'a').outflows).toEqual(['f', canonicalize(drawn!.name)].sort());
   });
 
   it('T23: deleting a stock removes its alias and every link touching either', async () => {

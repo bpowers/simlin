@@ -13,7 +13,11 @@
 
 import { canonicalize } from '@simlin/core/canonicalize';
 import {
+  auxFromJson,
+  flowFromJson,
   isNamedViewElement,
+  moduleFromJson,
+  stockFromJson,
   stockFlowViewToJson,
   type FlowViewElement,
   type Model,
@@ -87,6 +91,27 @@ function createOp(element: NamedViewElement): JsonModelOperation {
       return { type: 'upsertModule', payload: { module: { name: element.name, modelName: '', references: [] } } };
     case 'aux':
       return { type: 'upsertAux', payload: { aux: { name: element.name, equation: '' } } };
+  }
+}
+
+/**
+ * The variable the create op for `element` makes, read as the editor's
+ * datamodel reads the engine's: what the rendered model holds for an element
+ * whose create is still queued (see ProjectController's render).
+ */
+export function createdVariable(element: NamedViewElement): Variable {
+  const op = createOp(element);
+  switch (op.type) {
+    case 'upsertStock':
+      return stockFromJson(op.payload.stock);
+    case 'upsertFlow':
+      return flowFromJson(op.payload.flow);
+    case 'upsertModule':
+      return moduleFromJson(op.payload.module);
+    case 'upsertAux':
+      return auxFromJson(op.payload.aux);
+    default:
+      throw new Error('createOp returned an operation that creates no variable');
   }
 }
 

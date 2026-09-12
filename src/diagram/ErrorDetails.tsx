@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@simlin/core/datamodel';
+import { SimError, ModelError, EquationError, ErrorCode, UnitError, VariableWarning } from '@simlin/core/datamodel';
 import { errorCodeDescription } from '@simlin/engine';
 
 import styles from './ErrorDetails.module.css';
@@ -14,6 +14,7 @@ interface ErrorDetailsProps {
   modelErrors: readonly ModelError[];
   varErrors: ReadonlyMap<string, readonly EquationError[]>;
   varUnitErrors: ReadonlyMap<string, readonly UnitError[]>;
+  varWarnings: ReadonlyMap<string, readonly VariableWarning[]>;
   status: 'ok' | 'error' | 'disabled';
 }
 
@@ -22,6 +23,7 @@ export function ErrorDetails({
   modelErrors,
   varErrors,
   varUnitErrors,
+  varWarnings,
 }: ErrorDetailsProps): React.ReactElement {
   const errors = [];
   if (
@@ -71,6 +73,17 @@ export function ErrorDetails({
         </div>,
       );
     }
+  }
+  for (const [ident, warnings] of varWarnings) {
+    warnings.forEach((warning, i) => {
+      // An advisory's code is often the wire Generic, so its details are the
+      // message; the code description is only the fallback.
+      errors.push(
+        <div key={`warning-${ident}-${i}`} className={styles.list}>
+          variable "{ident}" warning: {warning.details ?? errorCodeDescription(warning.code)}
+        </div>,
+      );
+    });
   }
 
   return (

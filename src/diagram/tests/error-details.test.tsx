@@ -7,7 +7,7 @@ import { describe, test, expect } from '@rstest/core';
 import * as React from 'react';
 import { render, screen } from '@testing-library/react';
 
-import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@simlin/core/datamodel';
+import { SimError, ModelError, EquationError, ErrorCode, UnitError, VariableWarning } from '@simlin/core/datamodel';
 
 import { ErrorDetails } from '../ErrorDetails';
 
@@ -16,6 +16,7 @@ const noErrors = {
   modelErrors: [] as readonly ModelError[],
   varErrors: new Map<string, readonly EquationError[]>(),
   varUnitErrors: new Map<string, readonly UnitError[]>(),
+  varWarnings: new Map<string, readonly VariableWarning[]>(),
   status: 'ok' as const,
 };
 
@@ -91,5 +92,19 @@ describe('ErrorDetails', () => {
       />,
     );
     expect(screen.getByText(/unit error: unit mismatch/i)).not.toBeNull();
+  });
+
+  test('renders per-variable advisories as warnings with their details, not as errors', () => {
+    render(
+      <ErrorDetails
+        {...noErrors}
+        varWarnings={
+          new Map([['level', [{ code: ErrorCode.Generic, details: "stock 'level': its inflow list repeats 'f'" }]]])
+        }
+      />,
+    );
+    expect(screen.getByText(/variable "level" warning: stock 'level': its inflow list repeats 'f'/)).not.toBeNull();
+    expect(screen.queryByText(/variable "level" error:/)).toBeNull();
+    expect(screen.queryByText(/generic/i)).toBeNull();
   });
 });

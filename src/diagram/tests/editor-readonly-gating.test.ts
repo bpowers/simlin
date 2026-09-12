@@ -230,7 +230,13 @@ function makeSnapshot(): ProjectSnapshot {
     projectVersion: 1,
     serverVersion: 1,
     status: 'ok',
-    cachedErrors: { simError: undefined, modelErrors: [], varErrors: new Map(), unitErrors: new Map() },
+    cachedErrors: {
+      simError: undefined,
+      modelErrors: [],
+      varErrors: new Map(),
+      unitErrors: new Map(),
+      varWarnings: new Map(),
+    },
     data: new Map(),
     modelStack: [],
     // History exists, so undo/redo gating is observable (not vacuously off).

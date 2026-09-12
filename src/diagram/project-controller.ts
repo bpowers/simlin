@@ -37,8 +37,9 @@
 //   reopen of the last recorded snapshot means it failed; a failed reopen
 //   latches engine-unavailable. The model and the diagram never disagree.
 // - While a pending edit renames a variable, the rendered model names that
-//   variable by its new ident, so every rendered element resolves to the
-//   committed variable it will name.
+//   variable by its new ident, and while one creates a variable, the rendered
+//   model holds the variable its create op will produce, so every rendered
+//   element resolves to the variable it will name.
 //
 // The controller never owns presentation state: transient errors go to the
 // host through `onError`.
@@ -56,6 +57,7 @@ import {
   UID,
   Rect,
   Variable,
+  VariableWarning,
   projectFromJson,
   projectAttachSeries,
   groupSeriesByIdent,
@@ -67,7 +69,7 @@ import { canonicalize } from '@simlin/core/canonicalize';
 import { mapSet, setsEqual, uint8ArraysEqual, type Series } from '@simlin/core/common';
 import { first } from '@simlin/core/collections';
 import type { JsonProjectPatch, ErrorDetail, JsonProject } from '@simlin/engine';
-import { SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
+import { SimlinErrorKind, SimlinErrorSeverity, SimlinUnitErrorKind } from '@simlin/engine';
 
 import { advanceProjectHistory } from './project-history';
 import {
@@ -80,7 +82,7 @@ import {
   isMacroModel,
 } from './module-navigation';
 import { computeConnectorErrors } from './connector-sync';
-import { buildEditOps } from './view-model-sync';
+import { buildEditOps, createdVariable } from './view-model-sync';
 import { allocateVariableName, nameCollisionError } from './variable-names';
 
 /**
@@ -105,6 +107,7 @@ export const MaintenanceTimeBoundMs = 5000;
 export interface CachedErrorDetails {
   readonly varErrors: ReadonlyMap<string, readonly EquationError[]>;
   readonly unitErrors: ReadonlyMap<string, readonly UnitError[]>;
+  readonly varWarnings: ReadonlyMap<string, readonly VariableWarning[]>;
   readonly simError: SimError | undefined;
   readonly modelErrors: readonly ModelError[];
 }
@@ -278,8 +281,12 @@ function convertUnitErrorKind(kind: SimlinUnitErrorKind): UnitErrorKind {
 }
 
 /**
- * Convert the engine's flat error list into the model-scoped equation/unit
- * error maps the Editor renders. Errors for other models are filtered out.
+ * Convert the engine's flat error list into the model-scoped per-variable maps
+ * the Editor renders, by kind and severity: a unit error (either severity) is a
+ * unit error; any other Warning is an advisory (`varWarnings`), which leaves the
+ * variable's results standing; everything else is an equation error, which
+ * means the variable produced no valid data. Errors for other models are
+ * filtered out.
  */
 export function convertErrorDetails(
   errors: readonly ErrorDetail[],
@@ -287,19 +294,25 @@ export function convertErrorDetails(
 ): {
   varErrors: ReadonlyMap<string, readonly EquationError[]>;
   unitErrors: ReadonlyMap<string, readonly UnitError[]>;
+  varWarnings: ReadonlyMap<string, readonly VariableWarning[]>;
 } {
   const varErrors = new Map<string, EquationError[]>();
   const unitErrors = new Map<string, UnitError[]>();
+  const varWarnings = new Map<string, VariableWarning[]>();
 
   for (const err of errors) {
     if (err.modelName !== modelName) {
       continue;
     }
 
-    const ident = err.variableName;
-    if (!ident) {
+    if (!err.variableName) {
       continue;
     }
+    // Keyed like Model.variables. A raising site may name the variable by its
+    // canonical ident or by its source spelling (the stock-list advisory names
+    // 'Level', not 'level'); canonicalizing an already-canonical ident changes
+    // nothing.
+    const ident = canonicalize(err.variableName);
 
     const isUnitError = err.kind === SimlinErrorKind.Units;
 
@@ -322,6 +335,19 @@ export function convertErrorDetails(
         unitErrors.set(ident, existing);
       }
       existing.push(unitError);
+    } else if (err.severity === SimlinErrorSeverity.Warning) {
+      const warning: VariableWarning = {
+        code: err.code as unknown as ErrorCode,
+        // Prefer the bare reason over the terminal-formatted message, as for
+        // model errors (cachedErrorsFor).
+        details: err.details ?? err.message ?? undefined,
+      };
+      let existing = varWarnings.get(ident);
+      if (!existing) {
+        existing = [];
+        varWarnings.set(ident, existing);
+      }
+      existing.push(warning);
     } else {
       const eqError: EquationError = {
         start: err.startOffset ?? 0,
@@ -337,11 +363,11 @@ export function convertErrorDetails(
     }
   }
 
-  return { varErrors, unitErrors };
+  return { varErrors, unitErrors, varWarnings };
 }
 
 function cachedErrorsFor(errors: readonly ErrorDetail[], modelName: string): CachedErrorDetails {
-  const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
+  const { varErrors, unitErrors, varWarnings } = convertErrorDetails(errors, modelName);
   let simError: SimError | undefined;
   const modelErrors: ModelError[] = [];
   for (const err of errors) {
@@ -363,7 +389,7 @@ function cachedErrorsFor(errors: readonly ErrorDetail[], modelName: string): Cac
       });
     }
   }
-  return { varErrors, unitErrors, simError, modelErrors };
+  return { varErrors, unitErrors, varWarnings, simError, modelErrors };
 }
 
 /**
@@ -376,7 +402,7 @@ function annotateErrors(project: Project, cached: CachedErrorDetails, modelName:
   if (!model) {
     return project;
   }
-  const { varErrors, unitErrors } = cached;
+  const { varErrors, unitErrors, varWarnings } = cached;
   if (
     varErrors.size > 0 &&
     varErrors.size === model.variables.size &&
@@ -385,7 +411,7 @@ function annotateErrors(project: Project, cached: CachedErrorDetails, modelName:
   ) {
     return { ...project, hasNoEquations: true };
   }
-  if (varErrors.size === 0 && unitErrors.size === 0) {
+  if (varErrors.size === 0 && unitErrors.size === 0 && varWarnings.size === 0) {
     return project;
   }
   const variables = new Map(model.variables);
@@ -399,6 +425,12 @@ function annotateErrors(project: Project, cached: CachedErrorDetails, modelName:
     const variable = variables.get(ident);
     if (variable) {
       variables.set(ident, { ...variable, unitErrors: errs });
+    }
+  }
+  for (const [ident, warnings] of varWarnings) {
+    const variable = variables.get(ident);
+    if (variable) {
+      variables.set(ident, { ...variable, warnings });
     }
   }
   return { ...project, models: mapSet(project.models, modelName, { ...model, variables }) };
@@ -541,9 +573,41 @@ function withRenamedVariables(
   return out;
 }
 
+/**
+ * `variables` plus the variable each pending create will produce: a named
+ * element on `pendingView` whose uid is not on the committed view, and whose
+ * name names no variable, renders with `createdVariable`, the variable its
+ * create op makes. So a gesture onto a stock whose create is still queued finds
+ * its variable, as it will once the create lands ahead of the gesture's edit,
+ * while an element no pending edit creates and no variable names (an orphan an
+ * import left) still finds none. A create onto a name a variable keeps is
+ * refused at dequeue (buildEditOps), and that variable keeps rendering.
+ */
+function withCreatedVariables(
+  variables: ReadonlyMap<string, Variable>,
+  committedView: StockFlowView,
+  pendingView: StockFlowView,
+): ReadonlyMap<string, Variable> {
+  const committedUids = new Set(committedView.elements.map((el) => el.uid));
+  let out: Map<string, Variable> | undefined;
+  for (const el of pendingView.elements) {
+    if (!isNamedViewElement(el) || committedUids.has(el.uid)) {
+      continue;
+    }
+    const ident = canonicalize(el.name);
+    if ((out ?? variables).has(ident)) {
+      continue;
+    }
+    out ??= new Map(variables);
+    out.set(ident, createdVariable(el));
+  }
+  return out ?? variables;
+}
+
 const EMPTY_CACHED_ERRORS: CachedErrorDetails = {
   varErrors: new Map<string, readonly EquationError[]>(),
   unitErrors: new Map<string, readonly UnitError[]>(),
+  varWarnings: new Map<string, readonly VariableWarning[]>(),
   simError: undefined,
   modelErrors: [],
 };
@@ -857,7 +921,10 @@ export class ProjectController {
         if (name === this.modelName) {
           activeRenames = renames;
         }
-        const variables = withRenamedVariables(model.variables, renames);
+        const variables =
+          pendingView === undefined
+            ? model.variables
+            : withCreatedVariables(withRenamedVariables(model.variables, renames), committedView, pendingView);
         const rendered = withViewport(pendingView ?? committedView, this.viewport.get(name));
         if (rendered !== committedView || variables !== model.variables) {
           models = mapSet(models, name, { ...model, variables, views: [rendered, ...model.views.slice(1)] });

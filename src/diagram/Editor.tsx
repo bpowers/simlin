@@ -2325,6 +2325,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
           modelErrors={cachedErrors.modelErrors}
           varErrors={cachedErrors.varErrors}
           varUnitErrors={cachedErrors.unitErrors}
+          varWarnings={cachedErrors.varWarnings}
         />
       </div>
     );

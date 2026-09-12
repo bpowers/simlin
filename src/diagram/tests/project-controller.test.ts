@@ -32,7 +32,10 @@ import {
   type ViewElement,
 } from '@simlin/core/datamodel';
 import type { JsonProject, JsonProjectPatch, ErrorDetail } from '@simlin/engine';
-import { SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
+import { SimlinErrorKind, SimlinErrorSeverity, SimlinUnitErrorKind } from '@simlin/engine';
+import { planGesture } from '../gesture-planner';
+import { createdVariable } from '../view-model-sync';
+import { describeWithEngine, loadEngine } from './support/engine';
 
 import {
   ProjectController,
@@ -2231,6 +2234,172 @@ describe('convertErrorDetails', () => {
     const { unitErrors } = convertErrorDetails(errors, 'main');
     expect(unitErrors.get('x')![0].details).toBeUndefined();
     expect(unitErrors.get('x')![0].kind).toBe('definition');
+  });
+
+  it('sorts per-variable errors by kind and severity', () => {
+    // Every arm of the classification: a unit error is a unit error whatever its
+    // severity; any other Warning is an advisory; everything else is an error.
+    const at = (variableName: string, kind: SimlinErrorKind, severity: SimlinErrorSeverity): ErrorDetail =>
+      ({
+        modelName: 'main',
+        variableName,
+        kind,
+        severity,
+        unitErrorKind: SimlinUnitErrorKind.Consistency,
+        code: 32,
+        startOffset: 0,
+        endOffset: 0,
+        message: `formatted message for ${variableName}`,
+        details: variableName === 'bare' ? null : `reason for ${variableName}`,
+      }) as unknown as ErrorDetail;
+    const { varErrors, unitErrors, varWarnings } = convertErrorDetails(
+      [
+        at('unit_error', SimlinErrorKind.Units, SimlinErrorSeverity.Error),
+        at('unit_warning', SimlinErrorKind.Units, SimlinErrorSeverity.Warning),
+        at('equation_error', SimlinErrorKind.Variable, SimlinErrorSeverity.Error),
+        at('model_error', SimlinErrorKind.Model, SimlinErrorSeverity.Error),
+        at('advisory', SimlinErrorKind.Model, SimlinErrorSeverity.Warning),
+        at('variable_advisory', SimlinErrorKind.Variable, SimlinErrorSeverity.Warning),
+        at('bare', SimlinErrorKind.Model, SimlinErrorSeverity.Warning),
+        // Some raising sites name a variable by its source spelling.
+        at('Source Spelling', SimlinErrorKind.Model, SimlinErrorSeverity.Warning),
+      ],
+      'main',
+    );
+    expect([...unitErrors.keys()].sort()).toEqual(['unit_error', 'unit_warning']);
+    expect([...varErrors.keys()].sort()).toEqual(['equation_error', 'model_error']);
+    expect([...varWarnings.keys()].sort()).toEqual(['advisory', 'bare', 'source_spelling', 'variable_advisory']);
+    expect(varWarnings.get('advisory')).toEqual([{ code: 32, details: 'reason for advisory' }]);
+    // Without a bare reason the message stands in.
+    expect(varWarnings.get('bare')).toEqual([{ code: 32, details: 'formatted message for bare' }]);
+  });
+});
+
+describeWithEngine('convertErrorDetails over the real engine', () => {
+  it("a stock whose inflow list repeats a flow carries the engine's advisory as a warning, not an error", async () => {
+    const engine = await loadEngine();
+    const project = await engine.Project.openJson(
+      JSON.stringify({
+        name: 'repeats',
+        simSpecs: { startTime: 0, endTime: 3, dt: '1' },
+        models: [
+          {
+            name: 'main',
+            stocks: [{ name: 'Level', initialEquation: '1', inflows: ['f', 'f'], outflows: [] }],
+            flows: [{ name: 'f', equation: '1' }],
+            auxiliaries: [],
+            views: [{ elements: [] }],
+          },
+        ],
+      }),
+    );
+    try {
+      const { varErrors, varWarnings } = convertErrorDetails(await project.getErrors(), 'main');
+      expect(varErrors.has('level')).toBe(false);
+      const warnings = varWarnings.get('level') ?? [];
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0].details).toContain("repeats 'f'");
+      expect(await project.isSimulatable()).toBe(true);
+    } finally {
+      await project.dispose();
+    }
+  });
+});
+
+describe('ProjectController advisories', () => {
+  it('annotates a Warning as the variable’s warnings, leaving its errors and the status alone', async () => {
+    const opened = await openController({
+      errors: [
+        {
+          modelName: 'main',
+          variableName: 'a',
+          kind: SimlinErrorKind.Model,
+          severity: SimlinErrorSeverity.Warning,
+          code: 32,
+          details: 'an advisory',
+        } as unknown as ErrorDetail,
+      ],
+    });
+    const a = opened.controller.getModel()!.variables.get('a')!;
+    expect(a.errors).toBeUndefined();
+    expect(a.warnings).toEqual([{ code: 32, details: 'an advisory' }]);
+    expect(opened.controller.getSnapshot().cachedErrors.varWarnings.get('a')).toEqual(a.warnings);
+    expect(opened.controller.getSnapshot().cachedErrors.varErrors.size).toBe(0);
+    await opened.controller.dispose();
+  });
+});
+
+describe('ProjectController pending creations', () => {
+  // Stock A on the committed view with its variable; Ghost, an orphan stock
+  // element no variable names (an import can leave one).
+  const json = (() => {
+    const project = JSON.parse(
+      validProjectJson({
+        mainViewElements: [
+          { type: 'stock', uid: 1, name: 'A', x: 100, y: 100 },
+          { type: 'stock', uid: 2, name: 'Ghost', x: 100, y: 300 },
+        ],
+      }),
+    ) as { models: Array<{ stocks: unknown[] }> };
+    project.models[0].stocks = [{ name: 'A', initialEquation: '1', inflows: [], outflows: [] }];
+    return JSON.stringify(project);
+  })();
+
+  function stock(uid: number, name: string, x: number, y: number): StockViewElement {
+    return {
+      type: 'stock',
+      uid,
+      name,
+      ident: canonicalize(name),
+      var: undefined,
+      x,
+      y,
+      labelSide: 'bottom',
+      isZeroRadius: false,
+      inflows: [],
+      outflows: [],
+    };
+  }
+
+  function drawFlow(controller: ProjectController, fromUid: number, toUid: number) {
+    const rendered = view(controller);
+    const at = (uid: number) => rendered.elements.find((el) => el.uid === uid)!;
+    return planGesture({
+      view: rendered,
+      variables: controller.getModel()!.variables,
+      selection: new Set(),
+      gesture: { kind: 'createFlow', from: { stock: fromUid } },
+      press: at(fromUid),
+      current: at(toUid),
+      zoom: 1,
+      pointerType: 'mouse',
+      readOnly: false,
+      names: (base) => controller.newVariableName(base),
+    });
+  }
+
+  it('the rendered model holds the variable a queued create will produce, so a flow can be drawn onto it', async () => {
+    const gate = makeGate();
+    const engine = makeFakeEngine({ json, applyPatchGate: () => gate.wait(), applyPatchThrows: true });
+    const { config } = makeControllerConfig({ engine, format: 'json' });
+    const controller = new ProjectController(config);
+    await controller.openInitialProject();
+    await controller.whenIdle();
+
+    const b = stock(3, 'B', 400, 100);
+    const creating = controller.enqueueViewEdit({ label: 'create', nextView: withElements(view(controller), b) });
+    expect(controller.getModel()!.variables.get('b')).toEqual(createdVariable(b));
+    expect(drawFlow(controller, 1, 3).commit).toBe('edit');
+    // The orphan resolves to nothing, pending creates or not.
+    expect(controller.getModel()!.variables.has('ghost')).toBe(false);
+    expect(drawFlow(controller, 1, 2).commit).toBe('none');
+
+    // The create fails: the rendered model no longer holds its variable.
+    gate.open();
+    expect(await creating).toBe(false);
+    await controller.whenIdle();
+    expect(controller.getModel()!.variables.has('b')).toBe(false);
+    await controller.dispose();
   });
 });
 
