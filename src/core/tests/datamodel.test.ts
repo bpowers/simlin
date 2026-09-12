@@ -39,6 +39,8 @@ import {
   projectFromJson,
   projectToJson,
   projectAttachData,
+  projectAttachSeries,
+  groupSeriesByIdent,
   variableHasError,
   ErrorCode,
 } from '../datamodel';
@@ -1944,6 +1946,117 @@ describe('projectAttachData', () => {
 
     expect(v?.data).toBeUndefined();
   });
+
+  it('projectAttachSeries attaches the grouped arrays by identity', () => {
+    const project = projectWith(
+      [arrayedAux('population', ['region'])],
+      [{ name: 'region', subscripts: ['boston', 'nyc'] }],
+    );
+    const grouped = groupSeriesByIdent(
+      new Map<string, Series>([
+        ['population[boston]', series('population[boston]', [10, 11])],
+        ['population[nyc]', series('population[nyc]', [20, 21])],
+      ]),
+    );
+    const first = projectAttachSeries(project, grouped, 'main');
+    const second = projectAttachSeries(project, grouped, 'main');
+    const data = (p: Project) => defined(p.models.get('main')).variables.get('population')?.data;
+    expect(data(first)).toBe(grouped.get('population'));
+    // Attaching the same grouping again (a re-render) hands out the same array.
+    expect(data(second)).toBe(data(first));
+  });
+});
+
+describe('groupSeriesByIdent', () => {
+  const series = (name: string, values: number[]): Series => ({
+    name,
+    time: new Float64Array([0, 1]),
+    values: new Float64Array(values),
+  });
+  const a = series('a', [1, 2]);
+  const x1 = series('x[one]', [3, 4]);
+  const x2 = series('x[two]', [5, 6]);
+
+  it('groups scalar and per-element series under the variable ident, in result order', () => {
+    const grouped = groupSeriesByIdent(
+      new Map([
+        ['x[two]', x2],
+        ['a', a],
+        ['x[one]', x1],
+      ]),
+    );
+    expect([...grouped.keys()].sort()).toEqual(['a', 'x']);
+    expect(grouped.get('a')).toEqual([a]);
+    expect(grouped.get('x')).toEqual([x2, x1]);
+  });
+
+  // Every arm of the reuse decision: a variable keeps the previous array only
+  // when its series are the same objects, the same number, in the same order.
+  const previous = groupSeriesByIdent(
+    new Map([
+      ['a', a],
+      ['x[one]', x1],
+      ['x[two]', x2],
+    ]),
+  );
+  const rows: ReadonlyArray<{ name: string; data: Array<[string, Series]>; keepsX: boolean }> = [
+    {
+      name: 'the same series objects',
+      data: [
+        ['a', a],
+        ['x[one]', x1],
+        ['x[two]', x2],
+      ],
+      keepsX: true,
+    },
+    {
+      name: 'an equal but new series object',
+      data: [
+        ['a', a],
+        ['x[one]', series('x[one]', [3, 4])],
+        ['x[two]', x2],
+      ],
+      keepsX: false,
+    },
+    {
+      name: 'a series added',
+      data: [
+        ['a', a],
+        ['x[one]', x1],
+        ['x[two]', x2],
+        ['x[three]', a],
+      ],
+      keepsX: false,
+    },
+    {
+      name: 'a series removed',
+      data: [
+        ['a', a],
+        ['x[one]', x1],
+      ],
+      keepsX: false,
+    },
+    {
+      name: 'the series reordered',
+      data: [
+        ['a', a],
+        ['x[two]', x2],
+        ['x[one]', x1],
+      ],
+      keepsX: false,
+    },
+  ];
+  for (const row of rows) {
+    it(`${row.name}: ${row.keepsX ? 'keeps' : 'replaces'} the variable's array`, () => {
+      const next = groupSeriesByIdent(new Map(row.data), previous);
+      expect(next.get('a')).toBe(previous.get('a'));
+      if (row.keepsX) {
+        expect(next.get('x')).toBe(previous.get('x'));
+      } else {
+        expect(next.get('x')).not.toBe(previous.get('x'));
+      }
+    });
+  }
 });
 
 // These tests pin the wire fields that an editor upsert (a full variable

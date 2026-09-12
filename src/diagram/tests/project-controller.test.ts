@@ -149,13 +149,12 @@ interface Opened {
 async function openController(
   engineOptions: FakeEngineOptions = {},
   configOptions: Partial<Parameters<typeof makeControllerConfig>[0]> = {},
+  projectJson: string = validProjectJson({
+    auxiliaries: [{ name: 'a', equation: '1' }],
+    mainViewElements: [{ type: 'aux', uid: 1, name: 'a', x: 0, y: 0 }],
+  }),
 ): Promise<Opened> {
-  const project = statefulProject(
-    validProjectJson({
-      auxiliaries: [{ name: 'a', equation: '1' }],
-      mainViewElements: [{ type: 'aux', uid: 1, name: 'a', x: 0, y: 0 }],
-    }),
-  );
+  const project = statefulProject(projectJson);
   const engine = makeFakeEngine({ json: project.json, onApplyPatch: project.apply, ...engineOptions });
   const { config, errors, saves, openedWith } = makeControllerConfig({ engine, format: 'json', ...configOptions });
   const controller = new ProjectController(config);
@@ -652,6 +651,22 @@ describe('ProjectController a patch that applied but could not be read back', ()
     expect(uids(view(controller))).toEqual([1]);
     // The live viewport, which the snapshot does not carry, is persisted again.
     expect(viewOps(reopened[0].appliedPatches[0])[0].payload.view.zoom).toBe(2);
+    await controller.dispose();
+  });
+
+  it('reopen after a geometry-only edit refreshes errors, connectors and the sim on the reopened engine', async () => {
+    // The reopened snapshot is not the project the edit planned on, so whatever
+    // the failed patch carried, everything derived from the model is refreshed.
+    const { controller, reopened, failures } = armed('succeeds');
+    await controller.openInitialProject();
+    await controller.whenIdle();
+    failures.remaining = 2;
+    expect(await controller.enqueueViewEdit({ label: 'move', nextView: moved(view(controller), 1, 10) })).toBe(false);
+    await controller.whenIdle();
+    expect(reopened).toHaveLength(1);
+    for (const marker of ['getErrors', 'getModel', 'run']) {
+      expect(reopened[0].calls).toContain(marker);
+    }
     await controller.dispose();
   });
 
@@ -1270,8 +1285,12 @@ describe('ProjectController maintenance', () => {
       applyPatchGate: (_p, i) => (i === 0 ? gate.wait() : Promise.resolve()),
     });
     const runsBefore = engine.runCalls.length;
+    // Creates, since a geometry-only edit requests no sim run at all.
     for (let i = 0; i < 3; i++) {
-      void controller.enqueueViewEdit({ label: 'move', nextView: moved(view(controller), 1, 10) });
+      void controller.enqueueViewEdit({
+        label: 'create',
+        nextView: withElements(view(controller), aux(2 + i, `n${i}`)),
+      });
     }
     gate.open();
     await controller.whenIdle();
@@ -1287,8 +1306,13 @@ describe('ProjectController maintenance', () => {
   it(`maintenance runs after ${MaintenanceEditBound} consecutive edit items even while more are queued`, async () => {
     const { controller, engine, saves } = await openController();
     const start = engine.calls.length;
+    // Creates, so every maintenance kind is pending at the bound (a geometry-only
+    // edit requests only the save).
     for (let i = 0; i < MaintenanceEditBound + 2; i++) {
-      void controller.enqueueViewEdit({ label: 'move', nextView: moved(view(controller), 1, 10) });
+      void controller.enqueueViewEdit({
+        label: 'create',
+        nextView: withElements(view(controller), aux(2 + i, `n${i}`)),
+      });
     }
     await controller.whenIdle();
     const calls = engine.calls.slice(start);
@@ -1315,7 +1339,12 @@ describe('ProjectController maintenance', () => {
       },
     });
     expect(controller.getSnapshot().cachedErrors.varErrors.has('a')).toBe(false);
-    await controller.enqueueModelEdit({ label: 'equation', buildPatch: () => ({ models: [] }) });
+    await controller.enqueueModelEdit({
+      label: 'equation',
+      buildPatch: () => ({
+        models: [{ name: 'main', ops: [{ type: 'upsertAux', payload: { aux: { name: 'a', equation: '2' } } }] }],
+      }),
+    });
     await controller.whenIdle();
     expect(controller.getSnapshot().cachedErrors.varErrors.has('a')).toBe(true);
     expect(engine.calls.lastIndexOf('getIncomingLinks')).toBeGreaterThan(engine.calls.lastIndexOf('applyPatch'));
@@ -1835,6 +1864,305 @@ describe('ProjectController sim runs', () => {
     expect(engine.runCalls).toHaveLength(0);
     expect(controller.getSnapshot().status).toBe('error');
     await controller.dispose();
+  });
+});
+
+describe('ProjectController model refresh after a landed edit', () => {
+  // A stock, a flow from a cloud to a cloud, and an aux.
+  const stockFlowJson = JSON.stringify({
+    name: 'test',
+    simSpecs: { startTime: 0, endTime: 10, dt: '1' },
+    models: [
+      {
+        name: 'main',
+        stocks: [{ name: 's', initialEquation: '1', inflows: [], outflows: [] }],
+        flows: [{ name: 'f', equation: '1' }],
+        auxiliaries: [{ name: 'a', equation: '1' }],
+        views: [
+          {
+            elements: [
+              { type: 'stock', uid: 1, name: 's', x: 100, y: 100 },
+              {
+                type: 'flow',
+                uid: 2,
+                name: 'f',
+                x: 40,
+                y: 100,
+                points: [
+                  { x: 0, y: 100, attachedToUid: 3 },
+                  { x: 77.5, y: 100, attachedToUid: 4 },
+                ],
+              },
+              { type: 'cloud', uid: 3, flowUid: 2, x: 0, y: 100 },
+              { type: 'cloud', uid: 4, flowUid: 2, x: 77.5, y: 100 },
+              { type: 'aux', uid: 5, name: 'a', x: 0, y: 0 },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  // Each maintenance kind's mark in the fake engine's call log: the save
+  // serializes for the host, the error refresh reads getErrors, the connector
+  // refresh fetches the model, the sim runs it.
+  const SAVE = 'serializeJson:save';
+  const MODEL_REFRESH = ['getErrors', 'getModel', 'run'];
+
+  async function callsDuring(opened: Opened, act: () => Promise<unknown>): Promise<string[]> {
+    const start = opened.engine.calls.length;
+    await act();
+    await opened.controller.whenIdle();
+    return opened.engine.calls.slice(start);
+  }
+
+  const opTypes = (patch: JsonProjectPatch | undefined): string[] =>
+    (patch?.models ?? []).flatMap((m) => m.ops.map((op) => op.type));
+
+  const named = (type: 'stock' | 'flow' | 'aux' | 'module', uid: number, name: string): ViewElement =>
+    ({
+      type,
+      uid,
+      name,
+      ident: canonicalize(name),
+      var: undefined,
+      x: 200,
+      y: 200,
+      labelSide: 'bottom',
+      isZeroRadius: false,
+      ...(type === 'stock' ? { inflows: [], outflows: [] } : {}),
+      ...(type === 'flow' ? { points: [] } : {}),
+    }) as unknown as ViewElement;
+
+  // One row per model op buildEditOps emits for a view edit (view-model-sync.ts:
+  // renames, deletes, a create per element kind, stock list changes); each row
+  // checks its edit applied that op, so the row exercises the arm it names.
+  // Undo/redo, a model-only edit and a patch with no ops follow; the reopen arm
+  // is in 'a patch that applied but could not be read back', and the open's own
+  // refresh in the open lifecycle suite.
+  const viewEditRows: ReadonlyArray<{ op: string; next: (v: StockFlowView) => StockFlowView }> = [
+    {
+      op: 'renameVariable',
+      next: (v) => ({
+        ...v,
+        elements: v.elements.map((el) =>
+          el.uid === 5 && el.type === 'aux' ? { ...el, name: 'renamed', ident: 'renamed' } : el,
+        ),
+      }),
+    },
+    { op: 'deleteVariable', next: (v) => ({ ...v, elements: v.elements.filter((el) => el.uid !== 5) }) },
+    { op: 'upsertStock', next: (v) => withElements(v, named('stock', 10, 'new stock')) },
+    { op: 'upsertFlow', next: (v) => withElements(v, named('flow', 10, 'new flow')) },
+    { op: 'upsertAux', next: (v) => withElements(v, named('aux', 10, 'new aux')) },
+    { op: 'upsertModule', next: (v) => withElements(v, named('module', 10, 'new module')) },
+    {
+      op: 'updateStockFlows',
+      next: (v) => ({
+        ...v,
+        elements: v.elements
+          .filter((el) => el.uid !== 4)
+          .map((el) =>
+            el.type === 'flow' && el.uid === 2
+              ? { ...el, points: [el.points[0], { ...el.points[1], attachedToUid: 1 }] }
+              : el,
+          ),
+      }),
+    },
+  ];
+
+  it('a geometry-only view edit (only upsertView) saves and refreshes nothing derived from the model', async () => {
+    const opened = await openController({}, {}, stockFlowJson);
+    const savesBefore = opened.saves.length;
+    const calls = await callsDuring(opened, () =>
+      opened.controller.enqueueViewEdit({ label: 'move', nextView: moved(view(opened.controller), 5, 10) }),
+    );
+    expect(opTypes(opened.engine.appliedPatches.at(-1))).toEqual(['upsertView']);
+    expect(calls).toContain(SAVE);
+    expect(opened.saves.length).toBe(savesBefore + 1);
+    for (const marker of ['getErrors', 'isSimulatable', 'getModel', 'getIncomingLinks', 'mainModel', 'run']) {
+      expect(calls).not.toContain(marker);
+    }
+    await opened.controller.dispose();
+  });
+
+  for (const row of viewEditRows) {
+    it(`a view edit applying ${row.op} saves and refreshes errors, connectors and the sim`, async () => {
+      const opened = await openController({}, {}, stockFlowJson);
+      const calls = await callsDuring(opened, () =>
+        opened.controller.enqueueViewEdit({ label: row.op, nextView: row.next(view(opened.controller)) }),
+      );
+      expect(opTypes(opened.engine.appliedPatches.at(-1))).toContain(row.op);
+      for (const marker of [SAVE, ...MODEL_REFRESH]) {
+        expect(calls).toContain(marker);
+      }
+      await opened.controller.dispose();
+    });
+  }
+
+  it('a model-only edit saves and refreshes errors, connectors and the sim', async () => {
+    const opened = await openController({}, {}, stockFlowJson);
+    const calls = await callsDuring(opened, () =>
+      opened.controller.enqueueModelEdit({
+        label: 'equation',
+        buildPatch: () => ({
+          models: [{ name: 'main', ops: [{ type: 'upsertAux', payload: { aux: { name: 'a', equation: '2' } } }] }],
+        }),
+      }),
+    );
+    for (const marker of [SAVE, ...MODEL_REFRESH]) {
+      expect(calls).toContain(marker);
+    }
+    await opened.controller.dispose();
+  });
+
+  for (const direction of ['undo', 'redo'] as const) {
+    it(`${direction} saves and refreshes errors, connectors and the sim, even of a geometry-only edit`, async () => {
+      const opened = await openController({}, {}, stockFlowJson);
+      await opened.controller.enqueueViewEdit({ label: 'move', nextView: moved(view(opened.controller), 5, 10) });
+      await opened.controller.whenIdle();
+      if (direction === 'redo') {
+        opened.controller.undoRedo('undo');
+        await opened.controller.whenIdle();
+      }
+      const calls = await callsDuring(opened, async () => {
+        opened.controller.undoRedo(direction);
+      });
+      // Undo and redo reopen a recorded snapshot in a new engine; the fake
+      // config reuses this one engine for every open.
+      expect(calls).toContain('serializeJson:stdlib');
+      for (const marker of [SAVE, ...MODEL_REFRESH]) {
+        expect(calls).toContain(marker);
+      }
+      await opened.controller.dispose();
+    });
+  }
+
+  it('a patch whose only ops are project ops saves and refreshes errors, connectors and the sim', async () => {
+    const opened = await openController({}, {}, stockFlowJson);
+    const calls = await callsDuring(opened, () =>
+      opened.controller.enqueueModelEdit({
+        label: 'add model',
+        buildPatch: () => ({ projectOps: [{ type: 'addModel', payload: { name: 'child' } }], models: [] }),
+      }),
+    );
+    for (const marker of [SAVE, ...MODEL_REFRESH]) {
+      expect(calls).toContain(marker);
+    }
+    await opened.controller.dispose();
+  });
+
+  it('a patch with no ops changes no model: it saves and refreshes nothing else', async () => {
+    const opened = await openController({}, {}, stockFlowJson);
+    const calls = await callsDuring(opened, () =>
+      opened.controller.enqueueModelEdit({ label: 'nothing', buildPatch: () => ({ models: [] }) }),
+    );
+    expect(calls).toContain(SAVE);
+    for (const marker of MODEL_REFRESH) {
+      expect(calls).not.toContain(marker);
+    }
+    await opened.controller.dispose();
+  });
+});
+
+describe('ProjectController sim series identity', () => {
+  // Stock/Aux/Flow and their sparklines memoize on a variable's attached data
+  // array, so a variable whose results did not change must keep its Series and
+  // its array; formatting a large model's results is seconds of main-thread work.
+  const twoAuxJson = validProjectJson({
+    auxiliaries: [
+      { name: 'a', equation: '1' },
+      { name: 'b', equation: '2' },
+    ],
+    mainViewElements: [
+      { type: 'aux', uid: 1, name: 'a', x: 0, y: 0 },
+      { type: 'aux', uid: 2, name: 'b', x: 40, y: 0 },
+    ],
+  });
+  const first = { time: [0, 1, 2], a: [1, NaN, 3], b: [4, 5, 6] };
+  const equationEdit = {
+    label: 'equation',
+    buildPatch: () => ({
+      models: [{ name: 'main', ops: [{ type: 'upsertAux' as const, payload: { aux: { name: 'a', equation: '1' } } }] }],
+    }),
+  };
+  const attached = (controller: ProjectController, ident: string) =>
+    controller.getSnapshot().project?.models.get('main')?.variables.get(ident)?.data;
+
+  // Every arm of the reuse decision, as a second run against the first.
+  const rows: ReadonlyArray<{
+    name: string;
+    second: Record<string, number[]>;
+    keepsMap: boolean;
+    keepsA: boolean;
+    keepsB: boolean;
+  }> = [
+    { name: 'identical results (NaN included)', second: first, keepsMap: true, keepsA: true, keepsB: true },
+    {
+      name: 'one variable changed',
+      second: { ...first, b: [4, 5, 7] },
+      keepsMap: false,
+      keepsA: true,
+      keepsB: false,
+    },
+    {
+      name: 'the time axis changed',
+      second: { ...first, time: [0, 2, 4] },
+      keepsMap: false,
+      keepsA: false,
+      keepsB: false,
+    },
+    { name: 'a variable added', second: { ...first, c: [7, 8, 9] }, keepsMap: false, keepsA: true, keepsB: true },
+    {
+      name: 'a variable removed',
+      second: { time: first.time, a: first.a },
+      keepsMap: false,
+      keepsA: true,
+      keepsB: false,
+    },
+  ];
+
+  for (const row of rows) {
+    it(`a rerun with ${row.name}`, async () => {
+      const results = [first, row.second];
+      let call = 0;
+      const opened = await openController(
+        { run: () => fakeRun(results[Math.min(call++, results.length - 1)]) },
+        {},
+        twoAuxJson,
+      );
+      const before = opened.controller.getSnapshot();
+      const arrayA = attached(opened.controller, 'a');
+      const arrayB = attached(opened.controller, 'b');
+      expect(arrayA).toBeDefined();
+      expect(arrayB).toBeDefined();
+
+      await opened.controller.enqueueModelEdit(equationEdit);
+      await opened.controller.whenIdle();
+
+      expect(opened.engine.runCalls).toHaveLength(2);
+      const after = opened.controller.getSnapshot();
+      expect(after.data === before.data).toBe(row.keepsMap);
+      expect(after.data.get('a') === before.data.get('a')).toBe(row.keepsA);
+      expect(after.data.get('b') === before.data.get('b')).toBe(row.keepsB);
+      expect(attached(opened.controller, 'a') === arrayA).toBe(row.keepsA);
+      if (after.data.has('b')) {
+        expect(attached(opened.controller, 'b') === arrayB).toBe(row.keepsB);
+      }
+      await opened.controller.dispose();
+    });
+  }
+
+  it('a landed geometry-only edit re-renders the project with the same attached arrays and no rerun', async () => {
+    const opened = await openController({ run: () => fakeRun(first) }, {}, twoAuxJson);
+    const before = opened.controller.getSnapshot();
+    const arrayA = attached(opened.controller, 'a');
+    expect(arrayA).toBeDefined();
+    await opened.controller.enqueueViewEdit({ label: 'move', nextView: moved(view(opened.controller), 1, 10) });
+    await opened.controller.whenIdle();
+    expect(opened.engine.runCalls).toHaveLength(1);
+    expect(opened.controller.getSnapshot().project).not.toBe(before.project);
+    expect(attached(opened.controller, 'a')).toBe(arrayA);
+    await opened.controller.dispose();
   });
 });
 

@@ -57,7 +57,8 @@ import {
   Rect,
   Variable,
   projectFromJson,
-  projectAttachData,
+  projectAttachSeries,
+  groupSeriesByIdent,
   findNonFiniteViewCoord,
   isNamedViewElement,
   stockFlowViewToJson,
@@ -578,6 +579,57 @@ export interface NavigationOutcome {
   readonly restoredSelection: ReadonlySet<UID> | undefined;
 }
 
+/**
+ * Whether a patch changes anything but views: a project op, or a model op other
+ * than `upsertView`. A patch with no ops changes nothing.
+ */
+function patchChangesModel(patch: JsonProjectPatch): boolean {
+  return (
+    (patch.projectOps ?? []).length > 0 ||
+    (patch.models ?? []).some((model) => model.ops.some((op) => op.type !== 'upsertView'))
+  );
+}
+
+function sameFloats(a: Readonly<Float64Array>, b: Readonly<Float64Array>): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (!Object.is(a[i], b[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * A run's results as series, reusing `previous`'s Series object for every
+ * variable whose time axis and values are elementwise identical (`Object.is`, so
+ * NaN matches NaN), and returning `previous` itself when every variable is
+ * unchanged. A new Series object makes each sparkline that draws it rebuild its
+ * path, which over a large model's results costs seconds; comparing the arrays
+ * is cheap by comparison.
+ */
+function seriesReusingUnchanged(previous: ReadonlyMap<string, Series>, run: EngineRunApi): ReadonlyMap<string, Series> {
+  const time = run.getSeries('time') ?? new Float64Array(0);
+  const any = previous.values().next();
+  const previousTime = any.done ? undefined : any.value.time;
+  const sameTime = previousTime !== undefined && sameFloats(previousTime, time);
+  const next = new Map<string, Series>();
+  let changed = !sameTime || previous.size !== run.varNames.length;
+  for (const ident of run.varNames) {
+    const values = run.getSeries(ident) ?? new Float64Array(0);
+    const before = previous.get(ident);
+    if (sameTime && before !== undefined && sameFloats(before.values, values)) {
+      next.set(ident, before);
+    } else {
+      next.set(ident, { name: ident, time: sameTime ? previousTime : time, values });
+      changed = true;
+    }
+  }
+  return changed ? next : previous;
+}
+
 type MaintenanceKind = 'save' | 'errors' | 'connectors' | 'sim';
 // The order pending maintenance runs in: user data first, then the annotations
 // the diagram shows, then the (potentially slow) simulation.
@@ -648,6 +700,11 @@ export class ProjectController {
   private errorDetails: readonly ErrorDetail[] = [];
   private simulatable: boolean | undefined = undefined;
   private data: ReadonlyMap<string, Series> = new Map<string, Series>();
+  // `data` grouped per variable, derived once per run that changes `data`
+  // (groupSeriesByIdent, reusing unchanged variables' arrays). Every render
+  // attaches these same arrays: the diagram's sparklines memoize on array
+  // identity, and a landed edit re-renders the project without new results.
+  private seriesByIdent: ReadonlyMap<string, readonly Series[]> = new Map();
   // model name -> (variable ident -> equation dependencies), from the engine.
   private incomingLinks = new Map<string, ReadonlyMap<string, readonly string[]>>();
 
@@ -781,10 +838,10 @@ export class ProjectController {
           : cachedErrorsFor(this.errorDetails, this.modelName);
     let project = this.committed;
     if (project !== undefined) {
-      if (this.data.size > 0 && project.models.has('main')) {
+      if (this.seriesByIdent.size > 0 && project.models.has('main')) {
         // Sim data comes from the root model, so series attach to 'main' even
         // while a child model is viewed.
-        project = projectAttachData(project, this.data, 'main');
+        project = projectAttachSeries(project, this.seriesByIdent, 'main');
       }
       project = annotateErrors(project, cachedErrors, this.modelName);
       let models = project.models;
@@ -1305,7 +1362,16 @@ export class ProjectController {
         return false;
       }
     }
-    this.requestMaintenance('save', 'errors', 'connectors', 'sim');
+    if (patchChangesModel(patch)) {
+      this.requestMaintenance('save', 'errors', 'connectors', 'sim');
+    } else {
+      // Only views changed. A view feeds no simulation, no diagnostic and no
+      // equation dependency (connector targets are named elements, and creating,
+      // deleting or renaming one is a model op), so a geometry-only edit leaves
+      // everything those refreshes derive as it was. They are not free on a large
+      // model: a C-LEARN-sized run and its follow-up render take seconds.
+      this.requestMaintenance('save');
+    }
     return true;
   }
 
@@ -1771,11 +1837,12 @@ export class ProjectController {
     if (this.disposed) {
       return;
     }
-    const time = run.getSeries('time') ?? new Float64Array(0);
-    this.data = new Map<string, Series>(
-      run.varNames.map((ident) => [ident, { name: ident, time, values: run.getSeries(ident) ?? new Float64Array(0) }]),
-    );
-    this.notify();
+    const data = seriesReusingUnchanged(this.data, run);
+    if (data !== this.data) {
+      this.data = data;
+      this.seriesByIdent = groupSeriesByIdent(data, this.seriesByIdent);
+      this.notify();
+    }
     // A run can raise simulation errors (e.g. a runtime divide-by-zero).
     this.requestMaintenance('errors');
   }
