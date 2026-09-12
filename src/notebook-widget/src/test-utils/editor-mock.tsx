@@ -36,6 +36,8 @@ export interface EditorMockProps {
   // viewport and hands it back to the next mount.
   initialViewport?: Viewport;
   onViewportChange?: (modelName: string, viewport: Viewport) => void;
+  // The Reload action of the real Editor's engine-unavailable notice.
+  onReload?: () => void;
 }
 
 interface MountRecord {

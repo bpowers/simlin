@@ -1398,6 +1398,72 @@ fn test_isolated_flow_importance_is_5() {
     assert!((chains[0].importance - 5.0).abs() < f64::EPSILON);
 }
 
+/// A flow two stocks list on the same side (degenerate input) has one source
+/// in the metadata (`flow_to_stocks`), so it belongs to that stock's chain
+/// only; claiming it in both chains lays it out twice.
+#[test]
+fn test_detect_chains_claims_a_flow_only_for_its_metadata_stock() {
+    let mut stock_to_inflows: HashMap<String, Vec<String>> = HashMap::new();
+    let mut stock_to_outflows: HashMap<String, Vec<String>> = HashMap::new();
+    let mut flow_to_stocks: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    let mut all_flows: BTreeSet<String> = BTreeSet::new();
+
+    for stock in ["a", "b"] {
+        stock_to_outflows.insert(stock.into(), vec!["f".into()]);
+        stock_to_inflows.insert(stock.into(), vec![]);
+    }
+    for stock in ["c", "d"] {
+        stock_to_inflows.insert(stock.into(), vec!["g".into()]);
+        stock_to_outflows.insert(stock.into(), vec![]);
+    }
+    flow_to_stocks.insert("f".into(), (Some("b".into()), None));
+    flow_to_stocks.insert("g".into(), (None, Some("d".into())));
+    all_flows.extend(["f".into(), "g".into()]);
+
+    let chains = detect_chains(
+        &stock_to_inflows,
+        &stock_to_outflows,
+        &flow_to_stocks,
+        &all_flows,
+    );
+    for (flow, stock) in [("f", "b"), ("g", "d")] {
+        let claiming: Vec<&StockFlowChain> = chains
+            .iter()
+            .filter(|c| c.flows.iter().any(|x| x == flow))
+            .collect();
+        assert_eq!(claiming.len(), 1, "{flow} must be in exactly one chain");
+        assert!(
+            claiming[0].stocks.iter().any(|s| s == stock),
+            "{flow} belongs to the chain of its metadata stock {stock}"
+        );
+    }
+}
+
+/// sdCloud's `test_non_negative_all1.xmile` lists `OutFlow` as an outflow of
+/// both `TestStock0` and `TestStock1`, and `if_else` of two others. The layout
+/// emits each flow once, attached, and never a second detached copy.
+#[test]
+fn test_layout_emits_a_flow_listed_by_two_stocks_once() {
+    const NON_NEGATIVE: &str = include_str!(
+        "../../../../test/test-models/tests/non_negative_all/test_non_negative_all1.xmile"
+    );
+    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(NON_NEGATIVE.as_bytes()))
+        .expect("fixture imports");
+    let view = generate_layout(&project, "default", None).expect("layout");
+    for name in ["outflow", "if_else"] {
+        let count = view
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Flow(f) if canonicalize(&f.name) == name))
+            .count();
+        assert_eq!(count, 1, "flow {name} must be laid out once");
+    }
+    assert_eq!(
+        crate::diagram::flow_geometry::flow_invariant_violations(&view.elements),
+        Vec::<String>::new()
+    );
+}
+
 #[test]
 fn test_ast_deps_exclude_builtins() {
     // A variable referencing TIME (a builtin) should not produce a connector
@@ -4051,7 +4117,7 @@ fn test_resnap_preserves_stock_edge_position() {
     }));
     state.positions.insert(2, Position::new(300.0, 100.0));
 
-    resnap_flow_endpoints(&mut state, &config);
+    resnap_flow_endpoints(&mut state, &config, |_| true);
 
     let flow = state
         .elements
@@ -4133,7 +4199,7 @@ fn test_resnap_snaps_to_correct_face() {
     }));
     state.positions.insert(2, Position::new(200.0, 100.0));
 
-    resnap_flow_endpoints(&mut state, &config);
+    resnap_flow_endpoints(&mut state, &config, |_| true);
 
     let flow = state
         .elements
@@ -4214,7 +4280,7 @@ fn test_resnap_vertical_flow_snaps_to_bottom_edge() {
     }));
     state.positions.insert(2, Position::new(200.0, 250.0));
 
-    resnap_flow_endpoints(&mut state, &config);
+    resnap_flow_endpoints(&mut state, &config, |_| true);
 
     let flow = state
         .elements
@@ -5632,3 +5698,9 @@ mod label_tests;
 
 #[path = "layout_flow_side_tests.rs"]
 mod flow_side_tests;
+
+#[path = "layout_flow_geometry_tests.rs"]
+mod flow_geometry_tests;
+
+#[path = "layout_flow_tests.rs"]
+mod flow_tests;

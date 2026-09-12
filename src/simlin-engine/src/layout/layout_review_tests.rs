@@ -1926,7 +1926,7 @@ fn test_incremental_new_side_flow_valve_on_pipe() {
 }
 
 // ---------------------------------------------------------------------------
-// P2: Preserved side flows must be rebuilt when their offset changes
+// A preserved side flow keeps its slot when a sibling joins its face
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2067,47 +2067,29 @@ fn test_incremental_add_second_side_flow_takes_its_own_face() {
     let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
         .expect("incremental layout");
 
-    let new_stock_a = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
-            _ => None,
-        })
-        .expect("stock_a in new view");
+    let flow_named = |view: &datamodel::StockFlow, name: &str| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == name => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} in view"))
+    };
 
-    let new_waste_a = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => Some(f),
-            _ => None,
-        })
-        .expect("waste_a in new view");
+    // waste_a is a sibling the patch did not touch: it comes back byte for
+    // byte, pipe, valve and label side.
+    let new_waste_a = flow_named(&new_view, "waste_a");
+    assert_eq!(new_waste_a, flow_named(&old_view, "waste_a"));
 
-    let new_waste_b = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_b" => Some(f),
-            _ => None,
-        })
-        .expect("waste_b in new view");
-
-    // waste_a is untouched: same pipe, same valve.
-    assert_eq!(
-        new_waste_a.points, old_waste_a.points,
-        "waste_a must keep its pipe when a sibling is added"
-    );
-    assert!((new_waste_a.x - old_waste_a.x).abs() < 1e-9);
-    assert!((new_waste_a.y - old_waste_a.y).abs() < 1e-9);
-
-    // waste_b leaves from the top face, on the opposite side of the stock.
+    // waste_b leaves from the top face, on the opposite side of the stock
+    // (incremental layout never moves a stock the patch did not touch).
+    let new_waste_b = flow_named(&new_view, "waste_b");
     assert!(
-        new_waste_b.y < new_stock_a.y - 5.0,
+        new_waste_b.y < old_stock_a.y - 5.0,
         "waste_b valve y ({}) should be above stock_a y ({})",
         new_waste_b.y,
-        new_stock_a.y,
+        old_stock_a.y,
     );
     let valve_gap =
         ((new_waste_a.x - new_waste_b.x).powi(2) + (new_waste_a.y - new_waste_b.y).powi(2)).sqrt();
@@ -2118,14 +2100,14 @@ fn test_incremental_add_second_side_flow_takes_its_own_face() {
 }
 
 // ---------------------------------------------------------------------------
-// P2: Cloud flows must be reclassified when chain flows are removed
+// P2: A preserved cloud flow keeps its face when its stock's chain is removed
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_incremental_remove_chain_reclassifies_cloud_flow() {
+fn test_incremental_remove_chain_keeps_cloud_flow_in_place() {
     // Start with: stock_a -> chain_flow -> stock_b, stock_a -> waste_flow -> cloud
-    // waste_flow should be on Bottom because chain_flow exists.
-    // Then remove chain_flow and stock_b. waste_flow should move back to Right.
+    // waste_flow is on Bottom because chain_flow exists.
+    // Then remove chain_flow and stock_b. waste_flow stays where it is.
     let initial_model = datamodel::Model {
         name: TEST_MODEL.to_string(),
         sim_specs: None,
@@ -2237,42 +2219,21 @@ fn test_incremental_remove_chain_reclassifies_cloud_flow() {
     let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
         .expect("incremental layout");
 
-    let new_stock = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
-            _ => None,
-        })
-        .expect("stock_a in new view");
-
-    let new_waste = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => Some(f),
-            _ => None,
-        })
-        .expect("waste_flow in new view");
-
-    // waste_flow should now be horizontal (same y as stock) since there's no
-    // chain flow anymore -- it should be the sole outflow going right.
-    assert!(
-        (new_waste.y - new_stock.y).abs() < 5.0,
-        "waste_flow y ({}) should be near stock_a y ({}) after chain removed (now horizontal)",
-        new_waste.y,
-        new_stock.y,
-    );
-
-    // Flow points should be horizontal (similar y values)
-    let first_pt = &new_waste.points[0];
-    let last_pt = &new_waste.points[new_waste.points.len() - 1];
-    assert!(
-        (first_pt.y - last_pt.y).abs() < 5.0,
-        "waste_flow points should be horizontal after chain removal: first.y={}, last.y={}",
-        first_pt.y,
-        last_pt.y,
-    );
+    // waste_flow is a sibling the patch did not touch. With the chain gone a
+    // fresh layout would put it on the right face, but it keeps the bottom
+    // one: it comes back byte for byte.
+    let waste_flow = |view: &datamodel::StockFlow| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => {
+                    Some(f.clone())
+                }
+                _ => None,
+            })
+            .expect("waste_flow in view")
+    };
+    assert_eq!(waste_flow(&new_view), waste_flow(&old_view));
 }
 
 // ---------------------------------------------------------------------------
@@ -2374,7 +2335,7 @@ fn test_resnap_preserves_vertical_flow_offset() {
         compat: None,
     }));
 
-    resnap_flow_endpoints(&mut state, &config);
+    resnap_flow_endpoints(&mut state, &config, |_| true);
 
     let flow = state
         .elements
@@ -2547,15 +2508,15 @@ fn test_incremental_chain_flow_seeded_between_stocks() {
 }
 
 // ---------------------------------------------------------------------------
-// P2: Redistributing flows must preserve existing positional order
+// P2: Adding a sibling keeps a hand-reordered face exactly as it was
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_incremental_redistribute_preserves_visual_order() {
+fn test_incremental_add_side_flow_keeps_reordered_siblings_in_place() {
     // Three side outflows beside a chain flow: waste_a and waste_c share the
     // bottom face (waste_b holds the top). Construct a view where waste_c is
-    // visually LEFT of waste_a (non-alphabetical order). Adding waste_d, which
-    // reclassifies every flow on the stock, must not swap waste_a and waste_c.
+    // visually LEFT of waste_a (non-alphabetical order). Adding waste_d must
+    // leave every sibling exactly as drawn, the swapped order included.
 
     // First, build an initial model with chain + waste_a + waste_b + waste_c
     let initial_model = datamodel::Model {
@@ -2762,45 +2723,51 @@ fn test_incremental_redistribute_preserves_visual_order() {
     let new_view = incremental_layout(&swapped_view, &patched_project, TEST_MODEL, &patch, None)
         .expect("incremental layout");
 
-    // After redistribution, waste_c should still be to the left of waste_a
-    let new_wa_x = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => {
-                f.points.first().map(|p| p.x)
-            }
-            _ => None,
-        })
-        .expect("waste_a in new view");
-    let new_wc_x = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
-                f.points.first().map(|p| p.x)
-            }
-            _ => None,
-        })
-        .expect("waste_c in new view");
-
+    // waste_a, waste_b and waste_c are siblings the patch did not touch: they
+    // come back byte for byte, the swapped order included, and waste_d's stock
+    // end lands on none of theirs.
+    let flow_named = |view: &datamodel::StockFlow, name: &str| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == name => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} in view"))
+    };
+    for name in ["waste_a", "waste_b", "waste_c"] {
+        assert!(
+            flow_named(&new_view, name) == flow_named(&swapped_view, name),
+            "{name} must come back byte for byte"
+        );
+    }
+    let wd = flow_named(&new_view, "waste_d").points[0].clone();
+    for name in ["waste_a", "waste_b", "waste_c"] {
+        let end = flow_named(&swapped_view, name).points[0].clone();
+        assert!(
+            (wd.x - end.x).hypot(wd.y - end.y) > 1.0,
+            "waste_d's end ({}, {}) must not land on {name}'s ({}, {})",
+            wd.x,
+            wd.y,
+            end.x,
+            end.y,
+        );
+    }
     assert!(
-        new_wc_x < new_wa_x,
-        "waste_c ({}) should remain left of waste_a ({}) after adding waste_d",
-        new_wc_x,
-        new_wa_x,
+        swapped_wc_x < swapped_wa_x,
+        "fixture: waste_c stays left of waste_a"
     );
 }
 
 // ---------------------------------------------------------------------------
-// P1: DeleteVariable without UpdateStockFlows must still reclassify siblings
+// P1: DeleteVariable without UpdateStockFlows leaves siblings in place
 // ---------------------------------------------------------------------------
 
 #[test]
 fn test_incremental_delete_flow_without_update_stock_flows() {
     // Start with: stock_a -> chain_flow -> stock_b, stock_a -> waste_flow -> cloud
     // Delete chain_flow and stock_b using only DeleteVariable (no UpdateStockFlows).
-    // waste_flow should move back to horizontal.
+    // waste_flow is a sibling the patch did not touch and stays where it is.
     let initial_model = datamodel::Model {
         name: TEST_MODEL.to_string(),
         sim_specs: None,
@@ -2886,31 +2853,20 @@ fn test_incremental_delete_flow_without_update_stock_flows() {
     let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
         .expect("incremental layout");
 
-    let new_stock = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
-            _ => None,
-        })
-        .expect("stock_a");
-
-    let new_waste = new_view
-        .elements
-        .iter()
-        .find_map(|e| match e {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => Some(f),
-            _ => None,
-        })
-        .expect("waste_flow");
-
-    // waste_flow should now be horizontal (same y as stock) -- no more chain
-    assert!(
-        (new_waste.y - new_stock.y).abs() < 5.0,
-        "waste_flow y ({}) should be near stock_a y ({}) after chain deleted via DeleteVariable only",
-        new_waste.y,
-        new_stock.y,
-    );
+    // waste_flow is a sibling the patch did not touch: deleting the chain
+    // through DeleteVariable alone leaves it where it was.
+    let waste_flow = |view: &datamodel::StockFlow| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => {
+                    Some(f.clone())
+                }
+                _ => None,
+            })
+            .expect("waste_flow in view")
+    };
+    assert_eq!(waste_flow(&new_view), waste_flow(&old_view));
 }
 
 // ---------------------------------------------------------------------------

@@ -6,8 +6,8 @@ import * as React from 'react';
 
 import clsx from 'clsx';
 import { Descendant } from 'slate';
-import { defined, exists, mapValues, setsEqual } from '@simlin/core/common';
-import { at, first, getOrThrow, last, only } from '@simlin/core/collections';
+import { defined, exists } from '@simlin/core/common';
+import { first, last } from '@simlin/core/collections';
 import {
   ViewElement,
   AliasViewElement,
@@ -19,9 +19,7 @@ import {
   ModuleViewElement,
   StockViewElement,
   NamedViewElement,
-  Point as FlowPoint,
   UID,
-  LabelSide,
   StockFlowView,
   Project,
   Model,
@@ -33,9 +31,8 @@ import {
 import { canonicalize } from '@simlin/core/canonicalize';
 
 import { Alias, aliasBounds, AliasProps } from './Alias';
-import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
-import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
-import { isCloudOnSourceSide, isCloudOnSinkSide } from './cloud-utils';
+import { Aux, auxBounds, AuxProps } from './Auxiliary';
+import { Cloud, cloudBounds, CloudProps } from './Cloud';
 import {
   calcViewBox,
   displayName,
@@ -48,18 +45,15 @@ import {
   Rect,
   screenToCanvasPoint,
 } from './common';
-import { Connector, ConnectorProps, computeLinkCreationArc } from './Connector';
+import { Connector, ConnectorProps } from './Connector';
 import { EditableLabel } from './EditableLabel';
 import { CanvasRenderContext, EXPORT_LABEL_FILTER_ID, type CanvasRenderContextValue } from './canvas-render-context';
+import { fauxTargetUid } from './creation-sentinels';
 import { Flow, flowBounds } from './Flow';
-import { applyGroupMovement } from '../group-movement';
-import { growEndpointDrag, growInCreationFlow } from '../flow-attach';
 import { Group, groupBounds, GroupProps } from './Group';
-import { Module, moduleBounds, moduleContains, ModuleProps } from './Module';
+import { Module, moduleBounds, ModuleProps } from './Module';
 import { anyModuleHasModelReference } from '../module-warning';
-import { CustomElement } from './SlateEditor';
-import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
-import { isDragMovement, shouldShowVariableDetails } from './pointer-utils';
+import { Stock, stockBounds, StockProps } from './Stock';
 import {
   VELOCITY_THRESHOLD,
   calculateVelocity as computeVelocity,
@@ -75,70 +69,36 @@ import {
   wheelZoom,
   zoomAroundPoint,
 } from './viewport';
-import { pointerStateReset, resolveSelectionForReattachment } from '../selection-logic';
 import {
-  computeDragSelection,
-  decideMouseDownSelection,
-  idleState,
-  InteractionContext,
-  InteractionEffect,
-  InteractionState,
-  isDrag,
-  labelSideForPointer,
-  reduceInteraction,
-  resolveDeferredSelection,
-} from './canvas-interaction';
+  beyondThreshold,
+  classifyPress,
+  isLostRelease,
+  latchGesture,
+  planGesture,
+  sameGeometry,
+  type GesturePlan,
+  type PressGesture,
+  type PressHit,
+  type PressInput,
+  type PressOutcome,
+} from '../gesture-planner';
 
 import styles from './Canvas.module.css';
-
-// The creation sentinel UIDs live in one module (drawing/creation-sentinels)
-// and are re-exported here so existing `from '../drawing/Canvas'` imports keep
-// resolving. See creation-sentinels.ts for what each marks.
-export { inCreationUid, fauxTargetUid, inCreationCloudUid, fauxCloudTargetUid } from './creation-sentinels';
-import { inCreationUid, fauxTargetUid, inCreationCloudUid, fauxCloudTargetUid } from './creation-sentinels';
-
-const fauxTarget: AuxViewElement = {
-  type: 'aux',
-  name: '$⁚model-internal-faux-target',
-  ident: '$⁚model-internal-faux-target',
-  uid: fauxTargetUid,
-  var: undefined,
-  x: 0,
-  y: 0,
-  labelSide: 'right' as LabelSide,
-  isZeroRadius: true,
-};
-
-const fauxCloudTarget: CloudViewElement = {
-  type: 'cloud',
-  uid: fauxCloudTargetUid,
-  flowUid: -1,
-  x: 0,
-  y: 0,
-  isZeroRadius: true,
-  ident: undefined,
-};
 
 // Pure bounds pass over the displayed elements: every kind but a link folds in
 // its drawn box, label included, through the bounds function its renderer's
 // module exports. An alias's label shows its target's name, so the target is
 // looked up in `elementsByUid`. The engine's `resolve_view` folds the same
 // boxes (`tests/svg-rendering.test.ts` pins the two static renderers byte for
-// byte). Selection-update substitutions are applied first so drag-preview
-// geometry feeds the embedded-mode tight viewBox, matching what buildLayers
-// draws. Returns one entry per contributing element (undefined entries from
-// *Bounds are kept; calcViewBox skips them).
+// byte). A live gesture's planned elements are what is displayed, so they feed
+// the embedded-mode tight viewBox exactly as buildLayers draws them. Undefined
+// entries from *Bounds are kept; calcViewBox skips them.
 function computeElementBounds(
   displayElements: readonly ViewElement[],
-  selectionUpdates: ReadonlyMap<UID, ViewElement>,
   elementsByUid: ReadonlyMap<UID, ViewElement>,
 ): Array<Rect | undefined> {
   const bounds: Array<Rect | undefined> = [];
-  for (let element of displayElements) {
-    const updated = selectionUpdates.get(element.uid);
-    if (updated !== undefined) {
-      element = updated;
-    }
+  for (const element of displayElements) {
     switch (element.type) {
       case 'cloud':
         bounds.push(cloudBounds(element));
@@ -173,6 +133,10 @@ function computeElementBounds(
 
 const ZMax = 6;
 
+// A client point with no pointer behind it, for presses classified from events
+// that carry none (a module's double-click).
+const NO_POINTER = { clientX: 0, clientY: 0, shiftKey: false, ctrlKey: false, metaKey: false, pointerType: 'mouse' };
+
 // Momentum physics, zoom limits, and the wheel/pinch math live in `viewport.ts`
 // (the pure functional core); this shell resolves screen->canvas points and the
 // rAF/timer lifecycle, then calls those pure transforms.
@@ -199,38 +163,54 @@ interface VelocityTracker {
 }
 
 // The result of the single render-phase derivation step (deriveRenderState).
-// Every cached/derived value the render path needs is produced here exactly
-// once at the top of render(); the element-rendering helpers (connector(),
-// aux(), ...) only *read* these, never recompute or mutate during render. This
-// keeps render free of mid-render ref mutation beyond the single
-// deriveRenderState writer.
+// Every derived value the render path needs is produced there once, at the top
+// of render; the element-rendering helpers only read it, and event handlers read
+// it after render returns (connector ends, the name editor's element).
 interface RenderDerivation {
-  // The elements to draw (props.view.elements plus any in-creation element).
+  // What is drawn: the live gesture's plan while one is in flight, else the view
+  // (plus a draft element while its name is being edited).
   displayElements: readonly ViewElement[];
-  // UID -> element lookup over displayElements plus the faux drag targets.
-  // Reused at event-time (getElementByUid, handlers) -- see elementsRef.
+  // UID -> element lookup over displayElements.
   elementsByUid: Map<UID, ViewElement>;
-  // Selected elements with live drag/label updates applied (group movement,
-  // label-side, single-link arc suppression). Keyed by UID.
-  selectionUpdates: Map<UID, ViewElement>;
+  // The live gesture's plan, while one is in flight and still valid (E5).
+  plan: GesturePlan | undefined;
+  // The selection drawn: a committing plan's, so the last preview frame draws
+  // what the release commits (E2); otherwise the host's.
+  selection: ReadonlySet<UID>;
   // AC1.6: whether any module in the model has a model reference, used to
   // suppress warning dots while a model is being sketched.
   hasAnyModuleReference: boolean;
-  // The arc last computed for a single-link arrowhead drag (creation or
-  // reattachment), or undefined when not dragging a link / straight line.
-  // connector() renders this exact value and pointer-up persists it, so the
-  // saved arc always matches the on-screen arc (see "Link drag arc ownership").
-  draggedLinkArc: number | undefined;
+}
+
+/**
+ * What a gesture's release commits: the next view's elements and uid counter,
+ * exactly as the last preview frame drew them, and the selection it applies.
+ */
+export interface GestureCommit {
+  readonly label: string;
+  readonly elements: readonly ViewElement[];
+  readonly nextUid: number;
+  readonly selection: ReadonlySet<UID>;
+  /** The controller state token the gesture was pressed under. */
+  readonly token: number | undefined;
+  /**
+   * The view the release planned on. The host refuses the commit when its
+   * rendered view no longer agrees with it (E5): the elements replace the whole
+   * view, so an edit that landed in between would otherwise be reverted.
+   */
+  readonly baseView: StockFlowView;
+  /** An element the edit creates whose name editor opens next (a drawn flow). */
+  readonly editName?: UID;
 }
 
 export interface CanvasProps {
   embedded: boolean;
   // The host says the displayed model must not be mutated (read-only viewer,
-  // stdlib model, embed). The Editor already hands a read-only Canvas no-op
-  // mutation callbacks and no selectedTool; this flag additionally suppresses
-  // the UI-only entry points Canvas owns itself -- today the inline label
-  // editor a label double-click opens -- which would otherwise LOOK editable
-  // while the eventual onRenameVariable commit silently no-ops (issue #935).
+  // stdlib model, embed). The Editor also hands a read-only Canvas a no-op
+  // commit callback and no selectedTool; with this flag the gesture planner
+  // previews and commits no edit, and the inline label editor a label
+  // double-click opens never opens -- it would LOOK editable while the eventual
+  // onRenameVariable commit silently no-ops (issue #935).
   readOnly?: boolean;
   // Whether the mount-time offscreen re-center (issue #52) may run for this
   // mount. Default true. A host that opened the view at a viewport it carried
@@ -243,91 +223,95 @@ export interface CanvasProps {
   project: Project;
   model: Model;
   view: StockFlowView;
-  version: number;
+  // The host's state token (ProjectSnapshot.token): a live gesture pressed under
+  // another token aborts (E5), since the view it planned on was replaced.
+  token?: number;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined;
   selection: ReadonlySet<UID>;
-  onRenameVariable: (oldName: string, newName: string) => void;
+  // Returns an error message when the host refuses the name (it names another
+  // variable or a pending create); the inline name editor then stays open and
+  // shows it, and nothing is committed.
+  onRenameVariable: (oldName: string, newName: string) => string | undefined | void;
   onSetSelection: (selected: ReadonlySet<UID>) => void;
-  onMoveSelection: (position: Point, arcPoint?: Point, segmentIndex?: number) => void;
-  onMoveFlow: (
-    flow: FlowViewElement,
-    targetUid: number,
-    moveDelta: Point,
-    fauxTargetCenter: Point | undefined,
-    inCreation: boolean,
-    isSourceAttach?: boolean,
-  ) => void;
-  onMoveLabel: (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => void;
-  onAttachLink: (link: LinkViewElement, newTarget: string) => void;
-  onCreateVariable: (element: ViewElement) => void;
+  // A gesture released with an edit to commit (see GestureCommit).
+  onCommitGesture: (commit: GestureCommit) => void;
+  // Returns an error message when the host refuses the name, as onRenameVariable.
+  onCreateVariable: (element: ViewElement) => string | undefined | void;
   onClearSelectedTool: () => void;
+  // Deletes the selection; the Canvas calls it when a drawn flow's first name
+  // edit is cancelled (the flow is then the selection).
   onDeleteSelection: () => void;
   onShowVariableDetails: () => void;
   onViewBoxChange: (viewBox: ViewRect, zoom: number) => void;
   onDrillIntoModule: (moduleIdent: string, targetModelName: string) => void;
+  // Allocates the default name of a new element ("New Variable", "New
+  // Variable 1", ...). The host allocates against everything that exists once
+  // its pending edits land; `props.model` lacks pending creates, so two quick
+  // creates allocating from it both got the same name. Absent (static and test
+  // hosts), the Canvas allocates against `props.model`.
+  newVariableName?: (base: string) => string;
+  // Presses start no gesture: the host has an undo or redo queued, and a
+  // gesture planned on the view it is about to replace could not commit.
+  pressesDisabled?: boolean;
 }
 
-// UID -> element lookup for resolving connector ends. Module-level pure function
-// (formerly Canvas.buildSelectionMap, a static method). The skip rationale for
-// inCreationUid / missing elements is preserved verbatim below.
-export function buildSelectionMap(
-  props: CanvasProps,
-  elements: ReadonlyMap<UID, ViewElement>,
-  inCreation?: ViewElement,
-): Map<UID, ViewElement> {
-  const selection = new Map<UID, ViewElement>();
-  for (const uid of props.selection) {
-    if (uid === inCreationUid) {
-      if (inCreation) {
-        selection.set(uid, inCreation);
-      }
-      // When inCreation is undefined the async Editor update hasn't
-      // finished yet — skip this transient UID; the next render after
-      // Editor.setState will carry the real selection.
-      continue;
-    }
-    const e = elements.get(uid);
-    if (e === undefined) {
-      // The selection can transiently reference an element that has just
-      // been removed from the view (e.g. dropping a connector's arrowhead
-      // off-canvas deletes it): Editor updates the view and clears the
-      // selection in separate setState calls, so there is a render in
-      // between where props.view no longer has the element but
-      // props.selection still does. Skip it rather than crashing the whole
-      // canvas; the next render after the selection-clear lands is
-      // consistent. (Same rationale as the inCreationUid case above.)
-      continue;
-    }
-    selection.set(e.uid, e);
-  }
-  return selection;
+// A gesture in flight: what the press started, where (model coordinates), the
+// pointer now, and what it was pressed on. Every frame is planned afresh from
+// these, never from a previous frame.
+interface ActiveGesture {
+  readonly gesture: PressGesture;
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly press: Point;
+  readonly current: Point;
+  // The view and token at press: a republish that changes either aborts (E5).
+  readonly baseView: StockFlowView;
+  readonly token: number | undefined;
+  // The selection in effect after the press, and the one a click settles on.
+  readonly selection: ReadonlySet<UID>;
+  readonly clickSelection: ReadonlySet<UID> | undefined;
 }
 
-// The mutable instance state that, in the class component, lived as instance
-// fields (this.*) and was read by event handlers / native listeners / the
-// momentum rAF loop AFTER render returned. Collected here so the function
-// component can keep them in a single ref and the event-time readers share one
-// "current" view -- exactly as `this.*` always reflected the latest values.
+// An open inline name editor: the element being named, and for a creation
+// tool's draft the element itself (it is not in the view until the name is
+// done). A drawn flow's first name edit deletes the flow when cancelled.
+interface NameEdit {
+  readonly uid: UID;
+  readonly draft: ViewElement | undefined;
+  readonly creatingFlow: boolean;
+}
+
+// A two-finger pinch's fixed reference, captured when the second finger lands.
+interface PinchState {
+  readonly initialDistance: number;
+  readonly initialZoom: number;
+  readonly modelPoint: Point;
+}
+
+// The mutable instance state read by event handlers, native listeners, the
+// momentum rAF loop and the ResizeObserver after render returns, collected in
+// one ref so every event-time reader shares one "current" view.
 interface CanvasRefs {
   svgObserver: ResizeObserver | undefined;
-  mouseDownPoint: Point | undefined;
-  selectionCenterOffset: Point | undefined;
-  pointerId: number | undefined;
   prevSelectedTool: CanvasProps['selectedTool'];
 
-  // Cache key for the elements-by-uid lookup map: when props.version is
-  // unchanged we reuse the existing map (and the displayElements array) rather
-  // than rebuilding it. Owned exclusively by deriveRenderState().
-  cachedVersion: number;
+  // The live gesture, pinch and name editor. Handlers read these refs, so two
+  // events that arrive between renders see each other's writes; the gesture and
+  // name editor setters mirror into state to re-render (see setGesture).
+  gesture: ActiveGesture | undefined;
+  pinch: PinchState | undefined;
+  nameEdit: NameEdit | undefined;
 
-  // UID -> element lookup, populated by deriveRenderState() and intentionally
-  // NOT cleared at the end of render: event handlers (getElementByUid and the
-  // pointer callbacks) read it after render returns. Mirrors derived.elementsByUid.
+  // A pan's press in canvas coordinates: the pan physics anchor.
+  mouseDownPoint: Point | undefined;
+
+  // The displayed elements the lookup map was built from; the map is rebuilt
+  // only when they change identity. Owned by deriveRenderState().
+  cachedElements: readonly ViewElement[] | undefined;
   elements: Map<UID, ViewElement>;
 
   // The most recent render derivation. Written only by deriveRenderState();
-  // read by the element-rendering helpers during render and by the pointer
-  // handlers at event time.
+  // read by the element-rendering helpers during render and by handlers.
   derived: RenderDerivation;
 
   // Multi-touch tracking for pinch gestures
@@ -383,21 +367,15 @@ interface LiveViewport {
   zoom: number;
 }
 
-// The snapshot of props + discrete/continuous state that event-time readers
-// (native wheel/gesture listeners, the momentum rAF loop, the ResizeObserver,
-// the deferred tool-change commit) must see CURRENT, not as captured by a stale
-// render closure. Refreshed synchronously on every render so any escaped
-// callback reads the same values `this.props` / `this.state` would have.
+// The snapshot of props + continuous state that event-time readers (native
+// wheel/gesture listeners, the momentum rAF loop, the ResizeObserver, the
+// deferred tool-change commit) must see CURRENT, not as captured by a stale
+// render closure. Refreshed synchronously on every render.
 interface LatestState {
   props: CanvasProps;
-  interaction: InteractionState;
   editingName: Array<Descendant>;
-  dragSelectionPoint: Point | undefined;
-  moveDelta: Point | undefined;
   liveViewport: LiveViewport | undefined;
   svgSize: Readonly<{ width: number; height: number }> | undefined;
-  inCreation: ViewElement | undefined;
-  inCreationCloud: CloudViewElement | undefined;
 }
 
 // Main canvas + rendering engine (the imperative shell). Converted from a
@@ -432,38 +410,40 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     [props.embedded, labelHaloId],
   );
 
-  // ---- Discrete + continuous state (formerly CanvasState) -----------------
-  const [interaction, setInteraction] = React.useState<InteractionState>(idleState);
+  // ---- State ---------------------------------------------------------------
+  const [gesture, setGestureState] = React.useState<ActiveGesture | undefined>(undefined);
+  const [nameEdit, setNameEditState] = React.useState<NameEdit | undefined>(undefined);
   const [editingName, setEditingName] = React.useState<Array<Descendant>>([]);
-  const [dragSelectionPoint, setDragSelectionPoint] = React.useState<Point | undefined>(undefined);
-  const [moveDelta, setMoveDelta] = React.useState<Point | undefined>(undefined);
   const [liveViewport, setLiveViewport] = React.useState<LiveViewport | undefined>(undefined);
   const [initialBounds, setInitialBounds] = React.useState<ViewRect>(viewRectDefault);
   const [svgSize, setSvgSize] = React.useState<Readonly<{ width: number; height: number }> | undefined>(undefined);
-  const [inCreation, setInCreation] = React.useState<ViewElement | undefined>(undefined);
-  const [inCreationCloud, setInCreationCloud] = React.useState<CloudViewElement | undefined>(undefined);
+  // The host's refusal of the name the inline editor tried to commit; shown in
+  // the editor, cleared by typing or by the editor closing.
+  const [nameError, setNameError] = React.useState<string | undefined>(undefined);
 
   // initialBounds is written in the mount effect and only read there; keep the
   // setter referenced to avoid an unused-var lint while preserving the field.
   void initialBounds;
 
-  // ---- Instance fields (formerly this.*) as refs --------------------------
+  // ---- Instance fields as refs ---------------------------------------------
   const refs = React.useRef<CanvasRefs>(undefined as unknown as CanvasRefs);
   if (refs.current === undefined) {
+    const elements = new Map<UID, ViewElement>();
     refs.current = {
       svgObserver: undefined,
-      mouseDownPoint: undefined,
-      selectionCenterOffset: undefined,
-      pointerId: undefined,
       prevSelectedTool: undefined,
-      cachedVersion: -Infinity,
-      elements: new Map<UID, ViewElement>(),
+      gesture: undefined,
+      pinch: undefined,
+      nameEdit: undefined,
+      mouseDownPoint: undefined,
+      cachedElements: undefined,
+      elements,
       derived: {
         displayElements: [],
-        elementsByUid: new Map<UID, ViewElement>(),
-        selectionUpdates: new Map<UID, ViewElement>(),
+        elementsByUid: elements,
+        plan: undefined,
+        selection: new Set(),
         hasAnyModuleReference: false,
-        draggedLinkArc: undefined,
       },
       activePointers: new Map<number, TrackedPointer>(),
       panBaseOffset: undefined,
@@ -476,101 +456,25 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       momentumStartOffset: undefined,
       offscreenChecked: false,
     };
-    // Seed the empty derivation's elementsByUid to the same map instance, as the
-    // class constructor did (derived.elementsByUid === this.elements).
-    refs.current.derived.elementsByUid = refs.current.elements;
   }
   const r = refs.current;
 
   // ---- Latest props/state snapshot for escaped callbacks ------------------
   // Updated synchronously below on every render. Event handlers, native
   // listeners, the momentum loop, and the ResizeObserver all read through this
-  // so they see CURRENT values (the class read this.props/this.state, which
-  // were always current). Writing during render is safe: it is the same data
-  // the JSX below renders, just exposed to non-render-scope callers.
+  // so they see CURRENT values. Writing during render is safe: it is the same
+  // data the JSX below renders, just exposed to non-render-scope callers.
   const latest = React.useRef<LatestState>(undefined as unknown as LatestState);
-  latest.current = {
-    props,
-    interaction,
-    editingName,
-    dragSelectionPoint,
-    moveDelta,
-    liveViewport,
-    svgSize,
-    inCreation,
-    inCreationCloud,
+  latest.current = { props, editingName, liveViewport, svgSize };
+
+  const setGesture = (next: ActiveGesture | undefined): void => {
+    r.gesture = next;
+    setGestureState(next);
   };
 
-  // ---- Discrete-interaction-mode accessors --------------------------------
-  // The migration (#65) collapsed the former boolean CanvasState modes onto the
-  // tagged-union interaction state. These narrow helpers keep the call sites
-  // readable; they are the ONLY places that destructure the union mode, so the
-  // render/handler code stays mode-agnostic. They take the interaction value
-  // explicitly so render-time callers pass the render value and event-time
-  // callers pass latest.current.interaction.
-
-  // Dragging a link/flow arrowhead (sink) endpoint.
-  const isDraggingArrowhead = (i: InteractionState): boolean => i.mode === 'movingEndpoint' && i.endpoint === 'arrow';
-
-  // Dragging a flow source endpoint.
-  const isDraggingSource = (i: InteractionState): boolean => i.mode === 'movingEndpoint' && i.endpoint === 'source';
-
-  // The inline name editor is showing NOW. This reproduces the OLD boolean
-  // `isEditingName` ("the inline editor is visible"), which was distinct from
-  // `editNameOnPointerUp` ("enter editing AFTER this creation drag ends"). Both
-  // map onto the `editingName` union variant, separated by `onPointerUp`: during
-  // an aux/stock/module creation drag the variant is `editingName {onPointerUp:
-  // true}` but the editor is NOT yet visible, so this MUST exclude that staging
-  // case. Readers that drive the EditableLabel overlay, the label-suppression
-  // props, the overlay's pointer-event capture, and the tool-change deferred
-  // commit all want this "showing now" semantics -- never the staged handoff.
-  // The pointer-up staging read uses `mode === 'editingName' && onPointerUp`
-  // directly (the old `editNameOnPointerUp`), not this helper.
-  const isShowingNameEditor = (i: InteractionState): boolean => i.mode === 'editingName' && !i.onPointerUp;
-
-  // The pointer type captured at the start of an endpoint drag, or undefined
-  // when not dragging an endpoint. Drives the touch-is-always-straight link
-  // rule (touch links never get an arc).
-  const getDragPointerType = (i: InteractionState): string | undefined =>
-    i.mode === 'movingEndpoint' ? i.pointerType : undefined;
-
-  // The flow segment being dragged (undefined = valve / whole element).
-  const getDraggingSegmentIndex = (i: InteractionState): number | undefined =>
-    i.mode === 'movingSelection' ? i.segmentIndex : undefined;
-
-  // The active label-drag side, or undefined when not dragging a label.
-  const getLabelSide = (i: InteractionState): 'right' | 'bottom' | 'left' | 'top' | undefined =>
-    i.mode === 'movingLabel' ? i.side : undefined;
-
-  // The read-only environment the pure reducer needs from the shell. Reads the
-  // latest selection so a reducer call mid-handler sees current props.
-  const interactionContext = (): InteractionContext => ({ selection: latest.current.props.selection });
-
-  // Execute the discrete effects a reducer transition emitted, in order. The
-  // reducer only ever emits `capturePointer` today (selection/tool changes are
-  // done by the shell directly), so this is the lone arm.
-  const runEffects = (effects: readonly InteractionEffect[], target: Element | undefined, pointerId: number): void => {
-    for (const effect of effects) {
-      switch (effect.kind) {
-        case 'capturePointer':
-          target?.setPointerCapture(pointerId);
-          break;
-      }
-    }
-  };
-
-  // Apply the PointerStateReset bag (formerly `setState(pointerStateReset())`)
-  // by calling the per-field setters. React batches them into one render. The
-  // former loose instance fields (deferredSingleSelectUid, dragPointerType)
-  // now live inside the interaction union, reset by
-  // pointerStateReset()'s `interaction: idle`.
-  const applyPointerStateReset = (): void => {
-    const reset = pointerStateReset();
-    setInteraction(reset.interaction);
-    setMoveDelta(reset.moveDelta);
-    setDragSelectionPoint(reset.dragSelectionPoint);
-    setInCreation(reset.inCreation);
-    setInCreationCloud(reset.inCreationCloud);
+  const setNameEdit = (next: NameEdit | undefined): void => {
+    r.nameEdit = next;
+    setNameEditState(next);
   };
 
   // Offset/zoom resolve from the live viewport while a gesture is in flight,
@@ -634,8 +538,8 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       // its own settle -- don't double-commit. Otherwise commit now, so a plain
       // click/selection that interrupted a wheel scroll or a coast still persists
       // the viewport rather than stranding it in local state.
-      const mode = latest.current.interaction.mode;
-      const viewportGestureActive = r.momentumAnimationId !== undefined || mode === 'panning' || mode === 'pinching';
+      const viewportGestureActive =
+        r.momentumAnimationId !== undefined || r.gesture?.gesture.kind === 'pan' || r.pinch !== undefined;
       if (!viewportGestureActive) {
         commitLiveViewport();
       }
@@ -665,28 +569,11 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       scheduleDeferredCommit();
     }
   };
-
-  // Non-throwing element lookup. Returns undefined for the two creation
-  // sentinels when their backing element has already been cleared, and for any
-  // uid not present in the (version-cached) element map. Callers that can
-  // legitimately encounter a transiently-unresolvable uid (e.g. a selection
-  // that still references inCreationUid for one render after creation hands off
-  // to name-editing) use this and skip rather than crash; getElementByUid keeps
-  // the strict, throwing contract for everyone else.
-  const tryGetElementByUid = (uid: UID): ViewElement | undefined => {
-    if (uid === inCreationUid) {
-      return latest.current.inCreation;
-    } else if (uid === inCreationCloudUid) {
-      return latest.current.inCreationCloud;
-    }
-    return r.elements.get(uid);
-  };
-
-  const getElementByUid = (uid: UID): ViewElement => {
-    return defined(tryGetElementByUid(uid));
-  };
-
-  const isSelected = (element: ViewElement): boolean => latest.current.props.selection.has(element.uid);
+  // Non-throwing element lookup over what is drawn (a live plan's elements, or
+  // the view). A uid can transiently resolve to nothing -- a name editor naming a
+  // flow whose create was refused or rolled back -- and callers skip it rather
+  // than crash.
+  const tryGetElementByUid = (uid: UID): ViewElement | undefined => r.elements.get(uid);
 
   const getCanvasPoint = (x: number, y: number): Point => {
     if (svgRef.current) {
@@ -719,15 +606,18 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // subtree; focus left
   // on <body> would instead route the key by the last-active instance.
   // preventScroll: a host page (notebook) may scroll; focusing must not jump it.
-  // No fallback for a missing container: both callers -- clearPointerState
-  // (pointer release / click settle) and the name-edit commit/cancel path,
-  // which is reached from the keyboard too -- run on a rendered canvas, where
-  // svgRef is always attached.
+  // No fallback for a missing container: every caller -- a gesture's release
+  // and the name editor closing, which is reached from the keyboard too -- runs
+  // on a rendered canvas, where svgRef is always attached.
   const focusCanvas = (): void => {
     svgRef.current?.focus({ preventScroll: true });
   };
 
   const getNewVariableName = (base: string): string => {
+    const allocate = latest.current.props.newVariableName;
+    if (allocate !== undefined) {
+      return allocate(base);
+    }
     const variables = latest.current.props.model.variables;
     if (!variables.has(canonicalize(base))) {
       return base;
@@ -742,320 +632,73 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     return base;
   };
 
-  // ---- isValidTarget / arc / link-drag helpers ----------------------------
-  // These run during render (called by the element-rendering helpers) and at
-  // event time (pointer-up resolution). They read the live moveDelta and
-  // selectionCenterOffset; during render those reflect the current render, at
-  // event time they reflect the latest committed values -- both via `latest`/`r`.
+  // ---- The live gesture's plan ---------------------------------------------
 
-  const isValidTarget = (element: ViewElement): boolean | undefined => {
-    const draggingArrowhead = isDraggingArrowhead(latest.current.interaction);
-    const draggingSource = isDraggingSource(latest.current.interaction);
-
-    if ((!draggingArrowhead && !draggingSource) || !r.selectionCenterOffset) {
-      return undefined;
-    }
-
-    const arrowUid = only(latest.current.props.selection);
-    // Guard against a stale selection pointing at a now-missing element (e.g. an
-    // undo landing mid-drag) rather than throwing during render.
-    const arrow = tryGetElementByUid(arrowUid);
-    if (!arrow) {
-      return undefined;
-    }
-
-    const off = r.selectionCenterOffset;
-    const delta = latest.current.moveDelta || { x: 0, y: 0 };
-    const canvasOffset = getCanvasOffset();
-    const pointer = {
-      x: off.x - delta.x - canvasOffset.x,
-      y: off.y - delta.y - canvasOffset.y,
-    };
-
-    let isTarget = false;
-    if (element.type === 'cloud') {
-      isTarget = cloudContains(element, pointer);
-    } else if (element.type === 'stock') {
-      isTarget = stockContains(element, pointer);
-    } else if (element.type === 'module') {
-      isTarget = moduleContains(element, pointer);
-    } else if (element.type === 'aux') {
-      isTarget = auxContains(element, pointer);
-    } else if (element.type === 'flow') {
-      isTarget = auxContains(element, pointer);
-    }
-    if (!isTarget) {
-      return undefined;
-    }
-
-    // don't allow connectors from and to the same element
-    if (arrow.type === 'link' && arrow.fromUid === element.uid) {
-      return undefined;
-    }
-
-    // dont allow duplicate links between the same two elements
-    if (arrow.type === 'link') {
-      const { view } = latest.current.props;
-      for (const e of view.elements) {
-        // skip if its not a connector, or if it is the currently selected connector
-        if (e.type !== 'link' || e.uid === arrow.uid) {
-          continue;
-        }
-
-        if (e.fromUid === arrow.fromUid && e.toUid === element.uid) {
-          return false;
-        }
-      }
-    }
-
-    if (arrow.type === 'flow') {
-      if (element.type !== 'stock') {
-        return false;
-      }
-
-      if (draggingSource) {
-        // For source movement: check if target stock is valid source
-        const lastPt = last(arrow.points);
-        // Don't allow connecting source and sink to the same stock
-        if (lastPt.attachedToUid === element.uid) {
-          return false;
-        }
-        // For multi-segment flows (3+ points), the source needs to align with
-        // the adjacent point (second), not the sink point. For 2-point flows,
-        // points[1] gives us the last point, which is correct.
-        const adjacentToSource = at(arrow.points, 1);
-        return (
-          Math.abs(adjacentToSource.x - element.x) < StockWidth / 2 ||
-          Math.abs(adjacentToSource.y - element.y) < StockHeight / 2
-        );
-      } else {
-        // For arrowhead movement: check if target stock is valid sink
-        const firstPt = first(arrow.points);
-        // make sure we don't point a flow back at its source
-        if (firstPt.attachedToUid === element.uid) {
-          return false;
-        }
-        // For multi-segment flows (3+ points), the arrowhead needs to align with
-        // the adjacent point (second-to-last), not the source point. For 2-point
-        // flows, points.length - 2 = 0 gives us the first point, which is correct.
-        const adjacentToArrowhead = at(arrow.points, arrow.points.length - 2);
-        return (
-          Math.abs(adjacentToArrowhead.x - element.x) < StockWidth / 2 ||
-          Math.abs(adjacentToArrowhead.y - element.y) < StockHeight / 2
-        );
-      }
-    }
-
-    return element.type === 'flow' || element.type === 'aux' || element.type === 'module';
+  // Model coordinates of a client point: the canvas point less the live offset.
+  // Gesture presses and pointers are kept in model coordinates, so a wheel that
+  // pans or zooms mid-drag does not move what the drag plans.
+  const modelPoint = (clientX: number, clientY: number): Point => {
+    const p = getCanvasPoint(clientX, clientY);
+    const offset = getCanvasOffset();
+    return { x: p.x - offset.x, y: p.y - offset.y };
   };
 
-  const getArcPoint = (): FlowPoint | undefined => {
-    if (!r.selectionCenterOffset) {
-      return undefined;
-    }
-    const off = defined(r.selectionCenterOffset);
-    const delta = latest.current.moveDelta ?? { x: 0, y: 0 };
-    const canvasOffset = getCanvasOffset();
-    return {
-      x: off.x - delta.x - canvasOffset.x,
-      y: off.y - delta.y - canvasOffset.y,
-      attachedToUid: undefined,
-    };
-  };
+  // A live gesture survives a republish that changes nothing it reads (E5): the
+  // same controller token, and the same geometry as the view it was pressed on.
+  // A pan reads nothing of the view.
+  const gestureIsValid = (g: ActiveGesture, p: CanvasProps): boolean =>
+    g.gesture.kind === 'pan' || (g.token === p.token && sameGeometry(g.baseView, p.view));
 
-  // The element the dragged single link's arrowhead is currently snapped to (a
-  // valid aux/flow/module target under the cursor), or undefined for empty
-  // space. A pure read over the displayed elements; shared by connector()
-  // (visual `to` endpoint) and deriveDraggedLinkArc (arc computation) so both
-  // agree on the snap target within a render.
-  const findLinkDragTarget = (): ViewElement | undefined => {
-    return r.derived.displayElements.find((e: ViewElement) => {
-      if (e.type !== 'aux' && e.type !== 'flow' && e.type !== 'module') {
-        return false;
-      }
-      return isValidTarget(e) || false;
+  // The gesture's plan with the pointer at `current`. The preview renders it and
+  // a release commits it at the release point: preview and commit are one
+  // function evaluated at one point (E2).
+  const planAt = (g: ActiveGesture, current: Point): GesturePlan => {
+    const p = latest.current.props;
+    return planGesture({
+      view: p.view,
+      variables: p.model.variables,
+      selection: g.selection,
+      gesture: g.gesture,
+      press: g.press,
+      current,
+      zoom: getCanvasZoom(),
+      pointerType: g.pointerType,
+      readOnly: !!p.readOnly,
+      names: getNewVariableName,
+      clickSelection: g.clickSelection,
     });
-  };
-
-  // Compute the arc for a single-link arrowhead drag exactly as connector()
-  // renders it: an arc only when snapped to a valid target with a mouse
-  // pointer (touch links are always straight), undefined otherwise. Writes
-  // nothing; called once per render from deriveRenderState so connector() and
-  // the pointer-up persist path read the identical value.
-  const deriveDraggedLinkArc = (selectionUpdates: ReadonlyMap<UID, ViewElement>): number | undefined => {
-    if (!isDraggingArrowhead(latest.current.interaction) || !r.selectionCenterOffset) {
-      return undefined;
-    }
-    if (latest.current.props.selection.size !== 1) {
-      return undefined;
-    }
-    const linkUid = only(latest.current.props.selection);
-    let link = r.elements.get(linkUid);
-    const updated = selectionUpdates.get(linkUid);
-    if (updated !== undefined) {
-      link = updated;
-    }
-    if (link === undefined || link.type !== 'link') {
-      return undefined;
-    }
-    if (getDragPointerType(latest.current.interaction) === 'touch') {
-      return undefined;
-    }
-    const validTarget = findLinkDragTarget();
-    if (!validTarget) {
-      return undefined;
-    }
-    const from = selectionUpdates.get(link.fromUid) || tryGetElementByUid(link.fromUid);
-    if (!from) {
-      return undefined;
-    }
-    const arcPt = getArcPoint();
-    return arcPt ? computeLinkCreationArc(from, validTarget, arcPt) : undefined;
   };
 
   // The single render-phase derivation step. Invoked once at the top of the
   // render body (and the mount effect); it is the ONLY code permitted to write
-  // the render caches (r.elements, r.cachedVersion, r.derived). Every
-  // element-rendering helper reads r.derived and never recomputes or mutates a
-  // cache mid-render.
-  const deriveRenderState = (): RenderDerivation => {
+  // the render caches (r.elements, r.cachedElements, r.derived).
+  const deriveRenderState = (g: ActiveGesture | undefined, edit: NameEdit | undefined): RenderDerivation => {
     const p = latest.current.props;
-    const inCreationNow = latest.current.inCreation;
-    const inCreationCloudNow = latest.current.inCreationCloud;
-    let displayElements: readonly ViewElement[] = p.view.elements;
-    if (inCreationNow) {
-      displayElements = [...displayElements, inCreationNow];
+    const plan = g !== undefined && g.gesture.kind !== 'pan' && gestureIsValid(g, p) ? planAt(g, g.current) : undefined;
+    let displayElements: readonly ViewElement[] = plan?.elements ?? p.view.elements;
+    if (plan === undefined && edit?.draft !== undefined) {
+      displayElements = [...displayElements, edit.draft];
     }
-    if (inCreationCloudNow) {
-      displayElements = [...displayElements, inCreationCloudNow];
+    if (displayElements !== r.cachedElements) {
+      r.elements = new Map(displayElements.map((el) => [el.uid, el]));
+      r.cachedElements = displayElements;
     }
-
-    // Rebuild the uid lookup only when the project version changed. r.elements
-    // is held across renders because event handlers read it after render returns
-    // ("n.b. we don't want to clear r.elements"). The displayElements array
-    // identity must track the same key, so cache both together.
-    if (p.version !== r.cachedVersion) {
-      const elements = new Map<UID, ViewElement>(displayElements.map((el) => [el.uid, el]));
-      elements.set(fauxTarget.uid, fauxTarget);
-      elements.set(fauxCloudTarget.uid, fauxCloudTarget);
-      r.elements = elements;
-      r.cachedVersion = p.version;
-    }
-
-    let selectionUpdates = buildSelectionMap(p, r.elements, inCreationNow);
-    const activeLabelSide = getLabelSide(latest.current.interaction);
-    if (activeLabelSide) {
-      selectionUpdates = mapValues(selectionUpdates, (el) => {
-        return { ...el, labelSide: activeLabelSide } as ViewElement;
-      }) as Map<UID, ViewElement>;
-    }
-    if (latest.current.moveDelta) {
-      const moveDeltaValue = defined(latest.current.moveDelta);
-
-      // When dragging a single link arrow (creation or reattachment),
-      // suppress arcPoint so processLinks doesn't compute a rotation-based
-      // arc.  connector() handles arc computation directly.
-      const isDraggingLink = isDraggingArrowhead(latest.current.interaction) && p.selection.size === 1;
-      const { updatedElements } = applyGroupMovement({
-        elements: r.elements.values(),
-        selection: p.selection,
-        delta: moveDeltaValue,
-        arcPoint: isDraggingLink ? undefined : getArcPoint(),
-        segmentIndex: getDraggingSegmentIndex(latest.current.interaction),
-      });
-
-      selectionUpdates = new Map([...selectionUpdates, ...updatedElements]);
-    }
-
-    // Grow the in-creation flow's live preview. The flow tool stages a degenerate
-    // flow (both points at the press point) and records the drag only as
-    // moveDelta; applyGroupMovement can't grow it (a cloud->cloud flow translates
-    // rigidly, so it stays zero-length and invisible). Route it here the way the
-    // commit (computeFlowAttachment) does: the sink follows the cursor, or snaps
-    // onto a hovered stock's edge, with the source fixed and the flow orthogonal,
-    // so the preview matches what releasing the drag will produce.
-    if (inCreationNow?.type === 'flow' && latest.current.moveDelta && isDraggingArrowhead(latest.current.interaction)) {
-      let previewTarget: StockViewElement | undefined;
-      for (const el of displayElements) {
-        if (el.type === 'stock' && isValidTarget(el)) {
-          previewTarget = el;
-          break;
-        }
-      }
-      const grown = growInCreationFlow(inCreationNow, defined(latest.current.moveDelta), previewTarget);
-      selectionUpdates = new Map(selectionUpdates);
-      selectionUpdates.set(inCreationUid, grown);
-      // applyGroupMovement's single-flow path runs UpdateFlow, whose cloud->cloud
-      // case rigidly translates BOTH clouds by moveDelta -- dragging the source
-      // cloud along to the cursor. Restore it to its staged position so the flow
-      // grows from a planted tail. (The faux sink cloud isn't rendered.)
-      if (inCreationCloudNow) {
-        selectionUpdates.set(inCreationCloudUid, inCreationCloudNow);
-      }
-    }
-
-    // Live-route an EXISTING flow's cloud endpoint drag the same way flow
-    // creation does (growEndpointDrag -> UpdateCloudAndFlow, the routing the
-    // commit computeFlowAttachment also uses), so the flow line, arrowhead, and
-    // valve all track the dragged cloud. applyGroupMovement's single-flow path
-    // (UpdateFlow) instead treats an along-axis endpoint drag as a valve slide
-    // and leaves the path stale -- the reported "valve moves live but the flow
-    // doesn't". Only fires for a cloud endpoint; a stock-endpoint (detach) drag
-    // keeps its existing applyGroupMovement behavior.
-    const draggingEndpoint =
-      isDraggingArrowhead(latest.current.interaction) || isDraggingSource(latest.current.interaction);
-    if (!inCreationNow && latest.current.moveDelta && draggingEndpoint && p.selection.size === 1) {
-      const flowUid = only(p.selection);
-      const flowEl = r.elements.get(flowUid);
-      if (flowEl?.type === 'flow' && flowEl.points.length >= 2) {
-        const isSource = isDraggingSource(latest.current.interaction);
-        const endPt = isSource ? first(flowEl.points) : last(flowEl.points);
-        const endpointEl = endPt.attachedToUid !== undefined ? r.elements.get(endPt.attachedToUid) : undefined;
-        if (endpointEl?.type === 'cloud') {
-          let previewTarget: StockViewElement | undefined;
-          for (const el of displayElements) {
-            if (el.type === 'stock' && isValidTarget(el)) {
-              previewTarget = el;
-              break;
-            }
-          }
-          const grown = growEndpointDrag(flowEl, isSource, defined(latest.current.moveDelta), previewTarget);
-          selectionUpdates = new Map(selectionUpdates);
-          selectionUpdates.set(flowUid, grown);
-          // Keep the (hidden-during-drag) cloud coherent with the rerouted flow:
-          // over empty space its center coincides with the moved endpoint. When
-          // snapped to a stock the cloud is being replaced, so leave it be.
-          if (previewTarget === undefined) {
-            const newEndPt = isSource ? first(grown.points) : last(grown.points);
-            selectionUpdates.set(endpointEl.uid, { ...endpointEl, x: newEndPt.x, y: newEndPt.y });
-          }
-          // Cloud-to-cloud flow: applyGroupMovement's single-flow UpdateFlow
-          // path translates BOTH clouds by the drag delta, but growEndpointDrag
-          // holds the opposite endpoint FIXED. Restore the non-dragged cloud to
-          // its original position (it isn't hidden during the drag, unlike the
-          // dragged one) so it stays attached to the flow's fixed endpoint,
-          // matching the commit.
-          const otherPt = isSource ? last(flowEl.points) : first(flowEl.points);
-          const otherEl = otherPt.attachedToUid !== undefined ? r.elements.get(otherPt.attachedToUid) : undefined;
-          if (otherEl?.type === 'cloud') {
-            selectionUpdates.set(otherEl.uid, otherEl);
-          }
-        }
-      }
-    }
-
+    // A committing plan draws the selection its release applies, and a rubber
+    // band past the click threshold draws its membership, so the last preview
+    // frame is the committed frame.
+    const drawsPlanSelection =
+      plan !== undefined &&
+      g !== undefined &&
+      (plan.commit === 'edit' ||
+        (g.gesture.kind === 'rubberBand' && beyondThreshold(g.press, g.current, getCanvasZoom())));
     const derived: RenderDerivation = {
       displayElements,
       elementsByUid: r.elements,
-      selectionUpdates,
+      plan,
+      selection: drawsPlanSelection ? plan.selection : p.selection,
       hasAnyModuleReference: anyModuleHasModelReference(p.model.variables),
-      draggedLinkArc: undefined,
     };
-    // Publish before computing the dragged-link arc: deriveDraggedLinkArc reads
-    // r.derived.displayElements (via findLinkDragTarget) and selectionUpdates.
     r.derived = derived;
-    derived.draggedLinkArc = deriveDraggedLinkArc(selectionUpdates);
-
     return derived;
   };
 
@@ -1176,8 +819,8 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
   // Handle pinch-to-zoom gesture movement
   const handlePinchMove = (): void => {
-    const interactionNow = latest.current.interaction;
-    if (interactionNow.mode !== 'pinching') {
+    const interactionNow = r.pinch;
+    if (interactionNow === undefined) {
       return;
     }
 
@@ -1320,586 +963,455 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
 
   // ---- Pointer handlers ---------------------------------------------------
 
-  const clearPointerState = (clearSelection = true): void => {
-    r.pointerId = undefined;
-    r.mouseDownPoint = undefined;
-    r.selectionCenterOffset = undefined;
-    r.panBaseOffset = undefined;
-
-    applyPointerStateReset();
-
-    if (clearSelection) {
-      latest.current.props.onSetSelection(new Set());
-    }
-
-    focusCanvas();
-  };
-
-  const handlePointerCancel = (e: React.PointerEvent<SVGElement>): void => {
-    if (latest.current.props.embedded) {
-      return;
-    }
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Remove this pointer from tracking
-    r.activePointers.delete(e.pointerId);
-
-    // Handle end of pinch gesture
-    if (latest.current.interaction.mode === 'pinching') {
-      // Commit the pinched viewport once, on exit (handlePinchMove kept it local
-      // throughout the gesture).
-      commitLiveViewport();
-      // When exiting pinch mode, clear all gesture state for a clean restart.
-      // Continuing with a single finger after pinch leads to confusing UX.
-      const { state: nextInteraction } = reduceInteraction(
-        latest.current.interaction,
-        { kind: 'pinchEnd' },
-        interactionContext(),
-      );
-      setInteraction(nextInteraction);
-      r.activePointers.clear();
-      r.pointerId = undefined;
-      r.mouseDownPoint = undefined;
-      return;
-    }
-
-    if (r.pointerId === undefined || r.pointerId !== e.pointerId) {
-      return;
-    }
-
-    const showDetails = shouldShowVariableDetails(
-      r.selectionCenterOffset !== undefined,
-      latest.current.moveDelta,
-      getViewZoom(),
-      isDraggingArrowhead(latest.current.interaction),
-      isDraggingSource(latest.current.interaction),
-      latest.current.interaction.mode === 'movingLabel',
-    );
-
-    r.pointerId = undefined;
-
-    // Resolve deferred selection: if user clicked an already-selected element
-    // without modifier, we deferred the selection change to allow group drag.
-    // Now on mouseUp, if no drag occurred, collapse to the single element. The
-    // deferred fields now live in the movingSelection union variant.
-    const interactionNow = latest.current.interaction;
-    if (interactionNow.mode === 'movingSelection' && interactionNow.deferredSingleSelectUid !== undefined) {
-      const didDrag = isDrag(latest.current.moveDelta, getViewZoom());
-      const newSel = resolveDeferredSelection(interactionNow.deferredSingleSelectUid, didDrag);
-      // Collapse the group selection to the pressed element on a no-drag
-      // pointer-up (Figma-style). Name editing is NOT entered from here: a
-      // double-click on a label is a terminal `dblclick` and enters editing
-      // synchronously in handleSetSelection, never via this deferred pointer-up.
-      if (newSel) {
-        latest.current.props.onSetSelection(newSel);
-      }
-    }
-
-    if (interactionNow.mode === 'movingLabel') {
-      const selected = only(latest.current.props.selection);
-      latest.current.props.onMoveLabel(selected, interactionNow.side);
-      clearPointerState(false);
-      return;
-    }
-
-    if (r.selectionCenterOffset) {
-      if (latest.current.moveDelta) {
-        const arcPoint = getArcPoint();
-        const delta = latest.current.moveDelta;
-        // The mode after committing the move: idle, unless we hand off into name
-        // editing (creation tool, or a just-created flow). Computed once because
-        // every boolean that used to be cleared piecemeal now lives in the union.
-        let nextInteraction: InteractionState = idleState;
-
-        if (interactionNow.mode === 'editingName' && interactionNow.onPointerUp) {
-          let inCreationLocal = latest.current.inCreation;
-          if (
-            inCreationLocal !== undefined &&
-            (inCreationLocal.type === 'stock' || inCreationLocal.type === 'aux' || inCreationLocal.type === 'module')
-          ) {
-            inCreationLocal = {
-              ...inCreationLocal,
-              x: inCreationLocal.x - delta.x,
-              y: inCreationLocal.y - delta.y,
-            };
-          } else {
-            throw new Error('invariant broken');
-          }
-
-          const nextEditingName = plainDeserialize(
-            'label',
-            displayName(defined((inCreationLocal as NamedViewElement).name)),
-          );
-          setInteraction({ mode: 'editingName', onPointerUp: false, creatingFlow: false });
-          setEditingName(nextEditingName);
-          setInCreation(inCreationLocal);
-          setMoveDelta(undefined);
-          r.selectionCenterOffset = undefined;
-          // we do weird one off things in this codepath, so exit early
-          return;
-        } else if (!isDraggingArrowhead(interactionNow) && !isDraggingSource(interactionNow)) {
-          // A sub-threshold pointer wobble during a click is not a drag: don't
-          // nudge the element. shouldShowVariableDetails (which applies the
-          // same threshold) will open the details panel for it instead.
-          if (isDragMovement(delta, getViewZoom())) {
-            latest.current.props.onMoveSelection(delta, arcPoint, getDraggingSegmentIndex(interactionNow));
-          }
-        } else {
-          const element = getElementByUid(only(latest.current.props.selection));
-          let foundInvalidTarget = false;
-          const validTarget = r.derived.displayElements.find((el: ViewElement) => {
-            const isValid = isValidTarget(el);
-            foundInvalidTarget = foundInvalidTarget || isValid === false;
-            return isValid || false;
-          });
-          if (element.type === 'link' && validTarget) {
-            // Use the arc that was last rendered — computed once per render in
-            // deriveRenderState (derived.draggedLinkArc) and drawn by connector()
-            // — so the saved link matches the visual exactly. Works for both
-            // new-link creation and existing-link reattachment.
-            const linkToAttach = { ...element, arc: r.derived.draggedLinkArc };
-            latest.current.props.onAttachLink(linkToAttach, defined(validTarget.ident));
-          } else if (element.type === 'flow') {
-            // don't create a flow stacked on top of 2 clouds due to a misclick
-            // (a click that wobbled a pixel is still a misclick, not a drag)
-            if (!isDragMovement(latest.current.moveDelta, getViewZoom()) && latest.current.inCreation) {
-              clearPointerState();
-              return;
-            }
-            const inCreationFlag = !!latest.current.inCreation;
-            const isSourceAttach = isDraggingSource(interactionNow);
-            let fauxTargetCenter: Point | undefined;
-            if (element.points[1]?.attachedToUid === fauxCloudTargetUid) {
-              const canvasOffset = getCanvasOffset();
-              fauxTargetCenter = {
-                x: r.selectionCenterOffset.x - canvasOffset.x,
-                y: r.selectionCenterOffset.y - canvasOffset.y,
-              };
-            }
-            // For source movement when not snapped to a valid target, compute the faux source center
-            if (isSourceAttach && !validTarget) {
-              const canvasOffset = getCanvasOffset();
-              fauxTargetCenter = {
-                x: r.selectionCenterOffset.x - canvasOffset.x,
-                y: r.selectionCenterOffset.y - canvasOffset.y,
-              };
-            }
-            latest.current.props.onMoveFlow(
-              element,
-              validTarget ? validTarget.uid : 0,
-              delta,
-              fauxTargetCenter,
-              inCreationFlag,
-              isSourceAttach,
-            );
-            if (inCreationFlag) {
-              // Hand off into editing the just-created flow's name. creatingFlow
-              // (formerly flowStillBeingCreated) makes a later name-cancel delete
-              // the flow. The editingName Slate value is carried alongside.
-              nextInteraction = { mode: 'editingName', onPointerUp: false, creatingFlow: true };
-              setEditingName(plainDeserialize('label', displayName(defined(element.name))));
-            }
-          } else if (!foundInvalidTarget || latest.current.inCreation) {
-            latest.current.props.onDeleteSelection();
-          }
-        }
-
-        // Single coalesced commit: the discrete mode (idle, or the editingName
-        // hand-off computed above) plus the continuous companions that travel
-        // with a move. Replaces the former piecemeal isMovingArrow / isMovingSource
-        // / draggingSegmentIndex clears -- those all collapse into `interaction`.
-        // React batches these setters into one render with the net state.
-        setInteraction(nextInteraction);
-        setMoveDelta(undefined);
-        setInCreation(undefined);
-        setInCreationCloud(undefined);
-      } else if (isDraggingArrowhead(interactionNow) || isDraggingSource(interactionNow)) {
-        // User clicked on flow arrowhead/source (or cloud) but didn't move.
-        // Clear the movement mode so the cloud reappears.
-        setInteraction(idleState);
-      }
-      r.selectionCenterOffset = undefined;
-      if (showDetails) {
-        latest.current.props.onShowVariableDetails();
-      }
-      return;
-    }
-
-    if (interactionNow.mode === 'panning' && latest.current.liveViewport) {
-      // Start the momentum coast first. If it starts, the live viewport stays set
-      // and the single commit is deferred to the coast's natural end; if it does
-      // not (a stationary release), commit the pan now. Exactly one commit either
-      // way.
-      const didStartMomentum = startMomentumAnimation();
-      if (!didStartMomentum) {
-        commitLiveViewport();
-      }
-    }
-
-    if (!r.mouseDownPoint) {
-      return;
-    }
-
-    // Handle drag selection
-    if (interactionNow.mode === 'dragSelecting' && latest.current.dragSelectionPoint) {
-      const pointA = r.mouseDownPoint;
-      const pointB = latest.current.dragSelectionPoint;
-      const canvasOffset = getCanvasOffset();
-
-      // Calculate selection rectangle bounds
-      const left = Math.min(pointA.x, pointB.x) - canvasOffset.x;
-      const right = Math.max(pointA.x, pointB.x) - canvasOffset.x;
-      const top = Math.min(pointA.y, pointB.y) - canvasOffset.y;
-      const bottom = Math.max(pointA.y, pointB.y) - canvasOffset.y;
-
-      // Find all elements within the selection rectangle. Each element type's
-      // containment rule lives in canvas-interaction.isInDragSelectRect; auxes
-      // additionally count when any rectangle corner falls inside the aux
-      // circle (a geometry test the shell owns via auxContains).
-      const rect = { left, right, top, bottom };
-      const auxCornerHit = (element: ViewElement): boolean =>
-        auxContains(element as AuxViewElement, { x: left, y: top }) ||
-        auxContains(element as AuxViewElement, { x: right, y: top }) ||
-        auxContains(element as AuxViewElement, { x: left, y: bottom }) ||
-        auxContains(element as AuxViewElement, { x: right, y: bottom });
-      const selectedElements = computeDragSelection(r.derived.displayElements, rect, auxCornerHit);
-
-      // Update selection
-      latest.current.props.onSetSelection(selectedElements);
-      clearPointerState(false);
-      return;
-    }
-
-    // A pan must not clear the selection; everything reaching here does. The
-    // panning branch above only cleared movingCanvasOffset, so the mode is still
-    // 'panning' here (mirrors the former `!this.state.isMovingCanvas`).
-    const clearSelection = interactionNow.mode !== 'panning';
-    clearPointerState(clearSelection);
-  };
-
-  const handleSelectionMove = (e: React.PointerEvent<SVGElement>): void => {
-    if (!r.selectionCenterOffset) {
-      return;
-    }
-
-    const currPt = getCanvasPoint(e.clientX, e.clientY);
-
-    const dx = r.selectionCenterOffset.x - currPt.x;
-    const dy = r.selectionCenterOffset.y - currPt.y;
-
-    setMoveDelta({
-      x: dx,
-      y: dy,
-    });
-  };
-
-  const handleMovingCanvas = (e: React.PointerEvent<SVGElement>): void => {
-    if (!r.mouseDownPoint) {
-      return;
-    }
-
-    // Anchor against the offset captured at pan start (see refs.panBaseOffset),
-    // not props.view.viewBox, so an interrupted-momentum -> pan does not jump.
-    const base = r.panBaseOffset ?? latest.current.props.view.viewBox;
-    const curr = getCanvasPoint(e.clientX, e.clientY);
-
-    const newOffset = {
-      x: base.x + (curr.x - r.mouseDownPoint.x),
-      y: base.y + (curr.y - r.mouseDownPoint.y),
-    };
-
-    // Track position for momentum calculation
-    trackPosition(newOffset.x, newOffset.y);
-
-    // The panning mode was already entered on pointer-down; re-affirm it (it is
-    // the move-guard in handlePointerMove) alongside the continuous offset. A pan
-    // does not change zoom, so the live viewport keeps the current zoom.
-    setInteraction({ mode: 'panning' });
-    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom: getCanvasZoom() });
-  };
-
-  const handleDragSelection = (e: React.PointerEvent<SVGElement>): void => {
-    if (!r.mouseDownPoint) {
-      return;
-    }
-
-    const nextDragSelectionPoint = getCanvasPoint(e.clientX, e.clientY);
-
-    setInteraction({ mode: 'dragSelecting' });
-    setDragSelectionPoint(nextDragSelectionPoint);
-  };
-
-  const handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
-    if (latest.current.props.embedded) {
-      return;
-    }
-
-    // Update tracked pointer position
-    if (r.activePointers.has(e.pointerId)) {
-      r.activePointers.set(e.pointerId, {
-        id: e.pointerId,
-        x: e.clientX,
-        y: e.clientY,
-        timestamp: window.performance.now(),
-      });
-    }
-
-    // Handle pinch gesture
-    if (latest.current.interaction.mode === 'pinching' && r.activePointers.size >= 2) {
-      handlePinchMove();
-      return;
-    }
-
-    if (r.pointerId !== e.pointerId) {
-      return;
-    } else if (r.pointerId && e.pointerType === 'mouse' && e.buttons === 0) {
-      handlePointerCancel(e);
-    }
-
-    if (r.selectionCenterOffset) {
-      handleSelectionMove(e);
-    } else if (latest.current.interaction.mode === 'dragSelecting') {
-      handleDragSelection(e);
-    } else if (latest.current.interaction.mode === 'panning') {
-      handleMovingCanvas(e);
-    }
-  };
-
-  const handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
-    if (latest.current.props.embedded) {
-      return;
-    }
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    // A new press interrupts an in-flight momentum coast. The live viewport is
-    // preserved: a pan or pinch started by this press inherits it (via
-    // panBaseOffset / the pinch reference reads) and commits the combined result
-    // on its own settle, while a press that is NOT a viewport gesture (a
-    // click/selection) lets interruptCoast's deferred commit persist the coasted
-    // viewport. (A pending wheel commit is likewise left armed, not cancelled.)
-    interruptCoast();
-
-    // Track this pointer for multi-touch detection
+  const trackPointer = (e: { pointerId: number; clientX: number; clientY: number }): void => {
     r.activePointers.set(e.pointerId, {
       id: e.pointerId,
       x: e.clientX,
       y: e.clientY,
       timestamp: window.performance.now(),
     });
-
-    // Check for pinch gesture (two touches)
-    if (r.activePointers.size === 2 && e.pointerType === 'touch') {
-      // Start pinch mode - clear all single-finger gesture state to prevent
-      // simultaneous pan+pinch or drag+pinch if user adds second finger mid-gesture
-      r.pointerId = undefined;
-      r.mouseDownPoint = undefined;
-      r.selectionCenterOffset = undefined;
-      // Reset velocity tracker since pinch doesn't use momentum
-      r.velocityTracker.positions = [];
-
-      const distance = getPinchDistance();
-      const center = getPinchCenter();
-      const centerCanvas = getCanvasPoint(center.x, center.y);
-      // Anchor against the live viewport (= a prior pan's offset if one was in
-      // flight, else props.view), so a pinch that follows a pan keeps its place.
-      const base = getCanvasOffset();
-
-      // Calculate the MODEL point under the pinch center. This is the fixed
-      // point in model space that should remain under the user's fingers
-      // throughout the pinch gesture.
-      const pinchModelPoint = {
-        x: centerCanvas.x - base.x,
-        y: centerCanvas.y - base.y,
-      };
-
-      // Entering pinch mode supersedes any single-finger panning/dragSelecting
-      // mode; the reducer returns the pinching variant carrying the fixed
-      // reference. The live viewport is intentionally NOT cleared: handlePinchMove
-      // writes it each move and pinch exit commits it once.
-      const { state: nextInteraction, effects } = reduceInteraction(
-        latest.current.interaction,
-        {
-          kind: 'pinchStart',
-          initialDistance: distance,
-          initialZoom: getCanvasZoom(),
-          modelPoint: pinchModelPoint,
-        },
-        interactionContext(),
-      );
-      runEffects(effects, e.target as Element | undefined, e.pointerId);
-      setInteraction(nextInteraction);
-      return;
-    }
-
-    // If already pinching and a third finger comes in, ignore it
-    if (latest.current.interaction.mode === 'pinching') {
-      return;
-    }
-
-    // For non-primary touches when we already have a primary, track for potential pinch
-    if (!e.isPrimary && r.pointerId !== undefined) {
-      return;
-    }
-
-    const client = getCanvasPoint(e.clientX, e.clientY);
-
-    const canvasOffset = getCanvasOffset();
-    const { selectedTool } = latest.current.props;
-    if (selectedTool === 'aux' || selectedTool === 'stock' || selectedTool === 'module') {
-      let inCreationLocal: AuxViewElement | StockViewElement | ModuleViewElement;
-      if (selectedTool === 'aux') {
-        const name = getNewVariableName('New Variable');
-        inCreationLocal = {
-          type: 'aux',
-          uid: inCreationUid,
-          var: undefined,
-          x: client.x - canvasOffset.x,
-          y: client.y - canvasOffset.y,
-          name,
-          ident: canonicalize(name),
-          labelSide: 'right',
-          isZeroRadius: false,
-        };
-      } else if (selectedTool === 'stock') {
-        const name = getNewVariableName('New Stock');
-        inCreationLocal = {
-          type: 'stock',
-          uid: inCreationUid,
-          var: undefined,
-          x: client.x - canvasOffset.x,
-          y: client.y - canvasOffset.y,
-          name,
-          ident: canonicalize(name),
-          labelSide: 'bottom',
-          isZeroRadius: false,
-          inflows: [],
-          outflows: [],
-        };
-      } else {
-        const name = getNewVariableName('New Module');
-        inCreationLocal = {
-          type: 'module',
-          uid: inCreationUid,
-          var: undefined,
-          x: client.x - canvasOffset.x,
-          y: client.y - canvasOffset.y,
-          name,
-          ident: canonicalize(name),
-          labelSide: 'bottom',
-          isZeroRadius: false,
-        };
-      }
-
-      r.pointerId = e.pointerId;
-      r.selectionCenterOffset = client;
-
-      // The creation-tool press enters the editing-on-pointer-up handoff and
-      // captures the pointer (the capturePointer effect runs setPointerCapture).
-      // The staged element + zero moveDelta are the continuous companions the
-      // shell owns.
-      const { state: nextInteraction, effects } = reduceInteraction(
-        latest.current.interaction,
-        { kind: 'createToolPointerDown', tool: selectedTool },
-        interactionContext(),
-      );
-      runEffects(effects, e.target as Element | undefined, e.pointerId);
-      setInteraction(nextInteraction);
-      setInCreation(inCreationLocal);
-      setMoveDelta({ x: 0, y: 0 });
-      latest.current.props.onSetSelection(new Set([inCreationLocal.uid]));
-      return;
-    }
-    r.pointerId = e.pointerId;
-
-    if (selectedTool === 'flow') {
-      const canvasOffsetFlow = getCanvasOffset();
-      const x = client.x - canvasOffsetFlow.x;
-      const y = client.y - canvasOffsetFlow.y;
-
-      const inCreationCloudLocal: CloudViewElement = {
-        type: 'cloud',
-        uid: inCreationCloudUid,
-        flowUid: inCreationUid,
-        x,
-        y,
-        isZeroRadius: false,
-        ident: undefined,
-      };
-
-      const name = getNewVariableName('New Flow');
-      const inCreationLocal: FlowViewElement = {
-        type: 'flow',
-        uid: inCreationUid,
-        var: undefined,
-        name,
-        ident: canonicalize(name),
-        x,
-        y,
-        labelSide: 'bottom',
-        points: [
-          { x, y, attachedToUid: inCreationCloudLocal.uid },
-          { x, y, attachedToUid: fauxCloudTarget.uid },
-        ],
-        isZeroRadius: false,
-      };
-
-      r.selectionCenterOffset = client;
-
-      // Flow tool on empty canvas: enter arrowhead-drag of the staged flow so the
-      // user drags the sink into place (no pointer capture in this branch, as
-      // before). The staged flow + source cloud are the continuous companions.
-      const { state: nextInteraction, effects } = reduceInteraction(
-        latest.current.interaction,
-        { kind: 'flowToolPointerDown', pointerType: e.pointerType },
-        interactionContext(),
-      );
-      runEffects(effects, e.target as Element | undefined, e.pointerId);
-      setInteraction(nextInteraction);
-      setInCreation(inCreationLocal);
-      setInCreationCloud(inCreationCloudLocal);
-      setMoveDelta({ x: 0, y: 0 });
-      latest.current.props.onSetSelection(new Set([inCreationLocal.uid]));
-      return;
-    }
-
-    // onclick handlers are weird.  If we mouse down on a circle, move
-    // off the circle, and mouse-up on the canvas, the canvas gets an
-    // onclick.  Instead, capture where we mouse-down'd, and on mouse up
-    // check if its the same.
-    r.mouseDownPoint = getCanvasPoint(e.clientX, e.clientY);
-
-    // Discrete decision: touch / shift-drag pans, everything else rubber-band
-    // drag-selects. Routed through the pure reducer so the pan-vs-select rule
-    // lives in canvas-interaction; the continuous pan offset + momentum stay in
-    // the shell.
-    const pan = e.pointerType === 'touch' || e.shiftKey;
-    const { state: nextInteraction, effects } = reduceInteraction(
-      idleState,
-      { kind: 'canvasPointerDown', pan },
-      interactionContext(),
-    );
-    runEffects(effects, e.target as Element | undefined, e.pointerId);
-    if (nextInteraction.mode === 'panning') {
-      // Initialize velocity tracking for momentum
-      r.velocityTracker.positions = [];
-      const canvasOffsetPan = getCanvasOffset();
-      // Anchor the pan against the on-screen offset at press time (= the live
-      // viewport if a momentum coast was interrupted, else props.view.viewBox).
-      r.panBaseOffset = { x: canvasOffsetPan.x, y: canvasOffsetPan.y };
-      trackPosition(canvasOffsetPan.x, canvasOffsetPan.y);
-    }
-    // The pan-vs-drag-select mode came from the reducer; the in-creation
-    // companions are cleared regardless (an empty-canvas press stages nothing).
-    setInteraction(nextInteraction);
-    setInCreation(undefined);
-    setInCreationCloud(undefined);
   };
 
-  const handleModuleDoubleClick = (element: ModuleViewElement): void => {
+  // Drop the live gesture, and a pan's physics anchors with it. Its release (if
+  // one still comes) finds no gesture and commits nothing.
+  const endGesture = (): void => {
+    r.mouseDownPoint = undefined;
+    r.panBaseOffset = undefined;
+    setGesture(undefined);
+  };
+
+  // A pan's release: start the momentum coast; if it does not start (a
+  // stationary release), commit the pan now. Exactly one commit either way.
+  const settlePan = (): void => {
+    if (latest.current.liveViewport && !startMomentumAnimation()) {
+      commitLiveViewport();
+    }
+  };
+
+  // A gesture ended with no release to commit -- a pointercancel or a lost
+  // release -- commits nothing (E5). A pan still settles the viewport it moved:
+  // a viewport is presentation, not an edit.
+  const cancelGesture = (): void => {
+    if (r.gesture?.gesture.kind === 'pan') {
+      settlePan();
+    }
+    endGesture();
+    focusCanvas();
+  };
+
+  // A second finger: whatever the first finger started is dropped (E5), and the
+  // pinch anchors against the live viewport (a prior pan's offset if one was in
+  // flight, else props.view), so a pinch that follows a pan keeps its place.
+  const startPinch = (): void => {
+    endGesture();
+    r.velocityTracker.positions = [];
+    const center = getPinchCenter();
+    const centerCanvas = getCanvasPoint(center.x, center.y);
+    const base = getCanvasOffset();
+    // The MODEL point under the pinch center stays under the fingers throughout.
+    r.pinch = {
+      initialDistance: getPinchDistance(),
+      initialZoom: getCanvasZoom(),
+      modelPoint: { x: centerCanvas.x - base.x, y: centerCanvas.y - base.y },
+    };
+  };
+
+  // Commit the pinched viewport once, on exit, and drop every pointer:
+  // continuing with a single finger after a pinch leads to confusing UX.
+  const endPinch = (): void => {
+    commitLiveViewport();
+    r.pinch = undefined;
+    r.activePointers.clear();
+    r.mouseDownPoint = undefined;
+  };
+
+  const handleMovingCanvas = (e: React.PointerEvent<SVGElement>): void => {
+    if (!r.mouseDownPoint) {
+      return;
+    }
+    // Anchor against the offset captured at pan start (see refs.panBaseOffset),
+    // not props.view.viewBox, so an interrupted-momentum -> pan does not jump.
+    const base = r.panBaseOffset ?? latest.current.props.view.viewBox;
+    const curr = getCanvasPoint(e.clientX, e.clientY);
+    const newOffset = {
+      x: base.x + (curr.x - r.mouseDownPoint.x),
+      y: base.y + (curr.y - r.mouseDownPoint.y),
+    };
+    trackPosition(newOffset.x, newOffset.y);
+    // A pan does not change zoom, so the live viewport keeps the current zoom.
+    setLiveViewport({ x: newOffset.x, y: newOffset.y, zoom: getCanvasZoom() });
+  };
+
+  const pressInput = (
+    hit: PressHit,
+    e: {
+      clientX: number;
+      clientY: number;
+      shiftKey: boolean;
+      ctrlKey: boolean;
+      metaKey: boolean;
+      pointerType?: string;
+    },
+    pointers: number,
+  ): PressInput => {
+    const p = latest.current.props;
+    return {
+      view: p.view,
+      selection: p.selection,
+      tool: p.selectedTool,
+      hit,
+      point: modelPoint(e.clientX, e.clientY),
+      shiftKey: e.shiftKey,
+      toggleKey: e.ctrlKey || e.metaKey,
+      pointerType: e.pointerType || 'mouse',
+      readOnly: !!p.readOnly,
+      pressesDisabled: !!p.pressesDisabled,
+      pointers,
+      gestureLive: r.gesture !== undefined,
+    };
+  };
+
+  const beginNameEdit = (
+    uid: UID,
+    draft: ViewElement | undefined,
+    creatingFlow: boolean,
+    named: ViewElement | undefined,
+  ): void => {
+    setNameEdit({ uid, draft, creatingFlow });
+    const name = named !== undefined && isNamedViewElement(named) ? named.name : '';
+    setEditingName(plainDeserialize('label', displayName(name)));
+    setNameError(undefined);
+  };
+
+  // Close the name editor. Settling a name clears the selection, and focus lands
+  // on the canvas so the key events that follow belong to this editor.
+  const endNameEdit = (): void => {
+    setNameEdit(undefined);
+    setNameError(undefined);
+    latest.current.props.onSetSelection(new Set());
+    focusCanvas();
+  };
+
+  // Carry out what classifyPress decided a press does.
+  const applyPress = (outcome: PressOutcome, e: React.MouseEvent<Element>, capture: boolean): void => {
+    const p = latest.current.props;
+    switch (outcome.kind) {
+      case 'ignore':
+      case 'drill':
+        return;
+      case 'pinch':
+        startPinch();
+        return;
+      case 'abort':
+        endGesture();
+        return;
+      case 'commitName':
+        handleEditingNameDone(false);
+        return;
+      case 'select':
+        if (outcome.clearTool) {
+          p.onClearSelectedTool();
+        }
+        p.onSetSelection(outcome.selection);
+        return;
+      case 'editName':
+        if (outcome.clearTool) {
+          p.onClearSelectedTool();
+        }
+        p.onSetSelection(outcome.selection);
+        beginNameEdit(outcome.uid, undefined, false, tryGetElementByUid(outcome.uid));
+        return;
+      case 'start': {
+        const pe = e as React.PointerEvent<Element>;
+        if (outcome.clearTool) {
+          p.onClearSelectedTool();
+        }
+        if (outcome.selection !== undefined) {
+          p.onSetSelection(outcome.selection);
+        }
+        if (outcome.gesture.kind === 'pan') {
+          r.mouseDownPoint = getCanvasPoint(pe.clientX, pe.clientY);
+          r.velocityTracker.positions = [];
+          const offset = getCanvasOffset();
+          r.panBaseOffset = { x: offset.x, y: offset.y };
+          trackPosition(offset.x, offset.y);
+        } else if (capture) {
+          // Capture on the svg root, never the pressed node: a plan can remove the
+          // pressed element from the preview (a valid drop deletes the dragged
+          // cloud), which releases a capture it held, and a release over chrome
+          // would then be lost.
+          svgRef.current?.querySelector('svg')?.setPointerCapture(pe.pointerId);
+        }
+        const at = modelPoint(pe.clientX, pe.clientY);
+        setGesture({
+          gesture: outcome.gesture,
+          pointerId: pe.pointerId,
+          pointerType: pe.pointerType || 'mouse',
+          press: at,
+          current: at,
+          baseView: p.view,
+          token: p.token,
+          selection: outcome.selection ?? p.selection,
+          clickSelection: outcome.clickSelection,
+        });
+        return;
+      }
+    }
+  };
+
+  // A pointer press on the empty canvas or an element. A press that starts
+  // anything interrupts an in-flight momentum coast; the live viewport is
+  // preserved, so a pan or pinch this press starts inherits it and commits the
+  // combined result, while any other press lets interruptCoast's deferred
+  // commit persist it.
+  const pressPointer = (hit: PressHit, e: React.PointerEvent<SVGElement>): void => {
+    const pointers = r.activePointers.size + (r.activePointers.has(e.pointerId) ? 0 : 1);
+    const outcome = classifyPress(pressInput(hit, e, pointers));
+    if (outcome.kind === 'ignore') {
+      return;
+    }
+    interruptCoast();
+    trackPointer(e);
+    applyPress(outcome, e, true);
+  };
+
+  const moveGesture = (g: ActiveGesture, e: React.PointerEvent<SVGElement>): void => {
+    const current = modelPoint(e.clientX, e.clientY);
+    const latched = latchGesture(g.gesture, {
+      view: latest.current.props.view,
+      press: g.press,
+      current,
+      zoom: getCanvasZoom(),
+    });
+    setGesture({ ...g, gesture: latched, current });
+  };
+
+  // Commit a released gesture: its plan at the release point, which is the frame
+  // the preview drew there (E2), unless a republish invalidated it (E5).
+  const finishGesture = (g: ActiveGesture, current: Point): void => {
+    const p = latest.current.props;
+    if (!gestureIsValid(g, p)) {
+      focusCanvas();
+      return;
+    }
+    const released: ActiveGesture = {
+      ...g,
+      current,
+      gesture: latchGesture(g.gesture, { view: p.view, press: g.press, current, zoom: getCanvasZoom() }),
+    };
+    const plan = planAt(released, current);
+    if (plan.commit === 'edit') {
+      p.onCommitGesture({
+        label: plan.label,
+        elements: plan.elements,
+        nextUid: plan.nextUid,
+        selection: plan.selection,
+        token: g.token,
+        baseView: p.view,
+        editName: plan.handoff?.editName,
+      });
+    } else if (plan.commit === 'select') {
+      p.onSetSelection(plan.selection);
+    }
+    if (plan.handoff !== undefined) {
+      const uid = plan.handoff.editName;
+      const named = plan.draft ?? plan.elements.find((el) => el.uid === uid);
+      beginNameEdit(uid, plan.draft, released.gesture.kind === 'createFlow', named);
+      return;
+    }
+    if (plan.details) {
+      p.onShowVariableDetails();
+    }
+    focusCanvas();
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+    if (latest.current.props.embedded) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    pressPointer({ kind: 'canvas' }, e);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
+    if (latest.current.props.embedded) {
+      return;
+    }
+    if (r.activePointers.has(e.pointerId)) {
+      trackPointer(e);
+    }
+    if (r.pinch !== undefined) {
+      if (r.activePointers.size >= 2) {
+        handlePinchMove();
+      }
+      return;
+    }
+    const g = r.gesture;
+    if (g === undefined || g.pointerId !== e.pointerId) {
+      return;
+    }
+    if (isLostRelease(e.pointerType, e.buttons)) {
+      // The release never came, so forget the pointer too: a later press would
+      // count it, and a single touch would start a pinch.
+      r.activePointers.delete(e.pointerId);
+      cancelGesture();
+      return;
+    }
+    if (g.gesture.kind === 'pan') {
+      handleMovingCanvas(e);
+      return;
+    }
+    moveGesture(g, e);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
+    if (latest.current.props.embedded) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    r.activePointers.delete(e.pointerId);
+    if (r.pinch !== undefined) {
+      endPinch();
+      return;
+    }
+    const g = r.gesture;
+    if (g === undefined || g.pointerId !== e.pointerId) {
+      return;
+    }
+    // The gesture ends whatever its commit does: a host callback that throws
+    // must not leave it live for the next press to inherit.
+    try {
+      if (g.gesture.kind === 'pan') {
+        settlePan();
+        focusCanvas();
+      } else {
+        finishGesture(g, modelPoint(e.clientX, e.clientY));
+      }
+    } finally {
+      endGesture();
+    }
+  };
+
+  const handlePointerCancel = (e: React.PointerEvent<SVGElement>): void => {
+    if (latest.current.props.embedded) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    r.activePointers.delete(e.pointerId);
+    if (r.pinch !== undefined) {
+      endPinch();
+      return;
+    }
+    if (r.gesture === undefined || r.gesture.pointerId !== e.pointerId) {
+      return;
+    }
+    cancelGesture();
+  };
+
+  // A label dragged past the label component's own click threshold starts a
+  // label gesture on that first move. Its later moves and its release bubble to
+  // the svg's handlers, which update and finish the gesture like any other.
+  // The label holds its own pointer capture (Label.tsx), so a label gesture
+  // captures nothing more.
+  const labelDragImpl = (uid: number, e: React.PointerEvent<SVGElement>): void => {
+    if (latest.current.props.embedded || r.gesture !== undefined) {
+      return;
+    }
+    applyPress(classifyPress(pressInput({ kind: 'labelDrag', uid }, e, 1)), e, false);
+  };
+
+  const handleEditingEnd = (e: React.PointerEvent<HTMLDivElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    applyPress(classifyPress(pressInput({ kind: 'nameEditor' }, e, 1)), e, false);
+  };
+
+  const editConnectorImpl = (element: ViewElement, e: React.PointerEvent<SVGElement>, isArrowhead: boolean): void => {
+    setSelectionImpl(element, e, false, isArrowhead);
+  };
+
+  // Called from the element components' press handlers: a body, arrowhead or
+  // source-grip press with a pointer, or a label's double-click (isText), which
+  // carries no pointer and starts no drag.
+  const setSelectionImpl = (
+    element: ViewElement,
+    e: React.PointerEvent<SVGElement>,
+    isText?: boolean,
+    isArrowhead?: boolean,
+    isSource?: boolean,
+  ): void => {
+    if (latest.current.props.embedded) {
+      return;
+    }
+    if (isText) {
+      applyPress(classifyPress(pressInput({ kind: 'labelDoubleClick', uid: element.uid }, e, 1)), e, false);
+      return;
+    }
+    const part = isArrowhead ? 'arrowhead' : isSource ? 'source' : 'body';
+    pressPointer({ kind: 'element', uid: element.uid, part }, e);
+  };
+
+  const handleEditingNameChange = (value: Descendant[]): void => {
+    setEditingName(value);
+    setNameError(undefined);
+  };
+
+  const handleEditingNameDone = (isCancel: boolean): void => {
+    const edit = r.nameEdit;
+    if (edit === undefined) {
+      return;
+    }
+    if (isCancel) {
+      // Cancelling a drawn flow's first name edit deletes the flow (its commit
+      // made it the selection). The latch lives in this edit only, so a later
+      // rename's cancel can never delete anything.
+      if (edit.creatingFlow) {
+        latest.current.props.onDeleteSelection();
+      }
+      endNameEdit();
+      return;
+    }
+
+    // A commit whose sanitized name is empty (all whitespace/blank lines) is a
+    // cancel, not a rename to "": for a drawn flow it deletes the flow, matching
+    // Escape.
+    const newName = sanitizeLabelInput(plainSerialize(defined(latest.current.editingName)));
+    if (newName === '') {
+      handleEditingNameDone(true);
+      return;
+    }
+
+    // The element resolves through the non-throwing lookup: a refused or
+    // rolled-back create leaves the editor naming an element the view does not
+    // hold (issue #820), and there is nothing to commit then.
+    const element = edit.draft ?? tryGetElementByUid(edit.uid);
+    if (element === undefined || !isNamedViewElement(element)) {
+      endNameEdit();
+      return;
+    }
+
+    // Names persist line breaks as literal backslash-n (see displayName); the
+    // rename path encodes in rename-ops.ts (relabelVariable), the create path
+    // here. A refused name keeps the editor open with the host's message, so
+    // the user can pick another name without losing the element.
+    const refusal =
+      edit.draft !== undefined
+        ? latest.current.props.onCreateVariable({ ...element, name: encodeNameNewlines(newName) } as ViewElement)
+        : latest.current.props.onRenameVariable(displayName(element.name), newName);
+    if (typeof refusal === 'string') {
+      setNameError(refusal);
+      return;
+    }
+    endNameEdit();
+  };
+
+  const moduleDoubleClickImpl = (element: ModuleViewElement): void => {
+    if (classifyPress(pressInput({ kind: 'moduleDoubleClick', uid: element.uid }, NO_POINTER, 1)).kind !== 'drill') {
+      return;
+    }
     const variable = latest.current.props.model.variables.get(element.ident);
     if (variable?.type !== 'module' || !variable.modelName) {
       return;
@@ -1907,326 +1419,56 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     latest.current.props.onDrillIntoModule(element.ident, variable.modelName);
   };
 
-  const handleLabelDrag = (uid: number, e: React.PointerEvent<SVGElement>): void => {
-    r.pointerId = e.pointerId;
-
-    const selectionSet = new Set([uid]);
-    if (!setsEqual(latest.current.props.selection, selectionSet)) {
-      latest.current.props.onSetSelection(selectionSet);
-    }
-
-    const element = getElementByUid(uid);
-    const delta = getCanvasOffset();
-    const client = getCanvasPoint(e.clientX, e.clientY);
-    const pointer = {
-      x: client.x - delta.x,
-      y: client.y - delta.y,
-    };
-
-    const side = labelSideForPointer({ x: element.x, y: element.y }, pointer);
-
-    const { state: nextInteraction, effects } = reduceInteraction(
-      latest.current.interaction,
-      { kind: 'labelDragStart', side },
-      interactionContext(),
-    );
-    runEffects(effects, e.target as Element | undefined, e.pointerId);
-    setInteraction(nextInteraction);
-  };
-
-  const handleEditingEnd = (e: React.PointerEvent<HTMLDivElement>): void => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    handleEditingNameDone(false);
-  };
-
-  const handleEditConnector = (element: ViewElement, e: React.PointerEvent<SVGElement>, isArrowhead: boolean): void => {
-    handleSetSelection(element, e, false, isArrowhead);
-  };
-
-  // called from handleMouseDown in elements like Aux
-  const handleSetSelection = (
-    element: ViewElement,
-    e: React.PointerEvent<SVGElement>,
-    isText?: boolean,
-    isArrowhead?: boolean,
-    segmentIndex?: number,
-    isSource?: boolean,
-  ): void => {
-    if (latest.current.props.embedded) {
-      return;
-    }
-
-    // These locals track the discrete outcome the way the pre-migration code did
-    // (mutually-exclusive booleans); they are folded into a single interaction
-    // variant at the end. The shell owns the geometry/hit-testing here (cloud
-    // reattachment, staged tool elements, Slate name deserialize) and composes
-    // the pure selection decisions (decideMouseDownSelection,
-    // resolveSelectionForReattachment); the discrete *mode* it lands in is then
-    // expressed through the tagged union, not loose flags.
-    // A read-only canvas never opens the inline label editor: the rename it
-    // would eventually request is a no-op there, so offering the editing UI
-    // would be the "editable but unsavable" trap issue #935 closes.
-    let isEditingName = !!isText && !latest.current.props.readOnly;
-    let nextEditingName: Array<CustomElement> = [];
-    let draggingArrowEndpoint = !!isArrowhead;
-    let draggingSourceEndpoint = !!isSource;
-
-    r.pointerId = e.pointerId;
-
-    // For multi-selection, use the click point as the offset
-    // This ensures smooth dragging from where the user clicked
-    r.selectionCenterOffset = getCanvasPoint(e.clientX, e.clientY);
-
-    if (!isEditingName) {
-      (e.target as Element).setPointerCapture(e.pointerId);
-    }
-
-    const { selectedTool } = latest.current.props;
-    let inCreationLocal: ViewElement | undefined;
-
-    if (selectedTool === 'link' && isNamedViewElement(element)) {
-      isEditingName = false;
-      draggingArrowEndpoint = true;
-      inCreationLocal = {
-        type: 'link',
-        uid: inCreationUid,
-        fromUid: element.uid,
-        toUid: fauxTarget.uid,
-        arc: 0.0,
-        multiPoint: undefined,
-        isStraight: false,
-        polarity: undefined,
-        x: 0,
-        y: 0,
-        isZeroRadius: false,
-        ident: undefined,
-      };
-      element = inCreationLocal;
-    } else if (selectedTool === 'flow' && element.type === 'stock') {
-      isEditingName = false;
-      draggingArrowEndpoint = true;
-      const startPoint: FlowPoint = {
-        x: element.x,
-        y: element.y,
-        attachedToUid: element.uid,
-      };
-      const endPoint: FlowPoint = {
-        x: element.x,
-        y: element.y,
-        attachedToUid: fauxCloudTarget.uid,
-      };
-      const name = getNewVariableName('New Flow');
-      inCreationLocal = {
-        type: 'flow',
-        uid: inCreationUid,
-        var: undefined,
-        name: name,
-        ident: canonicalize(name),
-        x: element.x,
-        y: element.y,
-        labelSide: 'bottom',
-        points: [startPoint, endPoint],
-        isZeroRadius: false,
-      };
-      element = inCreationLocal;
-    } else {
-      // Not a link/flow tool action -- compute selection and handle clouds
-      latest.current.props.onClearSelectedTool();
-
-      // A name-edit request (double-click on the label) opens the inline editor
-      // immediately, whether or not the element is already selected. It must NOT
-      // go through the deferred-single-select dance below: that path only
-      // resolves into editing on the pointer-UP that follows a modifier-less
-      // press on a selected element, but a name-edit request arrives as a
-      // terminal `dblclick` whose pointer-up already fired -- so deferring would
-      // silently drop the edit for any already-selected variable (the reported
-      // "doesn't reliably open" bug). Only named elements render a label, so
-      // `element` is nameable here; collapse the selection to it and edit now.
-      if (isEditingName && isNamedViewElement(element)) {
-        nextEditingName = plainDeserialize('label', displayName(defined(element.name)));
-        latest.current.props.onSetSelection(new Set<UID>([element.uid]));
-        setInteraction({ mode: 'editingName', onPointerUp: false, creatingFlow: false });
-        setEditingName(nextEditingName);
-        setInCreation(undefined);
-        setMoveDelta(undefined);
-        return;
-      }
-
-      const isMultiSelect = e.ctrlKey || e.metaKey || e.shiftKey;
-      const { newSelection, deferSingleSelect } = decideMouseDownSelection(
-        latest.current.props.selection,
-        element.uid,
-        isMultiSelect,
-      );
-
-      if (deferSingleSelect !== undefined) {
-        // Element is already in the selection and no modifier -- defer selection
-        // change to mouseUp so that group drag works without dissolving selection.
-        // The deferred fields ride inside the movingSelection variant now.
-        setInteraction({
-          mode: 'movingSelection',
-          deferredSingleSelectUid: deferSingleSelect,
-          segmentIndex,
-        });
-        setEditingName(nextEditingName);
-        setInCreation(inCreationLocal);
-        setMoveDelta({ x: 0, y: 0 });
-        return;
-      }
-
-      // Cloud re-attachment only when the cloud will be the sole selection
-      const willBeSoleSelection = newSelection !== undefined && newSelection.size === 1;
-      if (element.type === 'cloud' && element.flowUid !== undefined && willBeSoleSelection) {
-        let flow: FlowViewElement | undefined;
-        try {
-          const flowElement = getElementByUid(element.flowUid);
-          if (flowElement.type === 'flow') {
-            flow = flowElement;
-          }
-        } catch (err) {
-          console.warn(`Cloud ${element.uid} references invalid flow ${element.flowUid}:`, err);
-        }
-        if (flow) {
-          if (isCloudOnSourceSide(element, flow)) {
-            draggingSourceEndpoint = true;
-            element = flow;
-          } else if (isCloudOnSinkSide(element, flow)) {
-            draggingArrowEndpoint = true;
-            element = flow;
-          }
-        }
-      }
-
-      // Only allow editing name if single selection of a named element
-      if (isEditingName && newSelection !== undefined && newSelection.size === 1) {
-        const uid = only(newSelection);
-        const editingElement = getElementByUid(uid) as NamedViewElement;
-        nextEditingName = plainDeserialize('label', displayName(defined(editingElement.name)));
-      } else {
-        isEditingName = false;
-      }
-
-      if (newSelection !== undefined) {
-        const enteredReattachment = draggingSourceEndpoint || draggingArrowEndpoint;
-        latest.current.props.onSetSelection(
-          resolveSelectionForReattachment(newSelection, enteredReattachment, element.uid),
-        );
-      }
-    }
-
-    // Fold the mutually-exclusive outcome into one interaction variant:
-    //  - an endpoint drag (arrowhead/source, link/flow tool, cloud reattach)
-    //  - inline name editing (double-click on a single named element)
-    //  - otherwise a (potential) selection move, carrying any flow segmentIndex.
-    // pointerType is recorded for every endpoint drag so the touch-is-always-
-    // straight link rule (connector()/deriveDraggedLinkArc) has the real value.
-    let nextInteraction: InteractionState;
-    if (draggingArrowEndpoint || draggingSourceEndpoint) {
-      nextInteraction = {
-        mode: 'movingEndpoint',
-        endpoint: draggingSourceEndpoint ? 'source' : 'arrow',
-        pointerType: e.pointerType,
-      };
-    } else if (isEditingName) {
-      nextInteraction = { mode: 'editingName', onPointerUp: false, creatingFlow: false };
-    } else {
-      nextInteraction = {
-        mode: 'movingSelection',
-        deferredSingleSelectUid: undefined,
-        segmentIndex,
-      };
-    }
-
-    setInteraction(nextInteraction);
-    setEditingName(nextEditingName);
-    setInCreation(inCreationLocal);
-    setMoveDelta({ x: 0, y: 0 });
-
-    if (selectedTool === 'link' || selectedTool === 'flow') {
-      latest.current.props.onSetSelection(new Set([element.uid]));
-    }
-  };
-
-  const handleEditingNameChange = (value: Descendant[]): void => {
-    setEditingName(value);
-  };
-
-  const handleEditingNameDone = (isCancel: boolean): void => {
-    const interactionNow = latest.current.interaction;
-    // Old guard was `if (!this.state.isEditingName) return` -- the editor must be
-    // SHOWING NOW. The staging variant (`onPointerUp: true`, set during a
-    // creation drag before the editor mounts) must NOT run this, so exclude it
-    // here too (mirrors the isShowingNameEditor helper while narrowing the union).
-    if (interactionNow.mode !== 'editingName' || interactionNow.onPointerUp) {
-      return;
-    }
-
-    if (isCancel) {
-      // Cancelling the initial name edit of a just-created flow deletes the
-      // flow; creatingFlow (formerly flowStillBeingCreated) is reset by
-      // clearPointerState's `interaction: idle` below, so a later rename-cancel
-      // can't re-trigger this.
-      if (interactionNow.creatingFlow) {
-        latest.current.props.onDeleteSelection();
-      }
-      clearPointerState();
-      return;
-    }
-
-    // A commit whose sanitized name is empty (all whitespace/blank lines) is a
-    // cancel, not a rename to "": for a just-created flow the recursive cancel
-    // path also deletes the flow, matching Escape.
-    const newName = sanitizeLabelInput(plainSerialize(defined(latest.current.editingName)));
-    if (newName === '') {
-      handleEditingNameDone(true);
-      return;
-    }
-
-    // Resolve the element being named through the NON-throwing lookup, mirroring
-    // the render-time guard (see the editingElement resolution). A failed
-    // flow-attach can leave the selection referencing a flow that was never
-    // committed to the view (issue #820); dereferencing it with the throwing
-    // getElementByUid wedged the editor in a repeated-exception loop. When the
-    // selection is not a single resolvable element there is nothing to commit --
-    // tear the editor down cleanly instead of crashing.
-    const selection = latest.current.props.selection;
-    const uid = selection.size === 1 ? only(selection) : undefined;
-    const element = uid !== undefined ? tryGetElementByUid(uid) : undefined;
-    if (uid === undefined || element === undefined) {
-      clearPointerState();
-      return;
-    }
-    const oldName = displayName(defined((element as NamedViewElement).name));
-
-    if (uid === inCreationUid) {
-      // Names persist line breaks as literal backslash-n (see displayName);
-      // the rename path encodes in rename-ops.ts (buildVariableRenameOps),
-      // the create path here.
-      latest.current.props.onCreateVariable({ ...element, name: encodeNameNewlines(newName) } as ViewElement);
-    } else {
-      latest.current.props.onRenameVariable(oldName, newName);
-    }
-
-    clearPointerState();
-  };
+  // The element components are memo'd, so the callbacks handed to them keep one
+  // identity for the Canvas's life and dispatch to this render's implementation.
+  // Otherwise every drag frame would re-render every element on the canvas.
+  const impls = { setSelectionImpl, labelDragImpl, editConnectorImpl, moduleDoubleClickImpl };
+  const handlers = React.useRef(impls);
+  handlers.current = impls;
+  const handleSetSelection = React.useCallback(
+    (
+      element: ViewElement,
+      e: React.PointerEvent<SVGElement>,
+      isText?: boolean,
+      isArrowhead?: boolean,
+      isSource?: boolean,
+    ): void => handlers.current.setSelectionImpl(element, e, isText, isArrowhead, isSource),
+    [],
+  );
+  const handleLabelDrag = React.useCallback(
+    (uid: number, e: React.PointerEvent<SVGElement>): void => handlers.current.labelDragImpl(uid, e),
+    [],
+  );
+  const handleEditConnector = React.useCallback(
+    (element: ViewElement, e: React.PointerEvent<SVGElement>, isArrowhead: boolean): void =>
+      handlers.current.editConnectorImpl(element, e, isArrowhead),
+    [],
+  );
+  const handleModuleDoubleClick = React.useCallback(
+    (element: ModuleViewElement): void => handlers.current.moduleDoubleClickImpl(element),
+    [],
+  );
 
   // ---- Element-rendering helpers (read r.derived; never mutate caches) -----
 
+  // Drawn as selected: the derived selection, a creation tool's draft while it
+  // is dragged, and the element whose name is being edited.
+  const isSelected = (uid: UID): boolean =>
+    r.derived.selection.has(uid) || r.derived.plan?.draft?.uid === uid || nameEdit?.uid === uid;
+
+  // The drop target a live gesture's pointer is over: green when valid, red when
+  // not, undefined for every other element.
+  const targetState = (uid: UID): boolean | undefined => {
+    const target = r.derived.plan?.target;
+    return target !== undefined && target.uid === uid ? target.valid : undefined;
+  };
+
   const alias = (element: AliasViewElement): React.ReactElement => {
     const aliasOf = r.elements.get(element.aliasOfUid) as NamedViewElement | undefined;
-    let series;
-    let validTarget: boolean | undefined;
-    if (aliasOf) {
-      series = props.model.variables.get(defined(aliasOf.ident))?.data;
-      validTarget = isValidTarget(aliasOf);
-    }
-    const selected = isSelected(element);
     const aliasProps: AliasProps = {
-      isSelected: selected,
-      isValidTarget: validTarget,
-      series,
+      isSelected: isSelected(element.uid),
+      isValidTarget: aliasOf ? targetState(aliasOf.uid) : undefined,
+      series: aliasOf ? props.model.variables.get(defined(aliasOf.ident))?.data : undefined,
       onSelection: handleSetSelection,
       onLabelDrag: handleLabelDrag,
       element,
@@ -2236,274 +1478,162 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   };
 
   const cloud = (element: CloudViewElement): React.ReactElement | undefined => {
-    const selected = isSelected(element);
-
-    // TODO: fix this -- we apparently can get in the state where a flow doesn't exist but we haven't deleted the cloud
-    let flow: FlowViewElement;
-    try {
-      flow = getElementByUid(defined(element.flowUid)) as FlowViewElement;
-    } catch {
-      return;
+    // A cloud whose flow is not drawn is corrupt or transient data: skip it.
+    if (tryGetElementByUid(element.flowUid) === undefined) {
+      return undefined;
     }
-
-    // When dragging a cloud to attach to a stock, we need to visually hide it
-    // but keep it in the DOM to maintain pointer capture.
-    let isHidden = false;
-    if (isSelected(flow)) {
-      try {
-        if (isDraggingArrowhead(interaction) && isCloudOnSinkSide(element, flow)) {
-          isHidden = true;
-        } else if (isDraggingSource(interaction) && isCloudOnSourceSide(element, flow)) {
-          isHidden = true;
-        }
-      } catch (e) {
-        console.error('Invalid flow state when checking cloud position:', e);
-      }
-    }
-
     const cloudProps: CloudProps = {
       element,
-      isSelected: selected,
-      isHidden,
+      isSelected: isSelected(element.uid),
       onSelection: handleSetSelection,
     };
-
     return <Cloud key={element.uid} {...cloudProps} />;
   };
 
-  const aux = (element: AuxViewElement): React.ReactElement => {
+  const aux = (element: AuxViewElement, editing: boolean): React.ReactElement => {
     const variable = props.model.variables.get(element.ident);
-    const hasWarning = variable ? variableHasError(variable) : false;
-    const selected = isSelected(element);
-    const series = variable?.data;
+    const selected = isSelected(element.uid);
     const auxProps: AuxProps = {
       element,
-      series,
+      series: variable?.data,
       isSelected: selected,
-      isEditingName: selected && isShowingNameEditor(interaction),
-      isValidTarget: isValidTarget(element),
+      isEditingName: selected && editing && nameEdit?.uid === element.uid,
+      isValidTarget: targetState(element.uid),
       onSelection: handleSetSelection,
       onLabelDrag: handleLabelDrag,
-      hasWarning,
+      hasWarning: variable ? variableHasError(variable) : false,
     };
-
     return <Aux key={element.uid} {...auxProps} />;
   };
 
-  const stock = (element: StockViewElement): React.ReactElement => {
+  const stock = (element: StockViewElement, editing: boolean): React.ReactElement => {
     const variable = props.model.variables.get(element.ident);
-    const hasWarning = variable ? variableHasError(variable) : false;
-    const selected = isSelected(element);
-    const series = variable?.data;
+    const selected = isSelected(element.uid);
     const stockProps: StockProps = {
       element,
-      series,
+      series: variable?.data,
       isSelected: selected,
-      isEditingName: selected && isShowingNameEditor(interaction),
-      isValidTarget: isValidTarget(element),
+      isEditingName: selected && editing && nameEdit?.uid === element.uid,
+      isValidTarget: targetState(element.uid),
       onSelection: handleSetSelection,
       onLabelDrag: handleLabelDrag,
-      hasWarning,
+      hasWarning: variable ? variableHasError(variable) : false,
     };
-
     return <Stock key={element.uid} {...stockProps} />;
   };
 
-  const module = (element: ModuleViewElement): React.ReactElement => {
+  const module = (element: ModuleViewElement, editing: boolean): React.ReactElement => {
     const variable = props.model.variables.get(element.ident);
     const hasEngineError = variable ? variableHasError(variable) : false;
-    // AC1.6: suppress warning when no module in the model has a model reference
-    // yet (new model scenario where user is rapidly sketching structure).
-    const hasWarning = hasEngineError && r.derived.hasAnyModuleReference;
-    const selected = isSelected(element);
+    const selected = isSelected(element.uid);
     const moduleProps: ModuleProps = {
       element,
       isSelected: selected,
-      isEditingName: selected && isShowingNameEditor(interaction),
-      isValidTarget: isValidTarget(element),
+      isEditingName: selected && editing && nameEdit?.uid === element.uid,
+      isValidTarget: targetState(element.uid),
       onSelection: handleSetSelection,
       onLabelDrag: handleLabelDrag,
       onDoubleClick: handleModuleDoubleClick,
-      hasWarning,
+      // AC1.6: suppress warning when no module in the model has a model reference
+      // yet (new model scenario where user is rapidly sketching structure).
+      hasWarning: hasEngineError && r.derived.hasAnyModuleReference,
     };
-
     return <Module key={element.uid} {...moduleProps} />;
   };
 
   const group = (element: GroupViewElement): React.ReactElement => {
-    const selected = isSelected(element);
-    const groupProps: GroupProps = {
-      element,
-      isSelected: selected,
-    };
-
+    const groupProps: GroupProps = { element, isSelected: isSelected(element.uid) };
     return <Group key={element.uid} {...groupProps} />;
   };
 
   const connector = (element: LinkViewElement): React.ReactElement | undefined => {
-    const draggingArrowhead = isDraggingArrowhead(interaction);
-    const selected = props.selection.has(element.uid);
-
-    // Get the updated element from selectionUpdates if available (arc was already adjusted
-    // by applyGroupMovement for group selection cases)
-    const updatedElement = r.derived.selectionUpdates.get(element.uid);
-    if (updatedElement !== undefined && updatedElement.type === 'link') {
-      element = updatedElement;
-    }
-
-    // A dangling from/to reference (uid not in the view) is corrupt data -- see
-    // flow() above. Skip rendering the broken link rather than throwing out of
-    // render (#812, #817).
-    const from = r.derived.selectionUpdates.get(element.fromUid) || tryGetElementByUid(element.fromUid);
-    let to = r.derived.selectionUpdates.get(element.toUid) || tryGetElementByUid(element.toUid);
+    // A dangling from/to reference (uid not in the view) is corrupt data: skip
+    // the broken link rather than throwing out of render (#812, #817). A link a
+    // gesture is dragging points at the plan's stand-in target at the pointer.
+    const from = tryGetElementByUid(element.fromUid);
+    const to = tryGetElementByUid(element.toUid);
     if (!from || !to) {
-      return;
+      return undefined;
     }
-    let isSticky = false;
-
-    // Dragging this link's arrowhead — covers both new-link creation and
-    // reattaching an existing link.  Unified: straight line when not over
-    // a target, dynamic arc when snapped to a valid target. The arc itself is
-    // computed once in deriveRenderState (derived.draggedLinkArc); we only
-    // resolve the visual `to` endpoint here. Reading the derived arc (instead
-    // of recomputing-and-caching it during render) keeps render free of
-    // mid-render cache mutation while preserving the guarantee that the rendered
-    // arc equals the value persisted on pointer-up.
-    const isDraggingLink = draggingArrowhead && selected;
-    if (isDraggingLink && r.selectionCenterOffset) {
-      const validTarget = findLinkDragTarget();
-      if (validTarget) {
-        isSticky = true;
-        to = validTarget;
-      } else {
-        const off = r.selectionCenterOffset;
-        const delta = moveDelta ?? { x: 0, y: 0 };
-        const canvasOffset = getCanvasOffset();
-        to = {
-          ...(to as AuxViewElement),
-          x: off.x - delta.x - canvasOffset.x,
-          y: off.y - delta.y - canvasOffset.y,
-          isZeroRadius: true,
-        };
-      }
-
-      const isTouch = getDragPointerType(interaction) === 'touch';
-      if (isSticky && !isTouch) {
-        element = { ...element, arc: r.derived.draggedLinkArc };
-      } else {
-        element = { ...element, arc: undefined };
-      }
-    }
-
     const connectorProps: ConnectorProps = {
       element,
       from,
       to,
-      isSelected: selected,
+      isSelected: isSelected(element.uid),
       isDashed: to.type === 'stock',
       onSelection: handleEditConnector,
     };
-    // When not dragging: pass arcPoint for existing arc-adjustment interactions
-    // (e.g. clicking the arc mid-line to curve it). During link dragging the arc
-    // is already computed on the element, so arcPoint would interfere.
-    if (selected && !isSticky && !isDraggingLink) {
-      connectorProps.arcPoint = getArcPoint();
-    }
     return <Connector key={element.uid} {...connectorProps} />;
   };
 
-  const flow = (element: FlowViewElement): React.ReactElement | undefined => {
+  const flow = (element: FlowViewElement, editing: boolean): React.ReactElement | undefined => {
     const variable = props.model.variables.get(element.ident);
-    const hasWarning = variable ? variableHasError(variable) : false;
-    const draggingArrowhead = isDraggingArrowhead(interaction);
-    const selected = isSelected(element);
-    const series = variable?.data;
+    const selected = isSelected(element.uid);
 
     if (element.points.length < 2) {
-      return;
-    }
-
-    const sourceId = first(element.points).attachedToUid;
-    if (!sourceId) {
-      return;
+      return undefined;
     }
     // A dangling endpoint reference (source/sink uid not in the view) is corrupt
     // data -- transient during an undo rebuild (#817) or persisted (#812). Skip
     // rendering the broken flow rather than throwing out of render and taking the
     // whole editor down via the ErrorBoundary.
-    const source = tryGetElementByUid(sourceId);
+    const sourceId = first(element.points).attachedToUid;
+    const source = sourceId === undefined ? undefined : tryGetElementByUid(sourceId);
     if (!source || (source.type !== 'stock' && source.type !== 'cloud')) {
-      return;
+      return undefined;
     }
-
     const sinkId = last(element.points).attachedToUid;
-    if (!sinkId) {
-      return;
-    }
-    const sink = tryGetElementByUid(sinkId);
+    const sink = sinkId === undefined ? undefined : tryGetElementByUid(sinkId);
     if (!sink || (sink.type !== 'stock' && sink.type !== 'cloud')) {
-      return;
+      return undefined;
     }
 
+    // A drag draws the flow exactly as it will be committed -- its sink cloud at
+    // the endpoint -- so nothing is drawn differently while moving (E2).
     return (
       <Flow
         key={element.uid}
         element={element}
-        series={series}
+        series={variable?.data}
         source={source}
         sink={sink}
         embedded={props.embedded}
         isSelected={selected}
-        hasWarning={hasWarning}
-        isMovingArrow={selected && draggingArrowhead}
-        isMovingSource={selected && isDraggingSource(interaction)}
-        isEditingName={selected && isShowingNameEditor(interaction)}
-        isValidTarget={isValidTarget(element)}
+        hasWarning={variable ? variableHasError(variable) : false}
+        isEditingName={selected && editing && nameEdit?.uid === element.uid}
+        isValidTarget={targetState(element.uid)}
         onSelection={handleSetSelection}
         onLabelDrag={handleLabelDrag}
       />
     );
   };
 
-  const buildLayers = (displayElements: readonly ViewElement[]): React.ReactElement[][] => {
-    const selectionUpdates = r.derived.selectionUpdates;
-
-    // create different layers for each of the display types so that views compose together nicely
+  // One layer per z-order so the element kinds compose: groups behind
+  // everything, then links, flows, stocks/clouds/modules, and auxes/aliases.
+  const buildLayers = (displayElements: readonly ViewElement[], editing: boolean): React.ReactElement[][] => {
     const zLayers = new Array(ZMax) as React.ReactElement[][];
     for (let i = 0; i < ZMax; i++) {
       zLayers[i] = [];
     }
 
-    for (let element of displayElements) {
-      if (selectionUpdates.has(element.uid)) {
-        element = getOrThrow(selectionUpdates, element.uid);
+    for (const element of displayElements) {
+      // A link preview's stand-in target at the pointer is never drawn.
+      if (element.uid === fauxTargetUid) {
+        continue;
       }
-
-      // const ZOrder = Map<'flow' | 'module' | 'stock' | 'aux' | 'link' | 'style' | 'reference' | 'cloud' | 'alias', number>([
-      //   ['style', 0],
-      //   ['module', 1],
-      //   ['link', 2],
-      //   ['flow', 3],
-      //   ['cloud', 4],
-      //   ['stock', 4],
-      //   ['aux', 5],
-      //   ['reference', 5],
-      //   ['alias', 5],
-      // ]);
-
       let zOrder = 0;
       let component: React.ReactElement | undefined;
       if (element.type === 'aux') {
-        component = aux(element);
+        component = aux(element, editing);
         zOrder = 5;
       } else if (element.type === 'link') {
         component = connector(element);
         zOrder = 2;
       } else if (element.type === 'stock') {
-        component = stock(element);
+        component = stock(element, editing);
         zOrder = 4;
       } else if (element.type === 'flow') {
-        component = flow(element);
+        component = flow(element, editing);
         zOrder = 3;
       } else if (element.type === 'cloud') {
         component = cloud(element);
@@ -2512,11 +1642,11 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         component = alias(element);
         zOrder = 5;
       } else if (element.type === 'module') {
-        component = module(element);
+        component = module(element, editing);
         zOrder = 4;
       } else if (element.type === 'group') {
         component = group(element);
-        zOrder = 0; // Groups render behind everything else
+        zOrder = 0;
       }
 
       if (!component) {
@@ -2555,16 +1685,13 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         // not enough: a continued pointer move would recreate it from the now
         // stale press-time anchor (panBaseOffset) / pinch reference and the
         // pointer-up could then commit that abandoned gesture back over the
-        // external view. Resetting the interaction to idle and dropping the
-        // pointer anchors makes handleMovingCanvas/handlePinchMove no-op and the
+        // external view. Dropping the pan gesture, the pinch and the pointer
+        // anchors makes handleMovingCanvas/handlePinchMove no-op and the
         // release a clean no-commit. (Non-viewport gestures don't touch
         // liveViewport, so they're left alone.)
-        const mode = latest.current.interaction.mode;
-        if (mode === 'panning' || mode === 'pinching') {
-          setInteraction(idleState);
-          r.mouseDownPoint = undefined;
-          r.panBaseOffset = undefined;
-          r.pointerId = undefined;
+        if (r.gesture?.gesture.kind === 'pan' || r.pinch !== undefined) {
+          endGesture();
+          r.pinch = undefined;
           r.activePointers.clear();
         }
       }
@@ -2584,15 +1711,10 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // Runs once (empty deps); reads the latest props/state through `latest`.
   // Cleanup is symmetric so a StrictMode mount/unmount/mount cycle is safe.
   React.useEffect(() => {
-    const derived = deriveRenderState();
+    const derived = deriveRenderState(r.gesture, r.nameEdit);
 
-    // Compute initial diagram bounds via the explicit pure pass (no longer a
-    // side effect of rendering each element).
-    const elementBounds = computeElementBounds(
-      derived.displayElements,
-      derived.selectionUpdates,
-      derived.elementsByUid,
-    );
+    // Compute initial diagram bounds via the explicit pure pass.
+    const elementBounds = computeElementBounds(derived.displayElements, derived.elementsByUid);
 
     let computedInitialBounds: ViewRect | undefined;
     const bounds = calcViewBox(elementBounds);
@@ -2629,6 +1751,15 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       svg.addEventListener('gesturechange', handleGestureChange, { passive: false });
       svg.addEventListener('gestureend', handleGestureEnd, { passive: false });
     }
+
+    // Escape abandons a live gesture: the preview returns to the published view
+    // and the release, when it comes, finds nothing to commit.
+    const handleEscape = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && r.gesture !== undefined) {
+        cancelGesture();
+      }
+    };
+    window.addEventListener('keydown', handleEscape);
 
     const svgWidth = svgElement.clientWidth;
     const svgHeight = svgElement.clientHeight;
@@ -2712,6 +1843,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         r.svgObserver.disconnect();
         r.svgObserver = undefined;
       }
+      window.removeEventListener('keydown', handleEscape);
       const teardownSvg = svgRef.current?.querySelector('svg');
       if (teardownSvg) {
         teardownSvg.removeEventListener('wheel', handleNativeWheel);
@@ -2729,10 +1861,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       // Clear velocity tracking and pointer data
       r.velocityTracker.positions = [];
       r.activePointers.clear();
-      // Clear single-pointer gesture state
-      r.pointerId = undefined;
+      // Clear the pan anchor and any pinch reference
       r.mouseDownPoint = undefined;
-      r.selectionCenterOffset = undefined;
+      r.pinch = undefined;
     };
     // Intentionally empty deps: this effect mirrors componentDidMount/Unmount.
     // All props/state it reads go through `latest`, and the native listeners /
@@ -2775,9 +1906,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     // Bounds come from the derivation the just-committed render produced (same
     // pure pass the mount effect uses), so this reflects what is actually drawn.
     const derived = r.derived;
-    const bounds = calcViewBox(
-      computeElementBounds(derived.displayElements, derived.selectionUpdates, derived.elementsByUid),
-    );
+    const bounds = calcViewBox(computeElementBounds(derived.displayElements, derived.elementsByUid));
     if (!bounds) {
       // Empty model: nothing to center against.
       return;
@@ -2803,14 +1932,39 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     // effect a no-op after its single run, so extra runs are harmless.
   }, [svgSize, props.view, liveViewport]);
 
+  // ---- E5: a republish that invalidates the live gesture drops it ---------
+  // Planning already ignores an invalid gesture (deriveRenderState renders the
+  // published view), and a release re-checks; dropping it here also keeps a
+  // later move from planning on the replaced view.
+  React.useEffect(() => {
+    const g = r.gesture;
+    if (g !== undefined && !gestureIsValid(g, props)) {
+      endGesture();
+    }
+  }, [props.view, props.token]);
+
+  // ---- A name editor whose element is gone closes quietly -----------------
+  // A refused or rolled-back flow create leaves the editor naming a uid the view
+  // no longer holds. It closes without settling a selection, so the overlay does
+  // not linger inert and a later tool change has nothing to commit. A draft (an
+  // element the view never held) is exempt.
+  React.useEffect(() => {
+    const edit = r.nameEdit;
+    if (edit !== undefined && edit.draft === undefined && !props.view.elements.some((el) => el.uid === edit.uid)) {
+      setNameEdit(undefined);
+      setNameError(undefined);
+    }
+  }, [props.view, nameEdit]);
+
   // ---- Render -------------------------------------------------------------
 
   const { selectedTool, embedded } = props;
 
-  let isEditingNameNow = isShowingNameEditor(interaction);
+  let isEditingNameNow = nameEdit !== undefined;
   if (isEditingNameNow && selectedTool !== r.prevSelectedTool) {
-    // The deferred editing-done fires after this render commits; route it
-    // through `latest` so it observes the freshest interaction/selection state.
+    // Changing the tool while editing commits the name. The deferred done fires
+    // after this render commits and reads the refs, so it observes the latest
+    // name edit.
     setTimeout(() => {
       handleEditingNameDone(false);
     });
@@ -2818,65 +1972,55 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   }
   r.prevSelectedTool = selectedTool;
 
-  // phase 1: the single render derivation. Produces displayElements, the uid
-  // lookup, selection updates, module-warning flag, and the dragged-link arc.
-  // This is the only place render mutates the instance caches (r.elements,
-  // r.cachedVersion, r.derived) -- the same writes the class did to this.*,
-  // with identical semantics, kept idempotent so a StrictMode double-render is
-  // safe (the version cache short-circuits the second pass).
-  const derived = deriveRenderState();
+  // phase 1: the single render derivation (displayed elements, lookup, the live
+  // plan and the drawn selection). The only place render writes the caches.
+  const derived = deriveRenderState(gesture, nameEdit);
   const displayElements = derived.displayElements;
 
   // phase 2: create React components and add them to the appropriate layer
-  const zLayers = buildLayers(displayElements);
+  const zLayers = buildLayers(displayElements, isEditingNameNow);
 
   let overlayClass = styles.overlay;
   let nameEditor;
 
   let dragRect;
-  if (interaction.mode === 'dragSelecting' && r.mouseDownPoint && dragSelectionPoint) {
-    const pointA = r.mouseDownPoint;
-    const pointB = dragSelectionPoint;
-    const offset = getCanvasOffset();
-
-    const x = Math.min(pointA.x, pointB.x) - offset.x;
-    const y = Math.min(pointA.y, pointB.y) - offset.y;
-    const w = Math.abs(pointA.x - pointB.x);
-    const h = Math.abs(pointA.y - pointB.y);
-
-    dragRect = <rect className={styles.dragRectOverlay} x={x} y={y} width={w} height={h} />;
+  if (gesture?.gesture.kind === 'rubberBand' && beyondThreshold(gesture.press, gesture.current, getCanvasZoom())) {
+    const { press, current } = gesture;
+    dragRect = (
+      <rect
+        className={styles.dragRectOverlay}
+        x={Math.min(press.x, current.x)}
+        y={Math.min(press.y, current.y)}
+        width={Math.abs(press.x - current.x)}
+        height={Math.abs(press.y - current.y)}
+      />
+    );
   }
 
-  // Resolve the element being named, if any. The selection can transiently
-  // reference inCreationUid for one render after a flow creation hands off to
-  // name-editing: the pointer-up enters editingName and clears the in-creation
-  // element in the same commit, but props.selection only updates to the real
-  // flow uid once the host's async attach lands. In that render the editing
-  // element is unresolvable -- skip the name editor (the next render, after the
-  // selection commits, shows it for the real element) rather than crashing.
-  // Same transient-skip rationale as buildSelectionMap.
+  // The element being named: a draft, or an element of what is drawn. It can be
+  // unresolvable for a moment -- a drawn flow whose commit the host refused --
+  // and the editor is skipped then rather than crashing.
   const editingElement =
-    isEditingNameNow && props.selection.size === 1
-      ? (tryGetElementByUid(only(props.selection)) as NamedViewElement | undefined)
+    isEditingNameNow && nameEdit !== undefined
+      ? ((nameEdit.draft ?? tryGetElementByUid(nameEdit.uid)) as NamedViewElement | undefined)
       : undefined;
   if (!editingElement) {
     overlayClass += ' ' + styles.noPointerEvents;
   } else {
     const zoom = getCanvasZoom();
-    const editingUid = editingElement.uid;
     const { rw, rh } = labelRadii(editingElement.type);
-    const side = editingElement.labelSide;
     const offset = getCanvasOffset();
     nameEditor = (
       <EditableLabel
-        uid={editingUid}
+        uid={editingElement.uid}
         cx={(editingElement.x + offset.x) * zoom}
         cy={(editingElement.y + offset.y) * zoom}
-        side={side}
+        side={editingElement.labelSide}
         rw={rw * zoom}
         rh={rh * zoom}
         zoom={zoom}
         value={defined(editingName)}
+        error={nameError}
         onChange={handleEditingNameChange}
         onDone={handleEditingNameDone}
       />
@@ -2888,7 +2032,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   if (embedded) {
     // For embedded/export mode, always calculate tight bounds from elements.
     // The stored view.viewBox represents the editor viewport, not diagram bounds.
-    const bounds = calcViewBox(computeElementBounds(displayElements, derived.selectionUpdates, derived.elementsByUid));
+    const bounds = calcViewBox(computeElementBounds(displayElements, derived.elementsByUid));
     if (bounds) {
       const left = Math.floor(bounds.left) - 10;
       const top = Math.floor(bounds.top) - 10;
@@ -2910,10 +2054,6 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       {nameEditor}
     </div>
   );
-
-  // n.b. r.elements (and r.derived) are intentionally NOT cleared here:
-  // event handlers read them after render returns (getElementByUid and the
-  // pointer callbacks resolve connector ends / persist the dragged-link arc).
 
   // The label halo: each label's glyphs dilated and blurred into a soft
   // backing plate at 85% opacity, so a label stays legible where it crosses a
@@ -2966,7 +2106,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerCancel={handlePointerCancel}
-        onPointerUp={handlePointerCancel}
+        onPointerUp={handlePointerUp}
       >
         <defs>{labelHaloFilter}</defs>
         <CanvasRenderContext.Provider value={renderContext}>

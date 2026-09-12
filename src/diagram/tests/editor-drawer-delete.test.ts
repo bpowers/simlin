@@ -70,9 +70,14 @@ function makeSnapshot(): ProjectSnapshot {
     modelName: 'main',
     projectVersion: 1,
     serverVersion: 1,
-    projectGeneration: 0,
     status: 'ok',
-    cachedErrors: { simError: undefined, modelErrors: [], varErrors: new Map(), unitErrors: new Map() },
+    cachedErrors: {
+      simError: undefined,
+      modelErrors: [],
+      varErrors: new Map(),
+      unitErrors: new Map(),
+      varWarnings: new Map(),
+    },
     data: new Map(),
     modelStack: [],
     canUndo: false,
@@ -108,7 +113,6 @@ describe('Editor.getDrawer() delete wiring', () => {
     rs.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
     rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
     rs.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
   });
 

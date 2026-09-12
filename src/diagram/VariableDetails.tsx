@@ -5,7 +5,7 @@
 import * as React from 'react';
 
 import { LineChart, ChartSeries } from './LineChart';
-import { createEditor, Descendant, Editor, Transforms } from 'slate';
+import { createEditor, Descendant, Editor, NodeEntry, Range, Text, Transforms } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
 import Button from './components/Button';
@@ -44,12 +44,14 @@ interface VariableDetailsProps {
   viewElement: ViewElement;
   getLatexEquation?: (ident: string) => Promise<string | undefined>;
   onDelete: (ident: string) => void;
+  // May resolve whether the submission landed; a submission that did not land
+  // is no longer the field's base (see draftText).
   onEquationChange: (
     ident: string,
     newEquation: string | undefined,
     newUnits: string | undefined,
     newDoc: string | undefined,
-  ) => void;
+  ) => Promise<boolean> | void;
   onTableChange: (ident: string, newTable: GraphicalFunction | null) => void;
   activeTab: number;
   onActiveTabChange: (newActiveTab: number) => void;
@@ -60,6 +62,109 @@ interface VariableDetailsProps {
   // lookup editing are hidden. The Editor keys this panel on the flag, so a
   // mid-session flip remounts (re-seeds) it rather than toggling in place.
   readOnly?: boolean;
+  // Registers this panel's draft commit with the host; returns the
+  // unregistration. A canvas press does not blur the panel (the canvas prevents
+  // the default focus change), so the host flushes the draft through this
+  // before the press starts a gesture, putting the draft's edit ahead of the
+  // gesture's. The flush returns true when it submitted a changed draft.
+  registerDraftFlush?: (flush: () => boolean) => () => void;
+  // Reports whether a field holds a draft (see draftText), and false on unmount.
+  // The host holds the panel's key while it does, so a landed edit does not
+  // remount the panel over text the user has not submitted, or has submitted
+  // but that has not landed yet.
+  onDraftStateChange?: (hasDraft: boolean) => void;
+  // The host's latest pending submission for this element, by field, read at
+  // mount. A panel reopened while its own submission is in flight seeds those
+  // fields from it (so it never shows the text the submission replaced) and
+  // takes it as their base, falling back as for its own submissions if it does
+  // not land.
+  pendingSubmission?: PendingSubmission;
+}
+
+/** A submitted field's text and whether its edit landed. */
+export type PendingSubmission = Partial<
+  Record<keyof DraftFields<string>, { readonly text: string; readonly landed: Promise<boolean> }>
+>;
+
+// A field's DRAFT: its text when that differs from the field's BASE, else
+// undefined. The base is what this panel last submitted for the field, or the
+// text the field was seeded with when nothing was submitted.
+//
+// Measuring against the base, not against the seeded or committed text, is
+// what keeps two things apart:
+//  - a field the user never touched equals its base, so it is never echoed --
+//    even when the held panel fell behind committed content (a rename rewrote
+//    a name the equation references) and submitting it would revert that;
+//  - a field changed back after a submission (typed, flushed, then cleared
+//    while the edit is in flight) differs from its base, so it is a draft and
+//    holds the key, even though it equals the seeded or pre-landing committed
+//    text -- otherwise the in-flight edit would land over it with no notice.
+// A submission that does not land stops being the base: the field's base
+// becomes its committed text then, so the text is a draft again to retry.
+export function draftText(text: string, baseText: string): string | undefined {
+  return text !== baseText ? text : undefined;
+}
+
+/** The texts of a pending submission, as bases. */
+export function pendingTexts(
+  pending: PendingSubmission | undefined,
+): Partial<Record<keyof DraftFields<string>, string>> {
+  const texts: Partial<Record<keyof DraftFields<string>, string>> = {};
+  for (const field of ['equation', 'units', 'docs'] as const) {
+    const entry = pending?.[field];
+    if (entry !== undefined) {
+      texts[field] = entry.text;
+    }
+  }
+  return texts;
+}
+
+/**
+ * Subscribe a panel that seeded from a pending submission to that submission's
+ * outcome: each field whose edit does not land falls back as for the panel's
+ * own submissions (basesAfterFailedSubmission). A panel effect.
+ */
+export function fallBackOnFailedPending(
+  pending: PendingSubmission | undefined,
+  alive: { readonly current: boolean },
+  committed: { readonly current: DraftFields<string> },
+  setBases: (
+    update: (
+      prev: Partial<Record<keyof DraftFields<string>, string>>,
+    ) => Partial<Record<keyof DraftFields<string>, string>>,
+  ) => void,
+): void {
+  for (const field of ['equation', 'units', 'docs'] as const) {
+    const entry = pending?.[field];
+    void entry?.landed.then((ok) => {
+      if (!ok && alive.current) {
+        setBases((prev) => basesAfterFailedSubmission(prev, { [field]: entry.text }, committed.current));
+      }
+    });
+  }
+}
+
+/** The panel fields a draft can live in. */
+export type DraftFields<T> = { readonly equation: T; readonly units: T; readonly docs: T };
+
+/**
+ * The bases after a submission settles as not landed: each field the
+ * submission set, and whose base is still that submission's text, falls back to
+ * its committed text.
+ */
+export function basesAfterFailedSubmission(
+  bases: Partial<Record<keyof DraftFields<string>, string>>,
+  submission: Partial<Record<keyof DraftFields<string>, string>>,
+  committed: DraftFields<string>,
+): Partial<Record<keyof DraftFields<string>, string>> {
+  const next = { ...bases };
+  for (const field of ['equation', 'units', 'docs'] as const) {
+    const submitted = submission[field];
+    if (submitted !== undefined && next[field] === submitted) {
+      next[field] = committed[field];
+    }
+  }
+  return next;
 }
 
 function stringFromDescendants(children: Descendant[]): string {
@@ -114,15 +219,54 @@ function rawEquationStart(displayed: string, isUnits: boolean): number {
   return !isUnits && displayed.startsWith(applyToAllPrefix) ? applyToAllPrefix.length : 0;
 }
 
-function highlightErrors(
-  s: string,
+// The error/warning underline of one field as a Slate `decorate` function over
+// the field's live document. Decorated from props at render rather than
+// seeded into the document as marks: the panel keeps its editors across edits
+// that change only the variable's errors (the Editor's panel key excludes
+// errors, so a landing edit that breaks this variable's equation does not
+// discard a draft), and the highlight follows the props when they change. The
+// engine's offsets describe the committed text, so the underline applies only
+// while the field shows exactly that text; a dirty draft is not underlined.
+function fieldDecorate(
+  committedText: string,
+  currentText: string,
   errors: readonly EquationError[] | undefined,
   unitErrors: readonly UnitError[] | undefined,
   isUnits: boolean,
-): CustomElement[] {
-  const rawStart = rawEquationStart(s, isUnits);
-  const range = highlightRangeForField(s.slice(rawStart), errors, unitErrors, isUnits);
-  return highlightSpansForLines(s, rawStart, range).map((children): CustomElement => ({ type: 'equation', children }));
+): (entry: NodeEntry) => Range[] {
+  if (currentText !== committedText) {
+    return () => [];
+  }
+  const rawStart = rawEquationStart(committedText, isUnits);
+  const range = highlightRangeForField(committedText.slice(rawStart), errors, unitErrors, isUnits);
+  if (range === undefined) {
+    return () => [];
+  }
+  // One Slate element per line, each holding one text node: path [line, 0].
+  const lines = highlightSpansForLines(committedText, rawStart, range);
+  return ([node, path]) => {
+    if (!Text.isText(node) || path.length !== 2 || path[1] !== 0) {
+      return [];
+    }
+    const spans = lines[path[0]];
+    if (spans === undefined) {
+      return [];
+    }
+    const out: Range[] = [];
+    let offset = 0;
+    for (const span of spans) {
+      const end = offset + span.text.length;
+      if (span.error || span.warning) {
+        out.push({
+          anchor: { path, offset },
+          focus: { path, offset: end },
+          ...(span.error ? { error: true } : { warning: true }),
+        } as Range);
+      }
+      offset = end;
+    }
+    return out;
+  };
 }
 
 // KaTeX needs `trust` enabled to honor `\htmlData`. Scope it to that one
@@ -258,40 +402,94 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   // embeds on one page can each show a details panel.
   const fieldIdPrefix = React.useId();
 
-  // The original (props-derived) document for each field. These seed the editors
-  // on mount and are what the discard path (Cancel/Escape) restores, so the
-  // seeding and the revert stay in lockstep -- including the error/warning
-  // highlight the equation and units fields carry.
-  const initialEquationContents = (): CustomElement[] =>
-    highlightErrors(scalarEquationFor(variable), variable.errors, variable.unitErrors, false);
-  const initialUnitsContents = (): CustomElement[] =>
-    highlightErrors(variable.units, variable.errors, variable.unitErrors, true);
-  const initialNotesContents = (): CustomElement[] => descendantsFromString(variable.documentation);
-
   // Seed the Slate editors and their contents from props exactly once per mount
   // (lazy useState initializers), mirroring the old constructor. The Editor keys
-  // this panel on projectGeneration, so a content change remounts the panel and
-  // re-seeds it -- there is deliberately NO prop-sync effect for these fields,
-  // which would fight that keyed-remount invariant (see diagram/CLAUDE.md
-  // "Details panels are keyed by projectGeneration"). The latex fields below ARE
-  // prop-driven (on viewElement.ident) because selecting a different variable
-  // without an intervening content edit does not remount the panel.
+  // this panel on the variable's committed editable content, so a landed edit to
+  // this variable remounts the panel and re-seeds it -- there is deliberately NO
+  // prop-sync effect for these fields, which would fight that keyed-remount
+  // invariant (see diagram/CLAUDE.md "Details panels are keyed by the selected
+  // variable's committed content"). The latex fields below ARE prop-driven (on
+  // viewElement.ident) because selecting a different variable without an
+  // intervening content edit does not remount the panel.
   const [equationEditor] = React.useState<CustomEditor>(
     () => withHistory(withReact(createEditor())) as unknown as CustomEditor,
   );
-  const [equationContents, setEquationContents] = React.useState<Descendant[]>(initialEquationContents);
+  const pendingAtMount = React.useRef(props.pendingSubmission);
+  const [equationContents, setEquationContents] = React.useState<Descendant[]>(() =>
+    descendantsFromString(pendingAtMount.current?.equation?.text ?? scalarEquationFor(variable)),
+  );
   const [unitsEditor] = React.useState<CustomEditor>(
     () => withHistory(withReact(createEditor())) as unknown as CustomEditor,
   );
-  const [unitsContents, setUnitsContents] = React.useState<Descendant[]>(initialUnitsContents);
+  const [unitsContents, setUnitsContents] = React.useState<Descendant[]>(() =>
+    descendantsFromString(pendingAtMount.current?.units?.text ?? variable.units),
+  );
   const [notesEditor] = React.useState<CustomEditor>(
     () => withHistory(withReact(createEditor())) as unknown as CustomEditor,
   );
-  const [notesContents, setNotesContents] = React.useState<Descendant[]>(initialNotesContents);
+  const [notesContents, setNotesContents] = React.useState<Descendant[]>(() =>
+    descendantsFromString(pendingAtMount.current?.docs?.text ?? variable.documentation),
+  );
   const [editingEquation, setEditingEquation] = React.useState<boolean>(
     () => !!(variable.errors && variable.errors.length > 0),
   );
   const [latexEquation, setLatexEquation] = React.useState<string | undefined>(undefined);
+  // The texts the fields were seeded with, and what this panel last submitted
+  // for each (see draftText).
+  const [seeded] = React.useState(() => ({
+    equation: scalarEquationFor(variable),
+    units: variable.units,
+    docs: variable.documentation,
+  }));
+  const [submitted, setSubmitted] = React.useState<Partial<Record<keyof DraftFields<string>, string>>>(() =>
+    pendingTexts(pendingAtMount.current),
+  );
+  const committedTexts: DraftFields<string> = {
+    equation: scalarEquationFor(variable),
+    units: variable.units,
+    docs: variable.documentation,
+  };
+  const committedRef = React.useRef(committedTexts);
+  committedRef.current = committedTexts;
+  const alive = React.useRef(true);
+  React.useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  React.useEffect(() => fallBackOnFailedPending(pendingAtMount.current, alive, committedRef, setSubmitted), []);
+  const drafts = {
+    equation: draftText(stringFromDescendants(equationContents), submitted.equation ?? seeded.equation),
+    units: draftText(stringFromDescendants(unitsContents), submitted.units ?? seeded.units),
+    docs: draftText(stringFromDescendants(notesContents), submitted.docs ?? seeded.docs),
+  };
+  // Independent of readOnly: a read-only panel's fields cannot change, and the
+  // host renders a panel read-only while an undo/redo is queued without that
+  // releasing a draft it holds.
+  const hasDraft = drafts.equation !== undefined || drafts.units !== undefined || drafts.docs !== undefined;
+  const onDraftStateChange = props.onDraftStateChange;
+  React.useEffect(() => {
+    onDraftStateChange?.(hasDraft);
+  }, [hasDraft, onDraftStateChange]);
+  React.useEffect(() => () => onDraftStateChange?.(false), [onDraftStateChange]);
+
+  const equationDecorate = React.useMemo(
+    () =>
+      fieldDecorate(
+        scalarEquationFor(variable),
+        stringFromDescendants(equationContents),
+        variable.errors,
+        variable.unitErrors,
+        false,
+      ),
+    [variable, equationContents],
+  );
+  const unitsDecorate = React.useMemo(
+    () =>
+      fieldDecorate(variable.units, stringFromDescendants(unitsContents), variable.errors, variable.unitErrors, true),
+    [variable, unitsContents],
+  );
 
   // Monotonic request id and mounted flag for the loadLatex race guard, mirroring
   // the class's `_latexRequestId`/`_mounted` instance fields. Refs (not state)
@@ -363,15 +561,20 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
     setNotesContents(equation);
   };
 
-  // Discard every in-progress edit and restore the original documents. Both the
-  // React state (which drives the preview and the Save/Cancel enabled state) and
-  // the live Slate documents (uncontrolled after mount) must be reset, or the
-  // visible editors would keep showing the abandoned text. Shared by the Cancel
-  // button and the Escape key.
+  // Discard every draft: each field goes back to its base -- what this panel
+  // last submitted for it while that submission stands, else the text it was
+  // seeded with (see draftText) -- so no field holds a draft afterwards and the
+  // host's hold on the panel releases. Restoring the committed text instead
+  // would make a field whose submission has not landed yet differ from its
+  // base, and the next blur or canvas press would submit the committed text over
+  // the pending save. Both the React state (which drives the preview and the
+  // Save/Cancel enabled state) and the live Slate documents (uncontrolled after
+  // mount) must be reset, or the visible editors would keep showing the
+  // abandoned text. Shared by the Cancel button and the Escape key.
   const handleEquationCancel = (): void => {
-    const equation = initialEquationContents();
-    const units = initialUnitsContents();
-    const notes = initialNotesContents();
+    const equation = descendantsFromString(submitted.equation ?? seeded.equation);
+    const units = descendantsFromString(submitted.units ?? seeded.units);
+    const notes = descendantsFromString(submitted.docs ?? seeded.docs);
     resetEditorDocument(equationEditor, equation);
     resetEditorDocument(unitsEditor, units);
     resetEditorDocument(notesEditor, notes);
@@ -382,10 +585,10 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   };
 
   // Blur commits the in-progress edit only when focus actually leaves the panel
-  // (to the canvas, another variable, or nowhere). This is load-bearing: a
-  // canvas-driven edit first blurs the side-panel editor, and that blur must
-  // commit the pending text (see diagram/CLAUDE.md, "Details panels are keyed by
-  // projectGeneration"). But a blur toward the panel's own Cancel/Save buttons
+  // (to another control, another variable, or nowhere). A canvas press does not
+  // blur the panel at all -- the canvas prevents the default focus change -- so
+  // that path goes through registerDraftFlush instead. But a blur toward the
+  // panel's own Cancel/Save buttons
   // or another field must NOT commit -- otherwise clicking or tabbing to Cancel
   // would save the very edit the user is discarding, and the button's own
   // pointerdown-preventDefault (which keeps focus on the editor for mouse/touch)
@@ -402,27 +605,37 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
     }
   };
 
-  const handleEquationSave = (): void => {
+  // True when a changed draft was submitted.
+  const handleEquationSave = (): boolean => {
     // Backstop: with the fields non-editable the contents cannot diverge from
     // the initial values, but a save must still never fire in read-only mode
     // (tab switches and blurs route through here unconditionally).
-    if (readOnly) {
-      return;
+    if (readOnly || !hasDraft) {
+      return false;
     }
-    const initialEquation = scalarEquationFor(variable);
-    const initialUnits = variable.units;
-    const initialDocs = variable.documentation;
-
-    const newEquation = stringFromDescendants(equationContents);
-    const newUnits = stringFromDescendants(unitsContents);
-    const newDocs = stringFromDescendants(notesContents);
-    const equation = initialEquation !== newEquation ? newEquation : undefined;
-    const units = initialUnits !== newUnits ? newUnits : undefined;
-    const docs = initialDocs !== newDocs ? newDocs : undefined;
-    if (equation !== undefined || units !== undefined || docs != undefined) {
-      onEquationChange(defined(viewElement.ident), equation, units, docs);
-    }
+    // Only the fields holding a draft: the rest echo committed content at dequeue.
+    const submission = drafts;
+    setSubmitted((prev) => ({
+      ...prev,
+      ...(submission.equation !== undefined ? { equation: submission.equation } : {}),
+      ...(submission.units !== undefined ? { units: submission.units } : {}),
+      ...(submission.docs !== undefined ? { docs: submission.docs } : {}),
+    }));
+    const landed = onEquationChange(defined(viewElement.ident), submission.equation, submission.units, submission.docs);
+    void landed?.then((ok) => {
+      if (!ok && alive.current) {
+        setSubmitted((prev) => basesAfterFailedSubmission(prev, submission, committedRef.current));
+      }
+    });
+    return true;
   };
+
+  // The flush the host calls before a canvas press. It reads the draft through a
+  // ref, so a registration made at mount commits the CURRENT text.
+  const saveRef = React.useRef(handleEquationSave);
+  saveRef.current = handleEquationSave;
+  const registerDraftFlush = props.registerDraftFlush;
+  React.useEffect(() => registerDraftFlush?.(() => saveRef.current()), [registerDraftFlush]);
 
   const formatValue = (value: number): string => {
     return value.toFixed(3);
@@ -468,10 +681,6 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   };
 
   const renderEquation = (): React.ReactElement => {
-    const initialEquation = scalarEquationFor(variable);
-    const initialUnits = variable.units;
-    const initialDocs = variable.documentation;
-
     const data: Readonly<Array<Series>> | undefined = variable.data;
 
     let yMin = 0;
@@ -500,11 +709,8 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
     yMin = Math.floor(yMin);
     yMax = Math.ceil(yMax);
 
-    // enable saving and canceling if the equation has changed
-    const equationActionsEnabled =
-      initialEquation !== stringFromDescendants(equationContents) ||
-      initialUnits !== stringFromDescendants(unitsContents) ||
-      initialDocs !== stringFromDescendants(notesContents);
+    // Save and Cancel act on drafts, so they are enabled exactly while one exists.
+    const equationActionsEnabled = hasDraft;
 
     const detailsView = variableDetailsView(variable);
     // Unit errors are non-fatal warnings: the variable still simulates and has
@@ -543,6 +749,14 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
       </div>
     ));
 
+    // Engine advisories are non-fatal too. Their code is often the wire
+    // Generic, so the details are the message.
+    const advisories = detailsView.warnings.map((warning, i) => (
+      <div key={`advisory-${i}`} className={styles.errorList}>
+        warning: {warning.details ?? errorCodeDescription(warning.code)}
+      </div>
+    ));
+
     let chartOrErrors;
     if (!detailsView.showChart) {
       // Equation/compile errors mean the variable produced no valid data, so
@@ -552,13 +766,14 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
           error: {errorCodeDescription(error.code)}
         </div>
       ));
-      chartOrErrors = [...errorList, ...unitWarnings, ...connectorWarnings];
+      chartOrErrors = [...errorList, ...unitWarnings, ...connectorWarnings, ...advisories];
     } else {
       chartOrErrors = (
         <>
           <LineChart height={300} series={chartSeries} yDomain={[yMin, yMax]} tooltipFormatter={formatValue} />
           {unitWarnings}
           {connectorWarnings}
+          {advisories}
         </>
       );
     }
@@ -606,6 +821,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
             <Editable
               className={styles.eqnEditor}
               renderLeaf={renderLeaf}
+              decorate={equationDecorate}
               placeholder="Enter an equation..."
               spellCheck={false}
               readOnly={readOnly}
@@ -663,6 +879,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
           <Editable
             className={styles.unitsEditor}
             renderLeaf={renderLeaf}
+            decorate={unitsDecorate}
             placeholder="Enter units..."
             spellCheck={false}
             readOnly={readOnly}

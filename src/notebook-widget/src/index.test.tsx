@@ -605,6 +605,34 @@ describe('WidgetApp <-> model protocol', () => {
     expect(mounts[1].props.initialProjectJson).toBe(withEditorView('{"name":"p","models":[{"name":"main"}]}'));
   });
 
+  it("the Editor's Reload (its engine lost) remounts it on the last acknowledged state: no page reload, nothing sent", async () => {
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([4]));
+    const sentBefore = model.sent.length;
+    expect(typeof mounts[0].props.onReload).toBe('function');
+    act(() => {
+      mounts[0].props.onReload!();
+    });
+    expect(mounts).toHaveLength(2);
+    // The kernel acknowledged our first edit, so that is what the new mount opens.
+    expect(mounts[1].props.initialProjectJson).toBe(localJson(SEED, 1));
+    expect(mounts[1].props.initialProjectVersion).toBe(4);
+    expect(model.sent).toHaveLength(sentBefore);
+    // The new Editor starts with nothing selected, so the trait is told.
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    expect(model.sets.filter((s) => s.key === 'selection')).toHaveLength(1);
+    expect(model.lastSet('selection')).toEqual([]);
+    // A second Reload remounts again: the pair is unchanged, the generation moves.
+    act(() => {
+      mounts[1].props.onReload!();
+    });
+    expect(mounts).toHaveLength(3);
+  });
+
   it('a revision that goes backwards with the same bytes still remounts (generation bump)', async () => {
     const model = new FakeModel(defaultState({ revision: 3, project_json: 'X' }));
     await mount(model);
@@ -1006,6 +1034,26 @@ describe('viewport carried across a kernel-originated remount', () => {
     expect(mounts[1].props.initialProjectJson).toBe(
       projectWith(box, { auxiliaries: [{ name: 'from_python', equation: '1' }] }),
     );
+  });
+
+  it("the Editor's Reload carries the live viewport and frees an in-flight snapshot slot for the new Editor", async () => {
+    const model = new FakeModel(defaultState({ project_json: projectWith(box), revision: 3 }));
+    model.busyKernel = true;
+    await mount(model);
+    fireEvent.click(screen.getByText('pan'));
+    fireEvent.click(screen.getByText('edit'));
+    const snapshots = () => model.sent.filter((m) => (m as { type: string }).type === 'snapshot');
+    expect(snapshots()).toHaveLength(1);
+    act(() => {
+      mounts[0].props.onReload!();
+    });
+    expect(mounts).toHaveLength(2);
+    expect(mounts[1].props.initialViewport).toEqual(firstPan);
+    // The replaced Editor's save resolves unsaved, and the new Editor's first
+    // edit is sent rather than refused as "one already in flight".
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined]));
+    fireEvent.click(screen.getByText('edit'));
+    expect(snapshots()).toHaveLength(2);
   });
 
   it("a kernel push that moved the stored viewport remounts on the kernel's (nothing carried)", async () => {

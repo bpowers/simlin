@@ -31,16 +31,26 @@ import { act, fireEvent, render, screen, type RenderResult } from '@testing-libr
 // the binding resolves to the real module and is hoisted alongside the factory.
 import * as react from 'react' with { rstest: 'importActual' };
 
-import type {
-  FlowViewElement,
-  GraphicalFunction,
-  LinkViewElement,
-  StockFlowView,
-  Variable,
-} from '@simlin/core/datamodel';
+import type { GraphicalFunction, StockFlowView, Variable } from '@simlin/core/datamodel';
 
 import { ProjectController, type ProjectSnapshot } from '../project-controller';
-import type { CanvasProps } from '../drawing/Canvas';
+import type { CanvasProps, GestureCommit } from '../drawing/Canvas';
+
+// Every view-editing gesture reaches the Editor as one commit; this one moves
+// the first element of the rendered view, planned on that view, so only the
+// read-only gate can stop it.
+function movedCommit(cp: CanvasProps): GestureCommit {
+  const [first, ...rest] = cp.view.elements;
+  const elements = first === undefined ? [] : [{ ...first, x: first.x + 10, y: first.y + 10 }, ...rest];
+  return {
+    label: 'move',
+    elements,
+    nextUid: cp.view.nextUid,
+    selection: new Set(),
+    token: cp.token,
+    baseView: cp.view,
+  };
+}
 import type { VariableDetails as VariableDetailsType } from '../VariableDetails';
 import type { ModuleDetails as ModuleDetailsType } from '../ModuleDetails';
 
@@ -219,9 +229,14 @@ function makeSnapshot(): ProjectSnapshot {
     modelName: 'main',
     projectVersion: 1,
     serverVersion: 1,
-    projectGeneration: 0,
     status: 'ok',
-    cachedErrors: { simError: undefined, modelErrors: [], varErrors: new Map(), unitErrors: new Map() },
+    cachedErrors: {
+      simError: undefined,
+      modelErrors: [],
+      varErrors: new Map(),
+      unitErrors: new Map(),
+      varWarnings: new Map(),
+    },
     data: new Map(),
     modelStack: [],
     // History exists, so undo/redo gating is observable (not vacuously off).
@@ -247,13 +262,14 @@ function makeProps(overrides: Partial<EditorProps> = {}): EditorProps {
 const viewOnlyLabel = 'View only';
 
 describe('Editor readOnlyMode capability gate', () => {
+  // Every way the Editor can change project content goes through one of these
+  // controller methods: diagram edits, model-only edits, and undo/redo.
   let mutationSpies: {
-    applyPatch: ReturnType<typeof rs.spyOn>;
-    applyPatchOrReportError: ReturnType<typeof rs.spyOn>;
-    updateView: ReturnType<typeof rs.spyOn>;
+    enqueueViewEdit: ReturnType<typeof rs.spyOn>;
+    enqueueModelEdit: ReturnType<typeof rs.spyOn>;
     undoRedo: ReturnType<typeof rs.spyOn>;
   };
-  let queueViewUpdateSpy: ReturnType<typeof rs.spyOn>;
+  let setViewportSpy: ReturnType<typeof rs.spyOn>;
 
   beforeEach(() => {
     canvasProps = undefined;
@@ -264,16 +280,13 @@ describe('Editor readOnlyMode capability gate', () => {
     rs.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
     rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
     rs.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
-    rs.spyOn(ProjectController.prototype, 'getEngine').mockReturnValue({} as never);
     mutationSpies = {
-      applyPatch: rs.spyOn(ProjectController.prototype, 'applyPatch').mockResolvedValue(true),
-      applyPatchOrReportError: rs.spyOn(ProjectController.prototype, 'applyPatchOrReportError').mockResolvedValue(true),
-      updateView: rs.spyOn(ProjectController.prototype, 'updateView').mockResolvedValue(undefined),
+      enqueueViewEdit: rs.spyOn(ProjectController.prototype, 'enqueueViewEdit').mockResolvedValue(true),
+      enqueueModelEdit: rs.spyOn(ProjectController.prototype, 'enqueueModelEdit').mockResolvedValue(true),
       undoRedo: rs.spyOn(ProjectController.prototype, 'undoRedo').mockImplementation(() => {}),
     };
-    queueViewUpdateSpy = rs.spyOn(ProjectController.prototype, 'queueViewUpdate').mockResolvedValue(undefined);
+    setViewportSpy = rs.spyOn(ProjectController.prototype, 'setViewport').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -290,13 +303,13 @@ describe('Editor readOnlyMode capability gate', () => {
       result = render(React.createElement(Editor, props));
     });
     fireEvent.pointerDown(result.container.firstElementChild as HTMLElement);
+    fireEvent.pointerUp(result.container.firstElementChild as HTMLElement);
     return result;
   }
 
   function expectNoMutations(): void {
-    expect(mutationSpies.applyPatch).not.toHaveBeenCalled();
-    expect(mutationSpies.applyPatchOrReportError).not.toHaveBeenCalled();
-    expect(mutationSpies.updateView).not.toHaveBeenCalled();
+    expect(mutationSpies.enqueueViewEdit).not.toHaveBeenCalled();
+    expect(mutationSpies.enqueueModelEdit).not.toHaveBeenCalled();
     expect(mutationSpies.undoRedo).not.toHaveBeenCalled();
   }
 
@@ -306,8 +319,7 @@ describe('Editor readOnlyMode capability gate', () => {
     const cp = canvasProps!;
     await act(async () => {
       cp.onRenameVariable('some var', 'renamed');
-      cp.onMoveSelection({ x: 10, y: 10 });
-      cp.onMoveLabel(9, 'left');
+      cp.onCommitGesture(movedCommit(cp));
       cp.onCreateVariable({
         type: 'aux',
         uid: -2,
@@ -319,14 +331,6 @@ describe('Editor readOnlyMode capability gate', () => {
         labelSide: 'right',
         isZeroRadius: false,
       });
-      cp.onMoveFlow(
-        { type: 'flow', uid: 12, points: [] } as unknown as FlowViewElement,
-        9,
-        { x: 0, y: 0 },
-        undefined,
-        true,
-      );
-      cp.onAttachLink({ type: 'link', uid: -2, fromUid: 9 } as unknown as LinkViewElement, 'some_var');
       void cp.onDeleteSelection();
     });
     await act(async () => {
@@ -352,14 +356,50 @@ describe('Editor readOnlyMode capability gate', () => {
         isZeroRadius: false,
       });
     });
-    expect(mutationSpies.applyPatchOrReportError).toHaveBeenCalled();
-    expect(mutationSpies.updateView).toHaveBeenCalled();
+    expect(mutationSpies.enqueueViewEdit).toHaveBeenCalled();
+
+    // Model-only edits, probed through the drawer.
+    await act(async () => {
+      drawerProps!.onSimSpecCommit('startTime', 1900);
+    });
+    expect(mutationSpies.enqueueModelEdit).toHaveBeenCalled();
 
     await act(async () => {
       fireEvent.keyDown(document, { key: 'z', ctrlKey: true });
     });
-    expect(mutationSpies.undoRedo).toHaveBeenCalledWith('undo');
+    // No panel is open, so there is no draft to queue the undo behind.
+    expect(mutationSpies.undoRedo).toHaveBeenCalledWith('undo', { afterQueuedEdits: false });
   });
+
+  // The panel handlers resolve whether the edit landed (a panel falls back to
+  // committed text on false). A submission identical to the latest pending one
+  // is not enqueued again, and must resolve as that one does, whichever way
+  // it goes.
+  for (const outcome of [false, true]) {
+    it(`an identical submission while one is pending resolves as the pending one does (${outcome})`, async () => {
+      let settle!: (landed: boolean) => void;
+      mutationSpies.enqueueModelEdit.mockImplementation(
+        () =>
+          new Promise<boolean>((resolve) => {
+            settle = resolve;
+          }),
+      );
+      renderEditor();
+      act(() => {
+        canvasProps!.onSetSelection(new Set([9]));
+        canvasProps!.onShowVariableDetails();
+      });
+      const first = variableDetailsProps!.onEquationChange('some_var', undefined, 'widgets', undefined);
+      const second = variableDetailsProps!.onEquationChange('some_var', undefined, 'widgets', undefined);
+      expect(mutationSpies.enqueueModelEdit).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        settle(outcome);
+        await Promise.resolve();
+      });
+      expect(await first).toBe(outcome);
+      expect(await second).toBe(outcome);
+    });
+  }
 
   it('a barrage of attempted mutations never reaches the controller in readOnlyMode', async () => {
     renderEditor(makeProps({ readOnlyMode: true }));
@@ -436,8 +476,7 @@ describe('Editor readOnlyMode capability gate', () => {
 
     await act(async () => {
       staleHandlers.onRenameVariable('some var', 'renamed');
-      staleHandlers.onMoveSelection({ x: 10, y: 10 });
-      staleHandlers.onMoveLabel(9, 'left');
+      staleHandlers.onCommitGesture(movedCommit(staleHandlers));
       staleHandlers.onCreateVariable({
         type: 'aux',
         uid: -2,
@@ -449,14 +488,6 @@ describe('Editor readOnlyMode capability gate', () => {
         labelSide: 'right',
         isZeroRadius: false,
       });
-      staleHandlers.onMoveFlow(
-        { type: 'flow', uid: 12, points: [] } as unknown as FlowViewElement,
-        9,
-        { x: 0, y: 0 },
-        undefined,
-        true,
-      );
-      staleHandlers.onAttachLink({ type: 'link', uid: -2, fromUid: 9 } as unknown as LinkViewElement, 'some_var');
       void staleHandlers.onDeleteSelection();
     });
     expectNoMutations();
@@ -480,7 +511,7 @@ describe('Editor readOnlyMode capability gate', () => {
     });
     // Viewport updates are view-only (never recorded in undo history, and the
     // host's save is a no-op), so panning a read-only project is allowed.
-    expect(queueViewUpdateSpy).toHaveBeenCalled();
+    expect(setViewportSpy).toHaveBeenCalled();
     expectNoMutations();
   });
 
@@ -542,14 +573,11 @@ describe('Editor readOnlyMode flips (both directions)', () => {
     rs.spyOn(ProjectController.prototype, 'getSnapshot').mockReturnValue(makeSnapshot());
     rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
     rs.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
-    rs.spyOn(ProjectController.prototype, 'getEngine').mockReturnValue({} as never);
-    rs.spyOn(ProjectController.prototype, 'applyPatch').mockResolvedValue(true);
-    rs.spyOn(ProjectController.prototype, 'applyPatchOrReportError').mockResolvedValue(true);
-    rs.spyOn(ProjectController.prototype, 'updateView').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'enqueueViewEdit').mockResolvedValue(true);
+    rs.spyOn(ProjectController.prototype, 'enqueueModelEdit').mockResolvedValue(true);
     rs.spyOn(ProjectController.prototype, 'undoRedo').mockImplementation(() => {});
-    rs.spyOn(ProjectController.prototype, 'queueViewUpdate').mockResolvedValue(undefined);
+    rs.spyOn(ProjectController.prototype, 'setViewport').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -564,6 +592,7 @@ describe('Editor readOnlyMode flips (both directions)', () => {
       result = render(React.createElement(Editor, props));
     });
     fireEvent.pointerDown(result.container.firstElementChild as HTMLElement);
+    fireEvent.pointerUp(result.container.firstElementChild as HTMLElement);
     return result;
   }
 
@@ -599,11 +628,11 @@ describe('Editor readOnlyMode flips (both directions)', () => {
     expect(canvasProps!.readOnly).toBe(true);
     expect(canvasProps!.selectedTool).toBeUndefined();
 
-    const updateView = ProjectController.prototype.updateView as unknown as ReturnType<typeof rs.fn>;
+    const enqueueViewEdit = ProjectController.prototype.enqueueViewEdit as unknown as ReturnType<typeof rs.fn>;
     await act(async () => {
-      canvasProps!.onMoveSelection({ x: 10, y: 10 });
+      canvasProps!.onCommitGesture(movedCommit(canvasProps!));
     });
-    expect(updateView).not.toHaveBeenCalled();
+    expect(enqueueViewEdit).not.toHaveBeenCalled();
   });
 
   it('an armed creation tool is disarmed by the flip and does not re-arm on flipping back', () => {
@@ -652,16 +681,16 @@ describe('Editor readOnlyMode flips (both directions)', () => {
     act(() => {
       canvasProps!.onSetSelection(new Set([9]));
     });
-    const updateView = ProjectController.prototype.updateView as unknown as ReturnType<typeof rs.fn>;
+    const enqueueViewEdit = ProjectController.prototype.enqueueViewEdit as unknown as ReturnType<typeof rs.fn>;
     await act(async () => {
       fireEvent.keyDown(document, { key: 'Delete' });
     });
-    expect(updateView).not.toHaveBeenCalled();
+    expect(enqueueViewEdit).not.toHaveBeenCalled();
 
     setReadOnly(result, false);
     await act(async () => {
       fireEvent.keyDown(document, { key: 'Delete' });
     });
-    expect(updateView).toHaveBeenCalled();
+    expect(enqueueViewEdit).toHaveBeenCalled();
   });
 });

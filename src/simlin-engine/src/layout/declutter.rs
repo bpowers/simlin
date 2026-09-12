@@ -573,7 +573,9 @@ pub(crate) fn resnap_flow_endpoints_to_stocks(elements: &mut [ViewElement]) {
             let dy = valve.1 - sy;
             if half_h * dx.abs() >= half_w * dy.abs() {
                 // Horizontal approach: snap to the left or right edge,
-                // preserving the (clamped) y position.
+                // preserving the (clamped) y position. Clamped to the face's
+                // span only: the layout's finishing pass
+                // (`finish_flow_geometry`) owns corner clearance.
                 pt.x = sx + dx.signum() * half_w;
                 pt.y = pt.y.clamp(sy - half_h, sy + half_h);
             } else {

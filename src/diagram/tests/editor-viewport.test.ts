@@ -83,7 +83,6 @@ function makeSnapshot(project: Project | undefined, overrides: Partial<ProjectSn
     project,
     projectVersion: 1,
     serverVersion: 1,
-    projectGeneration: 0,
     status: 'ok',
     cachedErrors: { simError: undefined, modelErrors: [], varErrors: new Map(), unitErrors: new Map() },
     data: new Map(),
@@ -124,7 +123,6 @@ describe('Editor onViewportChange (post-commit effect)', () => {
     });
     rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -164,7 +162,7 @@ describe('Editor onViewportChange (post-commit effect)', () => {
 
     // A content edit / save ack republishes a NEW project object whose view has
     // the same viewport: no notification.
-    publish(makeSnapshot(baseProject(), { projectVersion: 1.01, projectGeneration: 1 }));
+    publish(makeSnapshot(baseProject(), { projectVersion: 1.01 }));
     publish(makeSnapshot(baseProject(), { projectVersion: 1.02, serverVersion: 2 }));
     expect(onViewportChange).not.toHaveBeenCalled();
 
@@ -241,7 +239,6 @@ describe('Editor initialViewport (controller-config wiring)', () => {
   function captureConfigs(propsList: EditorProps[]): ControllerConfig[] {
     rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
     const captured: ControllerConfig[] = [];
     const real = ProjectControllerModule.ProjectController;
     rs.spyOn(ProjectControllerModule, 'ProjectController').mockImplementation((config: ControllerConfig) => {
@@ -270,7 +267,6 @@ describe('Editor initialViewport (controller-config wiring)', () => {
     rs.spyOn(ProjectController.prototype, 'getSnapshot').mockImplementation(() => makeSnapshot(baseProject()));
     rs.spyOn(ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
     rs.spyOn(ProjectController.prototype, 'subscribe').mockReturnValue(() => {});
 
     capturedCanvasProps = undefined;

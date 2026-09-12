@@ -10,6 +10,7 @@
 pub mod convert;
 pub mod elements;
 pub mod processing;
+mod routes;
 pub mod types;
 
 pub use convert::build_views;

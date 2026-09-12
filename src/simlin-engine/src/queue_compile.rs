@@ -947,6 +947,13 @@ pub fn build_compiled(
 )> {
     use crate::common::{Error, ErrorKind};
 
+    // Every stock's lists as the sets the engine integrates
+    // (`datamodel::distinct_stock_flows`), taken before anything below reads
+    // them: the expansions build their plans straight from these lists, and a
+    // repeat that reached them would drive a flow twice.
+    let project = project.with_distinct_stock_flows();
+    let project = project.as_ref();
+
     // Duplicate canonical variable idents are rejected BEFORE any expansion
     // (GH #885): `expand_conveyors`/`expand_queues` walk the raw datamodel
     // variable list where both twins are still visible, and while each pass

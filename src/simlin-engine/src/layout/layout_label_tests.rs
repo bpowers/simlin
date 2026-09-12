@@ -14,8 +14,9 @@
 //!   patch adds an element (settle path) and when it adds only a connector or
 //!   only deletes (the no-new-elements early-return path)
 //! - renamed element: preserved (a rename keeps the element's geometry)
-//! - flow rebuilt for an attach-offset change (orientation unchanged): preserved
-//! - flow rebuilt for an orientation flip: re-chosen
+//! - flow whose sibling on the same stock was added or removed: preserved
+//! - flow rebuilt because its attachment changed (an attached stock deleted):
+//!   re-chosen
 //! - element rebuilt after a kind change (aux -> stock): re-chosen
 //! - element that is new in this pass: chosen
 //!
@@ -440,9 +441,8 @@ fn incremental_layout_preserves_label_side_across_rename() {
 
 /// Fixture: stock_a -> chain_flow -> stock_b plus side outflows waste_a (the
 /// bottom face) and waste_b (the top face). Adding waste_c, with no free face
-/// left, puts it beside waste_a on the bottom face and moves waste_a along
-/// that face (offset 0.5 -> 1/3), which rebuilds waste_a's geometry without
-/// changing its orientation.
+/// left, puts a second flow on waste_a's face, which leaves waste_a a sibling
+/// the patch does not touch.
 fn side_flow_project() -> datamodel::Project {
     test_project(model_with(vec![
         scalar_stock("stock_a", &[], &["chain_flow", "waste_a", "waste_b"]),
@@ -488,56 +488,51 @@ fn add_waste_c(project: &datamodel::Project) -> (datamodel::Project, crate::patc
 }
 
 #[test]
-fn rebuilt_flow_with_unchanged_orientation_keeps_label_side() {
+fn flow_whose_sibling_is_added_keeps_label_side() {
     let project = side_flow_project();
     let base_view = generate_layout(&project, TEST_MODEL, None).expect("initial layout");
     let (patched, patch) = add_waste_c(&project);
 
-    let old_waste_a = find_flow(&base_view, "waste_a");
-    assert!(
-        matches!(
-            compute_flow_orientation(&old_waste_a.points),
-            FlowOrientation::Vertical
-        ),
-        "fixture: waste_a must start vertical (a side flow below stock_a)"
-    );
-    let old_attach_x = old_waste_a.points[0].x;
-
-    for side in [LabelSide::Left, LabelSide::Right] {
+    for side in ALL_SIDES {
         let mut old_view = base_view.clone();
         set_label_side(&mut old_view, "waste_a", side);
         let new_view = incremental_layout(&old_view, &patched, TEST_MODEL, &patch, None)
             .expect("incremental layout");
-        let new_waste_a = find_flow(&new_view, "waste_a");
-        assert!(
-            (new_waste_a.points[0].x - old_attach_x).abs() > 1.0,
-            "fixture: waste_a must actually be rebuilt (attach x moved from {old_attach_x} to {})",
-            new_waste_a.points[0].x
-        );
-        assert!(
-            matches!(
-                compute_flow_orientation(&new_waste_a.points),
-                FlowOrientation::Vertical
-            ),
-            "fixture: waste_a must stay vertical"
-        );
+        // fixture: the sibling really was added (find_flow panics otherwise)
+        find_flow(&new_view, "waste_b");
         assert_eq!(
-            new_waste_a.label_side, side,
-            "a flow rebuilt only for an attach-offset change keeps its label side"
+            find_flow(&new_view, "waste_a"),
+            find_flow(&old_view, "waste_a"),
+            "a flow whose sibling was added comes back byte for byte, label side {side:?} included"
         );
     }
 }
 
 /// Fixture: stock_a -> chain_flow -> stock_b plus stock_a -> waste_flow -> cloud.
-/// Deleting the chain reclassifies waste_flow from the bottom face to the
-/// right face, i.e. vertical -> horizontal.
-fn flip_flow_project() -> datamodel::Project {
+/// Removing the chain leaves waste_flow a sibling the patch does not touch;
+/// deleting only stock_b detaches chain_flow's sink, which rebuilds chain_flow.
+fn chain_and_waste_project() -> datamodel::Project {
     test_project(model_with(vec![
         scalar_stock("stock_a", &[], &["chain_flow", "waste_flow"]),
         scalar_stock("stock_b", &["chain_flow"], &[]),
         scalar_flow("chain_flow", "10"),
         scalar_flow("waste_flow", "5"),
     ]))
+}
+
+fn delete_sink_stock(
+    project: &datamodel::Project,
+) -> (datamodel::Project, crate::patch::ModelPatch) {
+    let mut patched = project.clone();
+    let model = patched.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.retain(|v| v.get_ident() != "stock_b");
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![crate::patch::ModelOperation::DeleteVariable {
+            ident: "stock_b".to_string(),
+        }],
+    };
+    (patched, patch)
 }
 
 fn remove_chain(project: &datamodel::Project) -> (datamodel::Project, crate::patch::ModelPatch) {
@@ -573,42 +568,50 @@ fn remove_chain(project: &datamodel::Project) -> (datamodel::Project, crate::pat
 }
 
 #[test]
-fn rebuilt_flow_with_flipped_orientation_rechooses_label_side() {
-    let project = flip_flow_project();
+fn flow_whose_sibling_chain_is_removed_keeps_label_side() {
+    let project = chain_and_waste_project();
     let base_view = generate_layout(&project, TEST_MODEL, None).expect("initial layout");
     let (patched, patch) = remove_chain(&project);
-    assert!(
-        matches!(
-            compute_flow_orientation(&find_flow(&base_view, "waste_flow").points),
-            FlowOrientation::Vertical
-        ),
-        "fixture: waste_flow must start vertical"
-    );
 
-    let mut chosen = Vec::new();
     for side in ALL_SIDES {
         let mut old_view = base_view.clone();
         set_label_side(&mut old_view, "waste_flow", side);
         let new_view = incremental_layout(&old_view, &patched, TEST_MODEL, &patch, None)
             .expect("incremental layout");
-        let waste = find_flow(&new_view, "waste_flow");
+        assert_eq!(
+            find_flow(&new_view, "waste_flow"),
+            find_flow(&old_view, "waste_flow"),
+            "a flow whose sibling chain was removed comes back byte for byte, \
+             label side {side:?} included"
+        );
+    }
+}
+
+#[test]
+fn reattached_flow_rechooses_label_side() {
+    let project = chain_and_waste_project();
+    let base_view = generate_layout(&project, TEST_MODEL, None).expect("initial layout");
+    let (patched, patch) = delete_sink_stock(&project);
+
+    let mut chosen = Vec::new();
+    for side in ALL_SIDES {
+        let mut old_view = base_view.clone();
+        set_label_side(&mut old_view, "chain_flow", side);
+        let new_view = incremental_layout(&old_view, &patched, TEST_MODEL, &patch, None)
+            .expect("incremental layout");
+        let chain = find_flow(&new_view, "chain_flow");
+        let sink = chain.points.last().and_then(|p| p.attached_to_uid);
         assert!(
-            matches!(
-                compute_flow_orientation(&waste.points),
-                FlowOrientation::Horizontal
+            new_view.elements.iter().any(
+                |e| matches!(e, ViewElement::Cloud(c) if Some(c.uid) == sink && c.flow_uid == chain.uid)
             ),
-            "fixture: waste_flow must flip to horizontal"
+            "fixture: chain_flow must be rebuilt with a sink cloud"
         );
-        assert!(
-            matches!(waste.label_side, LabelSide::Top | LabelSide::Bottom),
-            "a horizontal flow's label must sit above or below the pipe, got {:?}",
-            waste.label_side
-        );
-        chosen.push(waste.label_side);
+        chosen.push(chain.label_side);
     }
     assert!(
         chosen.iter().all(|s| *s == chosen[0]),
-        "a flipped flow's label side must not depend on the stale side: {chosen:?}"
+        "a re-attached flow's label side must not depend on the stale side: {chosen:?}"
     );
 }
 

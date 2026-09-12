@@ -4,14 +4,13 @@
 
 // Reconciler-level gesture tests for the Canvas `readOnly` prop (issue #935).
 //
-// The mutation gating itself lives in the Editor (it hands a read-only Canvas
-// no-op callbacks and no selectedTool); what Canvas owns is the one editing
-// entry point it opens ITSELF -- the inline label editor on a label
-// double-click. Without the prop that editor still opened while the eventual
-// onRenameVariable commit silently no-op'd: the exact "editable but unsavable"
-// deception the issue is about. These tests pin that the editor never opens
-// read-only, while selection (a read capability) still works and gestures
-// still raise their callbacks (the host decides what they do).
+// The Editor hands a read-only Canvas a no-op commit callback and no
+// selectedTool. The Canvas owns two things itself: the inline label editor a
+// label double-click opens, which must never open read-only (otherwise it LOOKS
+// editable while the eventual onRenameVariable commit silently no-ops, the
+// deception the issue is about), and the drag preview, which must not show a
+// move the release could never commit. Selection, a read capability, still
+// works.
 
 import { describe, it, expect } from '@rstest/core';
 
@@ -61,18 +60,19 @@ describe('Canvas gestures: readOnly', () => {
     expect([...lastCall]).toEqual([10]);
   });
 
-  it('a drag still raises onMoveSelection -- the host decides it is a no-op', () => {
-    // Deliberate layering: Canvas raises the gesture callback; the Editor
-    // substitutes a no-op when read-only. Pinning this keeps the gate's
-    // location honest (Editor-side, not silently duplicated in Canvas).
+  it('a drag previews no move and commits nothing (audit M9)', () => {
+    // The Editor also hands a read-only Canvas a no-op commit callback; the
+    // planner's own read-only arm keeps the preview from showing a move the
+    // release could never commit.
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)], selection: new Set([10]), readOnly: true });
     h.clearMountCalls();
 
     const aux = h.query('.simlin-aux')!;
     pointerDown(aux, 100, 100);
     pointerMove(aux, 200, 200, { buttons: 1 });
+    expect(h.query('.simlin-aux circle')?.getAttribute('cx')).toBe('100');
     pointerUp(h.svg, 200, 200);
 
-    expect(h.callbacks.onMoveSelection).toHaveBeenCalled();
+    expect(h.callbacks.onCommitGesture).not.toHaveBeenCalled();
   });
 });

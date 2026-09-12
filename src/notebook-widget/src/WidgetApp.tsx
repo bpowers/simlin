@@ -272,6 +272,34 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     [publishSelection],
   );
 
+  // The Editor's Reload, offered once its engine is lost and cannot be reopened.
+  // Reloading the page would reload the whole notebook front-end, so the widget
+  // remounts the Editor instead, on the last state the kernel acknowledged (the
+  // seed) with the live viewport carried. remountFrom is idempotent on the pair,
+  // and the pair has not changed, so this bumps the generation itself. A
+  // snapshot still in flight belongs to the Editor being replaced: its save
+  // resolves undefined and the slot is freed, as on a kernel remount.
+  const handleReload = React.useCallback((): void => {
+    const r = refs.current;
+    if (r.disposed) {
+      return;
+    }
+    if (r.inFlight !== null) {
+      const flight = r.inFlight;
+      r.inFlight = null;
+      flight.resolve(undefined);
+    }
+    const seedPair = r.seed;
+    const initialViewport = viewportToCarry(r.liveViewport, seedPair.projectJson, seedPair.projectJson);
+    setSeed((prev) => ({
+      revision: seedPair.revision,
+      projectJson: seedPair.projectJson,
+      generation: prev.generation + 1,
+      initialViewport,
+    }));
+    publishSelection([]);
+  }, [publishSelection]);
+
   // Kernel pushes. Only the kernel writes `project_json` and `revision`, so
   // every change event on them is a kernel push. The two travel in ONE
   // hold_sync but surface as up to two change events (Backbone fires per
@@ -491,6 +519,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
           onSelectionChanged={publishSelection}
           onViewportChange={handleViewportChange}
           initialViewport={seed.initialViewport}
+          onReload={handleReload}
           portalContainer={wrapper}
           // The notebook page has no "/" to go home to; the drawer's Exit
           // link would pushState the notebook page away.

@@ -9,6 +9,15 @@ import { RedoIcon, UndoIcon } from './components/icons';
 
 import styles from './UndoRedoBar.module.css';
 
+// Marks the undo/redo controls. A press on them does not flush an open details
+// panel's draft on pointerdown: the Editor flushes it in the undo/redo handler
+// instead, ahead of the undo (see handleUndoRedo).
+export const UNDO_REDO_BAR_ATTRIBUTE = 'data-simlin-undo-redo';
+
+const keepFocus = (e: React.MouseEvent): void => {
+  e.preventDefault();
+};
+
 interface UndoRedoBarProps {
   undoEnabled: boolean;
   redoEnabled: boolean;
@@ -33,8 +42,11 @@ export const UndoRedoBar = React.memo(function UndoRedoBar({
     onUndoRedo('redo');
   };
 
+  // A press keeps focus where it is: moving focus onto a button would blur an
+  // open details panel, whose blur commits its draft and makes undo refuse
+  // (an edit is queued) before the click arrives.
   return (
-    <div className={styles.card}>
+    <div className={styles.card} onMouseDown={keepFocus} {...{ [UNDO_REDO_BAR_ATTRIBUTE]: '' }}>
       <IconButton disabled={!undoEnabled} aria-label="Undo" onClick={handleUndo}>
         <UndoIcon />
       </IconButton>

@@ -27,6 +27,13 @@ if (baseConfig) {
       MutationCallback: 'readonly',
       MutationRecord: 'readonly',
       Node: 'readonly',
+      // The Playwright journeys' in-page probes and frame recorder.
+      performance: 'readonly',
+      PerformanceObserver: 'readonly',
+      PerformanceObserverInit: 'readonly',
+      SVGGraphicsElement: 'readonly',
+      SVGSVGElement: 'readonly',
+      Window: 'readonly',
       Response: 'readonly',
       TextEncoder: 'readonly',
       atob: 'readonly',

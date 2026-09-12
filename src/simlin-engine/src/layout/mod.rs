@@ -12,6 +12,7 @@ pub mod declutter;
 mod detect_ltm_loops;
 #[cfg(any(test, feature = "layout_eval"))]
 pub mod eval_stats;
+mod face_slots;
 pub mod graph;
 mod incremental;
 pub mod metadata;
@@ -65,6 +66,7 @@ use crate::common::canonicalize;
 use crate::datamodel;
 use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
 use crate::datamodel::{Rect, ViewElement};
+use crate::diagram::flow_geometry::clamp_to_face_span;
 use crate::ltm_dominance::{FeedbackLoop, LoopPolarity, PartitionSurface};
 
 /// A queued element during chain layout BFS traversal.
@@ -791,6 +793,8 @@ fn create_flow_view_element(
                 if half_h * dx.abs() >= half_w * dy.abs() {
                     FlowPoint {
                         x: stock_pos.x + dx.signum() * half_w,
+                        // The face's span only: the finishing pass
+                        // (`finish_flow_geometry`) owns corner clearance.
                         y: pos.y.clamp(stock_pos.y - half_h, stock_pos.y + half_h),
                         attached_to_uid: Some(stock_uid),
                     }
@@ -2886,12 +2890,10 @@ pub fn fresh_layout(
     // Phase 5: Normalize coordinates
     normalize_coordinates(&mut state.elements, DIAGRAM_ORIGIN_MARGIN);
 
-    // Phase 5b: Orthogonalize flow pipes. Placement positions stocks freely, so
-    // a flow between two stocks offset in both axes would render as a diagonal;
-    // SD convention draws flows with horizontal/vertical segments only. This
-    // runs last (after declutter/normalize) so nothing re-diagonalizes it, and
-    // before scoring so the metric sees the real pipe geometry.
-    orthogonal::orthogonalize_flow_pipes(&mut state.elements);
+    // Phase 5b: Settle flow geometry. This runs last (after declutter/normalize)
+    // so nothing moves a stock, valve or cloud after it, and before scoring so
+    // the metric sees the real pipe geometry.
+    finish_flow_geometry(&mut state.elements, |_| true);
 
     // Phase 6: Apply feedback loop curvature
     apply_loop_curvature(&mut state, config, model, metadata);
@@ -2925,6 +2927,49 @@ pub fn fresh_layout(
         font: None,
         sketch_compat: None,
     })
+}
+
+/// The last word on flow geometry in a layout pass: every diagonal pipe is
+/// rewritten into axis-aligned segments (placement positions stocks freely, so
+/// a flow between two stocks offset in both axes would render as a diagonal),
+/// then the flow invariants (`diagram::flow_geometry`) are established on the
+/// result. The orthogonalizer only routes between a pipe's two attached ends,
+/// leaving the valve and the clouds where placement put them, and placement
+/// positions those independently of the pipe; the normalization owns where
+/// they end up, as it does for imported views. The layout owns the valves of
+/// the flows it settles, so each is then kept off its segment's ends, where the
+/// editor would clamp a dragged valve, and off every other flow's pipe
+/// (`settle_laid_out_valve`). The route itself is not chosen around siblings:
+/// a created flow between two stocks whose slots `face_slots` put on opposite
+/// sides of a sibling's line is routed as a Z that crosses the sibling, as
+/// every route between the two faces that stays between the stocks must, and
+/// only its valve is kept off the sibling. `include` selects the flows (by
+/// uid) the pass may change: every flow in a fresh layout, and only the flows
+/// it creates in an incremental one.
+fn finish_flow_geometry(elements: &mut [ViewElement], include: impl Fn(i32) -> bool + Copy) {
+    orthogonal::orthogonalize_flow_pipes(elements, include);
+    crate::diagram::flow_geometry::normalize_flow_geometry_where(elements, include);
+    let pipes: Vec<(i32, Vec<FlowPoint>)> = elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Flow(f) => Some((f.uid, f.points.clone())),
+            _ => None,
+        })
+        .collect();
+    for element in elements.iter_mut() {
+        if let ViewElement::Flow(f) = element
+            && include(f.uid)
+        {
+            let others: Vec<&[FlowPoint]> = pipes
+                .iter()
+                .filter(|(uid, _)| *uid != f.uid)
+                .map(|(_, points)| points.as_slice())
+                .collect();
+            let mut valve = (f.x, f.y);
+            crate::diagram::flow_geometry::settle_laid_out_valve(&f.points, &mut valve, &others);
+            (f.x, f.y) = valve;
+        }
+    }
 }
 
 /// Copy free nodes' element coordinates back into `state.positions` after a
@@ -3244,13 +3289,15 @@ pub fn compute_metadata(
                     uid_to_ident.insert(uid, stock_ident.clone());
                 }
 
-                let inflows: Vec<String> = stock
-                    .inflows
+                // The sets the model integrates: a repeated entry is one flow
+                // with one pipe (`datamodel::distinct_stock_flows`).
+                let inflows: Vec<String> = datamodel::distinct_stock_flows(&stock.inflows)
+                    .flows
                     .iter()
                     .map(|f| canonicalize(f).into_owned())
                     .collect();
-                let outflows: Vec<String> = stock
-                    .outflows
+                let outflows: Vec<String> = datamodel::distinct_stock_flows(&stock.outflows)
+                    .flows
                     .iter()
                     .map(|f| canonicalize(f).into_owned())
                     .collect();
@@ -3531,28 +3578,44 @@ fn detect_chains(
             }
             chain_stocks.push(stock.clone());
 
-            // Follow inflows to connected stocks
+            // A stock claims a flow for its chain only when the metadata names
+            // it as that flow's sink (for an inflow) or source (for an
+            // outflow). A flow has one element and one attachment per side, so
+            // when two stocks list the same flow on one side (degenerate input)
+            // only the stock `flow_to_stocks` chose lays it out; claiming it in
+            // both chains would emit a second, detached copy.
             if let Some(inflows) = stock_to_inflows.get(&stock) {
                 for flow in inflows {
+                    let Some((from_stock, to_stock)) = flow_to_stocks.get(flow) else {
+                        continue;
+                    };
+                    if to_stock.as_deref() != Some(stock.as_str()) {
+                        continue;
+                    }
                     if seen_flows.insert(flow.clone()) {
                         chain_flows.push(flow.clone());
                         flows_in_chains.insert(flow.clone());
                     }
-                    if let Some((Some(from_stock), _)) = flow_to_stocks.get(flow)
+                    if let Some(from_stock) = from_stock
                         && !visited.contains(from_stock)
                     {
                         queue.push_back(from_stock.clone());
                     }
                 }
             }
-            // Follow outflows to connected stocks
             if let Some(outflows) = stock_to_outflows.get(&stock) {
                 for flow in outflows {
+                    let Some((from_stock, to_stock)) = flow_to_stocks.get(flow) else {
+                        continue;
+                    };
+                    if from_stock.as_deref() != Some(stock.as_str()) {
+                        continue;
+                    }
                     if seen_flows.insert(flow.clone()) {
                         chain_flows.push(flow.clone());
                         flows_in_chains.insert(flow.clone());
                     }
-                    if let Some((_, Some(to_stock))) = flow_to_stocks.get(flow)
+                    if let Some(to_stock) = to_stock
                         && !visited.contains(to_stock)
                     {
                         queue.push_back(to_stock.clone());

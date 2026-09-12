@@ -2,19 +2,17 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// Reconciler-level gesture tests for selection behavior of the React `Canvas`
-// (Piece 1a of the canvas-interaction migration; see
-// docs/design-plans/2026-06-07-canvas-interaction-migration.md). These pin the
-// CURRENT behavior of click-select, drag-select, modifier toggle,
-// deferred-single-select collapse, group drag, and pointercancel reset, and are
-// the gate for the subsequent class->tagged-union and class->hooks migrations.
-// They assert only on prop-callback payloads and rendered DOM -- never on Canvas
-// instance internals -- so they must survive Canvas becoming a function
-// component unchanged.
+// Reconciler-level gesture tests for selection behavior of the React `Canvas`:
+// click-select, drag-select, modifier toggle, deferred-single-select collapse,
+// group drag, and pointercancel. They assert only on prop-callback payloads and
+// rendered DOM, never on Canvas internals. The press table itself is
+// gesture-planner-classify.test.ts; these establish that real pointer events
+// reach it and that the Canvas carries out its outcomes.
 
 import { describe, it, expect } from '@rstest/core';
 import type { Mock } from '@rstest/core';
 
+import type { GestureCommit } from '../drawing/Canvas';
 import {
   makeAux,
   makeStock,
@@ -50,23 +48,28 @@ describe('Canvas gestures: empty-canvas click (checklist 1)', () => {
     expect(lastSelection(h.callbacks.onSetSelection)).toEqual([]);
   });
 
-  // Pinned surprise: the empty-canvas press has NO sub-threshold guard. ANY
-  // pointermove (even a 2px wobble) calls handleDragSelection, which sets
-  // isDragSelecting+dragSelectionPoint unconditionally (Canvas.handleDragSelection
-  // ~line 1674), so a drag rect renders and pointer-up routes through the
-  // drag-select path -- unlike the element-press path, which DOES threshold (see
-  // checklist 4). This is current behavior, not a harness artifact.
-  it('a sub-threshold wobble on empty canvas still renders a drag rect (no threshold here)', () => {
+  // E1: a wobble within the click threshold is a click, on the empty canvas as
+  // on an element: no rubber band previews, and the release clears the selection.
+  it('a sub-threshold wobble on empty canvas previews no drag rect and settles as a click', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)], selection: new Set([10]) });
     h.clearMountCalls();
 
     pointerDown(h.svg, 500, 500);
     pointerMove(h.svg, 502, 502, { buttons: 1 });
-    expect(h.query(DRAG_RECT)).not.toBeNull();
+    expect(h.query(DRAG_RECT)).toBeNull();
 
     pointerUp(h.svg, 502, 502);
-    // Empty rubber-band selects nothing, replacing the selection.
     expect(lastSelection(h.callbacks.onSetSelection)).toEqual([]);
+  });
+
+  it('a rubber band previews its membership while it is dragged', () => {
+    const h = renderCanvas({ elements: [makeAux(1, 'a', 100, 100)] });
+    h.clearMountCalls();
+
+    pointerDown(h.svg, 50, 50);
+    pointerMove(h.svg, 200, 200, { buttons: 1 });
+    expect(h.query('.simlin-aux')?.getAttribute('class')).toContain('simlin-selected');
+    expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
   });
 });
 
@@ -131,10 +134,9 @@ describe('Canvas gestures: element click (checklist 4)', () => {
 
     // Immediate selection replace with the clicked uid.
     expect(h.callbacks.onSetSelection).toHaveBeenCalledWith(new Set([1]));
-    // Sub-threshold wobble does not nudge the element (isDragMovement gate
-    // ~line 1109) ...
-    expect(h.callbacks.onMoveSelection).not.toHaveBeenCalled();
-    // ... and opens the variable-details panel instead (shouldShowVariableDetails).
+    // A sub-threshold wobble does not nudge the element (E1) ...
+    expect(h.callbacks.onCommitGesture).not.toHaveBeenCalled();
+    // ... and opens the variable-details panel instead.
     expect(h.callbacks.onShowVariableDetails).toHaveBeenCalledTimes(1);
   });
 });
@@ -199,9 +201,14 @@ describe('Canvas gestures: group drag (checklist 7)', () => {
     // The deferred single-select is abandoned because a drag occurred, so the
     // group selection is preserved (no onSetSelection from this gesture).
     expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
-    // The move is committed with the canvas-space delta (mouseDown - pointerUp).
-    expect(h.callbacks.onMoveSelection).toHaveBeenCalledTimes(1);
-    expect(h.callbacks.onMoveSelection.mock.calls[0][0]).toEqual({ x: -60, y: -60 });
+    // One commit moves both auxes by the pointer travel.
+    expect(h.callbacks.onCommitGesture).toHaveBeenCalledTimes(1);
+    const commit = h.callbacks.onCommitGesture.mock.calls[0][0] as GestureCommit;
+    expect(commit.elements.map((el) => [el.uid, el.x, el.y])).toEqual([
+      [1, 160, 160],
+      [2, 260, 260],
+    ]);
+    expect([...commit.selection].sort()).toEqual([1, 2]);
   });
 });
 
@@ -225,22 +232,20 @@ describe('Canvas gestures: pointercancel mid-gesture (checklist 16)', () => {
     expect(lastSelection(h.callbacks.onSetSelection)).toEqual([]);
   });
 
-  // Pinned surprise: pointercancel and pointerup are the SAME handler on the svg
-  // (onPointerCancel and onPointerUp both -> handlePointerCancel, ~lines
-  // 2515-2516), so a cancel mid element-drag COMMITS the move just like a
-  // release rather than discarding it. Documenting current behavior; the
-  // post-migration code must preserve it.
-  it('cancelling an element drag commits the in-progress move (cancel == up today)', () => {
+  // E5 (audit M3): a pointercancel is not a release. The drag is dropped
+  // without committing, and the element renders where it was.
+  it('cancelling an element drag commits nothing and restores the element', () => {
     const h = renderCanvas({ elements: [makeAux(10, 'foo', 100, 100)] });
     h.clearMountCalls();
 
     const node = h.query('.simlin-aux')!;
     pointerDown(node, 100, 100);
     pointerMove(h.svg, 160, 160, { buttons: 1 });
+    expect(h.query('.simlin-aux circle')?.getAttribute('cx')).toBe('160');
     pointerCancel(h.svg, 160, 160);
 
-    expect(h.callbacks.onMoveSelection).toHaveBeenCalledTimes(1);
-    expect(h.callbacks.onMoveSelection.mock.calls[0][0]).toEqual({ x: -60, y: -60 });
+    expect(h.callbacks.onCommitGesture).not.toHaveBeenCalled();
+    expect(h.query('.simlin-aux circle')?.getAttribute('cx')).toBe('100');
   });
 });
 

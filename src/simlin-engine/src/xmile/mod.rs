@@ -33,9 +33,6 @@ pub(crate) trait ToXml<W: Clone + Write> {
 
 pub(crate) type XmlWriter = Cursor<Vec<u8>>;
 
-pub(crate) const STOCK_WIDTH: f64 = 45.0;
-pub(crate) const STOCK_HEIGHT: f64 = 35.0;
-
 macro_rules! import_err(
     ($code:tt, $str:expr) => {{
         use crate::common::{Error, ErrorCode, ErrorKind};

@@ -75,6 +75,16 @@ export interface SimError {
   readonly details: string | undefined;
 }
 
+// An engine advisory about a variable that is not a unit error: a
+// Warning-severity diagnostic (for example a stock whose flow list repeats a
+// flow). The variable still simulates, so a warning never stands in for its
+// results. `details` is the engine's reason; the code is often the wire
+// `Generic`, which says nothing on its own.
+export interface VariableWarning {
+  readonly code: ErrorCode;
+  readonly details: string | undefined;
+}
+
 // A sketch-hygiene issue: the sketch connectors for a variable have drifted out
 // of sync with its equation. `missingConnector` -- the equation references
 // `ident` but no connector is drawn from it; `staleConnector` -- a connector is
@@ -592,6 +602,9 @@ export interface Stock {
   // Optional so the many Variable literals that predate this feature stay valid;
   // absent and undefined are equivalent ("no connector issues").
   readonly connectorErrors?: readonly ConnectorError[] | undefined;
+  // Engine advisories that are not unit errors, attached by the diagram layer.
+  // Optional like connectorErrors; absent and undefined are equivalent.
+  readonly warnings?: readonly VariableWarning[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -626,6 +639,9 @@ export interface Flow {
   // Optional so the many Variable literals that predate this feature stay valid;
   // absent and undefined are equivalent ("no connector issues").
   readonly connectorErrors?: readonly ConnectorError[] | undefined;
+  // Engine advisories that are not unit errors, attached by the diagram layer.
+  // Optional like connectorErrors; absent and undefined are equivalent.
+  readonly warnings?: readonly VariableWarning[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -652,6 +668,9 @@ export interface Aux {
   // Optional so the many Variable literals that predate this feature stay valid;
   // absent and undefined are equivalent ("no connector issues").
   readonly connectorErrors?: readonly ConnectorError[] | undefined;
+  // Engine advisories that are not unit errors, attached by the diagram layer.
+  // Optional like connectorErrors; absent and undefined are equivalent.
+  readonly warnings?: readonly VariableWarning[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -691,6 +710,9 @@ export interface Module {
   // Optional so the many Variable literals that predate this feature stay valid;
   // absent and undefined are equivalent ("no connector issues").
   readonly connectorErrors?: readonly ConnectorError[] | undefined;
+  // Engine advisories that are not unit errors, attached by the diagram layer.
+  // Optional like connectorErrors; absent and undefined are equivalent.
+  readonly warnings?: readonly VariableWarning[] | undefined;
   readonly uid: number | undefined;
 }
 
@@ -702,11 +724,13 @@ export function variableIsArrayed(v: Variable): boolean {
 }
 
 export function variableHasError(v: Variable): boolean {
-  // Includes non-fatal warnings (unit errors, sketch-connector drift), matching
-  // how the diagram surfaces every variable problem with the same indicator.
-  // Simulatability is decided separately (engine.isSimulatable), so a
-  // connector-only warning never blocks a run.
-  return v.errors !== undefined || v.unitErrors !== undefined || v.connectorErrors !== undefined;
+  // Includes non-fatal warnings (unit errors, sketch-connector drift, engine
+  // advisories), matching how the diagram surfaces every variable problem with
+  // the same indicator. Simulatability is decided separately
+  // (engine.isSimulatable), so a warning never blocks a run.
+  return (
+    v.errors !== undefined || v.unitErrors !== undefined || v.connectorErrors !== undefined || v.warnings !== undefined
+  );
 }
 
 export function variableGf(v: Variable): GraphicalFunction | undefined {
@@ -1240,7 +1264,11 @@ export function auxViewElementFromJson(json: JsonAuxiliaryViewElement, auxVar?: 
     var: auxVar?.type === 'aux' ? auxVar : undefined,
     x: json.x,
     y: json.y,
-    labelSide: (json.labelSide ?? 'right') as LabelSide,
+    // An absent side is Center, as the engine reads it (json.rs
+    // label_side_from_string) and as every other element kind here defaults:
+    // any other default rewrites the stored side the first time a view is
+    // upserted, and draws a label the Rust renderer places at the center.
+    labelSide: (json.labelSide ?? 'center') as LabelSide,
     isZeroRadius: false,
   };
 }
@@ -2086,29 +2114,61 @@ export function projectToJson(project: Project): JsonProject {
 }
 
 export function projectAttachData(project: Project, data: ReadonlyMap<string, Series>, modelName: string): Project {
-  const model = defined(project.models.get(modelName));
+  return projectAttachSeries(project, groupSeriesByIdent(data), modelName);
+}
 
-  // Group every result series by its base variable ident. A scalar variable's
-  // series is keyed by the bare canonical ident; an arrayed variable's
-  // per-element series are keyed `ident[<canonical subscripts>]` for any
-  // dimensionality (1-D `x[a]`, multi-D `x[a,b]`). Grouping by the ident before
-  // the first `[` attaches every element series -- so multi-dimensional
-  // variables are plotted too -- and matches whatever the simulation emitted
-  // rather than reconstructing keys from a Dimension's (original-case)
-  // subscripts, which avoids the element-name canonicalization mismatch
-  // entirely.
-  const seriesByIdent = new Map<string, Series[]>();
+/**
+ * Simulation result series grouped by the variable they belong to. A scalar
+ * variable's series is keyed by the bare canonical ident; an arrayed variable's
+ * per-element series are keyed `ident[<canonical subscripts>]` for any
+ * dimensionality (1-D `x[a]`, multi-D `x[a,b]`) and grouped, in result order,
+ * under the ident before the first `[`. That attaches every element series --
+ * so multi-dimensional variables are plotted too -- and matches whatever the
+ * simulation emitted rather than reconstructing keys from a Dimension's
+ * (original-case) subscripts, which avoids the element-name canonicalization
+ * mismatch entirely.
+ *
+ * `previous` is the grouping of an earlier result: a variable whose series are
+ * the same objects in the same order keeps that grouping's array. The array
+ * becomes the variable's `data`, and the diagram's sparklines memoize on its
+ * identity, so a variable whose results did not change must keep its array.
+ */
+export function groupSeriesByIdent(
+  data: ReadonlyMap<string, Series>,
+  previous: ReadonlyMap<string, readonly Series[]> = new Map(),
+): ReadonlyMap<string, readonly Series[]> {
+  const grouped = new Map<string, Series[]>();
   for (const [key, s] of data) {
     const open = key.indexOf('[');
     const ident = open === -1 ? key : key.slice(0, open);
-    const existing = seriesByIdent.get(ident);
+    const existing = grouped.get(ident);
     if (existing) {
       existing.push(s);
     } else {
-      seriesByIdent.set(ident, [s]);
+      grouped.set(ident, [s]);
     }
   }
+  const seriesByIdent = new Map<string, readonly Series[]>();
+  for (const [ident, series] of grouped) {
+    const before = previous.get(ident);
+    const unchanged =
+      before !== undefined && before.length === series.length && before.every((s, i) => s === series[i]);
+    seriesByIdent.set(ident, unchanged ? before : series);
+  }
+  return seriesByIdent;
+}
 
+/**
+ * `modelName`'s variables with their grouped result series (see
+ * `groupSeriesByIdent`) attached as `data`, by identity. A variable with no
+ * series is left unchanged.
+ */
+export function projectAttachSeries(
+  project: Project,
+  seriesByIdent: ReadonlyMap<string, readonly Series[]>,
+  modelName: string,
+): Project {
+  const model = defined(project.models.get(modelName));
   const variables = mapValues(model.variables, (v: Variable) => {
     const series = seriesByIdent.get(v.ident);
     if (!series || series.length === 0) {

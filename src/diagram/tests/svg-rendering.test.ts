@@ -42,36 +42,38 @@ describe('SVG rendering cross-language comparison', () => {
     'test/arrays1/arrays.stmx',
   ];
 
+  function expectIdenticalSvg(xmileData: Uint8Array): void {
+    // Rust rendering via WASM
+    const projectPtr = simlin_project_open_xmile(xmileData);
+
+    let rustSvg: string;
+    try {
+      const svgBytes = simlin_project_render_svg(projectPtr, 'main');
+      rustSvg = new TextDecoder().decode(svgBytes);
+    } finally {
+      simlin_project_unref(projectPtr);
+    }
+
+    // TypeScript rendering via React
+    const projectPtr2 = simlin_project_open_xmile(xmileData);
+    let tsSvg: string;
+    try {
+      const jsonBytes = simlin_project_serialize_json(projectPtr2, SimlinJsonFormat.Native);
+      const jsonStr = new TextDecoder().decode(jsonBytes);
+      const jsonProject = JSON.parse(jsonStr);
+      const tsProject = projectFromJson(jsonProject);
+      const [svg] = renderSvgToString(tsProject, 'main');
+      tsSvg = svg;
+    } finally {
+      simlin_project_unref(projectPtr2);
+    }
+
+    expect(rustSvg).toBe(tsSvg);
+  }
+
   for (const modelFile of testModels) {
     it(`produces identical SVG for ${path.basename(modelFile)}`, () => {
-      const xmileData = loadXmile(modelFile);
-
-      // Rust rendering via WASM
-      const projectPtr = simlin_project_open_xmile(xmileData);
-
-      let rustSvg: string;
-      try {
-        const svgBytes = simlin_project_render_svg(projectPtr, 'main');
-        rustSvg = new TextDecoder().decode(svgBytes);
-      } finally {
-        simlin_project_unref(projectPtr);
-      }
-
-      // TypeScript rendering via React
-      const projectPtr2 = simlin_project_open_xmile(xmileData);
-      let tsSvg: string;
-      try {
-        const jsonBytes = simlin_project_serialize_json(projectPtr2, SimlinJsonFormat.Native);
-        const jsonStr = new TextDecoder().decode(jsonBytes);
-        const jsonProject = JSON.parse(jsonStr);
-        const tsProject = projectFromJson(jsonProject);
-        const [svg] = renderSvgToString(tsProject, 'main');
-        tsSvg = svg;
-      } finally {
-        simlin_project_unref(projectPtr2);
-      }
-
-      expect(rustSvg).toBe(tsSvg);
+      expectIdenticalSvg(loadXmile(modelFile));
     });
   }
 
@@ -101,5 +103,29 @@ describe('SVG rendering cross-language comparison', () => {
     expect(top).toBeLessThanOrEqual(alias.y - AuxRadius);
     expect(left + width).toBeGreaterThanOrEqual(alias.x + AuxRadius);
     expect(top + height).toBeGreaterThanOrEqual(alias.y + AuxRadius);
+  });
+
+  // A center side is stored as an absent labelSide in the native JSON (the
+  // engine's serialization of Center), so this is also the absent-side case.
+  // None of the corpus models above uses one.
+  it('produces identical SVG for elements whose label side is center', () => {
+    const xmile = `<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>center labels</name><vendor>simlin</vendor><product version="1.0">simlin</product></header>
+  <sim_specs><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+  <model>
+    <variables>
+      <stock name="Level"><eqn>1</eqn></stock>
+      <aux name="Constant Rate"><eqn>1</eqn></aux>
+    </variables>
+    <views>
+      <view>
+        <stock name="Level" x="200" y="100" label_side="center"/>
+        <aux name="Constant Rate" x="100" y="200" label_side="center"/>
+      </view>
+    </views>
+  </model>
+</xmile>`;
+    expectIdenticalSvg(new TextEncoder().encode(xmile));
   });
 });

@@ -4,27 +4,49 @@
 
 // pattern: Imperative Shell
 //
-// ProjectController is the headless coordination layer extracted from
-// Editor.tsx. It owns the WASM engine lifecycle, the apply-patch ->
-// serialize -> rebuild pipeline, the save queue, undo/redo history, sim
-// runs, the cached-error derivation, version/generation bookkeeping (the
-// fractional render-cache key plus the server-acknowledged save version), and
-// the module-navigation stack. It has ZERO React and ZERO DOM dependencies
-// (no document/window; setTimeout is allowed for deferred dispatch) so the
-// async coordination can be unit-tested against a fake engine without jsdom.
+// ProjectController is the headless coordination layer between the Editor and
+// the WASM engine. It has ZERO React and ZERO DOM dependencies (setTimeout-free
+// as well: every engine call runs through one serialized executor), so the
+// async coordination is unit-tested against a fake engine without jsdom.
 //
-// The Editor is a thin view binding: it subscribes to the controller's
-// snapshot, mirrors it into one state field, and builds JSON ops that it
-// hands to controller.applyPatch()/updateView()/queueViewUpdate().
+// The model (docs/design-plans/2026-09-10-diagram-editing-core.md, "Controller"):
 //
-// The controller never owns presentation state. Toast-style transient errors
-// (the Editor's `modelErrors`) are surfaced via the `onError` config callback;
-// the Editor decides how to present them.
+// - `committed` is the engine's last acknowledged project.
+// - `queue` holds edit-class items in FIFO order: view edits and model-only
+//   edits (the pending edits), viewport persists, undo/redo, engine queries,
+//   and the initial open. An item stays at the head of the queue while it runs.
+// - The RENDERED view of a model is the next view of the last pending edit
+//   targeting it, else its committed view, with the live viewport for that
+//   model overlaid. The snapshot's `project` is committed plus those views plus
+//   the derived annotations (errors, sim series, connector drift).
+// - `token` is bumped by every truncation, undo/redo landing, and reopen. An
+//   edit with a next view planned under an older token is dropped as failed.
+// - One executor runs every engine call. No engine reference is held across an
+//   await outside an item.
+// - Maintenance (save serialization, error refresh, connector dependencies, sim
+//   runs) is coalesced to one pending run per kind and runs when no edit-class
+//   item is queued, or after MaintenanceEditBound consecutive edit-class items
+//   or MaintenanceTimeBoundMs of continuous edit work.
+// - A failed view edit truncates every later view edit and undo/redo (each was
+//   planned on its optimistic view), bumps the token, renders committed, and
+//   reports one error naming how many later edits were discarded. Model-only
+//   edits survive: they derive their payload from committed state at dequeue.
+//   A failed model-only edit only reports: nothing was planned on it. A patch
+//   that applied but could not be read back resyncs committed from the engine
+//   before the item's fate is decided: a successful re-read means it landed; a
+//   reopen of the last recorded snapshot means it failed; a failed reopen
+//   latches engine-unavailable. The model and the diagram never disagree.
+// - While a pending edit renames a variable, the rendered model names that
+//   variable by its new ident, and while one creates a variable, the rendered
+//   model holds the variable its create op will produce, so every rendered
+//   element resolves to the variable it will name.
+//
+// The controller never owns presentation state: transient errors go to the
+// host through `onError`.
 
 import {
   Project,
   Model,
-  Variable,
   EquationError,
   UnitError,
   UnitErrorKind,
@@ -34,18 +56,21 @@ import {
   StockFlowView,
   UID,
   Rect,
+  Variable,
+  VariableWarning,
   projectFromJson,
-  projectAttachData,
+  projectAttachSeries,
+  groupSeriesByIdent,
   findNonFiniteViewCoord,
-  stockFlowViewFromJson,
+  isNamedViewElement,
   stockFlowViewToJson,
 } from '@simlin/core/datamodel';
-import { defined, mapSet, setsEqual, uint8ArraysEqual, type Series } from '@simlin/core/common';
-import { first, getOrThrow } from '@simlin/core/collections';
-import type { JsonProjectPatch, JsonModelOperation, ErrorDetail, JsonProject } from '@simlin/engine';
-import { SimlinErrorKind, SimlinUnitErrorKind } from '@simlin/engine';
+import { canonicalize } from '@simlin/core/canonicalize';
+import { mapSet, setsEqual, uint8ArraysEqual, type Series } from '@simlin/core/common';
+import { first } from '@simlin/core/collections';
+import type { JsonProjectPatch, ErrorDetail, JsonProject } from '@simlin/engine';
+import { SimlinErrorKind, SimlinErrorSeverity, SimlinUnitErrorKind } from '@simlin/engine';
 
-import { preserveLiveView } from './merge-live-view';
 import { advanceProjectHistory } from './project-history';
 import {
   type ModuleStackEntry,
@@ -57,6 +82,8 @@ import {
   isMacroModel,
 } from './module-navigation';
 import { computeConnectorErrors } from './connector-sync';
+import { buildEditOps, createdVariable } from './view-model-sync';
+import { allocateVariableName, nameCollisionError } from './variable-names';
 
 /**
  * The maximum number of undo snapshots kept. A small buffer is intentional:
@@ -66,13 +93,21 @@ import { computeConnectorErrors } from './connector-sync';
 export const MaxUndoSize = 5;
 
 /**
- * Cached, model-scoped error derivation. Recomputed from `engine.getErrors()`
- * whenever the project content or the active model changes. The Editor reads
- * this from the snapshot to render the error panel and warning dots.
+ * Maintenance waits while edit-class items are queued, but never for more than
+ * this many consecutive items or this much continuous edit work, so a sustained
+ * stream of slow edits cannot starve saving.
+ */
+export const MaintenanceEditBound = 5;
+export const MaintenanceTimeBoundMs = 5000;
+
+/**
+ * Cached, model-scoped error derivation for the active model. The Editor reads
+ * this from the snapshot to render the error panel.
  */
 export interface CachedErrorDetails {
   readonly varErrors: ReadonlyMap<string, readonly EquationError[]>;
   readonly unitErrors: ReadonlyMap<string, readonly UnitError[]>;
+  readonly varWarnings: ReadonlyMap<string, readonly VariableWarning[]>;
   readonly simError: SimError | undefined;
   readonly modelErrors: readonly ModelError[];
 }
@@ -83,38 +118,48 @@ export interface CachedErrorDetails {
  * updates; prior snapshots are never mutated.
  */
 export interface ProjectSnapshot {
+  // The RENDERED project: committed content with each model's rendered view
+  // (pending next views, live viewports) and the derived annotations.
   readonly project: Project | undefined;
-  // PURELY the render-cache key: the fractional scheme (+0.01 for content
-  // edits, +0.001 for view-only updates) that Canvas invalidates caches off.
-  // It never resets and carries no server meaning -- the integer version the
-  // server holds is `serverVersion` below. (Deriving the save version from
-  // this value was issue #958: ~100 unsaved edits drifted the fraction past
-  // the next integer, corrupting the optimistic-concurrency check.)
+  // PURELY the render-cache key the Canvas invalidates its element lookup off.
+  // It advances whenever `project` is replaced and carries no server meaning --
+  // the integer version the server holds is `serverVersion`. (Deriving the
+  // save version from a render counter was issue #958: unsaved edits drifted it
+  // past the next integer, corrupting the optimistic-concurrency check.)
   readonly projectVersion: number;
-  // The last server-ACKNOWLEDGED integer version: seeded from the initial
-  // load and advanced only by a successful save's returned version. This is
-  // the sole source of the `currVersion` a save sends. Local edits, view
-  // updates, and undo/redo never move it -- the server's version doesn't
-  // change when the user edits locally.
+  // The last server-ACKNOWLEDGED integer version: seeded from the initial load
+  // and advanced only by a successful save's returned version. This is the
+  // sole source of the `currVersion` a save sends.
   readonly serverVersion: number;
-  // Increments exactly when project *content* changes (real edits and
-  // undo/redo) -- not on view-only updates or save-version bookkeeping.
-  // The Editor keys the details panels on this so a pan frame or autosave
-  // does not remount an open panel and discard in-progress edits.
-  readonly projectGeneration: number;
   readonly status: 'ok' | 'error' | 'disabled';
   readonly cachedErrors: CachedErrorDetails;
   readonly data: ReadonlyMap<string, Series>;
   readonly modelName: string;
   readonly modelStack: readonly ModuleStackEntry[];
+  // Undo/redo availability: history exists in that direction AND no edit or
+  // undo/redo item is queued (an undo landing under a pending edit would drop
+  // it as stale).
   readonly canUndo: boolean;
   readonly canRedo: boolean;
+  // True while an undo/redo item is queued: the Canvas ignores presses, since a
+  // gesture planned on the pre-undo view could not commit.
+  readonly undoRedoQueued: boolean;
+  // Bumped by every truncation, undo/redo landing and reopen (see the module
+  // header). A gesture captures it at press time and aborts when it moves.
+  readonly token: number;
+  // Bumped by every undo/redo landing. Restored content can equal content a
+  // panel was seeded from (a draft's edit landed and was undone before the host
+  // rendered), so a panel keyed on content alone would keep text that is no
+  // longer a draft.
+  readonly restoreSeq: number;
+  // True once the engine was lost and could not be reopened (see resync). It
+  // latches: every later edit, undo/redo and query is refused quietly, nothing
+  // more can be saved, and the host shows one persistent notice offering a
+  // reload instead of a toast per refused edit.
+  readonly engineUnavailable: boolean;
   // Monotonic counter bumped only when undo/redo resets navigation to 'main'
   // because the restored project no longer contains the viewed model. The
-  // Editor watches this to clear its own selection/details/tool UI state for
-  // that specific case (ordinary undo preserves them). Drill-in / back / level
-  // are driven by the Editor's own handlers (via the NavigationOutcome return),
-  // so they do NOT bump this.
+  // Editor watches this to clear its own selection/details/tool UI state.
   readonly navResetSeq: number;
 }
 
@@ -171,9 +216,7 @@ export function isUsableViewport(viewport: Viewport): boolean {
 /**
  * Configuration injected by the host (the Editor). The two `open*` factories
  * isolate the controller from the concrete `EngineProject` static methods so
- * it can be unit-tested against a fake engine. `onError` surfaces transient
- * errors to the host's toast UI; `onChange` notifies subscribers (the Editor
- * subscribes through `subscribe()`, which wraps this).
+ * it can be unit-tested against a fake engine.
  */
 export interface ProjectControllerConfig {
   readonly initialProjectVersion: number;
@@ -181,16 +224,14 @@ export interface ProjectControllerConfig {
     | { readonly format: 'protobuf'; readonly data: Readonly<Uint8Array> }
     | { readonly format: 'json'; readonly data: string };
   // When set, the root model's first view opens with THIS viewport in place of
-  // the one stored in the project. The override is applied before the first
-  // snapshot is published (the canvas never renders the stored viewport) and
-  // round-tripped to the engine as a view-only update -- no undo entry, no
-  // save -- so it is on the same footing as a pan the user just made: the next
-  // saved edit persists it, until then it is presentation. A host that
+  // the one stored in the project. It is the live viewport from the first
+  // published snapshot on (the canvas never renders or fits the stored one) and
+  // is persisted to the engine by a viewport item -- no undo entry, no save --
+  // so it is on the same footing as a pan the user just made. A host that
   // remounts the Editor on new project bytes (the notebook widget on a kernel
   // push) uses this to keep the user's live pan/zoom, which a pan alone never
-  // persists (`queueViewUpdate` does not save) and a remount on the stored
-  // bytes would otherwise reset. Ignored when the view is absent or the
-  // viewport is unusable (a non-finite coordinate, a non-positive zoom).
+  // saves. Ignored when the view is absent or the viewport is unusable (a
+  // non-finite coordinate, a non-positive zoom).
   readonly initialViewport?: Viewport;
   readonly openProtobuf: (data: Uint8Array) => Promise<EngineApi>;
   readonly openJson: (data: string) => Promise<EngineApi>;
@@ -199,6 +240,9 @@ export interface ProjectControllerConfig {
     currVersion: number,
   ) => Promise<number | undefined>;
   readonly onError: (err: Error) => void;
+  // The clock the maintenance time bound reads. Tests supply a controllable
+  // one; production uses Date.now.
+  readonly now?: () => number;
 }
 
 interface ErrorDetailsLike {
@@ -237,8 +281,12 @@ function convertUnitErrorKind(kind: SimlinUnitErrorKind): UnitErrorKind {
 }
 
 /**
- * Convert the engine's flat error list into the model-scoped equation/unit
- * error maps the Editor renders. Errors for other models are filtered out.
+ * Convert the engine's flat error list into the model-scoped per-variable maps
+ * the Editor renders, by kind and severity: a unit error (either severity) is a
+ * unit error; any other Warning is an advisory (`varWarnings`), which leaves the
+ * variable's results standing; everything else is an equation error, which
+ * means the variable produced no valid data. Errors for other models are
+ * filtered out.
  */
 export function convertErrorDetails(
   errors: readonly ErrorDetail[],
@@ -246,19 +294,25 @@ export function convertErrorDetails(
 ): {
   varErrors: ReadonlyMap<string, readonly EquationError[]>;
   unitErrors: ReadonlyMap<string, readonly UnitError[]>;
+  varWarnings: ReadonlyMap<string, readonly VariableWarning[]>;
 } {
   const varErrors = new Map<string, EquationError[]>();
   const unitErrors = new Map<string, UnitError[]>();
+  const varWarnings = new Map<string, VariableWarning[]>();
 
   for (const err of errors) {
     if (err.modelName !== modelName) {
       continue;
     }
 
-    const ident = err.variableName;
-    if (!ident) {
+    if (!err.variableName) {
       continue;
     }
+    // Keyed like Model.variables. A raising site may name the variable by its
+    // canonical ident or by its source spelling (the stock-list advisory names
+    // 'Level', not 'level'); canonicalizing an already-canonical ident changes
+    // nothing.
+    const ident = canonicalize(err.variableName);
 
     const isUnitError = err.kind === SimlinErrorKind.Units;
 
@@ -281,6 +335,19 @@ export function convertErrorDetails(
         unitErrors.set(ident, existing);
       }
       existing.push(unitError);
+    } else if (err.severity === SimlinErrorSeverity.Warning) {
+      const warning: VariableWarning = {
+        code: err.code as unknown as ErrorCode,
+        // Prefer the bare reason over the terminal-formatted message, as for
+        // model errors (cachedErrorsFor).
+        details: err.details ?? err.message ?? undefined,
+      };
+      let existing = varWarnings.get(ident);
+      if (!existing) {
+        existing = [];
+        varWarnings.set(ident, existing);
+      }
+      existing.push(warning);
     } else {
       const eqError: EquationError = {
         start: err.startOffset ?? 0,
@@ -296,44 +363,279 @@ export function convertErrorDetails(
     }
   }
 
-  return { varErrors, unitErrors };
+  return { varErrors, unitErrors, varWarnings };
+}
+
+function cachedErrorsFor(errors: readonly ErrorDetail[], modelName: string): CachedErrorDetails {
+  const { varErrors, unitErrors, varWarnings } = convertErrorDetails(errors, modelName);
+  let simError: SimError | undefined;
+  const modelErrors: ModelError[] = [];
+  for (const err of errors) {
+    if (err.modelName && err.modelName !== modelName) {
+      continue;
+    }
+    if (err.kind === SimlinErrorKind.Simulation) {
+      simError = {
+        code: err.code as unknown as ErrorCode,
+        details: err.message ?? undefined,
+      };
+    } else if (!err.variableName) {
+      modelErrors.push({
+        code: err.code as unknown as ErrorCode,
+        // Prefer the bare reason over the terminal-formatted message (the
+        // unit-inference umbrella carries a plain-language sentence there);
+        // most model errors have no details and keep the message.
+        details: err.details ?? err.message ?? undefined,
+      });
+    }
+  }
+  return { varErrors, unitErrors, varWarnings, simError, modelErrors };
+}
+
+/**
+ * Annotate `modelName`'s variables with their equation/unit errors, or flag the
+ * project `hasNoEquations` when every variable's only error is an empty
+ * equation: a brand-new sketch should not scream "error" at the user.
+ */
+function annotateErrors(project: Project, cached: CachedErrorDetails, modelName: string): Project {
+  const model = project.models.get(modelName);
+  if (!model) {
+    return project;
+  }
+  const { varErrors, unitErrors, varWarnings } = cached;
+  if (
+    varErrors.size > 0 &&
+    varErrors.size === model.variables.size &&
+    setsEqual(new Set(varErrors.keys()), new Set(model.variables.keys())) &&
+    [...varErrors.values()].every((errs) => errs.length === 1 && first(errs).code === ErrorCode.EmptyEquation)
+  ) {
+    return { ...project, hasNoEquations: true };
+  }
+  if (varErrors.size === 0 && unitErrors.size === 0 && varWarnings.size === 0) {
+    return project;
+  }
+  const variables = new Map(model.variables);
+  for (const [ident, errs] of varErrors) {
+    const variable = variables.get(ident);
+    if (variable) {
+      variables.set(ident, { ...variable, errors: errs });
+    }
+  }
+  for (const [ident, errs] of unitErrors) {
+    const variable = variables.get(ident);
+    if (variable) {
+      variables.set(ident, { ...variable, unitErrors: errs });
+    }
+  }
+  for (const [ident, warnings] of varWarnings) {
+    const variable = variables.get(ident);
+    if (variable) {
+      variables.set(ident, { ...variable, warnings });
+    }
+  }
+  return { ...project, models: mapSet(project.models, modelName, { ...model, variables }) };
+}
+
+/**
+ * Annotate the active model's aux/flow/stock variables with sketch-connector
+ * drift on the RENDERED view (see connector-sync.ts). Dependencies are the
+ * engine's per-variable `getIncomingLinks` for the variables the last
+ * connector refresh fetched: authoritative (they exclude builtins/TIME,
+ * structural flow<->stock edges and dotted module-output refs), where
+ * `getLinks` would add structural edges and omit initial-equation deps.
+ *
+ * Targets with a fatal equation error are skipped: their AST did not parse, so
+ * the engine reports no dependencies and every inbound connector would read as
+ * stale. That relies on `annotateErrors` having run first. The all-empty
+ * starter model sets `hasNoEquations` without annotating `errors`, so it
+ * returns early instead; stdlib and macro models are not user sketches.
+ */
+function annotateConnectors(
+  project: Project,
+  modelName: string,
+  committedDependencies: ReadonlyMap<string, readonly string[]> | undefined,
+  renames: ReadonlyMap<string, PendingRename>,
+): Project {
+  if (committedDependencies === undefined || isStdlibModel(modelName) || project.hasNoEquations) {
+    return project;
+  }
+  const model = project.models.get(modelName);
+  const view = model?.views[0];
+  if (!model || !view || isMacroModel(model)) {
+    return project;
+  }
+  // The engine reports dependencies under committed idents; the rendered model
+  // already names each pending rename's variable by its new ident.
+  const renamed = (ident: string): string => renames.get(ident)?.ident ?? ident;
+  const dependencies =
+    renames.size === 0
+      ? committedDependencies
+      : new Map([...committedDependencies].map(([ident, deps]) => [renamed(ident), deps.map(renamed)]));
+  const checked = new Map<string, readonly string[]>();
+  for (const el of view.elements) {
+    if (el.type !== 'aux' && el.type !== 'stock' && el.type !== 'flow') {
+      continue;
+    }
+    const variable = model.variables.get(el.ident);
+    const deps = dependencies.get(el.ident);
+    if (!variable || variable.type === 'module' || deps === undefined) {
+      continue;
+    }
+    if (variable.errors && variable.errors.length > 0) {
+      continue;
+    }
+    checked.set(el.ident, deps);
+  }
+  if (checked.size === 0) {
+    return project;
+  }
+  const issuesByIdent = computeConnectorErrors({
+    elements: view.elements,
+    variables: model.variables,
+    dependencies: checked,
+  });
+  if (issuesByIdent.size === 0) {
+    return project;
+  }
+  const variables = new Map(model.variables);
+  for (const [ident, issues] of issuesByIdent) {
+    const variable = variables.get(ident);
+    if (variable) {
+      variables.set(ident, { ...variable, connectorErrors: issues });
+    }
+  }
+  return { ...project, models: mapSet(project.models, modelName, { ...model, variables }) };
+}
+
+/** A committed variable a pending view renames: its ident and display name after the rename. */
+interface PendingRename {
+  readonly ident: string;
+  readonly name: string;
+}
+
+/**
+ * The renames `pendingView` implies against the committed model, keyed by
+ * committed ident: a named element whose uid is on the committed view under a
+ * different canonical name, naming a committed variable. The same derivation as
+ * buildEditOps' renames, so the rendered model shows exactly the renames the
+ * queued edits will send.
+ */
+function pendingRenames(
+  variables: ReadonlyMap<string, Variable>,
+  committedView: StockFlowView,
+  pendingView: StockFlowView,
+): ReadonlyMap<string, PendingRename> {
+  const committedIdents = new Map<UID, string>();
+  for (const el of committedView.elements) {
+    if (isNamedViewElement(el)) {
+      committedIdents.set(el.uid, canonicalize(el.name));
+    }
+  }
+  const renames = new Map<string, PendingRename>();
+  for (const el of pendingView.elements) {
+    if (!isNamedViewElement(el)) {
+      continue;
+    }
+    const from = committedIdents.get(el.uid);
+    const to = canonicalize(el.name);
+    if (from === undefined || from === to || !variables.has(from) || renames.has(from)) {
+      continue;
+    }
+    renames.set(from, { ident: to, name: el.name });
+  }
+  return renames;
+}
+
+/**
+ * The committed variables with each pending rename applied: the variable moves
+ * to its new ident, carrying its committed content and annotations. Every
+ * element of a rendered view names the variable it will name once its edit
+ * lands, so the canvas and the details panel resolve a renamed element to the
+ * committed variable it renames. A rename onto a name another committed variable
+ * keeps is not applied: buildEditOps refuses it at dequeue, and that variable
+ * keeps rendering.
+ */
+function withRenamedVariables(
+  variables: ReadonlyMap<string, Variable>,
+  renames: ReadonlyMap<string, PendingRename>,
+): ReadonlyMap<string, Variable> {
+  const applicable = [...renames].filter(([, to]) => !variables.has(to.ident) || renames.has(to.ident));
+  if (applicable.length === 0) {
+    return variables;
+  }
+  const out = new Map(variables);
+  for (const [from] of applicable) {
+    out.delete(from);
+  }
+  for (const [from, to] of applicable) {
+    out.set(to.ident, { ...variables.get(from)!, ident: to.ident, rawName: to.name });
+  }
+  return out;
+}
+
+/**
+ * `variables` plus the variable each pending create will produce: a named
+ * element on `pendingView` whose uid is not on the committed view, and whose
+ * name names no variable, renders with `createdVariable`, the variable its
+ * create op makes. So a gesture onto a stock whose create is still queued finds
+ * its variable, as it will once the create lands ahead of the gesture's edit,
+ * while an element no pending edit creates and no variable names (an orphan an
+ * import left) still finds none. A create onto a name a variable keeps is
+ * refused at dequeue (buildEditOps), and that variable keeps rendering.
+ */
+function withCreatedVariables(
+  variables: ReadonlyMap<string, Variable>,
+  committedView: StockFlowView,
+  pendingView: StockFlowView,
+): ReadonlyMap<string, Variable> {
+  const committedUids = new Set(committedView.elements.map((el) => el.uid));
+  let out: Map<string, Variable> | undefined;
+  for (const el of pendingView.elements) {
+    if (!isNamedViewElement(el) || committedUids.has(el.uid)) {
+      continue;
+    }
+    const ident = canonicalize(el.name);
+    if ((out ?? variables).has(ident)) {
+      continue;
+    }
+    out ??= new Map(variables);
+    out.set(ident, createdVariable(el));
+  }
+  return out ?? variables;
 }
 
 const EMPTY_CACHED_ERRORS: CachedErrorDetails = {
   varErrors: new Map<string, readonly EquationError[]>(),
   unitErrors: new Map<string, readonly UnitError[]>(),
+  varWarnings: new Map<string, readonly VariableWarning[]>(),
   simError: undefined,
   modelErrors: [],
 };
 
-/**
- * Replace `modelName`'s first view's viewport with `viewport` (when given and
- * usable). Returns the (possibly unchanged) project and the replaced view, or
- * `view: undefined` when nothing was applied -- the model or its view is absent,
- * no override was given, or the override is unusable.
- */
-function withInitialViewport(
-  project: Project,
-  modelName: string,
-  viewport: Viewport | undefined,
-): { project: Project; view: StockFlowView | undefined } {
-  if (viewport === undefined || !isUsableViewport(viewport)) {
-    return { project, view: undefined };
+function viewportOf(view: StockFlowView): Viewport {
+  return { viewBox: view.viewBox, zoom: view.zoom };
+}
+
+function viewportsEqual(a: Viewport, b: Viewport): boolean {
+  return (
+    a.zoom === b.zoom &&
+    a.viewBox.x === b.viewBox.x &&
+    a.viewBox.y === b.viewBox.y &&
+    a.viewBox.width === b.viewBox.width &&
+    a.viewBox.height === b.viewBox.height
+  );
+}
+
+function withViewport(view: StockFlowView, viewport: Viewport | undefined): StockFlowView {
+  if (viewport === undefined || viewportsEqual(viewportOf(view), viewport)) {
+    return view;
   }
-  const model = project.models.get(modelName);
-  const stored = model?.views[0];
-  if (model === undefined || stored === undefined) {
-    return { project, view: undefined };
-  }
-  const view: StockFlowView = { ...stored, viewBox: { ...viewport.viewBox }, zoom: viewport.zoom };
-  const views = [...model.views];
-  views[0] = view;
-  return { project: { ...project, models: mapSet(project.models, modelName, { ...model, views }) }, view };
+  return { ...view, viewBox: viewport.viewBox, zoom: viewport.zoom };
 }
 
 /** The result of a navigation method, describing the UI consequences the
  * Editor must apply (selection restoration, panel/tool resets). Viewport
- * restoration is handled internally by the controller via queueViewUpdate. */
+ * restoration is handled internally by the controller. */
 export interface NavigationOutcome {
   // The selection to restore (drill-in clears it; back/level restore the
   // parent's). Undefined means "navigation did not happen" (e.g. drill-in
@@ -342,80 +644,187 @@ export interface NavigationOutcome {
 }
 
 /**
+ * Whether a patch changes anything but views: a project op, or a model op other
+ * than `upsertView`. A patch with no ops changes nothing.
+ */
+function patchChangesModel(patch: JsonProjectPatch): boolean {
+  return (
+    (patch.projectOps ?? []).length > 0 ||
+    (patch.models ?? []).some((model) => model.ops.some((op) => op.type !== 'upsertView'))
+  );
+}
+
+function sameFloats(a: Readonly<Float64Array>, b: Readonly<Float64Array>): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (!Object.is(a[i], b[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * A run's results as series, reusing `previous`'s Series object for every
+ * variable whose time axis and values are elementwise identical (`Object.is`, so
+ * NaN matches NaN), and returning `previous` itself when every variable is
+ * unchanged. A new Series object makes each sparkline that draws it rebuild its
+ * path, which over a large model's results costs seconds; comparing the arrays
+ * is cheap by comparison.
+ */
+function seriesReusingUnchanged(previous: ReadonlyMap<string, Series>, run: EngineRunApi): ReadonlyMap<string, Series> {
+  const time = run.getSeries('time') ?? new Float64Array(0);
+  const any = previous.values().next();
+  const previousTime = any.done ? undefined : any.value.time;
+  const sameTime = previousTime !== undefined && sameFloats(previousTime, time);
+  const next = new Map<string, Series>();
+  let changed = !sameTime || previous.size !== run.varNames.length;
+  for (const ident of run.varNames) {
+    const values = run.getSeries(ident) ?? new Float64Array(0);
+    const before = previous.get(ident);
+    if (sameTime && before !== undefined && sameFloats(before.values, values)) {
+      next.set(ident, before);
+    } else {
+      next.set(ident, { name: ident, time: sameTime ? previousTime : time, values });
+      changed = true;
+    }
+  }
+  return changed ? next : previous;
+}
+
+type MaintenanceKind = 'save' | 'errors' | 'connectors' | 'sim';
+// The order pending maintenance runs in: user data first, then the annotations
+// the diagram shows, then the (potentially slow) simulation.
+const MAINTENANCE_ORDER: readonly MaintenanceKind[] = ['save', 'errors', 'connectors', 'sim'];
+
+interface ItemBase {
+  readonly settle: (landed: boolean) => void;
+}
+
+// An edit with a next view (a diagram edit, rename included) or without one (a
+// model-only edit whose payload is derived from the committed project at
+// dequeue, so an echoed field is never stale).
+interface EditItem extends ItemBase {
+  readonly kind: 'edit';
+  readonly label: string;
+  readonly modelName: string;
+  readonly token: number;
+  readonly baseView: StockFlowView | undefined;
+  readonly nextView: StockFlowView | undefined;
+  readonly buildPatch: ((committed: Project) => JsonProjectPatch) | undefined;
+}
+
+interface ViewportItem extends ItemBase {
+  readonly kind: 'viewport';
+  readonly modelName: string;
+}
+
+interface UndoRedoItem extends ItemBase {
+  readonly kind: 'undoRedo';
+  readonly direction: 'undo' | 'redo';
+}
+
+interface QueryItem extends ItemBase {
+  readonly kind: 'query';
+  readonly run: (engine: EngineApi) => Promise<void>;
+}
+
+interface OpenItem extends ItemBase {
+  readonly kind: 'open';
+}
+
+type QueueItem = EditItem | ViewportItem | UndoRedoItem | QueryItem | OpenItem;
+
+/**
  * Headless coordination for a single open project. Create one per mounted
  * Editor; call `dispose()` exactly once when the Editor unmounts.
  *
- * StrictMode safety: the Editor creates the controller in componentDidMount
- * and disposes it in componentWillUnmount. A mount -> unmount -> mount cycle
- * on the same Editor instance (React 18 StrictMode) therefore creates a
- * *fresh* controller on the second mount -- the first one was disposed. The
- * controller itself need not be re-armable after dispose; `disposed` latches
- * true and every async continuation short-circuits on it.
+ * StrictMode safety: the Editor disposes the controller when its mount effect
+ * cleans up and builds a fresh one on the next mount, so the controller itself
+ * need not be re-armable: `disposed` latches true, queued items settle as not
+ * landed, and the executor releases the engine once its running item returns.
  */
 export class ProjectController {
   private readonly config: ProjectControllerConfig;
+  private readonly now: () => number;
 
-  // The live engine handle. Undefined before openInitialProject() resolves
-  // and after dispose().
+  // The live engine handle. Only the executor touches it.
   private engine: EngineApi | undefined = undefined;
 
-  // --- snapshot-backing state ---
-  private project: Project | undefined = undefined;
+  // --- committed state
+  private committed: Project | undefined = undefined;
   private projectHistory: readonly Readonly<Uint8Array>[];
   private projectOffset = 0;
-  private projectVersion: number;
-  // Last server-acknowledged integer version (see ProjectSnapshot.serverVersion).
   private serverVersion: number;
-  private projectGeneration = 0;
-  private status: 'ok' | 'error' | 'disabled' = 'disabled';
-  private cachedErrors: CachedErrorDetails = EMPTY_CACHED_ERRORS;
+  private token = 0;
+
+  // --- derived-state inputs, refreshed by maintenance
+  private errorDetails: readonly ErrorDetail[] = [];
+  private simulatable: boolean | undefined = undefined;
   private data: ReadonlyMap<string, Series> = new Map<string, Series>();
+  // `data` grouped per variable, derived once per run that changes `data`
+  // (groupSeriesByIdent, reusing unchanged variables' arrays). Every render
+  // attaches these same arrays: the diagram's sparklines memoize on array
+  // identity, and a landed edit re-renders the project without new results.
+  private seriesByIdent: ReadonlyMap<string, readonly Series[]> = new Map();
+  // model name -> (variable ident -> equation dependencies), from the engine.
+  private incomingLinks = new Map<string, ReadonlyMap<string, readonly string[]>>();
+
+  // --- live state
+  private readonly viewport = new Map<string, Viewport>();
   private modelName = 'main';
   private modelStack: readonly ModuleStackEntry[] = [];
   private navResetSeq = 0;
+  private restoreSeq = 0;
+  private engineUnavailable = false;
 
-  // The currently-published immutable snapshot. Replaced wholesale whenever
-  // any backing field changes and a notify is flushed.
-  private snapshot: ProjectSnapshot;
+  // --- the executor
+  private queue: QueueItem[] = [];
+  // The item whose engine calls are in flight, if any. It stays at the head of
+  // the queue; dispose settles every other item.
+  private runningItem: QueueItem | undefined = undefined;
+  private readonly maintenance = new Set<MaintenanceKind>();
+  private running = false;
+  private loop: Promise<void> | undefined = undefined;
+  private editStreak = 0;
+  private editStreakStart = 0;
+  private idleWaiters: Array<() => void> = [];
 
-  // --- save queue ---
+  // --- save flush (outside the executor: a host save is a network call, not
+  // an engine call, and must not hold edits back)
   private inSave = false;
-  private saveQueued = false;
+  private queuedSave: { format: 'protobuf'; data: Uint8Array } | { format: 'json'; data: string } | undefined =
+    undefined;
 
-  // --- new-engine view race ---
-  // There exists a race where we need to center/update the viewBox when
-  // displaying a newly imported model, but the async wasm round-trip hasn't
-  // completed before we want to save the viewBox change. We stash the queued
-  // view and replay it once the new engine is installed.
-  private newEngineShouldPullView = false;
-  private newEngineQueuedView: StockFlowView | undefined = undefined;
-
-  // --- lifecycle ---
-  // Latches true on dispose(). Every async continuation checks it before
-  // touching state, opening an engine, or notifying subscribers, so work that
-  // was already in flight at dispose time cannot resurrect a dead controller.
+  // --- lifecycle
   private disposed = false;
 
-  // --- notification coalescing ---
+  // --- publication
+  private snapshot: ProjectSnapshot;
+  private projectVersion: number;
   private readonly listeners = new Set<() => void>();
-  // Depth counter so a synchronous multi-step mutation (the old code's single
-  // setState batch) flushes exactly one notify. notify() increments published
-  // state but defers the listener fan-out until the outermost batch closes.
   private batchDepth = 0;
   private snapshotDirty = false;
+  private renderMemo:
+    | {
+        readonly inputs: readonly unknown[];
+        readonly project: Project | undefined;
+        readonly cachedErrors: CachedErrorDetails;
+      }
+    | undefined = undefined;
 
   constructor(config: ProjectControllerConfig) {
     this.config = config;
-    // Both versions seed from the load: projectVersion then drifts fractionally
-    // as a cache key while serverVersion stays integer, tracking only what the
-    // server has acknowledged.
+    this.now = config.now ?? Date.now;
     this.projectVersion = config.initialProjectVersion;
     this.serverVersion = config.initialProjectVersion;
     this.projectHistory = config.input.format === 'protobuf' ? [config.input.data] : [];
     this.snapshot = this.buildSnapshot();
   }
 
-  // --- subscription API ---
+  // --- subscription API
 
   /** Subscribe to snapshot changes. Returns an unsubscribe function. */
   subscribe(listener: () => void): () => void {
@@ -431,27 +840,119 @@ export class ProjectController {
   }
 
   private buildSnapshot(): ProjectSnapshot {
+    const { project, cachedErrors } = this.render();
+    if (project !== this.snapshot?.project) {
+      this.projectVersion += 1;
+    }
     return {
-      project: this.project,
+      project,
       projectVersion: this.projectVersion,
       serverVersion: this.serverVersion,
-      projectGeneration: this.projectGeneration,
-      status: this.status,
-      cachedErrors: this.cachedErrors,
+      status: this.status(project),
+      cachedErrors,
       data: this.data,
       modelName: this.modelName,
       modelStack: this.modelStack,
       canUndo: this.canUndo(),
       canRedo: this.canRedo(),
+      undoRedoQueued: this.undoRedoQueued(),
+      token: this.token,
+      restoreSeq: this.restoreSeq,
+      engineUnavailable: this.engineUnavailable,
       navResetSeq: this.navResetSeq,
     };
   }
 
+  private status(project: Project | undefined): 'ok' | 'error' | 'disabled' {
+    if (!this.engine || !project || project.hasNoEquations || this.simulatable === undefined) {
+      return 'disabled';
+    }
+    return this.simulatable ? 'ok' : 'error';
+  }
+
+  /**
+   * The rendered project and the active model's error cache, memoized on their
+   * inputs so an unrelated republish (a save acknowledgment) keeps the project
+   * identity and the Canvas keeps its render caches.
+   */
+  private render(): { project: Project | undefined; cachedErrors: CachedErrorDetails } {
+    // Only pending NEXT VIEWS feed the rendered project: queuing a viewport,
+    // query or model-only item must not replace the project identity.
+    const pendingViews = this.queue.flatMap((item) =>
+      item.kind === 'edit' && item.nextView !== undefined ? [item.modelName, item.nextView] : [],
+    );
+    const inputs: readonly unknown[] = [
+      this.committed,
+      this.errorDetails,
+      this.data,
+      this.incomingLinks,
+      this.modelName,
+      ...pendingViews,
+      ...[...this.viewport.entries()].flat(),
+    ];
+    const memo = this.renderMemo;
+    if (memo && memo.inputs.length === inputs.length && memo.inputs.every((input, i) => input === inputs[i])) {
+      return memo;
+    }
+    const cachedErrors =
+      memo && memo.inputs[1] === this.errorDetails && memo.inputs[4] === this.modelName
+        ? memo.cachedErrors
+        : this.errorDetails.length === 0
+          ? EMPTY_CACHED_ERRORS
+          : cachedErrorsFor(this.errorDetails, this.modelName);
+    let project = this.committed;
+    if (project !== undefined) {
+      if (this.seriesByIdent.size > 0 && project.models.has('main')) {
+        // Sim data comes from the root model, so series attach to 'main' even
+        // while a child model is viewed.
+        project = projectAttachSeries(project, this.seriesByIdent, 'main');
+      }
+      project = annotateErrors(project, cachedErrors, this.modelName);
+      let models = project.models;
+      let activeRenames: ReadonlyMap<string, PendingRename> = new Map();
+      for (const [name, model] of project.models) {
+        const committedView = model.views[0];
+        if (committedView === undefined) {
+          continue;
+        }
+        const pendingView = this.pendingViewOf(name);
+        const renames =
+          pendingView === undefined ? new Map() : pendingRenames(model.variables, committedView, pendingView);
+        if (name === this.modelName) {
+          activeRenames = renames;
+        }
+        const variables =
+          pendingView === undefined
+            ? model.variables
+            : withCreatedVariables(withRenamedVariables(model.variables, renames), committedView, pendingView);
+        const rendered = withViewport(pendingView ?? committedView, this.viewport.get(name));
+        if (rendered !== committedView || variables !== model.variables) {
+          models = mapSet(models, name, { ...model, variables, views: [rendered, ...model.views.slice(1)] });
+        }
+      }
+      if (models !== project.models) {
+        project = { ...project, models };
+      }
+      project = annotateConnectors(project, this.modelName, this.incomingLinks.get(this.modelName), activeRenames);
+    }
+    this.renderMemo = { inputs, project, cachedErrors };
+    return this.renderMemo;
+  }
+
+  /** The next view of the last pending edit targeting `modelName`. */
+  private pendingViewOf(modelName: string): StockFlowView | undefined {
+    for (let i = this.queue.length - 1; i >= 0; i--) {
+      const item = this.queue[i];
+      if (item.kind === 'edit' && item.modelName === modelName && item.nextView !== undefined) {
+        return item.nextView;
+      }
+    }
+    return undefined;
+  }
+
   /**
    * Mark the snapshot stale and (when not inside a batch) flush a single
-   * notification. Subscribers run after the new snapshot is published, so a
-   * listener calling getSnapshot() sees the latest state. Disposed controllers
-   * never notify.
+   * notification. Disposed controllers never notify.
    */
   private notify(): void {
     this.snapshotDirty = true;
@@ -475,11 +976,7 @@ export class ProjectController {
     }
   }
 
-  /**
-   * Coalesce all snapshot changes made inside `fn` into a single notify. This
-   * mirrors the old code's batching of multiple synchronous setState-equivalent
-   * changes into one render. Re-entrant: only the outermost batch flushes.
-   */
+  /** Coalesce every snapshot change made inside `fn` into one notification. */
   private batch<T>(fn: () => T): T {
     this.batchDepth++;
     try {
@@ -492,30 +989,356 @@ export class ProjectController {
     }
   }
 
-  // --- undo/redo predicates ---
+  // --- undo/redo predicates
 
-  canUndo(): boolean {
+  private editsQueued(): boolean {
+    return this.queue.some((item) => item.kind === 'edit' || item.kind === 'undoRedo');
+  }
+
+  private undoRedoQueued(): boolean {
+    return this.queue.some((item) => item.kind === 'undoRedo');
+  }
+
+  private hasUndoHistory(): boolean {
     return this.projectHistory.length > 1 && this.projectOffset < this.projectHistory.length - 1;
   }
 
-  canRedo(): boolean {
+  private hasRedoHistory(): boolean {
     return this.projectOffset > 0;
   }
 
-  // --- engine lifecycle ---
+  canUndo(): boolean {
+    return this.hasUndoHistory() && !this.editsQueued() && !this.engineUnavailable;
+  }
+
+  canRedo(): boolean {
+    return this.hasRedoHistory() && !this.editsQueued() && !this.engineUnavailable;
+  }
+
+  // --- enqueueing
 
   /**
-   * Open the initial project in the engine and rebuild `project`. Idempotent
-   * against dispose: if dispose() races in before/after the open completes,
-   * the freshly-opened engine is released here rather than stranded.
-   *
-   * The try/catch deliberately extends past the engine open: the post-open
-   * steps (serializeProtobuf, serializeJson, projectFromJson) can still throw
-   * (a WASM panic, or projectFromJson rejecting an unknown view element type).
-   * Catching here surfaces a contextual message and disposes the orphaned
-   * engine, which is strictly better than leaving the user on a blank canvas.
+   * Open the initial project in the engine. Resolves when the open item has
+   * run (successfully or not).
    */
-  async openInitialProject(): Promise<void> {
+  openInitialProject(): Promise<void> {
+    return new Promise((resolve) => {
+      this.push({ kind: 'open', settle: () => resolve() });
+    });
+  }
+
+  /**
+   * Enqueue a diagram edit: `nextView` becomes the rendered view of `modelName`
+   * immediately, and the executor later applies the model ops implied by
+   * (`baseView` -> `nextView`) plus the view, atomically. Resolves true when the
+   * edit lands, false when it is refused, dropped, or rolled back.
+   *
+   * `baseView` defaults to the model's rendered view at enqueue time, which is
+   * what a handler reading `getView()` in the same tick planned on. `token`
+   * defaults to the current one; a gesture passes the token it captured at
+   * press so a truncation or undo landing in between drops it.
+   *
+   * Refused quietly while an undo/redo is queued: the edit was planned on the
+   * view the undo is about to replace, so it could only be dropped later, and
+   * reporting that would name a failure the user did not cause.
+   */
+  enqueueViewEdit(edit: {
+    readonly label: string;
+    readonly nextView: StockFlowView;
+    readonly modelName?: string;
+    readonly baseView?: StockFlowView;
+    readonly token?: number;
+  }): Promise<boolean> {
+    const modelName = edit.modelName ?? this.modelName;
+    const baseView = edit.baseView ?? this.getRenderedView(modelName);
+    if (this.disposed || this.engineUnavailable || baseView === undefined || this.undoRedoQueued()) {
+      return Promise.resolve(false);
+    }
+    // Refused here rather than dropped at dequeue, so the stale view never
+    // renders.
+    if (edit.token !== undefined && edit.token !== this.token) {
+      this.reportError(`${edit.label} discarded: the project changed while it was being made`);
+      return Promise.resolve(false);
+    }
+    // A non-finite coordinate serializes to JSON null, which the engine's patch
+    // parser rejects; it always means an upstream geometry bug, so the whole
+    // edit is refused before anything renders (issue #818).
+    const bad = findNonFiniteViewCoord(edit.nextView);
+    if (bad !== undefined) {
+      this.reportError(`internal error: refusing a view update with a non-finite coordinate (${bad})`);
+      return Promise.resolve(false);
+    }
+    return new Promise((resolve) => {
+      this.push({
+        kind: 'edit',
+        label: edit.label,
+        modelName,
+        token: edit.token ?? this.token,
+        baseView,
+        nextView: edit.nextView,
+        buildPatch: undefined,
+        settle: resolve,
+      });
+    });
+  }
+
+  /**
+   * Enqueue a model-only edit (equation, table, module wiring, sim specs):
+   * `buildPatch` runs at dequeue against the committed project, so the payload
+   * echoes the committed variable rather than one read before earlier edits
+   * landed. A builder that throws (the variable no longer exists) fails the
+   * item like an engine error. Resolves as `enqueueViewEdit` does.
+   */
+  enqueueModelEdit(edit: {
+    readonly label: string;
+    readonly buildPatch: (committed: Project) => JsonProjectPatch;
+  }): Promise<boolean> {
+    if (this.disposed || this.engineUnavailable || this.committed === undefined) {
+      return Promise.resolve(false);
+    }
+    return new Promise((resolve) => {
+      this.push({
+        kind: 'edit',
+        label: edit.label,
+        modelName: this.modelName,
+        token: this.token,
+        baseView: undefined,
+        nextView: undefined,
+        buildPatch: edit.buildPatch,
+        settle: resolve,
+      });
+    });
+  }
+
+  /**
+   * Set the live viewport of `modelName` (a settled pan/zoom, a resize, a
+   * centering, a navigation restore). It renders immediately and a viewport
+   * item persists it to the engine later: no history, no save. The item reads
+   * the LATEST viewport of its model when it runs and patches nothing when that
+   * equals the committed one, so a burst of settles while an edit runs persists
+   * once.
+   */
+  setViewport(modelName: string, viewport: Viewport): void {
+    if (this.disposed) {
+      return;
+    }
+    if (!isUsableViewport(viewport)) {
+      this.reportError('internal error: refusing a viewport with a non-finite coordinate or non-positive zoom');
+      return;
+    }
+    this.viewport.set(modelName, { viewBox: { ...viewport.viewBox }, zoom: viewport.zoom });
+    if (this.engineUnavailable) {
+      // Panning stays live; there is no engine to persist it to.
+      this.notify();
+      return;
+    }
+    this.push({ kind: 'viewport', modelName, settle: () => {} });
+  }
+
+  /**
+   * Enqueue an undo or redo. Refused (a no-op) while an edit or another
+   * undo/redo is queued, and when there is no history in that direction.
+   *
+   * `afterQueuedEdits` lifts only the queued-edit refusal: the undo/redo is
+   * queued behind the edits and applies to the history they leave. It is for a
+   * caller that has just submitted the user's latest change (a details-panel
+   * draft committed by the Undo press itself), so the undo applies to that
+   * change. View edits enqueued after it are refused as usual.
+   */
+  undoRedo(direction: 'undo' | 'redo', options: { readonly afterQueuedEdits?: boolean } = {}): void {
+    if (this.disposed || this.engineUnavailable || this.undoRedoQueued()) {
+      return;
+    }
+    const available = options.afterQueuedEdits
+      ? direction === 'undo'
+        ? this.hasUndoHistory()
+        : this.hasRedoHistory()
+      : direction === 'undo'
+        ? this.canUndo()
+        : this.canRedo();
+    if (!available) {
+      return;
+    }
+    this.push({ kind: 'undoRedo', direction, settle: () => {} });
+  }
+
+  /**
+   * Run a read-only engine query (LaTeX rendering, XMILE export) through the
+   * executor, so it never runs concurrently with a patch or an engine swap.
+   * Resolves undefined when the controller has no engine or the query throws.
+   */
+  query<T>(fn: (engine: EngineApi) => Promise<T>): Promise<T | undefined> {
+    if (this.disposed || this.engineUnavailable) {
+      return Promise.resolve(undefined);
+    }
+    return new Promise((resolve) => {
+      let result: T | undefined;
+      this.push({
+        kind: 'query',
+        run: async (engine) => {
+          try {
+            result = await fn(engine);
+          } catch {
+            result = undefined;
+          }
+        },
+        settle: () => resolve(result),
+      });
+    });
+  }
+
+  /** Request a save of the committed state. */
+  requestSave(): void {
+    this.requestMaintenance('save');
+  }
+
+  /**
+   * Resolves once nothing is queued, no maintenance is pending, the executor is
+   * idle and no host save is in flight.
+   */
+  whenIdle(): Promise<void> {
+    if (this.isIdle()) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.idleWaiters.push(resolve);
+    });
+  }
+
+  private isIdle(): boolean {
+    return !this.running && this.queue.length === 0 && this.maintenance.size === 0 && !this.inSave;
+  }
+
+  private maybeResolveIdle(): void {
+    if (this.isIdle() && this.idleWaiters.length > 0) {
+      const waiters = this.idleWaiters;
+      this.idleWaiters = [];
+      for (const waiter of waiters) {
+        waiter();
+      }
+    }
+  }
+
+  private push(item: QueueItem): void {
+    if (this.disposed) {
+      item.settle(false);
+      return;
+    }
+    this.queue.push(item);
+    this.notify();
+    this.kick();
+  }
+
+  private requestMaintenance(...kinds: MaintenanceKind[]): void {
+    if (this.disposed) {
+      return;
+    }
+    for (const kind of kinds) {
+      this.maintenance.add(kind);
+    }
+    this.kick();
+  }
+
+  // --- the executor
+
+  private kick(): void {
+    if (this.running || this.disposed) {
+      return;
+    }
+    this.running = true;
+    this.loop = this.runLoop();
+  }
+
+  private async runLoop(): Promise<void> {
+    // Start on a microtask so an enqueue returns (and its optimistic render
+    // publishes) before any engine call begins.
+    await Promise.resolve();
+    try {
+      for (;;) {
+        if (this.disposed) {
+          break;
+        }
+        const step = this.nextStep();
+        if (step === undefined) {
+          break;
+        }
+        await step();
+      }
+    } finally {
+      this.running = false;
+      this.loop = undefined;
+      if (this.disposed) {
+        await this.releaseEngine();
+      }
+      this.maybeResolveIdle();
+    }
+  }
+
+  private nextStep(): (() => Promise<void>) | undefined {
+    if (this.queue.length > 0) {
+      const streakExpired =
+        this.editStreak >= MaintenanceEditBound || this.now() - this.editStreakStart >= MaintenanceTimeBoundMs;
+      if (this.maintenance.size > 0 && this.editStreak > 0 && streakExpired) {
+        const kinds = MAINTENANCE_ORDER.filter((kind) => this.maintenance.has(kind));
+        this.editStreak = 0;
+        return async () => {
+          for (const kind of kinds) {
+            await this.runMaintenance(kind);
+          }
+        };
+      }
+      if (this.editStreak === 0) {
+        this.editStreakStart = this.now();
+      }
+      this.editStreak++;
+      const item = this.queue[0];
+      return () => this.runItem(item);
+    }
+    this.editStreak = 0;
+    const kind = MAINTENANCE_ORDER.find((k) => this.maintenance.has(k));
+    if (kind === undefined) {
+      return undefined;
+    }
+    return () => this.runMaintenance(kind);
+  }
+
+  private async runItem(item: QueueItem): Promise<void> {
+    let landed = false;
+    this.runningItem = item;
+    try {
+      switch (item.kind) {
+        case 'open':
+          await this.runOpen();
+          landed = true;
+          break;
+        case 'edit':
+          landed = await this.runEdit(item);
+          break;
+        case 'viewport':
+          landed = await this.runViewport(item);
+          break;
+        case 'undoRedo':
+          landed = await this.runUndoRedo(item);
+          break;
+        case 'query':
+          if (this.engine) {
+            await item.run(this.engine);
+          }
+          landed = true;
+          break;
+      }
+    } finally {
+      this.runningItem = undefined;
+      const index = this.queue.indexOf(item);
+      if (index !== -1) {
+        this.queue.splice(index, 1);
+      }
+      this.notify();
+      item.settle(landed);
+    }
+  }
+
+  private async runOpen(): Promise<void> {
     let engine: EngineApi;
     try {
       engine =
@@ -523,511 +1346,464 @@ export class ProjectController {
           ? await this.config.openJson(this.config.input.data)
           : await this.config.openProtobuf(this.config.input.data as Uint8Array);
     } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      this.reportError(`opening the project in the engine failed: ${err.message ?? 'Unknown error'}`);
+      this.reportError(`opening the project in the engine failed: ${getErrorDetails(e).message ?? 'Unknown error'}`);
       return;
     }
-
     if (this.disposed) {
-      // dispose() ran during the engine open. Release the orphan: dispose()
-      // could not reach an engine that didn't exist yet.
-      await this.disposeOrphanedEngine(engine);
+      await disposeQuietly(engine);
       return;
     }
-
-    // The view the host's viewport override was spliced into, to be
-    // round-tripped to the engine once the project is published.
-    let overriddenView: StockFlowView | undefined;
+    let serialized: Uint8Array;
+    let project: Project;
     try {
-      this.engine = engine;
-
-      const serializedProject = await engine.serializeProtobuf();
-      const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
-      // No live view exists on first open, so the engine-serialized view IS the
-      // rendered view -- compute connector annotations directly against it.
-      // The host's viewport override is spliced in first, so the FIRST published
-      // snapshot already carries it and the canvas never renders (or fits) the
-      // stored viewport for a frame.
-      const opened = withInitialViewport(projectFromJson(json), this.modelName, this.config.initialViewport);
-      const project = await this.attachConnectorErrors(await this.updateVariableErrors(opened.project));
-
-      if (this.disposed) {
-        this.engine = undefined;
-        await this.disposeOrphanedEngine(engine);
-        return;
-      }
-
-      this.batch(() => {
-        this.projectHistory = [serializedProject];
-        this.project = project;
-        this.notify();
-      });
-      overriddenView = opened.view;
+      serialized = await engine.serializeProtobuf();
+      project = projectFromJson(JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject);
     } catch (e: unknown) {
-      this.engine = undefined;
-      await this.disposeOrphanedEngine(engine);
-      const err = getErrorDetails(e);
-      this.reportError(`opening the project failed: ${err.message ?? 'Unknown error'}`);
+      await disposeQuietly(engine);
+      this.reportError(`opening the project failed: ${getErrorDetails(e).message ?? 'Unknown error'}`);
       return;
     }
-
-    if (overriddenView !== undefined) {
-      // Bring the engine's copy of the view in line with the override -- the
-      // same view-only round-trip a settled pan makes (no history, no save), so
-      // a later content edit's snapshot carries this viewport. Outside the
-      // try above on purpose: the project is already published, and a failure
-      // here is a view-update failure (reported by queueViewUpdate itself), not
-      // a failed open that should tear the engine down.
-      await this.queueViewUpdate(overriddenView);
+    if (this.disposed) {
+      await disposeQuietly(engine);
+      return;
     }
+    this.batch(() => {
+      this.engine = engine;
+      this.committed = project;
+      this.projectHistory = [serialized];
+      this.projectOffset = 0;
+      const initial = this.config.initialViewport;
+      if (initial !== undefined && isUsableViewport(initial) && project.models.get(this.modelName)?.views[0]) {
+        this.setViewport(this.modelName, initial);
+      }
+      this.notify();
+    });
+    this.requestMaintenance('errors', 'connectors', 'sim');
   }
 
-  /**
-   * Reopen the engine from a serialized snapshot (the undo/redo path). Disposes
-   * the previous engine first. Returns the new engine on success, undefined on
-   * failure. See openInitialProject for why the post-open steps are guarded.
-   */
-  private async openEngineProject(serializedProject: Readonly<Uint8Array>): Promise<EngineApi | undefined> {
-    await this.engine?.dispose();
-    this.engine = undefined;
-
-    let engine: EngineApi;
-    try {
-      engine = await this.config.openProtobuf(serializedProject as Uint8Array);
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      this.reportError(`opening the project in the engine failed: ${err.message ?? 'Unknown error'}`);
-      return undefined;
-    }
-
-    if (this.disposed) {
-      await this.disposeOrphanedEngine(engine);
-      return undefined;
-    }
-
-    try {
-      this.engine = engine;
-
-      const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
-      let project = projectFromJson(json);
-
-      if (this.newEngineShouldPullView) {
-        const queuedView = defined(this.newEngineQueuedView);
-        this.newEngineShouldPullView = false;
-        this.newEngineQueuedView = undefined;
-        const model = defined(project.models.get(this.modelName));
-        const views = [...model.views];
-        views[0] = queuedView;
-        const updatedModel = { ...model, views };
-        project = { ...project, models: mapSet(project.models, this.modelName, updatedModel) };
-        // queueViewUpdate is async; it will round-trip the queued view to the
-        // freshly-installed engine. We intentionally do not await it here.
-        void this.queueViewUpdate(queuedView);
-      }
-
-      // The rendered view here is `project`'s view -- either the engine snapshot
-      // or the queued view spliced in above -- so annotate directly against it.
-      const withErrors = await this.attachConnectorErrors(await this.updateVariableErrors(project));
-
-      if (this.disposed) {
-        this.engine = undefined;
-        await this.disposeOrphanedEngine(engine);
-        return undefined;
-      }
-
-      this.batch(() => {
-        this.project = withErrors;
-        // A reopen restores different project content (the undo/redo path). Bump
-        // the version (Canvas render-cache key) and the generation (detail-panel
-        // remount key) in the SAME notification as the content swap, so the
-        // version-keyed element cache rebuilds from the restored view and the
-        // panels re-seed from restored content. undoRedo deliberately does NOT
-        // bump these synchronously -- see the comment there (#817).
-        this.projectVersion = this.projectVersion + 0.01;
-        this.projectGeneration += 1;
-        this.notify();
-      });
-
-      return engine;
-    } catch (e: unknown) {
-      this.engine = undefined;
-      await this.disposeOrphanedEngine(engine);
-      const err = getErrorDetails(e);
-      this.reportError(`opening the project failed: ${err.message ?? 'Unknown error'}`);
-      return undefined;
-    }
-  }
-
-  /**
-   * Release the WASM engine handle and latch the controller disposed. Safe to
-   * call before openInitialProject() resolves: a still-in-flight open detects
-   * the disposed flag and releases its own engine. Best-effort: a throwing
-   * dispose must not crash the host.
-   */
-  async dispose(): Promise<void> {
-    if (this.disposed) {
-      return;
-    }
-    this.disposed = true;
-    this.listeners.clear();
+  private async runEdit(item: EditItem): Promise<boolean> {
     const engine = this.engine;
-    this.engine = undefined;
-    if (engine) {
-      await this.disposeOrphanedEngine(engine);
-    }
-  }
-
-  /**
-   * Release an engine handle we opened but never wired into a live snapshot,
-   * so the WASM allocation doesn't leak. dispose() is best-effort: a throwing
-   * dispose must not mask the original error we're surfacing.
-   */
-  private async disposeOrphanedEngine(engine: EngineApi): Promise<void> {
-    try {
-      await engine.dispose();
-    } catch {
-      // ignored: the engine is being abandoned regardless
-    }
-  }
-
-  // --- the update pipeline ---
-
-  /**
-   * Apply a content patch and, on success, rebuild `project` from the engine
-   * and schedule a re-simulation. Returns false (without rebuilding or
-   * scheduling) when the patch throws.
-   *
-   * `label` identifies the operation in the user-facing fallback message when
-   * the engine reports no message.
-   */
-  async applyPatch(patch: JsonProjectPatch, label: string): Promise<boolean> {
-    if (!(await this.applyPatchOrReportError(patch, label))) {
+    const committed = this.committed;
+    if (engine === undefined || committed === undefined) {
+      this.fail(item, `${item.label} failed: the project is not open`);
       return false;
     }
-    await this.refreshFromEngine();
-    return true;
-  }
-
-  /**
-   * Apply a patch (allowing errors so partially-invalid models can be edited),
-   * reporting any failure. Returns false on failure so callers can bail. This
-   * is split from refreshFromEngine() so a caller can interleave its own state
-   * updates between the patch and the (async, serialize-heavy) round-trip.
-   */
-  async applyPatchOrReportError(patch: JsonProjectPatch, label: string): Promise<boolean> {
-    const engine = this.engine;
-    if (!engine) {
+    if (item.nextView !== undefined && item.token !== this.token) {
+      // Whatever moved the token already bumped it; bumping again would abort
+      // gestures planned under the current token for no reason.
+      this.failFrom(item, `${item.label} discarded: the project changed while it was being made`, {
+        bumpToken: false,
+      });
       return false;
     }
+    let patch: JsonProjectPatch;
     try {
+      patch = this.patchFor(item, committed);
       await engine.applyPatch(patch, { allowErrors: true });
     } catch (e: unknown) {
       const err = getErrorDetails(e);
-      console.error(`applyPatch error (${label}):`, err.code, err.message, err.details);
-      this.reportError(err.message ?? `Unknown error during ${label}`);
+      console.error(`applyPatch error (${item.label}):`, err.code, err.message, err.details);
+      this.fail(item, err.message ?? `Unknown error during ${item.label}`);
       return false;
     }
-    this.adoptPatchedViews(patch);
+    if (this.disposed) {
+      return false;
+    }
+    try {
+      await this.rebuildCommitted(engine, true);
+    } catch (e: unknown) {
+      // The patch applied, but committed no longer matches the engine. The item
+      // stays at the head of the queue (its next view still renders) while the
+      // resync runs, so handlers keep planning on that view; its fate is decided
+      // only once committed agrees with the engine again.
+      const message = `reading the project back after ${item.label} failed: ${getErrorDetails(e).message ?? 'Unknown error'}`;
+      const outcome = await this.resync(engine, true);
+      if (outcome !== 'reread') {
+        // Reopened: the patch is lost, so the edit failed, and so did every view
+        // edit planned on its next view -- including those enqueued while the
+        // reopen ran, which is why this fails AFTER the swap. Released or
+        // disposed: the queue was already settled.
+        if (outcome === 'reopened') {
+          this.fail(item, message);
+        }
+        return false;
+      }
+    }
+    if (patchChangesModel(patch)) {
+      this.requestMaintenance('save', 'errors', 'connectors', 'sim');
+    } else {
+      // Only views changed. A view feeds no simulation, no diagnostic and no
+      // equation dependency (connector targets are named elements, and creating,
+      // deleting or renaming one is a model op), so a geometry-only edit leaves
+      // everything those refreshes derive as it was. They are not free on a large
+      // model: a C-LEARN-sized run and its follow-up render take seconds.
+      this.requestMaintenance('save');
+    }
     return true;
   }
 
-  /**
-   * Mirror any primary-view upsert carried by a just-applied patch into the
-   * live project, exactly as updateView's optimistic step does.
-   *
-   * Why: preserveLiveView (see updateProject) always keeps the ACTIVE model's
-   * live view on refresh, protecting newer optimistic pans/moves from older
-   * engine snapshots. But a view arriving in an explicit upsertView op (e.g.
-   * a rename patching the variable and its view together) is newer user intent
-   * than the live view by construction -- without this mirror, the stale live
-   * view clobbers the patched one on refresh, the edit looks like a silent
-   * no-op, and the next geometry edit round-trips the stale view back into the
-   * engine, persisting a model/view divergence.
-   *
-   * Elements are re-linked against the CURRENT (pre-patch) variables; refs to
-   * variables the patch introduced resolve as undefined until the follow-up
-   * refreshFromEngine re-links them (same transient the optimistic paths
-   * already tolerate).
-   */
-  private adoptPatchedViews(patch: JsonProjectPatch): void {
-    const variables = this.project?.models.get(this.modelName)?.variables;
-    if (!variables) {
-      return;
+  private patchFor(item: EditItem, committed: Project): JsonProjectPatch {
+    if (item.nextView === undefined || item.baseView === undefined) {
+      return item.buildPatch!(committed);
     }
-    for (const model of patch.models ?? []) {
-      if (model.name !== this.modelName) {
-        continue;
-      }
-      for (const op of model.ops ?? []) {
-        if (op.type === 'upsertView' && op.payload.index === 0) {
-          this.applyOptimisticView(stockFlowViewFromJson(op.payload.view, variables));
-        }
-      }
+    const model = committed.models.get(item.modelName);
+    if (model === undefined) {
+      throw new Error(`model '${item.modelName}' does not exist`);
     }
+    // An edit never persists a viewport ahead of the viewport items: the view it
+    // upserts carries the committed viewport.
+    const committedView = model.views[0];
+    const nextView =
+      committedView === undefined
+        ? item.nextView
+        : { ...item.nextView, viewBox: committedView.viewBox, zoom: committedView.zoom };
+    return { models: [{ name: item.modelName, ops: buildEditOps(model, item.baseView, nextView) }] };
   }
 
-  /** Round-trip the engine's serialized state back into `project` and schedule
-   * a re-simulation. Called after a successful patch. */
-  async refreshFromEngine(): Promise<void> {
+  private async runViewport(item: ViewportItem): Promise<boolean> {
     const engine = this.engine;
-    if (!engine) {
-      return;
+    const view = this.committed?.models.get(item.modelName)?.views[0];
+    const viewport = this.viewport.get(item.modelName);
+    if (engine === undefined || view === undefined || viewport === undefined) {
+      return false;
     }
-    await this.updateProject(await engine.serializeProtobuf());
-    this.scheduleSimRun();
-  }
-
-  /**
-   * Rebuild `project` from a serialized protobuf snapshot. Records undo history
-   * and schedules a save unless told otherwise.
-   *
-   * Preserving the live view: this call may have raced with a newer optimistic
-   * setView (the user kept panning while the round-trip was in flight), so the
-   * engine snapshot is potentially behind. preserveLiveView keeps the active
-   * model's view from the live `project` to avoid the diagram snapping back.
-   *
-   * View-only updates (recordHistory: false) refresh the rendered project and
-   * bump projectVersion but must not touch projectHistory/projectOffset:
-   * viewBox/zoom are serialized into the protobuf, so recording them would let
-   * a single momentum flick evict every real edit from the small undo buffer.
-   */
-  async updateProject(
-    serializedProject: Readonly<Uint8Array>,
-    opts: { scheduleSave?: boolean; recordHistory?: boolean } = {},
-  ): Promise<void> {
-    const { scheduleSave = true, recordHistory = true } = opts;
-    if (this.projectHistory.length > 0) {
-      const current = this.projectHistory[this.projectOffset];
-      if (uint8ArraysEqual(serializedProject, current)) {
-        return;
-      }
-    }
-
-    const engine = this.engine;
-    if (!engine) {
-      return;
-    }
-    // Include stdlib model definitions so the editor can display and navigate
-    // into stdlib modules. The save path does NOT pass includeStdlib, so
-    // stdlib models are never persisted.
-    const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
-    let activeProject = await this.updateVariableErrors(projectFromJson(json));
-    if (this.data) {
-      activeProject = projectAttachData(activeProject, this.data, 'main');
-    }
-    activeProject = preserveLiveView(activeProject, this.project, this.modelName);
-    // Connector annotations must reflect the RENDERED view, so compute them only
-    // after preserveLiveView has swapped in the (possibly newer) live view --
-    // see attachConnectorErrors. Runs after projectAttachData too, so it
-    // preserves the attached series when it rewrites the active model's vars.
-    activeProject = await this.attachConnectorErrors(activeProject);
-
-    if (this.disposed) {
-      return;
-    }
-
-    // Fractionally increase the render-cache key so the Canvas invalidates
-    // with a simple version check. This is display bookkeeping only: the
-    // integer version the save path sends lives in `serverVersion` (#958).
-    const projectVersion = this.projectVersion + 0.01;
-
-    this.batch(() => {
-      if (recordHistory) {
-        const nextHistory = advanceProjectHistory(
-          { projectHistory: this.projectHistory, projectOffset: this.projectOffset },
-          serializedProject,
-          MaxUndoSize,
-        );
-        this.projectHistory = nextHistory.projectHistory;
-        this.projectOffset = nextHistory.projectOffset;
-        this.projectGeneration += 1;
-      }
-      this.project = activeProject;
-      this.projectVersion = projectVersion;
-      this.notify();
-    });
-
-    if (scheduleSave) {
-      this.scheduleSave();
-    }
-  }
-
-  /**
-   * Optimistic view update for a DISCRETE element/structure edit (create,
-   * delete, element/group move, label move, flow/link attach): reflect the new
-   * view in the snapshot immediately (so the UI never flashes stale positions),
-   * then round-trip through the engine.
-   *
-   * `recordHistory` controls whether this edit advances the undo buffer; it
-   * defaults to false so the bare call stays a non-recording view refresh. Each
-   * discrete user edit passes `recordHistory: true` so it becomes individually
-   * undoable. For the handlers that apply a content patch (via
-   * applyPatchOrReportError) BEFORE calling this, the snapshot serialized here
-   * captures the engine state AFTER both the content patch and the view update,
-   * so a single recorded entry covers the whole edit -- no double-recording.
-   *
-   * The per-frame viewport stream (pan/zoom/momentum/resize) does NOT come
-   * through here -- it uses queueViewUpdate, which never records, so a momentum
-   * flick cannot evict real edits from the small undo buffer.
-   */
-  /**
-   * Guard against a view carrying a non-finite (NaN/Infinity) coordinate. Such a
-   * coordinate serializes to JSON `null`, which the engine's patch parser rejects
-   * with "invalid type: null, expected f64" -- historically bricking the model
-   * (every later edit failed and the element rendered displaced). A non-finite
-   * coordinate always means an upstream geometry bug, so we refuse the update
-   * entirely (no optimistic apply, no patch) and surface a descriptive error
-   * rather than corrupting the model. Returns true when the view is safe to
-   * apply. (issue #818)
-   */
-  private viewCoordsAreFinite(view: StockFlowView): boolean {
-    const bad = findNonFiniteViewCoord(view);
-    if (bad === undefined) {
+    if (viewportsEqual(viewportOf(view), viewport)) {
       return true;
     }
-    this.reportError(`internal error: refusing a view update with a non-finite coordinate (${bad})`);
-    return false;
-  }
-
-  async updateView(view: StockFlowView, opts: { recordHistory?: boolean } = {}): Promise<void> {
-    if (!this.viewCoordsAreFinite(view)) {
-      return;
-    }
-    const { recordHistory = false } = opts;
-    this.applyOptimisticView(view);
-
-    const engine = this.engine;
-    if (!engine) {
-      return;
-    }
-    const patch = this.viewPatch(view);
+    const patch: JsonProjectPatch = {
+      models: [
+        {
+          name: item.modelName,
+          ops: [
+            {
+              type: 'upsertView',
+              payload: {
+                index: 0,
+                view: stockFlowViewToJson({ ...view, viewBox: viewport.viewBox, zoom: viewport.zoom }),
+              },
+            },
+          ],
+        },
+      ],
+    };
     try {
       await engine.applyPatch(patch, { allowErrors: true });
     } catch (e: unknown) {
       const err = getErrorDetails(e);
-      console.error('applyPatch error (view update):', err.code, err.message, err.details);
+      console.error('applyPatch error (viewport):', err.code, err.message, err.details);
+      // The engine kept the committed viewport, so the rendered one goes back
+      // to it -- unless a newer viewport was set meanwhile, whose own item
+      // persists it.
+      if (this.viewport.get(item.modelName) === viewport) {
+        this.batch(() => {
+          this.viewport.delete(item.modelName);
+          this.notify();
+        });
+      }
       this.reportError(err.message ?? 'Unknown error during view update');
-      return;
+      return false;
     }
-    await this.updateProject(await engine.serializeProtobuf(), { scheduleSave: true, recordHistory });
-  }
-
-  /**
-   * Like updateView but for viewBox/zoom-only changes (pan/zoom/momentum,
-   * panel resizes): optimistic immediate snapshot, async engine round-trip
-   * that neither records history nor schedules a save. When no engine is yet
-   * installed (a newly imported model still loading), stash the view to replay
-   * once the engine arrives.
-   */
-  async queueViewUpdate(view: StockFlowView): Promise<void> {
-    if (!this.viewCoordsAreFinite(view)) {
-      return;
+    if (this.disposed) {
+      return false;
     }
-    this.applyOptimisticView(view);
-
-    const engine = this.engine;
-    if (!engine) {
-      this.newEngineShouldPullView = true;
-      this.newEngineQueuedView = view;
-      return;
-    }
-    const patch = this.viewPatch(view);
     try {
-      await engine.applyPatch(patch, { allowErrors: true });
-    } catch (e: unknown) {
-      const err = getErrorDetails(e);
-      console.error('applyPatch error (queue view update):', err.code, err.message, err.details);
-      this.reportError(err.message ?? 'Unknown error during view update');
-      return;
+      await this.rebuildCommitted(engine, false);
+    } catch {
+      // Nothing is reported: the re-read keeps the viewport, and a reopen loses
+      // nothing but viewports (committed differs from the last recorded snapshot
+      // only by persisted viewports), which it persists again. A release shows
+      // the engine-unavailable notice.
+      return (await this.resync(engine, false)) === 'reread';
     }
-    await this.updateProject(await engine.serializeProtobuf(), { scheduleSave: false, recordHistory: false });
+    return true;
   }
 
-  /**
-   * Synchronously replace the active model's primary view in `project` and bump
-   * the render version by a small fraction (cache-key only; no history, no
-   * generation bump). This is the optimistic step shared by updateView and
-   * queueViewUpdate. No-op (other than version bump skipped) when no project is
-   * loaded yet.
-   */
-  private applyOptimisticView(view: StockFlowView): void {
-    const project = this.project;
-    if (!project) {
-      return;
+  private async runUndoRedo(item: UndoRedoItem): Promise<boolean> {
+    const delta = item.direction === 'undo' ? 1 : -1;
+    const offset = Math.max(0, Math.min(this.projectOffset + delta, this.projectHistory.length - 1));
+    if (offset === this.projectOffset) {
+      return false;
     }
-    const model = defined(project.models.get(this.modelName));
-    const views = [...model.views];
-    views[0] = view;
-    const updatedModel = { ...model, views };
-    const activeProject = { ...project, models: mapSet(project.models, this.modelName, updatedModel) };
-
+    let engine: EngineApi;
+    try {
+      engine = await this.config.openProtobuf(this.projectHistory[offset] as Uint8Array);
+    } catch (e: unknown) {
+      this.reportError(`opening the project in the engine failed: ${getErrorDetails(e).message ?? 'Unknown error'}`);
+      return false;
+    }
+    let project: Project;
+    try {
+      project = projectFromJson(JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject);
+    } catch (e: unknown) {
+      await disposeQuietly(engine);
+      this.reportError(`opening the project failed: ${getErrorDetails(e).message ?? 'Unknown error'}`);
+      return false;
+    }
+    if (this.disposed) {
+      await disposeQuietly(engine);
+      return false;
+    }
+    const previous = this.engine;
+    this.engine = engine;
+    if (previous !== undefined) {
+      await disposeQuietly(previous);
+    }
     this.batch(() => {
-      this.project = activeProject;
-      this.projectVersion = this.projectVersion + 0.001;
+      this.committed = project;
+      this.projectOffset = offset;
+      this.token += 1;
+      this.restoreSeq += 1;
+      // The restored project carries its own viewports (they are part of each
+      // snapshot), exactly as the engine will save them.
+      this.viewport.clear();
+      if (this.modelStack.length > 0 && !project.models.has(this.modelName)) {
+        this.modelStack = [];
+        this.modelName = 'main';
+        this.navResetSeq += 1;
+      }
+      this.notify();
+    });
+    this.requestMaintenance('save', 'errors', 'connectors', 'sim');
+    return true;
+  }
+
+  /**
+   * Fail edit item `item`. A view edit fails from itself (see failFrom). A
+   * model-only edit has no next view, so no queued edit was planned on it: its
+   * failure is reported, later edits stay queued and the token does not move.
+   * The one thing that can wait behind a model-only edit and depends on it is
+   * an undo/redo queued with `afterQueuedEdits` (undo/redo is otherwise refused
+   * while an edit is queued): it was meant to apply to the change this edit
+   * carried, so it is discarded rather than applied to an older edit.
+   */
+  private fail(item: EditItem, message: string): void {
+    if (item.nextView === undefined) {
+      const index = this.queue.indexOf(item);
+      const dependent = new Set<QueueItem>(
+        index === -1 ? [] : this.queue.slice(index + 1).filter((i) => i.kind === 'undoRedo'),
+      );
+      if (dependent.size > 0) {
+        this.batch(() => {
+          this.queue = this.queue.filter((i) => !dependent.has(i));
+          this.notify();
+        });
+        for (const d of dependent) {
+          d.settle(false);
+        }
+      }
+      this.reportError(message);
+      return;
+    }
+    this.failFrom(item, message);
+  }
+
+  /**
+   * Fail view edit `item`: every later view edit and undo/redo was planned on
+   * its optimistic view (or would drop as stale), so they are discarded with it.
+   * Model-only edits stay queued: they build their whole payload from the
+   * committed project at dequeue, so an unrelated failure does not invalidate
+   * them, and discarding one would silently lose the user's typed text. One
+   * that targets a variable a discarded edit would have created fails on its own
+   * at dequeue and reports its own error. Viewport and query items are not edits
+   * and stay queued too. Bumps the token (unless the caller is dropping an item
+   * whose token already moved) and reports one error.
+   */
+  private failFrom(item: EditItem, message: string, options: { readonly bumpToken?: boolean } = {}): void {
+    const index = this.queue.indexOf(item);
+    const later = index === -1 ? [] : this.queue.slice(index + 1);
+    const discarded = new Set<QueueItem>(
+      later.filter(
+        (i) => (i.kind === 'edit' && i.nextView !== undefined) || i.kind === 'undoRedo' || i.kind === 'open',
+      ),
+    );
+    this.queue = [...this.queue.slice(0, index + 1), ...later.filter((i) => !discarded.has(i))];
+    this.batch(() => {
+      if (options.bumpToken ?? true) {
+        this.token += 1;
+      }
+      this.notify();
+    });
+    for (const d of discarded) {
+      d.settle(false);
+    }
+    const suffix =
+      discarded.size === 0 ? '' : ` (${discarded.size} later edit${discarded.size === 1 ? '' : 's'} discarded)`;
+    this.reportError(`${message}${suffix}`);
+  }
+
+  /**
+   * Bring `committed` back in line with the engine after a patch applied but
+   * reading the project back failed, before the next item runs, and say how:
+   *
+   * - 'reread': reading the engine again succeeded. The patch is kept, and
+   *   history records it when `recordHistory` (the caller's own setting: a
+   *   viewport persist records nothing).
+   * - 'reopened': the last recorded snapshot (the one at the history cursor) was
+   *   opened in a new engine and installed. The patch is lost, as a rolled-back
+   *   edit's is; the live viewports, which the snapshot may not carry, are
+   *   persisted again.
+   * - 'released': the reopen failed too. The engine is released and the
+   *   controller latches engine-unavailable (see becomeUnavailable).
+   * - 'disposed': the controller was disposed meanwhile; an engine the reopen
+   *   produced is released, and the executor releases the installed one.
+   */
+  private async resync(
+    engine: EngineApi,
+    recordHistory: boolean,
+  ): Promise<'reread' | 'reopened' | 'released' | 'disposed'> {
+    try {
+      await this.rebuildCommitted(engine, recordHistory);
+      return this.disposed ? 'disposed' : 'reread';
+    } catch {
+      // fall through to the reopen
+    }
+    if (this.disposed) {
+      return 'disposed';
+    }
+    let reopened: EngineApi;
+    let project: Project;
+    try {
+      reopened = await this.config.openProtobuf(this.projectHistory[this.projectOffset] as Uint8Array);
+      try {
+        project = projectFromJson(JSON.parse(await reopened.serializeJson(undefined, true)) as JsonProject);
+      } catch (e: unknown) {
+        await disposeQuietly(reopened);
+        throw e;
+      }
+    } catch (e: unknown) {
+      if (this.disposed) {
+        return 'disposed';
+      }
+      await this.becomeUnavailable(engine, e);
+      return 'released';
+    }
+    if (this.disposed) {
+      await disposeQuietly(reopened);
+      return 'disposed';
+    }
+    this.engine = reopened;
+    await disposeQuietly(engine);
+    this.batch(() => {
+      this.committed = project;
+      this.notify();
+    });
+    for (const modelName of this.viewport.keys()) {
+      this.push({ kind: 'viewport', modelName, settle: () => {} });
+    }
+    this.requestMaintenance('errors', 'connectors', 'sim');
+    return 'reopened';
+  }
+
+  /**
+   * Latch engine-unavailable after a resync could not reopen the project:
+   * release the engine, settle every queued item but the running one as not
+   * landed, drop pending maintenance, and refuse everything from here on
+   * quietly. One persistent state replaces a toast per refused edit: the host
+   * tells the user once that changes can no longer be saved and offers a reload.
+   */
+  private async becomeUnavailable(engine: EngineApi, cause: unknown): Promise<void> {
+    console.error('the project could not be reloaded:', getErrorDetails(cause).message ?? 'Unknown error');
+    const discarded = this.queue.filter((item) => item !== this.runningItem);
+    this.batch(() => {
+      this.engine = undefined;
+      this.engineUnavailable = true;
+      this.queue = this.queue.filter((item) => item === this.runningItem);
+      this.maintenance.clear();
+      this.notify();
+    });
+    for (const item of discarded) {
+      item.settle(false);
+    }
+    await disposeQuietly(engine);
+  }
+
+  /** Replace `committed` with the engine's serialized state, recording history. */
+  private async rebuildCommitted(engine: EngineApi, recordHistory: boolean): Promise<void> {
+    const serialized = await engine.serializeProtobuf();
+    // Include stdlib model definitions so the editor can display and navigate
+    // into stdlib modules. The save path does NOT include them, so stdlib models
+    // are never persisted.
+    const project = projectFromJson(JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject);
+    if (this.disposed) {
+      return;
+    }
+    this.batch(() => {
+      this.committed = project;
+      const head = this.projectHistory[this.projectOffset];
+      // viewBox/zoom are serialized into the protobuf, so a viewport persist
+      // never records: one momentum flick would evict every real edit from the
+      // small undo buffer.
+      if (recordHistory && (head === undefined || !uint8ArraysEqual(serialized, head))) {
+        const next = advanceProjectHistory(
+          { projectHistory: this.projectHistory, projectOffset: this.projectOffset },
+          serialized,
+          MaxUndoSize,
+        );
+        this.projectHistory = next.projectHistory;
+        this.projectOffset = next.projectOffset;
+      }
       this.notify();
     });
   }
 
-  private viewPatch(view: StockFlowView): JsonProjectPatch {
-    const ops: JsonModelOperation[] = [
-      {
-        type: 'upsertView',
-        payload: { index: 0, view: stockFlowViewToJson(view) },
-      },
-    ];
-    return { models: [{ name: this.modelName, ops }] };
-  }
+  // --- maintenance
 
-  // --- save queue ---
-
-  /**
-   * Schedule a save. Deferred via setTimeout so a burst of edits coalesces.
-   * The continuation short-circuits if the controller was disposed before it
-   * fired. The version to send is NOT captured here: save() reads the live
-   * `serverVersion` at flush time, so a save acknowledged between scheduling
-   * and flushing is reflected.
-   */
-  scheduleSave(): void {
-    setTimeout(() => {
-      if (this.disposed) {
-        return;
-      }
-      void this.save();
-    });
-  }
-
-  /**
-   * Serialize and hand off to the host's save callback, sending the last
-   * server-ACKNOWLEDGED version (`serverVersion`) as the optimistic-concurrency
-   * check -- never a value derived from the fractional `projectVersion` cache
-   * key, whose drift used to cross integer boundaries after ~100 unsaved edits
-   * and corrupt the check (issue #958). A returned version advances
-   * serverVersion; a failed save (rejection or resolved-undefined) leaves it
-   * untouched so the next attempt re-sends the same still-valid version.
-   *
-   * A save already in flight queues exactly one flush. inSave is released in a
-   * finally block: a thrown save (e.g. host-side network failure) must not
-   * leave inSave stuck true, otherwise every subsequent edit silently queues
-   * forever. The queued retry re-reads serverVersion, picking up whatever this
-   * save's outcome left there.
-   */
-  async save(): Promise<void> {
-    if (this.inSave) {
-      this.saveQueued = true;
+  private async runMaintenance(kind: MaintenanceKind): Promise<void> {
+    this.maintenance.delete(kind);
+    const engine = this.engine;
+    if (engine === undefined) {
       return;
     }
-
-    this.inSave = true;
-
     try {
-      const engine = defined(this.engine);
-      const currVersion = this.serverVersion;
-      let version: number | undefined;
-      if (this.config.input.format === 'json') {
-        version = await this.config.save({ format: 'json', data: await engine.serializeJson() }, currVersion);
-      } else {
-        version = await this.config.save({ format: 'protobuf', data: await engine.serializeProtobuf() }, currVersion);
+      switch (kind) {
+        case 'save':
+          await this.serializeForSave(engine);
+          break;
+        case 'errors':
+          await this.refreshErrors(engine);
+          break;
+        case 'connectors':
+          await this.refreshConnectors(engine);
+          break;
+        case 'sim':
+          await this.runSim(engine);
+          break;
       }
+    } catch (e: unknown) {
+      this.reportError(e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+
+  private async serializeForSave(engine: EngineApi): Promise<void> {
+    const project =
+      this.config.input.format === 'json'
+        ? { format: 'json' as const, data: await engine.serializeJson() }
+        : { format: 'protobuf' as const, data: await engine.serializeProtobuf() };
+    void this.flushSave(project);
+  }
+
+  /**
+   * Hand serialized bytes to the host, sending the last server-ACKNOWLEDGED
+   * version (`serverVersion`) as the optimistic-concurrency check. A returned
+   * version advances serverVersion; a failed save (rejection or
+   * resolved-undefined) leaves it untouched so the next attempt re-sends the
+   * same still-valid version.
+   *
+   * A save requested while one is in flight queues exactly one flush of the
+   * LATEST bytes, which re-reads serverVersion when it runs. inSave is released
+   * in a finally block: a thrown host save must not leave it stuck true, or
+   * every later save would queue forever.
+   */
+  private async flushSave(
+    project: { format: 'protobuf'; data: Uint8Array } | { format: 'json'; data: string },
+  ): Promise<void> {
+    if (this.inSave) {
+      this.queuedSave = project;
+      return;
+    }
+    this.inSave = true;
+    try {
+      const version = await this.config.save(project, this.serverVersion);
       if (version) {
         this.serverVersion = version;
         this.notify();
@@ -1036,115 +1812,78 @@ export class ProjectController {
       this.reportError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       this.inSave = false;
-      if (this.saveQueued) {
-        this.saveQueued = false;
-        await this.save();
+      const queued = this.queuedSave;
+      this.queuedSave = undefined;
+      if (queued !== undefined && !this.disposed) {
+        await this.flushSave(queued);
       }
+      this.maybeResolveIdle();
     }
   }
 
-  // --- undo/redo ---
-
-  /**
-   * Move the undo cursor and reopen the engine from the restored snapshot.
-   * Only the cursor (`projectOffset`) moves synchronously; the version and
-   * generation bump (and the notify that drives re-render / details-panel
-   * remount) are deferred to the engine reopen so they land together with the
-   * restored content -- see the inline comment below and openEngineProject
-   * (#817). One consequence: the UndoRedoBar's enabled state, read from the
-   * snapshot, updates a macrotask later (after the reopen notifies) rather than
-   * on click; canUndo()/canRedo() the live methods still reflect the cursor
-   * immediately. After the reopen, if the restored project no longer contains
-   * the viewed model (e.g. undo after creating and drilling into a new
-   * submodel), navigation resets to 'main' and `navResetSeq` bumps so the
-   * Editor clears its selection/details/tool state.
-   */
-  undoRedo(kind: 'undo' | 'redo'): void {
-    const delta = kind === 'undo' ? 1 : -1;
-    let projectOffset = this.projectOffset + delta;
-    projectOffset = Math.min(projectOffset, this.projectHistory.length - 1);
-    projectOffset = Math.max(projectOffset, 0);
-    const serializedProject = defined(this.projectHistory[projectOffset]);
-
-    // Move the undo cursor synchronously so canUndo/canRedo (live methods) and a
-    // rapid second click compute the right next offset. But do NOT bump
-    // projectVersion/projectGeneration or notify yet: this.project is still the
-    // pre-undo content and the rebuild is async. Bumping the version now would
-    // make the Canvas cache its uid lookup from the stale (pre-undo) view, then
-    // the async reopen would swap in the restored view WITHOUT re-bumping the
-    // version -- leaving the version-keyed element cache stale relative to
-    // props.view, the transient inconsistency behind the dangling-ref undo crash
-    // (#817). The bump + notify happens once, inside openEngineProject, in the
-    // same batch as the content swap.
-    this.projectOffset = projectOffset;
-
-    setTimeout(() => {
-      if (this.disposed) {
-        return;
-      }
-      void this.reopenForUndoRedo(serializedProject);
-    });
-  }
-
-  private async reopenForUndoRedo(serializedProject: Readonly<Uint8Array>): Promise<void> {
-    const engine = await this.openEngineProject(serializedProject);
+  private async refreshErrors(engine: EngineApi): Promise<void> {
+    const errors = await engine.getErrors();
+    const simulatable = await engine.isSimulatable();
     if (this.disposed) {
-      // The reopen finished against a disposed controller -- release the
-      // engine it installed so the WASM allocation isn't stranded.
-      this.engine = undefined;
-      if (engine) {
-        await this.disposeOrphanedEngine(engine);
-      }
       return;
     }
-    // After undo/redo, the restored project may not contain the model we were
-    // viewing. Reset navigation if the current model is gone.
-    const project = this.project;
-    if (project && this.modelStack.length > 0 && !project.models.has(this.modelName)) {
-      this.batch(() => {
-        this.modelStack = [];
-        this.modelName = 'main';
-        this.navResetSeq += 1;
-        this.notify();
-      });
-    }
-    this.scheduleSimRun();
-    this.scheduleSave();
-  }
-
-  // --- sim runs ---
-
-  /** Schedule a deferred simulation run. The continuation short-circuits on
-   * dispose or a missing engine. */
-  scheduleSimRun(): void {
-    setTimeout(() => {
-      if (this.disposed) {
-        return;
-      }
-      if (!this.engine) {
-        return;
-      }
-      void this.loadSim();
-    });
+    this.errorDetails = errors;
+    this.simulatable = simulatable;
+    this.notify();
   }
 
   /**
-   * Recalculate status, then run the main model and attach the resulting series
-   * to the root model. Sparklines don't need Loops-That-Matter analysis, and
-   * LTM compilation can blow up WASM memory on dense causal graphs (World3:
-   * ~1.8M elementary circuits -> RuntimeError: unreachable). We request a plain
-   * simulation first; on any failure we retry with LTM explicitly disabled so a
-   * future default flip cannot starve the UI of sparkline data. The first
-   * failure is surfaced as a warning-style error entry.
+   * Fetch the active model's equation dependencies for the aux/flow/stock
+   * variables on its committed view, under their committed idents (the engine
+   * knows no pending rename; annotateConnectors maps them onto the rendered
+   * model). Best-effort: a failing model lookup leaves the previous
+   * dependencies in place, and a per-variable failure drops only that variable
+   * from the check.
    */
-  async loadSim(): Promise<void> {
-    await this.recalculateStatus();
-
-    const engine = this.engine;
-    if (!engine) {
+  private async refreshConnectors(engine: EngineApi): Promise<void> {
+    const modelName = this.modelName;
+    const model = this.committed?.models.get(modelName);
+    const view = model?.views[0];
+    if (model === undefined || view === undefined || isStdlibModel(modelName) || isMacroModel(model)) {
       return;
     }
+    const targets = new Set<string>();
+    for (const el of view.elements) {
+      const ident = el.type === 'aux' || el.type === 'stock' || el.type === 'flow' ? canonicalize(el.name) : undefined;
+      if (ident !== undefined && model.variables.has(ident)) {
+        targets.add(ident);
+      }
+    }
+    let engineModel: EngineModelApi;
+    try {
+      engineModel = await engine.getModel(modelName);
+    } catch {
+      return;
+    }
+    const dependencies = new Map<string, readonly string[]>();
+    for (const ident of targets) {
+      try {
+        dependencies.set(ident, await engineModel.getIncomingLinks(ident));
+      } catch {
+        // dropped from the check
+      }
+    }
+    if (this.disposed) {
+      return;
+    }
+    this.incomingLinks = new Map(this.incomingLinks).set(modelName, dependencies);
+    this.notify();
+  }
 
+  /**
+   * Run the main model and attach the series. Sparklines don't need
+   * Loops-That-Matter analysis, and LTM compilation can blow up WASM memory on
+   * dense causal graphs (World3: ~1.8M elementary circuits -> RuntimeError:
+   * unreachable). A plain run is requested first; on any failure it retries
+   * with LTM explicitly disabled so a future default flip cannot starve the UI
+   * of sparkline data. The first failure is reported.
+   */
+  private async runSim(engine: EngineApi): Promise<void> {
     if (!(await engine.isSimulatable())) {
       return;
     }
@@ -1158,348 +1897,71 @@ export class ProjectController {
         run = await model.run({}, { analyzeLtm: false });
       } catch (e2) {
         this.reportError(e2 instanceof Error ? e2 : new Error(String(e2)));
-        await this.refreshCachedErrors();
+        this.requestMaintenance('errors');
         return;
       }
     }
-
     if (this.disposed) {
       return;
     }
-
-    const idents = run.varNames;
-    const time = run.getSeries('time') ?? new Float64Array(0);
-    const data = new Map<string, Series>(
-      idents.map((ident) => {
-        const values = run.getSeries(ident) ?? new Float64Array(0);
-        return [ident, { name: ident, time, values }];
-      }),
-    );
-    const project = defined(this.project);
-    // Simulation data comes from mainModel(), so variable idents are
-    // root-model-scoped. Always attach data to 'main' so root sparklines stay
-    // populated even when a sim runs while viewing a child model.
-    this.batch(() => {
-      this.project = projectAttachData(project, data, 'main');
+    const data = seriesReusingUnchanged(this.data, run);
+    if (data !== this.data) {
       this.data = data;
+      this.seriesByIdent = groupSeriesByIdent(data, this.seriesByIdent);
       this.notify();
-    });
-    // Refresh cached errors after simulation so the error panel reflects any
-    // new simulation errors (e.g. runtime divide-by-zero).
-    await this.refreshCachedErrors();
+    }
+    // A run can raise simulation errors (e.g. a runtime divide-by-zero).
+    this.requestMaintenance('errors');
   }
 
-  /** Derive simulatability status from the engine and project. */
-  async recalculateStatus(): Promise<void> {
-    const project = this.project;
-    const engine = this.engine;
+  // --- engine lifecycle
 
-    let status: 'ok' | 'error' | 'disabled';
-    if (!engine || !project || project.hasNoEquations) {
-      status = 'disabled';
-    } else if (!(await engine.isSimulatable())) {
-      status = 'error';
+  /**
+   * Latch the controller disposed and release the engine once the running item
+   * (if any) returns. Every other queued item settles as not landed now,
+   * including one the executor had not started yet. Best-effort: a throwing
+   * engine dispose must not crash the host.
+   */
+  async dispose(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    this.listeners.clear();
+    this.maintenance.clear();
+    this.settleQueued();
+    if (this.loop !== undefined) {
+      await this.loop;
     } else {
-      status = 'ok';
+      await this.releaseEngine();
     }
+    this.maybeResolveIdle();
+  }
 
-    if (this.disposed) {
-      return;
-    }
-    if (status !== this.status) {
-      this.status = status;
-      this.notify();
+  /** Settle every queued item but the running one as not landed. */
+  private settleQueued(): void {
+    const settled = this.queue.filter((item) => item !== this.runningItem);
+    this.queue = this.queue.filter((item) => item === this.runningItem);
+    for (const item of settled) {
+      item.settle(false);
     }
   }
 
-  // --- error cache ---
-
-  /**
-   * Re-derive the model-scoped cached errors from the engine. Returns the new
-   * cache (or undefined when no engine is installed).
-   */
-  async refreshCachedErrors(): Promise<CachedErrorDetails | undefined> {
+  private async releaseEngine(): Promise<void> {
     const engine = this.engine;
-    if (!engine) {
-      return undefined;
+    this.engine = undefined;
+    if (engine !== undefined) {
+      await disposeQuietly(engine);
     }
-
-    const modelName = this.modelName;
-    const errors = await engine.getErrors();
-    const { varErrors, unitErrors } = convertErrorDetails(errors, modelName);
-
-    let simError: SimError | undefined;
-    const modelErrors: ModelError[] = [];
-    for (const err of errors) {
-      if (err.modelName && err.modelName !== modelName) {
-        continue;
-      }
-      if (err.kind === SimlinErrorKind.Simulation) {
-        simError = {
-          code: err.code as unknown as ErrorCode,
-          details: err.message ?? undefined,
-        };
-      } else if (!err.variableName) {
-        modelErrors.push({
-          code: err.code as unknown as ErrorCode,
-          // Prefer the bare reason over the terminal-formatted message (the
-          // unit-inference umbrella carries a plain-language sentence there);
-          // most model errors have no details and keep the message.
-          details: err.details ?? err.message ?? undefined,
-        });
-      }
-    }
-    const cachedErrors: CachedErrorDetails = { varErrors, unitErrors, simError, modelErrors };
-    if (this.disposed) {
-      return cachedErrors;
-    }
-    this.cachedErrors = cachedErrors;
-    this.notify();
-    return cachedErrors;
   }
 
-  /**
-   * Annotate the project's active-model variables with their equation/unit
-   * errors. Refreshes the cached errors as a side effect. Returns a new Project;
-   * does not mutate `this.project`.
-   */
-  async updateVariableErrors(project: Project): Promise<Project> {
-    const cached = await this.refreshCachedErrors();
-    if (!cached) {
-      return project;
-    }
-
-    const modelName = this.modelName;
-    const { varErrors, unitErrors } = cached;
-
-    if (varErrors.size > 0) {
-      const model = getOrThrow(project.models, modelName);
-
-      // If all the errors are 'just' that we have no equations, don't scream
-      // "error" at the user -- they are starting from scratch on a new model
-      // and don't expect it to be running yet.
-      if (
-        varErrors.size === model.variables.size &&
-        setsEqual(new Set(varErrors.keys()), new Set(model.variables.keys()))
-      ) {
-        let foundOtherError = false;
-        for (const [, errs] of varErrors) {
-          if (errs.length !== 1 || first(errs).code !== ErrorCode.EmptyEquation) {
-            foundOtherError = true;
-            break;
-          }
-        }
-        if (!foundOtherError) {
-          return { ...project, hasNoEquations: true };
-        }
-      }
-
-      const mutableVars = new Map(model.variables);
-      for (const [ident, errs] of varErrors) {
-        const variable = mutableVars.get(ident);
-        if (variable) {
-          mutableVars.set(ident, { ...variable, errors: errs });
-        }
-      }
-      const updatedModel = { ...model, variables: mutableVars as ReadonlyMap<string, Variable> };
-      project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
-    }
-
-    if (unitErrors.size > 0) {
-      const model = getOrThrow(project.models, modelName);
-      const mutableVars = new Map(model.variables);
-      for (const [ident, errs] of unitErrors) {
-        const variable = mutableVars.get(ident);
-        if (variable) {
-          mutableVars.set(ident, { ...variable, unitErrors: errs });
-        }
-      }
-      const updatedModel = { ...model, variables: mutableVars as ReadonlyMap<string, Variable> };
-      project = { ...project, models: mapSet(project.models, modelName, updatedModel) };
-    }
-
-    return project;
-  }
-
-  /**
-   * Annotate the active model's aux/flow/stock variables with sketch-connector
-   * drift (connectors out of sync with equations; see diagram/connector-sync.ts).
-   * Equation dependencies come from the engine's per-variable `getIncomingLinks`
-   * (authoritative: excludes builtins/TIME, structural flow<->stock edges, and
-   * dotted module-output refs), so the check resolves arrayed/apply-to-all
-   * dependencies correctly. Returns a new Project; does not mutate `this.project`.
-   *
-   * ORDERING: this MUST run on the view that will actually be rendered, so it is
-   * called by each rebuild path AFTER that path has settled on its final view --
-   * NOT tail-called from updateVariableErrors. In updateProject the rendered view
-   * is the live optimistic view that `preserveLiveView` swaps in, which can be
-   * NEWER than the engine-serialized snapshot (e.g. a connector the user just
-   * drew but that has not round-tripped yet); computing against the stale engine
-   * view would flag a "missing" connector that is actually present on screen (or
-   * miss a stale one). The open/undo-reopen paths have no newer live view -- the
-   * engine (or queued) view IS the rendered view -- so they call this directly on
-   * that project.
-   *
-   * Best-effort and non-fatal: any engine failure (a raced rename, a missing
-   * model) leaves the project without connector annotations rather than aborting
-   * the rebuild. Skipped for stdlib/macro models (not user-edited sketches).
-   */
-  async attachConnectorErrors(project: Project): Promise<Project> {
-    const engine = this.engine;
-    const modelName = this.modelName;
-    // hasNoEquations is the brand-new starter model: every variable is empty, so
-    // updateVariableErrors sets the flag and DELIBERATELY skips annotating
-    // `variable.errors` (blank-sketch suppression). Without this guard the
-    // per-variable errors skip below never triggers, and getIncomingLinks would
-    // report no deps for every (empty-equation) variable -- surfacing every
-    // connector drawn while sketching as stale, the wall of warnings the editor
-    // suppresses during initial layout (cf. module-warning.ts).
-    if (!engine || isStdlibModel(modelName) || project.hasNoEquations) {
-      return project;
-    }
-    const model = project.models.get(modelName);
-    const view = model?.views[0];
-    if (!model || !view || isMacroModel(model)) {
-      return project;
-    }
-
-    // Only aux/flow/stock with a primary node on this view are checkable targets.
-    const targetIdents: string[] = [];
-    const seen = new Set<string>();
-    for (const el of view.elements) {
-      if (el.type !== 'aux' && el.type !== 'stock' && el.type !== 'flow') {
-        continue;
-      }
-      const variable = model.variables.get(el.ident);
-      if (!variable || variable.type === 'module' || seen.has(el.ident)) {
-        continue;
-      }
-      // Skip targets with fatal equation/compile errors: their AST did not parse,
-      // so the engine reports no dependencies and every inbound connector would be
-      // surfaced as stale (and every real dep as missing) -- bogus noise while the
-      // user is already seeing the real equation error. This relies on
-      // updateVariableErrors having annotated `errors` first, which every caller
-      // guarantees by running it before attachConnectorErrors on the same project.
-      // In a MIXED model a single not-yet-written variable carries an EmptyEquation
-      // error and is skipped here, so an inbound connector to it reads as a
-      // legitimate forward declaration rather than stale. This skip does NOT cover
-      // the ALL-empty starter model: there updateVariableErrors takes its
-      // hasNoEquations branch and skips annotating `errors` entirely, so `errors`
-      // is empty on every variable -- that case is handled by the hasNoEquations
-      // early return at the top of this method. Unit errors do NOT gate: the AST
-      // is fine there, so dependencies stay authoritative.
-      if (variable.errors && variable.errors.length > 0) {
-        continue;
-      }
-      seen.add(el.ident);
-      targetIdents.push(el.ident);
-    }
-    if (targetIdents.length === 0) {
-      return project;
-    }
-
-    let engineModel: EngineModelApi;
-    try {
-      engineModel = await engine.getModel(modelName);
-    } catch {
-      return project;
-    }
-    if (this.disposed) {
-      return project;
-    }
-
-    // Fetch each target's equation dependencies. A per-variable failure (e.g. a
-    // transient rename mismatch) drops only that variable from the check.
-    const dependencies = new Map<string, readonly string[]>();
-    const fetched = await Promise.all(
-      targetIdents.map(async (ident): Promise<readonly string[] | undefined> => {
-        try {
-          return await engineModel.getIncomingLinks(ident);
-        } catch {
-          return undefined;
-        }
-      }),
-    );
-    if (this.disposed) {
-      return project;
-    }
-    for (let i = 0; i < targetIdents.length; i++) {
-      const deps = fetched[i];
-      if (deps) {
-        dependencies.set(targetIdents[i], deps);
-      }
-    }
-    if (dependencies.size === 0) {
-      return project;
-    }
-
-    const issuesByIdent = computeConnectorErrors({
-      elements: view.elements,
-      variables: model.variables,
-      dependencies,
-    });
-    if (issuesByIdent.size === 0) {
-      return project;
-    }
-
-    const mutableVars = new Map(model.variables);
-    for (const [ident, issues] of issuesByIdent) {
-      const variable = mutableVars.get(ident);
-      if (variable) {
-        mutableVars.set(ident, { ...variable, connectorErrors: issues });
-      }
-    }
-    const updatedModel = { ...model, variables: mutableVars as ReadonlyMap<string, Variable> };
-    return { ...project, models: mapSet(project.models, modelName, updatedModel) };
-  }
-
-  /**
-   * Re-annotate the ACTIVE model's variables with equation/unit errors AND
-   * connector drift after a model switch that did NOT rebuild the project.
-   *
-   * `updateVariableErrors` and `attachConnectorErrors` are model-scoped and are
-   * otherwise reached only from the rebuild/open paths (which run `projectFromJson`
-   * and reset every model's annotations). Drilling into a module (drillIntoModule)
-   * only flips `modelName` -- no rebuild -- so without this the newly-active child
-   * model's variables would show neither error dots nor connector warnings on
-   * first navigation, even though the error PANEL (refreshCachedErrors) re-scopes.
-   * This subsumes the bare refreshCachedErrors those paths used to call, since
-   * updateVariableErrors refreshes the panel cache too.
-   *
-   * Commit guard: the two engine round-trips (getErrors, getIncomingLinks) can
-   * race a rebuild or a further navigation that lands first; committing our stale
-   * result would clobber the fresher (or differently model-scoped) project. So we
-   * commit ONLY when neither `this.project` nor `this.modelName` moved while we
-   * were in flight. The panel cache was still refreshed above (it is model-scoped
-   * and self-correcting), so skipping the commit loses nothing.
-   */
-  async refreshActiveModelAnnotations(): Promise<void> {
-    const project = this.project;
-    const modelName = this.modelName;
-    if (!this.engine || !project) {
-      return;
-    }
-    let annotated = await this.updateVariableErrors(project);
-    annotated = await this.attachConnectorErrors(annotated);
-    if (this.disposed || this.project !== project || this.modelName !== modelName) {
-      return;
-    }
-    this.project = annotated;
-    this.notify();
-  }
-
-  // --- active-model navigation ---
+  // --- navigation
 
   /**
    * Drill into a module's child model. Pushes a stack entry capturing the
-   * current (parent) selection/viewport, switches the active model, and clears
-   * the rendered model's optimistic view to the child's. Returns the selection
-   * the Editor should adopt (empty) or undefined when the target model is not
-   * present (a guard against pushing a nonexistent model). Viewport restoration
-   * is not needed on drill-in (the child keeps its own stored view).
-   *
-   * @param currentSelection the Editor's live selection to capture for restore
-   * @param currentViewBox/currentZoom the active view's viewport to capture
+   * parent's selection/viewport and switches the active model. Returns the
+   * selection the Editor should adopt (empty), or undefined when the target
+   * model is not present.
    */
   drillIntoModule(
     moduleIdent: string,
@@ -1508,8 +1970,7 @@ export class ProjectController {
     currentViewBox: Rect,
     currentZoom: number,
   ): NavigationOutcome {
-    const project = this.project;
-    if (!project || !project.models.has(targetModelName)) {
+    if (!this.committed?.models.has(targetModelName)) {
       return { restoredSelection: undefined };
     }
     const newStack = pushModule(
@@ -1520,27 +1981,16 @@ export class ProjectController {
       currentViewBox,
       currentZoom,
     );
-    const newModelName = currentModelName(newStack);
     this.batch(() => {
       this.modelStack = newStack;
-      this.modelName = newModelName;
+      this.modelName = currentModelName(newStack);
       this.notify();
     });
-    // Drill-in does NOT rebuild the project (only modelName flips), so annotate
-    // the newly-active child model's variables directly -- error dots AND
-    // connector warnings, not just the error panel. Fire-and-forget: the
-    // snapshot updates when it resolves. (refreshActiveModelAnnotations refreshes
-    // the panel cache too, subsuming the old bare refreshCachedErrors call.)
-    void this.refreshActiveModelAnnotations();
+    this.requestMaintenance('connectors');
     return { restoredSelection: new Set<UID>() };
   }
 
-  /**
-   * Navigate back one level. Restores the parent's selection (returned to the
-   * Editor) and viewport (applied internally via queueViewUpdate, which now
-   * resolves getView() to the just-restored model because modelName is updated
-   * synchronously first). Returns undefined selection when the stack is empty.
-   */
+  /** Navigate back one level, restoring the parent's selection and viewport. */
   navigateBack(): NavigationOutcome {
     if (this.modelStack.length === 0) {
       return { restoredSelection: undefined };
@@ -1548,10 +1998,7 @@ export class ProjectController {
     return this.applyNavigation(popModule(this.modelStack));
   }
 
-  /**
-   * Navigate to a breadcrumb level. Same restoration contract as navigateBack.
-   * Returns undefined selection when targetLevel is out of range.
-   */
+  /** Navigate to a breadcrumb level. Same restoration contract as navigateBack. */
   navigateToLevel(targetLevel: number): NavigationOutcome {
     if (targetLevel >= this.modelStack.length) {
       return { restoredSelection: undefined };
@@ -1569,67 +2016,81 @@ export class ProjectController {
     this.batch(() => {
       this.modelStack = result.newStack;
       this.modelName = result.restoredModelName;
+      // Navigation need not wait for the queue: the viewport restore renders now
+      // and persists through a viewport item for the restored model.
+      if (this.committed?.models.get(result.restoredModelName)?.views[0] !== undefined) {
+        this.setViewport(result.restoredModelName, { viewBox: result.restoredViewBox, zoom: result.restoredZoom });
+      }
       this.notify();
     });
-    // Restore the parent model's viewport. modelName was updated synchronously
-    // above, so getView() (via this.project) resolves to the restored model --
-    // no setState-callback deferral is needed. Fire-and-forget round-trip.
-    const view = this.getView();
-    if (view) {
-      // queueViewUpdate round-trips through updateProject, which re-annotates the
-      // restored active model's variables (error dots + connector warnings) as a
-      // side effect -- so back-navigation is covered without a separate pass.
-      void this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
-    } else {
-      // No stored view means no rebuild will run, so annotate the restored
-      // model's variables directly (mirrors drillIntoModule).
-      void this.refreshActiveModelAnnotations();
-    }
-    // Refresh the model-scoped error PANEL promptly. The annotation paths above
-    // also refresh it (via updateVariableErrors), but this keeps the panel snappy
-    // and covers a queueViewUpdate that bails on a non-finite restored viewport.
-    void this.refreshCachedErrors();
+    this.requestMaintenance('connectors');
     return { restoredSelection: result.restoredSelection };
   }
 
-  // --- read accessors used by the Editor's op builders ---
-
-  getEngine(): EngineApi | undefined {
-    return this.engine;
-  }
+  // --- read accessors
 
   getProject(): Project | undefined {
-    return this.project;
+    return this.snapshot.project;
   }
 
   getModel(): Model | undefined {
-    const project = this.project;
-    if (!project) {
-      return undefined;
-    }
-    return project.models.get(this.modelName);
+    return this.snapshot.project?.models.get(this.modelName);
   }
 
   getView(): StockFlowView | undefined {
-    const model = this.getModel();
-    if (!model) {
-      return undefined;
-    }
-    return model.views[0];
+    return this.getModel()?.views[0];
   }
 
   getModelName(): string {
     return this.modelName;
   }
 
-  // --- error surfacing ---
+  private getRenderedView(modelName: string): StockFlowView | undefined {
+    return this.snapshot.project?.models.get(modelName)?.views[0];
+  }
 
-  /** Forward a transient error to the host's toast UI (never presentation
-   * state the controller owns). Accepts a message string or an Error. */
+  /**
+   * The idents a new or renamed element may not take in `modelName`: the
+   * rendered model's variables (the committed variables, with each pending
+   * rename applied, so a name a pending rename frees is free) plus every name
+   * on the rendered view, which carries each pending create and rename.
+   */
+  usedIdents(modelName: string = this.modelName): ReadonlySet<string> {
+    const model = this.snapshot.project?.models.get(modelName);
+    const used = new Set<string>(model?.variables.keys() ?? []);
+    for (const el of model?.views[0]?.elements ?? []) {
+      if (isNamedViewElement(el)) {
+        used.add(canonicalize(el.name));
+      }
+    }
+    return used;
+  }
+
+  /** A default name for a new element of `modelName` that no variable or pending create uses. */
+  newVariableName(base: string, modelName: string = this.modelName): string {
+    return allocateVariableName(base, this.usedIdents(modelName));
+  }
+
+  /** The error to show when `newName` cannot name an element (see nameCollisionError). */
+  nameError(newName: string, currentIdent: string | undefined, modelName: string = this.modelName): string | undefined {
+    return nameCollisionError(newName, currentIdent, this.usedIdents(modelName));
+  }
+
+  // --- error surfacing
+
+  /** Forward a transient error to the host's toast UI. */
   private reportError(err: string | Error): void {
     if (this.disposed) {
       return;
     }
     this.config.onError(err instanceof Error ? err : new Error(err));
+  }
+}
+
+async function disposeQuietly(engine: EngineApi): Promise<void> {
+  try {
+    await engine.dispose();
+  } catch {
+    // ignored: the engine is being abandoned regardless
   }
 }

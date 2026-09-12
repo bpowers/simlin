@@ -5,7 +5,7 @@
 import { describe, it, expect } from '@rstest/core';
 
 import { ErrorCode } from '@simlin/core/datamodel';
-import type { Aux, EquationError, UnitError, Variable } from '@simlin/core/datamodel';
+import type { Aux, EquationError, UnitError, Variable, VariableWarning } from '@simlin/core/datamodel';
 
 import { variableDetailsView } from '../variable-details-display';
 
@@ -45,7 +45,19 @@ describe('variableDetailsView', () => {
       equationErrors: [],
       unitWarnings: [],
       connectorWarnings: [],
+      warnings: [],
     });
+  });
+
+  it('keeps the chart and surfaces engine advisories as warnings (not fatal)', () => {
+    const advisory: VariableWarning = {
+      code: ErrorCode.Generic,
+      details: "stock 'level': its inflow list repeats 'f'",
+    };
+    const view = variableDetailsView(aux({ warnings: [advisory] }));
+    expect(view.showChart).toBe(true);
+    expect(view.warnings).toEqual([advisory]);
+    expect(view.equationErrors).toEqual([]);
   });
 
   it('surfaces connector-sync drift as non-fatal warnings (chart stays)', () => {

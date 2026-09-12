@@ -401,6 +401,8 @@ struct SourceVariableFields {
     gf: Option<datamodel::GraphicalFunction>,
     inflows: Vec<String>,
     outflows: Vec<String>,
+    repeated_inflows: Vec<String>,
+    repeated_outflows: Vec<String>,
     module_refs: Vec<datamodel::ModuleReference>,
     /// A `Module` variable's referenced target model; empty for every other
     /// kind (NOT the owning model, which is `owner_model`).
@@ -414,9 +416,15 @@ struct SourceVariableFields {
 
 impl SourceVariableFields {
     fn from_datamodel(var: &datamodel::Variable, owner_model: &str) -> Self {
+        // The sets the compiler integrates, and what the lists repeat, for the
+        // `RepeatedStockFlow` advisory. Every salsa reader of a stock's flows
+        // reads these inputs, so this is where the set is taken for them.
         let (inflows, outflows) = match var {
-            datamodel::Variable::Stock(s) => (s.inflows.clone(), s.outflows.clone()),
-            _ => (Vec::new(), Vec::new()),
+            datamodel::Variable::Stock(s) => (
+                datamodel::distinct_stock_flows(&s.inflows),
+                datamodel::distinct_stock_flows(&s.outflows),
+            ),
+            _ => Default::default(),
         };
         let (module_refs, referenced_model_name) = match var {
             datamodel::Variable::Module(m) => (m.references.clone(), m.model_name.clone()),
@@ -435,8 +443,10 @@ impl SourceVariableFields {
                 datamodel::Variable::Aux(a) => a.gf.clone(),
                 _ => None,
             },
-            inflows,
-            outflows,
+            inflows: inflows.flows,
+            outflows: outflows.flows,
+            repeated_inflows: inflows.repeated,
+            repeated_outflows: outflows.repeated,
             module_refs,
             referenced_model_name,
             owner_model: owner_model.to_string(),
@@ -472,6 +482,8 @@ fn source_variable_from_datamodel(
         f.gf,
         f.inflows,
         f.outflows,
+        f.repeated_inflows,
+        f.repeated_outflows,
         f.module_refs,
         f.referenced_model_name,
         f.owner_model,
@@ -480,6 +492,10 @@ fn source_variable_from_datamodel(
         f.compat,
     )
 }
+
+#[cfg(test)]
+#[path = "sync_flow_list_tests.rs"]
+mod flow_list_tests;
 
 // ── Incremental sync ───────────────────────────────────────────────────
 
@@ -520,6 +536,12 @@ fn update_source_variable(
     }
     if *source_var.outflows(&*db) != f.outflows {
         source_var.set_outflows(db).to(f.outflows);
+    }
+    if *source_var.repeated_inflows(&*db) != f.repeated_inflows {
+        source_var.set_repeated_inflows(db).to(f.repeated_inflows);
+    }
+    if *source_var.repeated_outflows(&*db) != f.repeated_outflows {
+        source_var.set_repeated_outflows(db).to(f.repeated_outflows);
     }
     if *source_var.module_refs(&*db) != f.module_refs {
         source_var.set_module_refs(db).to(f.module_refs);

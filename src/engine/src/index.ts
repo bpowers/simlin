@@ -48,7 +48,7 @@ export * from './json-types';
 
 // Internal types needed for error handling
 export type { ErrorDetail } from './internal/types';
-export { SimlinErrorKind, SimlinUnitErrorKind } from './internal/types';
+export { SimlinErrorKind, SimlinErrorSeverity, SimlinUnitErrorKind } from './internal/types';
 
 // Backend interface and handle types
 export type { EngineBackend, ProjectHandle, ModelHandle, SimHandle } from './backend';

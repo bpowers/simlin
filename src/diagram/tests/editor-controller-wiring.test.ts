@@ -16,8 +16,8 @@
 // during the lazy state init), capture the config the Editor passed to the
 // ProjectController constructor by spying on it, then exercise the config's
 // save() directly and drive onError() and assert the resulting toast appears in
-// the rendered DOM. openInitialProject/dispose/scheduleSimRun are stubbed so the
-// test stays off WASM.
+// the rendered DOM. openInitialProject and dispose are stubbed so the test stays
+// off WASM.
 
 import { describe, it, expect, afterEach, rs } from '@rstest/core';
 
@@ -46,7 +46,6 @@ function makeProps(overrides: Partial<EditorProps> = {}): EditorProps {
 function renderAndCaptureConfig(props: EditorProps): { config: ControllerConfig; result: RenderResult } {
   rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
   rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-  rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
 
   let captured: ControllerConfig | undefined;
   const real = ProjectControllerModule.ProjectController;
@@ -117,7 +116,6 @@ describe('Editor controller config wiring', () => {
     // render. Render under StrictMode and assert exactly one pill and no toast.
     rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'openInitialProject').mockResolvedValue(undefined);
     rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'dispose').mockResolvedValue(undefined);
-    rs.spyOn(ProjectControllerModule.ProjectController.prototype, 'scheduleSimRun').mockImplementation(() => {});
 
     act(() => {
       render(

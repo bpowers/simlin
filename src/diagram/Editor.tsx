@@ -26,10 +26,6 @@ import {
   NamedViewElement,
   StockFlowView,
   GraphicalFunction,
-  LinkViewElement,
-  FlowViewElement,
-  CloudViewElement,
-  viewElementType,
   Rect,
   isNamedViewElement,
   stockToJson,
@@ -53,15 +49,14 @@ import type { SimSpecField } from './sim-spec-draft';
 import { renderSvgToString } from './render-common';
 import { Status } from './Status';
 import { StockIcon } from './StockIcon';
-import { UndoRedoBar } from './UndoRedoBar';
-import { VariableDetails } from './VariableDetails';
+import { UNDO_REDO_BAR_ATTRIBUTE, UndoRedoBar } from './UndoRedoBar';
+import { VariableDetails, type PendingSubmission } from './VariableDetails';
 import { ModuleDetails } from './ModuleDetails';
 import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
-import { Canvas, inCreationUid } from './drawing/Canvas';
-import { Point, searchableName } from './drawing/common';
-import { computeFlowAttachment } from './flow-attach';
-import { applyGroupMovement } from './group-movement';
+import { Canvas, type GestureCommit } from './drawing/Canvas';
+import { encodeNameNewlines, searchableName } from './drawing/common';
+import { sameGeometry } from './gesture-planner';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 import {
   EDITOR_ROOT_ATTRIBUTE,
@@ -73,7 +68,8 @@ import {
 import { isStdlibModel } from './module-navigation';
 import { countModelInstances } from './module-details-utils';
 import { buildModuleReferencePayload } from './module-wiring';
-import { buildVariableRenameOps } from './rename-ops';
+import { relabelVariable } from './rename-ops';
+import { planDelete } from './plan-delete';
 import { BreadcrumbBar } from './BreadcrumbBar';
 import { ProjectController, type ProjectSnapshot, type EngineApi, type Viewport } from './project-controller';
 
@@ -82,6 +78,10 @@ export type { Viewport } from './project-controller';
 import styles from './Editor.module.css';
 // These must stay in sync with --panel-width-sm/-md/-lg in theme.css (and the
 // media-query breakpoints in Editor.module.css).
+// Marks the details slot. A press inside it is the panel's own (it blurs and
+// commits normally); a press anywhere else flushes the panel's draft first.
+const DETAILS_SLOT_ATTRIBUTE = 'data-simlin-details-slot';
+
 const SearchbarWidthSm = 359;
 const SearchbarWidthMd = 420;
 const SearchbarWidthLg = 480;
@@ -114,10 +114,7 @@ function panelWidth(): number {
 // layer on every Editor render.
 const noopRename = (_oldName: string, _newName: string): void => {};
 const noopSetSelection = (_selected: ReadonlySet<UID>): void => {};
-const noopMoveSelection = (_position: Point): void => {};
-const noopMoveFlow = (_e: FlowViewElement, _t: number, _p: Point): void => {};
-const noopMoveLabel = (_u: UID, _s: 'top' | 'left' | 'bottom' | 'right'): void => {};
-const noopAttachLink = (_element: LinkViewElement, _to: string): void => {};
+const noopCommitGesture = (_commit: GestureCommit): void => {};
 const noopCreateVariable = (_element: ViewElement): void => {};
 const noop = (): void => {};
 const noopViewBoxChange = (_viewBox: Rect, _zoom: number): void => {};
@@ -155,16 +152,61 @@ function getErrorDetails(error: unknown): ErrorDetailsLike {
   return {};
 }
 
-// Editor state is now split in two: the project/engine coordination state
-// lives in the ProjectController and is mirrored here as a single immutable
-// `controllerSnapshot` field (replaced wholesale on every controller change,
-// so a new snapshot identity drives a re-render). The remaining fields are
-// genuinely Editor-owned UI/presentation state. Held as one useState object
-// (see the function component) with a class-like merging setState helper.
+/**
+ * The React key of the details panel for `variable`. The panels seed their
+ * Slate editors once per mount, so the key is what re-seeds them: it changes
+ * exactly when the selected variable's committed, user-editable content changes
+ * (a landed edit to it, an undo), or the read-only flag flips. It deliberately
+ * excludes errors (the highlight is decorated from props), sim data, connector
+ * drift, and every global counter, so an unrelated edit landing while the user
+ * types does not remount the panel and discard the draft.
+ */
+export function detailsPanelKey(
+  modelName: string,
+  elementUid: UID,
+  variable: Variable,
+  restoreSeq: number,
+  readOnly: boolean,
+): string {
+  // The element (a uid is unique only within its model), not the variable's
+  // ident: a rename changes the ident (at once, while it is pending) but none of
+  // the content a panel seeds.
+  const content =
+    variable.type === 'module'
+      ? [
+          modelName,
+          elementUid,
+          variable.type,
+          variable.modelName,
+          variable.references,
+          variable.units,
+          variable.documentation,
+        ]
+      : [
+          modelName,
+          elementUid,
+          variable.type,
+          variable.equation,
+          variable.units,
+          variable.documentation,
+          variable.type === 'stock' ? undefined : variable.gf,
+        ];
+  // restoreSeq: restored content can equal the content the panel was seeded
+  // from (a draft's edit landed and was undone before a render), and the panel
+  // must still drop that text; see ProjectSnapshot.restoreSeq.
+  return `${JSON.stringify(content)}-r${restoreSeq}${readOnly ? '-ro' : ''}`;
+}
+
+// The project/engine coordination state lives in the ProjectController and is
+// mirrored here as a single immutable `controllerSnapshot` field (replaced
+// wholesale on every controller change, so a new snapshot identity drives a
+// re-render). The remaining fields are genuinely Editor-owned UI/presentation
+// state. Held as one useState object (see the function component) with a
+// class-like merging setState helper.
 interface EditorState {
   // The latest immutable snapshot published by the ProjectController. Holds
-  // project, projectVersion, serverVersion, projectGeneration, status,
-  // cachedErrors, data, modelName, modelStack, and the undo/redo predicates.
+  // the rendered project, projectVersion, serverVersion, status, cachedErrors,
+  // data, modelName, modelStack, the undo/redo predicates, and the token.
   controllerSnapshot: ProjectSnapshot;
   // Toast-style transient errors. These STAY in the Editor as UI state: the
   // controller surfaces errors via its onError config callback, which appends
@@ -183,6 +225,9 @@ interface EditorState {
   // fresh URL per render; revoked when replaced, cleared, or on unmount.
   snapshotUrl: string | undefined;
   variableDetailsActiveTab: number;
+  // Whether the open details panel holds a draft (onDraftStateChange); while it
+  // does, the panel's key is held (see getDetails).
+  panelHasDraft: boolean;
 }
 
 // Enforces the Editor's selection invariant for the element-mutation paths
@@ -318,6 +363,11 @@ interface EditorPropsBase {
   // the live viewport during a gesture and commits it once on settle. A
   // content-equal republished view fires nothing.
   onViewportChange?: (modelName: string, viewport: Viewport) => void;
+  // Called by the Reload action of the notice shown once the engine is lost
+  // and cannot be reopened (ProjectSnapshot.engineUnavailable). Default: reload
+  // the page. A host whose page reload would not reload the project (or would
+  // discard more than the Editor) supplies its own.
+  onReload?: () => void;
 }
 
 export type EditorProps = EditorPropsBase & ProjectInputProps;
@@ -359,6 +409,28 @@ interface EditorRefs {
   // value and leak one URL; reading and revoking this field synchronously in
   // setSnapshotUrl is race-free.
   liveSnapshotUrl: string | undefined;
+  // True between a pointer press inside the editor and its release, wherever
+  // the release lands (see the mount effect's window listeners). Undo/redo is
+  // refused while it is set: a gesture planned on the current view could not
+  // commit once the undo replaced that view.
+  gestureLive: boolean;
+  // The open details panel's draft commit, registered by the panel (see
+  // registerDraftFlush). A canvas press calls it before the gesture starts; it
+  // returns true when it submitted a changed draft.
+  draftFlush: (() => boolean) | undefined;
+  // The latest pending model-only submission per target (model, label,
+  // variable), until it settles. A panel's flush on a canvas press and its blur
+  // afterwards submit the same draft; a submission identical to the LATEST
+  // pending one is not enqueued again. Any other is: a draft changed and changed
+  // back (A, B, A) must still land as A, which comparing against every pending
+  // submission would drop.
+  pendingModelEdits: Map<string, { readonly content: string; readonly landed: Promise<boolean> }>;
+  // The latest pending details-panel submission per element (model, uid), by
+  // field, until each field's edit settles: a panel reopened meanwhile seeds
+  // from it rather than from committed text the submission is replacing.
+  pendingPanelSubmissions: Map<string, PendingSubmission>;
+  // The details panel's last key and what it was held against (see getDetails).
+  heldPanelKey: { readonly base: string; readonly key: string } | undefined;
 }
 
 // The snapshot of props + state that escaped callbacks (the controller
@@ -444,6 +516,11 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       nextErrorKey: 1,
       errorKeys: new WeakMap<Error, number>(),
       liveSnapshotUrl: undefined,
+      gestureLive: false,
+      draftFlush: undefined,
+      pendingModelEdits: new Map<string, { readonly content: string; readonly landed: Promise<boolean> }>(),
+      pendingPanelSubmissions: new Map<string, PendingSubmission>(),
+      heldPanelKey: undefined,
     };
     makeController(props);
   }
@@ -465,6 +542,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     drawerOpen: false,
     snapshotUrl: undefined,
     variableDetailsActiveTab: 0,
+    panelHasDraft: false,
   }));
 
   // Class-parity setState: merges a partial patch (or a functional updater that
@@ -541,16 +619,24 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     // derived from the CURRENT prop on every render.
 
     document.addEventListener('keydown', handleKeyDown);
+    // A press inside the editor can be released anywhere -- over the host page,
+    // outside the browser window (the window loses focus) -- so the release is
+    // observed on the window, in the capture phase, where no handler can stop
+    // it first.
+    window.addEventListener('pointerup', handleGestureRelease, true);
+    window.addEventListener('pointercancel', handleGestureRelease, true);
+    // A context menu opened by the press can swallow its pointerup.
+    window.addEventListener('contextmenu', handleGestureRelease, true);
+    window.addEventListener('blur', handleGestureRelease);
     // Captured here (not read in the cleanup): React detaches refs before
     // passive-effect cleanups run, so rootRef.current is null by then.
     const root = rootRef.current;
 
-    // Open the engine, then schedule the first sim run. The controller guards
-    // its own dispose-races internally (see ProjectController.dispose), so no
-    // Editor-side timer or unmounted flag is needed here.
-    void controller.openInitialProject().then(() => {
-      r.controller?.scheduleSimRun();
-    });
+    // Open the engine. The open item requests the first sim run, error refresh
+    // and connector check itself, and the controller guards its own
+    // dispose-races (see ProjectController.dispose), so no Editor-side timer or
+    // unmounted flag is needed here.
+    void controller.openInitialProject();
 
     return () => {
       // componentWillUnmount: remove the keydown listener, unsubscribe (before
@@ -565,6 +651,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       // setup above so a StrictMode mount/unmount/mount cycle builds a fresh
       // controller on remount and leaves nothing stuck.
       document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('pointerup', handleGestureRelease, true);
+      window.removeEventListener('pointercancel', handleGestureRelease, true);
+      window.removeEventListener('contextmenu', handleGestureRelease, true);
+      window.removeEventListener('blur', handleGestureRelease);
       if (root) {
         // A key on <body> must never resolve to an unmounted instance.
         releaseEditorRoot(root);
@@ -635,7 +725,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // Report the committed viewport of the viewed model whenever it changes by
   // VALUE (offset, size or zoom), including the first render that has a view.
   // Keyed on the controller snapshot: every viewport commit -- a settled
-  // gesture's queueViewUpdate, the mount-time fit, an idle resize, module
+  // gesture's setViewport, the mount-time fit, an idle resize, module
   // navigation's viewport restore -- publishes a new snapshot, and the
   // prev-value ref keeps content-equal republishes (a content edit, a save
   // acknowledgment) silent. The Canvas holds a gesture's live viewport locally
@@ -815,6 +905,21 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // nothing would drop the caret.
   const handlePointerDownCapture = React.useCallback((e: React.PointerEvent<HTMLDivElement>): void => {
     handleActivity();
+    r.gestureLive = true;
+    // A press outside the details panel does not blur the panel's editors when
+    // its default is prevented (the Canvas prevents every press), so flush the
+    // draft now: its edit is enqueued ahead of whatever the press starts.
+    // Capture phase runs before the Canvas's own handler. The undo/redo controls
+    // are exempt: a draft flushed on their press would queue an edit, and undo
+    // refuses while one is queued, so the click would do nothing. handleUndoRedo
+    // flushes the draft itself and queues the undo behind it.
+    const target = e.target as Element | null;
+    const exempt =
+      typeof target?.closest === 'function' &&
+      target.closest(`[${DETAILS_SLOT_ATTRIBUTE}], [${UNDO_REDO_BAR_ATTRIBUTE}]`) !== null;
+    if (!exempt) {
+      r.draftFlush?.();
+    }
     const root = rootRef.current;
     if (!root) {
       return;
@@ -837,40 +942,43 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     }
   }, []);
 
+  const handleGestureRelease = React.useCallback((): void => {
+    r.gestureLive = false;
+  }, []);
+
+  // The panel registers its draft commit; the unregistration only clears a
+  // registration that is still its own, so a remounting panel's cleanup cannot
+  // drop the new mount's registration.
+  const registerDraftFlush = React.useCallback((flush: () => boolean): (() => void) => {
+    r.draftFlush = flush;
+    return () => {
+      if (r.draftFlush === flush) {
+        r.draftFlush = undefined;
+      }
+    };
+  }, []);
+
+  // The controller's CURRENT snapshot. Handlers plan edits on it rather than on
+  // the mirror in React state, which lags a render behind an enqueue: two
+  // handlers in one tick would otherwise both plan on the view before the
+  // first, and the second full-replacement view would drop the first edit.
+  const currentSnapshot = (): ProjectSnapshot => {
+    return r.controller?.getSnapshot() ?? latest.current.state.controllerSnapshot;
+  };
+
   const isUndoEnabled = (): boolean => {
-    return latest.current.state.controllerSnapshot.canUndo;
+    return currentSnapshot().canUndo;
   };
 
   const isRedoEnabled = (): boolean => {
-    return latest.current.state.controllerSnapshot.canRedo;
+    return currentSnapshot().canRedo;
   };
 
-  // Delegating accessor for the active data-model Project. Kept for the
-  // Editor's own render/op-building reads. No external consumer (HostedWebEditor,
-  // simlin-serve's EditorHost) uses it. Named getProject (the class method was
-  // project()) to avoid colliding with the many `const project = ...` locals.
+  // The rendered data-model Project (committed content plus pending edits).
+  // Named getProject (the class method was project()) to avoid colliding with
+  // the many `const project = ...` locals.
   const getProject = (): Project | undefined => {
-    return latest.current.state.controllerSnapshot.project;
-  };
-
-  // Op-building helpers go through the controller's apply* / view methods, so
-  // they generally don't need the raw engine handle. Retained as a delegating
-  // accessor (returns undefined before the engine opens / after dispose). Named
-  // getEngineProject (the class method was engine()) to avoid colliding with the
-  // `const engine = ...` locals.
-  const getEngineProject = (): EngineProject | undefined => {
-    return r.controller?.getEngine() as EngineProject | undefined;
-  };
-
-  // Convenience wrapper for the simple edit handlers: apply a patch and, on
-  // success, refresh from the engine. All engine/save/sim coordination lives
-  // in the controller now. Returns false (without refreshing) on patch failure.
-  const applyPatchAndRefresh = async (patch: JsonProjectPatch, label: string): Promise<boolean> => {
-    const controller = r.controller;
-    if (!controller) {
-      return false;
-    }
-    return await controller.applyPatch(patch, label);
+    return currentSnapshot().project;
   };
 
   // Surface a transient error to the toast list. Op-building handlers that
@@ -883,10 +991,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     }));
   };
 
-  // The active model name lives in the controller snapshot now. Op-building
-  // patches target it so operations work at any module nesting depth.
+  // The active model name lives in the controller snapshot. Edits target it so
+  // operations work at any module nesting depth.
   const modelName = (): string => {
-    return latest.current.state.controllerSnapshot.modelName;
+    return currentSnapshot().modelName;
   };
 
   // The active MODEL cannot be edited and its details panels must not open:
@@ -916,34 +1024,113 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     return !!latest.current.props.readOnlyMode || isModelLocked();
   };
 
-  // Thin delegating wrappers so the Editor's op-building handlers can keep
-  // their shape. All engine/save/sim/history coordination lives in the
-  // controller. Each is a no-op when no controller is mounted.
-  const applyPatchOrReportError = async (patch: JsonProjectPatch, label: string): Promise<boolean> => {
+  // The gate of every handler that enqueues a view edit: the mutation gate, plus
+  // a queued undo/redo. An edit planned now would be planned on the view the
+  // undo replaces, so the controller refuses it; the handler refuses first, so
+  // its UI side effects (a cleared selection, an un-suppressed panel) do not
+  // happen either.
+  const viewEditsRefused = (): boolean => {
+    return isReadOnly() || viewEditRefusal() !== undefined;
+  };
+
+  // Why a view edit cannot be made now, for the handlers whose refusal must be
+  // visible: a create or rename commits a typed name, and returning a message
+  // keeps the Canvas's name editor open, where returning nothing would close it
+  // and drop the name.
+  const viewEditRefusal = (): string | undefined => {
+    const snapshot = currentSnapshot();
+    if (snapshot.engineUnavailable) {
+      return 'The project cannot be edited until it is reloaded';
+    }
+    if (snapshot.undoRedoQueued) {
+      return 'Wait for the undo or redo to finish';
+    }
+    return undefined;
+  };
+
+  // A diagram edit: `nextView` renders at once and the controller later applies
+  // the model ops implied by (rendered view -> nextView) plus the view,
+  // atomically; a failure rolls the diagram back. No-op without a controller.
+  const enqueueViewEdit = (label: string, nextView: StockFlowView): void => {
+    void r.controller?.enqueueViewEdit({ label, nextView });
+  };
+
+  // The uid of the rendered element naming `ident` in the active model.
+  const renderedElementUid = (ident: string): UID | undefined => {
+    return getView()?.elements.find((el) => isNamedViewElement(el) && el.ident === ident)?.uid;
+  };
+
+  // The committed variable an edit enqueued for rendered element `uid` (named
+  // `ident` when enqueued) targets at dequeue: the variable the element names on
+  // the COMMITTED view. A rename may have landed since the edit was enqueued, or
+  // be pending then and rolled back since, so the ident as enqueued can be stale
+  // either way; the element's uid is not. An element absent from the committed
+  // view (its create was rolled back, or it was deleted) resolves to nothing.
+  // `ident` is the lookup only when no rendered element named it.
+  const committedVariable = (
+    committed: Project,
+    mName: string,
+    uid: UID | undefined,
+    ident: string,
+  ): Variable | undefined => {
+    const model = committed.models.get(mName);
+    if (uid === undefined) {
+      return model?.variables.get(ident);
+    }
+    const element = model?.views[0]?.elements.find((el) => el.uid === uid);
+    return element !== undefined && isNamedViewElement(element)
+      ? model?.variables.get(canonicalize(element.name))
+      : undefined;
+  };
+
+  // A model-only edit to variable `ident` of the active model. The payload is
+  // built at dequeue from the COMMITTED variable (see committedVariable), so
+  // echoed fields (a stock's inflows, a module's references) are never stale; a
+  // variable that no longer exists fails the item. An identical edit still
+  // pending is not enqueued twice (a panel's canvas-press flush and its later
+  // blur submit the same draft).
+  // Resolves whether the edit landed; a submission identical to the latest
+  // pending one resolves as that one does.
+  const enqueueVariableEdit = (
+    label: string,
+    ident: string,
+    content: unknown,
+    build: (variable: Variable, committed: Project, mName: string) => JsonProjectPatch,
+  ): Promise<boolean> => {
     const controller = r.controller;
     if (!controller) {
-      return false;
+      return Promise.resolve(false);
     }
-    return await controller.applyPatchOrReportError(patch, label);
-  };
-
-  const refreshFromEngine = async (): Promise<void> => {
-    await r.controller?.refreshFromEngine();
-  };
-
-  const scheduleSimRun = (): void => {
-    r.controller?.scheduleSimRun();
-  };
-
-  // Discrete element/structure edits pass { recordHistory: true } so each one
-  // becomes individually undoable; the per-frame viewport stream goes through
-  // queueViewUpdate (never records). See the controller's updateView doc.
-  const updateView = async (view: StockFlowView, opts?: { recordHistory?: boolean }): Promise<void> => {
-    await r.controller?.updateView(view, opts);
-  };
-
-  const queueViewUpdate = async (view: StockFlowView): Promise<void> => {
-    await r.controller?.queueViewUpdate(view);
+    const mName = modelName();
+    const target = JSON.stringify([mName, label, ident]);
+    const pending = r.pendingModelEdits.get(target);
+    const contentKey = JSON.stringify(content);
+    if (pending?.content === contentKey) {
+      return pending.landed;
+    }
+    const uid = renderedElementUid(ident);
+    const submission: { content: string; landed: Promise<boolean> } = {
+      content: contentKey,
+      landed: Promise.resolve(false),
+    };
+    submission.landed = controller
+      .enqueueModelEdit({
+        label,
+        buildPatch: (committed) => {
+          const variable = committedVariable(committed, mName, uid, ident);
+          if (variable === undefined) {
+            throw new EditorError(`${label} failed: '${ident}' no longer exists`);
+          }
+          return build(variable, committed, mName);
+        },
+      })
+      .finally(() => {
+        if (r.pendingModelEdits.get(target) === submission) {
+          r.pendingModelEdits.delete(target);
+        }
+      });
+    r.pendingModelEdits.set(target, submission);
+    return submission.landed;
   };
 
   const handleDialClick = React.useCallback((_event: React.MouseEvent<HTMLButtonElement>): void => {
@@ -968,44 +1155,40 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     });
   }, []);
 
-  const handleRename = React.useCallback(async (oldName: string, newName: string): Promise<void> => {
+  const handleRename = React.useCallback((oldName: string, newName: string): string | undefined => {
     // Defense in depth (issue #935): the canvas wiring already substitutes
     // no-ops when read-only, but every op-building handler re-checks so a
     // stale-closure commit (e.g. a blur that lands after a flip to read-only)
     // can never mutate the project. Same guard on every mutation handler below.
     if (isReadOnly() || oldName === newName) {
-      return;
+      return undefined;
     }
-
-    const eng = getEngineProject();
-    if (!eng) {
-      return;
+    const pausedRefusal = viewEditRefusal();
+    if (pausedRefusal !== undefined) {
+      return pausedRefusal;
     }
-
-    const view = defined(getView());
-    // buildVariableRenameOps sends the typed name RAW as the rename `to` (the
-    // engine preserves display spellings and matches canonically; issue #906)
-    // and keeps the sketch label in sync via the paired upsertView.
-    const { ops } = buildVariableRenameOps(view, oldName, newName);
-
-    const patch: JsonProjectPatch = {
-      models: [{ name: modelName(), ops: [...ops] }],
-    };
-
-    if (!(await applyPatchOrReportError(patch, 'rename'))) {
-      // A failed rename leaves flowStillBeingCreated untouched.
-      return;
+    const controller = r.controller;
+    const view = getView();
+    if (!controller || !view) {
+      return undefined;
     }
-
-    // Clear the in-progress flow-creation flag synchronously after the
-    // patch succeeds and BEFORE the engine round-trip in refreshFromEngine.
-    // This matches the pre-refactor ordering: the details panel for a
-    // just-named flow must un-suppress immediately, not wait out the
-    // serialize/JSON/setState round-trip.
+    // Refuse a name another variable (or a pending create) already has: the
+    // inline editor stays open with the message and nothing is enqueued.
+    const refusal = controller.nameError(encodeNameNewlines(newName), canonicalize(encodeNameNewlines(oldName)));
+    if (refusal !== undefined) {
+      return refusal;
+    }
+    // RenameVariable never renames view elements, so a rename is an edit WITH a
+    // next view: the rendered view with the element relabeled. The controller
+    // derives renameVariable from the relabeled element (the typed name raw,
+    // issue #906).
+    enqueueViewEdit('rename', relabelVariable(view, oldName, newName));
+    // The details panel for a just-named flow un-suppresses now, with the
+    // optimistic rename, not once the edit lands.
     setState({
       flowStillBeingCreated: false,
     });
-    await refreshFromEngine();
+    return undefined;
   }, []);
 
   const handleSelection = React.useCallback((selection: ReadonlySet<UID>): void => {
@@ -1036,334 +1219,109 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   }, []);
 
   const getLatexEquation = React.useCallback(async (ident: string): Promise<string | undefined> => {
-    const eng = getEngineProject();
-    if (!eng) return undefined;
-    try {
-      const model = await eng.getModel(modelName());
-      return (await model.getLatexEquation(ident)) ?? undefined;
-    } catch {
+    const controller = r.controller;
+    if (!controller) {
       return undefined;
     }
+    const mName = modelName();
+    // Through the executor, so the query never runs against an engine an undo is
+    // swapping out.
+    const latex = await controller.query(async (engine) => {
+      const model = (await engine.getModel(mName)) as unknown as {
+        getLatexEquation(ident: string): Promise<string | null | undefined>;
+      };
+      return (await model.getLatexEquation(ident)) ?? undefined;
+    });
+    return latex ?? undefined;
   }, []);
 
-  const handleSelectionDelete = React.useCallback(async (): Promise<void> => {
-    if (isReadOnly()) {
+  const handleSelectionDelete = React.useCallback((): void => {
+    if (viewEditsRefused()) {
       return;
     }
     const selection = latest.current.state.selection;
-    const mName = modelName();
-    const view = defined(getView());
-
-    // this will remove the selected elements, clouds, and connectors
-    let elements = view.elements.filter((element: ViewElement) => {
-      const remove =
-        selection.has(element.uid) ||
-        (element.type === 'cloud' && selection.has(element.flowUid)) ||
-        (element.type === 'link' && (selection.has(element.toUid) || selection.has(element.fromUid)));
-      return !remove;
-    });
-
-    // next we have to potentially make new clouds if we've deleted a stock
-    let { nextUid } = view;
-    const clouds: CloudViewElement[] = [];
-    elements = elements.map((element: ViewElement) => {
-      if (element.type !== 'flow') {
-        return element;
-      }
-      const points = element.points.map((pt) => {
-        if (!pt.attachedToUid || !selection.has(pt.attachedToUid)) {
-          return pt;
-        }
-
-        const cloud: CloudViewElement = {
-          type: 'cloud',
-          uid: nextUid++,
-          x: pt.x,
-          y: pt.y,
-          flowUid: element.uid,
-          isZeroRadius: false,
-          ident: undefined,
-        };
-
-        clouds.push(cloud);
-
-        return { ...pt, attachedToUid: cloud.uid };
-      });
-      return { ...element, points };
-    });
-    elements = [...elements, ...clouds];
-
-    // Parity with the pre-refactor `if (!engine) return`: bail before clearing
-    // the selection or running the optimistic view update if the engine hasn't
-    // finished opening yet, so a delete attempted in that brief window cleanly
-    // no-ops instead of mutating UI state against a project that can't apply it.
-    if (!r.controller?.getEngine()) {
+    const view = getView();
+    if (!r.controller || !view || selection.size === 0) {
       return;
     }
-
-    const deleteOps: JsonModelOperation[] = getSelectionIdents().map((ident) => ({
-      type: 'deleteVariable' as const,
-      payload: { ident },
-    }));
-
-    // Clear the selection now, in the same synchronous block (before any
-    // await) as the view update below, so React batches them into a single
-    // render: no consumer should ever observe a selection that references an
-    // element the view no longer contains. (Clearing it after
-    // `await updateView(...)` instead left a window where props.view had
-    // dropped the deleted element but props.selection still pointed at it --
-    // Canvas's buildSelectionMap now tolerates that, but the state transition
-    // should still be atomic.) The deleteOps above were computed from the
-    // pre-clear selection. selectionStatePatch also closes the variable panel
-    // (but not an open errors panel) and resets the tab in this same block so
-    // the emptied selection can't strand a variable panel over nothing.
+    // planDelete removes the selection, the links and aliases touching it, and
+    // the clouds of deleted flows, and turns endpoints on deleted stocks into
+    // clouds; the controller derives deleteVariable and the stock list ops from
+    // the view difference.
+    const nextView = planDelete(view, selection);
+    // Clear the selection in the same synchronous block as the optimistic view,
+    // so React batches them into a single render: no consumer should ever
+    // observe a selection that references an element the view no longer
+    // contains. selectionStatePatch also closes the variable panel (but not an
+    // open errors panel) and resets the tab.
     setState(selectionStatePatch(new Set<number>(), latest.current.state.showDetails));
-
-    if (deleteOps.length > 0) {
-      const patch: JsonProjectPatch = {
-        models: [{ name: mName, ops: deleteOps }],
-      };
-      // The controller reports any failure via onError; we ignore the boolean
-      // here because the view update below must run regardless (matching the
-      // original, which committed the cloud/view changes even on a delete-op
-      // failure).
-      await applyPatchOrReportError(patch, 'delete');
-    }
-
-    await updateView({ ...view, elements, nextUid }, { recordHistory: true });
-    scheduleSimRun();
+    enqueueViewEdit('delete', nextView);
   }, []);
 
-  const handleMoveLabel = React.useCallback(
-    async (uid: UID, side: 'top' | 'left' | 'bottom' | 'right'): Promise<void> => {
-      if (isReadOnly()) {
-        return;
-      }
-      const view = defined(getView());
-
-      const elements = view.elements.map((element: ViewElement) => {
-        if (element.uid !== uid || !isNamedViewElement(element)) {
-          return element;
-        }
-        return { ...element, labelSide: side };
-      });
-
-      await updateView({ ...view, elements }, { recordHistory: true });
-    },
-    [],
-  );
-
-  const handleFlowAttach = React.useCallback(
-    async (
-      flow: FlowViewElement,
-      targetUid: number,
-      cursorMoveDelta: Point,
-      fauxTargetCenter: Point | undefined,
-      inCreation: boolean,
-      isSourceAttach?: boolean,
-    ): Promise<void> => {
-      if (isReadOnly()) {
-        return;
-      }
-      const view = defined(getView());
-      const model = defined(getModel());
-
-      // Pure core: compute the new view (elements + nextUid), the model
-      // operations to apply, and the selection/creation state. See
-      // flow-attach.ts for the source/sink and op-builder deduplication.
-      const result = computeFlowAttachment(view, model.variables, {
-        flow,
-        targetUid,
-        cursorMoveDelta,
-        fauxTargetCenter,
-        inCreation,
-        isSourceAttach: !!isSourceAttach,
-      });
-
-      // The pure core only assigns a selection when creating a new flow;
-      // otherwise it returns undefined and the existing selection is preserved.
-      // This matches the original, which seeded `selection` from state and only
-      // reassigned it in the creation path.
-      const selection = result.selection ?? latest.current.state.selection;
-
-      // Preserve the original's early return on a missing engine: it bailed
-      // before applying ops or updating the view (no setState, no sim run).
-      if (!r.controller?.getEngine()) {
-        return;
-      }
-
-      if (result.ops.length > 0) {
-        const patch: JsonProjectPatch = {
-          models: [{ name: modelName(), ops: [...result.ops] }],
-        };
-        // Apply the model-level ops but do NOT bail on failure: the drawn flow
-        // must still be committed to the view (issue #820). The controller
-        // reports any failure via onError (the toast); the view update below
-        // runs regardless, matching handleCreateVariable/handleSelectionDelete.
-        // Discarding it here previously both lost the user's work AND left the
-        // just-created-flow name edit selecting a flow that was never committed
-        // to the view -- the handleEditingNameDone getElementByUid crash.
-        await applyPatchOrReportError(patch, 'flow attach');
-      }
-
-      await updateView({ ...view, nextUid: result.nextUid, elements: [...result.elements] }, { recordHistory: true });
-      // Creation assigns the new flow (non-empty) and arms flowStillBeingCreated
-      // (which suppresses the panel until the flow is named); a reattach
-      // preserves the prior selection. selectionStatePatch keeps the
-      // empty-selection invariant should either ever resolve to no selection.
-      setState({
-        ...selectionStatePatch(selection, latest.current.state.showDetails),
-        flowStillBeingCreated: inCreation,
-      });
-      scheduleSimRun();
-    },
-    [],
-  );
-
-  const handleLinkAttach = React.useCallback(async (link: LinkViewElement, newTarget: string): Promise<void> => {
-    if (isReadOnly()) {
+  // A canvas gesture's commit (docs/design-plans/2026-09-10-diagram-editing-core.md,
+  // E2): the planner's elements are the next view exactly as the preview showed
+  // them, and the controller derives every model op from the view difference at
+  // dequeue. The token is the one the gesture was pressed under, so a truncation
+  // or undo that landed meanwhile drops the edit rather than applying it to a
+  // view it was not planned on.
+  const handleCommitGesture = React.useCallback((commit: GestureCommit): void => {
+    if (viewEditsRefused()) {
       return;
     }
-    let { selection } = latest.current.state;
-    let view = defined(getView());
-
-    const getName = (ident: string) => {
-      for (const e of view.elements) {
-        if (isNamedViewElement(e) && e.ident === ident) {
-          return e;
-        }
-      }
-      throw new Error(`unknown name ${ident}`);
-    };
-
-    let nextUid = view.nextUid;
-    let elements: ViewElement[];
-    if (link.uid === inCreationUid) {
-      const to = getName(newTarget);
-      const newLink: LinkViewElement = {
-        ...link,
-        uid: nextUid++,
-        toUid: to.uid,
-      };
-      elements = [...view.elements, newLink];
-      selection = new Set([newLink.uid]);
-    } else {
-      // Reattachment: Canvas already computed the correct arc in
-      // link.arc, so we just update the target.
-      const to = getName(defined(newTarget));
-      elements = view.elements.map((element: ViewElement) => {
-        if (element.uid !== link.uid || element.type !== 'link') {
-          return element;
-        }
-        return { ...element, arc: link.arc, toUid: to.uid };
-      });
+    const view = getView();
+    if (!r.controller || !view || !sameGeometry(commit.baseView, view)) {
+      // A commit planned on a view another edit has since replaced is dropped
+      // quietly, as the Canvas drops a gesture whose view changed under it (E5).
+      return;
     }
-    view = { ...view, nextUid, elements };
-
-    await updateView(view, { recordHistory: true });
-    setState(selectionStatePatch(selection, latest.current.state.showDetails));
+    void r.controller.enqueueViewEdit({
+      label: commit.label,
+      nextView: { ...view, nextUid: commit.nextUid, elements: [...commit.elements] },
+      token: commit.token,
+    });
+    // A drawn flow hands off to its name editor; flowStillBeingCreated keeps its
+    // details panel closed until it is named (handleRename clears it). If the
+    // edit fails, the rolled-back view no longer holds the selected flow, which
+    // the Canvas tolerates (the name editor resolves nothing and closes).
+    setState({
+      ...selectionStatePatch(commit.selection, latest.current.state.showDetails),
+      flowStillBeingCreated: commit.editName !== undefined,
+    });
   }, []);
 
-  const handleCreateVariable = React.useCallback(async (element: ViewElement): Promise<void> => {
+  const handleCreateVariable = React.useCallback((element: ViewElement): string | undefined => {
     if (isReadOnly()) {
-      return;
+      return undefined;
     }
-    const view = defined(getView());
-    // Parity with the pre-refactor `if (!engine) return`: bail before the
-    // optimistic view update if the engine hasn't finished opening yet, so a
-    // create attempted in that window cleanly no-ops.
-    if (!r.controller?.getEngine()) {
-      return;
+    const pausedRefusal = viewEditRefusal();
+    if (pausedRefusal !== undefined) {
+      return pausedRefusal;
     }
-
-    let nextUid = view.nextUid;
-    const elements = [...view.elements, { ...element, uid: nextUid++ }];
-    const elementType = viewElementType(element);
-    const name = (element as NamedViewElement).name;
-
-    let op: JsonModelOperation;
-    if (elementType === 'stock') {
-      op = {
-        type: 'upsertStock',
-        payload: {
-          stock: {
-            name,
-            inflows: [],
-            outflows: [],
-            initialEquation: '',
-          },
-        },
-      };
-    } else if (elementType === 'flow') {
-      op = {
-        type: 'upsertFlow',
-        payload: {
-          flow: {
-            name,
-            equation: '',
-          },
-        },
-      };
-    } else if (elementType === 'module') {
-      op = {
-        type: 'upsertModule',
-        payload: {
-          module: {
-            name,
-            modelName: '',
-            references: [],
-          },
-        },
-      };
-    } else {
-      op = {
-        type: 'upsertAux',
-        payload: {
-          aux: {
-            name,
-            equation: '',
-          },
-        },
-      };
+    const controller = r.controller;
+    const view = getView();
+    if (!controller || !view || !isNamedViewElement(element)) {
+      return undefined;
     }
-
-    // AC5.2: patch targets modelName() (not a hardcoded value), so module
-    // creation works at any nesting depth -- navigating into a child model
-    // updates modelName, and newly created modules land in that child.
-    const patch: JsonProjectPatch = {
-      models: [{ name: modelName(), ops: [op] }],
-    };
-
-    // The controller reports any failure via onError; the view update below
-    // runs regardless, matching the original (which committed the new element
-    // even when the upsert errored).
-    await applyPatchOrReportError(patch, 'variable creation');
-
-    await updateView({ ...view, nextUid, elements }, { recordHistory: true });
+    // A typed name that another variable or a pending create already has keeps
+    // the name editor open with the message: the engine's upsert would silently
+    // replace that variable, whatever its kind.
+    const refusal = controller.nameError(element.name, undefined);
+    if (refusal !== undefined) {
+      return refusal;
+    }
+    // The created element names a variable that does not exist yet; the
+    // controller derives its upsert from the view difference. The edit targets
+    // the active model (AC5.2), so modules created while drilled in land there.
+    // The Canvas stages the element under its default name's ident; the element
+    // takes the typed name's, so every rendered element's ident is its name's.
+    enqueueViewEdit('variable creation', {
+      ...view,
+      nextUid: view.nextUid + 1,
+      elements: [...view.elements, { ...element, uid: view.nextUid, ident: canonicalize(element.name) }],
+    });
     setState(selectionStatePatch(new Set<number>(), latest.current.state.showDetails));
+    return undefined;
   }, []);
-
-  const handleSelectionMove = React.useCallback(
-    async (delta: Point, arcPoint?: Point, segmentIndex?: number): Promise<void> => {
-      if (isReadOnly()) {
-        return;
-      }
-      const view = defined(getView());
-      const selection = latest.current.state.selection;
-
-      const { updatedElements } = applyGroupMovement({
-        elements: view.elements,
-        selection,
-        delta,
-        arcPoint,
-        segmentIndex,
-      });
-
-      const elements = view.elements.map((el) => updatedElements.get(el.uid) ?? el);
-      await updateView({ ...view, elements }, { recordHistory: true });
-    },
-    [],
-  );
 
   const handleDrawerToggle = React.useCallback((isOpen: boolean): void => {
     setState({
@@ -1371,7 +1329,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     });
   }, []);
 
-  const applySimSpecChange = async (updates: Partial<JsonSimSpecs>): Promise<void> => {
+  const applySimSpecChange = (updates: Partial<JsonSimSpecs>): void => {
     // Sim specs are PROJECT content: read-only viewers cannot change them
     // (the drawer also renders its fields disabled). Gated on readOnlyMode,
     // not isReadOnly -- editing your own project's sim specs while viewing a
@@ -1379,41 +1337,30 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     if (latest.current.props.readOnlyMode) {
       return;
     }
-    // The engine is re-checked inside applyPatchAndRefresh; here we only
-    // need the project to read the current sim specs.
-    const project = getProject();
-    if (!project) {
-      return;
-    }
-
-    const simSpec = project.simSpecs;
-    const dt = simSpec.dt.isReciprocal ? `1/${simSpec.dt.value}` : `${simSpec.dt.value}`;
-
-    // Convert saveStep Dt to the actual numeric step size
-    let saveStep: number | undefined;
-    if (simSpec.saveStep) {
-      saveStep = simSpec.saveStep.isReciprocal ? 1 / simSpec.saveStep.value : simSpec.saveStep.value;
-    }
-
-    const simSpecs: JsonSimSpecs = {
-      startTime: updates.startTime ?? simSpec.start,
-      endTime: updates.endTime ?? simSpec.stop,
-      dt: updates.dt ?? dt,
-      timeUnits: updates.timeUnits ?? simSpec.timeUnits,
-      saveStep: updates.saveStep ?? saveStep,
-      method: updates.method ?? simSpec.simMethod,
-    };
-
-    const patch: JsonProjectPatch = {
-      projectOps: [
-        {
-          type: 'setSimSpecs',
-          payload: { simSpecs: simSpecs },
-        },
-      ],
-    };
-
-    await applyPatchAndRefresh(patch, 'sim specs');
+    void r.controller?.enqueueModelEdit({
+      label: 'sim specs',
+      // setSimSpecs replaces every field, so the untouched ones are echoed from
+      // the COMMITTED specs at dequeue, never from specs read before an earlier
+      // commit landed.
+      buildPatch: (committed) => {
+        const simSpec = committed.simSpecs;
+        const dt = simSpec.dt.isReciprocal ? `1/${simSpec.dt.value}` : `${simSpec.dt.value}`;
+        // Convert saveStep Dt to the actual numeric step size
+        let saveStep: number | undefined;
+        if (simSpec.saveStep) {
+          saveStep = simSpec.saveStep.isReciprocal ? 1 / simSpec.saveStep.value : simSpec.saveStep.value;
+        }
+        const simSpecs: JsonSimSpecs = {
+          startTime: updates.startTime ?? simSpec.start,
+          endTime: updates.endTime ?? simSpec.stop,
+          dt: updates.dt ?? dt,
+          timeUnits: updates.timeUnits ?? simSpec.timeUnits,
+          saveStep: updates.saveStep ?? saveStep,
+          method: updates.method ?? simSpec.simMethod,
+        };
+        return { projectOps: [{ type: 'setSimSpecs', payload: { simSpecs } }] };
+      },
+    });
   };
 
   // The drawer holds a draft while a sim-specs field is focused and calls this
@@ -1439,12 +1386,25 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   }, []);
 
   const handleDownloadXmile = React.useCallback(async (): Promise<void> => {
-    const engine = getEngineProject();
-    if (!engine) {
+    const controller = r.controller;
+    if (!controller) {
+      return;
+    }
+    const result = await controller.query(async (engine): Promise<{ xmile: string } | { error: unknown }> => {
+      try {
+        return { xmile: await (engine as unknown as EngineProject).toXmileString() };
+      } catch (error: unknown) {
+        return { error };
+      }
+    });
+    if (result === undefined) {
       return;
     }
     try {
-      const xmile = await engine.toXmileString();
+      if ('error' in result) {
+        throw result.error;
+      }
+      const xmile = result.xmile;
       const encoder = new TextEncoder();
       const xmileBytes = encoder.encode(xmile);
       const blob = new Blob([xmileBytes], {
@@ -1534,13 +1494,18 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     return model.views[0];
   };
 
-  const handleViewBoxChange = React.useCallback(async (viewBox: Rect, zoom: number): Promise<void> => {
-    const view = defined(getView());
-    await queueViewUpdate({ ...view, viewBox, zoom });
+  // Viewport changes (a settled pan/zoom, a resize, the mount fit, centering)
+  // render at once and persist through a controller viewport item: no undo
+  // entry, no save.
+  const handleViewBoxChange = React.useCallback((viewBox: Rect, zoom: number): void => {
+    r.controller?.setViewport(modelName(), { viewBox, zoom });
   }, []);
 
-  const centerVariable = async (element: ViewElement): Promise<void> => {
-    const view = defined(getView());
+  const centerVariable = (element: ViewElement): void => {
+    const view = getView();
+    if (!view) {
+      return;
+    }
     const zoom = view.zoom;
 
     const cx = element.x;
@@ -1555,8 +1520,12 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       y: viewCy - cy,
     };
 
-    await queueViewUpdate({ ...view, viewBox });
+    handleViewBoxChange(viewBox, zoom);
   };
+
+  const handleNewVariableName = React.useCallback((base: string): string => {
+    return r.controller?.newVariableName(base) ?? base;
+  }, []);
 
   const getCanvas = (): React.ReactElement | undefined => {
     const project = getProject();
@@ -1584,10 +1553,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     const readOnly = isReadOnly();
     const onRenameVariable = !readOnly ? handleRename : noopRename;
     const onSetSelection = !embedded ? handleSelection : noopSetSelection;
-    const onMoveSelection = !readOnly ? handleSelectionMove : noopMoveSelection;
-    const onMoveFlow = !readOnly ? handleFlowAttach : noopMoveFlow;
-    const onMoveLabel = !readOnly ? handleMoveLabel : noopMoveLabel;
-    const onAttachLink = !readOnly ? handleLinkAttach : noopAttachLink;
+    const onCommitGesture = !readOnly ? handleCommitGesture : noopCommitGesture;
     const onCreateVariable = !readOnly ? handleCreateVariable : noopCreateVariable;
     const onClearSelectedTool = !readOnly ? handleClearSelectedTool : noop;
     const onDeleteSelection = !readOnly ? handleSelectionDelete : noop;
@@ -1605,21 +1571,20 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         project={project}
         model={model}
         view={view}
-        version={latest.current.state.controllerSnapshot.projectVersion}
+        token={latest.current.state.controllerSnapshot.token}
         selectedTool={readOnly ? undefined : latest.current.state.selectedTool}
         selection={latest.current.state.selection}
         onRenameVariable={onRenameVariable}
         onSetSelection={onSetSelection}
-        onMoveSelection={onMoveSelection}
-        onMoveFlow={onMoveFlow}
-        onMoveLabel={onMoveLabel}
-        onAttachLink={onAttachLink}
+        onCommitGesture={onCommitGesture}
         onCreateVariable={onCreateVariable}
         onClearSelectedTool={onClearSelectedTool}
         onDeleteSelection={onDeleteSelection}
         onShowVariableDetails={onShowVariableDetails}
         onViewBoxChange={onViewBoxChange}
         onDrillIntoModule={onDrillIntoModule}
+        newVariableName={handleNewVariableName}
+        pressesDisabled={latest.current.state.controllerSnapshot.undoRedoQueued}
       />
     );
   };
@@ -1812,7 +1777,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         setState({
           showDetails: isModelLocked() ? undefined : 'variable',
         });
-        await centerVariable(element);
+        centerVariable(element);
       }
     },
     [],
@@ -1928,117 +1893,155 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   };
 
   const handleEquationChange = React.useCallback(
-    async (
+    (
       ident: string,
       newEquation: string | undefined,
       newUnits: string | undefined,
       newDocs: string | undefined,
-    ): Promise<void> => {
+    ): Promise<boolean> => {
       if (isReadOnly()) {
-        return;
+        return Promise.resolve(false);
       }
-      const model = getModel();
-      if (!model) {
-        return;
-      }
-
-      const variable = model.variables.get(ident);
-      if (!variable) {
-        return;
-      }
-
-      // When newEquation is provided, use it as a scalar equation.
-      // Otherwise, preserve the existing equation structure (including arrayed equations).
-      const existingEqFields = getEquationFields(variable);
-
-      let op: JsonModelOperation;
-      if (variable.type === 'stock') {
-        // Use stockToJson to preserve all fields (including compat flags
-        // like nonNegative, canBeModuleInput, isPublic), then override
-        // the fields being edited.
-        const base = stockToJson(variable);
-        op = {
-          type: 'upsertStock',
-          payload: {
-            stock: {
-              ...base,
-              initialEquation: newEquation ?? existingEqFields.equation,
-              arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
-              units: newUnits ?? variable.units ?? undefined,
-              documentation: newDocs ?? variable.documentation ?? undefined,
-            },
-          },
-        };
-      } else if (variable.type === 'flow') {
-        const base = flowToJson(variable);
-        op = {
-          type: 'upsertFlow',
-          payload: {
-            flow: {
-              ...base,
-              equation: newEquation ?? existingEqFields.equation,
-              arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
-              units: newUnits ?? variable.units ?? undefined,
-              documentation: newDocs ?? variable.documentation ?? undefined,
-            },
-          },
-        };
-      } else if (variable.type === 'module') {
-        // Modules have no equations or graphical functions -- only units and docs.
-        // Use moduleToJson to preserve all fields (including compat flags
-        // canBeModuleInput, isPublic, dataSource), then override edited fields.
-        const base = moduleToJson(variable);
-        op = {
-          type: 'upsertModule',
-          payload: {
-            module: {
-              ...base,
-              units: newUnits ?? variable.units ?? undefined,
-              documentation: newDocs ?? variable.documentation ?? undefined,
-            },
-          },
-        };
-      } else {
-        const auxVar = variable as Aux;
-        const base = auxToJson(auxVar);
-        op = {
-          type: 'upsertAux',
-          payload: {
-            aux: {
-              ...base,
-              equation: newEquation ?? existingEqFields.equation,
-              arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
-              units: newUnits ?? auxVar.units ?? undefined,
-              documentation: newDocs ?? auxVar.documentation ?? undefined,
-            },
-          },
-        };
-      }
-
-      const patch: JsonProjectPatch = {
-        models: [{ name: modelName(), ops: [op] }],
-      };
-
-      await applyPatchAndRefresh(patch, 'equation update');
+      const landed = enqueueVariableEdit(
+        'equation update',
+        ident,
+        [newEquation, newUnits, newDocs],
+        (variable, _committed, mName) => ({
+          models: [{ name: mName, ops: [equationChangeOp(variable, newEquation, newUnits, newDocs)] }],
+        }),
+      );
+      recordPanelSubmission(ident, { equation: newEquation, units: newUnits, docs: newDocs }, landed);
+      return landed;
     },
     [],
   );
 
-  const handleTableChange = React.useCallback(
-    async (ident: string, newTable: GraphicalFunction | null): Promise<void> => {
-      if (isReadOnly()) {
+  // Record a details-panel submission as the element's pending one (see
+  // EditorRefs.pendingPanelSubmissions). Each field's entry is removed once its
+  // edit settles, unless a newer submission for that field replaced it.
+  const recordPanelSubmission = (
+    ident: string,
+    fields: Partial<Record<'equation' | 'units' | 'docs', string | undefined>>,
+    landed: Promise<boolean>,
+  ): void => {
+    const uid = renderedElementUid(ident);
+    if (uid === undefined) {
+      return;
+    }
+    const key = JSON.stringify([modelName(), uid]);
+    const entries: PendingSubmission = { ...r.pendingPanelSubmissions.get(key) };
+    const recorded: Array<'equation' | 'units' | 'docs'> = [];
+    for (const field of ['equation', 'units', 'docs'] as const) {
+      const text = fields[field];
+      if (text !== undefined) {
+        entries[field] = { text, landed };
+        recorded.push(field);
+      }
+    }
+    r.pendingPanelSubmissions.set(key, entries);
+    void landed.finally(() => {
+      const current = r.pendingPanelSubmissions.get(key);
+      if (current === undefined) {
         return;
       }
-      const model = getModel();
-      if (!model) {
-        return;
+      const next: PendingSubmission = { ...current };
+      for (const field of recorded) {
+        if (next[field]?.landed === landed && next[field]?.text === fields[field]) {
+          delete next[field];
+        }
       }
+      if (Object.keys(next).length === 0) {
+        r.pendingPanelSubmissions.delete(key);
+      } else {
+        r.pendingPanelSubmissions.set(key, next);
+      }
+    });
+  };
 
-      const variable = model.variables.get(ident);
-      if (!variable) {
-        return;
-      }
+  // The full upsert for an equation/units/docs change of `variable` (the
+  // committed variable, at dequeue). The *ToJson serializers preserve every
+  // field (compat flags included); the edited fields override.
+  const equationChangeOp = (
+    variable: Variable,
+    newEquation: string | undefined,
+    newUnits: string | undefined,
+    newDocs: string | undefined,
+  ): JsonModelOperation => {
+    // When newEquation is provided, use it as a scalar equation.
+    // Otherwise, preserve the existing equation structure (including arrayed equations).
+    const existingEqFields = getEquationFields(variable);
 
+    let op: JsonModelOperation;
+    if (variable.type === 'stock') {
+      // Use stockToJson to preserve all fields (including compat flags
+      // like nonNegative, canBeModuleInput, isPublic), then override
+      // the fields being edited.
+      const base = stockToJson(variable);
+      op = {
+        type: 'upsertStock',
+        payload: {
+          stock: {
+            ...base,
+            initialEquation: newEquation ?? existingEqFields.equation,
+            arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
+            units: newUnits ?? variable.units ?? undefined,
+            documentation: newDocs ?? variable.documentation ?? undefined,
+          },
+        },
+      };
+    } else if (variable.type === 'flow') {
+      const base = flowToJson(variable);
+      op = {
+        type: 'upsertFlow',
+        payload: {
+          flow: {
+            ...base,
+            equation: newEquation ?? existingEqFields.equation,
+            arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
+            units: newUnits ?? variable.units ?? undefined,
+            documentation: newDocs ?? variable.documentation ?? undefined,
+          },
+        },
+      };
+    } else if (variable.type === 'module') {
+      // Modules have no equations or graphical functions -- only units and docs.
+      // Use moduleToJson to preserve all fields (including compat flags
+      // canBeModuleInput, isPublic, dataSource), then override edited fields.
+      const base = moduleToJson(variable);
+      op = {
+        type: 'upsertModule',
+        payload: {
+          module: {
+            ...base,
+            units: newUnits ?? variable.units ?? undefined,
+            documentation: newDocs ?? variable.documentation ?? undefined,
+          },
+        },
+      };
+    } else {
+      const auxVar = variable as Aux;
+      const base = auxToJson(auxVar);
+      op = {
+        type: 'upsertAux',
+        payload: {
+          aux: {
+            ...base,
+            equation: newEquation ?? existingEqFields.equation,
+            arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
+            units: newUnits ?? auxVar.units ?? undefined,
+            documentation: newDocs ?? auxVar.documentation ?? undefined,
+          },
+        },
+      };
+    }
+    return op;
+  };
+
+  const handleTableChange = React.useCallback((ident: string, newTable: GraphicalFunction | null): void => {
+    if (isReadOnly()) {
+      return;
+    }
+    enqueueVariableEdit('table update', ident, newTable, (variable, _committed, mName) => {
       const gf = newTable
         ? {
             yPoints: [...newTable.yPoints],
@@ -2082,75 +2085,65 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
           },
         };
       }
+      return { models: [{ name: mName, ops: [op] }] };
+    });
+  }, []);
 
-      const patch: JsonProjectPatch = {
-        models: [{ name: modelName(), ops: [op] }],
-      };
-
-      await applyPatchAndRefresh(patch, 'table update');
-    },
-    [],
-  );
+  // The module variable an edit builder reads; a variable that changed kind
+  // since the panel opened fails the item.
+  const asModule = (variable: Variable, label: string) => {
+    if (variable.type !== 'module') {
+      throw new EditorError(`${label} failed: '${variable.ident}' is no longer a module`);
+    }
+    return variable;
+  };
 
   // Updates the model reference for a module variable.
-  const handleModuleModelReferenceChange = React.useCallback(
-    async (ident: string, newModelName: string): Promise<void> => {
-      if (isReadOnly()) {
-        return;
-      }
-      const model = getModel();
-      if (!model) return;
-      const variable = model.variables.get(ident);
-      if (!variable || variable.type !== 'module') return;
-
-      // Preserve all fields (including compat) via moduleToJson; override the model ref.
-      const op: JsonModelOperation = {
-        type: 'upsertModule',
-        payload: {
-          module: {
-            ...moduleToJson(variable),
-            modelName: newModelName,
-          },
+  const handleModuleModelReferenceChange = React.useCallback((ident: string, newModelName: string): void => {
+    if (isReadOnly()) {
+      return;
+    }
+    enqueueVariableEdit('model reference update', ident, newModelName, (variable, _committed, mName) => ({
+      models: [
+        {
+          name: mName,
+          // Preserve all fields (including compat) via moduleToJson; override the model ref.
+          ops: [
+            {
+              type: 'upsertModule',
+              payload: {
+                module: { ...moduleToJson(asModule(variable, 'model reference update')), modelName: newModelName },
+              },
+            },
+          ],
         },
-      };
-
-      const patch: JsonProjectPatch = {
-        models: [{ name: modelName(), ops: [op] }],
-      };
-
-      await applyPatchAndRefresh(patch, 'model reference update');
-    },
-    [],
-  );
+      ],
+    }));
+  }, []);
 
   // Updates units and/or documentation for a module variable.
   const handleModuleUnitsDocsChange = React.useCallback(
-    async (ident: string, newUnits: string | undefined, newDocs: string | undefined): Promise<void> => {
+    (ident: string, newUnits: string | undefined, newDocs: string | undefined): Promise<boolean> => {
       if (isReadOnly()) {
-        return;
+        return Promise.resolve(false);
       }
-      const model = getModel();
-      if (!model) return;
-      const variable = model.variables.get(ident);
-      if (!variable || variable.type !== 'module') return;
-
-      // Preserve all fields (including compat) via moduleToJson; override units/docs.
-      const op: JsonModelOperation = {
-        type: 'upsertModule',
-        payload: {
-          module: {
-            ...moduleToJson(variable),
-            units: newUnits ?? variable.units ?? undefined,
-            documentation: newDocs ?? variable.documentation ?? undefined,
+      const landed = enqueueVariableEdit('module update', ident, [newUnits, newDocs], (variable, _committed, mName) => {
+        const module = asModule(variable, 'module update');
+        // Preserve all fields (including compat) via moduleToJson; override units/docs.
+        const op: JsonModelOperation = {
+          type: 'upsertModule',
+          payload: {
+            module: {
+              ...moduleToJson(module),
+              units: newUnits ?? module.units ?? undefined,
+              documentation: newDocs ?? module.documentation ?? undefined,
+            },
           },
-        },
-      };
-
-      const patch: JsonProjectPatch = {
-        models: [{ name: modelName(), ops: [op] }],
-      };
-
-      await applyPatchAndRefresh(patch, 'module update');
+        };
+        return { models: [{ name: mName, ops: [op] }] };
+      });
+      recordPanelSubmission(ident, { units: newUnits, docs: newDocs }, landed);
+      return landed;
     },
     [],
   );
@@ -2159,31 +2152,25 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // The engine does full variable replacement (not merge), so we send the
   // complete module with the new references array.
   const handleModuleReferencesChange = React.useCallback(
-    async (ident: string, newReferences: ReadonlyArray<ModuleReference>): Promise<void> => {
+    (ident: string, newReferences: ReadonlyArray<ModuleReference>): void => {
       if (isReadOnly()) {
         return;
       }
-      const model = getModel();
-      if (!model) return;
-      const variable = model.variables.get(ident);
-      if (!variable || variable.type !== 'module') return;
-
-      // Preserve all fields (including compat) via moduleToJson; override references.
-      const op: JsonModelOperation = {
-        type: 'upsertModule',
-        payload: {
-          module: {
-            ...moduleToJson(variable),
-            references: newReferences.map((ref) => ({ src: ref.src, dst: ref.dst })),
+      const references = newReferences.map((ref) => ({ src: ref.src, dst: ref.dst }));
+      enqueueVariableEdit('references update', ident, references, (variable, _committed, mName) => ({
+        models: [
+          {
+            name: mName,
+            // Preserve all fields (including compat) via moduleToJson; override references.
+            ops: [
+              {
+                type: 'upsertModule',
+                payload: { module: { ...moduleToJson(asModule(variable, 'references update')), references } },
+              },
+            ],
           },
-        },
-      };
-
-      const patch: JsonProjectPatch = {
-        models: [{ name: modelName(), ops: [op] }],
-      };
-
-      await applyPatchAndRefresh(patch, 'references update');
+        ],
+      }));
     },
     [],
   );
@@ -2191,117 +2178,129 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // Creates a new empty model and sets it as the module's reference.
   // The engine processes projectOps before model ops (see patch.rs),
   // so AddModel creates the model before upsertModule references it.
-  const handleCreateModelForModule = React.useCallback(async (moduleIdent: string): Promise<void> => {
+  const handleCreateModelForModule = React.useCallback((moduleIdent: string): void => {
     if (isReadOnly()) {
       return;
     }
-    const project = getProject();
-    if (!project) return;
-
-    // Generate a unique model name to avoid collisions when the module
-    // ident already matches an existing model name.
-    let newModelName = moduleIdent;
-    if (project.models.has(newModelName)) {
-      newModelName = getUniqueDuplicateName(moduleIdent, project);
-    }
-
-    // Look up existing module to preserve metadata (including compat) through the
-    // model reference change; the shared helper carries every field forward
-    // (incl. compat) and keeps this in lockstep with the duplicate-model path.
-    const model = getModel();
-    const existingModule = model?.variables.get(moduleIdent);
-    const modulePayload = buildModuleReferencePayload(existingModule, moduleIdent, newModelName);
-
-    const patch: JsonProjectPatch = {
-      projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
-      models: [
-        // Seed a default empty view so getCanvas() works after drilling in
-        {
-          name: newModelName,
-          ops: [{ type: 'upsertView', payload: { index: 0, view: { elements: [] } } }],
-        },
-        {
-          name: modelName(),
-          ops: [{ type: 'upsertModule', payload: { module: modulePayload } }],
-        },
-      ],
-    };
-
-    await applyPatchAndRefresh(patch, 'model creation');
+    const mName = modelName();
+    const uid = renderedElementUid(moduleIdent);
+    void r.controller?.enqueueModelEdit({
+      label: 'model creation',
+      buildPatch: (committed) => {
+        // Generate a unique model name to avoid collisions when the module
+        // ident already matches an existing model name.
+        let newModelName = moduleIdent;
+        if (committed.models.has(newModelName)) {
+          newModelName = getUniqueDuplicateName(moduleIdent, committed);
+        }
+        // Look up the committed module to preserve metadata (including compat)
+        // through the model reference change; the shared helper carries every
+        // field forward and keeps this in lockstep with the duplicate-model path.
+        const existingModule = committedVariable(committed, mName, uid, moduleIdent);
+        const modulePayload = buildModuleReferencePayload(
+          existingModule,
+          existingModule?.ident ?? moduleIdent,
+          newModelName,
+        );
+        return {
+          projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
+          models: [
+            // Seed a default empty view so getCanvas() works after drilling in
+            {
+              name: newModelName,
+              ops: [{ type: 'upsertView', payload: { index: 0, view: { elements: [] } } }],
+            },
+            {
+              name: mName,
+              ops: [{ type: 'upsertModule', payload: { module: modulePayload } }],
+            },
+          ],
+        };
+      },
+    });
   }, []);
 
   // Duplicates the source model and sets the copy as the module's reference.
   // Copies all variables and the primary view from the source model.
-  const handleDuplicateModelForModule = React.useCallback(
-    async (moduleIdent: string, sourceModelName: string): Promise<void> => {
-      if (isReadOnly()) {
-        return;
-      }
-      const project = getProject();
-      if (!project) return;
-
-      const sourceModel = project.models.get(sourceModelName);
-      if (!sourceModel) return;
-
-      const newModelName = getUniqueDuplicateName(sourceModelName, project);
-
-      // Build ops to copy all variables from source model
-      const variableOps: JsonModelOperation[] = [];
-      for (const variable of sourceModel.variables.values()) {
-        if (variable.type === 'stock') {
-          variableOps.push({ type: 'upsertStock', payload: { stock: stockToJson(variable) } });
-        } else if (variable.type === 'flow') {
-          variableOps.push({ type: 'upsertFlow', payload: { flow: flowToJson(variable) } });
-        } else if (variable.type === 'aux') {
-          variableOps.push({ type: 'upsertAux', payload: { aux: auxToJson(variable) } });
-        } else if (variable.type === 'module') {
-          variableOps.push({ type: 'upsertModule', payload: { module: moduleToJson(variable) } });
+  const handleDuplicateModelForModule = React.useCallback((moduleIdent: string, sourceModelName: string): void => {
+    if (isReadOnly()) {
+      return;
+    }
+    const mName = modelName();
+    const uid = renderedElementUid(moduleIdent);
+    void r.controller?.enqueueModelEdit({
+      label: 'model duplication',
+      buildPatch: (committed) => {
+        const sourceModel = committed.models.get(sourceModelName);
+        if (!sourceModel) {
+          throw new EditorError(`model duplication failed: model '${sourceModelName}' no longer exists`);
         }
+        const existingModule = committedVariable(committed, mName, uid, moduleIdent);
+        return duplicateModelPatch(committed, sourceModel, existingModule, existingModule?.ident ?? moduleIdent, mName);
+      },
+    });
+  }, []);
+
+  const duplicateModelPatch = (
+    project: Project,
+    sourceModel: Model,
+    existingModule: Variable | undefined,
+    moduleIdent: string,
+    mName: string,
+  ): JsonProjectPatch => {
+    const newModelName = getUniqueDuplicateName(sourceModel.name, project);
+
+    // Build ops to copy all variables from source model
+    const variableOps: JsonModelOperation[] = [];
+    for (const variable of sourceModel.variables.values()) {
+      if (variable.type === 'stock') {
+        variableOps.push({ type: 'upsertStock', payload: { stock: stockToJson(variable) } });
+      } else if (variable.type === 'flow') {
+        variableOps.push({ type: 'upsertFlow', payload: { flow: flowToJson(variable) } });
+      } else if (variable.type === 'aux') {
+        variableOps.push({ type: 'upsertAux', payload: { aux: auxToJson(variable) } });
+      } else if (variable.type === 'module') {
+        variableOps.push({ type: 'upsertModule', payload: { module: moduleToJson(variable) } });
       }
+    }
 
-      // Copy the primary view, or seed an empty one so getCanvas() works
-      if (sourceModel.views.length > 0) {
-        variableOps.push({
-          type: 'upsertView',
-          payload: { index: 0, view: stockFlowViewToJson(sourceModel.views[0]) },
-        });
-      } else {
-        variableOps.push({
-          type: 'upsertView',
-          payload: { index: 0, view: { elements: [] } },
-        });
-      }
+    // Copy the primary view, or seed an empty one so getCanvas() works
+    if (sourceModel.views.length > 0) {
+      variableOps.push({
+        type: 'upsertView',
+        payload: { index: 0, view: stockFlowViewToJson(sourceModel.views[0]) },
+      });
+    } else {
+      variableOps.push({
+        type: 'upsertView',
+        payload: { index: 0, view: { elements: [] } },
+      });
+    }
 
-      // Preserve ALL existing module fields (incl. compat: canBeModuleInput /
-      // isPublic / dataSource) through the model reference change. The hand-built
-      // payload here previously dropped compat -- the same full-replace data-loss
-      // trap fixed elsewhere; use the shared helper so it matches its sibling.
-      const currentModel = getModel();
-      const existingModule = currentModel?.variables.get(moduleIdent);
-      const dupModulePayload = buildModuleReferencePayload(existingModule, moduleIdent, newModelName);
+    // Preserve ALL existing module fields (incl. compat: canBeModuleInput /
+    // isPublic / dataSource) through the model reference change; the shared
+    // helper keeps this in lockstep with the create-model path, so a
+    // full-replacement upsert never drops a compat flag.
+    const dupModulePayload = buildModuleReferencePayload(existingModule, moduleIdent, newModelName);
 
-      // Combined patch: create model, copy contents, update module reference.
-      // Engine processes projectOps before model ops (patch.rs).
-      const patch: JsonProjectPatch = {
-        projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
-        models: [
-          { name: newModelName, ops: variableOps },
-          {
-            name: modelName(),
-            ops: [
-              {
-                type: 'upsertModule',
-                payload: { module: dupModulePayload },
-              },
-            ],
-          },
-        ],
-      };
-
-      await applyPatchAndRefresh(patch, 'model duplication');
-    },
-    [],
-  );
+    // Combined patch: create model, copy contents, update module reference.
+    // Engine processes projectOps before model ops (patch.rs).
+    return {
+      projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
+      models: [
+        { name: newModelName, ops: variableOps },
+        {
+          name: mName,
+          ops: [
+            {
+              type: 'upsertModule',
+              payload: { module: dupModulePayload },
+            },
+          ],
+        },
+      ],
+    };
+  };
 
   const getUniqueDuplicateName = (baseName: string, project: Project): string => {
     let name = `${baseName}_copy`;
@@ -2319,13 +2318,14 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     const { cachedErrors } = latest.current.state.controllerSnapshot;
 
     return (
-      <div className={varDetailsClassName}>
+      <div className={varDetailsClassName} {...{ [DETAILS_SLOT_ATTRIBUTE]: '' }}>
         <ErrorDetails
           status={latest.current.state.controllerSnapshot.status}
           simError={cachedErrors.simError}
           modelErrors={cachedErrors.modelErrors}
           varErrors={cachedErrors.varErrors}
           varUnitErrors={cachedErrors.unitErrors}
+          varWarnings={cachedErrors.varWarnings}
         />
       </div>
     );
@@ -2410,25 +2410,49 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       return;
     }
 
-    // The read-only flag is part of the panel key: the panels seed their Slate
-    // editors once per mount (see "Details panels are keyed by
-    // projectGeneration" in diagram/CLAUDE.md), so a mid-session readOnlyMode
-    // flip REMOUNTS an open panel rather than toggling it in place. That makes
-    // the flip deterministic: any in-flight typed text is discarded and the
-    // panel re-seeds from the committed model state.
+    // The panel key (detailsPanelKey) is the selected element plus its
+    // variable's committed editable content plus the read-only flag: the panels
+    // seed their Slate editors once per mount (see "Details panels are keyed by
+    // the selected variable's committed content" in diagram/CLAUDE.md), so a
+    // landed edit to this variable, or a mid-session readOnlyMode flip, REMOUNTS
+    // an open panel rather than toggling it in place. A flip is deterministic:
+    // any in-flight typed text is discarded and the panel re-seeds from the
+    // committed state.
     const readOnly = isReadOnly();
-    const keySuffix = readOnly ? '-ro' : '';
+    const restoreSeq = latest.current.state.controllerSnapshot.restoreSeq;
+    // While the panel holds a draft its key is held: a landed edit (to this
+    // variable, or one that rewrote it, as a rename of a name its equation
+    // references does) must not remount the panel over text the user typed.
+    // The key advances once the panel reports no draft -- its draft landed, or
+    // was cancelled. Selecting another element, an undo/redo landing
+    // (restoreSeq) and a read-only flip still remount at once.
+    const mName = modelName();
+    const freshKey = detailsPanelKey(mName, namedElement.uid, variable, restoreSeq, readOnly);
+    const base = JSON.stringify([mName, namedElement.uid, restoreSeq, readOnly]);
+    const held = r.heldPanelKey;
+    const key = latest.current.state.panelHasDraft && held?.base === base ? held.key : freshKey;
+    // Idempotent for a given state, so a StrictMode double render is harmless.
+    r.heldPanelKey = { base, key };
+    // While an undo/redo is queued the panel renders read-only, as the Canvas
+    // ignores presses then: the undo's landing remounts the panel (restoreSeq),
+    // which would discard text typed meanwhile. Not part of the key, so a draft
+    // already submitted keeps its panel until then.
+    const panelReadOnly = readOnly || latest.current.state.controllerSnapshot.undoRedoQueued === true;
+    const pendingSubmission = r.pendingPanelSubmissions.get(JSON.stringify([mName, namedElement.uid]));
 
     if (variable.type === 'module') {
       return (
-        <div className={varDetailsClassName}>
+        <div className={varDetailsClassName} {...{ [DETAILS_SLOT_ATTRIBUTE]: '' }}>
           <ModuleDetails
-            key={`md-${latest.current.state.controllerSnapshot.projectGeneration}-${ident}${keySuffix}`}
+            key={`md-${key}`}
             variable={variable}
             viewElement={namedElement}
             project={defined(getProject())}
             currentModelName={modelName()}
-            readOnly={readOnly}
+            readOnly={panelReadOnly}
+            registerDraftFlush={registerDraftFlush}
+            onDraftStateChange={handleDraftStateChange}
+            pendingSubmission={pendingSubmission}
             onDelete={handleVariableDelete}
             onModelReferenceChange={handleModuleModelReferenceChange}
             onUnitsDocsChange={handleModuleUnitsDocsChange}
@@ -2444,14 +2468,17 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     const activeTab = latest.current.state.variableDetailsActiveTab;
 
     return (
-      <div className={varDetailsClassName}>
+      <div className={varDetailsClassName} {...{ [DETAILS_SLOT_ATTRIBUTE]: '' }}>
         <VariableDetails
-          key={`vd-${latest.current.state.controllerSnapshot.projectGeneration}-${ident}${keySuffix}`}
+          key={`vd-${key}`}
           variable={variable}
           viewElement={namedElement}
           getLatexEquation={getLatexEquation}
           activeTab={activeTab}
-          readOnly={readOnly}
+          readOnly={panelReadOnly}
+          registerDraftFlush={registerDraftFlush}
+          onDraftStateChange={handleDraftStateChange}
+          pendingSubmission={pendingSubmission}
           onActiveTabChange={handleVariableDetailsActiveTabChange}
           onDelete={handleVariableDelete}
           onEquationChange={handleEquationChange}
@@ -2514,25 +2541,78 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     setState((prev) => ({ selectedTool: prev.selectedTool === 'module' ? undefined : 'module' }));
   }, []);
 
-  // Undo/redo is fully owned by the controller: it moves the undo cursor,
-  // bumps version/generation synchronously (so the details panels remount),
-  // reopens the engine from the restored snapshot, and -- when the restored
-  // project no longer contains the viewed model -- resets navigation to 'main'
-  // and bumps navResetSeq, which the navReset effect observes to clear the
-  // Editor's selection/details/tool UI state.
+  // Undo/redo is owned by the controller: an edit-class item that reopens the
+  // engine from the restored snapshot when it runs, bumps the token, and --
+  // when the restored project no longer contains the viewed model -- resets
+  // navigation to 'main' and bumps navResetSeq, which the navReset effect
+  // observes to clear the Editor's selection/details/tool UI state. The
+  // controller refuses it while an edit is pending (snapshot canUndo/canRedo).
   const handleUndoRedo = React.useCallback((kind: 'undo' | 'redo'): void => {
     // Undo/redo rewrite project content; a read-only viewer gets neither
     // (issue #935). This is the single choke point covering the UndoRedoBar
     // buttons and the keyboard shortcut alike. Project-scoped gate: see the
-    // keyboard handler's comment for why stdlib views keep undo.
-    if (latest.current.props.readOnlyMode) {
+    // keyboard handler's comment for why stdlib views keep undo. A live gesture
+    // blocks it too: the gesture's commit could not apply to the restored view.
+    if (latest.current.props.readOnlyMode || r.gestureLive) {
       return;
     }
-    r.controller?.undoRedo(kind);
+    // An open panel's draft is the user's latest change. Undo submits it first
+    // and queues the undo behind its edit, so the undo takes the draft back (and
+    // a redo restores it) rather than undoing an older edit under text the panel
+    // would then discard. Redo goes the other way: the redo is queued first and
+    // the draft submitted behind it -- the draft's payload derives from
+    // committed state at dequeue, so it applies on top of the redone project and
+    // neither is lost (submitting first would record the draft and discard the
+    // redo branch).
+    if (kind === 'undo') {
+      const submittedDraft = r.draftFlush?.() ?? false;
+      r.controller?.undoRedo(kind, { afterQueuedEdits: submittedDraft });
+    } else {
+      r.controller?.undoRedo(kind);
+      r.draftFlush?.();
+    }
   }, []);
 
-  const handleZoomChange = React.useCallback(async (newZoom: number): Promise<void> => {
-    const view = defined(getView());
+  const handleDraftStateChange = React.useCallback((hasDraft: boolean): void => {
+    setStateRaw((prev) => (prev.panelHasDraft === hasDraft ? prev : { ...prev, panelHasDraft: hasDraft }));
+  }, []);
+
+  const handleReload = React.useCallback((): void => {
+    const onReload = latest.current.props.onReload;
+    if (onReload) {
+      onReload();
+    } else {
+      window.location.reload();
+    }
+  }, []);
+
+  // The one persistent notice for a lost engine (ProjectSnapshot.engineUnavailable):
+  // every edit is refused quietly from then on, so this is the only report.
+  const getEngineUnavailableNotice = (): React.ReactElement | undefined => {
+    if (props.embedded || !latest.current.state.controllerSnapshot.engineUnavailable) {
+      return undefined;
+    }
+    return (
+      <div className={styles.engineUnavailableNotice} role="alert">
+        <p className={styles.engineUnavailableTitle}>The model engine stopped working</p>
+        <p className={styles.engineUnavailableBody}>
+          Changes can no longer be saved, and changes since the last save may be lost. Reload to continue from the last
+          saved version.
+        </p>
+        <div className={styles.engineUnavailableActions}>
+          <Button size="small" color="primary" onClick={handleReload}>
+            Reload
+          </Button>
+        </div>
+      </div>
+    );
+  };
+
+  const handleZoomChange = React.useCallback((newZoom: number): void => {
+    const view = getView();
+    if (!view) {
+      return;
+    }
     const oldViewBox = view.viewBox;
 
     const widthAdjust = latest.current.state.showDetails ? panelWidth() : 0;
@@ -2551,7 +2631,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       x: oldViewBox.x + diffX,
       y: oldViewBox.y + diffY,
     };
-    await handleViewBoxChange(newViewBox, newZoom);
+    handleViewBoxChange(newViewBox, newZoom);
   }, []);
 
   // True once the unmount cleanup has cleared the controller. The snapshot
@@ -2790,6 +2870,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         {getDetails(sharedModelBannerInfo.visible)}
         {getSearchBar()}
         {getSharedModelBanner(sharedModelBannerInfo)}
+        {getEngineUnavailableNotice()}
         {getCanvas()}
         {getSnackbar()}
         {getEditorControls()}
