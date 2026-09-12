@@ -63,6 +63,34 @@ typedef enum {
   SIMLIN_LTM_MODE_DISCOVERY = 2,
 } SimlinLtmMode;
 
+// Which part of an element a hit lands on.
+typedef enum {
+  // The element itself: a shape, a flow's pipe or valve, a link's line.
+  SIMLIN_HIT_PART_BODY = 0,
+  // A flow's sink end, or a link's arrowhead.
+  SIMLIN_HIT_PART_ARROWHEAD = 1,
+  // A flow's source end.
+  SIMLIN_HIT_PART_SOURCE = 2,
+  // The element's name label.
+  SIMLIN_HIT_PART_LABEL = 3,
+} SimlinHitPart;
+
+// The tool a host's toolbar arms.
+typedef enum {
+  SIMLIN_TOOL_NONE = 0,
+  SIMLIN_TOOL_STOCK = 1,
+  SIMLIN_TOOL_FLOW = 2,
+  SIMLIN_TOOL_AUX = 3,
+  SIMLIN_TOOL_LINK = 4,
+  SIMLIN_TOOL_MODULE = 5,
+} SimlinTool;
+
+typedef enum {
+  SIMLIN_POINTER_KIND_TOUCH = 0,
+  SIMLIN_POINTER_KIND_PENCIL = 1,
+  SIMLIN_POINTER_KIND_MOUSE = 2,
+} SimlinPointerKind;
+
 // Error codes for the C API
 typedef enum {
   // Success - no error
@@ -152,6 +180,9 @@ typedef enum {
   SIMLIN_JSON_FORMAT_NATIVE = 0,
   SIMLIN_JSON_FORMAT_SDAI = 1,
 } SimlinJsonFormat;
+
+// A live drag over the view as it was when the drag began.
+typedef struct SimlinGesture SimlinGesture;
 
 // A single feedback loop
 typedef struct {
@@ -443,6 +474,29 @@ typedef struct {
   SimlinLink *links;
   uintptr_t count;
 } SimlinLinks;
+
+// A press, resolved by the host: where it landed (model coordinates), what it
+// hit (`simlin_model_hit_test`), the armed tool, the selection before it, and
+// the pointer that made it.
+typedef struct {
+  double x;
+  double y;
+  // Whether the press landed on an element; `hit_uid` and `hit_part` are
+  // read only when it did.
+  bool has_hit;
+  int32_t hit_uid;
+  SimlinHitPart hit_part;
+  SimlinTool tool;
+  // The selection before the press: `selection_len` uids (NULL when zero).
+  const int32_t *selection;
+  uintptr_t selection_len;
+  // A selection modifier (Shift or Command) is held.
+  bool toggle;
+  SimlinPointerKind pointer;
+  // How far outside a drop target the pointer may be and still land on it,
+  // in model units (the host's touch slop divided by the zoom).
+  double target_slop;
+} SimlinPress;
 
 // Error detail structure containing contextual information for failures.
 typedef struct {
@@ -825,6 +879,143 @@ void simlin_analyze_get_loop_element_count(SimlinSim *sim,
                                            const char *loop_id,
                                            uintptr_t *out_element_count,
                                            SimlinError **out_error);
+
+// The element and part of the model's diagram that `(x, y)` (model
+// coordinates) lands on, decided in `simlin_engine::editing::hit_test`'s tiers:
+// a body firmly holding the point, else an end handle within reach, else a
+// label holding the point, else the nearest drawing within `tolerance` model
+// units (the host's touch slop divided by the zoom). Writes `*out_hit = false`
+// when nothing drawn is within reach. Refuses a model with no stock-and-flow
+// view with `DoesNotExist`, as every editing entry point does.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `out_hit`, `out_uid` and `out_part` must be valid, non-null pointers
+// - `out_error` may be null
+void simlin_model_hit_test(SimlinModel *model,
+                           double x,
+                           double y,
+                           double tolerance,
+                           bool *out_hit,
+                           int32_t *out_uid,
+                           SimlinHitPart *out_part,
+                           SimlinError **out_error);
+
+// Plan a tap. Writes a JSON object to a buffer the caller frees with
+// `simlin_free`: `commit` (`"none"`, `"edit"` or `"select"`), `selection` (what
+// the host adopts), `handoff` (a uid whose name editor opens once the edit
+// lands, or null), `details` (the tap opens the element's details), `label`
+// (the edit's name for history), and `patch` (the patch to apply for an
+// `"edit"`, else null).
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `press` must be a valid pointer to a SimlinPress
+// - `out_buf` and `out_len` must be valid, non-null pointers
+// - `out_error` may be null
+void simlin_model_plan_tap(SimlinModel *model,
+                           const SimlinPress *press,
+                           uint8_t **out_buf,
+                           uintptr_t *out_len,
+                           SimlinError **out_error);
+
+// Begin a drag. Returns the gesture, released with `simlin_gesture_unref`; or
+// NULL, with `*out_error` set when the call failed and with no error when the
+// press starts no drag (a finger on the empty canvas, which pans). The gesture
+// plans against the view as it is now: a host that applies an edit while a
+// drag is live ends the drag.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `press` must be a valid pointer to a SimlinPress
+// - `out_error` may be null
+SimlinGesture *simlin_gesture_begin(SimlinModel *model,
+                                    const SimlinPress *press,
+                                    SimlinError **out_error);
+
+// Plan the frame with the pointer at `(x, y)` (model coordinates). Writes a
+// JSON object to a buffer the gesture owns, valid until the next call on this
+// gesture or its release: `kind` (the gesture, null while a press on a pipe has
+// not yet moved), `commit`, `selection`, `target` (a drop target `{uid, valid}`
+// to highlight, or null), `handoff`, `details`, `label`, `hidden` (uids of base
+// scene elements the frame does not draw), and `elements` (scene elements, the
+// `simlin_project_render_scene` contract, drawn over the base scene in their
+// place).
+//
+// # Safety
+// - `gesture` must be a valid pointer to a SimlinGesture
+// - `out_buf` and `out_len` must be valid, non-null pointers
+// - `out_error` may be null
+void simlin_gesture_frame(SimlinGesture *gesture,
+                          double x,
+                          double y,
+                          const uint8_t **out_buf,
+                          uintptr_t *out_len,
+                          SimlinError **out_error);
+
+// Plan the release with the pointer at `(x, y)`: the frame the preview showed
+// there. Writes the same JSON object as `simlin_model_plan_tap` to a buffer the
+// caller frees with `simlin_free`, with `patch` null when the release changes
+// nothing (an invalid drop, a drag back to where it started).
+//
+// # Safety
+// - `gesture` must be a valid pointer to a SimlinGesture
+// - `out_buf` and `out_len` must be valid, non-null pointers
+// - `out_error` may be null
+void simlin_gesture_commit(SimlinGesture *gesture,
+                           double x,
+                           double y,
+                           uint8_t **out_buf,
+                           uintptr_t *out_len,
+                           SimlinError **out_error);
+
+// Increment a gesture's reference count.
+//
+// # Safety
+// - `gesture` must be a valid pointer to a SimlinGesture, or NULL
+void simlin_gesture_ref(SimlinGesture *gesture);
+
+// Decrement a gesture's reference count, releasing it at zero.
+//
+// # Safety
+// - `gesture` must be a valid pointer to a SimlinGesture, or NULL
+void simlin_gesture_unref(SimlinGesture *gesture);
+
+// The patch deleting `selection` (`selection_len` uids) from the model's
+// diagram: the selected elements, the clouds of removed flows, the aliases of
+// removed elements, every link touching a removed element, and a new cloud at
+// every surviving flow end attached to a removed element; applying it deletes
+// the variables and updates the stock lists. Written to a buffer the caller
+// frees with `simlin_free`.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `selection` must point to `selection_len` uids, or be NULL when it is zero
+// - `out_buf` and `out_len` must be valid, non-null pointers
+// - `out_error` may be null
+void simlin_model_plan_delete(SimlinModel *model,
+                              const int32_t *selection,
+                              uintptr_t selection_len,
+                              uint8_t **out_buf,
+                              uintptr_t *out_len,
+                              SimlinError **out_error);
+
+// The patch renaming the variable `old_name` to `new_name` (as typed, stored
+// verbatim): its elements relabeled on the model's diagram when it has any --
+// applying the edit then renames the variable -- else a direct rename. Written
+// to a buffer the caller frees with `simlin_free`.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `old_name` and `new_name` must be valid NUL-terminated UTF-8 strings
+// - `out_buf` and `out_len` must be valid, non-null pointers
+// - `out_error` may be null
+void simlin_model_plan_rename(SimlinModel *model,
+                              const char *old_name,
+                              const char *new_name,
+                              uint8_t **out_buf,
+                              uintptr_t *out_len,
+                              SimlinError **out_error);
 
 // simlin_error_str returns a string representation of an error code.
 // The returned string must not be freed or modified.

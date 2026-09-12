@@ -54,6 +54,9 @@ pub(crate) enum ResolvedElement<'a> {
     },
 }
 
+/// The layer connectors draw in (see [`ResolvedElement::layer`]).
+pub(crate) const LINK_LAYER: u8 = 2;
+
 impl ResolvedElement<'_> {
     /// The layer the element draws in: groups beneath connectors, connectors
     /// beneath flows, flows beneath stocks, clouds and modules, and auxes and
@@ -61,7 +64,7 @@ impl ResolvedElement<'_> {
     pub(crate) fn layer(&self) -> u8 {
         match self {
             ResolvedElement::Group(_) => 0,
-            ResolvedElement::Link { .. } => 2,
+            ResolvedElement::Link { .. } => LINK_LAYER,
             ResolvedElement::Flow { .. } => 3,
             ResolvedElement::Stock { .. }
             | ResolvedElement::Cloud(_)
@@ -144,54 +147,12 @@ pub(crate) fn resolve_view<'a>(
         .collect();
     let lookup = |uid: i32| -> Option<&'a ViewElement> { uid_to_element.get(&uid).copied() };
 
-    let mut elements: Vec<ResolvedElement<'a>> = Vec::with_capacity(stock_flow.elements.len());
-    for element in &stock_flow.elements {
-        let resolved = match element {
-            ViewElement::Group(group) => ResolvedElement::Group(group),
-            ViewElement::Link(link) => {
-                let (Some(from), Some(to)) = (lookup(link.from_uid), lookup(link.to_uid)) else {
-                    continue;
-                };
-                ResolvedElement::Link { link, from, to }
-            }
-            ViewElement::Flow(flow) => {
-                if flow.points.len() < 2 {
-                    continue;
-                }
-                let source_uid = flow.points.first().and_then(|p| p.attached_to_uid);
-                let sink_uid = flow.points.last().and_then(|p| p.attached_to_uid);
-                let (Some(source_uid), Some(sink_uid)) = (source_uid, sink_uid) else {
-                    continue;
-                };
-                if lookup(source_uid).is_none() {
-                    continue;
-                }
-                let Some(sink) = lookup(sink_uid) else {
-                    continue;
-                };
-                ResolvedElement::Flow {
-                    flow,
-                    sink,
-                    is_arrayed: is_arrayed(model, &flow.name),
-                }
-            }
-            ViewElement::Stock(stock) => ResolvedElement::Stock {
-                stock,
-                is_arrayed: is_arrayed(model, &stock.name),
-            },
-            ViewElement::Cloud(cloud) => ResolvedElement::Cloud(cloud),
-            ViewElement::Module(module) => ResolvedElement::Module(module),
-            ViewElement::Aux(aux) => ResolvedElement::Aux {
-                aux,
-                is_arrayed: is_arrayed(model, &aux.name),
-            },
-            ViewElement::Alias(alias) => ResolvedElement::Alias {
-                alias,
-                alias_of_name: lookup(alias.alias_of_uid).and_then(|e| e.get_name()),
-            },
-        };
-        elements.push(resolved);
-    }
+    let arrayed = |name: &str| is_arrayed(model, name);
+    let elements: Vec<ResolvedElement<'a>> = stock_flow
+        .elements
+        .iter()
+        .filter_map(|element| resolve_element(element, &lookup, &arrayed))
+        .collect();
 
     let content_bounds = calc_view_box(
         &elements
@@ -199,6 +160,7 @@ pub(crate) fn resolve_view<'a>(
             .map(ResolvedElement::content_bounds)
             .collect::<Vec<_>>(),
     );
+    let mut elements = elements;
     // A stable sort, so elements within a layer keep their view order.
     elements.sort_by_key(ResolvedElement::layer);
 
@@ -206,5 +168,54 @@ pub(crate) fn resolve_view<'a>(
         model,
         elements,
         content_bounds,
+    })
+}
+
+/// One element as a diagram draws it, with the neighbours its drawing needs
+/// found through `lookup`: `None` for an element that is not drawn -- a link or
+/// flow whose endpoints `lookup` does not hold, a flow with fewer than two
+/// points. `resolve_view` resolves a whole view through this, and a gesture
+/// preview resolves the elements a frame changed over the base view with the
+/// frame's changes substituted, so the two can never disagree about how an
+/// element draws.
+pub(crate) fn resolve_element<'a>(
+    element: &'a ViewElement,
+    lookup: &dyn Fn(i32) -> Option<&'a ViewElement>,
+    is_arrayed: &dyn Fn(&str) -> bool,
+) -> Option<ResolvedElement<'a>> {
+    Some(match element {
+        ViewElement::Group(group) => ResolvedElement::Group(group),
+        ViewElement::Link(link) => ResolvedElement::Link {
+            link,
+            from: lookup(link.from_uid)?,
+            to: lookup(link.to_uid)?,
+        },
+        ViewElement::Flow(flow) => {
+            if flow.points.len() < 2 {
+                return None;
+            }
+            let source_uid = flow.points.first().and_then(|p| p.attached_to_uid)?;
+            let sink_uid = flow.points.last().and_then(|p| p.attached_to_uid)?;
+            lookup(source_uid)?;
+            ResolvedElement::Flow {
+                flow,
+                sink: lookup(sink_uid)?,
+                is_arrayed: is_arrayed(&flow.name),
+            }
+        }
+        ViewElement::Stock(stock) => ResolvedElement::Stock {
+            stock,
+            is_arrayed: is_arrayed(&stock.name),
+        },
+        ViewElement::Cloud(cloud) => ResolvedElement::Cloud(cloud),
+        ViewElement::Module(module) => ResolvedElement::Module(module),
+        ViewElement::Aux(aux) => ResolvedElement::Aux {
+            aux,
+            is_arrayed: is_arrayed(&aux.name),
+        },
+        ViewElement::Alias(alias) => ResolvedElement::Alias {
+            alias,
+            alias_of_name: lookup(alias.alias_of_uid).and_then(|e| e.get_name()),
+        },
     })
 }

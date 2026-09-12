@@ -46,6 +46,7 @@ pub mod db;
 mod diagnostic;
 pub mod diagram;
 mod dimensions;
+pub mod editing;
 pub mod errors;
 pub mod float;
 pub mod io;

@@ -83,6 +83,7 @@ mod ffi;
 mod ffi_error;
 
 mod analysis;
+mod editing;
 mod error_api;
 mod layout;
 mod memory;
@@ -100,6 +101,7 @@ mod simulation;
 // `use super::*;` in the test module keeps working.
 
 pub use analysis::*;
+pub use editing::*;
 pub use error_api::*;
 pub use layout::*;
 pub use memory::*;

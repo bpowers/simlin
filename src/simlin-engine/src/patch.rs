@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::HashMap;
+
 use crate::ast::{Expr0, Expr2, IndexExpr0, IndexExpr2, print_eqn};
 use crate::builtins::{BuiltinFn, UntypedBuiltinFn};
 use crate::canonicalize;
@@ -64,23 +66,79 @@ pub enum ModelOperation {
         name: String,
         description: Option<String>,
     },
+    /// Edit one stock-and-flow view by upserting elements (by uid: substituting
+    /// or appending) and removing uids, and apply every model operation the
+    /// edit implies -- renames, deletes, creates, stock list updates -- derived
+    /// against the model as it is when this operation applies
+    /// (`editing::derived_operations`). A diagram host describes an edit only by
+    /// the elements it changed; the model follows.
+    EditView {
+        index: u32,
+        upsert: Vec<datamodel::ViewElement>,
+        remove: Vec<i32>,
+    },
 }
 
-/// Returns true when the patch only touches views (UpsertView/DeleteView)
-/// and has no project-level operations. View-only patches don't affect
-/// equations, variables, or simulation, so callers can skip recompilation.
-pub fn is_view_only_patch(patch: &ProjectPatch) -> bool {
+/// Whether applying the patch to `project` changes only views: no project-level
+/// operations, and every model operation an `UpsertView`, a `DeleteView`, or an
+/// `EditView` that implies no model operation (a moved element, a rerouted flow,
+/// a curved link). Such a patch cannot change equations, variables, or
+/// simulation, so callers can skip recompilation. Each `EditView` is judged
+/// against the view the patch's earlier view operations leave, the view it will
+/// actually edit; a patch that would fail to apply is not view-only, so the
+/// caller's full path reports the failure.
+pub fn is_view_only_patch(project: &datamodel::Project, patch: &ProjectPatch) -> bool {
     if !patch.project_ops.is_empty() {
         return false;
     }
-    patch.models.iter().all(|mp| {
-        mp.ops.iter().all(|op| {
-            matches!(
-                op,
-                ModelOperation::UpsertView { .. } | ModelOperation::DeleteView { .. }
-            )
-        })
-    })
+    let mut views: HashMap<&str, Vec<datamodel::View>> = HashMap::new();
+    for model_patch in &patch.models {
+        let Some(model) = project.get_model(&model_patch.name) else {
+            return false;
+        };
+        let working = views
+            .entry(model_patch.name.as_str())
+            .or_insert_with(|| model.views.clone());
+        for op in &model_patch.ops {
+            match op {
+                ModelOperation::UpsertView { index, view } => {
+                    let i = *index as usize;
+                    if i < working.len() {
+                        working[i] = view.clone();
+                    } else if i == working.len() {
+                        working.push(view.clone());
+                    } else {
+                        return false;
+                    }
+                }
+                ModelOperation::DeleteView { index } => {
+                    if (*index as usize) >= working.len() {
+                        return false;
+                    }
+                    working.remove(*index as usize);
+                }
+                ModelOperation::EditView {
+                    index,
+                    upsert,
+                    remove,
+                } => {
+                    let Some(datamodel::View::StockFlow(base)) = working.get(*index as usize)
+                    else {
+                        return false;
+                    };
+                    let next = crate::editing::edited_view(base, upsert, remove);
+                    if !crate::editing::derived_operations(model, base, &next)
+                        .is_ok_and(|ops| ops.is_empty())
+                    {
+                        return false;
+                    }
+                    working[*index as usize] = datamodel::View::StockFlow(next);
+                }
+                _ => return false,
+            }
+        }
+    }
+    true
 }
 
 pub fn apply_patch(project: &mut datamodel::Project, patch: ProjectPatch) -> Result<()> {
@@ -104,58 +162,102 @@ pub fn apply_patch(project: &mut datamodel::Project, patch: ProjectPatch) -> Res
     // Then apply model-level operations
     for model_patch in patch.models {
         for op in model_patch.ops {
-            match op {
-                ModelOperation::RenameVariable { from, to } => {
-                    apply_rename_variable(&mut staged, &model_patch.name, &from, &to)?;
-                }
-                _ => {
-                    let model = get_model_mut(&mut staged, &model_patch.name)?;
-                    match op {
-                        ModelOperation::UpsertStock(mut stock) => {
-                            canonicalize_stock_references(&mut stock);
-                            upsert_variable(model, Variable::Stock(stock));
-                        }
-                        ModelOperation::UpsertFlow(flow) => {
-                            upsert_variable(model, Variable::Flow(flow));
-                        }
-                        ModelOperation::UpsertAux(aux) => {
-                            upsert_variable(model, Variable::Aux(aux));
-                        }
-                        ModelOperation::UpsertModule(mut module) => {
-                            canonicalize_module_references(&mut module);
-                            upsert_variable(model, Variable::Module(module));
-                        }
-                        ModelOperation::DeleteVariable { ident } => {
-                            apply_delete_variable(model, &ident)?;
-                        }
-                        ModelOperation::UpsertView { index, view } => {
-                            apply_upsert_view(model, index, view)?;
-                        }
-                        ModelOperation::DeleteView { index } => {
-                            apply_delete_view(model, index)?;
-                        }
-                        ModelOperation::UpdateStockFlows {
-                            ident,
-                            inflows,
-                            outflows,
-                        } => {
-                            apply_update_stock_flows(model, &ident, &inflows, &outflows)?;
-                        }
-                        ModelOperation::SetLoopName {
-                            variables,
-                            name,
-                            description,
-                        } => {
-                            apply_set_loop_name(model, variables, name, description)?;
-                        }
-                        ModelOperation::RenameVariable { .. } => unreachable!(),
-                    }
-                }
-            }
+            apply_model_operation(&mut staged, &model_patch.name, op)?;
         }
     }
 
     *project = staged;
+    Ok(())
+}
+
+fn apply_model_operation(
+    project: &mut datamodel::Project,
+    model_name: &str,
+    op: ModelOperation,
+) -> Result<()> {
+    // Renames reach every model's equations through the project, and a view
+    // edit applies renames of its own, so both take the project.
+    if let ModelOperation::RenameVariable { from, to } = &op {
+        return apply_rename_variable(project, model_name, from, to);
+    }
+    if let ModelOperation::EditView {
+        index,
+        upsert,
+        remove,
+    } = &op
+    {
+        return apply_edit_view(project, model_name, *index, upsert, remove);
+    }
+    let model = get_model_mut(project, model_name)?;
+    match op {
+        ModelOperation::UpsertStock(mut stock) => {
+            canonicalize_stock_references(&mut stock);
+            upsert_variable(model, Variable::Stock(stock));
+        }
+        ModelOperation::UpsertFlow(flow) => {
+            upsert_variable(model, Variable::Flow(flow));
+        }
+        ModelOperation::UpsertAux(aux) => {
+            upsert_variable(model, Variable::Aux(aux));
+        }
+        ModelOperation::UpsertModule(mut module) => {
+            canonicalize_module_references(&mut module);
+            upsert_variable(model, Variable::Module(module));
+        }
+        ModelOperation::DeleteVariable { ident } => {
+            apply_delete_variable(model, &ident)?;
+        }
+        ModelOperation::UpsertView { index, view } => {
+            apply_upsert_view(model, index, view)?;
+        }
+        ModelOperation::DeleteView { index } => {
+            apply_delete_view(model, index)?;
+        }
+        ModelOperation::UpdateStockFlows {
+            ident,
+            inflows,
+            outflows,
+        } => {
+            apply_update_stock_flows(model, &ident, &inflows, &outflows)?;
+        }
+        ModelOperation::SetLoopName {
+            variables,
+            name,
+            description,
+        } => {
+            apply_set_loop_name(model, variables, name, description)?;
+        }
+        ModelOperation::RenameVariable { .. } | ModelOperation::EditView { .. } => {
+            unreachable!("applied through the project above")
+        }
+    }
+    Ok(())
+}
+
+/// Apply a view edit: the model operations the edit implies, derived against
+/// the model as it is now, then the edited view in place of the old one.
+fn apply_edit_view(
+    project: &mut datamodel::Project,
+    model_name: &str,
+    index: u32,
+    upsert: &[datamodel::ViewElement],
+    remove: &[i32],
+) -> Result<()> {
+    let model = get_model_mut(project, model_name)?;
+    let Some(datamodel::View::StockFlow(base)) = model.views.get(index as usize) else {
+        return Err(Error::new(
+            ErrorKind::Model,
+            ErrorCode::DoesNotExist,
+            Some(format!("view index {index} out of range")),
+        ));
+    };
+    let next = crate::editing::edited_view(base, upsert, remove);
+    let ops = crate::editing::derived_operations(model, base, &next)?;
+    for op in ops {
+        apply_model_operation(project, model_name, op)?;
+    }
+    let model = get_model_mut(project, model_name)?;
+    model.views[index as usize] = datamodel::View::StockFlow(next);
     Ok(())
 }
 
@@ -3487,6 +3589,7 @@ mod tests {
 
     #[test]
     fn test_is_view_only_patch() {
+        let project = TestProject::new("test").build_datamodel();
         let view_patch = ProjectPatch {
             project_ops: vec![],
             models: vec![ModelPatch {
@@ -3505,7 +3608,7 @@ mod tests {
                 }],
             }],
         };
-        assert!(is_view_only_patch(&view_patch));
+        assert!(is_view_only_patch(&project, &view_patch));
 
         let mixed_patch = ProjectPatch {
             project_ops: vec![],
@@ -3537,13 +3640,13 @@ mod tests {
                 ],
             }],
         };
-        assert!(!is_view_only_patch(&mixed_patch));
+        assert!(!is_view_only_patch(&project, &mixed_patch));
 
         let empty_patch = ProjectPatch {
             project_ops: vec![],
             models: vec![],
         };
-        assert!(is_view_only_patch(&empty_patch));
+        assert!(is_view_only_patch(&project, &empty_patch));
 
         let project_op_patch = ProjectPatch {
             project_ops: vec![ProjectOperation::AddModel {
@@ -3551,7 +3654,7 @@ mod tests {
             }],
             models: vec![],
         };
-        assert!(!is_view_only_patch(&project_op_patch));
+        assert!(!is_view_only_patch(&project, &project_op_patch));
     }
 
     /// Helper to set UIDs on variables in a built datamodel, since TestProject

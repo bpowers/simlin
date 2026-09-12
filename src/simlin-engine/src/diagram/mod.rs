@@ -14,8 +14,8 @@ mod path;
 mod render;
 #[cfg(feature = "png_render")]
 mod render_png;
-mod resolve;
-mod scene;
+pub(crate) mod resolve;
+pub(crate) mod scene;
 
 pub use render::render_svg;
 #[cfg(feature = "png_render")]

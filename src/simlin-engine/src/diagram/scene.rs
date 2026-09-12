@@ -22,11 +22,16 @@ use serde::Serialize;
 use crate::common::canonicalize;
 use crate::datamodel;
 use crate::diagram::arrowhead::{
-    ARROWHEAD_BACK_LARGE_ARC, ARROWHEAD_BACK_SWEEP, ArrowheadGeometry,
+    ARROWHEAD_BACK_LARGE_ARC, ARROWHEAD_BACK_SWEEP, ArrowheadGeometry, arrowhead_geometry,
 };
-use crate::diagram::common::{Circle, Frame, Point, Rect, merge_bounds, rotate_about};
-use crate::diagram::connector::{ConnectorGeometry, connector_geometry, connector_is_dashed};
-use crate::diagram::constants::{GROUP_LABEL_FONT_WEIGHT, LABEL_FONT_SIZE, LABEL_FONT_WEIGHT};
+use crate::diagram::common::{Circle, Frame, Point, Rect, merge_bounds, rad_to_deg, rotate_about};
+use crate::diagram::connector::{
+    ConnectorGeometry, connector_geometry, connector_is_dashed, get_visual_center,
+    intersect_element_straight,
+};
+use crate::diagram::constants::{
+    ARROWHEAD_RADIUS, GROUP_LABEL_FONT_WEIGHT, LABEL_FONT_SIZE, LABEL_FONT_WEIGHT,
+};
 use crate::diagram::elements::{
     CLOUD_PATH, alias_geometry, aux_geometry, cloud_transform, group_geometry, module_geometry,
     stock_geometry,
@@ -34,7 +39,7 @@ use crate::diagram::elements::{
 use crate::diagram::flow::flow_geometry;
 use crate::diagram::label::{LabelProps, TextAnchor, label_bounds, label_lines};
 use crate::diagram::path::{PathBuilder, control_point_bounds, parse_absolute_svg_path};
-use crate::diagram::resolve::{ResolvedElement, resolve_view};
+use crate::diagram::resolve::{LINK_LAYER, ResolvedElement, resolve_view};
 
 /// The contract version a consumer checks before reading a scene.
 pub const SCENE_VERSION: u32 = 1;
@@ -322,7 +327,9 @@ struct ElementParts {
     label_box: Option<Rect>,
 }
 
-fn scene_element(
+/// The scene element of one resolved element, `None` where the SVG draws
+/// nothing.
+pub(crate) fn scene_element(
     element: &ResolvedElement<'_>,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
 ) -> Option<SceneElement> {
@@ -500,6 +507,41 @@ fn scene_element(
         }
     };
     finish(parts, layer)
+}
+
+/// A link drawn from `from` to a point where no element is: a link being drawn
+/// or reattached while its end is over no valid target. A straight connector
+/// from the source's boundary along the bearing of the point, its arrowhead at
+/// the point, drawn as `straight_geometry` draws a link's start and arrowhead.
+pub(crate) fn dangling_link_scene_element(
+    uid: i32,
+    from: &datamodel::ViewElement,
+    to: Point,
+    is_arrayed_fn: &dyn Fn(&str) -> bool,
+) -> Option<SceneElement> {
+    let (fx, fy) = get_visual_center(from, is_arrayed_fn);
+    let theta = (to.y - fy).atan2(to.x - fx);
+    let start = intersect_element_straight(from, theta, is_arrayed_fn);
+    let arrowhead = arrowhead_geometry(to.x, to.y, rad_to_deg(theta), ARROWHEAD_RADIUS);
+    let mut line = PathBuilder::new();
+    line.move_to(start);
+    line.line_to(to);
+    finish(
+        ElementParts {
+            uid,
+            kind: SceneElementKind::Link,
+            ident: None,
+            is_arrayed: false,
+            shapes: vec![
+                path_shape(line.into_d(), ScenePaint::Connector),
+                path_shape(arrowhead_path(&arrowhead), ScenePaint::ArrowheadLink),
+            ],
+            sparkline: None,
+            label: None,
+            label_box: None,
+        },
+        LINK_LAYER,
+    )
 }
 
 fn finish(parts: ElementParts, layer: u8) -> Option<SceneElement> {

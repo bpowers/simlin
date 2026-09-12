@@ -18,6 +18,7 @@ mod common;
 
 mod analysis;
 mod diagram;
+mod editing;
 mod errors;
 mod incremental;
 mod memory;

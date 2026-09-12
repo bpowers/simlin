@@ -153,6 +153,15 @@ enum JsonModelOperation {
         #[serde(default)]
         description: Option<String>,
     },
+    /// Upsert and remove view elements; the engine derives the model operations
+    /// the edit implies when it applies (`ModelOperation::EditView`).
+    EditView {
+        index: u32,
+        #[serde(default)]
+        upsert: Vec<engine::json::ViewElement>,
+        #[serde(default)]
+        remove: Vec<i32>,
+    },
 }
 
 // ── conversion helpers ─────────────────────────────────────────────────
@@ -235,6 +244,15 @@ fn convert_json_model_operation(
             variables,
             name,
             description,
+        },
+        JsonModelOperation::EditView {
+            index,
+            upsert,
+            remove,
+        } => engine::ModelOperation::EditView {
+            index,
+            upsert: upsert.into_iter().map(Into::into).collect(),
+            remove,
         },
     };
     Ok(result)
@@ -487,15 +505,16 @@ pub(crate) unsafe fn apply_project_patch_internal(
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
 ) {
-    // View-only patches (UpsertView/DeleteView) don't affect variables,
-    // equations, or simulation results. Skip the expensive compilation
-    // and diagnostic validation and apply directly to the datamodel.
-    let view_only = engine::is_view_only_patch(&patch);
-
     // Hold the datamodel lock for the entire operation. This prevents
     // concurrent patchers from snapshotting a stale datamodel between
     // our validation and commit phases.
     let mut datamodel_locked = project_ref.datamodel.lock().unwrap();
+
+    // View-only patches (view upserts and deletes, and view edits that imply no
+    // model operation) don't affect variables, equations, or simulation
+    // results. Skip the expensive compilation and diagnostic validation and
+    // apply directly to the datamodel.
+    let view_only = engine::is_view_only_patch(&datamodel_locked, &patch);
 
     if view_only && !dry_run {
         if let Err(err) = engine::apply_patch(&mut datamodel_locked, patch) {

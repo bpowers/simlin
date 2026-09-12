@@ -73,10 +73,20 @@ Error formatting has no module here: `src/patch.rs` imports `simlin_engine::erro
 - **`src/layout.rs`** - Automatic diagram layout:
   - `simlin_project_diagram_sync(project, model_name, patch_json, out_error)` - Generate layout for a model, replacing its views in-place. When `patch_json` is non-null and the model already has a non-empty view, uses incremental layout (preserving existing element positions); otherwise generates a full layout from scratch. Preserves existing zoom. Works on all targets including WASM. Requires the project to be synced to the salsa db first (returns an error otherwise).
 
+### Diagram editing
+
+- **`src/editing.rs`** - The editing planner for native hosts (`simlin_engine::editing`):
+  - `simlin_model_hit_test(model, x, y, tolerance, out_hit, out_uid, out_part, out_error)` - the view element and `SimlinHitPart` under a canvas point, the tolerance in model units (the host's slop divided by the zoom)
+  - `simlin_model_plan_tap(model, press, ..)` - a tap's plan as JSON (`{kind, commit, selection, handoff, details, label, patch}`) in a `simlin_malloc` buffer
+  - `SimlinGesture`, a refcounted drag: `simlin_gesture_begin(model, press, out_error)` (NULL without an error when the press starts no drag -- a finger on the empty canvas pans), `simlin_gesture_frame` (the frame's plan plus `hidden` uids and the scene `elements` it draws in their place, written to a buffer the gesture owns and reuses until its next call, so a drag allocates no output buffer per frame), `simlin_gesture_commit` (the tap's JSON shape for the frame at the release point), `simlin_gesture_{ref,unref}`
+  - `simlin_model_plan_delete(model, uids, count, ..)` and `simlin_model_plan_rename(model, old_name, new_name, ..)` - patch JSON; a variable the diagram does not draw is renamed with a direct `renameVariable`
+  - `SimlinPress` carries the press: point, hit, armed `SimlinTool`, selection, toggle, `SimlinPointerKind`, target slop
+  - Every edit comes back as a patch the host applies with `simlin_project_apply_patch`, so an edit lands through the one patch path and its validation. A gesture plans against its own copy of the view taken when the drag began, locking nothing per frame. Every entry point refuses a model with no stock-and-flow view with `DoesNotExist`: the scene draws such a model through a transient layout, which no edit could change
+
 ### Patching
 
 - **`src/patch.rs`** - JSON patch application:
-  - JSON patch types (`JsonProjectPatch`, `JsonModelPatch`, `JsonProjectOperation`, `JsonModelOperation`). The `setLoopName` model op (`{variables, name, description?}`) pins a feedback loop by its variable set; the engine then always emits that loop's LTM score (the LOOPSCORE escape hatch -- see `/src/simlin-engine/CLAUDE.md`), surfaced through `simlin_analyze_get_loops` (id `pin{n}`) and `simlin_analyze_get_relative_loop_score` even in discovery mode
+  - JSON patch types (`JsonProjectPatch`, `JsonModelPatch`, `JsonProjectOperation`, `JsonModelOperation`). The `editView` model op (`{index, upsert, remove}`) edits a view and derives the model operations the edited view implies when it applies; whether a patch is view-only (and so skips recompiling) is decided by `engine::is_view_only_patch` against the locked datamodel. The `setLoopName` model op (`{variables, name, description?}`) pins a feedback loop by its variable set; the engine then always emits that loop's LTM score (the LOOPSCORE escape hatch -- see `/src/simlin-engine/CLAUDE.md`), surfaced through `simlin_analyze_get_loops` (id `pin{n}`) and `simlin_analyze_get_relative_loop_score` even in discovery mode
   - `simlin_project_apply_patch()` with dry-run support
   - `convert_json_project_patch()`, `convert_json_model_patch()` - JSON to engine patch conversion
   - `gather_error_details_with_db()` collects errors from the salsa accumulator path (`collect_all_diagnostics`) plus an optional VM validation error, using the datamodel for snippet/squiggle formatting
@@ -102,6 +112,7 @@ Integration tests live in the single consolidated `tests/integration` harness (o
 - **`tests/integration/rendering.rs`** - SVG, scene, and PNG diagram rendering: each entry point's NULL, model-name, and missing-model refusals, the transient layout of a viewless model, and the scene's `contentBounds` agreeing with the SVG viewBox of the same project
 - **`tests/integration/results.rs`** - Standalone results FFI via VDF import: run-file and dataset-file opens with pinned series values (fixtures under `/test/bobby/vdf/`), canonical + display-name series lookup, sorted name listing, malformed-input rejection (empty/garbage/truncated/NULL) without crashing, refcounting, and NULL-handle errors
 - **`tests/integration/diagram.rs`** - Diagram layout sync
+- **`tests/integration/editing.rs`** - The editing FFI from a press to an applied patch: a hit test, a creation tap and its handoff, a drag's frame (`hidden`, `elements`) and commit, a refused drop marking its target with no patch, a press that starts no drag, delete and rename patches (drawn and undrawn variables), `DoesNotExist` for a viewless model, and NULL inputs
 - **`tests/integration/errors.rs`** - Error formatting, error kind mapping, diagnostics
 - **`tests/integration/memory.rs`** - Allocator alignment
 - **`tests/integration/common/mod.rs`** - Shared test helpers (`open_project_from_datamodel`)
