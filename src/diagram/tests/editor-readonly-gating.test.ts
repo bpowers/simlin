@@ -31,16 +31,26 @@ import { act, fireEvent, render, screen, type RenderResult } from '@testing-libr
 // the binding resolves to the real module and is hoisted alongside the factory.
 import * as react from 'react' with { rstest: 'importActual' };
 
-import type {
-  FlowViewElement,
-  GraphicalFunction,
-  LinkViewElement,
-  StockFlowView,
-  Variable,
-} from '@simlin/core/datamodel';
+import type { GraphicalFunction, StockFlowView, Variable } from '@simlin/core/datamodel';
 
 import { ProjectController, type ProjectSnapshot } from '../project-controller';
-import type { CanvasProps } from '../drawing/Canvas';
+import type { CanvasProps, GestureCommit } from '../drawing/Canvas';
+
+// Every view-editing gesture reaches the Editor as one commit; this one moves
+// the first element of the rendered view, planned on that view, so only the
+// read-only gate can stop it.
+function movedCommit(cp: CanvasProps): GestureCommit {
+  const [first, ...rest] = cp.view.elements;
+  const elements = first === undefined ? [] : [{ ...first, x: first.x + 10, y: first.y + 10 }, ...rest];
+  return {
+    label: 'move',
+    elements,
+    nextUid: cp.view.nextUid,
+    selection: new Set(),
+    token: cp.token,
+    baseView: cp.view,
+  };
+}
 import type { VariableDetails as VariableDetailsType } from '../VariableDetails';
 import type { ModuleDetails as ModuleDetailsType } from '../ModuleDetails';
 
@@ -303,8 +313,7 @@ describe('Editor readOnlyMode capability gate', () => {
     const cp = canvasProps!;
     await act(async () => {
       cp.onRenameVariable('some var', 'renamed');
-      cp.onMoveSelection({ x: 10, y: 10 });
-      cp.onMoveLabel(9, 'left');
+      cp.onCommitGesture(movedCommit(cp));
       cp.onCreateVariable({
         type: 'aux',
         uid: -2,
@@ -316,14 +325,6 @@ describe('Editor readOnlyMode capability gate', () => {
         labelSide: 'right',
         isZeroRadius: false,
       });
-      cp.onMoveFlow(
-        { type: 'flow', uid: 12, points: [] } as unknown as FlowViewElement,
-        9,
-        { x: 0, y: 0 },
-        undefined,
-        true,
-      );
-      cp.onAttachLink({ type: 'link', uid: -2, fromUid: 9 } as unknown as LinkViewElement, 'some_var');
       void cp.onDeleteSelection();
     });
     await act(async () => {
@@ -469,8 +470,7 @@ describe('Editor readOnlyMode capability gate', () => {
 
     await act(async () => {
       staleHandlers.onRenameVariable('some var', 'renamed');
-      staleHandlers.onMoveSelection({ x: 10, y: 10 });
-      staleHandlers.onMoveLabel(9, 'left');
+      staleHandlers.onCommitGesture(movedCommit(staleHandlers));
       staleHandlers.onCreateVariable({
         type: 'aux',
         uid: -2,
@@ -482,14 +482,6 @@ describe('Editor readOnlyMode capability gate', () => {
         labelSide: 'right',
         isZeroRadius: false,
       });
-      staleHandlers.onMoveFlow(
-        { type: 'flow', uid: 12, points: [] } as unknown as FlowViewElement,
-        9,
-        { x: 0, y: 0 },
-        undefined,
-        true,
-      );
-      staleHandlers.onAttachLink({ type: 'link', uid: -2, fromUid: 9 } as unknown as LinkViewElement, 'some_var');
       void staleHandlers.onDeleteSelection();
     });
     expectNoMutations();
@@ -632,7 +624,7 @@ describe('Editor readOnlyMode flips (both directions)', () => {
 
     const enqueueViewEdit = ProjectController.prototype.enqueueViewEdit as unknown as ReturnType<typeof rs.fn>;
     await act(async () => {
-      canvasProps!.onMoveSelection({ x: 10, y: 10 });
+      canvasProps!.onCommitGesture(movedCommit(canvasProps!));
     });
     expect(enqueueViewEdit).not.toHaveBeenCalled();
   });

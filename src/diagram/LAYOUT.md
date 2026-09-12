@@ -143,35 +143,35 @@ Point {
 1. **Must have at least 2 points** (source and destination)
 2. **First point** connects to source (stock or cloud)
 3. **Last point** connects to sink (stock or cloud)
-4. **Intermediate points** define the path shape. Multi-segment (L- and
-   Z-shaped) flows are fully supported: stocks moving off-axis produce a
-   corner point, endpoint drags with a dominant perpendicular component
-   convert a straight flow to an L, and interior segments of 3+ point flows
-   can be dragged perpendicular to their direction. `normalizeFlowPoints`
-   removes zero-length and colinear interior segments after every mutation so
-   segments strictly alternate horizontal/vertical.
-5. **Flows are constrained** to horizontal or vertical segments when connected to stocks
-6. **Stock connections**:
-   - Endpoints snap to stock edges (±width/2 or ±height/2)
-   - Must be at least 3px from corners
-   - Multiple flows attaching to the same stock side spread evenly along the
-     edge (n flows sit at i/(n+1) fractions; straight flows keep their
-     anchor-determined position but still reserve a slot)
-7. **Cloud connections**:
+4. **Intermediate points** define the path shape. Every segment is horizontal
+   or vertical (cloud-to-cloud flows included), and an edited path has no
+   zero-length segment and no two consecutive collinear segments, so segments
+   alternate horizontal/vertical. Straight, L-, Z- and bracket-shaped flows are
+   all ordinary.
+5. **Stock connections**:
+   - The endpoint lies on a face of the stock (±StockWidth/2 or ±StockHeight/2
+     from its center), at least 3px (`CORNER_CLEARANCE`) from the corners
+   - The segment touching the stock leaves the face perpendicularly, outward,
+     and no segment passes through a terminal stock
+   - A flow newly landing on a face takes a slot at least 10px (`PIPE_SPACING`)
+     from the endpoints already on that face when one exists; sliding along a
+     face never re-spreads the other flows
+6. **Cloud connections**:
    - The endpoint sits at the cloud center; the rendered path is retracted by
      CloudRadius (13.5px) so the arrowhead lands on the cloud's edge
-   - Clouds adjust position when dragged
+   - A cloud moves with its flow's end: dragging the cloud drags that end
+7. **Valve**: lies on the path, at least 10px (`VALVE_CLAMP_MARGIN`) from its
+   ends when the path is long enough
 
 **Path Rendering**:
 - Path is drawn as SVG path using M (move) and L (line) commands
 - Final segment adjusted by 7.5px (finalAdjust) to accommodate arrowhead
 - Arrowhead angle snapped to cardinal directions (0°, 90°, 180°, 270°)
 
-**Movement Constraints**:
-- **Horizontal flows**: All points have same y-coordinate
-- **Vertical flows**: All points have same x-coordinate
-- **Valve movement**: Constrained within bounds between connected elements
-- **Cloud-to-cloud flows**: Can be diagonal (no axis constraint)
+**Imported geometry**: a saved or imported flow may break these rules (diagonal
+segments, ends with no attachment from a Vensim import, a valve off the path).
+It renders unmodified; the first edit that routes it repairs it (`heal` in
+`flow-geometry/`), giving any unattached end a cloud.
 
 ### Auxiliary Variables
 
@@ -255,11 +255,9 @@ CloudViewElement {
 
 **Special Properties**:
 - **No label**: Clouds are unnamed (no name or ident property)
-- **Always attached**: Must be connected to exactly one flow
-- **Position constraints**:
-  - When flow is horizontal: cloud can only move along x-axis
-  - When flow is vertical: cloud can only move along y-axis
-  - For diagonal flows (cloud-to-cloud): no movement constraints
+- **Always attached**: Must be an endpoint of exactly one flow, its owner
+- **Position**: always the owning flow's endpoint; moving the cloud re-routes
+  that end of the flow from its other end
 - **Scaling**: SVG path scaled using matrix transform to achieve target diameter
   - Scale factor = (2 × CloudRadius) / CloudWidth
 
@@ -429,42 +427,42 @@ switch(side) {
 
 ### Flow Connections
 
-Flows connect stocks and clouds with specific constraints:
+Flows connect stocks and clouds. `flow-geometry/` owns every rule in
+[Flow Elements](#flow-elements), and `tests/support/flow-invariants.ts` checks
+them on every flow an edit routes:
 
-1. **Stock-to-Stock flows**:
-   - **Axis constraint**: Must maintain horizontal OR vertical orientation
-   - **Endpoint attachment**: Snap to stock edge (±StockWidth/2 or ±StockHeight/2)
-   - **Valve position**: Constrained within connection bounds
-   - **Corner clearance**: Minimum 3px from stock corners
-   - **Movement**: When stock moves, flow endpoints adjust to maintain connection
-
-2. **Cloud-to-Stock flows**:
-   - **Cloud position**: Adjustable along flow axis only
-   - **Distance maintenance**: Cloud maintains CloudRadius distance from flow endpoint
-   - **Axis determination**: Based on relative positions at creation time
-
-3. **Cloud-to-Cloud flows**:
-   - **No axis constraint**: Can be diagonal
-   - **Free movement**: Both clouds and valve can move freely
-   - **Uniform translation**: All points move together when valve dragged
+1. **Stock-to-Stock flows**: both ends on faces; the path is straight when the
+   faces line up, otherwise an L, Z or bracket. The source and sink are
+   different stocks.
+2. **Cloud-to-Stock flows**: the stock end is on a face; the cloud end is the
+   cloud's center, wherever the cloud is.
+3. **Cloud-to-Cloud flows**: orthogonal like any other flow; with both clouds
+   selected, the whole flow translates.
 
 ### Flow Movement Algorithm
 
-**UpdateStockAndFlows**: When moving a stock with connected flows:
-1. Classify flows by attachment side (left, right, top, bottom)
-2. Calculate proposed new stock position
-3. Constrain position to keep flows valid:
-   - Horizontal flows: constrain Y within flow valve ± StockHeight/2 - 3px
-   - Vertical flows: constrain X within flow valve ± StockWidth/2 - 3px
-4. Adjust all flow endpoints to new stock edges
+Every canvas edit is planned by `gesture-planner/` from the view as it was when
+the gesture started (the base view), never from the previous frame, so the frame
+previewed at a pointer position is exactly the frame committed there. Movement
+below 5 screen pixels is a click and changes nothing.
 
-**UpdateFlow**: When moving a flow valve:
-1. Determine if flow is horizontal, vertical, or diagonal
-2. For stock-connected flows:
-   - Maintain axis alignment
-   - Constrain valve position within valid range
-3. Update cloud positions to follow flow movement
-4. Keep minimum 10px clearance from flow endpoints (`VALVE_CLAMP_MARGIN`)
+- **Moving a selection**: selected elements translate. A flow with both ends
+  moving translates; a flow with one moving end re-routes that end to its moved
+  terminal (`routeEnd`), keeping the face it was attached to where it can; a
+  selected flow with neither end moving slides its valve. Links whose endpoints
+  moved turn their arcs once, from the final positions.
+- **Dragging a valve or a pipe**: the first move past the click threshold decides
+  once. Along the pressed segment slides the valve along the path (`slideValve`);
+  perpendicular to it offsets that segment (`offsetSegment`), bending a straight
+  flow into an L or, between two stocks, a bracket.
+- **Dragging a flow end** (its arrowhead, its source grip, or its cloud): the end
+  follows the pointer. Over a stock that is a valid target it routes onto that
+  stock's face; over empty space it ends at a cloud; over an invalid target (the
+  flow's other stock, a stock with no variable) nothing commits.
+- **Drawing a flow**: routes from the pressed stock's face, or a new cloud at the
+  press point, to the pointer, then behaves as a dragged sink.
+- A move whose routed flows cannot hold the rules (a cloud dragged into a stock)
+  commits nothing.
 
 ### Connector Rules
 
@@ -660,11 +658,13 @@ Each element type has specific hit testing:
 - **Arrowheads**: Separate selection target for reconnection
 
 ### Interaction Modes
-- **Single click**: Select element
+- **Single click**: Select element (a movement under 5 screen pixels is a click)
 - **Double click on label**: Enter text edit mode
-- **Drag element**: Move with constraints
-- **Drag arrowhead**: Reconnect to different target
+- **Drag element**: Move the selection
+- **Drag valve or pipe**: Slide the valve or offset the segment
+- **Drag arrowhead, source grip or cloud**: Reconnect that end of the flow or link
 - **Drag label**: Reposition label side
+- **Drag empty canvas**: Rubber-band select (with touch or Shift: pan)
 
 ## Best Practices for View Generation
 

@@ -2,24 +2,23 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// The tolerant checker over real imported models, through the real WASM engine.
+// The flow checker over real imported models, through the real WASM engine.
 //
 // What this establishes: for a handful of small corpus models covering the
 // producers the corpus measurement grouped (Stella, Vensim via xmutil, native
 // MDL, Simlin-authored XMILE), the first stock-flow view as the editor loads it
-// (engine import -> serializeJson -> projectFromJson) passes tolerant mode, and
-// these six also hold M1/M3 (M1/M3 are committed-view checks for the elements an
-// edit routes or creates; a few other imports carry violations the editor still
-// accepts, e.g. an orphan cloud in Query_file.mdl, lookup-only variables in
-// test_lookups*.xmile); and strict mode reports exactly the
-// imported violations each model carries, flow by flow, so the tolerant pass is
-// not vacuous and the tolerant/strict split is exercised by real data.
+// (engine import -> serializeJson -> projectFromJson) passes tolerant mode and
+// holds M1/M3, and the engine's import normalization leaves every flow holding
+// strict geometry. Each file's raw geometry carries a violation shape the corpus
+// measurement recorded, so a row fails if the importer stops normalizing it
+// (M1/M3 are committed-view checks for the elements an edit routes or creates; a
+// few other imports carry violations the editor still accepts, e.g. an orphan
+// cloud in Query_file.mdl, lookup-only variables in test_lookups*.xmile).
 //
-// What it does not establish: anything about the other ~480 corpus models, or
-// that routing these flows yields strict geometry (the corpus routing test
-// arrives with flow-geometry.ts). The strict expectations characterize today's
-// importers; the planned engine import fixes (MDL endpoints on larger stocks,
-// MDL fallback flows) are expected to change them.
+// What it does not establish: anything about the other ~480 corpus models, that
+// strict mode detects violations at all (flow-invariants.test.ts mutates a valid
+// fixture once per arm), or that routing these flows keeps strict geometry
+// (gesture-planner-corpus.test.ts).
 
 import { describe, it, expect, beforeAll } from '@rstest/core';
 
@@ -44,49 +43,33 @@ const repoRoot = path.join(__dirname, '..', '..', '..');
 interface CorpusRow {
   readonly file: string;
   readonly producer: string;
-  /** Every strict violation, as `uid:arm`, one entry per occurrence. */
-  readonly strict: readonly string[];
+  /** The violation shape the file's raw geometry carries, which the import must normalize. */
+  readonly raw: string;
 }
 
-// Each row's strict violations are the shapes the corpus measurement recorded for
-// that file: a clean Stella model as the control; Stella endpoints on corners
-// and off the 45x35 face; xmutil and MDL clouds a few px off their endpoints;
-// MDL fallback flows with no attachment and valves off the path; a
-// Simlin-authored XMILE endpoint off its face.
 const CORPUS: readonly CorpusRow[] = [
-  { file: 'test/test-models/samples/teacup/teacup.stmx', producer: 'Stella', strict: [] },
+  { file: 'test/test-models/samples/teacup/teacup.stmx', producer: 'Stella', raw: 'none (the control)' },
   {
     file: 'test/land_model/land_model.stmx',
     producer: 'Stella',
-    strict: [
-      '110:G4.cornerClearance',
-      '110:G4.cornerClearance',
-      '111:G4.cornerClearance',
-      '112:G4.cornerClearance',
-      '112:G4.offFace',
-      '113:G4.cornerClearance',
-      '113:G4.offFace',
-      '114:G4.cornerClearance',
-      '201:G4.cornerClearance',
-      '202:G4.cornerClearance',
-    ],
+    raw: 'endpoints on stock corners and off the 45x35 face',
   },
   {
     file: 'test/test-models/tests/abs/test_abs.xmile',
     producer: 'Vensim via xmutil',
-    strict: ['2:G7.cloudOffEndpoint'],
+    raw: 'a cloud a few px off its endpoint',
   },
   {
     file: 'test/test-models/samples/Roessler_Chaos/roessler_chaos.mdl',
     producer: 'Vensim MDL',
-    strict: ['4:G7.cloudOffEndpoint', '11:G7.cloudOffEndpoint'],
+    raw: 'clouds a few px off their endpoints',
   },
   {
     file: 'test/test-models/tests/subscript_mapping_simple/test_subscript_mapping_simple.mdl',
     producer: 'Vensim MDL',
-    strict: ['8:G1.unattachedEndpoint', '8:G1.unattachedEndpoint', '8:G8.valveOffPath'],
+    raw: 'a fallback flow with unattached ends and its valve off the path',
   },
-  { file: 'test/cross_element_ltm/cross_element.stmx', producer: 'Simlin XMILE', strict: ['4:G4.offFace'] },
+  { file: 'test/cross_element_ltm/cross_element.stmx', producer: 'Simlin XMILE', raw: 'an endpoint off its face' },
 ];
 
 describeWithEngine('flow invariants over imported corpus models', () => {
@@ -107,7 +90,7 @@ describeWithEngine('flow invariants over imported corpus models', () => {
   }
 
   for (const row of CORPUS) {
-    it(`${row.producer}: ${row.file}`, async () => {
+    it(`${row.producer}: ${row.file} (raw: ${row.raw})`, async () => {
       const model = await loadMainModel(row.file);
       const view = model.views[0];
       expect(view.elements.some((e) => e.type === 'flow')).toBe(true);
@@ -115,11 +98,7 @@ describeWithEngine('flow invariants over imported corpus models', () => {
       const tolerant = checkFlowInvariants(view, { mode: 'tolerant' });
       const structural = [...checkKindAgreement(view, model.variables), ...checkReferentialIntegrity(view)];
       expect(formatFlowViolations(tolerant) + formatViewViolations(structural)).toBe('');
-
-      const strict = checkFlowInvariants(view, { mode: 'strict' })
-        .map((v) => `${v.uid}:${v.arm}`)
-        .sort();
-      expect(strict).toEqual([...row.strict].sort());
+      expect(formatFlowViolations(checkFlowInvariants(view, { mode: 'strict' }))).toBe('');
     });
   }
 });

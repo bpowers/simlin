@@ -13,8 +13,7 @@ import { at, getOrThrow } from '@simlin/core/collections';
 import { UID, ViewElement, Project, projectFromJson, projectAttachData } from '@simlin/core/datamodel';
 import { Project as EngineProject } from '@simlin/engine';
 import type { JsonProject } from '@simlin/engine';
-import { Point } from './drawing/common';
-import { Canvas } from './drawing/Canvas';
+import { Canvas, type GestureCommit } from './drawing/Canvas';
 
 interface DiagramProps {
   isDarkTheme?: boolean;
@@ -126,10 +125,7 @@ export function StaticDiagram(props: DiagramProps): React.ReactElement | null {
 
   const renameVariable = (_oldName: string, _newName: string): void => {};
   const onSelection = (_selected: ReadonlySet<UID>): void => {};
-  const moveSelection = (_position: Point): void => {};
-  const moveFlow = (_element: ViewElement, _target: number, _position: Point): void => {};
-  const moveLabel = (_uid: UID, _side: 'top' | 'left' | 'bottom' | 'right'): void => {};
-  const attachLink = (_element: ViewElement, _to: string): void => {};
+  const commitGesture = (_commit: GestureCommit): void => {};
   const createCb = (_element: ViewElement): void => {};
   const nullCb = (): void => {};
 
@@ -139,15 +135,11 @@ export function StaticDiagram(props: DiagramProps): React.ReactElement | null {
       project={project}
       model={model}
       view={at(model.views, 0)}
-      version={1}
       selectedTool={undefined}
       selection={new Set()}
       onRenameVariable={renameVariable}
       onSetSelection={onSelection}
-      onMoveSelection={moveSelection}
-      onMoveFlow={moveFlow}
-      onMoveLabel={moveLabel}
-      onAttachLink={attachLink}
+      onCommitGesture={commitGesture}
       onCreateVariable={createCb}
       onClearSelectedTool={nullCb}
       onDeleteSelection={nullCb}

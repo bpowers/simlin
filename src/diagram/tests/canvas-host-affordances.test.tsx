@@ -56,7 +56,7 @@ describe('Canvas pressesDisabled', () => {
     pointerMove(h.svg, 160, 160, { buttons: 1 });
     pointerUp(h.svg, 160, 160);
     expect(h.callbacks.onSetSelection).not.toHaveBeenCalled();
-    expect(h.callbacks.onMoveSelection).not.toHaveBeenCalled();
+    expect(h.callbacks.onCommitGesture).not.toHaveBeenCalled();
   });
 
   it('control: the same press and drag moves the element when presses are enabled', () => {
@@ -66,7 +66,7 @@ describe('Canvas pressesDisabled', () => {
     pointerDown(aux, 100, 100);
     pointerMove(h.svg, 160, 160, { buttons: 1 });
     pointerUp(h.svg, 160, 160);
-    expect(h.callbacks.onMoveSelection).toHaveBeenCalledTimes(1);
+    expect(h.callbacks.onCommitGesture).toHaveBeenCalledTimes(1);
   });
 });
 

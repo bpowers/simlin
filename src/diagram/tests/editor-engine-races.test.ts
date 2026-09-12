@@ -30,8 +30,10 @@
 // landing while typing, Undo with a draft whose edit fails (N7), Redo with a
 // draft (N8), and a swap of two names through three pending renames (O3).
 //
-// What this does not establish: the Canvas gestures that produce these callback
-// payloads (Phase 5 rewires them), or the geometry of the committed flows.
+// Gesture commits are planned by the production planner on the rendered view.
+// What this does not establish: the Canvas turning pointer events into those
+// gestures (canvas-gestures-*.test.tsx), or the strict geometry of the committed
+// flows (editor-gestures-engine.test.ts).
 
 import { it, expect, beforeAll, afterEach, rs } from '@rstest/core';
 
@@ -73,6 +75,7 @@ import { Project as EngineProject, type JsonProject, type JsonProjectPatch } fro
 
 import { ProjectController } from '../project-controller';
 import type { CanvasProps } from '../drawing/Canvas';
+import { planGesture, type Gesture } from '../gesture-planner';
 import { describeWithEngine, loadEngine, mainModel, type EngineModule } from './support/engine';
 import {
   checkKindAgreement,
@@ -432,11 +435,55 @@ function stockLists(model: Model, ident: string): { inflows: string[]; outflows:
   return { inflows: stock.inflows.map(canonicalize).sort(), outflows: stock.outflows.map(canonicalize).sort() };
 }
 
-// Reattach `flowUid`'s sink onto `targetUid`, as the Canvas's pointer-up does.
-function attachSink(m: Mounted, flowUid: number, targetUid: number, delta: { x: number; y: number }): void {
-  act(() => {
-    canvasProps!.onMoveFlow(m.element(flowUid) as FlowViewElement, targetUid, delta, undefined, false, false);
+// A gesture released at `current`: planned by the production planner on the
+// rendered view with the Canvas's inputs, and its commit handed to the Editor
+// exactly as the Canvas's pointer-up hands it.
+function release(gesture: Gesture, press: { x: number; y: number }, current: { x: number; y: number }): void {
+  const p = canvasProps!;
+  const plan = planGesture({
+    view: p.view,
+    variables: p.model.variables,
+    selection: p.selection,
+    gesture,
+    press,
+    current,
+    zoom: 1,
+    pointerType: 'mouse',
+    readOnly: !!p.readOnly,
+    names: p.newVariableName!,
   });
+  expect(plan.commit).toBe('edit');
+  p.onCommitGesture({
+    label: plan.label,
+    elements: plan.elements,
+    nextUid: plan.nextUid,
+    selection: plan.selection,
+    token: p.token,
+    baseView: p.view,
+    editName: plan.handoff?.editName,
+  });
+}
+
+// Reattach `flowUid`'s sink onto the stock `targetUid`: its arrowhead dragged
+// onto the stock's center.
+function attachSink(m: Mounted, flowUid: number, targetUid: number): void {
+  const flow = m.element(flowUid) as FlowViewElement;
+  const target = m.element(targetUid);
+  act(() => {
+    release({ kind: 'flowEndpoint', flow: flowUid, end: 'sink' }, flow.points[flow.points.length - 1], target);
+  });
+}
+
+// Drag element `uid`'s label 40px toward `side`.
+function moveLabel(uid: number, side: 'top' | 'bottom' | 'left' | 'right'): void {
+  const el = canvasProps!.view.elements.find((e) => e.uid === uid)!;
+  const at = {
+    top: { x: el.x, y: el.y - 40 },
+    bottom: { x: el.x, y: el.y + 40 },
+    left: { x: el.x - 40, y: el.y },
+    right: { x: el.x + 40, y: el.y },
+  }[side];
+  release({ kind: 'label', uid }, at, at);
 }
 
 function select(uids: number[]): void {
@@ -487,9 +534,9 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
   it('T11: two attaches onto one stock while the first patch is in flight both land', async () => {
     const m = await mount(projectJson(baseModel()));
     select([5]);
-    attachSink(m, 5, 1, { x: 400, y: 0 });
+    attachSink(m, 5, 1);
     select([6]);
-    attachSink(m, 6, 1, { x: 100, y: 200 });
+    attachSink(m, 6, 1);
     await m.settle();
     const model = await expectConsistent(m);
     expect(stockLists(model, 'a').inflows).toEqual(['g', 'h', 'k']);
@@ -515,9 +562,9 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
   it('T11c: an attach raced by a label move: both land', async () => {
     const m = await mount(projectJson(baseModel()));
     select([5]);
-    attachSink(m, 5, 1, { x: 400, y: 0 });
+    attachSink(m, 5, 1);
     act(() => {
-      canvasProps!.onMoveLabel(7, 'top');
+      moveLabel(7, 'top');
     });
     await m.settle();
     const model = await expectConsistent(m);
@@ -528,7 +575,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
   it('T11e: an attach raced by deleting another flow: the saved bytes hold the invariants', async () => {
     const m = await mount(projectJson(baseModel()));
     select([5]);
-    attachSink(m, 5, 1, { x: 400, y: 0 });
+    attachSink(m, 5, 1);
     select([6]);
     pressDelete();
     await m.settle();
@@ -549,13 +596,13 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
   it('T24: undo is unavailable while an attach is in flight, and undoes it once the attach lands', async () => {
     const m = await mount(projectJson(baseModel()));
     act(() => {
-      canvasProps!.onMoveLabel(7, 'top');
+      moveLabel(7, 'top');
     });
     await m.settle();
     expect((screen.getByLabelText('Undo') as HTMLButtonElement).disabled).toBe(false);
 
     select([5]);
-    attachSink(m, 5, 1, { x: 400, y: 0 });
+    attachSink(m, 5, 1);
     expect((screen.getByLabelText('Undo') as HTMLButtonElement).disabled).toBe(true);
     act(() => {
       fireEvent.click(screen.getByLabelText('Undo'));
@@ -578,7 +625,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
     model.stocks[0].inflows = ['g', 'k'];
     const m = await mount(projectJson(model));
     select([6]);
-    attachSink(m, 6, 1, { x: 100, y: 200 });
+    attachSink(m, 6, 1);
     await m.settle();
     const after = await expectConsistent(m);
     expect(stockLists(after, 'a').inflows).toEqual(['g', 'k']);
@@ -657,8 +704,27 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
     const m = await mount(projectJson(baseModel()));
     const patchesBefore = m.patches.length;
     select([4]);
+    // The planner never produces a non-finite coordinate (its fuzz asserts
+    // finiteness); this hand-builds one to exercise the executor's refusal, the
+    // defense in depth behind it (#818): f's sink detached to a NaN cloud.
+    const view = canvasProps!.view;
+    const f = m.element(4) as FlowViewElement;
+    const detached: FlowViewElement = {
+      ...f,
+      points: [f.points[0], { x: NaN, y: 100, attachedToUid: view.nextUid }],
+    };
     act(() => {
-      canvasProps!.onMoveFlow(m.element(4) as FlowViewElement, 0, { x: NaN, y: 0 }, undefined, false, false);
+      canvasProps!.onCommitGesture({
+        label: 'flow attach',
+        elements: [
+          ...view.elements.map((el) => (el.uid === 4 ? detached : el)),
+          { type: 'cloud', uid: view.nextUid, flowUid: 4, x: NaN, y: 100, isZeroRadius: false, ident: undefined },
+        ],
+        nextUid: view.nextUid + 1,
+        selection: new Set([4]),
+        token: canvasProps!.token,
+        baseView: view,
+      });
     });
     await m.settle();
     expect(m.patches.length).toBe(patchesBefore);
@@ -688,7 +754,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
       fireEvent.pointerDown(canvas);
     });
     act(() => {
-      canvasProps!.onMoveSelection({ x: -50, y: -40 });
+      release({ kind: 'moveSelection' }, { x: 100, y: 100 }, { x: 150, y: 140 });
     });
     act(() => {
       fireEvent.pointerUp(canvas);
@@ -771,7 +837,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
       fireEvent.pointerUp(canvas);
     });
     act(() => {
-      canvasProps!.onMoveLabel(1, 'top');
+      moveLabel(1, 'top');
     });
     await m.settle();
     const model = await expectConsistent(m);
@@ -815,7 +881,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
       canvasProps!.onCreateVariable(newAux('brand new', 600, 300));
     });
     act(() => {
-      canvasProps!.onMoveLabel(1, 'top');
+      moveLabel(1, 'top');
     });
     await m.settle();
     const model = await expectConsistent(m);
@@ -847,7 +913,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
     // move is planned on it.
     expect(m.view().elements.some((el) => nameOf(el) === 'brand new')).toBe(true);
     act(() => {
-      canvasProps!.onMoveLabel(1, 'top');
+      moveLabel(1, 'top');
     });
     openGate();
     await m.settle();
@@ -864,7 +930,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
     const m = await mount(projectJson(baseModel()), { onReload });
     // History to undo, so undo refusal below is the unavailable state's doing.
     act(() => {
-      canvasProps!.onMoveLabel(7, 'top');
+      moveLabel(7, 'top');
     });
     await m.settle();
     expect((screen.getByLabelText('Undo') as HTMLButtonElement).disabled).toBe(false);
@@ -881,7 +947,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
     let refusal: string | undefined | void;
     act(() => {
       refusal = canvasProps!.onCreateVariable(newAux('another', 600, 400));
-      canvasProps!.onMoveLabel(1, 'top');
+      moveLabel(1, 'top');
     });
     await m.settle();
     expect(refusal).toBe('The project cannot be edited until it is reloaded');
@@ -900,7 +966,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
   it('R10/N2: while an undo is queued, Delete does nothing and reports nothing, and a typed name is refused visibly', async () => {
     const m = await mount(projectJson(baseModel()));
     act(() => {
-      canvasProps!.onMoveLabel(7, 'top');
+      moveLabel(7, 'top');
     });
     await m.settle();
     select([6]);
@@ -932,18 +998,33 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
   it('two edits made in one tick both land: each handler plans on the view the previous one produced', async () => {
     const m = await mount(projectJson(baseModel()));
     act(() => {
-      canvasProps!.onMoveLabel(1, 'top');
-      canvasProps!.onMoveLabel(2, 'bottom');
+      canvasProps!.onCreateVariable(newAux('brand new', 600, 300));
+      pressDelete();
     });
     await m.settle();
     const model = await expectConsistent(m);
-    expect([labelSideOf(model, 1), labelSideOf(model, 2)]).toEqual(['top', 'bottom']);
+    expect(model.variables.has('brand_new')).toBe(true);
+  });
+
+  it('a gesture planned on a view another edit replaced in the same tick is dropped quietly (E5), the first landing', async () => {
+    const m = await mount(projectJson(baseModel()));
+    act(() => {
+      moveLabel(1, 'top');
+      // Planned on the same rendered view the first gesture planned on, which
+      // the first edit has replaced: committing it would revert that edit.
+      moveLabel(2, 'bottom');
+    });
+    await m.settle();
+    const model = await expectConsistent(m);
+    expect(labelSideOf(model, 1)).toBe('top');
+    expect(labelSideOf(model, 2)).not.toBe('bottom');
+    expect(alerts()).toEqual([]);
   });
 
   it('Undo pressed with a draft in the details panel takes the draft back; Redo restores it', async () => {
     const m = await mount(projectJson(baseModel()));
     act(() => {
-      canvasProps!.onMoveLabel(7, 'top');
+      moveLabel(7, 'top');
     });
     await m.settle();
     select([1]);
@@ -1044,7 +1125,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
     });
     const editor = await typeUnits('widgets');
     act(() => {
-      canvasProps!.onMoveLabel(7, 'top');
+      moveLabel(7, 'top');
     });
     await m.settle();
     expect(labelSideOf(await m.engineModel(), 7)).toBe('top');
@@ -1055,7 +1136,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
   it('N7: Undo pressed with a draft whose edit fails keeps the draft and undoes nothing', async () => {
     const m = await mount(projectJson(baseModel()));
     act(() => {
-      canvasProps!.onMoveLabel(7, 'top');
+      moveLabel(7, 'top');
     });
     await m.settle();
     select([1]);
@@ -1078,7 +1159,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
   it('N8: Redo pressed with a draft in the panel redoes, then lands the draft on the redone project', async () => {
     const m = await mount(projectJson(baseModel()));
     act(() => {
-      canvasProps!.onMoveLabel(7, 'top');
+      moveLabel(7, 'top');
     });
     await m.settle();
     act(() => {
@@ -1231,7 +1312,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
   it('M1: while an undo is queued the details panel is read-only, and it is editable again once the undo lands', async () => {
     const m = await mount(projectJson(baseModel()));
     act(() => {
-      canvasProps!.onMoveLabel(7, 'top');
+      moveLabel(7, 'top');
     });
     await m.settle();
     select([1]);
@@ -1354,7 +1435,7 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
       labelSide: undefined,
     });
     act(() => {
-      canvasProps!.onMoveLabel(1, 'top');
+      moveLabel(1, 'top');
     });
     await m.settle();
     persisted = await rawElement(7);

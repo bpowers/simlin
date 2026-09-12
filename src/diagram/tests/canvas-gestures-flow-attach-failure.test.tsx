@@ -31,9 +31,7 @@ import { describe, it, expect } from '@rstest/core';
 
 import { act, fireEvent } from '@testing-library/react';
 
-import type { StockFlowView } from '@simlin/core/datamodel';
-
-import { makeCloud, makeFlow, pointerDown, pointerMove, pointerUp, renderCanvas } from './canvas-gesture-harness';
+import { pointerDown, pointerMove, pointerUp, renderCanvas } from './canvas-gesture-harness';
 
 // Drain one macrotask so the render-scheduled deferred editing-done runs.
 async function flushDeferred(): Promise<void> {
@@ -55,11 +53,10 @@ function captureWindowErrors(): { errors: unknown[]; stop: () => void } {
 
 describe('Canvas name-edit teardown for a just-created flow', () => {
   it('the deferred editing-done does not crash on a phantom selection (commit path)', async () => {
-    const h = renderCanvas({ elements: [], selectedTool: 'flow' });
     // Model the failed-attach path: the host neither commits the drawn flow
-    // into the view nor selects a committed element, so the Canvas's selection
-    // is left pointing at the (now-cleared) in-creation flow.
-    h.callbacks.onMoveFlow.mockImplementation(() => {});
+    // into the view nor selects it, so the name editor names a flow the view
+    // never holds.
+    const h = renderCanvas({ elements: [], selectedTool: 'flow', autoCommitEdits: false });
     h.clearMountCalls();
 
     // Draw the flow. Pointer-up hands off into the just-created-flow name edit
@@ -92,31 +89,10 @@ describe('Canvas name-edit teardown for a just-created flow', () => {
   });
 
   it('cancelling a just-created flow name edit fires exactly one delete and never throws (cancel path)', () => {
+    // The harness applies the commit, so the name editor renders for a real
+    // element. A cancel can only be issued against a rendered editor, so this is
+    // the only way to exercise the genuine cancel/delete-on-cancel path.
     const h = renderCanvas({ elements: [], selectedTool: 'flow' });
-    // Success materializer: commit the drawn flow so the name editor renders for
-    // a real element. A cancel can only be issued against a rendered editor, so
-    // this is the only way to exercise the genuine cancel/delete-on-cancel path.
-    h.callbacks.onMoveFlow.mockImplementation(() => {
-      const source = makeCloud(51, 50, 200, 200);
-      const sink = makeCloud(52, 50, 300, 200);
-      const flow = makeFlow(
-        50,
-        'New Flow',
-        [
-          { x: 200, y: 200, attachedToUid: 51 },
-          { x: 300, y: 200, attachedToUid: 52 },
-        ],
-        { x: 250, y: 200 },
-      );
-      const view: StockFlowView = {
-        nextUid: 60,
-        elements: [source, sink, flow],
-        viewBox: { x: 0, y: 0, width: 1000, height: 1000 },
-        zoom: 1,
-        useLetteredPolarity: false,
-      };
-      h.setProps({ view, selection: new Set([50]) });
-    });
     h.clearMountCalls();
 
     pointerDown(h.svg, 200, 200);

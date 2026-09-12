@@ -43,6 +43,7 @@ import {
   FlowViewElement,
   LinkViewElement,
   Model,
+  modelFromJson,
   ModuleViewElement,
   Point as DataPoint,
   Project,
@@ -54,8 +55,9 @@ import {
   ViewElement,
 } from '@simlin/core/datamodel';
 import { canonicalize } from '@simlin/core/canonicalize';
+import type { JsonModel } from '@simlin/engine';
 
-import { Canvas, CanvasProps } from '../drawing/Canvas';
+import { Canvas, CanvasProps, type GestureCommit } from '../drawing/Canvas';
 import type { Point } from '../drawing/common';
 
 // ---------------------------------------------------------------------------
@@ -374,10 +376,27 @@ function makeView(elements: readonly ViewElement[], zoom = 1): StockFlowView {
   };
 }
 
+/**
+ * A variable for every named element, derived through the production
+ * `modelFromJson`: the editor's model always has one, and the gesture planner
+ * refuses a drop onto a stock whose variable does not exist.
+ */
+function variablesOf(elements: readonly ViewElement[]): ReadonlyMap<string, Variable> {
+  const names = (type: string): string[] =>
+    elements.filter((el) => el.type === type).map((el) => (el as { name: string }).name);
+  return modelFromJson({
+    name: 'main',
+    stocks: names('stock').map((name) => ({ name, initialEquation: '1', inflows: [], outflows: [] })),
+    flows: names('flow').map((name) => ({ name, equation: '1' })),
+    auxiliaries: names('aux').map((name) => ({ name, equation: '1' })),
+    modules: names('module').map((name) => ({ name, modelName: 'sub' })),
+  } as JsonModel).variables;
+}
+
 function makeModel(view: StockFlowView, variables?: ReadonlyMap<string, Variable>): Model {
   return {
     name: 'main',
-    variables: variables ?? new Map<string, Variable>(),
+    variables: variables ?? variablesOf(view.elements),
     views: [view],
     loopMetadata: [],
     groups: [],
@@ -407,10 +426,7 @@ function makeProject(model: Model): Project {
 export interface CanvasCallbacks {
   onRenameVariable: Mock;
   onSetSelection: Mock;
-  onMoveSelection: Mock;
-  onMoveFlow: Mock;
-  onMoveLabel: Mock;
-  onAttachLink: Mock;
+  onCommitGesture: Mock;
   onCreateVariable: Mock;
   onClearSelectedTool: Mock;
   onDeleteSelection: Mock;
@@ -423,10 +439,7 @@ function makeCallbacks(): CanvasCallbacks {
   return {
     onRenameVariable: rs.fn(),
     onSetSelection: rs.fn(),
-    onMoveSelection: rs.fn(),
-    onMoveFlow: rs.fn(),
-    onMoveLabel: rs.fn(),
-    onAttachLink: rs.fn(),
+    onCommitGesture: rs.fn(),
     onCreateVariable: rs.fn(),
     onClearSelectedTool: rs.fn(),
     onDeleteSelection: rs.fn(),
@@ -462,15 +475,21 @@ export interface HarnessOptions {
   mountSize?: { width: number; height: number };
   /**
    * When true (the default), `onSetSelection` commits the new selection back
-   * into `props.selection` and re-renders -- modeling the real host (Editor),
-   * which sets its selection state in the same React event so the resulting
-   * re-render sees both the new selection prop AND the new internal interaction
-   * state. Several Canvas render paths (e.g. `isValidTarget` doing
-   * `only(props.selection)` during an arrowhead drag) assume that batching and
-   * would throw if selection lagged behind. Set false only to test a host that
-   * deliberately ignores a selection request.
+   * into `props.selection` and re-renders, modeling the real host (Editor),
+   * which sets its selection state in the same React event. A selection change
+   * is UI state: it republishes nothing, so the view and every other prop stay
+   * as they were. Set false only to test a host that ignores a selection request.
    */
   autoCommitSelection?: boolean;
+  /**
+   * When true (the default), `onCommitGesture` applies the commit the way the
+   * controller's synchronous publish does: the committed elements become
+   * `props.view` and the commit's selection `props.selection`. Set false to test
+   * a host that refuses or loses the edit.
+   */
+  autoCommitEdits?: boolean;
+  /** The controller state token the Canvas reads (default 0); `setProps({ token })` moves it. */
+  token?: number;
   /** Forwarded to the Canvas prop of the same name (default: unset). */
   pressesDisabled?: boolean;
   /** Forwarded to the Canvas prop of the same name (default: unset, the Canvas allocates). */
@@ -481,8 +500,20 @@ export interface CanvasHarness {
   readonly callbacks: CanvasCallbacks;
   readonly container: HTMLElement;
   readonly svg: SVGSVGElement;
-  /** Re-render with updated props (e.g. after the host commits a selection). */
-  setProps: (next: Partial<Pick<CanvasProps, 'selection' | 'selectedTool' | 'view'>>) => void;
+  /**
+   * Re-render with updated props (e.g. after the host commits a selection). A new
+   * `view` re-derives the model's variables from its elements; a `model` passed
+   * with it replaces them (a republish carrying sim series or error annotations).
+   */
+  setProps: (
+    next: Partial<Pick<CanvasProps, 'selection' | 'selectedTool' | 'view' | 'model' | 'token' | 'readOnly'>>,
+  ) => void;
+  /** The view the Canvas currently renders from (after any applied commits). */
+  view: () => StockFlowView;
+  /** The model the Canvas currently renders from. */
+  model: () => Model;
+  /** The selection the Canvas currently holds (after any applied selection requests). */
+  selection: () => ReadonlySet<UID>;
   rerender: RenderResult['rerender'];
   unmount: RenderResult['unmount'];
   /** Find a rendered element node by the CSS class the element component emits. */
@@ -528,16 +559,18 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
   let selection: ReadonlySet<UID> = opts.selection ?? new Set<UID>();
   let selectedTool: CanvasProps['selectedTool'] = opts.selectedTool;
   let currentView = view;
-  let version = 1;
+  let currentModel = model;
+  let token = opts.token ?? 0;
+  let readOnly = opts.readOnly;
 
   const buildProps = (): CanvasProps => ({
     embedded: opts.embedded ?? false,
-    readOnly: opts.readOnly,
+    readOnly,
     recenterOffscreenOnMount: opts.recenterOffscreenOnMount,
     project,
-    model,
+    model: currentModel,
     view: currentView,
-    version,
+    token,
     selectedTool,
     selection,
     pressesDisabled: opts.pressesDisabled,
@@ -553,7 +586,17 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
     // already inside the event's act()), so the resulting render sees both.
     callbacks.onSetSelection.mockImplementation((next: ReadonlySet<UID>) => {
       selection = next;
-      version += 1;
+      result.rerender(<Canvas {...buildProps()} />);
+    });
+  }
+  if (opts.autoCommitEdits ?? true) {
+    callbacks.onCommitGesture.mockImplementation((commit: GestureCommit) => {
+      if (commit.baseView !== currentView) {
+        throw new Error('harness: a commit planned on a view other than the rendered one');
+      }
+      currentView = { ...currentView, elements: commit.elements, nextUid: commit.nextUid };
+      currentModel = { ...currentModel, views: [currentView], variables: variablesOf(commit.elements) };
+      selection = commit.selection;
       result.rerender(<Canvas {...buildProps()} />);
     });
   }
@@ -575,7 +618,9 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
 
   const svg = result.container.querySelector('svg') as SVGSVGElement;
 
-  const setProps = (next: Partial<Pick<CanvasProps, 'selection' | 'selectedTool' | 'view'>>): void => {
+  const setProps = (
+    next: Partial<Pick<CanvasProps, 'selection' | 'selectedTool' | 'view' | 'model' | 'token' | 'readOnly'>>,
+  ): void => {
     if ('selection' in next && next.selection !== undefined) {
       selection = next.selection;
     }
@@ -584,8 +629,17 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
     }
     if ('view' in next && next.view !== undefined) {
       currentView = next.view;
+      currentModel = { ...currentModel, views: [currentView], variables: variablesOf(currentView.elements) };
     }
-    version += 1;
+    if ('model' in next && next.model !== undefined) {
+      currentModel = { ...next.model, views: [currentView] };
+    }
+    if ('token' in next && next.token !== undefined) {
+      token = next.token;
+    }
+    if ('readOnly' in next) {
+      readOnly = next.readOnly;
+    }
     act(() => {
       result.rerender(<Canvas {...buildProps()} />);
     });
@@ -596,6 +650,9 @@ export function renderCanvas(opts: HarnessOptions): CanvasHarness {
     container: result.container,
     svg,
     setProps,
+    view: () => currentView,
+    model: () => currentModel,
+    selection: () => selection,
     rerender: result.rerender,
     unmount: result.unmount,
     query: (selector: string) => result.container.querySelector(selector),

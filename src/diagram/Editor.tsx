@@ -26,8 +26,6 @@ import {
   NamedViewElement,
   StockFlowView,
   GraphicalFunction,
-  LinkViewElement,
-  FlowViewElement,
   Rect,
   isNamedViewElement,
   stockToJson,
@@ -56,10 +54,9 @@ import { VariableDetails, type PendingSubmission } from './VariableDetails';
 import { ModuleDetails } from './ModuleDetails';
 import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
-import { Canvas, inCreationUid } from './drawing/Canvas';
-import { Point, encodeNameNewlines, searchableName } from './drawing/common';
-import { computeFlowAttachment } from './flow-attach';
-import { applyGroupMovement } from './group-movement';
+import { Canvas, type GestureCommit } from './drawing/Canvas';
+import { encodeNameNewlines, searchableName } from './drawing/common';
+import { sameGeometry } from './gesture-planner';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 import {
   EDITOR_ROOT_ATTRIBUTE,
@@ -117,10 +114,7 @@ function panelWidth(): number {
 // layer on every Editor render.
 const noopRename = (_oldName: string, _newName: string): void => {};
 const noopSetSelection = (_selected: ReadonlySet<UID>): void => {};
-const noopMoveSelection = (_position: Point): void => {};
-const noopMoveFlow = (_e: FlowViewElement, _t: number, _p: Point): void => {};
-const noopMoveLabel = (_u: UID, _s: 'top' | 'left' | 'bottom' | 'right'): void => {};
-const noopAttachLink = (_element: LinkViewElement, _to: string): void => {};
+const noopCommitGesture = (_commit: GestureCommit): void => {};
 const noopCreateVariable = (_element: ViewElement): void => {};
 const noop = (): void => {};
 const noopViewBoxChange = (_viewBox: Rect, _zoom: number): void => {};
@@ -1264,124 +1258,35 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     enqueueViewEdit('delete', nextView);
   }, []);
 
-  const handleMoveLabel = React.useCallback((uid: UID, side: 'top' | 'left' | 'bottom' | 'right'): void => {
+  // A canvas gesture's commit (docs/design-plans/2026-09-10-diagram-editing-core.md,
+  // E2): the planner's elements are the next view exactly as the preview showed
+  // them, and the controller derives every model op from the view difference at
+  // dequeue. The token is the one the gesture was pressed under, so a truncation
+  // or undo that landed meanwhile drops the edit rather than applying it to a
+  // view it was not planned on.
+  const handleCommitGesture = React.useCallback((commit: GestureCommit): void => {
     if (viewEditsRefused()) {
       return;
     }
     const view = getView();
-    if (!view) {
+    if (!r.controller || !view || !sameGeometry(commit.baseView, view)) {
+      // A commit planned on a view another edit has since replaced is dropped
+      // quietly, as the Canvas drops a gesture whose view changed under it (E5).
       return;
     }
-    const elements = view.elements.map((element: ViewElement) => {
-      if (element.uid !== uid || !isNamedViewElement(element)) {
-        return element;
-      }
-      return { ...element, labelSide: side };
+    void r.controller.enqueueViewEdit({
+      label: commit.label,
+      nextView: { ...view, nextUid: commit.nextUid, elements: [...commit.elements] },
+      token: commit.token,
     });
-    enqueueViewEdit('label move', { ...view, elements });
-  }, []);
-
-  const handleFlowAttach = React.useCallback(
-    (
-      flow: FlowViewElement,
-      targetUid: number,
-      cursorMoveDelta: Point,
-      fauxTargetCenter: Point | undefined,
-      inCreation: boolean,
-      isSourceAttach?: boolean,
-    ): void => {
-      if (viewEditsRefused()) {
-        return;
-      }
-      const view = getView();
-      const model = getModel();
-      if (!r.controller || !view || !model) {
-        return;
-      }
-
-      // Pure core: the new view (elements + nextUid) and the selection. Its
-      // model ops are NOT used: the controller derives the stock list ops from
-      // the view difference at dequeue, against the committed model, so a
-      // payload is never built from lists read before earlier edits landed and a
-      // flow already listed is never listed twice.
-      let result: ReturnType<typeof computeFlowAttachment>;
-      try {
-        result = computeFlowAttachment(view, model.variables, {
-          flow,
-          targetUid,
-          cursorMoveDelta,
-          fauxTargetCenter,
-          inCreation,
-          isSourceAttach: !!isSourceAttach,
-        });
-      } catch (err: unknown) {
-        appendModelError(`flow attach failed: ${getErrorDetails(err).message ?? 'Unknown error'}`);
-        return;
-      }
-
-      // The pure core only assigns a selection when creating a new flow;
-      // otherwise the existing selection is preserved.
-      const selection = result.selection ?? latest.current.state.selection;
-      enqueueViewEdit('flow attach', { ...view, nextUid: result.nextUid, elements: [...result.elements] });
-      // Creation selects the new flow and arms flowStillBeingCreated (which
-      // suppresses the panel until the flow is named); a reattach preserves the
-      // prior selection. If the edit fails, the rolled-back view no longer holds
-      // the selected flow, which the Canvas tolerates (buildSelectionMap skips a
-      // missing uid; the name editor resolves through tryGetElementByUid).
-      setState({
-        ...selectionStatePatch(selection, latest.current.state.showDetails),
-        flowStillBeingCreated: inCreation,
-      });
-    },
-    [],
-  );
-
-  const handleLinkAttach = React.useCallback((link: LinkViewElement, newTarget: string): void => {
-    if (viewEditsRefused()) {
-      return;
-    }
-    let { selection } = latest.current.state;
-    const baseView = getView();
-    if (!baseView) {
-      return;
-    }
-    let view = baseView;
-
-    const getName = (ident: string) => {
-      for (const e of view.elements) {
-        if (isNamedViewElement(e) && e.ident === ident) {
-          return e;
-        }
-      }
-      throw new Error(`unknown name ${ident}`);
-    };
-
-    let nextUid = view.nextUid;
-    let elements: ViewElement[];
-    if (link.uid === inCreationUid) {
-      const to = getName(newTarget);
-      const newLink: LinkViewElement = {
-        ...link,
-        uid: nextUid++,
-        toUid: to.uid,
-      };
-      elements = [...view.elements, newLink];
-      selection = new Set([newLink.uid]);
-    } else {
-      // Reattachment: Canvas already computed the correct arc in
-      // link.arc, so we just update the target.
-      const to = getName(defined(newTarget));
-      elements = view.elements.map((element: ViewElement) => {
-        if (element.uid !== link.uid || element.type !== 'link') {
-          return element;
-        }
-        return { ...element, arc: link.arc, toUid: to.uid };
-      });
-    }
-    view = { ...view, nextUid, elements };
-
-    enqueueViewEdit('link attach', view);
-    setState(selectionStatePatch(selection, latest.current.state.showDetails));
+    // A drawn flow hands off to its name editor; flowStillBeingCreated keeps its
+    // details panel closed until it is named (handleRename clears it). If the
+    // edit fails, the rolled-back view no longer holds the selected flow, which
+    // the Canvas tolerates (the name editor resolves nothing and closes).
+    setState({
+      ...selectionStatePatch(commit.selection, latest.current.state.showDetails),
+      flowStillBeingCreated: commit.editName !== undefined,
+    });
   }, []);
 
   const handleCreateVariable = React.useCallback((element: ViewElement): string | undefined => {
@@ -1416,28 +1321,6 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     });
     setState(selectionStatePatch(new Set<number>(), latest.current.state.showDetails));
     return undefined;
-  }, []);
-
-  const handleSelectionMove = React.useCallback((delta: Point, arcPoint?: Point, segmentIndex?: number): void => {
-    if (viewEditsRefused()) {
-      return;
-    }
-    const view = getView();
-    if (!view) {
-      return;
-    }
-    const selection = latest.current.state.selection;
-
-    const { updatedElements } = applyGroupMovement({
-      elements: view.elements,
-      selection,
-      delta,
-      arcPoint,
-      segmentIndex,
-    });
-
-    const elements = view.elements.map((el) => updatedElements.get(el.uid) ?? el);
-    enqueueViewEdit('move', { ...view, elements });
   }, []);
 
   const handleDrawerToggle = React.useCallback((isOpen: boolean): void => {
@@ -1670,10 +1553,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     const readOnly = isReadOnly();
     const onRenameVariable = !readOnly ? handleRename : noopRename;
     const onSetSelection = !embedded ? handleSelection : noopSetSelection;
-    const onMoveSelection = !readOnly ? handleSelectionMove : noopMoveSelection;
-    const onMoveFlow = !readOnly ? handleFlowAttach : noopMoveFlow;
-    const onMoveLabel = !readOnly ? handleMoveLabel : noopMoveLabel;
-    const onAttachLink = !readOnly ? handleLinkAttach : noopAttachLink;
+    const onCommitGesture = !readOnly ? handleCommitGesture : noopCommitGesture;
     const onCreateVariable = !readOnly ? handleCreateVariable : noopCreateVariable;
     const onClearSelectedTool = !readOnly ? handleClearSelectedTool : noop;
     const onDeleteSelection = !readOnly ? handleSelectionDelete : noop;
@@ -1691,15 +1571,12 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         project={project}
         model={model}
         view={view}
-        version={latest.current.state.controllerSnapshot.projectVersion}
+        token={latest.current.state.controllerSnapshot.token}
         selectedTool={readOnly ? undefined : latest.current.state.selectedTool}
         selection={latest.current.state.selection}
         onRenameVariable={onRenameVariable}
         onSetSelection={onSetSelection}
-        onMoveSelection={onMoveSelection}
-        onMoveFlow={onMoveFlow}
-        onMoveLabel={onMoveLabel}
-        onAttachLink={onAttachLink}
+        onCommitGesture={onCommitGesture}
         onCreateVariable={onCreateVariable}
         onClearSelectedTool={onClearSelectedTool}
         onDeleteSelection={onDeleteSelection}

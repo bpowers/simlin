@@ -24,12 +24,8 @@ import { describe, it, expect } from '@rstest/core';
 
 import { act, fireEvent } from '@testing-library/react';
 
-import type { StockFlowView, ViewElement } from '@simlin/core/datamodel';
-
 import {
   makeAux,
-  makeCloud,
-  makeFlow,
   pointerDown,
   pointerMove,
   pointerUp,
@@ -37,34 +33,9 @@ import {
   type CanvasHarness,
 } from './canvas-gesture-harness';
 
-// Materialize a concrete flow + source/sink clouds when the flow-tool drag
-// releases, mirroring Editor.handleFlowAttach: it commits the real flow (uid 50)
-// into the view and selects it. `extraElements` lets a test keep an unrelated
-// pre-existing variable in the view alongside the new flow.
-function installFlowMaterializer(h: CanvasHarness, extraElements: readonly ViewElement[] = []): void {
-  h.callbacks.onMoveFlow.mockImplementation(() => {
-    const source = makeCloud(51, 50, 200, 200);
-    const sink = makeCloud(52, 50, 300, 200);
-    const flow = makeFlow(
-      50,
-      'New Flow',
-      [
-        { x: 200, y: 200, attachedToUid: 51 },
-        { x: 300, y: 200, attachedToUid: 52 },
-      ],
-      { x: 250, y: 200 },
-    );
-    const elements = [...extraElements, source, sink, flow];
-    const view: StockFlowView = {
-      nextUid: 60,
-      elements,
-      viewBox: { x: 0, y: 0, width: 1000, height: 1000 },
-      zoom: 1,
-      useLetteredPolarity: false,
-    };
-    h.setProps({ view, selection: new Set([50]) });
-  });
-}
+// The harness applies a gesture's commit the way the controller publishes it:
+// the drawn flow and its clouds join the view and the flow becomes the
+// selection, which is what the name editor for the just-created flow opens on.
 
 // Drive the flow tool from empty canvas through to the on-screen name editor.
 // Returns the live contenteditable node for the just-created flow's name edit.
@@ -81,7 +52,6 @@ function createFlowAndEnterNameEdit(h: CanvasHarness): Element {
 describe('Canvas name-edit lifecycle: just-created flow', () => {
   it('cancelling the initial name edit of a just-created flow deletes it (checklist 12)', () => {
     const h = renderCanvas({ elements: [], selectedTool: 'flow' });
-    installFlowMaterializer(h);
     h.clearMountCalls();
 
     const editable = createFlowAndEnterNameEdit(h);
@@ -98,7 +68,6 @@ describe('Canvas name-edit lifecycle: just-created flow', () => {
 
   it('committing the initial flow name does NOT delete it and clears the latch', () => {
     const h = renderCanvas({ elements: [], selectedTool: 'flow' });
-    installFlowMaterializer(h);
     h.clearMountCalls();
 
     const editable = createFlowAndEnterNameEdit(h);
@@ -110,8 +79,8 @@ describe('Canvas name-edit lifecycle: just-created flow', () => {
       fireEvent.keyUp(editable, { code: 'Enter' });
     });
 
-    // Committing renames the flow (uid 50 != inCreationUid, so it is an existing
-    // element by now) and must NOT delete it.
+    // Committing renames the flow (its create already landed as the gesture's
+    // commit) and must NOT delete it.
     expect(h.callbacks.onDeleteSelection).not.toHaveBeenCalled();
     expect(h.callbacks.onRenameVariable).toHaveBeenCalledTimes(1);
     // The editor closes on commit.
@@ -122,7 +91,6 @@ describe('Canvas name-edit lifecycle: just-created flow', () => {
     // An unrelated variable that survives the flow creation and is renamed later.
     const existing = makeAux(9, 'Existing Variable', 600, 600);
     const h = renderCanvas({ elements: [existing], selectedTool: 'flow' });
-    installFlowMaterializer(h, [existing]);
     h.clearMountCalls();
 
     // 1. Create a flow and COMMIT its name. This clears the creatingFlow latch.
@@ -159,7 +127,6 @@ describe('Canvas name-edit lifecycle: just-created flow', () => {
 
   it('shift+Enter does NOT commit (it inserts a line break instead)', () => {
     const h = renderCanvas({ elements: [], selectedTool: 'flow' });
-    installFlowMaterializer(h);
     h.clearMountCalls();
 
     const editable = createFlowAndEnterNameEdit(h);

@@ -322,6 +322,38 @@ Semantics:
   invariants and the semantic rules: a flow's source and sink are different stocks,
   and the target's stock variable exists.
 
+Resolutions made while implementing (the module is `src/diagram/gesture-planner/`):
+
+- The Canvas plans on the view it is rendering each frame. A live gesture aborts (E5)
+  when the state token moves or the view's geometry changes by value from the view
+  captured at press (`sameGeometry`); a pan reads no geometry and is exempt. The
+  comparison covers the whole view rather than the gesture's read set: a real change
+  to ANY element aborts, including one the gesture does not read. That is simpler
+  than tracking read sets and costs little, since geometry changes mid-gesture only
+  when another edit lands. Benign republishes keep the gesture: a pending edit
+  landing (floats one ULP away, `isStraight`, `var` and `nextUid` re-derived), sim
+  results attaching, error annotations updating. The commit carries its base view,
+  and the Editor drops a commit whose base no longer matches the view it would edit.
+- A selection change mid-gesture does not abort: the gesture plans with the selection
+  captured at press.
+- A flow end that is unattached (a Vensim fallback flow) gets a new cloud when the
+  gesture routes the flow, so every committed flow holds G1.
+- A move whose routed flows break an invariant the plan does not excuse commits
+  nothing, like an invalid drop: a cloud dragged into another stock while the flow's
+  terminals are apart. Because G6 and the G3 minima are best effort when the terminal
+  bodies leave no room, a stock dragged onto or up to its flow's other terminal
+  still commits, holding G1-G5.
+- Only the aux, stock and module tools place an element on a click; a flow or link tool
+  click creates nothing. A creation press clears the selection rather than selecting a
+  sentinel uid.
+- A label drag that ends on the side the label already has commits nothing; the label
+  gesture's threshold belongs to `Label`, so the planner applies none to it.
+- Module double-click (drill-in) is classified before `pressesDisabled`: navigation is
+  not an edit.
+- A pointercancel or a lost release on a pan settles the viewport it reached.
+- Flows render identically while moving and at rest (no retracted-arrow or hidden-grip
+  variants), so the last preview frame equals the committed frame.
+
 `planDelete(view, selection)` (in its own module, `plan-delete.ts`, because the delete
 path is keyboard- and panel-driven rather than a pointer gesture) removes the selected
 elements, links touching them,

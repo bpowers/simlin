@@ -3,23 +3,14 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 /**
- * Sentinel UIDs used while a flow is being created or dragged.
+ * Sentinel UIDs for elements a gesture draws that are not in the view.
  *
- * During flow creation the Canvas stages placeholder elements that do not yet
- * exist in the persisted view; these negative UIDs mark them so the creation
- * logic (Canvas rendering, `flow-attach`'s `computeFlowAttachment`) can
- * recognize and later replace them with real, positive UIDs on commit.
- *
- * This is the single source of truth. `drawing/Canvas.tsx` and `flow-attach.ts`
- * both re-export these so existing import paths keep resolving, and so the
- * functional-core `flow-attach` module stays free of React/DOM imports.
+ * A live gesture renders placeholders the persisted view never holds; these
+ * negative UIDs mark them so they can never collide with an allocated uid and
+ * are never committed. A committed gesture allocates real uids from `nextUid`.
  */
 
-/** The in-creation flow itself (replaced with a real uid on commit). */
+/** The element an aux/stock/module tool press places until its name is typed. */
 export const inCreationUid = -2;
-/** The faux drag target under the cursor while reattaching an existing flow endpoint. */
+/** The zero-radius point a link previews toward while it is over no valid target. */
 export const fauxTargetUid = -3;
-/** The source cloud staged when a new flow is drawn out of empty space. */
-export const inCreationCloudUid = -4;
-/** The faux sink target a new flow points at until it snaps to a stock/cloud. */
-export const fauxCloudTargetUid = -5;
