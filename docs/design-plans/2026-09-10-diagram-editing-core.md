@@ -350,10 +350,17 @@ Resolutions made while implementing (the module is `src/diagram/gesture-planner/
   gesture's threshold belongs to `Label`, so the planner applies none to it.
 - Module double-click (drill-in) is classified before `pressesDisabled`: navigation is
   not an edit.
-- No routed segment passes through a stock the flow was attached to in the base view,
-  including one an end has just left (a real-browser repro detached a sink from a
-  stock and kept the old face's line straight through it). Routing takes those stocks
-  as obstacles that rank and fault exactly like terminal bodies.
+- A routed flow goes around every stock body in the view where it can, not only its
+  terminals: a pipe through a stock reads as attached to it (a real-browser repro
+  detached a sink from a stock and kept the old face's line straight through it).
+  G6 stays terminal-only; this is a preference. Routing takes the view's stocks as
+  obstacles: a candidate through one ranks as crossing, a preserved or pinned tail
+  through one is refused, the released search generates detours (U turns, more bends)
+  before settling for a route through a stock, and it never refuses its last resort.
+  `offsetSegment` treats every stock as an obstacle and takes the nearest clear
+  coordinate on either side. E3 gains a documented transition: a route stepping
+  around an obstacle when the pointer crosses the point where going around becomes
+  feasible or shorter.
 - Escape during a live gesture cancels it: the preview returns to the published view
   and the release commits nothing.
 - A pointercancel or a lost release on a pan settles the viewport it reached.

@@ -510,13 +510,15 @@ describe('planGesture audit repros and pinned behaviors', () => {
     }
   });
 
-  // No routed segment may pass through a stock the flow was attached to when the
-  // gesture started, including one an end has just left. Rows cover each gesture
-  // that routes a flow away from or around such a stock. The scene is the real-
-  // browser repro: births runs from a cloud down and right into Population's left
-  // face, and routeEnd once kept the corner on the old face's line and ran the
-  // detached end straight through Population's body.
-  describe('a routed flow never passes through a stock it was attached to', () => {
+  // A routed flow goes around every stock body where it can: a pipe through a
+  // stock reads as attached to it. Rows cover the stocks a flow can meet -- one
+  // an end has just left (class A), and any other (class C) -- through every
+  // gesture that routes: detach, reattach (either end), a stock move, drawing a
+  // flow, and offsetting a segment. births is the real-browser repro: its sink
+  // detached from Population once kept the corner on the old face's line and ran
+  // straight through Population's body. The land_model rows mirror the imported
+  // shapes the reviewer's sweep found crossing a third stock.
+  describe('a routed flow avoids every stock body', () => {
     const births = (): Scene =>
       scene([
         stock(1, 'Population', 200, 230),
@@ -527,6 +529,39 @@ describe('planGesture audit repros and pinned behaviors', () => {
           [177.5, 230, 1],
         ]),
         stock(4, 'Other', 420, 230),
+      ]);
+    // births after its sink was detached: Population is now no terminal of it.
+    const birthsDetached = (): Scene =>
+      scene([
+        stock(1, 'Population', 200, 230),
+        cloud(2, 3, 60, 150),
+        cloud(5, 3, 330, 320),
+        flow(3, 'births', { x: 195, y: 320 }, [
+          [60, 150, 2],
+          [60, 320],
+          [330, 320, 5],
+        ]),
+      ]);
+    const straight = (u?: Pt): Scene =>
+      scene([
+        stock(1, 'S', 100, 100),
+        stock(2, 'T', 400, 100),
+        flow(3, 'F', { x: 250, y: 100 }, [
+          [122.5, 100, 1],
+          [377.5, 100, 2],
+        ]),
+        ...(u === undefined ? [] : [stock(4, 'U', u.x, u.y)]),
+      ]);
+    // Imported land_model shapes: a cloud into stock 2, with stock 4 beyond it.
+    const landModel = (): Scene =>
+      scene([
+        cloud(284, 3, 282, 312),
+        stock(2, 'Land2', 480, 312),
+        stock(4, 'Land4', 691, 316),
+        flow(3, 'F3', { x: 370, y: 312 }, [
+          [282, 312, 284],
+          [457.5, 312, 2],
+        ]),
       ]);
     // Whether a segment passes through the open interior of the stock at `c`.
     const through = (points: readonly Pt[], c: Pt): boolean => {
@@ -547,76 +582,161 @@ describe('planGesture audit repros and pinned behaviors', () => {
         return a.x > box.minX + e && a.x < box.maxX - e && span > e;
       });
     };
+    const POPULATION = { x: 200, y: 230 };
     const ROWS: ReadonlyArray<{
       name: string;
+      scene: () => Scene;
       gesture: PressGesture;
       selection: number[];
       press: Pt;
       current: Pt;
-      /** Where the stock the flow must stay out of sits in the planned frame. */
-      stockAt: Pt;
-      sinkOn?: number;
+      /** The stocks the routed flow must stay out of, where they sit in the planned frame. */
+      avoid: Pt[];
+      /** An end's expected attachment after the gesture. */
+      attached?: { end: 'source' | 'sink'; uid: number };
     }> = [
       {
-        name: 'detach: births` sink dragged from Population into empty space beyond it',
+        name: 'A detach: births` sink dragged from Population into empty space beyond it',
+        scene: births,
         gesture: { kind: 'flowEndpoint', flow: 3, end: 'sink' },
         selection: [3],
         press: { x: 177.5, y: 230 },
         current: { x: 363, y: 230 },
-        stockAt: { x: 200, y: 230 },
+        avoid: [POPULATION],
       },
       {
-        name: 'reattach: births` sink dropped onto another stock beyond Population',
+        name: 'A detach: a straight flow`s sink dragged up past its old stock',
+        scene: () => straight(),
+        gesture: { kind: 'flowEndpoint', flow: 3, end: 'sink' },
+        selection: [3],
+        press: { x: 377.5, y: 100 },
+        current: { x: 380, y: -150 },
+        avoid: [{ x: 400, y: 100 }],
+      },
+      {
+        name: 'A reattach: births` sink dropped onto another stock beyond Population',
+        scene: births,
         gesture: { kind: 'flowEndpoint', flow: 3, end: 'sink' },
         selection: [3],
         press: { x: 177.5, y: 230 },
         current: { x: 420, y: 230 },
-        stockAt: { x: 200, y: 230 },
-        sinkOn: 4,
+        avoid: [POPULATION],
+        attached: { end: 'sink', uid: 4 },
       },
       {
-        name: 'stock move: Population moved past births` source cloud',
+        name: 'A reattach: a straight flow`s sink dropped onto a stock above its old stock',
+        scene: () => straight({ x: 400, y: -150 }),
+        gesture: { kind: 'flowEndpoint', flow: 3, end: 'sink' },
+        selection: [3],
+        press: { x: 377.5, y: 100 },
+        current: { x: 400, y: -150 },
+        avoid: [{ x: 400, y: 100 }],
+        attached: { end: 'sink', uid: 4 },
+      },
+      {
+        name: 'A reattach, the other end: a straight flow`s source dropped onto a stock beyond its old stock',
+        scene: () => straight({ x: -150, y: -150 }),
+        gesture: { kind: 'flowEndpoint', flow: 3, end: 'source' },
+        selection: [3],
+        press: { x: 122.5, y: 100 },
+        current: { x: -150, y: -150 },
+        avoid: [{ x: 100, y: 100 }],
+        attached: { end: 'source', uid: 4 },
+      },
+      {
+        name: 'A reattach, imported: land_model`s sink dropped onto the stock beyond its old one',
+        scene: landModel,
+        gesture: { kind: 'flowEndpoint', flow: 3, end: 'sink' },
+        selection: [3],
+        press: { x: 457.5, y: 312 },
+        current: { x: 691, y: 316 },
+        avoid: [{ x: 480, y: 312 }],
+        attached: { end: 'sink', uid: 4 },
+      },
+      {
+        name: 'A and C detach, imported: land_model`s sink dragged below the stock beyond its old one',
+        scene: landModel,
+        gesture: { kind: 'flowEndpoint', flow: 3, end: 'sink' },
+        selection: [3],
+        press: { x: 457.5, y: 312 },
+        current: { x: 679, y: 404 },
+        avoid: [
+          { x: 480, y: 312 },
+          { x: 691, y: 316 },
+        ],
+      },
+      {
+        name: 'C stock move, imported: land_model`s sink stock moved past a neighbor',
+        scene: landModel,
+        gesture: { kind: 'moveSelection' },
+        selection: [2],
+        press: { x: 480, y: 312 },
+        current: { x: 780, y: 312 },
+        avoid: [{ x: 691, y: 316 }],
+        attached: { end: 'sink', uid: 2 },
+      },
+      {
+        name: 'terminal stock move: Population moved past births` source cloud',
+        scene: births,
         gesture: { kind: 'moveSelection' },
         selection: [1],
         press: { x: 200, y: 230 },
         current: { x: -40, y: 230 },
-        stockAt: { x: -40, y: 230 },
-        sinkOn: 1,
+        avoid: [{ x: -40, y: 230 }],
+        attached: { end: 'sink', uid: 1 },
       },
       {
         name: 'create: a flow drawn from Population back past its own far side',
+        scene: births,
         gesture: { kind: 'createFlow', from: { stock: 1 } },
         selection: [],
         press: { x: 215, y: 230 },
         current: { x: 0, y: 300 },
-        stockAt: { x: 200, y: 230 },
+        avoid: [POPULATION],
       },
       {
         name: 'offset: births` last segment dragged down within Population`s height',
+        scene: births,
         gesture: { kind: 'offsetSegment', flow: 3, segmentIndex: 1 },
         selection: [3],
         press: { x: 120, y: 230 },
         current: { x: 120, y: 242 },
-        stockAt: { x: 200, y: 230 },
-        sinkOn: 1,
+        avoid: [POPULATION],
+        attached: { end: 'sink', uid: 1 },
+      },
+      {
+        name: 'C offset across a former terminal: detached births` run dragged onto Population',
+        scene: birthsDetached,
+        gesture: { kind: 'offsetSegment', flow: 3, segmentIndex: 1 },
+        selection: [3],
+        press: { x: 195, y: 320 },
+        current: { x: 195, y: 215 },
+        avoid: [POPULATION],
+      },
+      {
+        name: 'C offset across a third stock: a straight flow`s bracket dragged onto a stock below',
+        scene: () => straight({ x: 250, y: 300 }),
+        gesture: { kind: 'offsetSegment', flow: 3, segmentIndex: 0 },
+        selection: [3],
+        press: { x: 250, y: 100 },
+        current: { x: 250, y: 285 },
+        avoid: [{ x: 250, y: 300 }],
       },
     ];
     for (const row of ROWS) {
       it(row.name, () => {
-        const s = births();
+        const s = row.scene();
         const p = planGesture(planInput(s, row.gesture, row.press, row.current, { selection: new Set(row.selection) }));
         expect(p.commit).toBe('edit');
         expect(committedReport(s, p)).toBe('');
-        const routed = p.elements.find(
-          (e): e is FlowViewElement => e.type === 'flow' && (e.uid === 3 || e.uid === s.view.nextUid),
-        )!;
-        const f =
-          row.gesture.kind === 'createFlow'
-            ? p.elements.find((e): e is FlowViewElement => e.type === 'flow' && e.uid === s.view.nextUid)!
-            : routed;
-        expect(through(f.points, row.stockAt)).toBe(false);
-        if (row.sinkOn !== undefined) {
-          expect(f.points[f.points.length - 1].attachedToUid).toBe(row.sinkOn);
+        const uid = row.gesture.kind === 'createFlow' ? s.view.nextUid : 'flow' in row.gesture ? row.gesture.flow : 3;
+        const f = elementOf(p, uid) as FlowViewElement;
+        for (const at of row.avoid) {
+          expect(through(f.points, at)).toBe(false);
+        }
+        if (row.attached !== undefined) {
+          const point = row.attached.end === 'source' ? f.points[0] : f.points[f.points.length - 1];
+          expect(point.attachedToUid).toBe(row.attached.uid);
         }
       });
     }

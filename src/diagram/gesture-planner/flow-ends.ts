@@ -96,9 +96,10 @@ export function planFlowEndpoint(input: PlanInput, flowUid: UID, end: FlowEnd): 
   const fixed = end === 'source' ? terminals.sink : terminals.source;
   const attachedUid = flow.points[endIndex].attachedToUid;
   const endEl = attachedUid === undefined ? undefined : byUid.get(attachedUid);
-  // The stock this end leaves stays in the way: a route keeping the old face's
-  // line would otherwise run straight through it.
-  const obstacles: XY[] = endEl?.type === 'stock' ? [endEl] : [];
+  // Every stock is in the way, the one this end leaves included: a route keeping
+  // the old face's line would run straight through it, and a pipe through any
+  // stock reads as attached to it.
+  const obstacles = stocks;
   const withEnd = (t: Terminal): Terminals =>
     end === 'source' ? { source: t, sink: fixed } : { source: fixed, sink: t };
   const changed = new Map<UID, ViewElement>([...loose.clouds, ...h.clouds].map((c) => [c.uid, c]));
@@ -135,9 +136,7 @@ export function planFlowEndpoint(input: PlanInput, flowUid: UID, end: FlowEnd): 
     });
     const distinct = !(fixed.kind === 'stock' && fixed.stock.uid === target.uid);
     const valid =
-      distinct &&
-      stockVariableExists(input, target) &&
-      flowFault(g.flow, withEnd(terminal), stocks, obstacles) === 'none';
+      distinct && stockVariableExists(input, target) && flowFault(g.flow, withEnd(terminal), stocks) === 'none';
     if (valid) {
       const removed = new Set<UID>();
       if (endEl?.type === 'cloud') {
@@ -163,7 +162,7 @@ export function planFlowEndpoint(input: PlanInput, flowUid: UID, end: FlowEnd): 
   const p = endpointOf(g.flow.points, end);
   changed.set(flowUid, g.flow);
   changed.set(cloud.uid, { ...cloud, x: p.x, y: p.y });
-  const valid = mark === undefined && flowFault(g.flow, withEnd(terminal), stocks, obstacles) === 'none';
+  const valid = mark === undefined && flowFault(g.flow, withEnd(terminal), stocks) === 'none';
   return finish(valid ? 'edit' : 'none', nextUid, mark, new Set());
 }
 
@@ -241,6 +240,7 @@ export function planCreateFlow(input: PlanInput, from: { readonly stock: UID } |
     const g = route(source, terminal, {
       flow: draft,
       occupied: occupiedOn(view.elements, flowUid, stockUidsOf(source, terminal)),
+      obstacles: stocks,
     });
     const distinct = !(source.kind === 'stock' && source.stock.uid === target.uid);
     const valid =
@@ -254,7 +254,11 @@ export function planCreateFlow(input: PlanInput, from: { readonly stock: UID } |
   }
   const sinkCloud = newCloud(nextUid++, flowUid, input.current);
   const sink = freeTerminal(input.current, sinkCloud);
-  const g = route(source, sink, { flow: draft, occupied: occupiedOn(view.elements, flowUid, stockUidsOf(source)) });
+  const g = route(source, sink, {
+    flow: draft,
+    occupied: occupiedOn(view.elements, flowUid, stockUidsOf(source)),
+    obstacles: stocks,
+  });
   const valid = mark === undefined && flowFault(g.flow, { source, sink }, stocks) === 'none';
   return plan(g.flow, sinkCloud, valid ? 'edit' : 'none', mark);
 }

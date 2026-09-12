@@ -269,7 +269,7 @@ function routeMovedEnd(
     }
   }
   const occupied = occupiedOn(input.view.elements, el.uid, stockUids, (uid) => (moving.has(uid) ? d : { x: 0, y: 0 }));
-  const g = routeEnd(flow, end, terminal, { fixed, occupied });
+  const g = routeEnd(flow, end, terminal, { fixed, occupied, obstacles: frameStocks });
   for (const cloud of h.clouds) {
     changed.set(cloud.uid, cloud);
   }

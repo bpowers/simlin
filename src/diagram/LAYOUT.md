@@ -152,9 +152,9 @@ Point {
    - The endpoint lies on a face of the stock (±StockWidth/2 or ±StockHeight/2
      from its center), at least 3px (`CORNER_CLEARANCE`) from the corners
    - The segment touching the stock leaves the face perpendicularly, outward,
-     and no segment passes through a terminal stock, nor through a stock the
-     flow was attached to before the edit (an end detached from a stock routes
-     around it)
+     and no segment passes through a terminal stock; an edit also routes around
+     every other stock where a route around exists (a pipe through a stock reads
+     as attached to it), including one an end has just been detached from
    - A flow newly landing on a face takes a slot at least 10px (`PIPE_SPACING`)
      from the endpoints already on that face when one exists; sliding along a
      face never re-spreads the other flows

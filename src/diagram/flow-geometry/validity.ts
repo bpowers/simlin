@@ -61,12 +61,15 @@ export interface PathQuality {
   /** A FAULT_* rank: 0 when the path holds G2-G6. */
   readonly fault: number;
   /**
-   * Whether the path crosses a terminal body or puts a free endpoint inside a
-   * stock, computed whether or not G6's precondition holds. With the bodies
-   * apart a crossing is a fault; with them overlapping it is G6's best effort,
-   * a preference the ranking still honors rather than no constraint at all.
+   * Whether the path crosses a terminal body, puts a free endpoint inside a
+   * stock, or is `obstructed`, computed whether or not G6's precondition holds.
+   * With the bodies apart the first two are a fault; with them overlapping they
+   * are G6's best effort, and an obstruction is never a fault. The ranking
+   * honors every one as a preference rather than no constraint at all.
    */
   readonly crossing: boolean;
+  /** Whether some segment passes through an obstacle stock that is not a terminal (see pathQuality). */
+  readonly obstructed: boolean;
   /**
    * Whether some segment is under its G3 minimum, computed whether or not the
    * terminals leave room. With room it is a fault; without, the minima are best
@@ -80,10 +83,11 @@ export interface PathQuality {
 /**
  * Classify a path against its terminals. `stocks` are the view's stocks a free
  * endpoint must not sit inside (G6's cloud clause); the terminal stocks are
- * always checked. `obstacles` are stocks no segment may pass through even though
- * they are not terminals: the stocks the flow was attached to when the gesture
- * started, which an end may just have left. A path through one ranks and faults
- * exactly like a path through a terminal body.
+ * always checked. `obstacles` are stocks the path should not pass through
+ * although they are not its terminals (a pipe through a stock reads as attached
+ * to it): a path through one is `obstructed` and ranks as crossing, but is never
+ * a fault, so a route still exists where nothing else does. An obstacle at a
+ * terminal stock's center is that terminal, whose crossing G6 governs.
  */
 export function pathQuality(
   points: readonly XY[],
@@ -92,7 +96,7 @@ export function pathQuality(
   obstacles?: readonly XY[],
 ): PathQuality {
   const n = points.length;
-  const structure = { fault: FAULT_STRUCTURE, crossing: false, short: false };
+  const structure = { fault: FAULT_STRUCTURE, crossing: false, obstructed: false, short: false };
   if (n < 2 || !points.every(isFiniteXY)) {
     return structure;
   }
@@ -134,31 +138,64 @@ export function pathQuality(
       return structure;
     }
   }
-  const crossing = crossesBodies(points, terminals, stocks, obstacles);
+  const terminalCrossing = crossesBodies(points, terminals, stocks);
+  const obstructed = obstacles !== undefined && throughObstacles(points, terminals, obstacles);
+  const crossing = terminalCrossing || obstructed;
   let short = false;
   for (let i = 0; i < n - 1 && !short; i++) {
     const minimum = i === n - 2 ? MIN_SINK_SEGMENT : MIN_SEGMENT;
     short = distance(points[i], points[i + 1]) < minimum - e;
   }
   if (short && terminalsLeaveRoom(terminals)) {
-    return { fault: FAULT_SHORT, crossing, short };
+    return { fault: FAULT_SHORT, crossing, obstructed, short };
   }
-  return { fault: crossing && bodiesApart(terminals) ? FAULT_CROSSING : FAULT_NONE, crossing, short };
+  const fault = terminalCrossing && bodiesApart(terminals) ? FAULT_CROSSING : FAULT_NONE;
+  return { fault, crossing, obstructed, short };
 }
 
-function crossesBodies(
-  points: readonly XY[],
-  terminals: Terminals,
-  stocks: readonly XY[] | undefined,
-  obstacles: readonly XY[] | undefined,
-): boolean {
+/**
+ * Whether a segment passes through the body of an obstacle other than a
+ * terminal. The path's bounding box prefilters the obstacles, so a stock that
+ * cannot be hit costs one comparison however many a view holds.
+ */
+function throughObstacles(points: readonly XY[], terminals: Terminals, obstacles: readonly XY[]): boolean {
+  const e = GEOMETRY_EPSILON;
   const n = points.length;
-  const bodies: readonly XY[] = [
-    ...[terminals.source, terminals.sink].flatMap((t): XY[] => (t.kind === 'stock' ? [t.stock] : [])),
-    ...(obstacles ?? []),
-  ];
-  for (const center of bodies) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of points) {
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  }
+  const terminalStocks = [terminals.source, terminals.sink].flatMap((t): XY[] => (t.kind === 'stock' ? [t.stock] : []));
+  for (const center of obstacles) {
     const body = stockBody(center);
+    if (body.maxX <= minX || body.minX >= maxX || body.maxY <= minY || body.minY >= maxY) {
+      continue;
+    }
+    if (terminalStocks.some((t) => Math.abs(t.x - center.x) <= e && Math.abs(t.y - center.y) <= e)) {
+      continue;
+    }
+    for (let i = 0; i < n - 1; i++) {
+      if (segmentThroughBox(points[i], points[i + 1], body)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function crossesBodies(points: readonly XY[], terminals: Terminals, stocks: readonly XY[] | undefined): boolean {
+  const n = points.length;
+  for (const t of [terminals.source, terminals.sink]) {
+    if (t.kind !== 'stock') {
+      continue;
+    }
+    const body = stockBody(t.stock);
     for (let i = 0; i < n - 1; i++) {
       if (segmentThroughBox(points[i], points[i + 1], body)) {
         return true;
@@ -186,15 +223,10 @@ function crossesBodies(
 /**
  * Classify a flow's path against its terminals (G2-G6). The planner uses this to
  * decide whether committing onto a target yields a view that holds the
- * invariants; `stocks` extends G6's cloud clause to the rest of the view, and
- * `obstacles` its segment clause to the stocks the flow was attached to when the
- * gesture started (see pathQuality).
+ * invariants; `stocks` extends G6's cloud clause to the rest of the view. A path
+ * through a non-terminal stock is a routing preference, not a fault, so it has
+ * no say here.
  */
-export function flowFault(
-  flow: FlowViewElement,
-  terminals: Terminals,
-  stocks?: readonly XY[],
-  obstacles?: readonly XY[],
-): RouteFault {
-  return FAULT_NAMES[pathQuality(flow.points, terminals, stocks, obstacles).fault];
+export function flowFault(flow: FlowViewElement, terminals: Terminals, stocks?: readonly XY[]): RouteFault {
+  return FAULT_NAMES[pathQuality(flow.points, terminals, stocks).fault];
 }

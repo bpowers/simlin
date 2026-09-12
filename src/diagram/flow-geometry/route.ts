@@ -22,6 +22,8 @@ import type { FlowViewElement } from '@simlin/core/datamodel';
 
 import {
   type Axis,
+  type Box,
+  boxesOverlap,
   clamp,
   compose,
   CORNER_CLEARANCE,
@@ -29,6 +31,7 @@ import {
   FACES,
   type FlowEnd,
   GEOMETRY_EPSILON,
+  inflate,
   isFiniteXY,
   MIN_SEGMENT,
   MIN_SINK_SEGMENT,
@@ -167,6 +170,8 @@ interface Candidate {
   readonly fault: number;
   /** A best effort G6 miss on a valid candidate (see PathQuality), honored as a preference. */
   readonly crossing: boolean;
+  /** Passes through a non-terminal stock (see PathQuality); worth generating detours to avoid. */
+  readonly obstructed: boolean;
   readonly index: number;
 }
 
@@ -177,7 +182,7 @@ interface Search {
   readonly minSource: number;
   readonly minSink: number;
   readonly terminals: Terminals;
-  /** Stocks besides the terminals no segment may pass through (see pathQuality). */
+  /** Stocks besides the terminals a candidate should not pass through; one that does ranks as crossing (see pathQuality). */
   readonly obstacles: readonly XY[];
   /** Turns a generated path into the flow's full path (routeEnd prepends or appends a preserved prefix). */
   readonly assemble: (path: XY[]) => XY[];
@@ -221,15 +226,41 @@ function dedupe(values: readonly number[]): number[] {
 }
 
 /**
+ * The box a route between the search's ports can be expected to pass through:
+ * the terminal bodies and port references, inflated by two minimum segments.
+ * Only obstacles meeting it contribute clearance holds, so a view's distant
+ * stocks do not multiply the candidates of every search.
+ */
+function reachBox(search: Omit<Search, 'pools' | 'pointPools' | 'baseHolds'>): Box {
+  const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+  const add = (b: Box): void => {
+    box.minX = Math.min(box.minX, b.minX);
+    box.maxX = Math.max(box.maxX, b.maxX);
+    box.minY = Math.min(box.minY, b.minY);
+    box.maxY = Math.max(box.maxY, b.maxY);
+  };
+  const pointBox = (p: XY): Box => ({ minX: p.x, maxX: p.x, minY: p.y, maxY: p.y });
+  for (const t of [search.terminals.source, search.terminals.sink]) {
+    add(t.kind === 'stock' ? stockBody(t.stock) : pointBox(t.point));
+  }
+  for (const port of [...search.sources, ...search.sinks]) {
+    add(pointBox(portRef(port)));
+  }
+  return inflate(box, 2 * MIN_SEGMENT);
+}
+
+/**
  * Pair-independent hold candidates per axis. `pointPools` is the minimum
  * distance either side of a point port: a Z whose riser hugs a cloud turns into
  * the L the cloud reaches with the least change, and a tail leaves a preserved
  * corner by exactly a minimum riser, so these rank ahead of a pair's midpoint.
  * `pools` follows the midpoint: point coordinates, stub tips, and clearances
- * around each terminal and obstacle body (a route can only go around a body
- * whose clearance is a hold it can take).
+ * around each terminal body and each obstacle within reach (a route can only go
+ * around a body whose clearance is a hold it can take).
  */
 function buildPools(search: Omit<Search, 'pools' | 'pointPools' | 'baseHolds'>): Pick<Search, 'pools' | 'pointPools'> {
+  const reach = reachBox(search);
+  const nearObstacles = search.obstacles.filter((center) => boxesOverlap(stockBody(center), reach));
   const pool = (axis: Axis): { point: number[]; rest: number[] } => {
     const point: number[] = [];
     const rest: number[] = [];
@@ -248,7 +279,7 @@ function buildPools(search: Omit<Search, 'pools' | 'pointPools' | 'baseHolds'>):
     }
     const bodies: readonly XY[] = [
       ...[search.terminals.source, search.terminals.sink].flatMap((t): XY[] => (t.kind === 'stock' ? [t.stock] : [])),
-      ...search.obstacles,
+      ...nearObstacles,
     ];
     for (const center of bodies) {
       const body = stockBody(center);
@@ -484,6 +515,7 @@ function emit(search: Search, P: Port, Q: Port, path: XY[], bends: number, out: 
     length: pathLength(points),
     fault: quality.fault,
     crossing: quality.crossing,
+    obstructed: quality.obstructed,
     index: out.length,
   });
 }
@@ -503,9 +535,12 @@ function compareCandidates(a: Candidate, b: Candidate): number {
  * within one bend of the best); then bends, axis change and length. Shapes past
  * straight, L and Z are generated only when needed: tails up to `maxBends` when
  * nothing valid exists yet or the stickiness window reaches past what was
- * generated, and, when `detours` is set and nothing is valid, U turns and then
- * more bends. With nothing valid at all, the least severe fault wins, so a route
- * always exists.
+ * generated, and, when `detours` is set and nothing is valid -- or every valid
+ * candidate crosses something and one of them passes through a non-terminal
+ * stock -- U turns and then more bends. A detour around a stock therefore beats
+ * a route through it, while a crossing G6 excuses (overlapping terminal bodies)
+ * generates no detours. With nothing valid at all, the least severe fault wins,
+ * so a route always exists.
  */
 function search(s: Search): XY[] {
   const candidates: Candidate[] = [];
@@ -544,6 +579,17 @@ function search(s: Search): XY[] {
       return fallback[0].points;
     }
     const clear = valid.filter((c) => !c.crossing);
+    if (clear.length === 0 && s.detours && valid.some((c) => c.obstructed)) {
+      if (!uTurns) {
+        uTurns = true;
+        generate(s, 2, candidates, 'uTurns');
+        continue;
+      }
+      if (generated < 4) {
+        generate(s, ++generated, candidates);
+        continue;
+      }
+    }
     const pool = clear.length > 0 ? clear : valid;
     const best = Math.min(...pool.map((c) => c.bends));
     const window = pool.filter((c) => c.bends <= best + 1);
@@ -618,8 +664,9 @@ export interface RouteContext {
    */
   readonly occupied?: readonly XY[];
   /**
-   * Stocks the route may not pass through although they are not its terminals:
-   * the stocks the flow was attached to when the gesture started.
+   * The view's stocks, in this frame's coordinates. A candidate through one
+   * that is not a terminal ranks as crossing, so the route goes around it
+   * wherever it can: a pipe through a stock reads as attached to it.
    */
   readonly obstacles?: readonly XY[];
 }
@@ -657,9 +704,9 @@ export interface RouteEndContext {
   /** Other flows' endpoints on the terminal stocks, in this frame's coordinates (see RouteContext). */
   readonly occupied?: readonly XY[];
   /**
-   * Stocks the flow may not pass through although they are not its terminals:
-   * the stock the moving end was attached to when the gesture started, which a
-   * preserved corner on its old face's line would otherwise run straight through.
+   * The view's stocks, in this frame's coordinates (see RouteContext), including
+   * one the moving end has just left, which a preserved corner on its old face's
+   * line would otherwise run straight through.
    */
   readonly obstacles?: readonly XY[];
 }
@@ -675,8 +722,9 @@ export interface RouteEndContext {
  * and a tail that grows it is a detour, which releasing to fewer preserved
  * corners replaces. Then k = 0 with the fixed terminal pinned to its base face
  * and offset, and only if that is still invalid or crossing is the flow
- * released to `route`. Every attempt treats a path through `ctx.obstacles` as it
- * treats a path through a terminal body.
+ * released to `route`. A path through `ctx.obstacles` ranks as crossing in
+ * every attempt: a preserved or pinned tail through one is refused, and the
+ * released search prefers a route around it but never refuses its last resort.
  *
  * The valve keeps its arc-length distance from the fixed end. A non-finite
  * terminal returns the base flow unchanged.

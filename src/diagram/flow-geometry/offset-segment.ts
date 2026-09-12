@@ -39,7 +39,11 @@ import {
 import { FAULT_NONE, pathQuality } from './validity';
 
 export interface OffsetContext {
-  /** The view's stocks: a cloud moved with its segment must not land inside one (G6). */
+  /**
+   * The view's stocks. A cloud moved with its segment must not land inside one
+   * (G6), and the dragged path steps around every one that is not a terminal: a
+   * pipe through a stock reads as attached to it.
+   */
   readonly stocks?: readonly XY[];
 }
 
@@ -68,11 +72,11 @@ const OBSTACLE_STEP = 2;
  * (removing that corner). These constraints are solved jointly, as the feasible
  * coordinate nearest the request, so a short riser collapses when the request is
  * within half a minimum of collapsing and is pushed out to the minimum otherwise.
- * When the resolved coordinate still puts the path through a terminal body or a
- * cloud inside a stock, the nearest valid coordinate on either side of that
- * obstacle is taken: the segment follows the pointer up to the obstacle and
- * jumps across it once the far side is nearer (a documented feasibility
- * transition).
+ * When the resolved coordinate still puts the path through a terminal body, a
+ * cloud inside a stock, or the body of any other stock in `ctx.stocks`, the
+ * nearest valid coordinate on either side of that obstacle is taken: the segment
+ * follows the pointer up to the obstacle and jumps across it once the far side is
+ * nearer (a documented feasibility transition).
  *
  * At a terminal the tail is re-solved: a cloud moves with the segment; a stock
  * endpoint sits at the coordinate clamped to the face extent (minus
@@ -118,9 +122,13 @@ export function offsetSegment(
   // Validity is judged on the normalized path: a riser collapsed to zero length
   // is a corner removed, not a zero-length segment.
   const build = (c: number): Point[] => normalize(attachPoints(buildOffset(pts, segmentIndex, c, tails), terminals));
-  const valid = (c: number): boolean => pathQuality(build(c), terminals, ctx.stocks).fault === FAULT_NONE;
+  const clear = (points: readonly XY[]): boolean => {
+    const quality = pathQuality(points, terminals, ctx.stocks, ctx.stocks);
+    return quality.fault === FAULT_NONE && !quality.obstructed;
+  };
+  const valid = (c: number): boolean => clear(build(c));
   let c = resolve(coordinate);
-  if (!valid(c) && pathQuality(pts, terminals, ctx.stocks).fault === FAULT_NONE) {
+  if (!valid(c) && clear(pts)) {
     c = nearestValid(segmentHold(pts, segmentIndex).hold, c, resolve, valid);
   }
   const points = build(c);
