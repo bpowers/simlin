@@ -130,6 +130,14 @@ test.describe('notebook widget bundle', () => {
       // The engine keeps the display spelling verbatim (canonical matching
       // happens on lookup), so the snapshot carries the name as typed.
       .toContain('"New Variable"');
+    // The fake kernel records a snapshot synchronously in `send` but accepts it
+    // on a later task, as a real comm round trip would, so observing the
+    // snapshot says nothing yet about the accept: wait for the kernel to act.
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as HarnessWindow).harness.models[0].kernel.revision), {
+        timeout: 30_000,
+      })
+      .toBeGreaterThan(0);
 
     const saved = await page.evaluate(() => {
       const m = (window as unknown as HarnessWindow).harness.models[0];
