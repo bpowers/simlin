@@ -12,6 +12,15 @@
 // What this does not establish: the geometry a gesture commits
 // (gesture-planner*.test.ts) or the controller refusing a stale token
 // (project-controller.test.ts).
+//
+// Coverage note, two paths with no row. The release's own validity re-check
+// cannot be killed in jsdom: act() flushes the E5 effect that drops an
+// invalidated gesture before the next dispatched event, so no release here ever
+// finds one still live. It guards the browser case, where a controller
+// republish can leave that effect pending when pointerup arrives. The no-op
+// commit handler the Editor gives a read-only Canvas is equivalent to the real
+// one, which already refuses while read-only (viewEditsRefused includes
+// isReadOnly).
 
 import { describe, it, expect, rs } from '@rstest/core';
 
@@ -306,6 +315,26 @@ describe('Canvas gesture lifecycle: what keeps a gesture live', () => {
     });
     expect(Number(auxX(h))).toBeCloseTo(100, 6);
     pointerMove(h.svg, 170, 170, B1);
+    pointerUp(h.svg, 170, 170);
+    expect(h.callbacks.onCommitGesture).not.toHaveBeenCalled();
+  });
+
+  it('E5: a gesture a republish invalidated stays dropped when the view changes back', () => {
+    const h = renderCanvas({ elements: [makeAux(10, 'a', 100, 100), makeAux(11, 'b', 400, 400)] });
+    h.clearMountCalls();
+    const original = h.view();
+    pointerDown(h.query('g.simlin-aux')!, 100, 100);
+    pointerMove(h.svg, 160, 160, B1);
+    h.setProps({
+      view: viewOf(
+        h,
+        h.view().elements.map((el) => (el.uid === 11 ? ({ ...el, x: el.x + 20 } as ViewElement) : el)),
+      ),
+    });
+    // The same geometry and token the press saw: validity alone would revive it.
+    h.setProps({ view: original });
+    pointerMove(h.svg, 170, 170, B1);
+    expect(auxX(h)).toBe('100');
     pointerUp(h.svg, 170, 170);
     expect(h.callbacks.onCommitGesture).not.toHaveBeenCalled();
   });
