@@ -238,6 +238,95 @@ fn only_the_links_a_sync_creates_are_curved_for_a_loop() {
     }
 }
 
+/// The link drawn from the element named `from` to the one named `to`.
+fn link_between(view: &datamodel::StockFlow, from: &str, to: &str) -> Option<view_element::Link> {
+    let uid = |name: &str| {
+        view.elements.iter().find_map(|e| {
+            let n = e.get_name()?;
+            (canonicalize(n) == name).then(|| e.get_uid())
+        })
+    };
+    let (f, t) = (uid(from)?, uid(to)?);
+    view.elements.iter().find_map(|e| match e {
+        ViewElement::Link(l) if l.from_uid == f && l.to_uid == t => Some(l.clone()),
+        _ => None,
+    })
+}
+
+fn center_named(view: &datamodel::StockFlow, name: &str) -> Option<(f64, f64)> {
+    view.elements.iter().find_map(|e| match e {
+        ViewElement::Aux(a) if canonicalize(&a.name) == name => Some((a.x, a.y)),
+        ViewElement::Stock(s) if canonicalize(&s.name) == name => Some((s.x, s.y)),
+        ViewElement::Module(m) if canonicalize(&m.name) == name => Some((m.x, m.y)),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_variable_whose_kind_changes_is_redrawn_where_it_was() {
+    // An agent turns the parameter birth_rate into a stock with an upsert. The
+    // stock is drawn where the parameter was, and the link from it into
+    // births -- still a dependency -- is the link a person drew.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("population", &["births"], &[])),
+        datamodel::Variable::Flow(flow("births", "population * birth_rate")),
+        datamodel::Variable::Aux(aux("birth_rate", "0.1")),
+    ]);
+    let base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertStock(stock("birth_rate", &[], &[]))],
+    );
+    assert!(
+        view.elements
+            .iter()
+            .any(|e| matches!(e, ViewElement::Stock(s) if canonicalize(&s.name) == "birth_rate")),
+        "birth_rate is drawn as a stock"
+    );
+    assert_eq!(
+        center_named(&view, "birth_rate"),
+        center_named(&base, "birth_rate"),
+        "the stock is drawn where the parameter was"
+    );
+    assert_eq!(
+        link_between(&view, "birth_rate", "births"),
+        link_between(&base, "birth_rate", "births"),
+        "the link keeps its uid and shape"
+    );
+}
+
+#[test]
+fn a_flow_rebuilt_for_a_new_attachment_keeps_its_links() {
+    // transfer drains source into sink, at a rate read from source and rate.
+    // Deleting sink rebuilds transfer with a cloud end; the links into it are
+    // still dependencies, so they keep their uids and their kinds of shape.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("source", &[], &["transfer"])),
+        datamodel::Variable::Stock(stock("sink", &["transfer"], &[])),
+        datamodel::Variable::Flow(flow("transfer", "source * rate")),
+        datamodel::Variable::Aux(aux("rate", "0.1")),
+    ]);
+    let base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::DeleteVariable {
+            ident: "sink".to_string(),
+        }],
+    );
+    for from in ["rate", "source"] {
+        let before = link_between(&base, from, "transfer").expect("drawn before");
+        let after = link_between(&view, from, "transfer").expect("drawn after");
+        assert_eq!(after.uid, before.uid, "{from} -> transfer keeps its uid");
+        assert_eq!(
+            std::mem::discriminant(&after.shape),
+            std::mem::discriminant(&before.shape),
+            "{from} -> transfer keeps its kind of shape"
+        );
+    }
+}
+
 #[test]
 fn a_stock_added_to_a_drawn_chain_lands_clear_of_side_flows() {
     // tank drains to a cloud off its right face, and a person drew the drain

@@ -1440,6 +1440,52 @@ fn translate_view_element(elem: &mut ViewElement, dx: f64, dy: f64) {
     }
 }
 
+/// Keep the bow of every curved link the view already drew whose endpoint this
+/// pass moved (a rebuilt flow's valve): its takeoff angle turns with the chord
+/// between its ends, so it curves as it did relative to that line.
+fn rebow_moved_links(elements: &mut [ViewElement], old_view: &datamodel::StockFlow) {
+    use crate::diagram::connector::get_visual_center;
+    let not_arrayed = |_: &str| false;
+    let centers = |els: &[ViewElement]| -> HashMap<i32, (f64, f64)> {
+        els.iter()
+            .filter(|e| !matches!(e, ViewElement::Link(_) | ViewElement::Group(_)))
+            .map(|e| (e.get_uid(), get_visual_center(e, &not_arrayed)))
+            .collect()
+    };
+    let before = centers(&old_view.elements);
+    let after = centers(elements);
+    let drawn_before: HashSet<i32> = old_view
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Link(_)))
+        .map(ViewElement::get_uid)
+        .collect();
+    let chord = |a: (f64, f64), b: (f64, f64)| (b.1 - a.1).atan2(b.0 - a.0).to_degrees();
+    for elem in elements.iter_mut() {
+        let ViewElement::Link(link) = elem else {
+            continue;
+        };
+        let LinkShape::Arc(takeoff) = link.shape else {
+            continue;
+        };
+        if !drawn_before.contains(&link.uid) {
+            continue;
+        }
+        let (Some(&f0), Some(&t0), Some(&f1), Some(&t1)) = (
+            before.get(&link.from_uid),
+            before.get(&link.to_uid),
+            after.get(&link.from_uid),
+            after.get(&link.to_uid),
+        ) else {
+            continue;
+        };
+        if (f0, t0) == (f1, t1) {
+            continue;
+        }
+        link.shape = LinkShape::Arc(takeoff + chord(f1, t1) - chord(f0, t0));
+    }
+}
+
 /// Apply a model patch incrementally to an existing diagram view,
 /// preserving existing element positions and only placing new or
 /// modified elements.
@@ -1546,7 +1592,9 @@ pub fn incremental_layout(
     // is no DeleteVariable in the patch and the old Aux element is still in state.
     // identify_new_elements only checks for UID presence, not element type, so the
     // stale element would survive.  We detect type mismatches here and remove the
-    // old element so it is rebuilt with the correct type.
+    // old element so it is rebuilt with the correct type, keeping its uid (so its
+    // links and aliases survive) and recording its center for the rebuild.
+    let mut kind_changed_centers: Vec<(String, Position)> = Vec::new();
     {
         let kind_changed: Vec<String> = model
             .variables
@@ -1568,15 +1616,12 @@ pub fn incremental_layout(
             })
             .collect();
         for ident in kind_changed {
-            // Save the display name before apply_deletion removes it from display_names,
-            // so the rebuilt element can recover the original casing (e.g. "Growth Rate"
-            // instead of "growth_rate").
-            let saved_display = state.display_names.get(&ident).cloned();
-            state.apply_deletion(&ident);
-            // Restore: use the saved original display name when available, otherwise
-            // fall back to the canonical ident so the entry is always present.
-            let display = saved_display.unwrap_or_else(|| ident.clone());
-            state.display_names.insert(ident, display);
+            if let Some(uid) = state.uid_manager.get_uid(&ident)
+                && let Some(&pos) = state.positions.get(&uid)
+            {
+                kind_changed_centers.push((ident.clone(), pos));
+            }
+            state.remove_for_rebuild(&ident);
         }
     }
 
@@ -1665,17 +1710,11 @@ pub fn incremental_layout(
             .collect();
 
         for flow_ident in flows_to_reset {
-            // apply_deletion removes the element from state.elements but leaves
-            // the UID in uid_manager. identify_new_elements will see a UID with
-            // no corresponding element and classify the flow as new, causing
-            // create_flow_view_element to rebuild it with correct endpoints.
-            let canonical = canonicalize(&flow_ident).into_owned();
-            // Save the display name before apply_deletion removes it so the
-            // rebuilt element recovers the original casing.
-            let saved_display = state.display_names.get(&canonical).cloned();
-            state.apply_deletion(&flow_ident);
-            let display = saved_display.unwrap_or_else(|| flow_ident.clone());
-            state.display_names.insert(canonical, display);
+            // identify_new_elements sees the uid with no element and classifies
+            // the flow as new, so create_flow_view_element rebuilds it with
+            // correct endpoints under the same uid, and the links into it
+            // survive.
+            state.remove_for_rebuild(&flow_ident);
         }
     }
 
@@ -1724,6 +1763,62 @@ pub fn incremental_layout(
     // A link this pass creates has a uid the view before it did not use.
     let old_uids: HashSet<i32> = old_view.elements.iter().map(ViewElement::get_uid).collect();
     let created_link = |uid: i32| !old_uids.contains(&uid);
+
+    // A variable whose kind changed to a stock, a parameter or a module is
+    // redrawn at its old element's center: an agent turning a parameter into a
+    // stock changed what it is, not where a person put it. Its label side is
+    // chosen afresh (it is absent from `pinned_labels`), but no pass below moves
+    // it. A variable that became a flow is placed as a new flow, since its valve
+    // belongs on the pipe between its stocks.
+    let mut rebuilt_in_place: HashSet<i32> = HashSet::new();
+    let mut in_place_idents: HashSet<String> = HashSet::new();
+    for (ident, pos) in &kind_changed_centers {
+        let Some(var) = model.get_variable(ident) else {
+            continue;
+        };
+        let uid = state.get_or_alloc_uid(ident);
+        let name = format_label_with_line_breaks(&state.display_name(ident));
+        let (x, y) = (pos.x, pos.y);
+        let element = match var {
+            datamodel::Variable::Stock(_) => ViewElement::Stock(view_element::Stock {
+                name,
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }),
+            datamodel::Variable::Aux(_) => ViewElement::Aux(view_element::Aux {
+                name,
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }),
+            datamodel::Variable::Module(_) => ViewElement::Module(view_element::Module {
+                name,
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+            }),
+            datamodel::Variable::Flow(_) => continue,
+        };
+        state.elements.push(element);
+        state.positions.insert(uid, *pos);
+        rebuilt_in_place.insert(uid);
+        in_place_idents.insert(ident.clone());
+    }
+    let new_elements = NewElements {
+        new_stocks: without(new_elements.new_stocks, &in_place_idents),
+        new_flows: new_elements.new_flows,
+        new_auxes: without(new_elements.new_auxes, &in_place_idents),
+        new_modules: without(new_elements.new_modules, &in_place_idents),
+    };
+    // What the polish passes may move: what this pass created, less what it
+    // redrew in place.
+    let moves = |uid: i32| !standing_uids.contains(&uid) && !rebuilt_in_place.contains(&uid);
 
     if new_elements.is_empty() {
         // No new element, so no flow is created or rebuilt: every flow in the
@@ -1934,10 +2029,8 @@ pub fn incremental_layout(
     // label sides chosen by what the metric charges. Pinned elements keep their positions and
     // sides even if a new connector now runs through a label (hand placement
     // wins; the human can move it).
-    polish::polish_crossings_for(&mut state.elements, |uid| !standing_uids.contains(&uid));
-    declutter::declutter_part(&mut state.elements, needs_label_placement, |uid| {
-        !standing_uids.contains(&uid)
-    });
+    polish::polish_crossings_for(&mut state.elements, moves);
+    declutter::declutter_part(&mut state.elements, needs_label_placement, moves);
     // The decluttered free-floating elements' positions, for the loop arcs.
     for elem in &state.elements {
         let (uid, x, y) = match elem {
@@ -1950,6 +2043,7 @@ pub fn incremental_layout(
             *pos = Position::new(x, y);
         }
     }
+    rebow_moved_links(&mut state.elements, old_view);
     apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
 
     validate_view_completeness(&state, model)?;

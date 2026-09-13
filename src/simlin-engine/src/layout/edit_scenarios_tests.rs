@@ -67,10 +67,6 @@ const FIXTURES: [Fixture; 8] = [
     },
 ];
 
-const REBUILDS_KIND_CHANGE_ELSEWHERE: &str =
-    "a variable whose kind changes is rebuilt away from its old element";
-const RECREATES_LINKS_OF_REBUILT: &str =
-    "the links touching a rebuilt element or flow are re-created";
 const REBUILT_FLOW_LANDS_ON_A_SHAPE: &str =
     "a flow rebuilt with a cloud end puts its cloud or valve on another shape";
 const DETACHED_CLOUD_INSIDE_STOCK: &str =
@@ -85,99 +81,15 @@ const DRAWS_OMITTED_CONNECTORS: &str =
 const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "population",
-        "aux_to_stock",
-        "rebuilt_element_moved",
-        REBUILDS_KIND_CHANGE_ELSEWHERE,
-    ),
-    (
-        "population",
-        "aux_to_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "population",
-        "delete_middle_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "population",
         "detach_flow",
         "shape_overlap",
         REBUILT_FLOW_LANDS_ON_A_SHAPE,
-    ),
-    (
-        "population",
-        "detach_flow",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "logistic_growth",
-        "aux_to_stock",
-        "rebuilt_element_moved",
-        REBUILDS_KIND_CHANGE_ELSEWHERE,
-    ),
-    (
-        "logistic_growth",
-        "aux_to_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "logistic_growth",
-        "detach_flow",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "logistic_growth_straight",
-        "aux_to_stock",
-        "rebuilt_element_moved",
-        REBUILDS_KIND_CHANGE_ELSEWHERE,
-    ),
-    (
-        "logistic_growth_straight",
-        "aux_to_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "logistic_growth_straight",
-        "detach_flow",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "fishbanks",
-        "aux_to_stock",
-        "rebuilt_element_moved",
-        REBUILDS_KIND_CHANGE_ELSEWHERE,
-    ),
-    (
-        "fishbanks",
-        "aux_to_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
     ),
     (
         "fishbanks",
         "delete_middle_stock",
         "shape_overlap",
         REBUILT_FLOW_LANDS_ON_A_SHAPE,
-    ),
-    (
-        "fishbanks",
-        "delete_middle_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "fishbanks",
-        "detach_flow",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
     ),
     (
         "reliability",
@@ -187,27 +99,9 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "reliability",
-        "aux_to_stock",
-        "rebuilt_element_moved",
-        REBUILDS_KIND_CHANGE_ELSEWHERE,
-    ),
-    (
-        "reliability",
-        "aux_to_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "reliability",
         "delete_middle_stock",
         "shape_overlap",
         REBUILT_FLOW_LANDS_ON_A_SHAPE,
-    ),
-    (
-        "reliability",
-        "delete_middle_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
     ),
     (
         "sir",
@@ -229,27 +123,9 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "sir",
-        "aux_to_stock",
-        "rebuilt_element_moved",
-        REBUILDS_KIND_CHANGE_ELSEWHERE,
-    ),
-    (
-        "sir",
-        "aux_to_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "sir",
         "delete_middle_stock",
         "shape_overlap",
         REBUILT_FLOW_LANDS_ON_A_SHAPE,
-    ),
-    (
-        "sir",
-        "delete_middle_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
     ),
     (
         "sir",
@@ -271,51 +147,9 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "sir",
-        "detach_flow",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "sir",
         "restate_variable",
         "return_to_original",
         DRAWS_OMITTED_CONNECTORS,
-    ),
-    (
-        "hares_and_foxes",
-        "aux_to_stock",
-        "rebuilt_element_moved",
-        REBUILDS_KIND_CHANGE_ELSEWHERE,
-    ),
-    (
-        "hares_and_foxes",
-        "aux_to_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "lotka_volterra",
-        "aux_to_stock",
-        "rebuilt_element_moved",
-        REBUILDS_KIND_CHANGE_ELSEWHERE,
-    ),
-    (
-        "lotka_volterra",
-        "aux_to_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "lotka_volterra",
-        "delete_middle_stock",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "lotka_volterra",
-        "detach_flow",
-        "untouched_link_changed",
-        RECREATES_LINKS_OF_REBUILT,
     ),
 ];
 

@@ -367,6 +367,45 @@ impl LayoutState {
         self.display_names.remove(&canonical_str);
     }
 
+    /// Remove a variable's element so this pass rebuilds it -- its kind
+    /// changed, or the stocks its flow attaches to did -- keeping everything
+    /// that refers to it by uid. The uid stays mapped, so the rebuilt element
+    /// takes it and the links and aliases touching it survive (the connector
+    /// diff still drops a link whose dependency is gone); its position and
+    /// display name stay for the rebuild to read. Its clouds go: they belong
+    /// to the old pipe.
+    pub fn remove_for_rebuild(&mut self, ident: &str) {
+        let canonical = canonicalize(ident).into_owned();
+        let Some(uid) = self.uid_manager.get_uid(&canonical) else {
+            return;
+        };
+        let cloud_uids: Vec<i32> = self
+            .elements
+            .iter()
+            .filter_map(|elem| match elem {
+                ViewElement::Cloud(c) if c.flow_uid == uid => Some(c.uid),
+                _ => None,
+            })
+            .collect();
+        self.elements.retain(|elem| match elem {
+            ViewElement::Aux(_)
+            | ViewElement::Stock(_)
+            | ViewElement::Flow(_)
+            | ViewElement::Module(_) => elem.get_uid() != uid,
+            ViewElement::Cloud(c) => c.flow_uid != uid,
+            ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => true,
+        });
+        for cloud_uid in &cloud_uids {
+            self.positions.remove(cloud_uid);
+        }
+        if let Some(cloud_idents) = self.flow_ident_to_clouds.remove(&canonical) {
+            for ci in &cloud_idents {
+                self.cloud_ident_to_uid.remove(ci);
+                self.cloud_ident_to_flow_ident.remove(ci);
+            }
+        }
+    }
+
     /// Update a variable's identity in-place while preserving its
     /// position and UID.  Updates the element name, uid_manager
     /// mapping, and display_names entry.
