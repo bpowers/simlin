@@ -21,7 +21,7 @@ mod geometry;
 mod gesture;
 mod heal;
 mod hit;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "layout_eval"))]
 pub mod invariants;
 mod links;
 mod offset;

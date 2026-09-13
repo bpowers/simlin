@@ -108,6 +108,33 @@ fn rasterize(svg: &str, file: &str, out: &str) -> bool {
     true
 }
 
+/// Render `view` (installed into a clone of `project`) to `{out}/{file}` with
+/// the SVG `marks` drawn over it. On any failure WARN and return `false`.
+pub fn render_marked(
+    project: &datamodel::Project,
+    view: &datamodel::StockFlow,
+    file: &str,
+    out: &str,
+    marks: &str,
+) -> bool {
+    let mut p = project.clone();
+    let Some(model) = p.get_model_mut(MAIN_MODEL) else {
+        return false;
+    };
+    model.views = vec![datamodel::View::StockFlow(view.clone())];
+    let svg = match render_svg(&p, MAIN_MODEL) {
+        Ok(svg) => svg,
+        Err(err) => {
+            eprintln!("WARN: failed to render {file}: {err}");
+            return false;
+        }
+    };
+    let Some(end) = svg.rfind("</svg>") else {
+        return false;
+    };
+    rasterize(&format!("{}{marks}</svg>", &svg[..end]), file, out)
+}
+
 /// Render `view` (installed into a clone of `project`) to `{out}/{file}` and
 /// score it; with `overlay`, also write `{stem}_defects.png` with the metric's
 /// defects drawn over it. On any failure WARN and return `None` so the sweep

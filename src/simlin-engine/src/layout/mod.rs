@@ -11,6 +11,10 @@ pub mod connector;
 pub mod declutter;
 mod detect_ltm_loops;
 #[cfg(any(test, feature = "layout_eval"))]
+pub mod edit_audit;
+#[cfg(any(test, feature = "layout_eval"))]
+pub mod edit_scenarios;
+#[cfg(any(test, feature = "layout_eval"))]
 pub mod eval_stats;
 mod face_slots;
 pub mod graph;

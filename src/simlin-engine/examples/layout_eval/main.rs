@@ -11,11 +11,15 @@
 //! incrementally after each (what an agent or notebook user GETS), and render
 //! the hand-authored reference, the production and incremental layouts, and
 //! the median and worst seeds to PNG. Writes `metrics.json`, `corpus.json`, and an
-//! `index.html` contact sheet under a gitignored `target/` directory.
+//! `index.html` contact sheet under a gitignored `target/` directory. Then it
+//! drives every edit scenario (`layout::edit_scenarios`) from the model's
+//! diagram, audits each synced step (`layout::edit_audit`), and writes
+//! `edits.json` and an `edits.html` contact sheet of marked before and after
+//! renders.
 //!
 //! This is a thin imperative shell over the metric core
-//! (`layout::metrics::compute_layout_metrics`) and the statistics core
-//! (`layout::eval_stats`).
+//! (`layout::metrics::compute_layout_metrics`), the statistics core
+//! (`layout::eval_stats`), and the edit audit.
 //!
 //! Usage:
 //!   cargo run --release -p simlin-engine --features png_render,file_io --example layout_eval
@@ -35,6 +39,7 @@
 //!   LAYOUT_EVAL_DECLUTTER      0 -> disable the declutter pass in the seed sweep
 //!   LAYOUT_EVAL_REPLAY_STEPS   edits in the incremental-build replay (default 4;
 //!                              0 skips the replay)
+//!   LAYOUT_EVAL_EDITS          0 -> skip the edit scenarios
 //!
 //! Baseline diff: the committed `examples/layout_eval_baseline.json` (a
 //! serialized `CorpusReport`) records a reference run. A normal run re-scores
@@ -45,6 +50,7 @@
 //! and `file_io` so Vensim corpus models that reference external data load.
 
 mod corpus;
+mod edits;
 mod knobs;
 mod render;
 mod replay;
@@ -275,6 +281,7 @@ fn main() {
     let mut per_model = Vec::new();
     let mut renders = Vec::new();
     let mut facts = Vec::new();
+    let mut edit_reports = Vec::new();
     for spec in &specs {
         match process_model(spec, &seeds, &knobs) {
             Ok((stats, model_renders, model_facts)) => {
@@ -284,6 +291,12 @@ fn main() {
             }
             Err(err) => eprintln!("WARN: skipping {}: {err}", spec.key),
         }
+        if knobs.edits {
+            edit_reports.extend(edits::run_model(spec, &knobs.out));
+        }
+    }
+    if knobs.edits {
+        edits::write(&edit_reports, &knobs.out);
     }
 
     let weights = MetricWeights::default();

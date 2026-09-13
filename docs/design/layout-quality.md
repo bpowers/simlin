@@ -157,6 +157,48 @@ values beside the current ones. The committed baseline
 (`examples/layout_eval_baseline.json`, see its README) is diffed the same way on
 every run.
 
+## Evaluating edits
+
+A diagram an agent or a notebook user edits is synced after every patch by
+`incremental_layout`. Its quality is not one static score: a sync must leave
+alone what the edit did not touch, keep the view consistent with the model, and
+put what it creates somewhere sensible. `layout::edit_audit` states that
+contract from an edit's inputs and outputs alone, in three layers:
+
+- **Scope.** An untouched element comes back exactly as it was. Touched is
+  derived from the two models and the patch: a deleted variable, a renamed one
+  (only its name changes), one whose kind changed (rebuilt, keeping its center
+  unless it became a flow), a flow whose attachment changed. A link whose
+  dependency survives keeps its uid, endpoints, polarity, and shape.
+- **Consistency.** Every variable drawn once with its kind, references resolve,
+  links and drawn dependencies agree, flows attach where the stock lists say,
+  and every flow the sync created or changed holds the strict flow invariants
+  (`editing::invariants`). Only findings the edit introduced count, so an
+  imported view's own inconsistencies are not charged to an edit.
+- **Placement.** What the sync created or changed does not cover another shape,
+  and a pipe it routed does not pass through a stock that is not one of its ends.
+
+It also records what it does not charge: connectors drawn for dependencies the
+author's view left out, variables drawn for the first time, how far rebuilt
+elements moved, and the metric's cost before and after.
+
+`layout::edit_scenarios` generates the edits for any model -- restate a
+variable, add or delete a parameter, insert an intermediate, delete a flow or a
+middle stock, detach a flow, turn an aux into a stock, rename (with the rename
+operation, and the way an agent without one does it), add a flow between two
+stocks, close a loop, extend a chain, add a side flow, add a sector, add then
+undo -- picking targets deterministically, and runs each through `apply_patch`
+and the production sync rule, auditing every step and checking that two syncs
+of one edit agree and that an edit expected to return the original view does.
+
+The unit battery (`layout/edit_scenarios_tests.rs`) drives every scenario over
+hand-drawn and imported views and pins every finding in `KNOWN_DEFECTS`, one row
+per (fixture, scenario, finding) naming the defect: a finding no row expects
+fails, and so does a row that no longer reproduces. The harness runs the same
+scenarios over the whole corpus (`LAYOUT_EVAL_EDITS=0` skips them) and writes
+`edits.json` and `edits.html`, with each run's last step rendered before (removed
+elements marked) and after (created, changed, and every located finding marked).
+
 ## The improvement loop
 
 1. Run the harness on the current code into one directory, and on the changed
