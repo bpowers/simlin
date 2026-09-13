@@ -112,6 +112,76 @@ fn geometry(view: &datamodel::StockFlow) -> HashMap<i32, (f64, f64, LabelSide)> 
         .collect()
 }
 
+fn default_project(name: &str) -> datamodel::Project {
+    let path = format!(
+        "{}/../../default_projects/{name}/model.xmile",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    crate::compat::open_xmile(&mut std::io::BufReader::new(file)).expect("model imports")
+}
+
+fn shipped_view(project: &datamodel::Project) -> datamodel::StockFlow {
+    match project.get_model(TEST_MODEL).and_then(|m| m.views.first()) {
+        Some(datamodel::View::StockFlow(sf)) => sf.clone(),
+        None => panic!("the project ships no view"),
+    }
+}
+
+#[test]
+fn an_edit_that_changes_no_structure_returns_the_view_byte_for_byte() {
+    // An agent restates a flow exactly as it is. Nothing about the diagram
+    // changed, so the view comes back as it was -- element order included,
+    // since the order is the draw order and what the saved file lists.
+    // Fishbanks' hand-drawn view has several links and clouds, so a sync that
+    // re-lists connectors or clouds shows up.
+    let project = default_project("fishbanks");
+    let view = shipped_view(&project);
+    let harvest = project
+        .get_model(TEST_MODEL)
+        .and_then(|m| m.get_variable("harvest_rate"))
+        .cloned()
+        .expect("harvest_rate");
+    let datamodel::Variable::Flow(harvest) = harvest else {
+        panic!("harvest_rate is a flow");
+    };
+    let (_, synced) = sync(&project, &view, vec![ModelOperation::UpsertFlow(harvest)]);
+    let order =
+        |v: &datamodel::StockFlow| v.elements.iter().map(|e| e.get_uid()).collect::<Vec<_>>();
+    assert_eq!(order(&synced), order(&view), "element order");
+    assert!(synced == view, "the restated view must equal the original");
+}
+
+#[test]
+fn syncing_one_edit_twice_produces_one_view() {
+    // One edit creates three side flows, each ending at a cloud, plus the
+    // links their rates read. Every sync of it must list the created clouds
+    // and links in the same order, however the sync's maps hash.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("population", &["births"], &[])),
+        datamodel::Variable::Flow(flow("births", "population * 0.03")),
+    ]);
+    let base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let ops = vec![
+        ModelOperation::UpsertStock(stock(
+            "population",
+            &["births"],
+            &["deaths", "emigration", "retirement"],
+        )),
+        ModelOperation::UpsertFlow(flow("deaths", "population * 0.01")),
+        ModelOperation::UpsertFlow(flow("emigration", "population * 0.02")),
+        ModelOperation::UpsertFlow(flow("retirement", "population * 0.005")),
+    ];
+    let (_, first) = sync(&project, &base, ops.clone());
+    for _ in 0..12 {
+        let (_, again) = sync(&project, &base, ops.clone());
+        assert!(
+            again == first,
+            "a second sync of one edit must equal the first"
+        );
+    }
+}
+
 #[test]
 fn new_parameters_are_decluttered_around_the_fixed_diagram() {
     // Six new parameters that all feed one existing flow are seeded in a tight

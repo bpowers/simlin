@@ -703,15 +703,13 @@ pub fn resnap_flow_endpoints(
 /// against edges derived from the current dep_graph, then preserve
 /// unchanged links, remove stale ones, and create new links with
 /// default shapes.
+///
+/// A preserved link stays where it is in the view's element list and a
+/// created one is appended, in `(from_uid, to_uid)` order: the element list is
+/// the view's draw order and what a saved file lists, so an edit that leaves a
+/// link alone must not move it, and two syncs of one edit must produce one
+/// list.
 pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
-    // Build HashMap<(from_uid, to_uid), ViewElement> for existing links
-    let mut old_links: HashMap<(i32, i32), ViewElement> = HashMap::new();
-    for elem in &state.elements {
-        if let ViewElement::Link(l) = elem {
-            old_links.insert((l.from_uid, l.to_uid), elem.clone());
-        }
-    }
-
     // Compute new dependency edges from dep_graph, skipping structural flow-stock edges
     let stock_inflows: HashMap<String, HashSet<String>> = metadata
         .stock_to_inflows
@@ -724,8 +722,10 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
         .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
         .collect();
 
-    let mut new_edges: HashSet<(i32, i32)> = HashSet::new();
-    let mut new_edge_idents: HashMap<(i32, i32), (String, String)> = HashMap::new();
+    // Ordered by uid pair: each created link allocates the next uid and is
+    // appended, so the edges must come out in one order however the maps hash
+    // (the incremental analogue of #633).
+    let mut new_edges: BTreeMap<(i32, i32), (String, String)> = BTreeMap::new();
 
     for (var, deps) in &metadata.dep_graph {
         for dep in deps {
@@ -746,8 +746,7 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
             };
 
             if from_uid != 0 && to_uid != 0 {
-                new_edges.insert((from_uid, to_uid));
-                new_edge_idents.insert(
+                new_edges.insert(
                     (from_uid, to_uid),
                     (from_ident.to_string(), to_ident.to_string()),
                 );
@@ -768,56 +767,37 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
         })
         .collect();
 
-    // Remove all old links from elements
-    state
-        .elements
-        .retain(|elem| !matches!(elem, ViewElement::Link(_)));
+    // A link survives when the dependency it draws, read through aliases, is
+    // still one the model has. Every such link survives: an imported view can
+    // draw one dependency several times, through different aliases of the same
+    // variable.
+    let mut drawn: HashSet<(i32, i32)> = HashSet::new();
+    state.elements.retain(|elem| {
+        let ViewElement::Link(l) = elem else {
+            return true;
+        };
+        let edge = (
+            alias_to_primary
+                .get(&l.from_uid)
+                .copied()
+                .unwrap_or(l.from_uid),
+            alias_to_primary.get(&l.to_uid).copied().unwrap_or(l.to_uid),
+        );
+        let survives = new_edges.contains_key(&edge);
+        if survives {
+            drawn.insert(edge);
+        }
+        survives
+    });
 
-    // Track which old links have been consumed so each is used at most once.
-    let mut consumed_old_links: HashSet<(i32, i32)> = HashSet::new();
-
-    // Iterate edges in a deterministic order. `new_edges` is a HashSet, so its
-    // iteration order is per-process random; since each newly-created link both
-    // allocates a sequential `uid` and is appended to `state.elements` in this
-    // loop, hash order would otherwise assign different uids / element ordering
-    // to the same logical link run-to-run (the incremental analogue of #633).
-    let mut sorted_new_edges: Vec<(i32, i32)> = new_edges.iter().copied().collect();
-    sorted_new_edges.sort_unstable();
-
-    // Add back preserved links (unchanged) and create new links
-    for (from_uid, to_uid) in sorted_new_edges {
-        if let Some(old_link) = old_links.get(&(from_uid, to_uid)) {
-            // Preserved: keep the old link exactly as-is
-            state.elements.push(old_link.clone());
-            consumed_old_links.insert((from_uid, to_uid));
-        } else if let Some(key) = old_links
-            .keys()
-            .copied()
-            .filter(|&(of, ot)| {
-                if consumed_old_links.contains(&(of, ot)) {
-                    return false;
-                }
-                let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
-                let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
-                rf == from_uid && rt == to_uid
-            })
-            // Pick the lowest matching key so the alias-match selection is
-            // deterministic; HashMap iteration order would otherwise vary.
-            .min()
-        {
-            // Preserved via alias: the old link targets an alias whose primary
-            // variable matches this dependency edge. Keep the alias link as-is.
-            state.elements.push(old_links[&key].clone());
-            consumed_old_links.insert(key);
-        } else if let Some((from_ident, to_ident)) = new_edge_idents.get(&(from_uid, to_uid)) {
-            // Added: create new link with default shape
-            let link_uid = state.uid_manager.alloc("");
-            let shape = if is_structural_stock_flow(
-                from_ident,
-                to_ident,
-                &stock_inflows,
-                &stock_outflows,
-            ) {
+    for (&(from_uid, to_uid), (from_ident, to_ident)) in &new_edges {
+        if drawn.contains(&(from_uid, to_uid)) {
+            continue;
+        }
+        // Added: create new link with default shape
+        let link_uid = state.uid_manager.alloc("");
+        let shape =
+            if is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows) {
                 let arc_angle = if let (Some(&s_pos), Some(&f_pos)) =
                     (state.positions.get(&from_uid), state.positions.get(&to_uid))
                 {
@@ -843,34 +823,13 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
                 LinkShape::Straight
             };
 
-            state.elements.push(ViewElement::Link(view_element::Link {
-                uid: link_uid,
-                from_uid,
-                to_uid,
-                shape,
-                polarity: None,
-            }));
-        }
-    }
-
-    // Preserve remaining alias-backed links whose alias-resolved endpoints
-    // match a valid dependency. Imported views may have multiple rendered
-    // connectors for the same dependency (e.g., links to two different
-    // aliases of the same variable).
-    // Iterate in a deterministic order for the same reason as the new-edge loop:
-    // the preserved links are appended to `state.elements`, so HashMap iteration
-    // order would otherwise perturb element ordering run-to-run.
-    let mut sorted_old_links: Vec<&(i32, i32)> = old_links.keys().collect();
-    sorted_old_links.sort_unstable();
-    for &(of, ot) in sorted_old_links {
-        if consumed_old_links.contains(&(of, ot)) {
-            continue;
-        }
-        let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
-        let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
-        if new_edges.contains(&(rf, rt)) {
-            state.elements.push(old_links[&(of, ot)].clone());
-        }
+        state.elements.push(ViewElement::Link(view_element::Link {
+            uid: link_uid,
+            from_uid,
+            to_uid,
+            shape,
+            polarity: None,
+        }));
     }
 }
 
@@ -928,17 +887,18 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
         })
         .collect();
 
-    // Remove all old clouds from elements
-    state
-        .elements
-        .retain(|elem| !matches!(elem, ViewElement::Cloud(_)));
-
-    // For each flow, determine what to keep vs create
-    let all_flow_uids: HashSet<i32> = needed_flow_uids
+    // For each flow, determine what to keep vs create. A preserved cloud keeps
+    // its place in the element list and a created one is appended, flows in
+    // uid order: the element list is the view's draw order and what a saved
+    // file lists, so a cloud the edit leaves alone must not move in it, and two
+    // syncs of one edit must produce one list.
+    let all_flow_uids: BTreeSet<i32> = needed_flow_uids
         .iter()
         .chain(old_clouds_by_flow.keys())
         .copied()
         .collect();
+    let mut kept: HashSet<i32> = HashSet::new();
+    let mut created: Vec<ViewElement> = Vec::new();
 
     for flow_uid in all_flow_uids {
         let old_clouds = old_clouds_by_flow
@@ -951,11 +911,6 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
         let needed_count = wants_source as usize + wants_sink as usize;
 
         if needed_count == 0 {
-            for c in &old_clouds {
-                if let ViewElement::Cloud(cloud) = c {
-                    state.positions.remove(&cloud.uid);
-                }
-            }
             continue;
         }
 
@@ -1005,23 +960,14 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
             }
         }
 
-        // Push preserved clouds and remove positions of discarded ones
-        for cloud in &old_clouds {
-            if let ViewElement::Cloud(c) = cloud {
-                if used_uids.contains(&c.uid) {
-                    state.elements.push(cloud.clone());
-                } else {
-                    state.positions.remove(&c.uid);
-                }
-            }
-        }
+        kept.extend(used_uids);
 
         // Create new clouds for roles that couldn't be filled from old clouds
         if wants_source && !preserved_source {
             let pos = endpoints.map(|(src, _)| *src);
             let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
             let cloud_uid = state.uid_manager.alloc("");
-            state.elements.push(ViewElement::Cloud(view_element::Cloud {
+            created.push(ViewElement::Cloud(view_element::Cloud {
                 uid: cloud_uid,
                 flow_uid,
                 x: cx,
@@ -1034,7 +980,7 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
             let pos = endpoints.map(|(_, sink)| *sink);
             let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
             let cloud_uid = state.uid_manager.alloc("");
-            state.elements.push(ViewElement::Cloud(view_element::Cloud {
+            created.push(ViewElement::Cloud(view_element::Cloud {
                 uid: cloud_uid,
                 flow_uid,
                 x: cx,
@@ -1044,6 +990,18 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
             state.positions.insert(cloud_uid, Position::new(cx, cy));
         }
     }
+
+    for elem in &state.elements {
+        if let ViewElement::Cloud(c) = elem
+            && !kept.contains(&c.uid)
+        {
+            state.positions.remove(&c.uid);
+        }
+    }
+    state
+        .elements
+        .retain(|elem| !matches!(elem, ViewElement::Cloud(c) if !kept.contains(&c.uid)));
+    state.elements.extend(created);
 
     // Repair pass: for XMILE-imported views a cloud element may exist but the
     // corresponding flow point's attached_to_uid may be None.  Wire up any
