@@ -709,7 +709,15 @@ pub fn resnap_flow_endpoints(
 /// the view's draw order and what a saved file lists, so an edit that leaves a
 /// link alone must not move it, and two syncs of one edit must produce one
 /// list.
-pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
+///
+/// A dependency with no link gets one only when `draws(from, to)` accepts its
+/// idents: incremental layout draws a connector only where the edit is about
+/// it, so a connector an author left out of the view stays out.
+pub fn diff_connectors(
+    state: &mut LayoutState,
+    metadata: &ComputedMetadata,
+    draws: impl Fn(&str, &str) -> bool,
+) {
     // Compute new dependency edges from dep_graph, skipping structural flow-stock edges
     let stock_inflows: HashMap<String, HashSet<String>> = metadata
         .stock_to_inflows
@@ -791,7 +799,7 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
     });
 
     for (&(from_uid, to_uid), (from_ident, to_ident)) in &new_edges {
-        if drawn.contains(&(from_uid, to_uid)) {
+        if drawn.contains(&(from_uid, to_uid)) || !draws(from_ident, to_ident) {
             continue;
         }
         // Added: create new link with default shape
@@ -2054,6 +2062,49 @@ pub fn incremental_layout(
         }
     }
 
+    // What the edit is about, for the connectors it may draw: a dependency the
+    // view does not draw gets a link only into a variable the patch names (it
+    // upserted, renamed, or re-listed that variable), or where either end is an
+    // element drawn for the first time, which carries no author's choice about
+    // its connectors. A connector an author left out anywhere else stays out.
+    let named: HashSet<String> = patch
+        .ops
+        .iter()
+        .filter_map(|op| {
+            let ident = match op {
+                crate::patch::ModelOperation::UpsertStock(s) => &s.ident,
+                crate::patch::ModelOperation::UpsertFlow(f) => &f.ident,
+                crate::patch::ModelOperation::UpsertAux(a) => &a.ident,
+                crate::patch::ModelOperation::UpsertModule(m) => &m.ident,
+                crate::patch::ModelOperation::RenameVariable { to, .. } => to,
+                crate::patch::ModelOperation::UpdateStockFlows { ident, .. } => ident,
+                crate::patch::ModelOperation::DeleteVariable { .. }
+                | crate::patch::ModelOperation::UpsertView { .. }
+                | crate::patch::ModelOperation::DeleteView { .. }
+                | crate::patch::ModelOperation::SetLoopName { .. }
+                | crate::patch::ModelOperation::EditView { .. } => return None,
+            };
+            Some(canonicalize(ident).into_owned())
+        })
+        .collect();
+    let drawn_before: HashSet<String> = state
+        .elements
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ViewElement::Stock(_)
+                    | ViewElement::Flow(_)
+                    | ViewElement::Aux(_)
+                    | ViewElement::Module(_)
+            )
+        })
+        .filter_map(|e| e.get_name().map(|n| canonicalize(n).into_owned()))
+        .collect();
+    let draws_connector = |from: &str, to: &str| {
+        named.contains(to) || !drawn_before.contains(from) || !drawn_before.contains(to)
+    };
+
     // Between steps 3 and 4a: detect variables whose type changed (e.g., Aux -> Stock).
     // When a caller issues UpsertStock for a variable that was previously an Aux, there
     // is no DeleteVariable in the patch and the old Aux element is still in state.
@@ -2330,7 +2381,7 @@ pub fn incremental_layout(
     if new_elements.is_empty() {
         // No new element, so no flow is created or rebuilt: every flow in the
         // view is untouched, and none of the flow geometry passes runs.
-        diff_connectors(&mut state, &metadata);
+        diff_connectors(&mut state, &metadata, draws_connector);
         diff_clouds(&mut state, &metadata);
         declutter::declutter_part(&mut state.elements, needs_label_placement, |_| false);
         apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
@@ -2541,7 +2592,7 @@ pub fn incremental_layout(
     }
 
     // Step 7: Diff connectors and clouds
-    diff_connectors(&mut state, &metadata);
+    diff_connectors(&mut state, &metadata, draws_connector);
     diff_clouds(&mut state, &metadata);
 
     // Step 8: Polish. The new free-floating elements step off crossings and

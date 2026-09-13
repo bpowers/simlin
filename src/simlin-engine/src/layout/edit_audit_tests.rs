@@ -48,8 +48,16 @@ struct Edited {
 }
 
 fn edited(rel: &str, kind: ScenarioKind) -> Edited {
-    let before = load(rel);
-    let before_view = shipped_view(&before);
+    edited_from(rel, kind, |_| {})
+}
+
+/// `edited`, from the shipped view changed by `prepare` first.
+fn edited_from(rel: &str, kind: ScenarioKind, prepare: impl FnOnce(&mut StockFlow)) -> Edited {
+    let mut before = load(rel);
+    let mut before_view = shipped_view(&before);
+    prepare(&mut before_view);
+    before.get_model_mut(MODEL).expect("model").views =
+        vec![datamodel::View::StockFlow(before_view.clone())];
     let scenario = build_scenario(&before, MODEL, kind).expect("the scenario applies");
     let patch = ModelPatch {
         name: before.get_model(MODEL).expect("model").name.clone(),
@@ -230,6 +238,25 @@ fn row_for(kind: FindingKind) {
                 .cloned()
                 .expect("the link");
             e.row(kind, unchanged, |v| v.elements.push(link));
+        }
+        FindingKind::UnrelatedLinkAdded => {
+            // The author's view leaves out average_lifespan -> deaths. An edit
+            // adding births_multiplier is not about that dependency, so the
+            // correct view still leaves it out.
+            let without = |v: &mut StockFlow| {
+                let (from, to) = (uid_named(v, "average_lifespan"), uid_named(v, "deaths"));
+                v.elements
+                    .retain(|el| !matches!(el, ViewElement::Link(l) if l.from_uid == from && l.to_uid == to));
+            };
+            let e = edited_from(POPULATION, ScenarioKind::AddParameter, without);
+            let (from, to) = (
+                uid_named(&e.after_view, "average_lifespan"),
+                uid_named(&e.after_view, "deaths"),
+            );
+            e.row(kind, without, |v| {
+                without(v);
+                push_link(v, from, to);
+            });
         }
         FindingKind::RebuiltElementMoved => {
             // Turn a parameter into a stock. The correct arm puts the rebuilt

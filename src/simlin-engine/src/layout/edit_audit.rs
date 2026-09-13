@@ -18,6 +18,9 @@
 //!   (its pipe, valve and clouds may be rebuilt). A link whose dependency
 //!   survives keeps its uid, endpoints and polarity, and its shape too unless
 //!   an endpoint moved, when it keeps at least its kind (straight or curved).
+//!   A connector the view did not draw is drawn only where the edit is about
+//!   it: into a variable the patch names, or between elements drawn for the
+//!   first time. A connector an author left out elsewhere stays out.
 //!   The one change allowed to an untouched element is wiring a flow endpoint
 //!   the view left unattached to the flow's own cloud, which moves nothing.
 //! - **Consistency.** The view after the edit agrees with the model after it:
@@ -89,6 +92,11 @@ pub enum FindingKind {
     /// A link whose dependency the edit removed (or one of whose ends it
     /// deleted) is still drawn.
     StaleLinkRemains,
+    /// A link the view did not draw was added for a dependency the edit is not
+    /// about: the patch names neither its reader, nor was either end drawn for
+    /// the first time. An author's view that leaves a connector out keeps it
+    /// out.
+    UnrelatedLinkAdded,
     /// A variable whose kind changed to anything but a flow was rebuilt away
     /// from where its old element was.
     RebuiltElementMoved,
@@ -131,11 +139,12 @@ pub enum FindingKind {
 }
 
 impl FindingKind {
-    pub const ALL: [FindingKind; 21] = [
+    pub const ALL: [FindingKind; 22] = [
         FindingKind::DeletedElementRemains,
         FindingKind::UntouchedElementChanged,
         FindingKind::UntouchedLinkChanged,
         FindingKind::StaleLinkRemains,
+        FindingKind::UnrelatedLinkAdded,
         FindingKind::RebuiltElementMoved,
         FindingKind::ViewPropertiesChanged,
         FindingKind::UidProblem,
@@ -162,6 +171,7 @@ impl FindingKind {
             FindingKind::UntouchedElementChanged => "untouched_element_changed",
             FindingKind::UntouchedLinkChanged => "untouched_link_changed",
             FindingKind::StaleLinkRemains => "stale_link_remains",
+            FindingKind::UnrelatedLinkAdded => "unrelated_link_added",
             FindingKind::RebuiltElementMoved => "rebuilt_element_moved",
             FindingKind::ViewPropertiesChanged => "view_properties_changed",
             FindingKind::UidProblem => "uid_problem",
@@ -188,6 +198,7 @@ impl FindingKind {
             | FindingKind::UntouchedElementChanged
             | FindingKind::UntouchedLinkChanged
             | FindingKind::StaleLinkRemains
+            | FindingKind::UnrelatedLinkAdded
             | FindingKind::RebuiltElementMoved
             | FindingKind::ViewPropertiesChanged => Layer::Scope,
             FindingKind::UidProblem
@@ -256,11 +267,6 @@ pub struct EditAudit {
     /// Elements the edit rebuilt (kind changes, re-attached flows), and how far
     /// each one's center or valve moved.
     pub displacements: Vec<Displacement>,
-    /// Links drawn for a dependency that existed before the edit, between
-    /// variables the edit did not touch, that the view before the edit did not
-    /// draw. Not charged: whether a sync completes an author's view is a
-    /// product decision, and this records how often it does.
-    pub omitted_links_added: Vec<String>,
     /// Variables that existed before the edit with no element and have one
     /// after it.
     pub completed_variables: Vec<String>,
@@ -608,7 +614,7 @@ pub fn audit_edit(input: &EditInput) -> EditAudit {
     let renames = Renames::of(input.patch);
 
     let changed = changed_uids(&before, &after, &renames);
-    scope_findings(&before, &after, &renames, &mut audit);
+    scope_findings(&before, &after, &renames, input.patch, &mut audit);
 
     let image = |i: &str| renames.image(i);
     let identity = |i: &str| i.to_string();
@@ -679,7 +685,13 @@ fn unchanged_finding(
 
 /// The scope layer: walk every element of the view before the edit and check
 /// that what came back is what the edit allows.
-fn scope_findings(before: &Side, after: &Side, renames: &Renames, audit: &mut EditAudit) {
+fn scope_findings(
+    before: &Side,
+    after: &Side,
+    renames: &Renames,
+    patch: &ModelPatch,
+    audit: &mut EditAudit,
+) {
     let image = |i: &str| renames.image(i);
     let deleted = |i0: &str| !after.kinds.contains_key(&renames.image(i0));
     let kind_changed = |i0: &str| {
@@ -889,8 +901,11 @@ fn scope_findings(before: &Side, after: &Side, renames: &Renames, audit: &mut Ed
     audit.findings.extend(findings);
     audit.displacements.extend(displacements);
 
-    // Notes: links created for a dependency the model already had between
-    // variables the edit left alone, and variables drawn for the first time.
+    // A connector the view did not draw may be drawn into a variable the patch
+    // names, or between elements drawn for the first time, which carry no
+    // author's choice about their connectors. Anywhere else it is a change to
+    // a part of the diagram the edit is not about.
+    let named: HashSet<String> = patch.ops.iter().filter_map(named_by_op).collect();
     let untouched_var = |i1: &str| {
         let i0 = renames.preimage(i1);
         before.kinds.contains_key(&i0) && !kind_changed(&i0)
@@ -907,11 +922,6 @@ fn scope_findings(before: &Side, after: &Side, renames: &Renames, audit: &mut Ed
             _ => None,
         })
         .collect();
-    let before_edges: HashSet<(String, String)> = before
-        .edges
-        .iter()
-        .map(|(d, v)| (renames.image(d), renames.image(v)))
-        .collect();
     let before_drawn: HashSet<String> = before
         .view
         .elements
@@ -926,15 +936,16 @@ fn scope_findings(before: &Side, after: &Side, renames: &Renames, audit: &mut Ed
             if let (Some((from, _)), Some((to, _))) =
                 (after.endpoint(l.from_uid), after.endpoint(l.to_uid))
             {
-                let edge = (from, to);
-                if before_edges.contains(&edge)
-                    && !before_link_edges.contains(&edge)
-                    && untouched_var(&edge.0)
-                    && untouched_var(&edge.1)
-                {
-                    audit
-                        .omitted_links_added
-                        .push(format!("link {} -> {}", edge.0, edge.1));
+                let related = named.contains(&to)
+                    || !before_drawn.contains(&from)
+                    || !before_drawn.contains(&to);
+                if !related && !before_link_edges.contains(&(from.clone(), to.clone())) {
+                    audit.findings.push(Finding::new(
+                        FindingKind::UnrelatedLinkAdded,
+                        format!("link {from} -> {to}"),
+                        "the patch names neither its reader nor a newly drawn end",
+                        None,
+                    ));
                 }
             }
         } else if let Some(i1) = named_ident(e1)
@@ -944,6 +955,25 @@ fn scope_findings(before: &Side, after: &Side, renames: &Renames, audit: &mut Ed
             audit.completed_variables.push(i1);
         }
     }
+}
+
+/// The variable an operation defines, by its ident after the patch: the reader
+/// whose connectors the operation is about.
+fn named_by_op(op: &ModelOperation) -> Option<String> {
+    let ident = match op {
+        ModelOperation::UpsertStock(s) => &s.ident,
+        ModelOperation::UpsertFlow(f) => &f.ident,
+        ModelOperation::UpsertAux(a) => &a.ident,
+        ModelOperation::UpsertModule(m) => &m.ident,
+        ModelOperation::RenameVariable { to, .. } => to,
+        ModelOperation::UpdateStockFlows { ident, .. } => ident,
+        ModelOperation::DeleteVariable { .. }
+        | ModelOperation::UpsertView { .. }
+        | ModelOperation::DeleteView { .. }
+        | ModelOperation::SetLoopName { .. }
+        | ModelOperation::EditView { .. } => return None,
+    };
+    Some(canonicalize(ident).into_owned())
 }
 
 /// The consistency layer over one side. `routed` holds the uids the sync

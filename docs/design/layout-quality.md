@@ -169,7 +169,10 @@ contract from an edit's inputs and outputs alone, in three layers:
   derived from the two models and the patch: a deleted variable, a renamed one
   (only its name changes), one whose kind changed (rebuilt, keeping its center
   unless it became a flow), a flow whose attachment changed. A link whose
-  dependency survives keeps its uid, endpoints, polarity, and shape.
+  dependency survives keeps its uid, endpoints, polarity, and shape. A connector
+  the view did not draw is drawn only into a variable the patch names or between
+  elements drawn for the first time: a connector an author left out elsewhere
+  stays out.
 - **Consistency.** Every variable drawn once with its kind, references resolve,
   links and drawn dependencies agree, flows attach where the stock lists say,
   and every flow the sync created or changed holds the strict flow invariants
@@ -178,9 +181,8 @@ contract from an edit's inputs and outputs alone, in three layers:
 - **Placement.** What the sync created or changed does not cover another shape,
   and a pipe it routed does not pass through a stock that is not one of its ends.
 
-It also records what it does not charge: connectors drawn for dependencies the
-author's view left out, variables drawn for the first time, how far rebuilt
-elements moved, and the metric's cost before and after.
+It also records what it does not charge: variables drawn for the first time,
+how far rebuilt elements moved, and the metric's cost before and after.
 
 `layout::edit_scenarios` generates the edits for any model -- restate a
 variable, add or delete a parameter, insert an intermediate, delete a flow or a

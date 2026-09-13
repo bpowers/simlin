@@ -558,6 +558,60 @@ fn a_created_valve_lands_clear_of_a_parameter() {
 }
 
 #[test]
+fn a_sync_draws_a_missing_connector_only_where_the_edit_is_about_it() {
+    // population grows by births at birth_rate, and doubled reads birth_rate.
+    // The author's view draws neither births' connectors nor doubled at all.
+    // Every arm of what an edit may draw:
+    // - an unrelated edit (a new note): births' connectors stay out;
+    // - an edit naming births (restating it): its connectors are drawn;
+    // - an element drawn for the first time (doubled, drawn because the view
+    //   had no element for it): the connector into it is drawn, since a new
+    //   element carries no author's choice about its connectors.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("population", &["births"], &[])),
+        datamodel::Variable::Flow(flow("births", "population * birth_rate")),
+        datamodel::Variable::Aux(aux("birth_rate", "0.1")),
+        datamodel::Variable::Aux(aux("doubled", "birth_rate * 2")),
+    ]);
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let doubled = center_named(&base, "doubled").map(|_| {
+        base.elements
+            .iter()
+            .find(|e| e.get_name().is_some_and(|n| canonicalize(n) == "doubled"))
+            .map(ViewElement::get_uid)
+            .expect("doubled drawn")
+    });
+    let births = flow_named(&base, "births").uid;
+    base.elements.retain(|e| match e {
+        ViewElement::Link(l) => l.to_uid != births && Some(l.to_uid) != doubled,
+        other => Some(other.get_uid()) != doubled,
+    });
+
+    let (_, unrelated) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertAux(aux("note", "1"))],
+    );
+    assert!(link_between(&unrelated, "birth_rate", "births").is_none());
+    assert!(link_between(&unrelated, "population", "births").is_none());
+    assert!(
+        link_between(&unrelated, "birth_rate", "doubled").is_some(),
+        "doubled is drawn for the first time, with its connector"
+    );
+
+    let (_, restated) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertFlow(flow(
+            "births",
+            "population * birth_rate",
+        ))],
+    );
+    assert!(link_between(&restated, "birth_rate", "births").is_some());
+    assert!(link_between(&restated, "population", "births").is_some());
+}
+
+#[test]
 fn a_stock_added_to_a_drawn_chain_lands_clear_of_side_flows() {
     // tank drains to a cloud off its right face, and a person drew the drain
     // pipe long enough that its cloud sits where a downstream stock would

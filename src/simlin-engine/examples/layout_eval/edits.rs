@@ -38,7 +38,6 @@ pub struct EditReport {
     pub continuity: Vec<Displacement>,
     /// Elements rebuilt by kind changes or re-attachment, and how far each moved.
     pub displacements: Vec<Displacement>,
-    pub omitted_links_added: Vec<String>,
     pub completed_variables: Vec<String>,
     /// Layout-quality cost before the first step and after the last.
     pub cost_before: Option<f64>,
@@ -169,10 +168,6 @@ pub fn run_model(spec: &ModelSpec, out: &str) -> Vec<EditReport> {
             displacements: audits
                 .clone()
                 .flat_map(|a| a.displacements.clone())
-                .collect(),
-            omitted_links_added: audits
-                .clone()
-                .flat_map(|a| a.omitted_links_added.clone())
                 .collect(),
             completed_variables: audits
                 .clone()
@@ -305,13 +300,6 @@ fn render_html(reports: &[EditReport]) -> String {
                 "<p class=\"note\">{} moved {:.1}</p>",
                 html_escape(&d.subject),
                 d.distance
-            );
-        }
-        if !r.omitted_links_added.is_empty() {
-            let _ = write!(
-                html,
-                "<p class=\"note\">connectors the author left out, now drawn: {}</p>",
-                html_escape(&r.omitted_links_added.join(", "))
             );
         }
         if !r.completed_variables.is_empty() {

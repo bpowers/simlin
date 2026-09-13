@@ -67,24 +67,8 @@ const FIXTURES: [Fixture; 8] = [
     },
 ];
 
-const DRAWS_OMITTED_CONNECTORS: &str =
-    "a sync draws connectors the author left out (whether it should is undecided)";
-
 /// `(fixture, scenario, finding kind, the defect behind it)`.
-const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
-    (
-        "sir",
-        "add_then_undo",
-        "return_to_original",
-        DRAWS_OMITTED_CONNECTORS,
-    ),
-    (
-        "sir",
-        "restate_variable",
-        "return_to_original",
-        DRAWS_OMITTED_CONNECTORS,
-    ),
-];
+const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[];
 
 fn load(rel: &str) -> datamodel::Project {
     let path = format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"));
