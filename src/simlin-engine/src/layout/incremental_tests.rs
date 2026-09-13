@@ -239,6 +239,62 @@ fn only_the_links_a_sync_creates_are_curved_for_a_loop() {
 }
 
 #[test]
+fn a_stock_added_to_a_drawn_chain_lands_clear_of_side_flows() {
+    // tank drains to a cloud off its right face, and a person drew the drain
+    // pipe long enough that its cloud sits where a downstream stock would
+    // naturally go. An agent adds a reservoir fed from tank: it must not land
+    // on the drain's cloud.
+    use crate::layout::metrics::node_shape_box;
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("tank", &[], &["drain"])),
+        datamodel::Variable::Flow(flow("drain", "tank * 0.1")),
+    ]);
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let drain_cloud = base.elements.iter().find_map(|e| match e {
+        ViewElement::Flow(f) if canonicalize(&f.name) == "drain" => {
+            f.points.last()?.attached_to_uid
+        }
+        _ => None,
+    });
+    for e in &mut base.elements {
+        match e {
+            ViewElement::Flow(f) if canonicalize(&f.name) == "drain" => {
+                f.points.last_mut().expect("points").x += 40.0;
+            }
+            ViewElement::Cloud(c) if Some(c.uid) == drain_cloud => c.x += 40.0,
+            _ => {}
+        }
+    }
+    let ops = vec![
+        ModelOperation::UpsertStock(stock("tank", &[], &["drain", "transfer"])),
+        ModelOperation::UpsertFlow(flow("transfer", "tank * 0.2")),
+        ModelOperation::UpsertStock(stock("reservoir", &["transfer"], &[])),
+    ];
+    let (_, view) = sync(&project, &base, ops);
+    let reservoir = view
+        .elements
+        .iter()
+        .find(|e| e.get_name().is_some_and(|n| canonicalize(n) == "reservoir"))
+        .expect("reservoir drawn");
+    let r = node_shape_box(reservoir).expect("a stock has a shape");
+    let base_uids: HashSet<i32> = base.elements.iter().map(ViewElement::get_uid).collect();
+    for e in view
+        .elements
+        .iter()
+        .filter(|e| base_uids.contains(&e.get_uid()))
+    {
+        let Some(o) = node_shape_box(e) else { continue };
+        let w = r.right.min(o.right) - r.left.max(o.left);
+        let h = r.bottom.min(o.bottom) - r.top.max(o.top);
+        assert!(
+            w <= 0.0 || h <= 0.0,
+            "reservoir covers #{} ({w:.1} x {h:.1})",
+            e.get_uid()
+        );
+    }
+}
+
+#[test]
 fn new_parameters_are_decluttered_around_the_fixed_diagram() {
     // Six new parameters that all feed one existing flow are seeded in a tight
     // ring beside it. Their names must not land on each other or on anything

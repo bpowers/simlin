@@ -1290,7 +1290,8 @@ fn place_new_chains(
 /// Set each new stock that hangs off a drawn chain -- joined by a flow to a
 /// stock already drawn -- one chain step past that neighbor, in its row: right
 /// of the stock it drains, left of the stock it feeds, fanning vertically only
-/// past a stock or parameter already drawn there
+/// past a shape already drawn there -- a stock, a parameter, or a valve or
+/// cloud of a flow
 /// (`chain::find_free_stock_position`). A new stock reached only through other
 /// new stocks is placed from them in turn. Returns the idents of the stocks
 /// placed; a flow between two stocks that are now drawn takes the stock-pair
@@ -1321,6 +1322,9 @@ fn place_chain_extensions(
                         (None, Some(anchor)) if pending.contains(from) => (anchor, from, -step),
                         _ => continue,
                     };
+                // Every drawn shape blocks the spot, a side flow's valve and
+                // cloud included: a person often draws a side flow's pipe off
+                // the very face a chain continues from.
                 let occupied: Vec<Position> = state
                     .elements
                     .iter()
@@ -1328,7 +1332,10 @@ fn place_chain_extensions(
                         ViewElement::Stock(s) => Some(Position::new(s.x, s.y)),
                         ViewElement::Aux(a) => Some(Position::new(a.x, a.y)),
                         ViewElement::Module(m) => Some(Position::new(m.x, m.y)),
-                        _ => None,
+                        ViewElement::Flow(f) => Some(Position::new(f.x, f.y)),
+                        ViewElement::Cloud(c) => Some(Position::new(c.x, c.y)),
+                        ViewElement::Alias(a) => Some(Position::new(a.x, a.y)),
+                        ViewElement::Link(_) | ViewElement::Group(_) => None,
                     })
                     .collect();
                 let pos = chain::find_free_stock_position(

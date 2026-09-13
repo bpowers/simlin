@@ -78,7 +78,6 @@ const DETACHED_CLOUD_INSIDE_STOCK: &str =
 const CREATED_FLOW_THROUGH_A_STOCK: &str =
     "a flow created between two stocks is routed through a stock between them";
 const CREATED_VALVE_ON_A_SHAPE: &str = "a created flow's valve lands on another shape";
-const CHAIN_EXTENSION_ON_A_CLOUD: &str = "a stock added to a drawn chain lands on a cloud";
 const DRAWS_OMITTED_CONNECTORS: &str =
     "a sync draws connectors the author left out (whether it should is undecided)";
 
@@ -179,12 +178,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "detach_flow",
         "untouched_link_changed",
         RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "fishbanks",
-        "extend_chain",
-        "shape_overlap",
-        CHAIN_EXTENSION_ON_A_CLOUD,
     ),
     (
         "reliability",
