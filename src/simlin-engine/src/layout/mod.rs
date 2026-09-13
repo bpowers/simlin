@@ -2467,12 +2467,16 @@ fn optimize_labels(state: &mut LayoutState, model: &datamodel::Model, metadata: 
     }
 }
 
-/// Apply arc curvature to connectors involved in feedback loops.
+/// Apply arc curvature to connectors involved in feedback loops, among the
+/// links `curves` accepts (by uid): every link in a fresh layout, and only the
+/// links an incremental pass creates, since a link a person drew straight is
+/// theirs to keep, whichever loop an edit now puts it on.
 fn apply_loop_curvature(
     state: &mut LayoutState,
     config: &LayoutConfig,
     model: &datamodel::Model,
     metadata: &ComputedMetadata,
+    curves: impl Fn(i32) -> bool,
 ) {
     if metadata.feedback_loops.is_empty() {
         return;
@@ -2532,7 +2536,7 @@ fn apply_loop_curvature(
             };
 
             if let ViewElement::Link(link) = &state.elements[elem_idx]
-                && matches!(link.shape, LinkShape::Arc(_))
+                && (matches!(link.shape, LinkShape::Arc(_)) || !curves(link.uid))
             {
                 continue;
             }
@@ -2900,7 +2904,7 @@ pub fn fresh_layout(
     finish_flow_geometry(&mut state.elements, |_| true);
 
     // Phase 6: Apply feedback loop curvature
-    apply_loop_curvature(&mut state, config, model, metadata);
+    apply_loop_curvature(&mut state, config, model, metadata, |_| true);
 
     validate_view_completeness(&state, model)?;
 

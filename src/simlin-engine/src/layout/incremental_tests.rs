@@ -182,6 +182,62 @@ fn syncing_one_edit_twice_produces_one_view() {
     }
 }
 
+/// The shape of the link drawn from the element named `from` to the one named
+/// `to`, if one is drawn.
+fn link_shape(view: &datamodel::StockFlow, from: &str, to: &str) -> Option<LinkShape> {
+    let uid = |name: &str| {
+        view.elements.iter().find_map(|e| {
+            let n = e.get_name()?;
+            (canonicalize(n) == name).then(|| e.get_uid())
+        })
+    };
+    let (f, t) = (uid(from)?, uid(to)?);
+    view.elements.iter().find_map(|e| match e {
+        ViewElement::Link(l) if l.from_uid == f && l.to_uid == t => Some(l.shape.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn only_the_links_a_sync_creates_are_curved_for_a_loop() {
+    // An agent makes birth_rate read population, closing the loop population
+    // -> birth_rate -> births -> population. The diagram's links were drawn
+    // straight by hand. The link the edit creates is curved as a loop link,
+    // and the two links it did not create keep the shapes a person chose.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("population", &["births"], &[])),
+        datamodel::Variable::Flow(flow("births", "population * birth_rate")),
+        datamodel::Variable::Aux(aux("birth_rate", "0.1")),
+    ]);
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    for e in &mut base.elements {
+        if let ViewElement::Link(l) = e {
+            l.shape = LinkShape::Straight;
+        }
+    }
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertAux(aux(
+            "birth_rate",
+            "0.1 * (1 - population / 1000)",
+        ))],
+    );
+    assert!(
+        matches!(
+            link_shape(&view, "population", "birth_rate"),
+            Some(LinkShape::Arc(_))
+        ),
+        "the link the edit created on the loop is curved"
+    );
+    for (from, to) in [("birth_rate", "births"), ("population", "births")] {
+        assert!(
+            matches!(link_shape(&view, from, to), Some(LinkShape::Straight)),
+            "the link {from} -> {to} the edit did not create keeps its straight shape"
+        );
+    }
+}
+
 #[test]
 fn new_parameters_are_decluttered_around_the_fixed_diagram() {
     // Six new parameters that all feed one existing flow are seeded in a tight

@@ -1714,6 +1714,9 @@ pub fn incremental_layout(
         .map(ViewElement::get_uid)
         .collect();
     let needs_label_placement = |uid: i32| !pinned_labels.contains(&uid);
+    // A link this pass creates has a uid the view before it did not use.
+    let old_uids: HashSet<i32> = old_view.elements.iter().map(ViewElement::get_uid).collect();
+    let created_link = |uid: i32| !old_uids.contains(&uid);
 
     if new_elements.is_empty() {
         // No new element, so no flow is created or rebuilt: every flow in the
@@ -1721,7 +1724,7 @@ pub fn incremental_layout(
         diff_connectors(&mut state, &metadata);
         diff_clouds(&mut state, &metadata);
         declutter::declutter_part(&mut state.elements, needs_label_placement, |_| false);
-        apply_loop_curvature(&mut state, &config, model, &metadata);
+        apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
         validate_view_completeness(&state, model)?;
         return Ok(build_stock_flow_from_state(state, old_view));
     }
@@ -1940,7 +1943,7 @@ pub fn incremental_layout(
             *pos = Position::new(x, y);
         }
     }
-    apply_loop_curvature(&mut state, &config, model, &metadata);
+    apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
 
     validate_view_completeness(&state, model)?;
 

@@ -67,8 +67,6 @@ const FIXTURES: [Fixture; 8] = [
     },
 ];
 
-const RECURVES_UNTOUCHED_LINKS: &str =
-    "loop curvature re-curves a straight link the patch did not create";
 const REBUILDS_KIND_CHANGE_ELSEWHERE: &str =
     "a variable whose kind changes is rebuilt away from its old element";
 const RECREATES_LINKS_OF_REBUILT: &str =
@@ -97,12 +95,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "aux_to_stock",
         "untouched_link_changed",
         RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "population",
-        "close_loop",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
     ),
     (
         "population",
@@ -142,36 +134,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "logistic_growth_straight",
-        "add_parameter",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
-        "add_sector",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
-        "add_side_flow",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
-        "add_then_undo",
-        "return_to_original",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
-        "add_then_undo",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
         "aux_to_stock",
         "rebuilt_element_moved",
         REBUILDS_KIND_CHANGE_ELSEWHERE,
@@ -180,55 +142,13 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "logistic_growth_straight",
         "aux_to_stock",
         "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
-        "close_loop",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
+        RECREATES_LINKS_OF_REBUILT,
     ),
     (
         "logistic_growth_straight",
         "detach_flow",
         "untouched_link_changed",
         RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "logistic_growth_straight",
-        "extend_chain",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
-        "insert_intermediate",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
-        "rename_by_remove_and_add",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
-        "rename_variable",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
-        "restate_variable",
-        "return_to_original",
-        RECURVES_UNTOUCHED_LINKS,
-    ),
-    (
-        "logistic_growth_straight",
-        "restate_variable",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
     ),
     (
         "fishbanks",
@@ -283,12 +203,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "aux_to_stock",
         "untouched_link_changed",
         RECREATES_LINKS_OF_REBUILT,
-    ),
-    (
-        "reliability",
-        "close_loop",
-        "untouched_link_changed",
-        RECURVES_UNTOUCHED_LINKS,
     ),
     (
         "reliability",
