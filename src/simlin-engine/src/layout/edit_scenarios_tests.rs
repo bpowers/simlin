@@ -67,10 +67,6 @@ const FIXTURES: [Fixture; 8] = [
     },
 ];
 
-const REBUILT_FLOW_LANDS_ON_A_SHAPE: &str =
-    "a flow rebuilt with a cloud end puts its cloud or valve on another shape";
-const DETACHED_CLOUD_INSIDE_STOCK: &str =
-    "a detached flow end's cloud is placed inside the stock it left";
 const CREATED_FLOW_THROUGH_A_STOCK: &str =
     "a flow created between two stocks is routed through a stock between them";
 const CREATED_VALVE_ON_A_SHAPE: &str = "a created flow's valve lands on another shape";
@@ -80,28 +76,10 @@ const DRAWS_OMITTED_CONNECTORS: &str =
 /// `(fixture, scenario, finding kind, the defect behind it)`.
 const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
-        "population",
-        "detach_flow",
-        "shape_overlap",
-        REBUILT_FLOW_LANDS_ON_A_SHAPE,
-    ),
-    (
-        "fishbanks",
-        "delete_middle_stock",
-        "shape_overlap",
-        REBUILT_FLOW_LANDS_ON_A_SHAPE,
-    ),
-    (
         "reliability",
         "add_flow_between_stocks",
         "shape_overlap",
         CREATED_VALVE_ON_A_SHAPE,
-    ),
-    (
-        "reliability",
-        "delete_middle_stock",
-        "shape_overlap",
-        REBUILT_FLOW_LANDS_ON_A_SHAPE,
     ),
     (
         "sir",
@@ -120,30 +98,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "add_then_undo",
         "return_to_original",
         DRAWS_OMITTED_CONNECTORS,
-    ),
-    (
-        "sir",
-        "delete_middle_stock",
-        "shape_overlap",
-        REBUILT_FLOW_LANDS_ON_A_SHAPE,
-    ),
-    (
-        "sir",
-        "detach_flow",
-        "flow_invariant",
-        DETACHED_CLOUD_INSIDE_STOCK,
-    ),
-    (
-        "sir",
-        "detach_flow",
-        "pipe_through_stock",
-        DETACHED_CLOUD_INSIDE_STOCK,
-    ),
-    (
-        "sir",
-        "detach_flow",
-        "shape_overlap",
-        DETACHED_CLOUD_INSIDE_STOCK,
     ),
     (
         "sir",

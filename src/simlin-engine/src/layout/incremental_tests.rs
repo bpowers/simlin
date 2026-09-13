@@ -327,6 +327,137 @@ fn a_flow_rebuilt_for_a_new_attachment_keeps_its_links() {
     }
 }
 
+fn flow_named(view: &datamodel::StockFlow, name: &str) -> view_element::Flow {
+    view.elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name) == name => Some(f.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{name} drawn"))
+}
+
+/// Every pair of shapes that overlap, where one of them is in `uids`.
+fn overlaps_involving(view: &datamodel::StockFlow, uids: &HashSet<i32>) -> Vec<(i32, i32)> {
+    use crate::layout::metrics::node_shape_box;
+    let shapes: Vec<(i32, crate::diagram::common::Rect)> = view
+        .elements
+        .iter()
+        .filter_map(|e| node_shape_box(e).map(|r| (e.get_uid(), r)))
+        .collect();
+    let mut out = Vec::new();
+    for (i, (a, ra)) in shapes.iter().enumerate() {
+        for (b, rb) in &shapes[i + 1..] {
+            if !uids.contains(a) && !uids.contains(b) {
+                continue;
+            }
+            let w = ra.right.min(rb.right) - ra.left.max(rb.left);
+            let h = ra.bottom.min(rb.bottom) - ra.top.max(rb.top);
+            if w > 0.5 && h > 0.5 {
+                out.push((*a, *b));
+            }
+        }
+    }
+    out
+}
+
+/// The strict flow invariant violations of the flows in `uids`.
+fn strict_violations(view: &datamodel::StockFlow, uids: &HashSet<i32>) -> String {
+    use crate::editing::invariants::{Mode, check_flow_invariants, format_violations};
+    format_violations(&check_flow_invariants(
+        &view.elements,
+        Mode::Strict { routed: Some(uids) },
+    ))
+}
+
+#[test]
+fn a_detached_flow_end_becomes_a_cloud_clear_of_the_stock() {
+    // source drains into sink through transfer. An agent restates source
+    // without transfer in its outflows, so transfer's source end is now a
+    // cloud. The pipe keeps its line, the cloud sits outside source, and what
+    // the edit changed covers no shape.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("source", &[], &["transfer"])),
+        datamodel::Variable::Stock(stock("sink", &["transfer"], &[])),
+        datamodel::Variable::Flow(flow("transfer", "10")),
+    ]);
+    let base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertStock(stock("source", &[], &[]))],
+    );
+    let before = flow_named(&base, "transfer");
+    let after = flow_named(&view, "transfer");
+    let source_end = after.points[0].attached_to_uid.expect("attached");
+    assert!(
+        view.elements.iter().any(
+            |e| matches!(e, ViewElement::Cloud(c) if c.uid == source_end && c.flow_uid == after.uid)
+        ),
+        "the source end is a cloud of transfer's own"
+    );
+    assert_eq!(
+        after.points.last().map(|p| p.attached_to_uid),
+        before.points.last().map(|p| p.attached_to_uid),
+        "the sink end still attaches to sink"
+    );
+    let line = before.points[0].y;
+    assert!(
+        after.points.iter().all(|p| (p.y - line).abs() < 1e-9),
+        "the pipe keeps its line: {:?}",
+        after.points
+    );
+    let changed: HashSet<i32> = [after.uid, source_end].into_iter().collect();
+    assert_eq!(
+        overlaps_involving(&view, &changed),
+        Vec::<(i32, i32)>::new()
+    );
+    assert_eq!(
+        strict_violations(&view, &[after.uid].into_iter().collect()),
+        ""
+    );
+}
+
+#[test]
+fn deleting_a_middle_stock_leaves_the_flows_through_it_in_place() {
+    // upstream -> inflow -> middle -> outflow -> downstream. Deleting middle
+    // turns the ends of inflow and outflow that touched it into clouds. The
+    // two pipes stay where they were drawn, and nothing the edit changed covers
+    // a shape.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("upstream", &[], &["inflow"])),
+        datamodel::Variable::Stock(stock("middle", &["inflow"], &["outflow"])),
+        datamodel::Variable::Stock(stock("downstream", &["outflow"], &[])),
+        datamodel::Variable::Flow(flow("inflow", "10")),
+        datamodel::Variable::Flow(flow("outflow", "10")),
+    ]);
+    let base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::DeleteVariable {
+            ident: "middle".to_string(),
+        }],
+    );
+    let points = |f: &view_element::Flow| f.points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>();
+    let mut changed: HashSet<i32> = HashSet::new();
+    for name in ["inflow", "outflow"] {
+        let (before, after) = (flow_named(&base, name), flow_named(&view, name));
+        assert_eq!(points(&after), points(&before), "{name}'s pipe stays put");
+        changed.insert(after.uid);
+        changed.extend(after.points.iter().filter_map(|p| p.attached_to_uid));
+    }
+    assert_eq!(
+        overlaps_involving(&view, &changed),
+        Vec::<(i32, i32)>::new()
+    );
+    let flows: HashSet<i32> = ["inflow", "outflow"]
+        .iter()
+        .map(|n| flow_named(&view, n).uid)
+        .collect();
+    assert_eq!(strict_violations(&view, &flows), "");
+}
+
 #[test]
 fn a_stock_added_to_a_drawn_chain_lands_clear_of_side_flows() {
     // tank drains to a cloud off its right face, and a person drew the drain

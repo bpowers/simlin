@@ -52,3 +52,12 @@ pub use hit::{Hit, HitPart, hit_test};
 pub use preview::{Preview, preview};
 
 pub(crate) use edit_view::{derived_operations, edited_view};
+// The flow geometry incremental layout routes through when an edit re-attaches
+// a drawn flow, so a tool edit's pipes are drawn by the same core as a touch
+// edit's.
+pub(crate) use heal::heal;
+pub(crate) use path::place_valve;
+pub(crate) use route::{route, route_end};
+pub(crate) use terminal::{
+    CloudRef, FlowGeometry, flow_terminals, free_terminal, target_stock_terminal,
+};
