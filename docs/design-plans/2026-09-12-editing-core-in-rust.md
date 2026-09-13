@@ -84,7 +84,7 @@ Every entry point refuses a model with no stock-and-flow view with `DoesNotExist
 ## Driving the planner from a host
 
 - **Which touches plan.** A host asks `simlin_gesture_begin` at the moment its pan would begin, with the point the touch went down at, and lets the canvas pan when no drag starts. A press that grabs nothing then costs panning no delay.
-- **Drawing a frame.** A host hides the base scene elements a frame lists in `hidden` and draws its `elements` above the scene, complete, whatever the camera is doing: a frame is a handful of elements replaced at display rate, and a label that appeared a frame late would flicker on every frame.
+- **Drawing a frame.** A host hides the base scene elements a frame lists in `hidden` and draws its `elements` among the scene at their layers, complete, whatever the camera is doing: a frame is a handful of elements replaced at display rate, and a label that appeared a frame late would flicker on every frame. The layers are load-bearing: a link's arc runs between the centers of the elements it connects, and only those elements, drawn above it, hide its ends, so a frame drawn on top of the scene shows links crossing what they connect.
 - **Landing an edit.** A host applies the release's patch off its UI thread, with errors allowed (a new variable has no equation yet), rebuilds the scene, and shows it in place of the last frame without moving the camera; then it adopts the plan's selection, opens the name editor on a handoff, and simulates again. Presses start nothing while an edit lands, since they would plan against a view the project has left.
 
 ## Testing

@@ -519,8 +519,9 @@ unsafe fn require_gesture<'a>(
 /// not yet moved), `commit`, `selection`, `target` (a drop target `{uid, valid}`
 /// to highlight, or null), `handoff`, `details`, `label`, `hidden` (uids of base
 /// scene elements the frame does not draw), and `elements` (scene elements, the
-/// `simlin_project_render_scene` contract, drawn over the base scene in their
-/// place).
+/// `simlin_project_render_scene` contract, drawn among the base scene at their
+/// layers: a link's arc runs between the centers of what it connects, and the
+/// elements above it hide its ends).
 ///
 /// # Safety
 /// - `gesture` must be a valid pointer to a SimlinGesture

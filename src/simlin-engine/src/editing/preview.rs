@@ -6,10 +6,13 @@
 //! base elements they stand in for.
 //!
 //! A host draws the base view's scene once per edit and, while a gesture is
-//! live, hides a frame's `hidden` elements and draws its `elements` on top, so a
-//! frame costs in proportion to what the gesture touches. The elements come from
-//! the scene's own per-element builder over the base view with the plan's
-//! changes substituted, so a preview draws exactly what the committed view will.
+//! live, hides a frame's `hidden` elements and draws its `elements` among the
+//! scene at their layers, so a frame costs in proportion to what the gesture
+//! touches. The elements come from the scene's own per-element builder over the
+//! base view with the plan's changes substituted, so a preview draws exactly
+//! what the committed view will -- provided the host keeps the layers: a link's
+//! arc runs between the centers of the elements it connects, and only those
+//! elements, drawn above it, hide its ends.
 
 use std::collections::{HashMap, HashSet};
 
