@@ -67,32 +67,11 @@ const FIXTURES: [Fixture; 8] = [
     },
 ];
 
-const CREATED_FLOW_THROUGH_A_STOCK: &str =
-    "a flow created between two stocks is routed through a stock between them";
-const CREATED_VALVE_ON_A_SHAPE: &str = "a created flow's valve lands on another shape";
 const DRAWS_OMITTED_CONNECTORS: &str =
     "a sync draws connectors the author left out (whether it should is undecided)";
 
 /// `(fixture, scenario, finding kind, the defect behind it)`.
 const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
-    (
-        "reliability",
-        "add_flow_between_stocks",
-        "shape_overlap",
-        CREATED_VALVE_ON_A_SHAPE,
-    ),
-    (
-        "sir",
-        "add_flow_between_stocks",
-        "pipe_through_stock",
-        CREATED_FLOW_THROUGH_A_STOCK,
-    ),
-    (
-        "sir",
-        "add_flow_between_stocks",
-        "shape_overlap",
-        CREATED_FLOW_THROUGH_A_STOCK,
-    ),
     (
         "sir",
         "add_then_undo",

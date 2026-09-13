@@ -458,6 +458,105 @@ fn deleting_a_middle_stock_leaves_the_flows_through_it_in_place() {
     assert_eq!(strict_violations(&view, &flows), "");
 }
 
+/// The stocks whose interior a flow's pipe passes through, other than its own
+/// ends.
+fn stocks_crossed(view: &datamodel::StockFlow, flow: &view_element::Flow) -> Vec<String> {
+    use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+    let ends: HashSet<i32> = [flow.points.first(), flow.points.last()]
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.attached_to_uid)
+        .collect();
+    let mut out = Vec::new();
+    for e in &view.elements {
+        let ViewElement::Stock(s) = e else { continue };
+        if ends.contains(&s.uid) {
+            continue;
+        }
+        let (hw, hh) = (STOCK_WIDTH / 2.0 - 0.5, STOCK_HEIGHT / 2.0 - 0.5);
+        let crosses = flow.points.windows(2).any(|w| {
+            // Pipes are orthogonal: a segment enters the interior when it runs
+            // within the body's span on its own axis and overlaps it on the
+            // other.
+            let (a, b) = (&w[0], &w[1]);
+            if (a.y - b.y).abs() < 1e-9 {
+                (a.y - s.y).abs() < hh && a.x.min(b.x) < s.x + hw && a.x.max(b.x) > s.x - hw
+            } else {
+                (a.x - s.x).abs() < hw && a.y.min(b.y) < s.y + hh && a.y.max(b.y) > s.y - hh
+            }
+        });
+        if crosses {
+            out.push(canonicalize(&s.name).into_owned());
+        }
+    }
+    out
+}
+
+#[test]
+fn a_flow_created_between_two_stocks_routes_around_the_stocks_between() {
+    // upstream -> inflow -> middle -> outflow -> downstream, drawn in a row. An
+    // agent adds a bypass from upstream straight to downstream. Its pipe goes
+    // around middle rather than through it, holds the flow invariants, and
+    // covers no shape.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("upstream", &[], &["inflow"])),
+        datamodel::Variable::Stock(stock("middle", &["inflow"], &["outflow"])),
+        datamodel::Variable::Stock(stock("downstream", &["outflow"], &[])),
+        datamodel::Variable::Flow(flow("inflow", "10")),
+        datamodel::Variable::Flow(flow("outflow", "10")),
+    ]);
+    let base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![
+            ModelOperation::UpsertFlow(flow("bypass", "1")),
+            ModelOperation::UpsertStock(stock("upstream", &[], &["inflow", "bypass"])),
+            ModelOperation::UpsertStock(stock("downstream", &["outflow", "bypass"], &[])),
+        ],
+    );
+    let bypass = flow_named(&view, "bypass");
+    assert_eq!(stocks_crossed(&view, &bypass), Vec::<String>::new());
+    let uids: HashSet<i32> = [bypass.uid].into_iter().collect();
+    assert_eq!(strict_violations(&view, &uids), "");
+    assert_eq!(overlaps_involving(&view, &uids), Vec::<(i32, i32)>::new());
+}
+
+#[test]
+fn a_created_valve_lands_clear_of_a_parameter() {
+    // tank has a parameter, leak_rate, that a person parked just right of it,
+    // where a side flow leaving tank's right face puts its valve. An agent adds
+    // drain, a flow out of tank at leak_rate: its valve must not land on the
+    // parameter.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("tank", &[], &[])),
+        datamodel::Variable::Aux(aux("leak_rate", "0.1")),
+    ]);
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let config = LayoutConfig::default();
+    let (tx, ty) = center_named(&base, "tank").expect("tank drawn");
+    for e in &mut base.elements {
+        if let ViewElement::Aux(a) = e {
+            (a.x, a.y) = (
+                tx + config.stock_width / 2.0 + config.horizontal_spacing / 2.0,
+                ty,
+            );
+        }
+    }
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![
+            ModelOperation::UpsertFlow(flow("drain", "tank * leak_rate")),
+            ModelOperation::UpsertStock(stock("tank", &[], &["drain"])),
+        ],
+    );
+    let drain = flow_named(&view, "drain");
+    let uids: HashSet<i32> = [drain.uid].into_iter().collect();
+    assert_eq!(overlaps_involving(&view, &uids), Vec::<(i32, i32)>::new());
+    assert_eq!(strict_violations(&view, &uids), "");
+}
+
 #[test]
 fn a_stock_added_to_a_drawn_chain_lands_clear_of_side_flows() {
     // tank drains to a cloud off its right face, and a person drew the drain

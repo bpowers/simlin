@@ -1745,6 +1745,168 @@ fn retarget_flow(
     true
 }
 
+/// Whether `flow`'s pipe passes through the interior of a stock that is not
+/// one of its ends.
+fn crosses_foreign_stock(
+    flow: &view_element::Flow,
+    stocks: &[(i32, crate::editing::Point)],
+) -> bool {
+    use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+    const EPS: f64 = 1e-6;
+    let ends: [Option<i32>; 2] = [
+        flow.points.first().and_then(|p| p.attached_to_uid),
+        flow.points.last().and_then(|p| p.attached_to_uid),
+    ];
+    let (hw, hh) = (STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0);
+    stocks
+        .iter()
+        .filter(|(uid, _)| !ends.contains(&Some(*uid)))
+        .any(|(_, c)| {
+            flow.points.windows(2).any(|w| {
+                let (a, b) = (&w[0], &w[1]);
+                if (a.y - b.y).abs() <= EPS {
+                    (a.y - c.y).abs() < hh - EPS
+                        && a.x.min(b.x) < c.x + hw - EPS
+                        && a.x.max(b.x) > c.x - hw + EPS
+                } else if (a.x - b.x).abs() <= EPS {
+                    (a.x - c.x).abs() < hw - EPS
+                        && a.y.min(b.y) < c.y + hh - EPS
+                        && a.y.max(b.y) > c.y - hh + EPS
+                } else {
+                    false
+                }
+            })
+        })
+}
+
+/// Re-route every flow this pass created whose pipe passes through a stock
+/// that is not one of its ends, through the editing core's router, which ranks
+/// a path through a stock as crossing and generates detours around it. The
+/// finishing pass orthogonalizes between the ends it is given and sees no
+/// other stock, so a flow between two stocks with a third drawn between them
+/// would otherwise run straight through the third, reading as attached to it.
+/// A pipe that already clears every stock keeps what the finishing pass gave
+/// it.
+fn route_created_flows_around_stocks(elements: &mut [ViewElement], created: &HashSet<i32>) {
+    use crate::editing::{FlowEnd, FlowGeometry, Point, flow_terminals, route};
+    let stocks: Vec<(i32, Point)> = elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Stock(s) => Some((s.uid, Point::new(s.x, s.y))),
+            _ => None,
+        })
+        .collect();
+    let centers: Vec<Point> = stocks.iter().map(|(_, c)| *c).collect();
+    let mut updates: Vec<(usize, FlowGeometry)> = Vec::new();
+    {
+        let by_uid: HashMap<i32, &ViewElement> =
+            elements.iter().map(|e| (e.get_uid(), e)).collect();
+        for (index, elem) in elements.iter().enumerate() {
+            let ViewElement::Flow(f) = elem else { continue };
+            if !created.contains(&f.uid) || f.points.len() < 2 || !crosses_foreign_stock(f, &stocks)
+            {
+                continue;
+            }
+            let terminals = flow_terminals(f, |uid| by_uid.get(&uid).copied());
+            let terminal_stocks: Vec<i32> = [&terminals.source, &terminals.sink]
+                .into_iter()
+                .filter_map(|t| t.stock_center().and(t.uid()))
+                .collect();
+            let occupied: Vec<Point> = elements
+                .iter()
+                .filter_map(|e| match e {
+                    ViewElement::Flow(g) if g.uid != f.uid => Some(g),
+                    _ => None,
+                })
+                .flat_map(|g| [g.points.first(), g.points.last()])
+                .flatten()
+                .filter(|p| {
+                    p.attached_to_uid
+                        .is_some_and(|u| terminal_stocks.contains(&u))
+                })
+                .map(point_of)
+                .collect();
+            updates.push((
+                index,
+                route(
+                    terminals.source,
+                    terminals.sink,
+                    f,
+                    FlowEnd::Source,
+                    &occupied,
+                    centers.as_slice(),
+                ),
+            ));
+        }
+    }
+    for (index, geometry) in updates {
+        for moved in &geometry.clouds {
+            for e in elements.iter_mut() {
+                if let ViewElement::Cloud(c) = e
+                    && c.uid == moved.uid
+                {
+                    (c.x, c.y) = (moved.at.x, moved.at.y);
+                }
+            }
+        }
+        elements[index] = ViewElement::Flow(geometry.flow);
+    }
+}
+
+/// Slide the valve of every flow this pass created along its pipe to the
+/// position nearest where it sits whose valve covers no other shape, when where
+/// it sits covers one: a person may have parked a parameter, or drawn another
+/// valve or cloud, exactly where placement puts a new valve. The valve keeps
+/// `VALVE_CLAMP_MARGIN` from the pipe's ends; a pipe with no clear position
+/// keeps its valve.
+fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32>) {
+    use crate::diagram::common::Rect;
+    use crate::diagram::constants::AUX_RADIUS;
+    use crate::editing::{VALVE_CLAMP_MARGIN, arc_position, path_length, point_at_arc};
+    use crate::layout::metrics::node_shape_box;
+    /// The step, in px of arc length, at which candidate valve positions are
+    /// tried.
+    const STEP: f64 = 1.0;
+    let shapes: Vec<(i32, Rect)> = elements
+        .iter()
+        .filter_map(|e| node_shape_box(e).map(|r| (e.get_uid(), r)))
+        .collect();
+    for elem in elements.iter_mut() {
+        let ViewElement::Flow(f) = elem else { continue };
+        if !created.contains(&f.uid) || f.points.len() < 2 {
+            continue;
+        }
+        let clear = |p: crate::editing::Point| {
+            shapes
+                .iter()
+                .filter(|(uid, _)| *uid != f.uid)
+                .all(|(_, r)| {
+                    let w = r.right.min(p.x + AUX_RADIUS) - r.left.max(p.x - AUX_RADIUS);
+                    let h = r.bottom.min(p.y + AUX_RADIUS) - r.top.max(p.y - AUX_RADIUS);
+                    w <= 0.0 || h <= 0.0
+                })
+        };
+        let valve = crate::editing::Point::new(f.x, f.y);
+        if clear(valve) {
+            continue;
+        }
+        let length = path_length(&f.points);
+        if length < 2.0 * VALVE_CLAMP_MARGIN {
+            continue;
+        }
+        let at = arc_position(&f.points, valve);
+        let steps = ((length - 2.0 * VALVE_CLAMP_MARGIN) / STEP).floor() as usize;
+        let best = (0..=steps)
+            .map(|i| VALVE_CLAMP_MARGIN + i as f64 * STEP)
+            .filter(|&s| clear(point_at_arc(&f.points, s)))
+            .min_by(|a, b| (a - at).abs().total_cmp(&(b - at).abs()));
+        if let Some(s) = best {
+            let p = point_at_arc(&f.points, s);
+            (f.x, f.y) = (p.x, p.y);
+        }
+    }
+}
+
 /// Keep the bow of every curved link the view already drew whose endpoint this
 /// pass moved (a rebuilt flow's valve): its takeoff angle turns with the chord
 /// between its ends, so it curves as it did relative to that line.
@@ -2364,6 +2526,19 @@ pub fn incremental_layout(
     resnap_flow_endpoints(&mut state, &config, is_created);
     face_slots::place_created_flow_ends(&mut state.elements, &created_flows);
     finish_flow_geometry(&mut state.elements, is_created);
+    route_created_flows_around_stocks(&mut state.elements, &created_flows);
+    keep_created_valves_clear(&mut state.elements, &created_flows);
+    for elem in &state.elements {
+        match elem {
+            ViewElement::Flow(f) if created_flows.contains(&f.uid) => {
+                state.positions.insert(f.uid, Position::new(f.x, f.y));
+            }
+            ViewElement::Cloud(c) if created_flows.contains(&c.flow_uid) => {
+                state.positions.insert(c.uid, Position::new(c.x, c.y));
+            }
+            _ => {}
+        }
+    }
 
     // Step 7: Diff connectors and clouds
     diff_connectors(&mut state, &metadata);

@@ -56,7 +56,7 @@ pub(crate) use edit_view::{derived_operations, edited_view};
 // a drawn flow, so a tool edit's pipes are drawn by the same core as a touch
 // edit's.
 pub(crate) use heal::heal;
-pub(crate) use path::place_valve;
+pub(crate) use path::{arc_position, path_length, place_valve, point_at_arc};
 pub(crate) use route::{route, route_end};
 pub(crate) use terminal::{
     CloudRef, FlowGeometry, flow_terminals, free_terminal, target_stock_terminal,
