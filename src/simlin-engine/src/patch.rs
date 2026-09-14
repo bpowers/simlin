@@ -960,10 +960,13 @@ fn rename_canonical_ident(
         let prefix = &ident_str[..pos];
         let suffix = &ident_str[pos + '·'.len_utf8()..];
 
-        // Only rename self-qualified references (self·variable)
-        // Don't rename other module-qualified references as they refer to different variables
-        if suffix == old_ident.as_str() && prefix == "self" {
-            return Ident::from_unchecked(format!("self·{}", new_ident.as_str()));
+        // Only rename references to this model's own variable: self-qualified
+        // (`self·x`), or XMILE's parent-scope spelling (`.x`, canonicalized to
+        // `·x`), which every consumer reads as the bare name
+        // (`db::DepScope::resolve`). Any other qualifier names another
+        // module's variable.
+        if suffix == old_ident.as_str() && (prefix == "self" || prefix.is_empty()) {
+            return Ident::from_unchecked(format!("{prefix}·{}", new_ident.as_str()));
         }
     }
 
@@ -1438,6 +1441,59 @@ mod tests {
         assert_eq!(module.references.len(), 1);
         assert_eq!(module.references[0].src, "new_input");
         assert_eq!(module.references[0].dst, "self.target");
+    }
+
+    #[test]
+    fn rename_rewrites_a_parent_scope_module_source() {
+        // XMILE spells a module input's source in the enclosing model as `.x`
+        // (`<connect to="hares.area" from=".area"/>`), which the reader stores
+        // canonicalized, as `·x`, and which every consumer reads as the bare
+        // name. Renaming x must rewrite that source, or the module silently
+        // reads its input port's default.
+        let mut project = TestProject::new("test")
+            .aux("input", "1", None)
+            .build_datamodel();
+        let parent_scope_source = canonicalize(".input").into_owned();
+        let model = project.get_model_mut("main").expect("main model");
+        model
+            .variables
+            .push(datamodel::Variable::Module(datamodel::Module {
+                ident: "child".to_string(),
+                model_name: "child".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: vec![datamodel::ModuleReference {
+                    src: parent_scope_source,
+                    dst: canonicalize("child.target").into_owned(),
+                }],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }));
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::RenameVariable {
+                    from: "input".to_string(),
+                    to: "new_input".to_string(),
+                }],
+            }],
+        };
+        apply_patch(&mut project, patch).unwrap();
+
+        let Some(Variable::Module(module)) =
+            project.get_model("main").unwrap().get_variable("child")
+        else {
+            panic!("child is a module");
+        };
+        // A rename writes a reference's source spelling (`self.target`, `.x`);
+        // what it names is the canonical form every consumer reads.
+        assert_eq!(
+            canonicalize(&module.references[0].src),
+            canonicalize(".new_input")
+        );
     }
 
     #[test]

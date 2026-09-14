@@ -101,10 +101,6 @@ const ALIAS_LABEL_RECHOSEN: &str = "alias label side re-chosen by an unrelated s
 /// A link drawing no dependency the extraction recognizes is removed although
 /// the patch does not name its reader.
 const UNEXPLAINED_LINK_DROPPED: &str = "author's link without a recognized dependency dropped";
-/// Renaming a variable a module reads through the parent-scope spelling
-/// (`.area`) leaves the module's source naming the old variable.
-const RENAME_UNWIRES_PARENT_SCOPE_SOURCE: &str =
-    "rename leaves a parent-scope module source unrenamed";
 /// A variable the view did not draw is drawn by an edit that does not name it.
 const UNDRAWN_VARIABLE_DRAWN: &str = "variable the author left undrawn drawn by an unrelated sync";
 /// Flows that met a deleted stock at one point keep their ends there as
@@ -673,12 +669,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "restate_variable",
         "untouched_link_changed",
         UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "hares_and_foxes",
-        "rename_variable",
-        "untouched_link_changed",
-        RENAME_UNWIRES_PARENT_SCOPE_SOURCE,
     ),
 ];
 
