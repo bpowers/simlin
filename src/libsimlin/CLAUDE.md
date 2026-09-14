@@ -71,7 +71,7 @@ Error formatting has no module here: `src/patch.rs` imports `simlin_engine::erro
 ### Layout
 
 - **`src/layout.rs`** - Automatic diagram layout:
-  - `simlin_project_diagram_sync(project, model_name, patch_json, out_error)` - Generate layout for a model, replacing its views in-place. When `patch_json` is non-null and the model already has a non-empty view, uses incremental layout (preserving existing element positions); otherwise generates a full layout from scratch. Preserves existing zoom. Works on all targets including WASM. Requires the project to be synced to the salsa db first (returns an error otherwise).
+  - `simlin_project_diagram_sync(project, model_name, patch_json, out_error)` - Generate layout for a model, replacing its first view in place (added when the model has none); any other view the project carries is the author's and comes back unchanged. When `patch_json` is non-null and the model already has a non-empty view, uses incremental layout (preserving existing element positions); otherwise generates a full layout from scratch. Preserves existing zoom. Works on all targets including WASM. Requires the project to be synced to the salsa db first (returns an error otherwise).
 
 ### Diagram editing
 

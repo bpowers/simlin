@@ -825,6 +825,56 @@ async fn rename_variable_rewrites_readers_and_keeps_the_diagram() {
     );
 }
 
+/// The diagram sync redraws a model's first view; any other view the project
+/// carries is the author's and survives an edit exactly as it was saved.
+#[tokio::test]
+async fn an_edit_keeps_every_view_but_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
+    edit_model(
+        &TestFileSystemAccess,
+        edit_input(&path, vec![upsert_aux("birth_rate", "0.03")]),
+    )
+    .await
+    .expect("build the model");
+
+    let opened = TestFileSystemAccess.open(&path).await.expect("open");
+    let mut project = opened.project;
+    let datamodel::View::StockFlow(first) = project.models[0].views[0].clone();
+    let overview = datamodel::StockFlow { zoom: 0.5, ..first };
+    project.models[0]
+        .views
+        .push(datamodel::View::StockFlow(overview));
+    TestFileSystemAccess
+        .save(&path, &project, opened.source_format, None)
+        .await
+        .expect("save the second view");
+    let before = TestFileSystemAccess.open(&path).await.expect("reopen");
+    assert_eq!(
+        before.project.models[0].views.len(),
+        2,
+        "the file holds both views"
+    );
+
+    edit_model(
+        &TestFileSystemAccess,
+        edit_input(&path, vec![upsert_aux("death_rate", "0.01")]),
+    )
+    .await
+    .expect("edit");
+
+    let after = TestFileSystemAccess.open(&path).await.expect("reopen");
+    assert_eq!(after.project.models[0].views.len(), 2, "no view is dropped");
+    assert!(
+        aux_element(&after.project, "death_rate").is_some(),
+        "the first view is synced"
+    );
+    assert!(
+        after.project.models[0].views[1] == before.project.models[0].views[1],
+        "the second view comes back as it was saved"
+    );
+}
+
 #[tokio::test]
 async fn upsert_stock_is_full_replacement() {
     let dir = tempfile::tempdir().unwrap();
