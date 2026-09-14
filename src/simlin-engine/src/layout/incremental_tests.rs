@@ -1187,16 +1187,14 @@ fn clouds_of_flows_leaving_a_deleted_stock_at_one_point_separate() {
     assert_eq!(strict_violations(&view, &flows), "");
 }
 
-#[test]
-fn a_reattached_flow_valve_lands_clear_of_a_parameter() {
-    // transfer drains source into sink. A person drew its valve just off
-    // source's face and parked note at the pipe's middle. Restating source
-    // without transfer turns that end into a cloud, which covers the valve;
-    // the valve moves, but not onto note.
+/// transfer drains source into sink, its valve drawn just off source's face,
+/// with note parked at the pipe's middle: the view `a_reattached_flow_*` tests
+/// edit.
+fn reattached_valve_fixture(transfer_equation: &str) -> (datamodel::Project, datamodel::StockFlow) {
     let project = project_with(vec![
         datamodel::Variable::Stock(stock("source", &[], &["transfer"])),
         datamodel::Variable::Stock(stock("sink", &["transfer"], &[])),
-        datamodel::Variable::Flow(flow("transfer", "10")),
+        datamodel::Variable::Flow(flow("transfer", transfer_equation)),
         datamodel::Variable::Aux(aux("note", "1")),
     ]);
     let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
@@ -1221,23 +1219,44 @@ fn a_reattached_flow_valve_lands_clear_of_a_parameter() {
             _ => {}
         }
     }
-    let (_, view) = sync(
-        &project,
-        &base,
-        vec![ModelOperation::UpsertStock(stock("source", &[], &[]))],
-    );
-    let transfer = flow_named(&view, "transfer");
-    let mut changed: HashSet<i32> = [transfer.uid].into_iter().collect();
-    changed.extend(transfer.points.iter().filter_map(|p| p.attached_to_uid));
-    changed.remove(&sink);
-    assert_eq!(
-        overlaps_involving(&view, &changed),
-        Vec::<(i32, i32)>::new()
-    );
-    assert_eq!(
-        strict_violations(&view, &[transfer.uid].into_iter().collect()),
-        ""
-    );
+    (project, base)
+}
+
+#[test]
+fn a_reattached_flow_valve_lands_clear_of_a_parameter() {
+    // Restating source without transfer turns that end into a cloud, which
+    // covers the valve; the valve moves, but not onto note, and the pipe stays
+    // on sink's face and its new cloud. Rows over the two ways the pass runs:
+    // the edit alone creates no element, and with a parameter added the pass
+    // also places and settles a created element, which must not drag the
+    // re-attached flow back to where its valve sat before it slid.
+    let (project, base) = reattached_valve_fixture("10");
+    let sink = uid_named(&base, "sink");
+    for (row, extra) in [
+        ("the re-attachment alone", vec![]),
+        (
+            "with a created parameter",
+            vec![ModelOperation::UpsertAux(aux("extra", "1"))],
+        ),
+    ] {
+        let mut ops = vec![ModelOperation::UpsertStock(stock("source", &[], &[]))];
+        ops.extend(extra);
+        let (_, view) = sync(&project, &base, ops);
+        let transfer = flow_named(&view, "transfer");
+        let mut changed: HashSet<i32> = [transfer.uid].into_iter().collect();
+        changed.extend(transfer.points.iter().filter_map(|p| p.attached_to_uid));
+        changed.remove(&sink);
+        assert_eq!(
+            overlaps_involving(&view, &changed),
+            Vec::<(i32, i32)>::new(),
+            "{row}"
+        );
+        assert_eq!(
+            strict_violations(&view, &[transfer.uid].into_iter().collect()),
+            "",
+            "{row}"
+        );
+    }
 }
 
 #[test]
@@ -1341,4 +1360,191 @@ fn a_cloud_left_by_a_deleted_stock_steps_off_a_parameter_drawn_on_its_pipe() {
         strict_violations(&view, &[drain.uid].into_iter().collect()),
         ""
     );
+}
+
+#[test]
+fn a_sync_draws_nothing_that_references_an_undrawn_variable() {
+    // population grows by births at birth_rate and drains by emigration; quad
+    // reads doubled, which reads birth_rate. The author's view leaves out
+    // doubled and emigration. Every variable has a uid, as in a project MCP
+    // opened (`simlin-mcp-core`'s `ensure_variable_uids` mints the missing
+    // ones), so the connector and cloud diffs can name the undrawn variables
+    // by uid. An edit naming neither must not draw a connector into or out of
+    // doubled, or a cloud of emigration: nothing is drawn at the other end,
+    // so the link or cloud would reference no element. Rows over the two ways
+    // the pass runs: an edit that creates an element, and one that creates
+    // none.
+    let mut project = project_with(vec![
+        datamodel::Variable::Stock(stock("population", &["births"], &["emigration"])),
+        datamodel::Variable::Flow(flow("births", "population * birth_rate")),
+        datamodel::Variable::Flow(flow("emigration", "population * 0.01")),
+        datamodel::Variable::Aux(aux("birth_rate", "0.1")),
+        datamodel::Variable::Aux(aux("doubled", "birth_rate * 2")),
+        datamodel::Variable::Aux(aux("quad", "doubled * 2")),
+    ]);
+    let model = project.get_model_mut(TEST_MODEL).expect("model");
+    for (uid, var) in (1..).zip(model.variables.iter_mut()) {
+        match var {
+            datamodel::Variable::Stock(s) => s.uid = Some(uid),
+            datamodel::Variable::Flow(f) => f.uid = Some(uid),
+            datamodel::Variable::Aux(a) => a.uid = Some(uid),
+            datamodel::Variable::Module(m) => m.uid = Some(uid),
+        }
+    }
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let (doubled, emigration) = (uid_named(&base, "doubled"), uid_named(&base, "emigration"));
+    let undrawn = [doubled, emigration];
+    base.elements.retain(|e| match e {
+        ViewElement::Link(l) => !undrawn.contains(&l.from_uid) && !undrawn.contains(&l.to_uid),
+        ViewElement::Cloud(c) => !undrawn.contains(&c.flow_uid),
+        other => !undrawn.contains(&other.get_uid()),
+    });
+
+    for (row, op) in [
+        (
+            "an edit that creates an element",
+            ModelOperation::UpsertAux(aux("note", "1")),
+        ),
+        (
+            "an edit that creates none",
+            ModelOperation::UpsertAux(aux("birth_rate", "0.2")),
+        ),
+    ] {
+        let (_, view) = sync(&project, &base, vec![op]);
+        let by_uid: HashMap<i32, &ViewElement> =
+            view.elements.iter().map(|e| (e.get_uid(), e)).collect();
+        for e in &view.elements {
+            match e {
+                ViewElement::Link(l) => assert!(
+                    [l.from_uid, l.to_uid].iter().all(|u| by_uid
+                        .get(u)
+                        .is_some_and(|x| !matches!(x, ViewElement::Link(_)))),
+                    "{row}: link #{} {} -> {} references an element the view does not draw",
+                    l.uid,
+                    l.from_uid,
+                    l.to_uid
+                ),
+                ViewElement::Cloud(c) => assert!(
+                    matches!(by_uid.get(&c.flow_uid), Some(ViewElement::Flow(_))),
+                    "{row}: cloud #{} belongs to #{}, which is no drawn flow",
+                    c.uid,
+                    c.flow_uid
+                ),
+                _ => {}
+            }
+        }
+        for name in ["doubled", "emigration"] {
+            assert!(
+                !view
+                    .elements
+                    .iter()
+                    .any(|e| e.get_name().is_some_and(|n| canonicalize(n) == name)),
+                "{row}: {name} stays undrawn"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_curved_link_turns_with_an_endpoint_the_sync_moved() {
+    // A surviving curved link whose endpoint the sync moved keeps its bow: its
+    // takeoff angle turns by exactly as much as the chord between its ends.
+    // Rows over what moves an endpoint -- a re-attached flow's valve (restating
+    // source without transfer puts a cloud on the valve, which takes the pipe's
+    // middle and slides off note) and a variable redrawn as a stock (a, turned
+    // into a stock, covers b and moves off it) -- each alone, which creates no
+    // element, and with a created parameter, which makes the pass place one.
+    let mut valve_project_base = reattached_valve_fixture("note * 10");
+    let rebuilt_project = project_with(vec![
+        datamodel::Variable::Aux(aux("a", "1")),
+        datamodel::Variable::Aux(aux("b", "2")),
+        datamodel::Variable::Aux(aux("c", "a * 2")),
+    ]);
+    let mut rebuilt_base =
+        generate_layout(&rebuilt_project, TEST_MODEL, None).expect("base layout");
+    for e in &mut rebuilt_base.elements {
+        match e {
+            ViewElement::Aux(x) if canonicalize(&x.name) == "a" => (x.x, x.y) = (100.0, 100.0),
+            ViewElement::Aux(x) if canonicalize(&x.name) == "b" => (x.x, x.y) = (130.0, 100.0),
+            ViewElement::Aux(x) if canonicalize(&x.name) == "c" => (x.x, x.y) = (100.0, 300.0),
+            _ => {}
+        }
+    }
+    let curve = |view: &mut datamodel::StockFlow| {
+        for e in &mut view.elements {
+            if let ViewElement::Link(l) = e {
+                l.shape = LinkShape::Arc(40.0);
+            }
+        }
+    };
+    curve(&mut valve_project_base.1);
+    curve(&mut rebuilt_base);
+    let center = |view: &datamodel::StockFlow, name: &str| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Aux(a) if canonicalize(&a.name) == name => Some((a.x, a.y)),
+                ViewElement::Stock(s) if canonicalize(&s.name) == name => Some((s.x, s.y)),
+                ViewElement::Flow(f) if canonicalize(&f.name) == name => Some((f.x, f.y)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} drawn"))
+    };
+    let chord = |view: &datamodel::StockFlow, from: &str, to: &str| {
+        let (a, b) = (center(view, from), center(view, to));
+        (b.1 - a.1).atan2(b.0 - a.0).to_degrees()
+    };
+    let takeoff =
+        |view: &datamodel::StockFlow, from: &str, to: &str| match link_between(view, from, to)
+            .map(|l| l.shape)
+        {
+            Some(LinkShape::Arc(t)) => t,
+            other => panic!("{from} -> {to} is no curved link: {other:?}"),
+        };
+
+    let (valve_project, valve_base) = &valve_project_base;
+    let fixtures = [
+        (
+            "a re-attached flow's valve",
+            valve_project,
+            valve_base,
+            ModelOperation::UpsertStock(stock("source", &[], &[])),
+            ("note", "transfer"),
+            "transfer",
+        ),
+        (
+            "a variable redrawn as a stock",
+            &rebuilt_project,
+            &rebuilt_base,
+            ModelOperation::UpsertStock(stock("a", &[], &[])),
+            ("a", "c"),
+            "a",
+        ),
+    ];
+    for (what, project, base, op, (from, to), moved) in fixtures {
+        for (extra_row, extra) in [
+            ("alone", vec![]),
+            (
+                "with a created parameter",
+                vec![ModelOperation::UpsertAux(aux("extra", "1"))],
+            ),
+        ] {
+            let row = format!("{what}, {extra_row}");
+            let mut ops = vec![op.clone()];
+            ops.extend(extra);
+            let (_, view) = sync(project, base, ops);
+            assert_ne!(
+                center(&view, moved),
+                center(base, moved),
+                "{row}: the sync moves {moved}, or this row pins nothing"
+            );
+            let turned = takeoff(&view, from, to) - takeoff(base, from, to);
+            let expected = chord(&view, from, to) - chord(base, from, to);
+            let off = (turned - expected).rem_euclid(360.0);
+            assert!(
+                off.min(360.0 - off) < 1e-9,
+                "{row}: the takeoff turned {turned} degrees, the chord {expected}"
+            );
+        }
+    }
 }

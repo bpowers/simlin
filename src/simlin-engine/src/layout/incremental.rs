@@ -710,13 +710,14 @@ pub fn resnap_flow_endpoints(
 /// link alone must not move it, and two syncs of one edit must produce one
 /// list.
 ///
-/// A dependency with no link gets one only when `draws(from, to)` accepts its
-/// idents: incremental layout draws a connector only where the edit is about
-/// it, so a connector an author left out of the view stays out. A link drawing
-/// no dependency the model has survives when `keeps(reader)` accepts the ident
-/// of the variable it points into (through an alias; empty when it points at
-/// no variable): an imported view's connector the extraction does not explain
-/// is an author's choice that only an edit to its reader may undo.
+/// A dependency with no link gets one only when both its ends are drawn and
+/// `draws(from, to)` accepts its idents: incremental layout draws a connector
+/// only where the edit is about it, so a connector an author left out of the
+/// view stays out. A link drawing no dependency the model has survives when
+/// `keeps(reader)` accepts the ident of the variable it points into (through
+/// an alias; empty when it points at no variable): an imported view's
+/// connector the extraction does not explain is an author's choice that only
+/// an edit to its reader may undo.
 pub fn diff_connectors(
     state: &mut LayoutState,
     metadata: &ComputedMetadata,
@@ -819,7 +820,14 @@ pub fn diff_connectors(
     });
 
     for (&(from_uid, to_uid), (from_ident, to_ident)) in &new_edges {
-        if drawn.contains(&(from_uid, to_uid)) || !draws(from_ident, to_ident) {
+        // A link is drawn between two drawn variables: a variable with a uid
+        // may still be one the view leaves out (a project MCP opened gives
+        // every variable a uid), and a link into it would reference no element.
+        if drawn.contains(&(from_uid, to_uid))
+            || !ident_of.contains_key(&from_uid)
+            || !ident_of.contains_key(&to_uid)
+            || !draws(from_ident, to_ident)
+        {
             continue;
         }
         // Added: create new link with default shape
@@ -990,32 +998,29 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
 
         kept.extend(used_uids);
 
-        // Create new clouds for roles that couldn't be filled from old clouds
-        if wants_source && !preserved_source {
-            let pos = endpoints.map(|(src, _)| *src);
-            let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
+        // Create new clouds for roles that couldn't be filled from old clouds,
+        // at the drawn pipe's ends. A flow with no drawn pipe -- one the view
+        // leaves out, which may still have a uid -- has nowhere to put a cloud,
+        // and a cloud of it would belong to no element.
+        let Some(&(src_pos, snk_pos)) = endpoints else {
+            continue;
+        };
+        for (wanted, preserved, at) in [
+            (wants_source, preserved_source, src_pos),
+            (wants_sink, preserved_sink, snk_pos),
+        ] {
+            if !wanted || preserved {
+                continue;
+            }
             let cloud_uid = state.uid_manager.alloc("");
             created.push(ViewElement::Cloud(view_element::Cloud {
                 uid: cloud_uid,
                 flow_uid,
-                x: cx,
-                y: cy,
+                x: at.x,
+                y: at.y,
                 compat: None,
             }));
-            state.positions.insert(cloud_uid, Position::new(cx, cy));
-        }
-        if wants_sink && !preserved_sink {
-            let pos = endpoints.map(|(_, sink)| *sink);
-            let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
-            let cloud_uid = state.uid_manager.alloc("");
-            created.push(ViewElement::Cloud(view_element::Cloud {
-                uid: cloud_uid,
-                flow_uid,
-                x: cx,
-                y: cy,
-                compat: None,
-            }));
-            state.positions.insert(cloud_uid, Position::new(cx, cy));
+            state.positions.insert(cloud_uid, at);
         }
     }
 
@@ -2047,6 +2052,32 @@ fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32
     }
 }
 
+/// Record in `state`'s caches where each flow in `flows` is now drawn -- its
+/// valve position and pipe template, and its clouds' positions -- after a
+/// geometry pass moved the elements themselves. Later steps read the caches:
+/// the settled-coordinate copy translates every flow by the offset from its
+/// cached valve position, so a flow whose valve slid with a stale cache comes
+/// back to the old spot with its whole pipe, pulling the ends off their stocks
+/// and clouds.
+fn record_flow_geometry(state: &mut LayoutState, flows: &HashSet<i32>) {
+    let mut moved: Vec<view_element::Flow> = Vec::new();
+    for elem in &state.elements {
+        match elem {
+            ViewElement::Flow(f) if flows.contains(&f.uid) => {
+                state.positions.insert(f.uid, Position::new(f.x, f.y));
+                moved.push(f.clone());
+            }
+            ViewElement::Cloud(c) if flows.contains(&c.flow_uid) => {
+                state.positions.insert(c.uid, Position::new(c.x, c.y));
+            }
+            _ => {}
+        }
+    }
+    for f in &moved {
+        record_flow_template(state, &canonicalize(&f.name), f);
+    }
+}
+
 /// Move each created or rebuilt parameter, module or stock whose shape still
 /// covers another shape to the nearest clear spot: rings a parameter's radius
 /// apart around where it sits, the first clear position by ring and then by
@@ -2129,7 +2160,8 @@ fn element_center(elem: &ViewElement) -> Option<(f64, f64)> {
 }
 
 /// Keep the bow of every curved link the view already drew whose endpoint this
-/// pass moved (a rebuilt flow's valve): its takeoff angle turns with the chord
+/// pass moved (a re-attached or rebuilt flow's valve, a variable redrawn in
+/// place that moved off a shape): its takeoff angle turns with the chord
 /// between its ends, so it curves as it did relative to that line.
 fn rebow_moved_links(elements: &mut [ViewElement], old_view: &datamodel::StockFlow) {
     use crate::diagram::connector::get_visual_center;
@@ -2184,7 +2216,8 @@ fn rebow_moved_links(elements: &mut [ViewElement], old_view: &datamodel::StockFl
 ///
 /// Contract for elements the patch did not touch: position AND
 /// `label_side` are returned byte-for-byte. A variable the view does not
-/// draw stays undrawn unless the patch names it. A label side is chosen only
+/// draw stays undrawn unless the patch names it, and no connector or cloud the
+/// pass creates references it. A label side is chosen only
 /// for elements created in this pass -- new variables, kind-changed
 /// rebuilds, and flows rebuilt because their attachment changed. The
 /// optimizer never revisits an existing side, even when a connector added
@@ -2500,6 +2533,7 @@ pub fn incremental_layout(
     // the valve took the pipe's middle, which may be where a person parked
     // something.
     keep_created_valves_clear(&mut state.elements, &retargeted);
+    record_flow_geometry(&mut state, &retargeted);
 
     // Step 4: Identify new elements and compute initial positions
     let new_elements = state.identify_new_elements(model).filtered(draws_element);
@@ -2607,8 +2641,10 @@ pub fn incremental_layout(
     let moves = |uid: i32| !standing_uids.contains(&uid) && !rebuilt_in_place.contains(&uid);
 
     if new_elements.is_empty() {
-        // No new element, so no flow is created or rebuilt: every flow in the
-        // view is untouched, and none of the flow geometry passes runs.
+        // No new element, so no flow is created: every flow in the view is
+        // untouched or was re-attached above, and none of the created-flow
+        // geometry passes runs. A re-attached valve or a variable redrawn in
+        // place may still have moved, so the curved links into them turn.
         diff_connectors(&mut state, &metadata, draws_connector, keeps_connector);
         diff_clouds(&mut state, &metadata);
         declutter::declutter_part(&mut state.elements, needs_label_placement, |_| false);
@@ -2620,6 +2656,7 @@ pub fn incremental_layout(
                 state.positions.insert(elem.get_uid(), Position::new(x, y));
             }
         }
+        rebow_moved_links(&mut state.elements, old_view);
         apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
         validate_view_completeness(&state, model, draws_element)?;
         return Ok(build_stock_flow_from_state(state, old_view));
@@ -2815,17 +2852,7 @@ pub fn incremental_layout(
     finish_flow_geometry(&mut state.elements, is_created);
     route_created_flows_around_stocks(&mut state.elements, &created_flows);
     keep_created_valves_clear(&mut state.elements, &created_flows);
-    for elem in &state.elements {
-        match elem {
-            ViewElement::Flow(f) if created_flows.contains(&f.uid) => {
-                state.positions.insert(f.uid, Position::new(f.x, f.y));
-            }
-            ViewElement::Cloud(c) if created_flows.contains(&c.flow_uid) => {
-                state.positions.insert(c.uid, Position::new(c.x, c.y));
-            }
-            _ => {}
-        }
-    }
+    record_flow_geometry(&mut state, &created_flows);
 
     // Step 7: Diff connectors and clouds
     diff_connectors(&mut state, &metadata, draws_connector, keeps_connector);
