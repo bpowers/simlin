@@ -1517,18 +1517,24 @@ fn clear_of_stocks(
     crate::editing::Point::new(p.x + ux * step, p.y + uy * step)
 }
 
-/// Where a cloud end goes when its cloud would cover another shape: slid back
-/// along its pipe toward `adjacent`, a cloud's radius at a time, to the first
-/// position whose cloud covers none of `shapes`, stopping a cloud's radius
-/// short of `adjacent`; `p` itself when it is clear or nothing along the pipe
-/// is. Flows that met a stock at its faces keep their ends there when the
-/// stock is deleted, and clouds on two perpendicular faces cover each other.
-fn clear_of_shapes(
-    p: crate::editing::Point,
-    adjacent: crate::editing::Point,
+/// Where a flow end that becomes a cloud goes when its cloud would cover
+/// another shape, and how many of the pipe's points it passes: slid along the
+/// pipe from the end toward the valve, a cloud's radius at a time, to the first
+/// position whose cloud covers none of `shapes`, stopping a cloud's and a
+/// valve's radius short of the valve; the end itself when it is clear or
+/// nothing short of the valve is. `path` runs from the end inward. Flows that
+/// met a deleted stock keep their ends on its faces, where clouds on two
+/// perpendicular faces cover each other, and an imported view can draw two
+/// flows leaving one face point along one line, so the end's own segment alone
+/// may not separate them.
+fn clear_along_pipe(
+    path: &[crate::editing::Point],
+    valve: crate::editing::Point,
     shapes: &[crate::diagram::common::Rect],
-) -> crate::editing::Point {
-    use crate::diagram::constants::CLOUD_RADIUS;
+) -> (crate::editing::Point, usize) {
+    use crate::diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
+    use crate::editing::{arc_position, point_at_arc};
+    const EPS: f64 = 1e-9;
     let covers = |q: crate::editing::Point| {
         shapes.iter().any(|r| {
             let w = r.right.min(q.x + CLOUD_RADIUS) - r.left.max(q.x - CLOUD_RADIUS);
@@ -1536,23 +1542,36 @@ fn clear_of_shapes(
             w > 0.0 && h > 0.0
         })
     };
-    if !covers(p) {
-        return p;
+    let Some(&end) = path.first() else {
+        return (crate::editing::Point::new(f64::NAN, f64::NAN), 0);
+    };
+    if path.len() < 2 || !covers(end) {
+        return (end, 0);
     }
-    let (dx, dy) = (adjacent.x - p.x, adjacent.y - p.y);
-    let len = dx.hypot(dy);
-    if len <= 2.0 * CLOUD_RADIUS {
-        return p;
+    let limit = arc_position(path, valve) - CLOUD_RADIUS - AUX_RADIUS;
+    let steps = (limit / CLOUD_RADIUS).floor();
+    if steps < 1.0 {
+        return (end, 0);
     }
-    let (ux, uy) = (dx / len, dy / len);
-    let steps = ((len - CLOUD_RADIUS) / CLOUD_RADIUS).floor() as usize;
-    (1..=steps)
-        .map(|i| {
-            let s = i as f64 * CLOUD_RADIUS;
-            crate::editing::Point::new(p.x + ux * s, p.y + uy * s)
+    let arcs: Vec<f64> = std::iter::once(0.0)
+        .chain(path.windows(2).scan(0.0, |total, w| {
+            *total += (w[1].x - w[0].x).hypot(w[1].y - w[0].y);
+            Some(*total)
+        }))
+        .collect();
+    (1..=steps as usize)
+        .map(|k| k as f64 * CLOUD_RADIUS)
+        .find_map(|s| {
+            let q = point_at_arc(path, s);
+            (!covers(q)).then(|| {
+                let passed = arcs[1..path.len() - 1]
+                    .iter()
+                    .filter(|&&a| a <= s + EPS)
+                    .count();
+                (q, passed)
+            })
         })
-        .find(|&q| !covers(q))
-        .unwrap_or(p)
+        .unwrap_or((end, 0))
 }
 
 /// What one end of a re-attached flow becomes.
@@ -1561,14 +1580,16 @@ enum RetargetedEnd {
     Kept,
     /// Attaches to a different stock, drawn at a center.
     Stock(i32, crate::editing::Point),
-    /// Becomes a cloud at a point.
-    Cloud(crate::editing::Point),
+    /// Becomes a cloud at a point, past this many of the pipe's points, which
+    /// the pipe drops.
+    Cloud(crate::editing::Point, usize),
 }
 
 /// Re-attach a drawn flow whose stocks changed by moving only the ends that
 /// changed, through the editing core that routes a touch edit's pipes: an end
 /// that becomes a cloud stays where it was (moved off a stock it no longer
-/// attaches to) and the pipe is healed; an end that attaches to another stock
+/// attaches to, and along its pipe off any shape its cloud would cover) and the
+/// pipe is healed; an end that attaches to another stock
 /// is routed to it with the rest of the pipe kept where it stays valid; when
 /// both do, the pipe is routed afresh, around every stock. The flow keeps its
 /// uid, name and valve (unless a new cloud would cover the valve, which then
@@ -1623,7 +1644,7 @@ fn retarget_flow(
         let by_uid: HashMap<i32, &ViewElement> =
             state.elements.iter().map(|e| (e.get_uid(), e)).collect();
         let mut ends: Vec<RetargetedEnd> = Vec::with_capacity(2);
-        for (i, (point, adjacent)) in [(0, 1), (n - 1, n - 2)].into_iter().enumerate() {
+        for (i, point) in [0, n - 1].into_iter().enumerate() {
             let attached = flow.points[point].attached_to_uid;
             let own_cloud = attached.is_some_and(
                 |u| matches!(by_uid.get(&u), Some(ViewElement::Cloud(c)) if c.flow_uid == flow_uid),
@@ -1635,15 +1656,22 @@ fn retarget_flow(
                     None => return false,
                 },
                 None if own_cloud => RetargetedEnd::Kept,
-                None => RetargetedEnd::Cloud(clear_of_shapes(
-                    clear_of_stocks(
-                        point_of(&flow.points[point]),
-                        point_of(&flow.points[adjacent]),
-                        &stocks,
-                    ),
-                    point_of(&flow.points[adjacent]),
-                    &shapes,
-                )),
+                None => {
+                    // The pipe from this end inward, its end moved off any
+                    // stock body first.
+                    let mut path: Vec<crate::editing::Point> =
+                        flow.points.iter().map(point_of).collect();
+                    if i == 1 {
+                        path.reverse();
+                    }
+                    path[0] = clear_of_stocks(path[0], path[1], &stocks);
+                    let (at, passed) = clear_along_pipe(
+                        &path,
+                        crate::editing::Point::new(flow.x, flow.y),
+                        &shapes,
+                    );
+                    RetargetedEnd::Cloud(at, passed)
+                }
             });
         }
         (ends, flow_terminals(&flow, |uid| by_uid.get(&uid).copied()))
@@ -1653,13 +1681,21 @@ fn retarget_flow(
     let mut base = flow.clone();
     let mut created_clouds: Vec<i32> = Vec::new();
     for (i, end) in ends.iter().enumerate() {
-        let point = if i == 0 { 0 } else { n - 1 };
         let terminal = match *end {
             RetargetedEnd::Kept => continue,
             RetargetedEnd::Stock(uid, center) => target_stock_terminal(uid, center),
-            RetargetedEnd::Cloud(at) => {
+            RetargetedEnd::Cloud(at, passed) => {
                 let uid = state.uid_manager.alloc("");
                 created_clouds.push(uid);
+                // Both ends stop short of the valve, so the points one end
+                // passes are never the other's.
+                if i == 0 {
+                    base.points.drain(..passed);
+                } else {
+                    let len = base.points.len();
+                    base.points.truncate(len - passed);
+                }
+                let point = if i == 0 { 0 } else { base.points.len() - 1 };
                 base.points[point].x = at.x;
                 base.points[point].y = at.y;
                 base.points[point].attached_to_uid = Some(uid);

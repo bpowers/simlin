@@ -1108,3 +1108,81 @@ fn a_created_parameter_left_on_a_shape_moves_to_the_nearest_clear_spot() {
         "not created by the pass: it stays"
     );
 }
+
+#[test]
+fn clouds_of_flows_leaving_a_deleted_stock_at_one_point_separate() {
+    // An imported view (thyroid's plasma T4) draws two flows leaving middle
+    // from the same point of its top face, rising together a short way before
+    // turning apart to a and b. Deleting middle turns both ends into clouds at
+    // that one point; each slides along its own pipe, past the shared rise,
+    // until its cloud covers nothing.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("a", &["to_a"], &[])),
+        datamodel::Variable::Stock(stock("middle", &[], &["to_a", "to_b"])),
+        datamodel::Variable::Stock(stock("b", &["to_b"], &[])),
+        datamodel::Variable::Flow(flow("to_a", "1")),
+        datamodel::Variable::Flow(flow("to_b", "1")),
+    ]);
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let uid = |view: &datamodel::StockFlow, name: &str| {
+        view.elements
+            .iter()
+            .find(|e| e.get_name().is_some_and(|n| canonicalize(n) == name))
+            .map(ViewElement::get_uid)
+            .unwrap_or_else(|| panic!("{name} drawn"))
+    };
+    let (a, middle, b) = (uid(&base, "a"), uid(&base, "middle"), uid(&base, "b"));
+    let point = |x: f64, y: f64, attached: Option<i32>| view_element::FlowPoint {
+        x,
+        y,
+        attached_to_uid: attached,
+    };
+    for e in &mut base.elements {
+        match e {
+            ViewElement::Stock(s) if s.uid == a => (s.x, s.y) = (325.0, 595.0),
+            ViewElement::Stock(s) if s.uid == middle => (s.x, s.y) = (610.0, 595.0),
+            ViewElement::Stock(s) if s.uid == b => (s.x, s.y) = (920.0, 595.0),
+            ViewElement::Flow(f) if canonicalize(&f.name) == "to_a" => {
+                f.points = vec![
+                    point(610.0, 577.5, Some(middle)),
+                    point(610.0, 540.0, None),
+                    point(325.0, 540.0, None),
+                    point(325.0, 577.5, Some(a)),
+                ];
+                (f.x, f.y) = (465.0, 540.0);
+            }
+            ViewElement::Flow(f) if canonicalize(&f.name) == "to_b" => {
+                f.points = vec![
+                    point(610.0, 577.5, Some(middle)),
+                    point(610.0, 539.0, None),
+                    point(920.0, 539.0, None),
+                    point(920.0, 577.5, Some(b)),
+                ];
+                (f.x, f.y) = (770.0, 539.0);
+            }
+            _ => {}
+        }
+    }
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::DeleteVariable {
+            ident: "middle".to_string(),
+        }],
+    );
+    let mut changed: HashSet<i32> = HashSet::new();
+    let mut flows: HashSet<i32> = HashSet::new();
+    for name in ["to_a", "to_b"] {
+        let f = flow_named(&view, name);
+        flows.insert(f.uid);
+        changed.insert(f.uid);
+        changed.extend(f.points.iter().filter_map(|p| p.attached_to_uid));
+    }
+    changed.remove(&a);
+    changed.remove(&b);
+    assert_eq!(
+        overlaps_involving(&view, &changed),
+        Vec::<(i32, i32)>::new()
+    );
+    assert_eq!(strict_violations(&view, &flows), "");
+}
