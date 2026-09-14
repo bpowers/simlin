@@ -1045,3 +1045,66 @@ fn uid_named(view: &datamodel::StockFlow, name: &str) -> i32 {
         .map(ViewElement::get_uid)
         .unwrap_or_else(|| panic!("{name} drawn"))
 }
+
+#[test]
+fn a_created_parameter_left_on_a_shape_moves_to_the_nearest_clear_spot() {
+    // Rows over the pass's arms, on elements in the shape incremental layout
+    // hands it after the declutter: a created parameter still on a shape moves
+    // to the nearest clear position; one clear of every shape stays; an
+    // element the pass did not create stays where a person put it, overlap
+    // included. The composition through production is pinned by the battery's
+    // catastrophe fixture, where an inserted intermediate landed on an alias
+    // the jammed relaxation could not clear.
+    use crate::diagram::constants::AUX_RADIUS;
+    let aux = |uid: i32, x: f64| {
+        ViewElement::Aux(view_element::Aux {
+            name: format!("a{uid}"),
+            uid,
+            x,
+            y: 100.0,
+            label_side: LabelSide::Bottom,
+            compat: None,
+        })
+    };
+    let alias = ViewElement::Alias(view_element::Alias {
+        uid: 1,
+        alias_of_uid: 99,
+        x: 200.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    });
+    let center = |elements: &[ViewElement]| {
+        elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Aux(a) => Some((a.x, a.y)),
+                _ => None,
+            })
+            .expect("the parameter")
+    };
+
+    let mut elements = vec![alias.clone(), aux(7, 205.0)];
+    keep_created_nodes_clear(&mut elements, |uid| uid == 7);
+    assert_eq!(
+        center(&elements),
+        (205.0 + 2.0 * AUX_RADIUS, 100.0),
+        "a created parameter on a shape takes the nearest clear ring"
+    );
+
+    let mut elements = vec![alias.clone(), aux(7, 260.0)];
+    keep_created_nodes_clear(&mut elements, |uid| uid == 7);
+    assert_eq!(
+        center(&elements),
+        (260.0, 100.0),
+        "clear of every shape: it stays"
+    );
+
+    let mut elements = vec![alias, aux(7, 205.0)];
+    keep_created_nodes_clear(&mut elements, |_| false);
+    assert_eq!(
+        center(&elements),
+        (205.0, 100.0),
+        "not created by the pass: it stays"
+    );
+}

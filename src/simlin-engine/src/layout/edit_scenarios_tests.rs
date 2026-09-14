@@ -95,17 +95,8 @@ const FIXTURES: [Fixture; 13] = [
     },
 ];
 
-/// A created free-floating element whose footprint the declutter cannot clear
-/// (the relaxation jams in a crowded region) stays on another shape.
-const CREATED_ELEMENT_ON_SHAPE: &str = "created element left on a shape when relaxation jams";
-
 /// `(fixture, scenario, finding kind, the defect behind it)`.
-const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[(
-    "catastrophe",
-    "insert_intermediate",
-    "shape_overlap",
-    CREATED_ELEMENT_ON_SHAPE,
-)];
+const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[];
 
 fn load(rel: &str) -> datamodel::Project {
     let path = format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"));

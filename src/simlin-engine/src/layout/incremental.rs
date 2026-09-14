@@ -1990,6 +1990,65 @@ fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32
     }
 }
 
+/// Move each created parameter or module whose shape still covers another shape
+/// after the declutter to the nearest clear spot: rings a parameter's radius
+/// apart around where it landed, the first clear position by ring and then by
+/// angle. The declutter's relaxation pushes footprints apart but can jam in a
+/// crowded region and leave a created element where it landed; nothing drawn
+/// before the sync may move, so the created element takes the clearance.
+/// `moves` accepts the uids this pass created.
+fn keep_created_nodes_clear(elements: &mut [ViewElement], moves: impl Fn(i32) -> bool) {
+    use crate::diagram::common::Rect;
+    use crate::diagram::constants::AUX_RADIUS;
+    use crate::layout::metrics::node_shape_box;
+    const MAX_RINGS: usize = 24;
+    let overlaps = |a: &Rect, b: &Rect| {
+        a.right.min(b.right) - a.left.max(b.left) > 0.0
+            && a.bottom.min(b.bottom) - a.top.max(b.top) > 0.0
+    };
+    for i in 0..elements.len() {
+        if !matches!(elements[i], ViewElement::Aux(_) | ViewElement::Module(_))
+            || !moves(elements[i].get_uid())
+        {
+            continue;
+        }
+        let Some(shape) = node_shape_box(&elements[i]) else {
+            continue;
+        };
+        let others: Vec<Rect> = elements
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .filter_map(|(_, e)| node_shape_box(e))
+            .collect();
+        let clear = |dx: f64, dy: f64| {
+            let moved = Rect {
+                left: shape.left + dx,
+                right: shape.right + dx,
+                top: shape.top + dy,
+                bottom: shape.bottom + dy,
+            };
+            !others.iter().any(|r| overlaps(&moved, r))
+        };
+        if clear(0.0, 0.0) {
+            continue;
+        }
+        let found = (1..=MAX_RINGS).find_map(|k| {
+            let radius = k as f64 * AUX_RADIUS;
+            let n = 8 * k;
+            (0..n)
+                .map(|m| {
+                    let angle = std::f64::consts::TAU * m as f64 / n as f64;
+                    (radius * angle.cos(), radius * angle.sin())
+                })
+                .find(|&(dx, dy)| clear(dx, dy))
+        });
+        if let Some((dx, dy)) = found {
+            translate_view_element(&mut elements[i], dx, dy);
+        }
+    }
+}
+
 /// Keep the bow of every curved link the view already drew whose endpoint this
 /// pass moved (a rebuilt flow's valve): its takeoff angle turns with the chord
 /// between its ends, so it curves as it did relative to that line.
@@ -2687,6 +2746,7 @@ pub fn incremental_layout(
     // wins; the human can move it).
     polish::polish_crossings_for(&mut state.elements, moves);
     declutter::declutter_part(&mut state.elements, needs_label_placement, moves);
+    keep_created_nodes_clear(&mut state.elements, moves);
     // The decluttered free-floating elements' positions, for the loop arcs.
     for elem in &state.elements {
         let (uid, x, y) = match elem {
