@@ -168,7 +168,7 @@ contract from an edit's inputs and outputs alone, in three layers:
 - **Scope.** An untouched element comes back exactly as it was. Touched is
   derived from the two models and the patch: a deleted variable, a renamed one
   (only its name changes), one whose kind changed (rebuilt, keeping its center
-  unless it became a flow), a flow whose attachment changed. A link whose
+  unless it became a flow or its new shape there would cover another shape), a flow whose attachment changed. A link whose
   dependency survives keeps its uid, endpoints, polarity, and shape, and a link
   drawing no dependency the model has survives unless the patch names its
   reader. A connector the view did not draw is drawn only into a variable the

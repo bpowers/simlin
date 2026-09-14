@@ -1186,3 +1186,95 @@ fn clouds_of_flows_leaving_a_deleted_stock_at_one_point_separate() {
     );
     assert_eq!(strict_violations(&view, &flows), "");
 }
+
+#[test]
+fn a_reattached_flow_valve_lands_clear_of_a_parameter() {
+    // transfer drains source into sink. A person drew its valve just off
+    // source's face and parked note at the pipe's middle. Restating source
+    // without transfer turns that end into a cloud, which covers the valve;
+    // the valve moves, but not onto note.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("source", &[], &["transfer"])),
+        datamodel::Variable::Stock(stock("sink", &["transfer"], &[])),
+        datamodel::Variable::Flow(flow("transfer", "10")),
+        datamodel::Variable::Aux(aux("note", "1")),
+    ]);
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let (source, sink) = (uid_named(&base, "source"), uid_named(&base, "sink"));
+    let point = |x: f64, y: f64, attached: Option<i32>| view_element::FlowPoint {
+        x,
+        y,
+        attached_to_uid: attached,
+    };
+    for e in &mut base.elements {
+        match e {
+            ViewElement::Stock(s) if s.uid == source => (s.x, s.y) = (100.0, 100.0),
+            ViewElement::Stock(s) if s.uid == sink => (s.x, s.y) = (400.0, 100.0),
+            ViewElement::Aux(a) if canonicalize(&a.name) == "note" => (a.x, a.y) = (250.0, 100.0),
+            ViewElement::Flow(f) if canonicalize(&f.name) == "transfer" => {
+                f.points = vec![
+                    point(122.5, 100.0, Some(source)),
+                    point(377.5, 100.0, Some(sink)),
+                ];
+                (f.x, f.y) = (135.0, 100.0);
+            }
+            _ => {}
+        }
+    }
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertStock(stock("source", &[], &[]))],
+    );
+    let transfer = flow_named(&view, "transfer");
+    let mut changed: HashSet<i32> = [transfer.uid].into_iter().collect();
+    changed.extend(transfer.points.iter().filter_map(|p| p.attached_to_uid));
+    changed.remove(&sink);
+    assert_eq!(
+        overlaps_involving(&view, &changed),
+        Vec::<(i32, i32)>::new()
+    );
+    assert_eq!(
+        strict_violations(&view, &[transfer.uid].into_iter().collect()),
+        ""
+    );
+}
+
+#[test]
+fn a_variable_redrawn_as_a_larger_shape_moves_off_its_neighbour() {
+    // a and b are parameters a person drew 30 px apart. Turning a into a stock
+    // redraws it at its old center, where a stock's body covers b; it moves to
+    // the nearest spot clear of every shape, and b stays where it was.
+    let project = project_with(vec![
+        datamodel::Variable::Aux(aux("a", "1")),
+        datamodel::Variable::Aux(aux("b", "2")),
+    ]);
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    for e in &mut base.elements {
+        match e {
+            ViewElement::Aux(x) if canonicalize(&x.name) == "a" => (x.x, x.y) = (100.0, 100.0),
+            ViewElement::Aux(x) if canonicalize(&x.name) == "b" => (x.x, x.y) = (130.0, 100.0),
+            _ => {}
+        }
+    }
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertStock(stock("a", &[], &[]))],
+    );
+    let a = uid_named(&view, "a");
+    assert_eq!(
+        overlaps_involving(&view, &[a].into_iter().collect()),
+        Vec::<(i32, i32)>::new()
+    );
+    assert_eq!(
+        center_named(&view, "b"),
+        Some((130.0, 100.0)),
+        "b stays put"
+    );
+    let (x, y) = center_named(&view, "a").expect("a drawn");
+    assert!(
+        (x - 100.0).hypot(y - 100.0) <= crate::diagram::constants::STOCK_WIDTH,
+        "a moves only as far as it must: ({x}, {y})"
+    );
+}

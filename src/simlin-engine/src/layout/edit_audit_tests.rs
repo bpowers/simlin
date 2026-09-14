@@ -312,6 +312,16 @@ fn row_for(kind: FindingKind) {
                 |v| set_center(element_named(v, "average_lifespan"), x, y),
                 |v| set_center(element_named(v, "average_lifespan"), x + 30.0, y),
             );
+            // Where the stock's body at the old center would cover another
+            // shape (birth_rate parked there), moving off it is allowed.
+            let blocked = e.audit(|v| {
+                set_center(element_named(v, "average_lifespan"), x + 80.0, y);
+                set_center(element_named(v, "birth_rate"), x, y);
+            });
+            assert!(
+                !blocked.kinds().contains(&kind),
+                "a rebuilt element whose old center is covered may move"
+            );
         }
         FindingKind::ViewPropertiesChanged => {
             let e = edited(POPULATION, ScenarioKind::AddParameter);

@@ -1972,10 +1972,11 @@ fn route_created_flows_around_stocks(elements: &mut [ViewElement], created: &Has
     }
 }
 
-/// Slide the valve of every flow this pass created along its pipe to the
-/// position nearest where it sits whose valve covers no other shape, when where
-/// it sits covers one: a person may have parked a parameter, or drawn another
-/// valve or cloud, exactly where placement puts a new valve. The valve keeps
+/// Slide the valve of every flow in `created` (the flows this pass created, or
+/// the ones it re-attached) along its pipe to the position nearest where it
+/// sits whose valve covers no other shape, when where it sits covers one: a
+/// person may have parked a parameter, or drawn another valve or cloud, exactly
+/// where placement puts a valve. The valve keeps
 /// `VALVE_CLAMP_MARGIN` from the pipe's ends; a pipe with no clear position
 /// keeps its valve.
 fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32>) {
@@ -2026,13 +2027,15 @@ fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32
     }
 }
 
-/// Move each created parameter or module whose shape still covers another shape
-/// after the declutter to the nearest clear spot: rings a parameter's radius
-/// apart around where it landed, the first clear position by ring and then by
+/// Move each created or rebuilt parameter, module or stock whose shape still
+/// covers another shape to the nearest clear spot: rings a parameter's radius
+/// apart around where it sits, the first clear position by ring and then by
 /// angle. The declutter's relaxation pushes footprints apart but can jam in a
-/// crowded region and leave a created element where it landed; nothing drawn
-/// before the sync may move, so the created element takes the clearance.
-/// `moves` accepts the uids this pass created.
+/// crowded region and leave a created element where it landed, and a variable
+/// redrawn in place as a stock takes a larger body at its old center; nothing
+/// drawn before the sync may move, so the created or rebuilt element takes the
+/// clearance. `moves` accepts the uids this pass created or rebuilt; a stock a
+/// flow attaches to stays, since moving it would tear the pipe.
 fn keep_created_nodes_clear(elements: &mut [ViewElement], moves: impl Fn(i32) -> bool) {
     use crate::diagram::common::Rect;
     use crate::diagram::constants::AUX_RADIUS;
@@ -2043,9 +2046,19 @@ fn keep_created_nodes_clear(elements: &mut [ViewElement], moves: impl Fn(i32) ->
             && a.bottom.min(b.bottom) - a.top.max(b.top) > 0.0
     };
     for i in 0..elements.len() {
-        if !matches!(elements[i], ViewElement::Aux(_) | ViewElement::Module(_))
-            || !moves(elements[i].get_uid())
+        if !matches!(
+            elements[i],
+            ViewElement::Aux(_) | ViewElement::Module(_) | ViewElement::Stock(_)
+        ) || !moves(elements[i].get_uid())
         {
+            continue;
+        }
+        let uid = elements[i].get_uid();
+        let attached = elements.iter().any(|e| {
+            matches!(e, ViewElement::Flow(f)
+                if f.points.iter().any(|p| p.attached_to_uid == Some(uid)))
+        });
+        if attached {
             continue;
         }
         let Some(shape) = node_shape_box(&elements[i]) else {
@@ -2082,6 +2095,16 @@ fn keep_created_nodes_clear(elements: &mut [ViewElement], moves: impl Fn(i32) ->
         if let Some((dx, dy)) = found {
             translate_view_element(&mut elements[i], dx, dy);
         }
+    }
+}
+
+/// The center of a parameter, module or stock.
+fn element_center(elem: &ViewElement) -> Option<(f64, f64)> {
+    match elem {
+        ViewElement::Aux(a) => Some((a.x, a.y)),
+        ViewElement::Module(m) => Some((m.x, m.y)),
+        ViewElement::Stock(s) => Some((s.x, s.y)),
+        _ => None,
     }
 }
 
@@ -2453,6 +2476,10 @@ pub fn incremental_layout(
             state.remove_for_rebuild(&flow_ident);
         }
     }
+    // A re-attached flow keeps its valve unless a new cloud covered it, when
+    // the valve took the pipe's middle, which may be where a person parked
+    // something.
+    keep_created_valves_clear(&mut state.elements, &retargeted);
 
     // Step 4: Identify new elements and compute initial positions
     let new_elements = state.identify_new_elements(model).filtered(draws_element);
@@ -2505,8 +2532,9 @@ pub fn incremental_layout(
     // A variable whose kind changed to a stock, a parameter or a module is
     // redrawn at its old element's center: an agent turning a parameter into a
     // stock changed what it is, not where a person put it. Its label side is
-    // chosen afresh (it is absent from `pinned_labels`), but no pass below moves
-    // it. A variable that became a flow is placed as a new flow, since its valve
+    // chosen afresh (it is absent from `pinned_labels`), and no pass below moves
+    // it, unless its new shape covers another shape at that center
+    // (`keep_created_nodes_clear`). A variable that became a flow is placed as a new flow, since its valve
     // belongs on the pipe between its stocks.
     let mut rebuilt_in_place: HashSet<i32> = HashSet::new();
     let mut in_place_idents: HashSet<String> = HashSet::new();
@@ -2564,6 +2592,14 @@ pub fn incremental_layout(
         diff_connectors(&mut state, &metadata, draws_connector, keeps_connector);
         diff_clouds(&mut state, &metadata);
         declutter::declutter_part(&mut state.elements, needs_label_placement, |_| false);
+        keep_created_nodes_clear(&mut state.elements, |uid| rebuilt_in_place.contains(&uid));
+        for elem in &state.elements {
+            if rebuilt_in_place.contains(&elem.get_uid())
+                && let Some((x, y)) = element_center(elem)
+            {
+                state.positions.insert(elem.get_uid(), Position::new(x, y));
+            }
+        }
         apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
         validate_view_completeness(&state, model, draws_element)?;
         return Ok(build_stock_flow_from_state(state, old_view));
@@ -2782,13 +2818,16 @@ pub fn incremental_layout(
     // wins; the human can move it).
     polish::polish_crossings_for(&mut state.elements, moves);
     declutter::declutter_part(&mut state.elements, needs_label_placement, moves);
-    keep_created_nodes_clear(&mut state.elements, moves);
+    keep_created_nodes_clear(&mut state.elements, |uid| {
+        moves(uid) || rebuilt_in_place.contains(&uid)
+    });
     // The decluttered free-floating elements' positions, for the loop arcs.
     for elem in &state.elements {
         let (uid, x, y) = match elem {
             ViewElement::Aux(a) => (a.uid, a.x, a.y),
             ViewElement::Module(m) => (m.uid, m.x, m.y),
             ViewElement::Alias(a) => (a.uid, a.x, a.y),
+            ViewElement::Stock(s) if rebuilt_in_place.contains(&s.uid) => (s.uid, s.x, s.y),
             _ => continue,
         };
         if let Some(pos) = state.positions.get_mut(&uid) {

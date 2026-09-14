@@ -14,7 +14,8 @@
 //!   was. What counts as touched is derived from the two models and the patch:
 //!   a deleted variable (its element, clouds, aliases and links go), a renamed
 //!   one (only its name changes), one whose kind changed (it is rebuilt, and
-//!   anything but a flow keeps its center), and a flow whose attachment changed
+//!   anything but a flow keeps its center, unless its new shape there would
+//!   cover another shape), and a flow whose attachment changed
 //!   (its pipe, valve and clouds may be rebuilt). A link whose dependency
 //!   survives keeps its uid, endpoints and polarity, and its shape too unless
 //!   an endpoint moved, when it keeps at least its kind (straight or curved).
@@ -105,7 +106,8 @@ pub enum FindingKind {
     /// name it. An author's view that leaves a variable out keeps it out.
     UnrelatedElementAdded,
     /// A variable whose kind changed to anything but a flow was rebuilt away
-    /// from where its old element was.
+    /// from where its old element was, although its new shape at the old center
+    /// would cover no other shape.
     RebuiltElementMoved,
     /// The view's own properties (viewport, zoom, name, font, polarity style)
     /// changed.
@@ -874,7 +876,27 @@ fn scope_findings(
                             subject: i1.clone(),
                             distance: d,
                         });
-                        if after.kinds.get(&i1) != Some(&VarKind::Flow) && d > GEOMETRY_EPSILON {
+                        // A larger body at the old center (a parameter turned
+                        // into a stock) may have to move off what it covers.
+                        let rebuilt_uid = rebuilt.map(ViewElement::get_uid);
+                        let blocked = rebuilt.and_then(node_shape_box).is_some_and(|b| {
+                            let (dx, dy) = (c0.0 - c1.0, c0.1 - c1.1);
+                            after
+                                .view
+                                .elements
+                                .iter()
+                                .filter(|e| Some(e.get_uid()) != rebuilt_uid)
+                                .filter_map(node_shape_box)
+                                .any(|r| {
+                                    let w = r.right.min(b.right + dx) - r.left.max(b.left + dx);
+                                    let h = r.bottom.min(b.bottom + dy) - r.top.max(b.top + dy);
+                                    w > 0.0 && h > 0.0 && w * h > MIN_OVERLAP_AREA
+                                })
+                        });
+                        if after.kinds.get(&i1) != Some(&VarKind::Flow)
+                            && d > GEOMETRY_EPSILON
+                            && !blocked
+                        {
                             findings.push(Finding::new(
                                 FindingKind::RebuiltElementMoved,
                                 subject,
