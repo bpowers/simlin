@@ -20,7 +20,7 @@ use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
 
 use super::edit_audit::{Displacement, EditAudit, EditInput, Finding, FindingKind, audit_edit};
 use super::metadata::ComputedMetadata;
-use super::{compute_layout_metadata, generate_best_layout, incremental_layout};
+use super::{compute_dependency_metadata, generate_best_layout, incremental_layout};
 
 /// One kind of edit.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -431,7 +431,7 @@ struct Targets<'a> {
 impl<'a> Targets<'a> {
     fn new(project: &'a datamodel::Project, model_name: &'a str) -> Option<Targets<'a>> {
         let model = project.get_model(model_name)?;
-        let meta = compute_layout_metadata(project, model_name, None)?;
+        let meta = compute_dependency_metadata(project, model_name, None)?;
         Some(Targets {
             project,
             model_name,

@@ -18,9 +18,12 @@
 //!   (its pipe, valve and clouds may be rebuilt). A link whose dependency
 //!   survives keeps its uid, endpoints and polarity, and its shape too unless
 //!   an endpoint moved, when it keeps at least its kind (straight or curved).
+//!   A link drawing no dependency the model has (an author's connector the
+//!   extraction does not explain) survives unless the patch names its reader.
 //!   A connector the view did not draw is drawn only where the edit is about
 //!   it: into a variable the patch names, or between elements drawn for the
-//!   first time. A connector an author left out elsewhere stays out.
+//!   first time, and a variable the view did not draw is drawn only when the
+//!   patch names it. What an author left out elsewhere stays out.
 //!   The one change allowed to an untouched element is wiring a flow endpoint
 //!   the view left unattached to the flow's own cloud, which moves nothing.
 //! - **Consistency.** The view after the edit agrees with the model after it:
@@ -48,7 +51,7 @@ use crate::diagram::common::Rect;
 use crate::editing::invariants::{Mode, check_flow_invariants};
 use crate::patch::{ModelOperation, ModelPatch};
 
-use super::compute_layout_metadata;
+use super::compute_dependency_metadata;
 use super::config::LayoutConfig;
 use super::metadata::ComputedMetadata;
 use super::metrics::{MetricWeights, compute_layout_metrics, node_shape_box};
@@ -90,13 +93,17 @@ pub enum FindingKind {
     /// changed its endpoints, polarity or shape.
     UntouchedLinkChanged,
     /// A link whose dependency the edit removed (or one of whose ends it
-    /// deleted) is still drawn.
+    /// deleted), or a link drawing no dependency into a variable the patch
+    /// names, is still drawn.
     StaleLinkRemains,
     /// A link the view did not draw was added for a dependency the edit is not
     /// about: the patch names neither its reader, nor was either end drawn for
     /// the first time. An author's view that leaves a connector out keeps it
     /// out.
     UnrelatedLinkAdded,
+    /// A variable the view did not draw was drawn although the patch does not
+    /// name it. An author's view that leaves a variable out keeps it out.
+    UnrelatedElementAdded,
     /// A variable whose kind changed to anything but a flow was rebuilt away
     /// from where its old element was.
     RebuiltElementMoved,
@@ -139,12 +146,13 @@ pub enum FindingKind {
 }
 
 impl FindingKind {
-    pub const ALL: [FindingKind; 22] = [
+    pub const ALL: [FindingKind; 23] = [
         FindingKind::DeletedElementRemains,
         FindingKind::UntouchedElementChanged,
         FindingKind::UntouchedLinkChanged,
         FindingKind::StaleLinkRemains,
         FindingKind::UnrelatedLinkAdded,
+        FindingKind::UnrelatedElementAdded,
         FindingKind::RebuiltElementMoved,
         FindingKind::ViewPropertiesChanged,
         FindingKind::UidProblem,
@@ -172,6 +180,7 @@ impl FindingKind {
             FindingKind::UntouchedLinkChanged => "untouched_link_changed",
             FindingKind::StaleLinkRemains => "stale_link_remains",
             FindingKind::UnrelatedLinkAdded => "unrelated_link_added",
+            FindingKind::UnrelatedElementAdded => "unrelated_element_added",
             FindingKind::RebuiltElementMoved => "rebuilt_element_moved",
             FindingKind::ViewPropertiesChanged => "view_properties_changed",
             FindingKind::UidProblem => "uid_problem",
@@ -199,6 +208,7 @@ impl FindingKind {
             | FindingKind::UntouchedLinkChanged
             | FindingKind::StaleLinkRemains
             | FindingKind::UnrelatedLinkAdded
+            | FindingKind::UnrelatedElementAdded
             | FindingKind::RebuiltElementMoved
             | FindingKind::ViewPropertiesChanged => Layer::Scope,
             FindingKind::UidProblem
@@ -267,9 +277,6 @@ pub struct EditAudit {
     /// Elements the edit rebuilt (kind changes, re-attached flows), and how far
     /// each one's center or valve moved.
     pub displacements: Vec<Displacement>,
-    /// Variables that existed before the edit with no element and have one
-    /// after it.
-    pub completed_variables: Vec<String>,
     /// The layout-quality cost of the view before and after the edit.
     pub cost_before: f64,
     pub cost_after: f64,
@@ -409,7 +416,7 @@ impl<'a> Side<'a> {
         view: &'a StockFlow,
     ) -> Option<Side<'a>> {
         let model = project.get_model(model_name)?;
-        let meta = compute_layout_metadata(project, model_name, None)?;
+        let meta = compute_dependency_metadata(project, model_name, None)?;
         let kinds = model
             .variables
             .iter()
@@ -693,6 +700,9 @@ fn scope_findings(
     audit: &mut EditAudit,
 ) {
     let image = |i: &str| renames.image(i);
+    // The variables the patch names, by their idents after it: the readers
+    // whose connectors the edit is about.
+    let named: HashSet<String> = patch.ops.iter().filter_map(named_by_op).collect();
     let deleted = |i0: &str| !after.kinds.contains_key(&renames.image(i0));
     let kind_changed = |i0: &str| {
         matches!(
@@ -738,7 +748,16 @@ fn scope_findings(
                     continue;
                 };
                 let edge = (renames.image(&from), renames.image(&to));
-                let survives = !deleted(&from) && !deleted(&to) && after.edges.contains(&edge);
+                // A link drawing no dependency is an author's choice the
+                // extraction does not explain (a module port, an input the
+                // dependency walk does not see, a deliberate annotation), so
+                // only an edit to its reader may drop it. A dependency changes
+                // only through its reader or a deleted end, so a link whose
+                // dependency the edit removed always names a reader the patch
+                // names.
+                let survives = !deleted(&from)
+                    && !deleted(&to)
+                    && (after.edges.contains(&edge) || !named.contains(&edge.1));
                 match (survives, e1) {
                     (false, Some(_)) => findings.push(Finding::new(
                         FindingKind::StaleLinkRemains,
@@ -903,9 +922,9 @@ fn scope_findings(
 
     // A connector the view did not draw may be drawn into a variable the patch
     // names, or between elements drawn for the first time, which carry no
-    // author's choice about their connectors. Anywhere else it is a change to
-    // a part of the diagram the edit is not about.
-    let named: HashSet<String> = patch.ops.iter().filter_map(named_by_op).collect();
+    // author's choice about their connectors; a variable the view did not draw
+    // may be drawn only when the patch names it. Anywhere else it is a change
+    // to a part of the diagram the edit is not about.
     let untouched_var = |i1: &str| {
         let i0 = renames.preimage(i1);
         before.kinds.contains_key(&i0) && !kind_changed(&i0)
@@ -951,8 +970,14 @@ fn scope_findings(
         } else if let Some(i1) = named_ident(e1)
             && untouched_var(&i1)
             && !before_drawn.contains(&i1)
+            && !named.contains(&i1)
         {
-            audit.completed_variables.push(i1);
+            audit.findings.push(Finding::new(
+                FindingKind::UnrelatedElementAdded,
+                i1,
+                "the view did not draw it and the patch does not name it",
+                region_of(e1),
+            ));
         }
     }
 }

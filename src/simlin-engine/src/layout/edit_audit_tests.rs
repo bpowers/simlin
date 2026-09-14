@@ -188,6 +188,22 @@ fn push_link(view: &mut StockFlow, from_uid: i32, to_uid: i32) {
     }));
 }
 
+/// Remove average_lifespan and the links touching it from a population view.
+fn undraw_average_lifespan(view: &mut StockFlow) {
+    let Some(uid) = view
+        .elements
+        .iter()
+        .find(|el| named_ident(el).as_deref() == Some("average_lifespan"))
+        .map(ViewElement::get_uid)
+    else {
+        return;
+    };
+    view.elements.retain(|el| match el {
+        ViewElement::Link(l) => l.from_uid != uid && l.to_uid != uid,
+        other => other.get_uid() != uid,
+    });
+}
+
 fn row_for(kind: FindingKind) {
     match kind {
         FindingKind::DeletedElementRemains => {
@@ -256,6 +272,26 @@ fn row_for(kind: FindingKind) {
             e.row(kind, without, |v| {
                 without(v);
                 push_link(v, from, to);
+            });
+        }
+        FindingKind::UnrelatedElementAdded => {
+            // The author's view leaves average_lifespan undrawn. An edit adding
+            // births_multiplier is not about it, so the correct view still
+            // leaves it out.
+            let element = shipped_view(&load(POPULATION))
+                .elements
+                .iter()
+                .find(|el| named_ident(el).as_deref() == Some("average_lifespan"))
+                .cloned()
+                .expect("average_lifespan is drawn");
+            let e = edited_from(
+                POPULATION,
+                ScenarioKind::AddParameter,
+                undraw_average_lifespan,
+            );
+            e.row(kind, undraw_average_lifespan, |v| {
+                undraw_average_lifespan(v);
+                v.elements.push(element);
             });
         }
         FindingKind::RebuiltElementMoved => {
@@ -525,6 +561,43 @@ fn every_finding_kind_is_raised_exactly_where_it_applies() {
     for kind in FindingKind::ALL {
         row_for(kind);
     }
+}
+
+#[test]
+fn a_link_drawing_no_dependency_goes_only_with_an_edit_to_its_reader() {
+    // A link drawing no dependency is an author's choice the extraction does
+    // not explain. Adding births_multiplier names births, not deaths: a link
+    // birth_rate -> deaths must survive, and a link average_lifespan -> births
+    // must go.
+    const EXTRA: i32 = 90_000;
+    let with_link = |from: &'static str, to: &'static str| {
+        move |v: &mut StockFlow| {
+            if v.elements.iter().any(|el| el.get_uid() == EXTRA) {
+                return;
+            }
+            let (from_uid, to_uid) = (uid_named(v, from), uid_named(v, to));
+            v.elements.push(ViewElement::Link(view_element::Link {
+                uid: EXTRA,
+                from_uid,
+                to_uid,
+                shape: LinkShape::Straight,
+                polarity: None,
+            }));
+        }
+    };
+    let without_link = |v: &mut StockFlow| v.elements.retain(|el| el.get_uid() != EXTRA);
+
+    let unnamed_reader = with_link("birth_rate", "deaths");
+    let e = edited_from(POPULATION, ScenarioKind::AddParameter, unnamed_reader);
+    e.row(
+        FindingKind::UntouchedLinkChanged,
+        unnamed_reader,
+        without_link,
+    );
+
+    let named_reader = with_link("average_lifespan", "births");
+    let e = edited_from(POPULATION, ScenarioKind::AddParameter, named_reader);
+    e.row(FindingKind::StaleLinkRemains, without_link, named_reader);
 }
 
 #[test]

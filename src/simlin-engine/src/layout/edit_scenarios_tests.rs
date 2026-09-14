@@ -4,7 +4,10 @@
 
 //! The scenario battery: every `ScenarioKind` driven over hand-drawn and
 //! imported views through the production patch and sync path, with every
-//! finding the audit raises pinned.
+//! finding the audit raises pinned. The imported fixtures are Vensim views
+//! with aliases, links the dependency extraction does not explain, variables
+//! the author did not draw, and flows that meet at one stock face: the shapes
+//! of view a sync meets when an agent edits a published model.
 //!
 //! `KNOWN_DEFECTS` lists what the sync still gets wrong, one row per (fixture,
 //! scenario, finding kind), each naming the defect. The test fails on a finding
@@ -24,7 +27,7 @@ struct Fixture {
     straighten_links: bool,
 }
 
-const FIXTURES: [Fixture; 8] = [
+const FIXTURES: [Fixture; 13] = [
     Fixture {
         key: "population",
         path: "default_projects/population/model.xmile",
@@ -65,10 +68,619 @@ const FIXTURES: [Fixture; 8] = [
         path: "test/test-models/samples/Lotka_Volterra/Lotka_Volterra.mdl",
         straighten_links: false,
     },
+    Fixture {
+        key: "groupon",
+        path: "test/metasd/social-network-valuation/groupon 1.mdl",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "catastrophe",
+        path: "test/metasd/early-warnings-catastrophe/catastropeWarning2.mdl",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "beer_game",
+        path: "test/metasd/beer-game/RealBeer4-Sterman13.mdl",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "bathtub",
+        path: "test/metasd/bathtub-statistics/integration3.mdl",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "alias1",
+        path: "test/alias1/alias1.stmx",
+        straighten_links: false,
+    },
 ];
 
+/// An alias the edit did not touch has its label side chosen again: aliases
+/// are not pinned like the elements they stand for.
+const ALIAS_LABEL_RECHOSEN: &str = "alias label side re-chosen by an unrelated sync";
+/// A link drawing no dependency the extraction recognizes is removed although
+/// the patch does not name its reader.
+const UNEXPLAINED_LINK_DROPPED: &str = "author's link without a recognized dependency dropped";
+/// Renaming a variable a module reads through the parent-scope spelling
+/// (`.area`) leaves the module's source naming the old variable.
+const RENAME_UNWIRES_PARENT_SCOPE_SOURCE: &str =
+    "rename leaves a parent-scope module source unrenamed";
+/// A variable the view did not draw is drawn by an edit that does not name it.
+const UNDRAWN_VARIABLE_DRAWN: &str = "variable the author left undrawn drawn by an unrelated sync";
+/// Flows that met a deleted stock at one point keep their ends there as
+/// clouds, on top of each other.
+const CLOUDS_MEET_AT_DELETED_STOCK: &str = "clouds of flows through a deleted stock overlap";
+/// A created side flow's cloud is kept off other clouds only, and lands on a
+/// stock.
+const CREATED_CLOUD_ON_SHAPE: &str = "created cloud lands on a shape";
+
 /// `(fixture, scenario, finding kind, the defect behind it)`.
-const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[];
+const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
+    (
+        "alias1",
+        "delete_flow",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "alias1",
+        "insert_intermediate",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "bathtub",
+        "add_side_flow",
+        "shape_overlap",
+        CREATED_CLOUD_ON_SHAPE,
+    ),
+    (
+        "bathtub",
+        "delete_middle_stock",
+        "shape_overlap",
+        CLOUDS_MEET_AT_DELETED_STOCK,
+    ),
+    (
+        "beer_game",
+        "add_sector",
+        "shape_overlap",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "add_sector",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "add_sector",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "beer_game",
+        "aux_to_stock",
+        "shape_overlap",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "aux_to_stock",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "aux_to_stock",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "beer_game",
+        "close_loop",
+        "shape_overlap",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "close_loop",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "close_loop",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "beer_game",
+        "delete_parameter",
+        "shape_overlap",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "delete_parameter",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "delete_parameter",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "beer_game",
+        "insert_intermediate",
+        "shape_overlap",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "insert_intermediate",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "insert_intermediate",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "beer_game",
+        "rename_variable",
+        "shape_overlap",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "rename_variable",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "rename_variable",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "beer_game",
+        "restate_variable",
+        "return_to_original",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "beer_game",
+        "restate_variable",
+        "shape_overlap",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "restate_variable",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "restate_variable",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "add_flow_between_stocks",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "add_flow_between_stocks",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "add_parameter",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "add_parameter",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "add_sector",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "add_sector",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "add_side_flow",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "add_side_flow",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "add_then_undo",
+        "return_to_original",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "add_then_undo",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "add_then_undo",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "aux_to_stock",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "aux_to_stock",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "close_loop",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "close_loop",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "delete_flow",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "delete_flow",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "delete_middle_stock",
+        "shape_overlap",
+        CLOUDS_MEET_AT_DELETED_STOCK,
+    ),
+    (
+        "catastrophe",
+        "delete_middle_stock",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "delete_middle_stock",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "delete_parameter",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "delete_parameter",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "detach_flow",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "detach_flow",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "extend_chain",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "extend_chain",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "insert_intermediate",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "insert_intermediate",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "rename_by_remove_and_add",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "rename_by_remove_and_add",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "rename_variable",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "rename_variable",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "restate_variable",
+        "return_to_original",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "catastrophe",
+        "restate_variable",
+        "unrelated_element_added",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "restate_variable",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "add_flow_between_stocks",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "add_flow_between_stocks",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "add_parameter",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "add_parameter",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "add_sector",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "add_sector",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "add_side_flow",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "add_side_flow",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "add_then_undo",
+        "return_to_original",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "add_then_undo",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "add_then_undo",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "aux_to_stock",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "aux_to_stock",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "close_loop",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "close_loop",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "delete_flow",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "delete_flow",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "delete_middle_stock",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "delete_middle_stock",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "delete_parameter",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "delete_parameter",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "detach_flow",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "detach_flow",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "extend_chain",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "extend_chain",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "insert_intermediate",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "insert_intermediate",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "rename_variable",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "rename_variable",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "restate_variable",
+        "return_to_original",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "groupon",
+        "restate_variable",
+        "untouched_element_changed",
+        ALIAS_LABEL_RECHOSEN,
+    ),
+    (
+        "groupon",
+        "restate_variable",
+        "untouched_link_changed",
+        UNEXPLAINED_LINK_DROPPED,
+    ),
+    (
+        "hares_and_foxes",
+        "rename_variable",
+        "untouched_link_changed",
+        RENAME_UNWIRES_PARENT_SCOPE_SOURCE,
+    ),
+];
 
 fn load(rel: &str) -> datamodel::Project {
     let path = format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"));
@@ -194,6 +806,31 @@ fn lotka_volterra() {
 }
 
 #[test]
+fn groupon() {
+    check("groupon");
+}
+
+#[test]
+fn catastrophe() {
+    check("catastrophe");
+}
+
+#[test]
+fn beer_game() {
+    check("beer_game");
+}
+
+#[test]
+fn bathtub() {
+    check("bathtub");
+}
+
+#[test]
+fn alias1() {
+    check("alias1");
+}
+
+#[test]
 fn every_fixture_has_a_test() {
     // The per-fixture tests above are written out so they run in parallel;
     // this names every fixture key they must cover.
@@ -206,6 +843,11 @@ fn every_fixture_has_a_test() {
         "sir",
         "hares_and_foxes",
         "lotka_volterra",
+        "groupon",
+        "catastrophe",
+        "beer_game",
+        "bathtub",
+        "alias1",
     ];
     let keys: Vec<&str> = FIXTURES.iter().map(|f| f.key).collect();
     assert_eq!(keys, tested);

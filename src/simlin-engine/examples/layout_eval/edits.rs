@@ -38,7 +38,6 @@ pub struct EditReport {
     pub continuity: Vec<Displacement>,
     /// Elements rebuilt by kind changes or re-attachment, and how far each moved.
     pub displacements: Vec<Displacement>,
-    pub completed_variables: Vec<String>,
     /// Layout-quality cost before the first step and after the last.
     pub cost_before: Option<f64>,
     pub cost_after: Option<f64>,
@@ -165,14 +164,7 @@ pub fn run_model(spec: &ModelSpec, out: &str) -> Vec<EditReport> {
             planned: scenario.steps.len(),
             findings: outcome.findings.clone(),
             continuity: outcome.continuity.clone(),
-            displacements: audits
-                .clone()
-                .flat_map(|a| a.displacements.clone())
-                .collect(),
-            completed_variables: audits
-                .clone()
-                .flat_map(|a| a.completed_variables.clone())
-                .collect(),
+            displacements: audits.flat_map(|a| a.displacements.clone()).collect(),
             cost_before: outcome.steps.first().map(|s| s.audit.cost_before),
             cost_after: outcome.steps.last().map(|s| s.audit.cost_after),
             before_png,
@@ -300,13 +292,6 @@ fn render_html(reports: &[EditReport]) -> String {
                 "<p class=\"note\">{} moved {:.1}</p>",
                 html_escape(&d.subject),
                 d.distance
-            );
-        }
-        if !r.completed_variables.is_empty() {
-            let _ = write!(
-                html,
-                "<p class=\"note\">variables drawn for the first time: {}</p>",
-                html_escape(&r.completed_variables.join(", "))
             );
         }
         html.push_str("<div class=\"renders\">");

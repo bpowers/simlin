@@ -3317,6 +3317,27 @@ pub fn compute_metadata(
     model_name: &str,
     db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Option<ComputedMetadata> {
+    compute_metadata_parts(project, model_name, db_state, true)
+}
+
+/// `compute_metadata` without the feedback loops and dominant periods: the
+/// dependencies a diagram draws, the stock-flow chains and the stock lists.
+/// Loop detection simulates the model, which a reader of the dependency
+/// structure alone (the edit audit, the edit scenarios) does not need.
+pub fn compute_dependency_metadata(
+    project: &datamodel::Project,
+    model_name: &str,
+    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+) -> Option<ComputedMetadata> {
+    compute_metadata_parts(project, model_name, db_state, false)
+}
+
+fn compute_metadata_parts(
+    project: &datamodel::Project,
+    model_name: &str,
+    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+    with_loops: bool,
+) -> Option<ComputedMetadata> {
     let model = project.get_model(model_name)?;
     let mut dep_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut reverse_dep_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -3524,6 +3545,20 @@ pub fn compute_metadata(
         &flow_to_stocks,
         &all_flows,
     );
+
+    if !with_loops {
+        return Some(ComputedMetadata {
+            chains,
+            feedback_loops: Vec::new(),
+            dominant_periods: Vec::new(),
+            dep_graph,
+            reverse_dep_graph,
+            constants,
+            stock_to_inflows,
+            stock_to_outflows,
+            flow_to_stocks,
+        });
+    }
 
     // Try LTM-based loop detection. Falls back to persisted loop_metadata
     // if LTM detection or simulation fails. The branch decides the
