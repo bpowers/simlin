@@ -2297,11 +2297,12 @@ pub fn incremental_layout(
     }
 
     // Every element still standing at this point survived the patch untouched
-    // (or was merely renamed): it keeps its position, and a named one its label
-    // side, for the rest of the pass. Whatever gets created from here on -- new
-    // variables, kind-changed rebuilds, flows rebuilt because their attachment
-    // changed -- is absent from this snapshot, so `declutter_part` below chooses
-    // its side and may move it.
+    // (or was merely renamed): it keeps its position, and a labelled one its
+    // label side, for the rest of the pass. Whatever gets created from here on
+    // -- new variables, kind-changed rebuilds, flows rebuilt because their
+    // attachment changed -- is absent from this snapshot, so `declutter_part`
+    // below chooses its side and may move it. An alias is never created or
+    // rebuilt here, so every alias keeps its side.
     let standing_uids: HashSet<i32> = state.elements.iter().map(ViewElement::get_uid).collect();
     let pinned_labels: HashSet<i32> = state
         .elements
@@ -2313,6 +2314,7 @@ pub fn incremental_layout(
                     | ViewElement::Flow(_)
                     | ViewElement::Aux(_)
                     | ViewElement::Module(_)
+                    | ViewElement::Alias(_)
             ) && !retargeted.contains(&elem.get_uid())
         })
         .map(ViewElement::get_uid)

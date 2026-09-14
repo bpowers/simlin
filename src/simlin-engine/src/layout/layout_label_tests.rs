@@ -13,6 +13,7 @@
 //! - untouched element (aux, stock, flow, module): preserved, both when the
 //!   patch adds an element (settle path) and when it adds only a connector or
 //!   only deletes (the no-new-elements early-return path)
+//! - untouched alias: preserved on both paths
 //! - renamed element: preserved (a rename keeps the element's geometry)
 //! - flow whose sibling on the same stock was added or removed: preserved
 //! - flow rebuilt because its attachment changed (an attached stock deleted):
@@ -392,6 +393,67 @@ fn early_return_path_preserves_untouched_label_sides() {
         connector_view.elements.len() > base_view.elements.len(),
         "fixture: the connector-only patch really adds a link"
     );
+}
+
+#[test]
+fn an_untouched_alias_keeps_its_label_side() {
+    // An imported view draws birth_rate a second time, as an alias. Neither the
+    // settle path (a new aux) nor the early-return path (a new connector only)
+    // is about the alias, so it comes back byte for byte, label side included.
+    let project = project_with_module();
+    let mut base_view = generate_layout(&project, TEST_MODEL, None).expect("initial layout");
+    let (of, x, y) = base_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Aux(a) if canonicalize(&a.name) == "birth_rate" => Some((a.uid, a.x, a.y)),
+            _ => None,
+        })
+        .expect("birth_rate drawn");
+    let uid = base_view
+        .elements
+        .iter()
+        .map(ViewElement::get_uid)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    base_view
+        .elements
+        .push(ViewElement::Alias(view_element::Alias {
+            uid,
+            alias_of_uid: of,
+            x: x + 150.0,
+            y: y + 150.0,
+            label_side: LabelSide::Bottom,
+            compat: None,
+        }));
+    let alias = |view: &datamodel::StockFlow| {
+        view.elements
+            .iter()
+            .find(|e| e.get_uid() == uid)
+            .cloned()
+            .expect("the alias is drawn")
+    };
+
+    let cases = [
+        ("settle", add_dependent_aux(&project)),
+        ("connector-only", connector_only_patch(&project)),
+    ];
+    for (label, (patched, patch)) in &cases {
+        for side in ALL_SIDES {
+            let mut old_view = base_view.clone();
+            if let Some(ViewElement::Alias(a)) = old_view.elements.last_mut() {
+                a.label_side = side;
+            }
+            let new_view = incremental_layout(&old_view, patched, TEST_MODEL, patch, None)
+                .expect("incremental layout");
+            assert_eq!(
+                alias(&new_view),
+                alias(&old_view),
+                "{label}: an untouched alias changed with old side {side:?}"
+            );
+        }
+    }
 }
 
 #[test]

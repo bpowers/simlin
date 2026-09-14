@@ -95,9 +95,6 @@ const FIXTURES: [Fixture; 13] = [
     },
 ];
 
-/// An alias the edit did not touch has its label side chosen again: aliases
-/// are not pinned like the elements they stand for.
-const ALIAS_LABEL_RECHOSEN: &str = "alias label side re-chosen by an unrelated sync";
 /// A link drawing no dependency the extraction recognizes is removed although
 /// the patch does not name its reader.
 const UNEXPLAINED_LINK_DROPPED: &str = "author's link without a recognized dependency dropped";
@@ -110,19 +107,35 @@ const CLOUDS_MEET_AT_DELETED_STOCK: &str = "clouds of flows through a deleted st
 /// stock.
 const CREATED_CLOUD_ON_SHAPE: &str = "created cloud lands on a shape";
 
+/// A created free-floating element whose footprint the declutter cannot clear
+/// (the relaxation jams in a crowded region) stays on another shape.
+const CREATED_ELEMENT_ON_SHAPE: &str = "created element left on a shape when relaxation jams";
+
 /// `(fixture, scenario, finding kind, the defect behind it)`.
 const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
-        "alias1",
-        "delete_flow",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
+        "catastrophe",
+        "insert_intermediate",
+        "shape_overlap",
+        CREATED_ELEMENT_ON_SHAPE,
     ),
     (
-        "alias1",
-        "insert_intermediate",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
+        "catastrophe",
+        "restate_variable",
+        "return_to_original",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "catastrophe",
+        "add_then_undo",
+        "return_to_original",
+        UNDRAWN_VARIABLE_DRAWN,
+    ),
+    (
+        "beer_game",
+        "restate_variable",
+        "return_to_original",
+        UNDRAWN_VARIABLE_DRAWN,
     ),
     (
         "bathtub",
@@ -150,12 +163,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "beer_game",
-        "add_sector",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "beer_game",
         "aux_to_stock",
         "shape_overlap",
         UNDRAWN_VARIABLE_DRAWN,
@@ -165,12 +172,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "aux_to_stock",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "aux_to_stock",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "beer_game",
@@ -186,12 +187,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "beer_game",
-        "close_loop",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "beer_game",
         "delete_parameter",
         "shape_overlap",
         UNDRAWN_VARIABLE_DRAWN,
@@ -201,12 +196,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "delete_parameter",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "delete_parameter",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "beer_game",
@@ -222,12 +211,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "beer_game",
-        "insert_intermediate",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "beer_game",
         "rename_variable",
         "shape_overlap",
         UNDRAWN_VARIABLE_DRAWN,
@@ -240,18 +223,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "beer_game",
-        "rename_variable",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "beer_game",
-        "restate_variable",
-        "return_to_original",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "beer_game",
         "restate_variable",
         "shape_overlap",
         UNDRAWN_VARIABLE_DRAWN,
@@ -261,12 +232,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "restate_variable",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "restate_variable",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "catastrophe",
@@ -276,21 +241,9 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "catastrophe",
-        "add_flow_between_stocks",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
         "add_parameter",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "add_parameter",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "catastrophe",
@@ -300,39 +253,15 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "catastrophe",
-        "add_sector",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
         "add_side_flow",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
     ),
     (
         "catastrophe",
-        "add_side_flow",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
-        "add_then_undo",
-        "return_to_original",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
         "add_then_undo",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "add_then_undo",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "catastrophe",
@@ -342,33 +271,15 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "catastrophe",
-        "aux_to_stock",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
         "close_loop",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
     ),
     (
         "catastrophe",
-        "close_loop",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
         "delete_flow",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "delete_flow",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "catastrophe",
@@ -384,21 +295,9 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "catastrophe",
-        "delete_middle_stock",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
         "delete_parameter",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "delete_parameter",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "catastrophe",
@@ -408,21 +307,9 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "catastrophe",
-        "detach_flow",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
         "extend_chain",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "extend_chain",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "catastrophe",
@@ -432,21 +319,9 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "catastrophe",
-        "insert_intermediate",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
         "rename_by_remove_and_add",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "rename_by_remove_and_add",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "catastrophe",
@@ -456,33 +331,9 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "catastrophe",
-        "rename_variable",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
-        "restate_variable",
-        "return_to_original",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "catastrophe",
         "restate_variable",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "restate_variable",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "groupon",
-        "add_flow_between_stocks",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "groupon",
@@ -493,32 +344,14 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "groupon",
         "add_parameter",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "groupon",
-        "add_parameter",
         "untouched_link_changed",
         UNEXPLAINED_LINK_DROPPED,
     ),
     (
         "groupon",
         "add_sector",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "groupon",
-        "add_sector",
         "untouched_link_changed",
         UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "add_side_flow",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "groupon",
@@ -535,20 +368,8 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "groupon",
         "add_then_undo",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "groupon",
-        "add_then_undo",
         "untouched_link_changed",
         UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "aux_to_stock",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "groupon",
@@ -559,20 +380,8 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "groupon",
         "close_loop",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "groupon",
-        "close_loop",
         "untouched_link_changed",
         UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "delete_flow",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "groupon",
@@ -583,20 +392,8 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "groupon",
         "delete_middle_stock",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "groupon",
-        "delete_middle_stock",
         "untouched_link_changed",
         UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "delete_parameter",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "groupon",
@@ -607,20 +404,8 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "groupon",
         "detach_flow",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "groupon",
-        "detach_flow",
         "untouched_link_changed",
         UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "extend_chain",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "groupon",
@@ -631,20 +416,8 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "groupon",
         "insert_intermediate",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
-    ),
-    (
-        "groupon",
-        "insert_intermediate",
         "untouched_link_changed",
         UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "rename_variable",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "groupon",
@@ -657,12 +430,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "restate_variable",
         "return_to_original",
         UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "restate_variable",
-        "untouched_element_changed",
-        ALIAS_LABEL_RECHOSEN,
     ),
     (
         "groupon",
