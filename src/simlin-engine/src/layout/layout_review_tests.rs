@@ -1625,7 +1625,7 @@ fn test_diff_connectors_preserves_alias_links() {
         .dep_graph
         .insert("a".to_string(), ["b".to_string()].into_iter().collect());
 
-    diff_connectors(&mut state, &metadata, |_, _| true);
+    diff_connectors(&mut state, &metadata, |_, _| true, |_| false);
 
     // The link from alias_of_b to "a" should be preserved (not replaced by b->a)
     let alias_link = state

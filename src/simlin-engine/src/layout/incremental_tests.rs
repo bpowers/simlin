@@ -612,6 +612,70 @@ fn a_sync_draws_a_missing_connector_only_where_the_edit_is_about_it() {
 }
 
 #[test]
+fn a_link_drawing_no_dependency_goes_only_with_an_edit_to_its_reader() {
+    // An imported view draws note_rate -> births, which no equation explains
+    // (a module port, an input the extraction does not see, an annotation).
+    // Every arm of whether a sync keeps it:
+    // - an unrelated edit (a new note): kept, byte for byte;
+    // - an edit to the link's source (restating note_rate): kept;
+    // - an edit to its reader (restating births): dropped, since the reader's
+    //   equation is what says which connectors into it are drawn.
+    const EXTRA: i32 = 90_000;
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("population", &["births"], &[])),
+        datamodel::Variable::Flow(flow("births", "population * birth_rate")),
+        datamodel::Variable::Aux(aux("birth_rate", "0.1")),
+        datamodel::Variable::Aux(aux("note_rate", "0.5")),
+    ]);
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let note_rate = base
+        .elements
+        .iter()
+        .find(|e| e.get_name().is_some_and(|n| canonicalize(n) == "note_rate"))
+        .map(ViewElement::get_uid)
+        .expect("note_rate drawn");
+    let births = flow_named(&base, "births").uid;
+    let link = ViewElement::Link(view_element::Link {
+        uid: EXTRA,
+        from_uid: note_rate,
+        to_uid: births,
+        shape: LinkShape::Arc(30.0),
+        polarity: None,
+    });
+    base.elements.push(link.clone());
+    let kept =
+        |view: &datamodel::StockFlow| view.elements.iter().find(|e| e.get_uid() == EXTRA).cloned();
+
+    let (_, unrelated) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertAux(aux("note", "1"))],
+    );
+    assert_eq!(
+        kept(&unrelated),
+        Some(link.clone()),
+        "an unrelated edit keeps it"
+    );
+
+    let (_, source) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertAux(aux("note_rate", "0.6"))],
+    );
+    assert_eq!(kept(&source), Some(link), "an edit to its source keeps it");
+
+    let (_, reader) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertFlow(flow(
+            "births",
+            "population * birth_rate",
+        ))],
+    );
+    assert_eq!(kept(&reader), None, "an edit to its reader drops it");
+}
+
+#[test]
 fn a_stock_added_to_a_drawn_chain_lands_clear_of_side_flows() {
     // tank drains to a cloud off its right face, and a person drew the drain
     // pipe long enough that its cloud sits where a downstream stock would
@@ -806,4 +870,59 @@ fn a_stock_added_to_a_drawn_chain_continues_its_row() {
     for (uid, g) in &before {
         assert_eq!(after.get(uid), Some(g), "element {uid} must stay put");
     }
+}
+
+#[test]
+fn deleting_a_variable_removes_the_links_of_its_aliases() {
+    // An imported view draws birth_rate a second time, as an alias beside
+    // births, with the connector from the alias. Deleting birth_rate (and
+    // nothing else, so births is not an edit the link's reader is named by)
+    // removes the alias and every link touching it, so nothing references a
+    // uid the view no longer draws.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("population", &["births"], &[])),
+        datamodel::Variable::Flow(flow("births", "population * birth_rate")),
+        datamodel::Variable::Aux(aux("birth_rate", "0.1")),
+    ]);
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let birth_rate = base
+        .elements
+        .iter()
+        .find(|e| {
+            e.get_name()
+                .is_some_and(|n| canonicalize(n) == "birth_rate")
+        })
+        .map(ViewElement::get_uid)
+        .expect("birth_rate drawn");
+    let births = flow_named(&base, "births").uid;
+    let (alias, link) = (90_000, 90_001);
+    base.elements.push(ViewElement::Alias(view_element::Alias {
+        uid: alias,
+        alias_of_uid: birth_rate,
+        x: 400.0,
+        y: 400.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    base.elements.push(ViewElement::Link(view_element::Link {
+        uid: link,
+        from_uid: alias,
+        to_uid: births,
+        shape: LinkShape::Straight,
+        polarity: None,
+    }));
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::DeleteVariable {
+            ident: "birth_rate".to_string(),
+        }],
+    );
+    let left: Vec<i32> = view
+        .elements
+        .iter()
+        .map(ViewElement::get_uid)
+        .filter(|uid| [alias, link].contains(uid))
+        .collect();
+    assert_eq!(left, Vec::<i32>::new(), "the alias and its link are gone");
 }

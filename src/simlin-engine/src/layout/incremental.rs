@@ -712,11 +712,16 @@ pub fn resnap_flow_endpoints(
 ///
 /// A dependency with no link gets one only when `draws(from, to)` accepts its
 /// idents: incremental layout draws a connector only where the edit is about
-/// it, so a connector an author left out of the view stays out.
+/// it, so a connector an author left out of the view stays out. A link drawing
+/// no dependency the model has survives when `keeps(reader)` accepts the ident
+/// of the variable it points into (through an alias; empty when it points at
+/// no variable): an imported view's connector the extraction does not explain
+/// is an author's choice that only an edit to its reader may undo.
 pub fn diff_connectors(
     state: &mut LayoutState,
     metadata: &ComputedMetadata,
     draws: impl Fn(&str, &str) -> bool,
+    keeps: impl Fn(&str) -> bool,
 ) {
     // Compute new dependency edges from dep_graph, skipping structural flow-stock edges
     let stock_inflows: HashMap<String, HashSet<String>> = metadata
@@ -775,10 +780,25 @@ pub fn diff_connectors(
         })
         .collect();
 
+    let ident_of: HashMap<i32, String> = state
+        .elements
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ViewElement::Stock(_)
+                    | ViewElement::Flow(_)
+                    | ViewElement::Aux(_)
+                    | ViewElement::Module(_)
+            )
+        })
+        .filter_map(|e| Some((e.get_uid(), canonicalize(e.get_name()?).into_owned())))
+        .collect();
+
     // A link survives when the dependency it draws, read through aliases, is
     // still one the model has. Every such link survives: an imported view can
     // draw one dependency several times, through different aliases of the same
-    // variable.
+    // variable. A link drawing no dependency survives where `keeps` says so.
     let mut drawn: HashSet<(i32, i32)> = HashSet::new();
     state.elements.retain(|elem| {
         let ViewElement::Link(l) = elem else {
@@ -791,11 +811,11 @@ pub fn diff_connectors(
                 .unwrap_or(l.from_uid),
             alias_to_primary.get(&l.to_uid).copied().unwrap_or(l.to_uid),
         );
-        let survives = new_edges.contains_key(&edge);
-        if survives {
+        if new_edges.contains_key(&edge) {
             drawn.insert(edge);
+            return true;
         }
-        survives
+        keeps(ident_of.get(&edge.1).map(String::as_str).unwrap_or(""))
     });
 
     for (&(from_uid, to_uid), (from_ident, to_ident)) in &new_edges {
@@ -2104,6 +2124,9 @@ pub fn incremental_layout(
     let draws_connector = |from: &str, to: &str| {
         named.contains(to) || !drawn_before.contains(from) || !drawn_before.contains(to)
     };
+    // Likewise a link the view draws for no dependency the model has goes only
+    // with an edit to its reader.
+    let keeps_connector = |to: &str| !named.contains(to);
 
     // Between steps 3 and 4a: detect variables whose type changed (e.g., Aux -> Stock).
     // When a caller issues UpsertStock for a variable that was previously an Aux, there
@@ -2383,7 +2406,7 @@ pub fn incremental_layout(
     if new_elements.is_empty() {
         // No new element, so no flow is created or rebuilt: every flow in the
         // view is untouched, and none of the flow geometry passes runs.
-        diff_connectors(&mut state, &metadata, draws_connector);
+        diff_connectors(&mut state, &metadata, draws_connector, keeps_connector);
         diff_clouds(&mut state, &metadata);
         declutter::declutter_part(&mut state.elements, needs_label_placement, |_| false);
         apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
@@ -2594,7 +2617,7 @@ pub fn incremental_layout(
     }
 
     // Step 7: Diff connectors and clouds
-    diff_connectors(&mut state, &metadata, draws_connector);
+    diff_connectors(&mut state, &metadata, draws_connector, keeps_connector);
     diff_clouds(&mut state, &metadata);
 
     // Step 8: Polish. The new free-floating elements step off crossings and

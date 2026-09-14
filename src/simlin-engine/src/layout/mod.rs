@@ -342,7 +342,16 @@ impl LayoutState {
             ViewElement::Stock(s) if s.uid == deleted_uid => false,
             ViewElement::Flow(f) if f.uid == deleted_uid => false,
             ViewElement::Module(m) if m.uid == deleted_uid => false,
-            ViewElement::Link(l) if l.from_uid == deleted_uid || l.to_uid == deleted_uid => false,
+            // A link touching one of the variable's aliases goes with the
+            // alias: the connector diff keeps a link it cannot explain, so
+            // nothing else removes it.
+            ViewElement::Link(l)
+                if [l.from_uid, l.to_uid]
+                    .iter()
+                    .any(|u| *u == deleted_uid || removed_alias_uids.contains(u)) =>
+            {
+                false
+            }
             ViewElement::Cloud(c) if c.flow_uid == deleted_uid => false,
             ViewElement::Alias(a) if a.alias_of_uid == deleted_uid => false,
             _ => true,

@@ -95,9 +95,6 @@ const FIXTURES: [Fixture; 13] = [
     },
 ];
 
-/// A link drawing no dependency the extraction recognizes is removed although
-/// the patch does not name its reader.
-const UNEXPLAINED_LINK_DROPPED: &str = "author's link without a recognized dependency dropped";
 /// A variable the view did not draw is drawn by an edit that does not name it.
 const UNDRAWN_VARIABLE_DRAWN: &str = "variable the author left undrawn drawn by an unrelated sync";
 /// Flows that met a deleted stock at one point keep their ends there as
@@ -334,108 +331,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "restate_variable",
         "unrelated_element_added",
         UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "groupon",
-        "add_flow_between_stocks",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "add_parameter",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "add_sector",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "add_side_flow",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "add_then_undo",
-        "return_to_original",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "add_then_undo",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "aux_to_stock",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "close_loop",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "delete_flow",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "delete_middle_stock",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "delete_parameter",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "detach_flow",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "extend_chain",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "insert_intermediate",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "rename_variable",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "restate_variable",
-        "return_to_original",
-        UNEXPLAINED_LINK_DROPPED,
-    ),
-    (
-        "groupon",
-        "restate_variable",
-        "untouched_link_changed",
-        UNEXPLAINED_LINK_DROPPED,
     ),
 ];
 

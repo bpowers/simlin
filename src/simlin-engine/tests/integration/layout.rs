@@ -1499,7 +1499,7 @@ fn find_element_uid(
 fn test_incremental_combined_ops() {
     use simlin_engine::datamodel;
     use simlin_engine::layout::incremental_layout;
-    use simlin_engine::{ModelOperation, ModelPatch};
+    use simlin_engine::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
 
     // SIR model variables:
     //   stocks: susceptible, infectious, recovered
@@ -1516,7 +1516,8 @@ fn test_incremental_combined_ops() {
     // Patch:
     //   1. Delete contact_infectivity
     //   2. Rename total_population -> total_pop
-    //   3. Add immunity_rate = 1/duration, change recovering = infectious * immunity_rate
+    //   3. Restate succumbing without contact_infectivity
+    //   4. Add immunity_rate = 1/duration, change recovering = infectious * immunity_rate
     //      This inserts immunity_rate between duration and recovering:
     //      old: duration -> recovering
     //      new: duration -> immunity_rate -> recovering
@@ -1531,69 +1532,27 @@ fn test_incremental_combined_ops() {
         .get("total_population")
         .expect("total_population should exist");
 
-    // Build post-patch model manually
-    let mut patched_project = project.clone();
-    let model = patched_project.get_model_mut(MAIN_MODEL).unwrap();
-
-    // Delete contact_infectivity
-    model
-        .variables
-        .retain(|v| canonicalize(v.get_ident()).as_ref() != "contact_infectivity");
-
-    // Rename total_population -> total_pop
-    for var in &mut model.variables {
-        if canonicalize(var.get_ident()).as_ref() == "total_population"
-            && let datamodel::Variable::Aux(a) = var
-        {
-            a.ident = "total_pop".to_string();
-        }
-    }
-
-    // Update succumbing equation to remove contact_infectivity reference
-    for var in &mut model.variables {
-        if canonicalize(var.get_ident()).as_ref() == "succumbing"
-            && let datamodel::Variable::Flow(f) = var
-        {
-            f.equation =
-                datamodel::Equation::Scalar("susceptible*infectious/total_pop".to_string());
-        }
-    }
-
-    // Update susceptible init to reference total_pop
-    for var in &mut model.variables {
-        if canonicalize(var.get_ident()).as_ref() == "susceptible"
-            && let datamodel::Variable::Stock(s) = var
-        {
-            s.equation = datamodel::Equation::Scalar("total_pop".to_string());
-        }
-    }
-
-    // Change recovering equation to use immunity_rate instead of duration
-    for var in &mut model.variables {
-        if canonicalize(var.get_ident()).as_ref() == "recovering"
-            && let datamodel::Variable::Flow(f) = var
-        {
-            f.equation = datamodel::Equation::Scalar("infectious * immunity_rate".to_string());
-        }
-    }
-
-    // Add immunity_rate aux
-    model
-        .variables
-        .push(datamodel::Variable::Aux(datamodel::Aux {
-            ident: "immunity_rate".to_string(),
-            equation: datamodel::Equation::Scalar("1 / duration".to_string()),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Default::default(),
-        }));
-
-    // Build the patch
+    // The patch an agent sends for this edit, and the model after it derived
+    // through the production patch path: a reader whose equation changes is
+    // one the patch restates, so the sync knows which connectors into it
+    // belong.
+    let flow_with = |ident: &str, equation: &str| {
+        project
+            .get_model(MAIN_MODEL)
+            .and_then(|m| {
+                m.variables.iter().find_map(|v| match v {
+                    datamodel::Variable::Flow(f) if canonicalize(&f.ident).as_ref() == ident => {
+                        let mut f = f.clone();
+                        f.equation = datamodel::Equation::Scalar(equation.to_string());
+                        Some(f)
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_else(|| panic!("{ident} is a flow"))
+    };
     let patch = ModelPatch {
-        name: String::new(),
+        name: MAIN_MODEL.to_string(),
         ops: vec![
             ModelOperation::DeleteVariable {
                 ident: "contact_infectivity".to_string(),
@@ -1612,8 +1571,24 @@ fn test_incremental_combined_ops() {
                 uid: None,
                 compat: Default::default(),
             }),
+            ModelOperation::UpsertFlow(flow_with("succumbing", "susceptible*infectious/total_pop")),
+            ModelOperation::UpsertFlow(flow_with("recovering", "infectious * immunity_rate")),
         ],
     };
+    // As in production, the model carries the view being synced when the
+    // patch applies, so the uids it mints for new variables are past every
+    // uid the view uses.
+    let mut patched_project = project.clone();
+    patched_project.get_model_mut(MAIN_MODEL).unwrap().views =
+        vec![datamodel::View::StockFlow(old_view.clone())];
+    apply_patch(
+        &mut patched_project,
+        ProjectPatch {
+            project_ops: vec![],
+            models: vec![patch.clone()],
+        },
+    )
+    .expect("the patch applies");
 
     let new_view = incremental_layout(&old_view, &patched_project, MAIN_MODEL, &patch, None)
         .expect("incremental layout with combined ops should succeed");
