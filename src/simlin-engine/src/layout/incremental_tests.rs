@@ -1278,3 +1278,67 @@ fn a_variable_redrawn_as_a_larger_shape_moves_off_its_neighbour() {
         "a moves only as far as it must: ({x}, {y})"
     );
 }
+
+#[test]
+fn a_cloud_left_by_a_deleted_stock_steps_off_a_parameter_drawn_on_its_pipe() {
+    // Industrial dynamics draws an alias on the short pipe between a stock's
+    // bottom face and the valve of the flow draining it. Deleting the stock
+    // turns that end into a cloud, and no position short of the valve clears
+    // the alias; the space the stock took is free, so the end extends into it
+    // instead, as little as clears.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("tank", &[], &["drain"])),
+        datamodel::Variable::Flow(flow("drain", "1")),
+        datamodel::Variable::Aux(aux("marker", "1")),
+    ]);
+    let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let tank = uid_named(&base, "tank");
+    let point = |x: f64, y: f64, attached: Option<i32>| view_element::FlowPoint {
+        x,
+        y,
+        attached_to_uid: attached,
+    };
+    let cloud = base
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Cloud(c) => Some(c.uid),
+            _ => None,
+        })
+        .expect("drain's cloud");
+    for e in &mut base.elements {
+        match e {
+            ViewElement::Stock(s) if s.uid == tank => (s.x, s.y) = (500.0, 1262.0),
+            ViewElement::Aux(a) if canonicalize(&a.name) == "marker" => {
+                (a.x, a.y) = (499.0, 1301.0)
+            }
+            ViewElement::Flow(f) if canonicalize(&f.name) == "drain" => {
+                f.points = vec![
+                    point(499.0, 1279.5, Some(tank)),
+                    point(499.0, 1387.0, Some(cloud)),
+                ];
+                (f.x, f.y) = (499.0, 1344.0);
+            }
+            ViewElement::Cloud(c) if c.uid == cloud => (c.x, c.y) = (499.0, 1387.0),
+            _ => {}
+        }
+    }
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::DeleteVariable {
+            ident: "tank".to_string(),
+        }],
+    );
+    let drain = flow_named(&view, "drain");
+    let mut changed: HashSet<i32> = [drain.uid].into_iter().collect();
+    changed.extend(drain.points.iter().filter_map(|p| p.attached_to_uid));
+    assert_eq!(
+        overlaps_involving(&view, &changed),
+        Vec::<(i32, i32)>::new()
+    );
+    assert_eq!(
+        strict_violations(&view, &[drain.uid].into_iter().collect()),
+        ""
+    );
+}

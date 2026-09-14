@@ -36,7 +36,8 @@
 //!   charged for them.
 //! - **Placement.** What the sync created or changed does not land on another
 //!   element's shape, and a pipe it routed does not pass through a stock that
-//!   is not one of its ends.
+//!   is not one of its ends. Two shapes that already overlapped before the edit
+//!   are the author's, and are not charged.
 //!
 //! The runner-level findings (a sync that failed, two syncs of one edit that
 //! disagree, an edit that should have returned the original view) are raised
@@ -134,7 +135,8 @@ pub enum FindingKind {
     /// A flow the sync created or changed violates a strict flow invariant
     /// (or any flow violates a tolerant one).
     FlowInvariant,
-    /// A created or changed element's shape covers another element's shape.
+    /// A created or changed element's shape covers another element's shape
+    /// that it did not already cover before the edit.
     ShapeOverlap,
     /// A created or changed pipe passes through a stock that is not one of
     /// its ends.
@@ -637,7 +639,7 @@ pub fn audit_edit(input: &EditInput) -> EditAudit {
             audit.findings.push(finding);
         }
     }
-    placement_findings(&after, &changed, &mut audit.findings);
+    placement_findings(&before, &after, &changed, &mut audit.findings);
     audit
 }
 
@@ -1357,8 +1359,28 @@ fn segment_enters(a: (f64, f64), b: (f64, f64), r: &Rect) -> bool {
 }
 
 /// The placement layer, over the elements the sync created or changed.
-fn placement_findings(side: &Side, changed: &HashSet<i32>, out: &mut Vec<Finding>) {
+fn placement_findings(before: &Side, side: &Side, changed: &HashSet<i32>, out: &mut Vec<Finding>) {
     let name = |i: &str| i.to_string();
+    let boxes = |s: &Side| -> Vec<(i32, Rect)> {
+        s.view
+            .elements
+            .iter()
+            .filter_map(|e| node_shape_box(e).map(|r| (e.get_uid(), r)))
+            .collect()
+    };
+    // The pairs the author's view already overlapped: an imported view can
+    // draw an alias on a pipe or a valve, and a sync that re-attaches the flow
+    // may have nowhere clear to put it.
+    let before_boxes = boxes(before);
+    let overlapped_before: HashSet<(i32, i32)> = before_boxes
+        .iter()
+        .flat_map(|(a, ra)| {
+            before_boxes
+                .iter()
+                .filter(move |(b, rb)| a < b && overlap_area(ra, rb) > MIN_OVERLAP_AREA)
+                .map(move |(b, _)| (*a, *b))
+        })
+        .collect();
     let shapes: Vec<(&ViewElement, Rect)> = side
         .view
         .elements
@@ -1376,7 +1398,10 @@ fn placement_findings(side: &Side, changed: &HashSet<i32>, out: &mut Vec<Finding
             }
             let pair = (e.get_uid().min(o.get_uid()), e.get_uid().max(o.get_uid()));
             let area = overlap_area(r, ro);
-            if area > MIN_OVERLAP_AREA && reported.insert(pair) {
+            if area > MIN_OVERLAP_AREA
+                && !overlapped_before.contains(&pair)
+                && reported.insert(pair)
+            {
                 out.push(Finding::new(
                     FindingKind::ShapeOverlap,
                     format!(

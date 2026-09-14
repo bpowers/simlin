@@ -442,6 +442,20 @@ fn row_for(kind: FindingKind) {
             e.row(kind, unchanged, |v| {
                 set_center(element_named(v, "births_multiplier"), x, y)
             });
+            // A pair the author's view already overlapped is not charged, even
+            // where the sync changed one of them.
+            let parked = |v: &mut StockFlow| set_center(element_named(v, "birth_rate"), x, y);
+            let e = edited_from(POPULATION, ScenarioKind::AddParameter, parked);
+            let nudged = e.audit(|v| {
+                parked(v);
+                if let ViewElement::Aux(a) = element_named(v, "birth_rate") {
+                    a.x += 1.0;
+                }
+            });
+            assert!(
+                !nudged.kinds().contains(&kind),
+                "an overlap the author drew is not charged to the edit"
+            );
         }
         FindingKind::PipeThroughStock => {
             // A flow from recovered to susceptible, past infectious between

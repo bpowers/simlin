@@ -180,8 +180,9 @@ contract from an edit's inputs and outputs alone, in three layers:
   and every flow the sync created or changed holds the strict flow invariants
   (`editing::invariants`). Only findings the edit introduced count, so an
   imported view's own inconsistencies are not charged to an edit.
-- **Placement.** What the sync created or changed does not cover another shape,
-  and a pipe it routed does not pass through a stock that is not one of its ends.
+- **Placement.** What the sync created or changed does not cover another shape
+  it did not already cover before the edit, and a pipe it routed does not pass
+  through a stock that is not one of its ends.
 
 It also records what it does not charge: how far rebuilt elements moved, and
 the metric's cost before and after.

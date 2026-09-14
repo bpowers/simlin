@@ -1517,25 +1517,35 @@ fn clear_of_stocks(
     crate::editing::Point::new(p.x + ux * step, p.y + uy * step)
 }
 
+/// How far past a flow end, along its end segment, a cloud may be set when no
+/// position along the pipe clears: the space a deleted stock took, or open
+/// space off a stock the flow left.
+const MAX_CLOUD_EXTENSION: f64 = 4.0 * crate::diagram::constants::CLOUD_RADIUS;
+
 /// Where a flow end that becomes a cloud goes when its cloud would cover
-/// another shape, and how many of the pipe's points it passes: slid along the
-/// pipe from the end toward the valve, a cloud's radius at a time, to the first
-/// position whose cloud covers none of `shapes`, stopping a cloud's and a
-/// valve's radius short of the valve; the end itself when it is clear or
-/// nothing short of the valve is. `path` runs from the end inward. Flows that
-/// met a deleted stock keep their ends on its faces, where clouds on two
-/// perpendicular faces cover each other, and an imported view can draw two
-/// flows leaving one face point along one line, so the end's own segment alone
-/// may not separate them.
+/// another shape, and how many of the pipe's points it passes: the nearest
+/// position, a pixel at a time, whose cloud covers none of `shapes`, either
+/// along the pipe from the end toward the valve (stopping a cloud's and a
+/// valve's radius short of it, the pipe dropping the points the end passes)
+/// or past the end along its segment (extending the pipe, at most
+/// `MAX_CLOUD_EXTENSION`), the position along the pipe on a tie; the end
+/// itself when it is clear or nothing is. `path` runs from the end inward.
+/// Flows that met a deleted stock keep their ends on its faces, where clouds
+/// on perpendicular faces cover each other; an imported view can draw two
+/// flows leaving one face point along one line, so the end segment alone may
+/// not separate them; and one can draw a parameter on the short pipe between
+/// a stock and a valve, where only the space the stock took is clear.
 fn clear_along_pipe(
     path: &[crate::editing::Point],
     valve: crate::editing::Point,
     shapes: &[crate::diagram::common::Rect],
 ) -> (crate::editing::Point, usize) {
     use crate::diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
-    use crate::editing::{arc_position, point_at_arc};
+    use crate::editing::{Point, arc_position, point_at_arc};
+    /// The step, in px, at which candidate positions are tried.
+    const STEP: f64 = 1.0;
     const EPS: f64 = 1e-9;
-    let covers = |q: crate::editing::Point| {
+    let covers = |q: Point| {
         shapes.iter().any(|r| {
             let w = r.right.min(q.x + CLOUD_RADIUS) - r.left.max(q.x - CLOUD_RADIUS);
             let h = r.bottom.min(q.y + CLOUD_RADIUS) - r.top.max(q.y - CLOUD_RADIUS);
@@ -1543,14 +1553,9 @@ fn clear_along_pipe(
         })
     };
     let Some(&end) = path.first() else {
-        return (crate::editing::Point::new(f64::NAN, f64::NAN), 0);
+        return (Point::new(f64::NAN, f64::NAN), 0);
     };
     if path.len() < 2 || !covers(end) {
-        return (end, 0);
-    }
-    let limit = arc_position(path, valve) - CLOUD_RADIUS - AUX_RADIUS;
-    let steps = (limit / CLOUD_RADIUS).floor();
-    if steps < 1.0 {
         return (end, 0);
     }
     let arcs: Vec<f64> = std::iter::once(0.0)
@@ -1559,19 +1564,34 @@ fn clear_along_pipe(
             Some(*total)
         }))
         .collect();
-    (1..=steps as usize)
-        .map(|k| k as f64 * CLOUD_RADIUS)
-        .find_map(|s| {
-            let q = point_at_arc(path, s);
-            (!covers(q)).then(|| {
+    let inward_limit = arc_position(path, valve) - CLOUD_RADIUS - AUX_RADIUS;
+    let (dx, dy) = (end.x - path[1].x, end.y - path[1].y);
+    let segment = dx.hypot(dy);
+    let outward = (segment > EPS).then(|| (dx / segment, dy / segment));
+    let reach = inward_limit.max(MAX_CLOUD_EXTENSION);
+    let steps = (reach / STEP).floor() as usize;
+    for k in 1..=steps {
+        let d = k as f64 * STEP;
+        if d <= inward_limit {
+            let q = point_at_arc(path, d);
+            if !covers(q) {
                 let passed = arcs[1..path.len() - 1]
                     .iter()
-                    .filter(|&&a| a <= s + EPS)
+                    .filter(|&&a| a <= d + EPS)
                     .count();
-                (q, passed)
-            })
-        })
-        .unwrap_or((end, 0))
+                return (q, passed);
+            }
+        }
+        if let Some((ux, uy)) = outward
+            && d <= MAX_CLOUD_EXTENSION
+        {
+            let q = Point::new(end.x + ux * d, end.y + uy * d);
+            if !covers(q) {
+                return (q, 0);
+            }
+        }
+    }
+    (end, 0)
 }
 
 /// What one end of a re-attached flow becomes.
