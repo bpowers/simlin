@@ -494,6 +494,17 @@ pub struct NewElements {
 }
 
 impl NewElements {
+    /// The new elements whose idents `keep` accepts.
+    pub fn filtered(self, keep: impl Fn(&str) -> bool) -> NewElements {
+        let only = |idents: Vec<String>| idents.into_iter().filter(|i| keep(i)).collect();
+        NewElements {
+            new_stocks: only(self.new_stocks),
+            new_flows: only(self.new_flows),
+            new_auxes: only(self.new_auxes),
+            new_modules: only(self.new_modules),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.new_stocks.is_empty()
             && self.new_flows.is_empty()
@@ -2609,15 +2620,24 @@ fn apply_loop_curvature(
     }
 }
 
-/// Ensure every stock/flow/aux/module variable in the model has a
-/// corresponding rendered view element.
-fn validate_view_completeness(state: &LayoutState, model: &datamodel::Model) -> Result<(), String> {
+/// Ensure every stock/flow/aux/module variable in the model whose ident
+/// `expected` accepts has a corresponding rendered view element: every
+/// variable for a fresh layout, and for a sync the ones it must draw.
+fn validate_view_completeness(
+    state: &LayoutState,
+    model: &datamodel::Model,
+    expected: impl Fn(&str) -> bool,
+) -> Result<(), String> {
     let mut expected_stocks = BTreeSet::new();
     let mut expected_flows = BTreeSet::new();
     let mut expected_auxes = BTreeSet::new();
     let mut expected_modules = BTreeSet::new();
 
-    for var in &model.variables {
+    for var in model
+        .variables
+        .iter()
+        .filter(|v| expected(&canonicalize(v.get_ident())))
+    {
         match var {
             datamodel::Variable::Stock(s) => {
                 expected_stocks.insert(canonicalize(&s.ident).into_owned());
@@ -2954,7 +2974,7 @@ pub fn fresh_layout(
     // Phase 6: Apply feedback loop curvature
     apply_loop_curvature(&mut state, config, model, metadata, |_| true);
 
-    validate_view_completeness(&state, model)?;
+    validate_view_completeness(&state, model, |_| true)?;
 
     // Phase 7: Compute ViewBox from final element positions
     let (bmin_x, _bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, config);

@@ -559,33 +559,40 @@ fn a_created_valve_lands_clear_of_a_parameter() {
 
 #[test]
 fn a_sync_draws_a_missing_connector_only_where_the_edit_is_about_it() {
-    // population grows by births at birth_rate, and doubled reads birth_rate.
-    // The author's view draws neither births' connectors nor doubled at all.
-    // Every arm of what an edit may draw:
-    // - an unrelated edit (a new note): births' connectors stay out;
+    // population grows by births at birth_rate; doubled reads birth_rate and
+    // quad reads doubled. The author's view draws neither births' connectors
+    // nor doubled at all. Every arm of what an edit may draw:
+    // - an unrelated edit (a new note): births' connectors stay out, and so
+    //   does doubled, a variable the author left undrawn;
     // - an edit naming births (restating it): its connectors are drawn;
-    // - an element drawn for the first time (doubled, drawn because the view
-    //   had no element for it): the connector into it is drawn, since a new
-    //   element carries no author's choice about its connectors.
+    // - an edit naming doubled (restating it): doubled is drawn with the
+    //   connector into it, and the connector from it to quad too, although
+    //   quad is not named, since an element drawn for the first time carries
+    //   no author's choice about its connectors.
     let project = project_with(vec![
         datamodel::Variable::Stock(stock("population", &["births"], &[])),
         datamodel::Variable::Flow(flow("births", "population * birth_rate")),
         datamodel::Variable::Aux(aux("birth_rate", "0.1")),
         datamodel::Variable::Aux(aux("doubled", "birth_rate * 2")),
+        datamodel::Variable::Aux(aux("quad", "doubled * 2")),
     ]);
     let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
-    let doubled = center_named(&base, "doubled").map(|_| {
-        base.elements
-            .iter()
-            .find(|e| e.get_name().is_some_and(|n| canonicalize(n) == "doubled"))
-            .map(ViewElement::get_uid)
-            .expect("doubled drawn")
-    });
+    let doubled = base
+        .elements
+        .iter()
+        .find(|e| e.get_name().is_some_and(|n| canonicalize(n) == "doubled"))
+        .map(ViewElement::get_uid)
+        .expect("doubled drawn");
     let births = flow_named(&base, "births").uid;
     base.elements.retain(|e| match e {
-        ViewElement::Link(l) => l.to_uid != births && Some(l.to_uid) != doubled,
-        other => Some(other.get_uid()) != doubled,
+        ViewElement::Link(l) => l.to_uid != births && l.to_uid != doubled && l.from_uid != doubled,
+        other => other.get_uid() != doubled,
     });
+    let drawn = |view: &datamodel::StockFlow, name: &str| {
+        view.elements
+            .iter()
+            .any(|e| e.get_name().is_some_and(|n| canonicalize(n) == name))
+    };
 
     let (_, unrelated) = sync(
         &project,
@@ -595,8 +602,8 @@ fn a_sync_draws_a_missing_connector_only_where_the_edit_is_about_it() {
     assert!(link_between(&unrelated, "birth_rate", "births").is_none());
     assert!(link_between(&unrelated, "population", "births").is_none());
     assert!(
-        link_between(&unrelated, "birth_rate", "doubled").is_some(),
-        "doubled is drawn for the first time, with its connector"
+        !drawn(&unrelated, "doubled"),
+        "a variable the author left undrawn stays undrawn"
     );
 
     let (_, restated) = sync(
@@ -609,6 +616,22 @@ fn a_sync_draws_a_missing_connector_only_where_the_edit_is_about_it() {
     );
     assert!(link_between(&restated, "birth_rate", "births").is_some());
     assert!(link_between(&restated, "population", "births").is_some());
+    assert!(!drawn(&restated, "doubled"));
+
+    let (_, named) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::UpsertAux(aux("doubled", "birth_rate * 2"))],
+    );
+    assert!(
+        drawn(&named, "doubled"),
+        "a variable the patch names is drawn"
+    );
+    assert!(link_between(&named, "birth_rate", "doubled").is_some());
+    assert!(
+        link_between(&named, "doubled", "quad").is_some(),
+        "doubled is drawn for the first time, with its connector to quad"
+    );
 }
 
 #[test]

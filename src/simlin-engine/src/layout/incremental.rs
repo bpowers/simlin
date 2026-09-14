@@ -1990,7 +1990,8 @@ fn rebow_moved_links(elements: &mut [ViewElement], old_view: &datamodel::StockFl
 /// reference so callers can inspect the operations.
 ///
 /// Contract for elements the patch did not touch: position AND
-/// `label_side` are returned byte-for-byte. A label side is chosen only
+/// `label_side` are returned byte-for-byte. A variable the view does not
+/// draw stays undrawn unless the patch names it. A label side is chosen only
 /// for elements created in this pass -- new variables, kind-changed
 /// rebuilds, and flows rebuilt because their attachment changed. The
 /// optimizer never revisits an existing side, even when a connector added
@@ -2125,8 +2126,12 @@ pub fn incremental_layout(
         named.contains(to) || !drawn_before.contains(from) || !drawn_before.contains(to)
     };
     // Likewise a link the view draws for no dependency the model has goes only
-    // with an edit to its reader.
+    // with an edit to its reader, and a variable the view does not draw is
+    // drawn only when the patch names it: an author who left a variable out of
+    // a view keeps it out whatever unrelated edit follows. Whatever the view
+    // drew stays drawn, rebuilt where its kind or attachment changed.
     let keeps_connector = |to: &str| !named.contains(to);
+    let draws_element = |ident: &str| named.contains(ident) || drawn_before.contains(ident);
 
     // Between steps 3 and 4a: detect variables whose type changed (e.g., Aux -> Stock).
     // When a caller issues UpsertStock for a variable that was previously an Aux, there
@@ -2300,7 +2305,7 @@ pub fn incremental_layout(
     }
 
     // Step 4: Identify new elements and compute initial positions
-    let new_elements = state.identify_new_elements(model);
+    let new_elements = state.identify_new_elements(model).filtered(draws_element);
 
     // The face each new flow attaches on, from its stocks' current flow lists
     // and the faces their drawn side flows already take. Only new flows read
@@ -2410,7 +2415,7 @@ pub fn incremental_layout(
         diff_clouds(&mut state, &metadata);
         declutter::declutter_part(&mut state.elements, needs_label_placement, |_| false);
         apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
-        validate_view_completeness(&state, model)?;
+        validate_view_completeness(&state, model, draws_element)?;
         return Ok(build_stock_flow_from_state(state, old_view));
     }
 
@@ -2642,7 +2647,7 @@ pub fn incremental_layout(
     rebow_moved_links(&mut state.elements, old_view);
     apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
 
-    validate_view_completeness(&state, model)?;
+    validate_view_completeness(&state, model, draws_element)?;
 
     // Step 9: Build StockFlow
     Ok(build_stock_flow_from_state(state, old_view))

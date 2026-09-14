@@ -95,8 +95,6 @@ const FIXTURES: [Fixture; 13] = [
     },
 ];
 
-/// A variable the view did not draw is drawn by an edit that does not name it.
-const UNDRAWN_VARIABLE_DRAWN: &str = "variable the author left undrawn drawn by an unrelated sync";
 /// Flows that met a deleted stock at one point keep their ends there as
 /// clouds, on top of each other.
 const CLOUDS_MEET_AT_DELETED_STOCK: &str = "clouds of flows through a deleted stock overlap";
@@ -117,24 +115,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         CREATED_ELEMENT_ON_SHAPE,
     ),
     (
-        "catastrophe",
-        "restate_variable",
-        "return_to_original",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "add_then_undo",
-        "return_to_original",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "restate_variable",
-        "return_to_original",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
         "bathtub",
         "add_side_flow",
         "shape_overlap",
@@ -147,190 +127,10 @@ const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
         CLOUDS_MEET_AT_DELETED_STOCK,
     ),
     (
-        "beer_game",
-        "add_sector",
-        "shape_overlap",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "add_sector",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "aux_to_stock",
-        "shape_overlap",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "aux_to_stock",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "close_loop",
-        "shape_overlap",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "close_loop",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "delete_parameter",
-        "shape_overlap",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "delete_parameter",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "insert_intermediate",
-        "shape_overlap",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "insert_intermediate",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "rename_variable",
-        "shape_overlap",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "rename_variable",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "restate_variable",
-        "shape_overlap",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "beer_game",
-        "restate_variable",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "add_flow_between_stocks",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "add_parameter",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "add_sector",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "add_side_flow",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "add_then_undo",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "aux_to_stock",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "close_loop",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "delete_flow",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
         "catastrophe",
         "delete_middle_stock",
         "shape_overlap",
         CLOUDS_MEET_AT_DELETED_STOCK,
-    ),
-    (
-        "catastrophe",
-        "delete_middle_stock",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "delete_parameter",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "detach_flow",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "extend_chain",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "insert_intermediate",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "rename_by_remove_and_add",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "rename_variable",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
-    ),
-    (
-        "catastrophe",
-        "restate_variable",
-        "unrelated_element_added",
-        UNDRAWN_VARIABLE_DRAWN,
     ),
 ];
 
