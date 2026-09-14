@@ -329,3 +329,119 @@ fn every_known_defect_names_a_fixture_scenario_and_finding() {
         );
     }
 }
+
+#[test]
+fn every_scenario_writes_equations_that_read_names_needing_quotes() {
+    // Every variable here has a name the lexer cannot read bare, so a
+    // scenario that interpolates one into equation text unquoted writes some
+    // other expression (`labor-force * 0.1` is a subtraction reading `labor`
+    // and `force`), and the battery would audit a different edit from the one
+    // it names. The oracle is the production compiler: a variable a step
+    // writes that comes out with an equation error was written an equation
+    // that does not read what it says. Only the written variables are charged:
+    // deleting a parameter leaves its readers with an unknown dependency, which
+    // is the edit, not a spelling. Every kind must apply, so every arm of
+    // `build_scenario` is covered.
+    use crate::db::{
+        DiagnosticSeverity, LtmOverlay, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
+    };
+    let errors = |project: &datamodel::Project, only: Option<&BTreeSet<String>>| -> Vec<String> {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, project);
+        collect_all_diagnostics(&db, sync.project, LtmOverlay::Off)
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .filter(|d| {
+                only.is_none_or(|written| {
+                    d.variable
+                        .as_deref()
+                        .is_some_and(|v| written.contains(canonicalize(v).as_ref()))
+                })
+            })
+            .map(|d| format!("{:?}: {:?}", d.variable, d.error.code()))
+            .collect()
+    };
+    let names = |idents: &[&str]| idents.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let mut project = datamodel::Project {
+        name: "quoted".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: Vec::new(),
+        units: Vec::new(),
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: Vec::new(),
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+    apply_patch(
+        &mut project,
+        ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![
+                    stock(
+                        "labor-force",
+                        "100",
+                        &names(&["hiring-rate"]),
+                        &names(&["quit-rate"]),
+                    ),
+                    stock("retirees", "0", &names(&["quit-rate"]), &[]),
+                    stock("open-positions", "10", &[], &[]),
+                    flow("hiring-rate", "\"labor-force\" * \"hire-fraction\""),
+                    flow("quit-rate", "\"labor-force\" * 0.05"),
+                    aux("hire-fraction", "0.1"),
+                ],
+            }],
+        },
+    )
+    .expect("the fixture applies");
+    assert_eq!(
+        errors(&project, None),
+        Vec::<String>::new(),
+        "the fixture compiles"
+    );
+
+    for kind in ScenarioKind::ALL {
+        let scenario = build_scenario(&project, "main", kind)
+            .unwrap_or_else(|| panic!("{} applies to the fixture", kind.name()));
+        let mut current = project.clone();
+        for (step, ops) in scenario.steps.iter().enumerate() {
+            apply_patch(
+                &mut current,
+                ProjectPatch {
+                    project_ops: vec![],
+                    models: vec![ModelPatch {
+                        name: "main".to_string(),
+                        ops: ops.clone(),
+                    }],
+                },
+            )
+            .unwrap_or_else(|e| panic!("{} step {step} applies: {e:?}", kind.name()));
+            let written: BTreeSet<String> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    ModelOperation::UpsertStock(s) => Some(&s.ident),
+                    ModelOperation::UpsertFlow(f) => Some(&f.ident),
+                    ModelOperation::UpsertAux(a) => Some(&a.ident),
+                    ModelOperation::UpsertModule(m) => Some(&m.ident),
+                    _ => None,
+                })
+                .map(|ident| canonicalize(ident).into_owned())
+                .collect();
+            assert_eq!(
+                errors(&current, Some(&written)),
+                Vec::<String>::new(),
+                "{} ({}) step {step} leaves the model with equation errors",
+                kind.name(),
+                scenario.description
+            );
+        }
+    }
+}

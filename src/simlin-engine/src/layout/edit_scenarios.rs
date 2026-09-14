@@ -409,6 +409,14 @@ fn stock(ident: &str, equation: &str, inflows: &[String], outflows: &[String]) -
     })
 }
 
+/// `ident` as equation text reads it: an agent's name for a variable (a
+/// hyphen, a leading digit, a keyword) can need quotes, and interpolated bare
+/// it parses as some other expression, so the scenario would audit a different
+/// edit from the one it names.
+fn eqn_text(ident: &str) -> String {
+    crate::ast::print_ident(ident)
+}
+
 fn upsert(v: Variable) -> ModelOperation {
     match v {
         Variable::Stock(s) => ModelOperation::UpsertStock(s),
@@ -603,7 +611,7 @@ impl<'a> Targets<'a> {
         let n = self.fresh(&format!("{f}_multiplier"));
         let ops = vec![
             aux(&n, "1"),
-            self.with_equation(&f, &format!("({eqn}) * {n}"))?,
+            self.with_equation(&f, &format!("({eqn}) * {}", eqn_text(&n)))?,
         ];
         Some((f, n, ops))
     }
@@ -657,7 +665,7 @@ pub fn build_scenario(
             let eqn = t.renamed_equation(&reader, &p, &x)?;
             Some(single(
                 format!("insert {x} between {p} and {reader}"),
-                vec![aux(&x, &p), t.with_equation(&reader, &eqn)?],
+                vec![aux(&x, &eqn_text(&p)), t.with_equation(&reader, &eqn)?],
             ))
         }
         ScenarioKind::DeleteParameter => {
@@ -772,7 +780,7 @@ pub fn build_scenario(
             Some(single(
                 format!("add {n} from {a} to {b}"),
                 vec![
-                    flow(&n, &format!("{a} * 0.01")),
+                    flow(&n, &format!("{} * 0.01", eqn_text(&a))),
                     t.with_flows(&a, sa.inflows.clone(), out_a)?,
                     t.with_flows(&b, in_b, sb.outflows.clone())?,
                 ],
@@ -798,7 +806,7 @@ pub fn build_scenario(
             let eqn = scalar(t.var(&p)?)?;
             Some(single(
                 format!("make {p} read {s}"),
-                vec![t.with_equation(&p, &format!("({eqn}) * (1 + {s} / 1000)"))?],
+                vec![t.with_equation(&p, &format!("({eqn}) * (1 + {} / 1000)", eqn_text(&s)))?],
             ))
         }
         ScenarioKind::ExtendChain => {
@@ -810,7 +818,7 @@ pub fn build_scenario(
             Some(single(
                 format!("add {downstream}, fed from {s} by {transfer}"),
                 vec![
-                    flow(&transfer, &format!("{s} * 0.1")),
+                    flow(&transfer, &format!("{} * 0.1", eqn_text(&s))),
                     stock(&downstream, "0", std::slice::from_ref(&transfer), &[]),
                     t.with_flows(&s, st.inflows.clone(), outflows)?,
                 ],
@@ -824,7 +832,7 @@ pub fn build_scenario(
             Some(single(
                 format!("add {loss} out of {s}"),
                 vec![
-                    flow(&loss, &format!("{s} * 0.01")),
+                    flow(&loss, &format!("{} * 0.01", eqn_text(&s))),
                     t.with_flows(&s, st.inflows.clone(), outflows)?,
                 ],
             ))
@@ -839,7 +847,10 @@ pub fn build_scenario(
                 vec![
                     aux(&rate, "0.1"),
                     flow(&inflow, "1"),
-                    flow(&outflow, &format!("{level} * {rate}")),
+                    flow(
+                        &outflow,
+                        &format!("{} * {}", eqn_text(&level), eqn_text(&rate)),
+                    ),
                     stock(
                         &level,
                         "10",
