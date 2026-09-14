@@ -16,6 +16,7 @@ CRITICAL: this is new software -- `ReadModel` and `CreateModel` are safe, but ON
 - `upsertFlow` -- Create or replace a flow (rate). Requires `name` and `equation`. Optional: `units`, `documentation`, `graphicalFunction`.
 - `upsertAuxiliary` -- Create or replace an auxiliary variable. Requires `name` and `equation`. Optional: `units`, `documentation`, `graphicalFunction`.
 - `removeVariable` -- Remove a variable by `name`.
+- `renameVariable` -- Rename a variable `from` its current name `to` a new one. Every equation that reads it is rewritten, and its diagram element keeps its place and connectors; prefer it to removing the variable and upserting it under the new name.
 - `setLoopName` -- Assign a human-readable name to a feedback loop. Requires `variables` (list of variable names forming the loop) and `name`. Optional: `description`.
 
 ### Typical workflow

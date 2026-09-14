@@ -138,6 +138,17 @@ pub struct RemoveVariableInput {
     pub name: String,
 }
 
+/// Rename a variable. Every equation that reads it is rewritten to the new
+/// name, and its diagram element keeps its place and connectors.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameVariableInput {
+    /// Current name of the variable.
+    pub from: String,
+    /// New name for the variable; no other variable may already have it.
+    pub to: String,
+}
+
 /// Assign a human-readable name to a feedback loop identified by its
 /// participating variables.
 #[derive(Deserialize, JsonSchema)]
@@ -162,6 +173,7 @@ pub enum EditOperation {
     UpsertFlow(UpsertFlowInput),
     UpsertAuxiliary(UpsertAuxiliaryInput),
     RemoveVariable(RemoveVariableInput),
+    RenameVariable(RenameVariableInput),
     SetLoopName(SetLoopNameInput),
 }
 
@@ -623,6 +635,10 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
         EditOperation::RemoveVariable(r) => {
             simlin_engine::ModelOperation::DeleteVariable { ident: r.name }
         }
+        EditOperation::RenameVariable(r) => simlin_engine::ModelOperation::RenameVariable {
+            from: r.from,
+            to: r.to,
+        },
         EditOperation::SetLoopName(input) => simlin_engine::ModelOperation::SetLoopName {
             variables: input.variables,
             name: input.name,
@@ -671,11 +687,11 @@ mod tests {
         assert_eq!(convert_arrayed_equation(input).has_except_default, None);
     }
 
-    /// `convert_operation` is a five-way dispatch over `EditOperation`, and
+    /// `convert_operation` is a six-way dispatch over `EditOperation`, and
     /// each arm both selects a `ModelOperation` variant and carries the
     /// caller's fields across. The rows are derived from `EditOperation`'s
-    /// variant list, not sampled from it: a sixth variant added there needs a
-    /// sixth row here. `ModelOperation` is the wider enum (it also carries
+    /// variant list, not sampled from it: a seventh variant added there needs a
+    /// seventh row here. `ModelOperation` is the wider enum (it also carries
     /// operations the MCP surface does not expose), so the match keeps a
     /// catch-all -- reaching it means an arm mapped to the wrong family.
     #[test]
@@ -711,6 +727,10 @@ mod tests {
             EditOperation::RemoveVariable(RemoveVariableInput {
                 name: "deaths".into(),
             }),
+            EditOperation::RenameVariable(RenameVariableInput {
+                from: "rate".into(),
+                to: "growth rate".into(),
+            }),
             EditOperation::SetLoopName(SetLoopNameInput {
                 variables: vec!["population".into(), "births".into()],
                 name: "Growth Loop".into(),
@@ -739,6 +759,10 @@ mod tests {
                 // request becomes a DeleteVariable, not an upsert.
                 ModelOperation::DeleteVariable { ident } => {
                     assert_eq!(ident, "deaths");
+                }
+                ModelOperation::RenameVariable { from, to } => {
+                    assert_eq!(from, "rate");
+                    assert_eq!(to, "growth rate");
                 }
                 ModelOperation::SetLoopName {
                     variables,
