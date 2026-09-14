@@ -138,6 +138,17 @@ pub struct RemoveVariableInput {
     pub name: String,
 }
 
+/// Rename a variable. Every equation that reads it is rewritten to the new
+/// name, and its diagram element keeps its place and connectors.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameVariableInput {
+    /// Current name of the variable.
+    pub from: String,
+    /// New name for the variable; no other variable may already have it.
+    pub to: String,
+}
+
 /// Assign a human-readable name to a feedback loop identified by its
 /// participating variables.
 #[derive(Deserialize, JsonSchema)]
@@ -162,6 +173,7 @@ pub enum EditOperation {
     UpsertFlow(UpsertFlowInput),
     UpsertAuxiliary(UpsertAuxiliaryInput),
     RemoveVariable(RemoveVariableInput),
+    RenameVariable(RenameVariableInput),
     SetLoopName(SetLoopNameInput),
 }
 
@@ -241,7 +253,9 @@ pub struct EditModelOutput {
     /// advisory and synthetic-fragment compile-failure warnings (GH #662),
     /// plus the on-disk writer's lossiness warnings (an MDL project holding
     /// a construct Vensim cannot express is saved in its closest
-    /// representable form; the message carries an `MDL export:` prefix).
+    /// representable form; the message carries an `MDL export:` prefix), and a
+    /// diagram sync that failed (the edit landed but the diagram still shows
+    /// the model as it was; the message carries a `diagram sync:` prefix).
     /// A `dryRun` computes the writer warnings without writing, so an agent
     /// can preview what a real save would degrade.  Empty (and elided from
     /// JSON) when there are none.
@@ -329,9 +343,11 @@ pub async fn edit_model<A: ProjectAccess>(
     simlin_engine::apply_patch(&mut project, patch)
         .map_err(|e| AccessError::ParseError(anyhow::anyhow!("patch application failed: {e:?}")))?;
 
-    if !dry_run && has_variable_ops {
-        sync_diagram(&mut project, &model_name, model_patch.as_ref());
-    }
+    let diagram_warning = if !dry_run && has_variable_ops {
+        sync_diagram(&mut project, &model_name, model_patch.as_ref())
+    } else {
+        None
+    };
 
     // One SimlinDb shared between the diagnostic gate and analyze_model
     // so salsa's caches are reused.
@@ -371,6 +387,7 @@ pub async fn edit_model<A: ProjectAccess>(
     .filter(|e| e.model_name.as_ref().is_none_or(|name| name == &model_name))
     .map(ErrorOutput::from)
     .collect();
+    warnings.extend(diagram_warning);
 
     let has_new_errors = post_edit_model_errors
         .iter()
@@ -453,19 +470,19 @@ pub async fn edit_model<A: ProjectAccess>(
     })
 }
 
-/// Regenerate the diagram layout for the named model, replacing its views
-/// in-place.  When a model patch is provided and the model already has a
-/// non-empty view, uses incremental layout to preserve existing element
-/// positions.  Falls back to full layout generation otherwise.
+/// Bring the named model's diagram in line with the patched model: its first
+/// view is synced (incremental layout when a model patch is provided and the
+/// view is non-empty, preserving existing element positions; a full layout
+/// otherwise) and installed by [`install_synced_view`].
 ///
-/// Preserves the existing zoom level when the model already has a view.
-/// Layout failures are silently ignored -- a missing diagram is non-fatal
-/// and the model data is still correct.
+/// Returns the warning to report when the sync failed. A failed sync never
+/// fails the edit -- the model data is correct -- but the agent has to know
+/// the diagram no longer matches it.
 fn sync_diagram(
     project: &mut simlin_engine::datamodel::Project,
     model_name: &str,
     model_patch: Option<&simlin_engine::ModelPatch>,
-) {
+) -> Option<ErrorOutput> {
     let old_view = project
         .get_model(model_name)
         .and_then(|m| m.views.first())
@@ -473,9 +490,7 @@ fn sync_diagram(
             simlin_engine::datamodel::View::StockFlow(sf) => sf,
         });
 
-    let existing_zoom = old_view.map(|sf| sf.zoom).filter(|&z| z > 0.0);
-
-    let new_view = if let (Some(old_sf), Some(patch)) = (old_view, model_patch) {
+    let synced = if let (Some(old_sf), Some(patch)) = (old_view, model_patch) {
         if !old_sf.elements.is_empty() {
             let old_sf = old_sf.clone();
             simlin_engine::layout::incremental_layout(&old_sf, project, model_name, patch, None)
@@ -486,18 +501,52 @@ fn sync_diagram(
         simlin_engine::layout::generate_best_layout(project, model_name, None)
     };
 
-    let mut layout = match new_view {
-        Ok(l) => l,
-        Err(_) => return,
+    install_synced_view(project, model_name, synced)
+}
+
+/// Install the result of syncing a model's first view.
+///
+/// A synced view replaces the first view only, keeping its zoom, and every
+/// other view the model holds stays as it was: the layout syncs one view, and
+/// a project can carry more (JSON and protobuf hold a list), which are the
+/// author's and must not vanish because an agent edited the model.
+///
+/// A failed sync leaves every view as it was and returns a warning naming the
+/// reason, so the agent learns the diagram still shows the model as it was
+/// before this edit rather than reading a stale diagram as current.
+fn install_synced_view(
+    project: &mut simlin_engine::datamodel::Project,
+    model_name: &str,
+    synced: Result<simlin_engine::datamodel::StockFlow, String>,
+) -> Option<ErrorOutput> {
+    let mut layout = match synced {
+        Ok(layout) => layout,
+        Err(reason) => {
+            return Some(ErrorOutput {
+                code: simlin_engine::common::ErrorCode::Generic.to_string(),
+                message: format!(
+                    "diagram sync: {reason}; the edit was applied, but the diagram was not \
+                     updated and still shows the model as it was before this edit"
+                ),
+                model_name: Some(model_name.to_string()),
+                variable_name: None,
+                kind: "model".to_string(),
+            });
+        }
     };
-
-    if let Some(zoom) = existing_zoom {
-        layout.zoom = zoom;
+    let model = project.get_model_mut(model_name)?;
+    match model.views.first_mut() {
+        Some(simlin_engine::datamodel::View::StockFlow(first)) => {
+            if first.zoom > 0.0 {
+                layout.zoom = first.zoom;
+            }
+            *first = layout;
+        }
+        None => model
+            .views
+            .push(simlin_engine::datamodel::View::StockFlow(layout)),
     }
-
-    if let Some(model) = project.get_model_mut(model_name) {
-        model.views = vec![simlin_engine::datamodel::View::StockFlow(layout)];
-    }
+    None
 }
 
 /// Build an engine `ProjectPatch` from the curated MCP inputs.
@@ -623,6 +672,10 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
         EditOperation::RemoveVariable(r) => {
             simlin_engine::ModelOperation::DeleteVariable { ident: r.name }
         }
+        EditOperation::RenameVariable(r) => simlin_engine::ModelOperation::RenameVariable {
+            from: r.from,
+            to: r.to,
+        },
         EditOperation::SetLoopName(input) => simlin_engine::ModelOperation::SetLoopName {
             variables: input.variables,
             name: input.name,
@@ -634,6 +687,81 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every arm of installing a sync's result: a synced view replaces a
+    /// model's first view (keeping its zoom) and leaves the rest, is added to
+    /// a model with no view, and a failed sync leaves the views as they were
+    /// and reports why. How a sync fails is the layout's business; the warning
+    /// is what this layer owes the agent whatever the reason.
+    #[test]
+    fn install_synced_view_arms() {
+        use simlin_engine::datamodel::View;
+        let mut project = crate::types::build_empty_project();
+        simlin_engine::apply_patch(
+            &mut project,
+            build_patch(
+                "main",
+                None,
+                Some(vec![EditOperation::UpsertAuxiliary(UpsertAuxiliaryInput {
+                    name: "rate".into(),
+                    equation: "0.1".into(),
+                    units: None,
+                    documentation: None,
+                    graphical_function: None,
+                    arrayed_equation: None,
+                })]),
+            ),
+        )
+        .expect("the patch applies");
+        let synced =
+            simlin_engine::layout::generate_best_layout(&project, "main", None).expect("layout");
+        let first = simlin_engine::datamodel::StockFlow {
+            elements: Vec::new(),
+            zoom: 2.0,
+            ..synced.clone()
+        };
+        let second = simlin_engine::datamodel::StockFlow {
+            zoom: 0.5,
+            ..synced.clone()
+        };
+
+        project.models[0].views = vec![
+            View::StockFlow(first.clone()),
+            View::StockFlow(second.clone()),
+        ];
+        assert!(install_synced_view(&mut project, "main", Ok(synced.clone())).is_none());
+        let kept_zoom = simlin_engine::datamodel::StockFlow {
+            zoom: 2.0,
+            ..synced.clone()
+        };
+        assert!(
+            project.models[0].views
+                == vec![View::StockFlow(kept_zoom), View::StockFlow(second.clone())],
+            "the first view is replaced at its zoom, the second is untouched"
+        );
+
+        project.models[0].views = Vec::new();
+        assert!(install_synced_view(&mut project, "main", Ok(synced.clone())).is_none());
+        assert!(project.models[0].views == vec![View::StockFlow(synced.clone())]);
+
+        let before = vec![View::StockFlow(first), View::StockFlow(second)];
+        project.models[0].views = before.clone();
+        let warning = install_synced_view(&mut project, "main", Err("no room".into()))
+            .expect("a failed sync is reported");
+        assert!(
+            project.models[0].views == before,
+            "a failed sync changes no view"
+        );
+        assert_eq!(warning.code, "generic");
+        assert_eq!(warning.kind, "model");
+        assert_eq!(warning.model_name.as_deref(), Some("main"));
+        assert_eq!(warning.variable_name, None);
+        assert!(
+            warning.message.starts_with("diagram sync: no room;"),
+            "{}",
+            warning.message
+        );
+    }
 
     #[test]
     fn convert_arrayed_equation_infers_except_default() {
@@ -671,11 +799,11 @@ mod tests {
         assert_eq!(convert_arrayed_equation(input).has_except_default, None);
     }
 
-    /// `convert_operation` is a five-way dispatch over `EditOperation`, and
+    /// `convert_operation` is a six-way dispatch over `EditOperation`, and
     /// each arm both selects a `ModelOperation` variant and carries the
     /// caller's fields across. The rows are derived from `EditOperation`'s
-    /// variant list, not sampled from it: a sixth variant added there needs a
-    /// sixth row here. `ModelOperation` is the wider enum (it also carries
+    /// variant list, not sampled from it: a seventh variant added there needs a
+    /// seventh row here. `ModelOperation` is the wider enum (it also carries
     /// operations the MCP surface does not expose), so the match keeps a
     /// catch-all -- reaching it means an arm mapped to the wrong family.
     #[test]
@@ -711,6 +839,10 @@ mod tests {
             EditOperation::RemoveVariable(RemoveVariableInput {
                 name: "deaths".into(),
             }),
+            EditOperation::RenameVariable(RenameVariableInput {
+                from: "rate".into(),
+                to: "growth rate".into(),
+            }),
             EditOperation::SetLoopName(SetLoopNameInput {
                 variables: vec!["population".into(), "births".into()],
                 name: "Growth Loop".into(),
@@ -739,6 +871,10 @@ mod tests {
                 // request becomes a DeleteVariable, not an upsert.
                 ModelOperation::DeleteVariable { ident } => {
                     assert_eq!(ident, "deaths");
+                }
+                ModelOperation::RenameVariable { from, to } => {
+                    assert_eq!(from, "rate");
+                    assert_eq!(to, "growth rate");
                 }
                 ModelOperation::SetLoopName {
                     variables,

@@ -48,6 +48,50 @@ fn test_diagram_sync_sir_model() {
 }
 
 #[test]
+fn test_diagram_sync_keeps_every_view_but_the_first() {
+    // The sync lays out a model's first view; a project can carry more, and
+    // those are the author's, so they come back exactly as they were.
+    let mut datamodel = TestProject::new("two_views")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * 0.02", None)
+        .build_datamodel();
+    let laid_out = engine::layout::generate_best_layout(&datamodel, "main", None).expect("layout");
+    let overview = datamodel::View::StockFlow(datamodel::StockFlow {
+        zoom: 0.5,
+        ..laid_out
+    });
+    let empty_first = datamodel::View::StockFlow(datamodel::StockFlow {
+        elements: Vec::new(),
+        ..match &overview {
+            datamodel::View::StockFlow(sf) => sf.clone(),
+        }
+    });
+    datamodel.models[0].views = vec![empty_first, overview.clone()];
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let model_name = CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
+        assert!(err.is_null(), "diagram_sync should succeed");
+
+        let datamodel_locked = (*proj).datamodel.lock().unwrap();
+        let model = datamodel_locked.get_model("main").unwrap();
+        assert_eq!(model.views.len(), 2, "no view is dropped");
+        let datamodel::View::StockFlow(first) = &model.views[0];
+        assert!(!first.elements.is_empty(), "the first view is laid out");
+        assert!(
+            model.views[1] == overview,
+            "the second view comes back as it was"
+        );
+        drop(datamodel_locked);
+
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
 fn test_diagram_sync_test_project() {
     let test_project = TestProject::new("layout_test")
         .with_sim_time(0.0, 10.0, 1.0)

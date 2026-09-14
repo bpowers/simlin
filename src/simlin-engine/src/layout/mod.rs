@@ -11,6 +11,10 @@ pub mod connector;
 pub mod declutter;
 mod detect_ltm_loops;
 #[cfg(any(test, feature = "layout_eval"))]
+pub mod edit_audit;
+#[cfg(any(test, feature = "layout_eval"))]
+pub mod edit_scenarios;
+#[cfg(any(test, feature = "layout_eval"))]
 pub mod eval_stats;
 mod face_slots;
 pub mod graph;
@@ -338,7 +342,16 @@ impl LayoutState {
             ViewElement::Stock(s) if s.uid == deleted_uid => false,
             ViewElement::Flow(f) if f.uid == deleted_uid => false,
             ViewElement::Module(m) if m.uid == deleted_uid => false,
-            ViewElement::Link(l) if l.from_uid == deleted_uid || l.to_uid == deleted_uid => false,
+            // A link touching one of the variable's aliases goes with the
+            // alias: the connector diff keeps a link it cannot explain, so
+            // nothing else removes it.
+            ViewElement::Link(l)
+                if [l.from_uid, l.to_uid]
+                    .iter()
+                    .any(|u| *u == deleted_uid || removed_alias_uids.contains(u)) =>
+            {
+                false
+            }
             ViewElement::Cloud(c) if c.flow_uid == deleted_uid => false,
             ViewElement::Alias(a) if a.alias_of_uid == deleted_uid => false,
             _ => true,
@@ -361,6 +374,45 @@ impl LayoutState {
             }
         }
         self.display_names.remove(&canonical_str);
+    }
+
+    /// Remove a variable's element so this pass rebuilds it -- its kind
+    /// changed, or the stocks its flow attaches to did -- keeping everything
+    /// that refers to it by uid. The uid stays mapped, so the rebuilt element
+    /// takes it and the links and aliases touching it survive (the connector
+    /// diff still drops a link whose dependency is gone); its position and
+    /// display name stay for the rebuild to read. Its clouds go: they belong
+    /// to the old pipe.
+    pub fn remove_for_rebuild(&mut self, ident: &str) {
+        let canonical = canonicalize(ident).into_owned();
+        let Some(uid) = self.uid_manager.get_uid(&canonical) else {
+            return;
+        };
+        let cloud_uids: Vec<i32> = self
+            .elements
+            .iter()
+            .filter_map(|elem| match elem {
+                ViewElement::Cloud(c) if c.flow_uid == uid => Some(c.uid),
+                _ => None,
+            })
+            .collect();
+        self.elements.retain(|elem| match elem {
+            ViewElement::Aux(_)
+            | ViewElement::Stock(_)
+            | ViewElement::Flow(_)
+            | ViewElement::Module(_) => elem.get_uid() != uid,
+            ViewElement::Cloud(c) => c.flow_uid != uid,
+            ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => true,
+        });
+        for cloud_uid in &cloud_uids {
+            self.positions.remove(cloud_uid);
+        }
+        if let Some(cloud_idents) = self.flow_ident_to_clouds.remove(&canonical) {
+            for ci in &cloud_idents {
+                self.cloud_ident_to_uid.remove(ci);
+                self.cloud_ident_to_flow_ident.remove(ci);
+            }
+        }
     }
 
     /// Update a variable's identity in-place while preserving its
@@ -442,6 +494,17 @@ pub struct NewElements {
 }
 
 impl NewElements {
+    /// The new elements whose idents `keep` accepts.
+    pub fn filtered(self, keep: impl Fn(&str) -> bool) -> NewElements {
+        let only = |idents: Vec<String>| idents.into_iter().filter(|i| keep(i)).collect();
+        NewElements {
+            new_stocks: only(self.new_stocks),
+            new_flows: only(self.new_flows),
+            new_auxes: only(self.new_auxes),
+            new_modules: only(self.new_modules),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.new_stocks.is_empty()
             && self.new_flows.is_empty()
@@ -2463,12 +2526,16 @@ fn optimize_labels(state: &mut LayoutState, model: &datamodel::Model, metadata: 
     }
 }
 
-/// Apply arc curvature to connectors involved in feedback loops.
+/// Apply arc curvature to connectors involved in feedback loops, among the
+/// links `curves` accepts (by uid): every link in a fresh layout, and only the
+/// links an incremental pass creates, since a link a person drew straight is
+/// theirs to keep, whichever loop an edit now puts it on.
 fn apply_loop_curvature(
     state: &mut LayoutState,
     config: &LayoutConfig,
     model: &datamodel::Model,
     metadata: &ComputedMetadata,
+    curves: impl Fn(i32) -> bool,
 ) {
     if metadata.feedback_loops.is_empty() {
         return;
@@ -2528,7 +2595,7 @@ fn apply_loop_curvature(
             };
 
             if let ViewElement::Link(link) = &state.elements[elem_idx]
-                && matches!(link.shape, LinkShape::Arc(_))
+                && (matches!(link.shape, LinkShape::Arc(_)) || !curves(link.uid))
             {
                 continue;
             }
@@ -2553,15 +2620,24 @@ fn apply_loop_curvature(
     }
 }
 
-/// Ensure every stock/flow/aux/module variable in the model has a
-/// corresponding rendered view element.
-fn validate_view_completeness(state: &LayoutState, model: &datamodel::Model) -> Result<(), String> {
+/// Ensure every stock/flow/aux/module variable in the model whose ident
+/// `expected` accepts has a corresponding rendered view element: every
+/// variable for a fresh layout, and for a sync the ones it must draw.
+fn validate_view_completeness(
+    state: &LayoutState,
+    model: &datamodel::Model,
+    expected: impl Fn(&str) -> bool,
+) -> Result<(), String> {
     let mut expected_stocks = BTreeSet::new();
     let mut expected_flows = BTreeSet::new();
     let mut expected_auxes = BTreeSet::new();
     let mut expected_modules = BTreeSet::new();
 
-    for var in &model.variables {
+    for var in model
+        .variables
+        .iter()
+        .filter(|v| expected(&canonicalize(v.get_ident())))
+    {
         match var {
             datamodel::Variable::Stock(s) => {
                 expected_stocks.insert(canonicalize(&s.ident).into_owned());
@@ -2896,9 +2972,9 @@ pub fn fresh_layout(
     finish_flow_geometry(&mut state.elements, |_| true);
 
     // Phase 6: Apply feedback loop curvature
-    apply_loop_curvature(&mut state, config, model, metadata);
+    apply_loop_curvature(&mut state, config, model, metadata, |_| true);
 
-    validate_view_completeness(&state, model)?;
+    validate_view_completeness(&state, model, |_| true)?;
 
     // Phase 7: Compute ViewBox from final element positions
     let (bmin_x, _bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, config);
@@ -3270,6 +3346,27 @@ pub fn compute_metadata(
     model_name: &str,
     db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Option<ComputedMetadata> {
+    compute_metadata_parts(project, model_name, db_state, true)
+}
+
+/// `compute_metadata` without the feedback loops and dominant periods: the
+/// dependencies a diagram draws, the stock-flow chains and the stock lists.
+/// Loop detection simulates the model, which a reader of the dependency
+/// structure alone (the edit audit, the edit scenarios) does not need.
+pub fn compute_dependency_metadata(
+    project: &datamodel::Project,
+    model_name: &str,
+    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+) -> Option<ComputedMetadata> {
+    compute_metadata_parts(project, model_name, db_state, false)
+}
+
+fn compute_metadata_parts(
+    project: &datamodel::Project,
+    model_name: &str,
+    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+    with_loops: bool,
+) -> Option<ComputedMetadata> {
     let model = project.get_model(model_name)?;
     let mut dep_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut reverse_dep_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -3477,6 +3574,20 @@ pub fn compute_metadata(
         &flow_to_stocks,
         &all_flows,
     );
+
+    if !with_loops {
+        return Some(ComputedMetadata {
+            chains,
+            feedback_loops: Vec::new(),
+            dominant_periods: Vec::new(),
+            dep_graph,
+            reverse_dep_graph,
+            constants,
+            stock_to_inflows,
+            stock_to_outflows,
+            flow_to_stocks,
+        });
+    }
 
     // Try LTM-based loop detection. Falls back to persisted loop_metadata
     // if LTM detection or simulation fails. The branch decides the

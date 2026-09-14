@@ -285,11 +285,14 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
 
   // Put the creation tool away, then a click (no drag) on the variable's
   // circle opens its details (a click on the label would start renaming
-  // it).  Clicking the rendered-equation preview swaps in the raw editor.
-  // The details panel's classes are CSS-module names, `<local>-<hash>`.
+  // it). The new aux's empty equation is an equation error, and a variable
+  // with an equation error opens its details on the raw equation editor rather
+  // than the rendered preview (VariableDetails' showPreview), so the editor is
+  // already there to type into. The details panel's classes are CSS-module
+  // names, `<local>-<hash>`.
   await widget.getByRole('button', { name: 'Variable', exact: true }).click();
   await canvas.locator('g.simlin-aux', { hasText: 'New Variable' }).locator('circle').first().click();
-  await widget.locator('[class*="eqnPreview"]').click();
+  await expect(widget.getByText('error: Variable has empty equation')).toBeVisible();
   const equationEditor = widget.locator('[data-slate-editor="true"][class*="eqnEditor"]');
   await expect(equationEditor).toBeVisible();
   await equationEditor.click();

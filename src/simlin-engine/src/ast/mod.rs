@@ -554,8 +554,10 @@ pub(crate) fn needs_quoting(canonical: &str) -> bool {
 }
 
 /// Canonicalize an identifier for display, re-quoting if the canonical form
-/// contains characters that can't appear in a bare identifier.
-fn print_ident(raw: &str) -> String {
+/// contains characters that can't appear in a bare identifier. The one spelling
+/// of a name inside equation text: code composing an equation from names goes
+/// through it rather than interpolating a name bare.
+pub(crate) fn print_ident(raw: &str) -> String {
     let canonical = canonicalize(raw);
     if needs_quoting(&canonical) {
         format!("\"{}\"", canonical)

@@ -17,8 +17,8 @@ use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::test_support::{TestFileSystemAccess, chain_scc_project_json};
 use simlin_mcp_core::tools::edit_model::{
-    EditModelInput, EditOperation, RemoveVariableInput, SetLoopNameInput, UpsertAuxiliaryInput,
-    UpsertFlowInput, UpsertStockInput, edit_model,
+    EditModelInput, EditOperation, RemoveVariableInput, RenameVariableInput, SetLoopNameInput,
+    UpsertAuxiliaryInput, UpsertFlowInput, UpsertStockInput, edit_model,
 };
 use simlin_mcp_core::types::SourceFormat;
 
@@ -702,6 +702,176 @@ async fn edit_model_defaults_to_first_model_when_no_main() {
     assert!(
         auxes.iter().any(|a| a["name"] == "x"),
         "edit must have applied to the first model ('mymodel'): {auxes:?}"
+    );
+}
+
+fn edit_input(path: &Path, operations: Vec<EditOperation>) -> EditModelInput {
+    EditModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+        dry_run: None,
+        sim_specs: None,
+        operations: Some(operations),
+    }
+}
+
+/// `(uid, x, y)` of the aux element whose name is `name` canonically on the
+/// saved diagram (the layout stores a display spelling).
+fn aux_element(project: &datamodel::Project, name: &str) -> Option<(i32, f64, f64)> {
+    project.models[0].views.iter().find_map(|v| match v {
+        datamodel::View::StockFlow(sf) => sf.elements.iter().find_map(|e| match e {
+            datamodel::ViewElement::Aux(a) if simlin_engine::canonicalize(&a.name) == name => {
+                Some((a.uid, a.x, a.y))
+            }
+            _ => None,
+        }),
+    })
+}
+
+/// The link from the element with uid `from` into the flow named `to`.
+fn link_uid_into(project: &datamodel::Project, from: i32, to: &str) -> Option<i32> {
+    let datamodel::View::StockFlow(sf) = &project.models[0].views[0];
+    let to_uid = sf.elements.iter().find_map(|e| match e {
+        datamodel::ViewElement::Flow(f) if simlin_engine::canonicalize(&f.name) == to => {
+            Some(f.uid)
+        }
+        _ => None,
+    })?;
+    sf.elements.iter().find_map(|e| match e {
+        datamodel::ViewElement::Link(l) if l.from_uid == from && l.to_uid == to_uid => Some(l.uid),
+        _ => None,
+    })
+}
+
+/// `renameVariable` renames a variable the way the engine does: every
+/// equation that reads it is rewritten, and the diagram keeps the variable's
+/// element -- its uid, where it was drawn, and the link from it -- rather than
+/// deleting the element and drawing a new one somewhere else, which is what
+/// spelling a rename as a remove and an upsert does.
+#[tokio::test]
+async fn rename_variable_rewrites_readers_and_keeps_the_diagram() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
+
+    edit_model(
+        &TestFileSystemAccess,
+        edit_input(
+            &path,
+            vec![
+                EditOperation::UpsertStock(UpsertStockInput {
+                    name: "population".into(),
+                    initial_equation: "100".into(),
+                    units: None,
+                    documentation: None,
+                    inflows: Some(vec!["births".into()]),
+                    outflows: None,
+                    arrayed_equation: None,
+                }),
+                EditOperation::UpsertFlow(UpsertFlowInput {
+                    name: "births".into(),
+                    equation: "population * birth_rate".into(),
+                    units: None,
+                    documentation: None,
+                    graphical_function: None,
+                    arrayed_equation: None,
+                }),
+                upsert_aux("birth_rate", "0.03"),
+            ],
+        ),
+    )
+    .await
+    .expect("build the model");
+    let before = TestFileSystemAccess.open(&path).await.expect("open");
+    let (uid, x, y) = aux_element(&before.project, "birth_rate").expect("birth_rate is drawn");
+    let link = link_uid_into(&before.project, uid, "births").expect("birth_rate -> births drawn");
+
+    edit_model(
+        &TestFileSystemAccess,
+        edit_input(
+            &path,
+            vec![EditOperation::RenameVariable(RenameVariableInput {
+                from: "birth_rate".into(),
+                to: "fertility".into(),
+            })],
+        ),
+    )
+    .await
+    .expect("rename");
+
+    let after = TestFileSystemAccess.open(&path).await.expect("reopen");
+    assert_eq!(
+        variable_names(&after.project),
+        vec!["births", "fertility", "population"]
+    );
+    let births = after.project.models[0]
+        .get_variable("births")
+        .expect("births");
+    assert_eq!(
+        births.get_equation(),
+        Some(&datamodel::Equation::Scalar(
+            "population * fertility".into()
+        )),
+        "the reader's equation follows the rename"
+    );
+    assert_eq!(
+        aux_element(&after.project, "fertility"),
+        Some((uid, x, y)),
+        "the renamed variable keeps its element and where it was drawn"
+    );
+    assert_eq!(
+        link_uid_into(&after.project, uid, "births"),
+        Some(link),
+        "the link from it survives"
+    );
+}
+
+/// The diagram sync redraws a model's first view; any other view the project
+/// carries is the author's and survives an edit exactly as it was saved.
+#[tokio::test]
+async fn an_edit_keeps_every_view_but_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
+    edit_model(
+        &TestFileSystemAccess,
+        edit_input(&path, vec![upsert_aux("birth_rate", "0.03")]),
+    )
+    .await
+    .expect("build the model");
+
+    let opened = TestFileSystemAccess.open(&path).await.expect("open");
+    let mut project = opened.project;
+    let datamodel::View::StockFlow(first) = project.models[0].views[0].clone();
+    let overview = datamodel::StockFlow { zoom: 0.5, ..first };
+    project.models[0]
+        .views
+        .push(datamodel::View::StockFlow(overview));
+    TestFileSystemAccess
+        .save(&path, &project, opened.source_format, None)
+        .await
+        .expect("save the second view");
+    let before = TestFileSystemAccess.open(&path).await.expect("reopen");
+    assert_eq!(
+        before.project.models[0].views.len(),
+        2,
+        "the file holds both views"
+    );
+
+    edit_model(
+        &TestFileSystemAccess,
+        edit_input(&path, vec![upsert_aux("death_rate", "0.01")]),
+    )
+    .await
+    .expect("edit");
+
+    let after = TestFileSystemAccess.open(&path).await.expect("reopen");
+    assert_eq!(after.project.models[0].views.len(), 2, "no view is dropped");
+    assert!(
+        aux_element(&after.project, "death_rate").is_some(),
+        "the first view is synced"
+    );
+    assert!(
+        after.project.models[0].views[1] == before.project.models[0].views[1],
+        "the second view comes back as it was saved"
     );
 }
 

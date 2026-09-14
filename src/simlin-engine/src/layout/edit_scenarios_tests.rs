@@ -1,0 +1,447 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+//! The scenario battery: every `ScenarioKind` driven over hand-drawn and
+//! imported views through the production patch and sync path, with every
+//! finding the audit raises pinned. The imported fixtures are Vensim views
+//! with aliases, links the dependency extraction does not explain, variables
+//! the author did not draw, and flows that meet at one stock face: the shapes
+//! of view a sync meets when an agent edits a published model.
+//!
+//! `KNOWN_DEFECTS` lists what the sync still gets wrong, one row per (fixture,
+//! scenario, finding kind), each naming the defect. The test fails on a finding
+//! no row expects and on a row that no longer reproduces, so fixing a defect
+//! means deleting its rows, and a regression cannot hide behind a row.
+
+use super::*;
+use crate::layout::edit_audit::FindingKind;
+use crate::layout::taste::{Degradation, degrade};
+
+struct Fixture {
+    key: &'static str,
+    path: &'static str,
+    /// Start from the shipped view with every connector drawn straight, the way
+    /// a modeler who straightens links leaves a diagram, so an edit that
+    /// re-curves an untouched link shows up.
+    straighten_links: bool,
+}
+
+const FIXTURES: [Fixture; 13] = [
+    Fixture {
+        key: "population",
+        path: "default_projects/population/model.xmile",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "logistic_growth",
+        path: "default_projects/logistic-growth/model.xmile",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "logistic_growth_straight",
+        path: "default_projects/logistic-growth/model.xmile",
+        straighten_links: true,
+    },
+    Fixture {
+        key: "fishbanks",
+        path: "default_projects/fishbanks/model.xmile",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "reliability",
+        path: "default_projects/reliability/model.xmile",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "sir",
+        path: "test/test-models/samples/SIR/SIR.stmx",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "hares_and_foxes",
+        path: "test/modules_hares_and_foxes/modules_hares_and_foxes.stmx",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "lotka_volterra",
+        path: "test/test-models/samples/Lotka_Volterra/Lotka_Volterra.mdl",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "groupon",
+        path: "test/metasd/social-network-valuation/groupon 1.mdl",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "catastrophe",
+        path: "test/metasd/early-warnings-catastrophe/catastropeWarning2.mdl",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "beer_game",
+        path: "test/metasd/beer-game/RealBeer4-Sterman13.mdl",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "bathtub",
+        path: "test/metasd/bathtub-statistics/integration3.mdl",
+        straighten_links: false,
+    },
+    Fixture {
+        key: "alias1",
+        path: "test/alias1/alias1.stmx",
+        straighten_links: false,
+    },
+];
+
+/// `(fixture, scenario, finding kind, the defect behind it)`.
+const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[];
+
+fn load(rel: &str) -> datamodel::Project {
+    let path = format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"));
+    if rel.ends_with(".mdl") {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        crate::compat::open_vensim(&text).unwrap_or_else(|e| panic!("{path}: {e:?}"))
+    } else {
+        let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        crate::compat::open_xmile(&mut std::io::BufReader::new(file))
+            .unwrap_or_else(|e| panic!("{path}: {e:?}"))
+    }
+}
+
+fn fixture(key: &str) -> &'static Fixture {
+    FIXTURES
+        .iter()
+        .find(|f| f.key == key)
+        .unwrap_or_else(|| panic!("no fixture {key}"))
+}
+
+/// The fixture's project, holding the view its scenarios start from.
+fn starting_point(f: &Fixture) -> (datamodel::Project, StockFlow) {
+    let mut project = load(f.path);
+    let shipped = match project.get_model("main").and_then(|m| m.views.first()) {
+        Some(datamodel::View::StockFlow(sf)) => sf.clone(),
+        None => panic!("{} ships no view", f.key),
+    };
+    let view = if f.straighten_links {
+        degrade(&shipped, Degradation::StraightenLinks).expect("the view curves some link")
+    } else {
+        shipped
+    };
+    project.get_model_mut("main").expect("main").views =
+        vec![datamodel::View::StockFlow(view.clone())];
+    (project, view)
+}
+
+/// Every `(scenario, finding kind)` the battery raises on `f`.
+fn battery(f: &Fixture) -> BTreeSet<(&'static str, &'static str)> {
+    let (project, view) = starting_point(f);
+    let mut found = BTreeSet::new();
+    for kind in ScenarioKind::ALL {
+        let Some(scenario) = build_scenario(&project, "main", kind) else {
+            continue;
+        };
+        let outcome = run_scenario(&project, "main", &view, &scenario);
+        for finding in &outcome.findings {
+            eprintln!(
+                "{} {} ({}): {} {}: {}",
+                f.key,
+                kind.name(),
+                scenario.description,
+                finding.kind.name(),
+                finding.subject,
+                finding.detail
+            );
+            found.insert((kind.name(), finding.kind.name()));
+        }
+    }
+    found
+}
+
+fn check(key: &str) {
+    let f = fixture(key);
+    let expected: BTreeSet<(&str, &str)> = KNOWN_DEFECTS
+        .iter()
+        .filter(|row| row.0 == key)
+        .map(|row| (row.1, row.2))
+        .collect();
+    let actual = battery(f);
+    let rows = |set: BTreeSet<&(&str, &str)>| {
+        set.into_iter()
+            .map(|(s, k)| format!("    (\"{key}\", \"{s}\", \"{k}\", \"\"),"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let unexpected = rows(actual.difference(&expected).collect());
+    let fixed = rows(expected.difference(&actual).collect());
+    assert!(
+        unexpected.is_empty() && fixed.is_empty(),
+        "{key}: findings no row expects:\n{unexpected}\nrows that no longer reproduce (delete them):\n{fixed}"
+    );
+}
+
+#[test]
+fn population() {
+    check("population");
+}
+
+#[test]
+fn logistic_growth() {
+    check("logistic_growth");
+}
+
+#[test]
+fn logistic_growth_straight() {
+    check("logistic_growth_straight");
+}
+
+#[test]
+fn fishbanks() {
+    check("fishbanks");
+}
+
+#[test]
+fn reliability() {
+    check("reliability");
+}
+
+#[test]
+fn sir() {
+    check("sir");
+}
+
+#[test]
+fn hares_and_foxes() {
+    check("hares_and_foxes");
+}
+
+#[test]
+fn lotka_volterra() {
+    check("lotka_volterra");
+}
+
+#[test]
+fn groupon() {
+    check("groupon");
+}
+
+#[test]
+fn catastrophe() {
+    check("catastrophe");
+}
+
+#[test]
+fn beer_game() {
+    check("beer_game");
+}
+
+#[test]
+fn bathtub() {
+    check("bathtub");
+}
+
+#[test]
+fn alias1() {
+    check("alias1");
+}
+
+#[test]
+fn every_fixture_has_a_test() {
+    // The per-fixture tests above are written out so they run in parallel;
+    // this names every fixture key they must cover.
+    let tested = [
+        "population",
+        "logistic_growth",
+        "logistic_growth_straight",
+        "fishbanks",
+        "reliability",
+        "sir",
+        "hares_and_foxes",
+        "lotka_volterra",
+        "groupon",
+        "catastrophe",
+        "beer_game",
+        "bathtub",
+        "alias1",
+    ];
+    let keys: Vec<&str> = FIXTURES.iter().map(|f| f.key).collect();
+    assert_eq!(keys, tested);
+}
+
+#[test]
+fn scenarios_target_only_variables_the_view_draws() {
+    // A variable the view does not draw is drawn by any edit that names it, so
+    // a scenario about one exercises that rule (pinned by incremental layout's
+    // own tests) rather than the edit, and an edit expected to return the
+    // original view cannot. Population's first flow by ident is births; with
+    // births left out of the view, the restate names deaths instead.
+    let (mut project, mut view) = starting_point(fixture("population"));
+    let births = view
+        .elements
+        .iter()
+        .find(|e| e.get_name().is_some_and(|n| canonicalize(n) == "births"))
+        .map(ViewElement::get_uid)
+        .expect("births drawn");
+    view.elements.retain(|e| match e {
+        ViewElement::Link(l) => l.from_uid != births && l.to_uid != births,
+        ViewElement::Cloud(c) => c.flow_uid != births,
+        other => other.get_uid() != births,
+    });
+    project.get_model_mut("main").expect("main").views = vec![datamodel::View::StockFlow(view)];
+    let restate = build_scenario(&project, "main", ScenarioKind::RestateVariable).expect("applies");
+    assert!(
+        restate.description.contains("deaths"),
+        "{}",
+        restate.description
+    );
+}
+
+#[test]
+fn every_scenario_kind_applies_to_some_fixture() {
+    let projects: Vec<datamodel::Project> = FIXTURES.iter().map(|f| load(f.path)).collect();
+    for kind in ScenarioKind::ALL {
+        assert!(
+            projects
+                .iter()
+                .any(|p| build_scenario(p, "main", kind).is_some()),
+            "{} applies to no fixture, so the battery never runs it",
+            kind.name()
+        );
+    }
+}
+
+#[test]
+fn every_known_defect_names_a_fixture_scenario_and_finding() {
+    for (key, scenario, finding, defect) in KNOWN_DEFECTS {
+        assert!(FIXTURES.iter().any(|f| f.key == *key), "fixture {key}");
+        assert!(
+            ScenarioKind::ALL.iter().any(|k| k.name() == *scenario),
+            "scenario {scenario}"
+        );
+        assert!(
+            FindingKind::ALL.iter().any(|k| k.name() == *finding),
+            "finding {finding}"
+        );
+        assert!(
+            !defect.is_empty(),
+            "{key} {scenario} {finding} names no defect"
+        );
+    }
+}
+
+#[test]
+fn every_scenario_writes_equations_that_read_names_needing_quotes() {
+    // Every variable here has a name the lexer cannot read bare, so a
+    // scenario that interpolates one into equation text unquoted writes some
+    // other expression (`labor-force * 0.1` is a subtraction reading `labor`
+    // and `force`), and the battery would audit a different edit from the one
+    // it names. The oracle is the production compiler: a variable a step
+    // writes that comes out with an equation error was written an equation
+    // that does not read what it says. Only the written variables are charged:
+    // deleting a parameter leaves its readers with an unknown dependency, which
+    // is the edit, not a spelling. Every kind must apply, so every arm of
+    // `build_scenario` is covered.
+    use crate::db::{
+        DiagnosticSeverity, LtmOverlay, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
+    };
+    let errors = |project: &datamodel::Project, only: Option<&BTreeSet<String>>| -> Vec<String> {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, project);
+        collect_all_diagnostics(&db, sync.project, LtmOverlay::Off)
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .filter(|d| {
+                only.is_none_or(|written| {
+                    d.variable
+                        .as_deref()
+                        .is_some_and(|v| written.contains(canonicalize(v).as_ref()))
+                })
+            })
+            .map(|d| format!("{:?}: {:?}", d.variable, d.error.code()))
+            .collect()
+    };
+    let names = |idents: &[&str]| idents.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let mut project = datamodel::Project {
+        name: "quoted".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: Vec::new(),
+        units: Vec::new(),
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: Vec::new(),
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+    apply_patch(
+        &mut project,
+        ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![
+                    stock(
+                        "labor-force",
+                        "100",
+                        &names(&["hiring-rate"]),
+                        &names(&["quit-rate"]),
+                    ),
+                    stock("retirees", "0", &names(&["quit-rate"]), &[]),
+                    stock("open-positions", "10", &[], &[]),
+                    flow("hiring-rate", "\"labor-force\" * \"hire-fraction\""),
+                    flow("quit-rate", "\"labor-force\" * 0.05"),
+                    aux("hire-fraction", "0.1"),
+                ],
+            }],
+        },
+    )
+    .expect("the fixture applies");
+    assert_eq!(
+        errors(&project, None),
+        Vec::<String>::new(),
+        "the fixture compiles"
+    );
+
+    for kind in ScenarioKind::ALL {
+        let scenario = build_scenario(&project, "main", kind)
+            .unwrap_or_else(|| panic!("{} applies to the fixture", kind.name()));
+        let mut current = project.clone();
+        for (step, ops) in scenario.steps.iter().enumerate() {
+            apply_patch(
+                &mut current,
+                ProjectPatch {
+                    project_ops: vec![],
+                    models: vec![ModelPatch {
+                        name: "main".to_string(),
+                        ops: ops.clone(),
+                    }],
+                },
+            )
+            .unwrap_or_else(|e| panic!("{} step {step} applies: {e:?}", kind.name()));
+            let written: BTreeSet<String> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    ModelOperation::UpsertStock(s) => Some(&s.ident),
+                    ModelOperation::UpsertFlow(f) => Some(&f.ident),
+                    ModelOperation::UpsertAux(a) => Some(&a.ident),
+                    ModelOperation::UpsertModule(m) => Some(&m.ident),
+                    _ => None,
+                })
+                .map(|ident| canonicalize(ident).into_owned())
+                .collect();
+            assert_eq!(
+                errors(&current, Some(&written)),
+                Vec::<String>::new(),
+                "{} ({}) step {step} leaves the model with equation errors",
+                kind.name(),
+                scenario.description
+            );
+        }
+    }
+}

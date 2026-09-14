@@ -3585,7 +3585,7 @@ fn make_connector_diff_state() -> (LayoutState, ComputedMetadata) {
 fn test_diff_connectors_preserves_existing_links() {
     let (mut state, metadata) = make_connector_diff_state();
 
-    diff_connectors(&mut state, &metadata);
+    diff_connectors(&mut state, &metadata, |_, _| true, |_| false);
 
     // birth_rate(3)->births(2) should still exist with Arc(45.0) and Positive polarity
     let link_br = state
@@ -3638,7 +3638,7 @@ fn test_diff_connectors_removes_stale_links() {
         deps.remove("death_rate");
     }
 
-    diff_connectors(&mut state, &metadata);
+    diff_connectors(&mut state, &metadata, |_, _| true, |_| false);
 
     // death_rate->deaths link should no longer exist
     let link_dr = state
@@ -3671,7 +3671,7 @@ fn test_diff_connectors_adds_new_links() {
         .count();
     assert_eq!(link_count_before, 4, "precondition: four links");
 
-    diff_connectors(&mut state, &metadata);
+    diff_connectors(&mut state, &metadata, |_, _| true, |_| false);
 
     // New link: death_rate(5)->births(2)
     let new_link = state
@@ -3714,7 +3714,7 @@ fn test_diff_connectors_noop_same_dep_graph() {
         .collect();
     let total_before = state.elements.len();
 
-    diff_connectors(&mut state, &metadata);
+    diff_connectors(&mut state, &metadata, |_, _| true, |_| false);
 
     let links_after: Vec<(i32, i32, LinkShape)> = state
         .elements
@@ -3745,7 +3745,7 @@ fn test_diff_connectors_noop_same_dep_graph() {
 fn test_diff_connectors_structural_flow_stock_skipped() {
     let (mut state, metadata) = make_connector_diff_state();
 
-    diff_connectors(&mut state, &metadata);
+    diff_connectors(&mut state, &metadata, |_, _| true, |_| false);
 
     // births(2)->population(1) is structural flow->stock. The dep_graph
     // has this as population depending on births, which would be

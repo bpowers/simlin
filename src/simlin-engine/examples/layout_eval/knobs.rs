@@ -36,6 +36,8 @@ pub struct Knobs {
     /// `LAYOUT_EVAL_REPLAY_STEPS`: edits in the incremental-build replay; 0
     /// skips it.
     pub replay_steps: usize,
+    /// `LAYOUT_EVAL_EDITS=0` skips the edit scenarios.
+    pub edits: bool,
 }
 
 fn list(name: &str) -> Option<Vec<String>> {
@@ -110,6 +112,10 @@ impl Knobs {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_REPLAY_STEPS),
+            edits: !matches!(
+                env::var("LAYOUT_EVAL_EDITS").unwrap_or_default().trim(),
+                "0" | "false"
+            ),
         }
     }
 }

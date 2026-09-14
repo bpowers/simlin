@@ -21,7 +21,7 @@ mod geometry;
 mod gesture;
 mod heal;
 mod hit;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "layout_eval"))]
 pub mod invariants;
 mod links;
 mod offset;
@@ -52,3 +52,12 @@ pub use hit::{Hit, HitPart, hit_test};
 pub use preview::{Preview, preview};
 
 pub(crate) use edit_view::{derived_operations, edited_view};
+// The flow geometry incremental layout routes through when an edit re-attaches
+// a drawn flow, so a tool edit's pipes are drawn by the same core as a touch
+// edit's.
+pub(crate) use heal::heal;
+pub(crate) use path::{arc_position, path_length, place_valve, point_at_arc};
+pub(crate) use route::{route, route_end};
+pub(crate) use terminal::{
+    CloudRef, FlowGeometry, flow_terminals, free_terminal, target_stock_terminal,
+};

@@ -214,7 +214,13 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         layout.zoom = zoom;
     }
 
-    // Model existence was verified above, so this should always succeed.
+    // Model existence was verified above, so this should always succeed. The
+    // layout syncs the first view only; any other view the project carries is
+    // the author's and stays as it was.
     let model = datamodel_locked.get_model_mut(model_name_str).unwrap();
-    model.views = vec![engine::datamodel::View::StockFlow(layout)];
+    let view = engine::datamodel::View::StockFlow(layout);
+    match model.views.first_mut() {
+        Some(first) => *first = view,
+        None => model.views.push(view),
+    }
 }

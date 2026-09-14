@@ -703,15 +703,27 @@ pub fn resnap_flow_endpoints(
 /// against edges derived from the current dep_graph, then preserve
 /// unchanged links, remove stale ones, and create new links with
 /// default shapes.
-pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
-    // Build HashMap<(from_uid, to_uid), ViewElement> for existing links
-    let mut old_links: HashMap<(i32, i32), ViewElement> = HashMap::new();
-    for elem in &state.elements {
-        if let ViewElement::Link(l) = elem {
-            old_links.insert((l.from_uid, l.to_uid), elem.clone());
-        }
-    }
-
+///
+/// A preserved link stays where it is in the view's element list and a
+/// created one is appended, in `(from_uid, to_uid)` order: the element list is
+/// the view's draw order and what a saved file lists, so an edit that leaves a
+/// link alone must not move it, and two syncs of one edit must produce one
+/// list.
+///
+/// A dependency with no link gets one only when both its ends are drawn and
+/// `draws(from, to)` accepts its idents: incremental layout draws a connector
+/// only where the edit is about it, so a connector an author left out of the
+/// view stays out. A link drawing no dependency the model has survives when
+/// `keeps(reader)` accepts the ident of the variable it points into (through
+/// an alias; empty when it points at no variable): an imported view's
+/// connector the extraction does not explain is an author's choice that only
+/// an edit to its reader may undo.
+pub fn diff_connectors(
+    state: &mut LayoutState,
+    metadata: &ComputedMetadata,
+    draws: impl Fn(&str, &str) -> bool,
+    keeps: impl Fn(&str) -> bool,
+) {
     // Compute new dependency edges from dep_graph, skipping structural flow-stock edges
     let stock_inflows: HashMap<String, HashSet<String>> = metadata
         .stock_to_inflows
@@ -724,8 +736,10 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
         .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
         .collect();
 
-    let mut new_edges: HashSet<(i32, i32)> = HashSet::new();
-    let mut new_edge_idents: HashMap<(i32, i32), (String, String)> = HashMap::new();
+    // Ordered by uid pair: each created link allocates the next uid and is
+    // appended, so the edges must come out in one order however the maps hash
+    // (the incremental analogue of #633).
+    let mut new_edges: BTreeMap<(i32, i32), (String, String)> = BTreeMap::new();
 
     for (var, deps) in &metadata.dep_graph {
         for dep in deps {
@@ -746,8 +760,7 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
             };
 
             if from_uid != 0 && to_uid != 0 {
-                new_edges.insert((from_uid, to_uid));
-                new_edge_idents.insert(
+                new_edges.insert(
                     (from_uid, to_uid),
                     (from_ident.to_string(), to_ident.to_string()),
                 );
@@ -768,56 +781,59 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
         })
         .collect();
 
-    // Remove all old links from elements
-    state
+    let ident_of: HashMap<i32, String> = state
         .elements
-        .retain(|elem| !matches!(elem, ViewElement::Link(_)));
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ViewElement::Stock(_)
+                    | ViewElement::Flow(_)
+                    | ViewElement::Aux(_)
+                    | ViewElement::Module(_)
+            )
+        })
+        .filter_map(|e| Some((e.get_uid(), canonicalize(e.get_name()?).into_owned())))
+        .collect();
 
-    // Track which old links have been consumed so each is used at most once.
-    let mut consumed_old_links: HashSet<(i32, i32)> = HashSet::new();
+    // A link survives when the dependency it draws, read through aliases, is
+    // still one the model has. Every such link survives: an imported view can
+    // draw one dependency several times, through different aliases of the same
+    // variable. A link drawing no dependency survives where `keeps` says so.
+    let mut drawn: HashSet<(i32, i32)> = HashSet::new();
+    state.elements.retain(|elem| {
+        let ViewElement::Link(l) = elem else {
+            return true;
+        };
+        let edge = (
+            alias_to_primary
+                .get(&l.from_uid)
+                .copied()
+                .unwrap_or(l.from_uid),
+            alias_to_primary.get(&l.to_uid).copied().unwrap_or(l.to_uid),
+        );
+        if new_edges.contains_key(&edge) {
+            drawn.insert(edge);
+            return true;
+        }
+        keeps(ident_of.get(&edge.1).map(String::as_str).unwrap_or(""))
+    });
 
-    // Iterate edges in a deterministic order. `new_edges` is a HashSet, so its
-    // iteration order is per-process random; since each newly-created link both
-    // allocates a sequential `uid` and is appended to `state.elements` in this
-    // loop, hash order would otherwise assign different uids / element ordering
-    // to the same logical link run-to-run (the incremental analogue of #633).
-    let mut sorted_new_edges: Vec<(i32, i32)> = new_edges.iter().copied().collect();
-    sorted_new_edges.sort_unstable();
-
-    // Add back preserved links (unchanged) and create new links
-    for (from_uid, to_uid) in sorted_new_edges {
-        if let Some(old_link) = old_links.get(&(from_uid, to_uid)) {
-            // Preserved: keep the old link exactly as-is
-            state.elements.push(old_link.clone());
-            consumed_old_links.insert((from_uid, to_uid));
-        } else if let Some(key) = old_links
-            .keys()
-            .copied()
-            .filter(|&(of, ot)| {
-                if consumed_old_links.contains(&(of, ot)) {
-                    return false;
-                }
-                let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
-                let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
-                rf == from_uid && rt == to_uid
-            })
-            // Pick the lowest matching key so the alias-match selection is
-            // deterministic; HashMap iteration order would otherwise vary.
-            .min()
+    for (&(from_uid, to_uid), (from_ident, to_ident)) in &new_edges {
+        // A link is drawn between two drawn variables: a variable with a uid
+        // may still be one the view leaves out (a project MCP opened gives
+        // every variable a uid), and a link into it would reference no element.
+        if drawn.contains(&(from_uid, to_uid))
+            || !ident_of.contains_key(&from_uid)
+            || !ident_of.contains_key(&to_uid)
+            || !draws(from_ident, to_ident)
         {
-            // Preserved via alias: the old link targets an alias whose primary
-            // variable matches this dependency edge. Keep the alias link as-is.
-            state.elements.push(old_links[&key].clone());
-            consumed_old_links.insert(key);
-        } else if let Some((from_ident, to_ident)) = new_edge_idents.get(&(from_uid, to_uid)) {
-            // Added: create new link with default shape
-            let link_uid = state.uid_manager.alloc("");
-            let shape = if is_structural_stock_flow(
-                from_ident,
-                to_ident,
-                &stock_inflows,
-                &stock_outflows,
-            ) {
+            continue;
+        }
+        // Added: create new link with default shape
+        let link_uid = state.uid_manager.alloc("");
+        let shape =
+            if is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows) {
                 let arc_angle = if let (Some(&s_pos), Some(&f_pos)) =
                     (state.positions.get(&from_uid), state.positions.get(&to_uid))
                 {
@@ -843,34 +859,13 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
                 LinkShape::Straight
             };
 
-            state.elements.push(ViewElement::Link(view_element::Link {
-                uid: link_uid,
-                from_uid,
-                to_uid,
-                shape,
-                polarity: None,
-            }));
-        }
-    }
-
-    // Preserve remaining alias-backed links whose alias-resolved endpoints
-    // match a valid dependency. Imported views may have multiple rendered
-    // connectors for the same dependency (e.g., links to two different
-    // aliases of the same variable).
-    // Iterate in a deterministic order for the same reason as the new-edge loop:
-    // the preserved links are appended to `state.elements`, so HashMap iteration
-    // order would otherwise perturb element ordering run-to-run.
-    let mut sorted_old_links: Vec<&(i32, i32)> = old_links.keys().collect();
-    sorted_old_links.sort_unstable();
-    for &(of, ot) in sorted_old_links {
-        if consumed_old_links.contains(&(of, ot)) {
-            continue;
-        }
-        let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
-        let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
-        if new_edges.contains(&(rf, rt)) {
-            state.elements.push(old_links[&(of, ot)].clone());
-        }
+        state.elements.push(ViewElement::Link(view_element::Link {
+            uid: link_uid,
+            from_uid,
+            to_uid,
+            shape,
+            polarity: None,
+        }));
     }
 }
 
@@ -928,17 +923,18 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
         })
         .collect();
 
-    // Remove all old clouds from elements
-    state
-        .elements
-        .retain(|elem| !matches!(elem, ViewElement::Cloud(_)));
-
-    // For each flow, determine what to keep vs create
-    let all_flow_uids: HashSet<i32> = needed_flow_uids
+    // For each flow, determine what to keep vs create. A preserved cloud keeps
+    // its place in the element list and a created one is appended, flows in
+    // uid order: the element list is the view's draw order and what a saved
+    // file lists, so a cloud the edit leaves alone must not move in it, and two
+    // syncs of one edit must produce one list.
+    let all_flow_uids: BTreeSet<i32> = needed_flow_uids
         .iter()
         .chain(old_clouds_by_flow.keys())
         .copied()
         .collect();
+    let mut kept: HashSet<i32> = HashSet::new();
+    let mut created: Vec<ViewElement> = Vec::new();
 
     for flow_uid in all_flow_uids {
         let old_clouds = old_clouds_by_flow
@@ -951,11 +947,6 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
         let needed_count = wants_source as usize + wants_sink as usize;
 
         if needed_count == 0 {
-            for c in &old_clouds {
-                if let ViewElement::Cloud(cloud) = c {
-                    state.positions.remove(&cloud.uid);
-                }
-            }
             continue;
         }
 
@@ -1005,45 +996,45 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
             }
         }
 
-        // Push preserved clouds and remove positions of discarded ones
-        for cloud in &old_clouds {
-            if let ViewElement::Cloud(c) = cloud {
-                if used_uids.contains(&c.uid) {
-                    state.elements.push(cloud.clone());
-                } else {
-                    state.positions.remove(&c.uid);
-                }
-            }
-        }
+        kept.extend(used_uids);
 
-        // Create new clouds for roles that couldn't be filled from old clouds
-        if wants_source && !preserved_source {
-            let pos = endpoints.map(|(src, _)| *src);
-            let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
+        // Create new clouds for roles that couldn't be filled from old clouds,
+        // at the drawn pipe's ends. A flow with no drawn pipe -- one the view
+        // leaves out, which may still have a uid -- has nowhere to put a cloud,
+        // and a cloud of it would belong to no element.
+        let Some(&(src_pos, snk_pos)) = endpoints else {
+            continue;
+        };
+        for (wanted, preserved, at) in [
+            (wants_source, preserved_source, src_pos),
+            (wants_sink, preserved_sink, snk_pos),
+        ] {
+            if !wanted || preserved {
+                continue;
+            }
             let cloud_uid = state.uid_manager.alloc("");
-            state.elements.push(ViewElement::Cloud(view_element::Cloud {
+            created.push(ViewElement::Cloud(view_element::Cloud {
                 uid: cloud_uid,
                 flow_uid,
-                x: cx,
-                y: cy,
+                x: at.x,
+                y: at.y,
                 compat: None,
             }));
-            state.positions.insert(cloud_uid, Position::new(cx, cy));
-        }
-        if wants_sink && !preserved_sink {
-            let pos = endpoints.map(|(_, sink)| *sink);
-            let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
-            let cloud_uid = state.uid_manager.alloc("");
-            state.elements.push(ViewElement::Cloud(view_element::Cloud {
-                uid: cloud_uid,
-                flow_uid,
-                x: cx,
-                y: cy,
-                compat: None,
-            }));
-            state.positions.insert(cloud_uid, Position::new(cx, cy));
+            state.positions.insert(cloud_uid, at);
         }
     }
+
+    for elem in &state.elements {
+        if let ViewElement::Cloud(c) = elem
+            && !kept.contains(&c.uid)
+        {
+            state.positions.remove(&c.uid);
+        }
+    }
+    state
+        .elements
+        .retain(|elem| !matches!(elem, ViewElement::Cloud(c) if !kept.contains(&c.uid)));
+    state.elements.extend(created);
 
     // Repair pass: for XMILE-imported views a cloud element may exist but the
     // corresponding flow point's attached_to_uid may be None.  Wire up any
@@ -1332,7 +1323,8 @@ fn place_new_chains(
 /// Set each new stock that hangs off a drawn chain -- joined by a flow to a
 /// stock already drawn -- one chain step past that neighbor, in its row: right
 /// of the stock it drains, left of the stock it feeds, fanning vertically only
-/// past a stock or parameter already drawn there
+/// past a shape already drawn there -- a stock, a parameter, or a valve or
+/// cloud of a flow
 /// (`chain::find_free_stock_position`). A new stock reached only through other
 /// new stocks is placed from them in turn. Returns the idents of the stocks
 /// placed; a flow between two stocks that are now drawn takes the stock-pair
@@ -1363,6 +1355,9 @@ fn place_chain_extensions(
                         (None, Some(anchor)) if pending.contains(from) => (anchor, from, -step),
                         _ => continue,
                     };
+                // Every drawn shape blocks the spot, a side flow's valve and
+                // cloud included: a person often draws a side flow's pipe off
+                // the very face a chain continues from.
                 let occupied: Vec<Position> = state
                     .elements
                     .iter()
@@ -1370,7 +1365,10 @@ fn place_chain_extensions(
                         ViewElement::Stock(s) => Some(Position::new(s.x, s.y)),
                         ViewElement::Aux(a) => Some(Position::new(a.x, a.y)),
                         ViewElement::Module(m) => Some(Position::new(m.x, m.y)),
-                        _ => None,
+                        ViewElement::Flow(f) => Some(Position::new(f.x, f.y)),
+                        ViewElement::Cloud(c) => Some(Position::new(c.x, c.y)),
+                        ViewElement::Alias(a) => Some(Position::new(a.x, a.y)),
+                        ViewElement::Link(_) | ViewElement::Group(_) => None,
                     })
                     .collect();
                 let pos = chain::find_free_stock_position(
@@ -1475,6 +1473,739 @@ fn translate_view_element(elem: &mut ViewElement, dx: f64, dy: f64) {
     }
 }
 
+/// How far past a stock's face a cloud end is placed beyond the cloud's own
+/// radius, so the cloud reads as off the stock rather than on it.
+const DETACHED_CLOUD_GAP: f64 = 2.0;
+
+fn point_of(p: &FlowPoint) -> crate::editing::Point {
+    crate::editing::Point::new(p.x, p.y)
+}
+
+/// Where a flow end that becomes a cloud goes: `p` itself when no stock body
+/// holds it (a deleted stock's face, open space), else along its pipe toward
+/// `adjacent`, past the stock's face by the cloud's radius and a gap, so the
+/// pipe keeps its line and the cloud sits off the stock it left.
+fn clear_of_stocks(
+    p: crate::editing::Point,
+    adjacent: crate::editing::Point,
+    stocks: &[crate::editing::Point],
+) -> crate::editing::Point {
+    use crate::diagram::constants::{CLOUD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
+    const EPS: f64 = 1e-6;
+    let (half_w, half_h) = (STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0);
+    let Some(center) = stocks
+        .iter()
+        .find(|c| (p.x - c.x).abs() <= half_w + EPS && (p.y - c.y).abs() <= half_h + EPS)
+    else {
+        return p;
+    };
+    let (dx, dy) = (adjacent.x - p.x, adjacent.y - p.y);
+    let len = dx.hypot(dy);
+    if len <= EPS {
+        return p;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    // The distance along the pipe at which the end leaves the stock's body.
+    let exit = |v: f64, c: f64, half: f64, u: f64| {
+        if u > EPS {
+            (c + half - v) / u
+        } else if u < -EPS {
+            (c - half - v) / u
+        } else {
+            f64::INFINITY
+        }
+    };
+    let leave = exit(p.x, center.x, half_w, ux)
+        .min(exit(p.y, center.y, half_h, uy))
+        .max(0.0);
+    let step = leave + CLOUD_RADIUS + DETACHED_CLOUD_GAP;
+    crate::editing::Point::new(p.x + ux * step, p.y + uy * step)
+}
+
+/// How far past a flow end, along its end segment, a cloud may be set when no
+/// position along the pipe clears: the space a deleted stock took, or open
+/// space off a stock the flow left.
+const MAX_CLOUD_EXTENSION: f64 = 4.0 * crate::diagram::constants::CLOUD_RADIUS;
+
+/// Where a flow end that becomes a cloud goes when its cloud would cover
+/// another shape, and how many of the pipe's points it passes: the nearest
+/// position, a pixel at a time, whose cloud covers none of `shapes`, either
+/// along the pipe from the end toward the valve (stopping a cloud's and a
+/// valve's radius short of it, the pipe dropping the points the end passes)
+/// or past the end along its segment (extending the pipe, at most
+/// `MAX_CLOUD_EXTENSION`), the position along the pipe on a tie; the end
+/// itself when it is clear or nothing is. `path` runs from the end inward.
+/// Flows that met a deleted stock keep their ends on its faces, where clouds
+/// on perpendicular faces cover each other; an imported view can draw two
+/// flows leaving one face point along one line, so the end segment alone may
+/// not separate them; and one can draw a parameter on the short pipe between
+/// a stock and a valve, where only the space the stock took is clear.
+fn clear_along_pipe(
+    path: &[crate::editing::Point],
+    valve: crate::editing::Point,
+    shapes: &[crate::diagram::common::Rect],
+) -> (crate::editing::Point, usize) {
+    use crate::diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
+    use crate::editing::{Point, arc_position, point_at_arc};
+    /// The step, in px, at which candidate positions are tried.
+    const STEP: f64 = 1.0;
+    const EPS: f64 = 1e-9;
+    let covers = |q: Point| {
+        shapes.iter().any(|r| {
+            let w = r.right.min(q.x + CLOUD_RADIUS) - r.left.max(q.x - CLOUD_RADIUS);
+            let h = r.bottom.min(q.y + CLOUD_RADIUS) - r.top.max(q.y - CLOUD_RADIUS);
+            w > 0.0 && h > 0.0
+        })
+    };
+    let Some(&end) = path.first() else {
+        return (Point::new(f64::NAN, f64::NAN), 0);
+    };
+    if path.len() < 2 || !covers(end) {
+        return (end, 0);
+    }
+    let arcs: Vec<f64> = std::iter::once(0.0)
+        .chain(path.windows(2).scan(0.0, |total, w| {
+            *total += (w[1].x - w[0].x).hypot(w[1].y - w[0].y);
+            Some(*total)
+        }))
+        .collect();
+    let inward_limit = arc_position(path, valve) - CLOUD_RADIUS - AUX_RADIUS;
+    let (dx, dy) = (end.x - path[1].x, end.y - path[1].y);
+    let segment = dx.hypot(dy);
+    let outward = (segment > EPS).then(|| (dx / segment, dy / segment));
+    let reach = inward_limit.max(MAX_CLOUD_EXTENSION);
+    let steps = (reach / STEP).floor() as usize;
+    for k in 1..=steps {
+        let d = k as f64 * STEP;
+        if d <= inward_limit {
+            let q = point_at_arc(path, d);
+            if !covers(q) {
+                let passed = arcs[1..path.len() - 1]
+                    .iter()
+                    .filter(|&&a| a <= d + EPS)
+                    .count();
+                return (q, passed);
+            }
+        }
+        if let Some((ux, uy)) = outward
+            && d <= MAX_CLOUD_EXTENSION
+        {
+            let q = Point::new(end.x + ux * d, end.y + uy * d);
+            if !covers(q) {
+                return (q, 0);
+            }
+        }
+    }
+    (end, 0)
+}
+
+/// What one end of a re-attached flow becomes.
+enum RetargetedEnd {
+    /// Still attached where the model says.
+    Kept,
+    /// Attaches to a different stock, drawn at a center.
+    Stock(i32, crate::editing::Point),
+    /// Becomes a cloud at a point, past this many of the pipe's points, which
+    /// the pipe drops.
+    Cloud(crate::editing::Point, usize),
+}
+
+/// Re-attach a drawn flow whose stocks changed by moving only the ends that
+/// changed, through the editing core that routes a touch edit's pipes: an end
+/// that becomes a cloud stays where it was (moved off a stock it no longer
+/// attaches to, and along its pipe off any shape its cloud would cover) and the
+/// pipe is healed; an end that attaches to another stock
+/// is routed to it with the rest of the pipe kept where it stays valid; when
+/// both do, the pipe is routed afresh, around every stock. The flow keeps its
+/// uid, name and valve (unless a new cloud would cover the valve, which then
+/// takes the pipe's middle); its label side is reset to the default for its
+/// orientation, for the declutter to choose again. `expected` names the stock
+/// uid each end must attach to (`None`: a cloud of its own).
+///
+/// Returns false, touching nothing, when an end must attach to a stock with no
+/// drawn position yet (one this pass creates): that flow is rebuilt as a new
+/// flow instead.
+fn retarget_flow(
+    state: &mut LayoutState,
+    flow_uid: i32,
+    expected: [Option<i32>; 2],
+    stock_centers: &BTreeMap<i32, crate::editing::Point>,
+) -> bool {
+    use crate::diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
+    use crate::editing::{
+        CloudRef, FlowEnd, FlowGeometry, flow_terminals, free_terminal, heal, place_valve, route,
+        route_end, target_stock_terminal,
+    };
+    let Some(index) = state
+        .elements
+        .iter()
+        .position(|e| matches!(e, ViewElement::Flow(f) if f.uid == flow_uid))
+    else {
+        return false;
+    };
+    let ViewElement::Flow(flow) = state.elements[index].clone() else {
+        return false;
+    };
+    let n = flow.points.len();
+    if n < 2 {
+        return false;
+    }
+    let stocks: Vec<crate::editing::Point> = stock_centers.values().copied().collect();
+    // Every shape but this flow's own valve and clouds, which a cloud end this
+    // pass creates must not cover: another flow's cloud (one an earlier
+    // re-attachment made included), a valve, a parameter.
+    let shapes: Vec<crate::diagram::common::Rect> = state
+        .elements
+        .iter()
+        .filter(|e| match e {
+            ViewElement::Flow(f) => f.uid != flow_uid,
+            ViewElement::Cloud(c) => c.flow_uid != flow_uid,
+            _ => true,
+        })
+        .filter_map(crate::layout::metrics::node_shape_box)
+        .collect();
+
+    let (ends, current) = {
+        let by_uid: HashMap<i32, &ViewElement> =
+            state.elements.iter().map(|e| (e.get_uid(), e)).collect();
+        let mut ends: Vec<RetargetedEnd> = Vec::with_capacity(2);
+        for (i, point) in [0, n - 1].into_iter().enumerate() {
+            let attached = flow.points[point].attached_to_uid;
+            let own_cloud = attached.is_some_and(
+                |u| matches!(by_uid.get(&u), Some(ViewElement::Cloud(c)) if c.flow_uid == flow_uid),
+            );
+            ends.push(match expected[i] {
+                Some(stock) if attached == Some(stock) => RetargetedEnd::Kept,
+                Some(stock) => match stock_centers.get(&stock) {
+                    Some(&center) => RetargetedEnd::Stock(stock, center),
+                    None => return false,
+                },
+                None if own_cloud => RetargetedEnd::Kept,
+                None => {
+                    // The pipe from this end inward, its end moved off any
+                    // stock body first.
+                    let mut path: Vec<crate::editing::Point> =
+                        flow.points.iter().map(point_of).collect();
+                    if i == 1 {
+                        path.reverse();
+                    }
+                    path[0] = clear_of_stocks(path[0], path[1], &stocks);
+                    let (at, passed) = clear_along_pipe(
+                        &path,
+                        crate::editing::Point::new(flow.x, flow.y),
+                        &shapes,
+                    );
+                    RetargetedEnd::Cloud(at, passed)
+                }
+            });
+        }
+        (ends, flow_terminals(&flow, |uid| by_uid.get(&uid).copied()))
+    };
+
+    let mut terminals = current;
+    let mut base = flow.clone();
+    let mut created_clouds: Vec<i32> = Vec::new();
+    for (i, end) in ends.iter().enumerate() {
+        let terminal = match *end {
+            RetargetedEnd::Kept => continue,
+            RetargetedEnd::Stock(uid, center) => target_stock_terminal(uid, center),
+            RetargetedEnd::Cloud(at, passed) => {
+                let uid = state.uid_manager.alloc("");
+                created_clouds.push(uid);
+                // Both ends stop short of the valve, so the points one end
+                // passes are never the other's.
+                if i == 0 {
+                    base.points.drain(..passed);
+                } else {
+                    let len = base.points.len();
+                    base.points.truncate(len - passed);
+                }
+                let point = if i == 0 { 0 } else { base.points.len() - 1 };
+                base.points[point].x = at.x;
+                base.points[point].y = at.y;
+                base.points[point].attached_to_uid = Some(uid);
+                free_terminal(at, Some(CloudRef { uid, at }))
+            }
+        };
+        if i == 0 {
+            terminals.source = terminal;
+        } else {
+            terminals.sink = terminal;
+        }
+    }
+    let terminal_stocks: HashSet<i32> = [&terminals.source, &terminals.sink]
+        .into_iter()
+        .filter_map(|t| t.stock_center().and(t.uid()))
+        .collect();
+    let occupied: Vec<crate::editing::Point> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Flow(f) if f.uid != flow_uid => Some(f),
+            _ => None,
+        })
+        .flat_map(|f| [f.points.first(), f.points.last()])
+        .flatten()
+        .filter(|p| {
+            p.attached_to_uid
+                .is_some_and(|u| terminal_stocks.contains(&u))
+        })
+        .map(point_of)
+        .collect();
+    let to_stock = |end: &RetargetedEnd| matches!(end, RetargetedEnd::Stock(..));
+    let FlowGeometry {
+        flow: mut next,
+        clouds: moved_clouds,
+    } = match (to_stock(&ends[0]), to_stock(&ends[1])) {
+        (false, false) => heal(&base, &terminals, stocks.as_slice()),
+        (true, false) => route_end(
+            &base,
+            FlowEnd::Source,
+            terminals.source,
+            terminals.sink,
+            &occupied,
+            stocks.as_slice(),
+        ),
+        (false, true) => route_end(
+            &base,
+            FlowEnd::Sink,
+            terminals.sink,
+            terminals.source,
+            &occupied,
+            stocks.as_slice(),
+        ),
+        (true, true) => route(
+            terminals.source,
+            terminals.sink,
+            &base,
+            FlowEnd::Source,
+            &occupied,
+            stocks.as_slice(),
+        ),
+    };
+    let Some(last) = next.points.len().checked_sub(1).filter(|&l| l > 0) else {
+        return false;
+    };
+    let end_at = |uid: i32| {
+        [&next.points[0], &next.points[last]]
+            .into_iter()
+            .find(|p| p.attached_to_uid == Some(uid))
+            .map(point_of)
+    };
+    let valve = crate::editing::Point::new(next.x, next.y);
+    let covered = created_clouds.iter().any(|&uid| {
+        end_at(uid)
+            .is_some_and(|at| (at.x - valve.x).hypot(at.y - valve.y) < CLOUD_RADIUS + AUX_RADIUS)
+    });
+    if covered {
+        let path: Vec<crate::editing::Point> = next.points.iter().map(point_of).collect();
+        let middle = place_valve(&path, FlowEnd::Source, None);
+        (next.x, next.y) = (middle.x, middle.y);
+    }
+    let created: Vec<(i32, crate::editing::Point)> = created_clouds
+        .iter()
+        .filter_map(|&uid| end_at(uid).map(|at| (uid, at)))
+        .collect();
+    next.label_side = match compute_flow_orientation(&next.points) {
+        FlowOrientation::Horizontal => LabelSide::Top,
+        FlowOrientation::Vertical => LabelSide::Left,
+    };
+
+    let ends_now: HashSet<i32> = [
+        next.points[0].attached_to_uid,
+        next.points[last].attached_to_uid,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let removed: HashSet<i32> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Cloud(c) if c.flow_uid == flow_uid && !ends_now.contains(&c.uid) => {
+                Some(c.uid)
+            }
+            _ => None,
+        })
+        .collect();
+    state
+        .elements
+        .retain(|e| !matches!(e, ViewElement::Cloud(c) if removed.contains(&c.uid)));
+    for uid in &removed {
+        state.positions.remove(uid);
+    }
+    for mv in &moved_clouds {
+        for e in &mut state.elements {
+            if let ViewElement::Cloud(c) = e
+                && c.uid == mv.uid
+            {
+                (c.x, c.y) = (mv.at.x, mv.at.y);
+            }
+        }
+        state
+            .positions
+            .insert(mv.uid, Position::new(mv.at.x, mv.at.y));
+    }
+    let ident = canonicalize(&next.name).into_owned();
+    if let Some(clouds) = state.flow_ident_to_clouds.get_mut(&ident) {
+        clouds.retain(|ci| {
+            state
+                .cloud_ident_to_uid
+                .get(ci)
+                .is_none_or(|u| !removed.contains(u))
+        });
+    }
+    for (uid, at) in &created {
+        state.elements.push(ViewElement::Cloud(view_element::Cloud {
+            uid: *uid,
+            flow_uid,
+            x: at.x,
+            y: at.y,
+            compat: None,
+        }));
+        state.positions.insert(*uid, Position::new(at.x, at.y));
+        let cloud_ident = make_cloud_node_ident(*uid);
+        state.cloud_ident_to_uid.insert(cloud_ident.clone(), *uid);
+        state
+            .cloud_ident_to_flow_ident
+            .insert(cloud_ident.clone(), ident.clone());
+        state
+            .flow_ident_to_clouds
+            .entry(ident.clone())
+            .or_default()
+            .push(cloud_ident);
+    }
+    state
+        .positions
+        .insert(flow_uid, Position::new(next.x, next.y));
+    record_flow_template(state, &ident, &next);
+    if let Some(slot) = state
+        .elements
+        .iter_mut()
+        .find(|e| matches!(e, ViewElement::Flow(f) if f.uid == flow_uid))
+    {
+        *slot = ViewElement::Flow(next);
+    }
+    true
+}
+
+/// Whether `flow`'s pipe passes through the interior of a stock that is not
+/// one of its ends.
+fn crosses_foreign_stock(
+    flow: &view_element::Flow,
+    stocks: &[(i32, crate::editing::Point)],
+) -> bool {
+    use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+    const EPS: f64 = 1e-6;
+    let ends: [Option<i32>; 2] = [
+        flow.points.first().and_then(|p| p.attached_to_uid),
+        flow.points.last().and_then(|p| p.attached_to_uid),
+    ];
+    let (hw, hh) = (STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0);
+    stocks
+        .iter()
+        .filter(|(uid, _)| !ends.contains(&Some(*uid)))
+        .any(|(_, c)| {
+            flow.points.windows(2).any(|w| {
+                let (a, b) = (&w[0], &w[1]);
+                if (a.y - b.y).abs() <= EPS {
+                    (a.y - c.y).abs() < hh - EPS
+                        && a.x.min(b.x) < c.x + hw - EPS
+                        && a.x.max(b.x) > c.x - hw + EPS
+                } else if (a.x - b.x).abs() <= EPS {
+                    (a.x - c.x).abs() < hw - EPS
+                        && a.y.min(b.y) < c.y + hh - EPS
+                        && a.y.max(b.y) > c.y - hh + EPS
+                } else {
+                    false
+                }
+            })
+        })
+}
+
+/// Re-route every flow this pass created whose pipe passes through a stock
+/// that is not one of its ends, through the editing core's router, which ranks
+/// a path through a stock as crossing and generates detours around it. The
+/// finishing pass orthogonalizes between the ends it is given and sees no
+/// other stock, so a flow between two stocks with a third drawn between them
+/// would otherwise run straight through the third, reading as attached to it.
+/// A pipe that already clears every stock keeps what the finishing pass gave
+/// it.
+fn route_created_flows_around_stocks(elements: &mut [ViewElement], created: &HashSet<i32>) {
+    use crate::editing::{FlowEnd, FlowGeometry, Point, flow_terminals, route};
+    let stocks: Vec<(i32, Point)> = elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Stock(s) => Some((s.uid, Point::new(s.x, s.y))),
+            _ => None,
+        })
+        .collect();
+    let centers: Vec<Point> = stocks.iter().map(|(_, c)| *c).collect();
+    let mut updates: Vec<(usize, FlowGeometry)> = Vec::new();
+    {
+        let by_uid: HashMap<i32, &ViewElement> =
+            elements.iter().map(|e| (e.get_uid(), e)).collect();
+        for (index, elem) in elements.iter().enumerate() {
+            let ViewElement::Flow(f) = elem else { continue };
+            if !created.contains(&f.uid) || f.points.len() < 2 || !crosses_foreign_stock(f, &stocks)
+            {
+                continue;
+            }
+            let terminals = flow_terminals(f, |uid| by_uid.get(&uid).copied());
+            let terminal_stocks: Vec<i32> = [&terminals.source, &terminals.sink]
+                .into_iter()
+                .filter_map(|t| t.stock_center().and(t.uid()))
+                .collect();
+            let occupied: Vec<Point> = elements
+                .iter()
+                .filter_map(|e| match e {
+                    ViewElement::Flow(g) if g.uid != f.uid => Some(g),
+                    _ => None,
+                })
+                .flat_map(|g| [g.points.first(), g.points.last()])
+                .flatten()
+                .filter(|p| {
+                    p.attached_to_uid
+                        .is_some_and(|u| terminal_stocks.contains(&u))
+                })
+                .map(point_of)
+                .collect();
+            updates.push((
+                index,
+                route(
+                    terminals.source,
+                    terminals.sink,
+                    f,
+                    FlowEnd::Source,
+                    &occupied,
+                    centers.as_slice(),
+                ),
+            ));
+        }
+    }
+    for (index, geometry) in updates {
+        for moved in &geometry.clouds {
+            for e in elements.iter_mut() {
+                if let ViewElement::Cloud(c) = e
+                    && c.uid == moved.uid
+                {
+                    (c.x, c.y) = (moved.at.x, moved.at.y);
+                }
+            }
+        }
+        elements[index] = ViewElement::Flow(geometry.flow);
+    }
+}
+
+/// Slide the valve of every flow in `created` (the flows this pass created, or
+/// the ones it re-attached) along its pipe to the position nearest where it
+/// sits whose valve covers no other shape, when where it sits covers one: a
+/// person may have parked a parameter, or drawn another valve or cloud, exactly
+/// where placement puts a valve. The valve keeps
+/// `VALVE_CLAMP_MARGIN` from the pipe's ends; a pipe with no clear position
+/// keeps its valve.
+fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32>) {
+    use crate::diagram::common::Rect;
+    use crate::diagram::constants::AUX_RADIUS;
+    use crate::editing::{VALVE_CLAMP_MARGIN, arc_position, path_length, point_at_arc};
+    use crate::layout::metrics::node_shape_box;
+    /// The step, in px of arc length, at which candidate valve positions are
+    /// tried.
+    const STEP: f64 = 1.0;
+    let shapes: Vec<(i32, Rect)> = elements
+        .iter()
+        .filter_map(|e| node_shape_box(e).map(|r| (e.get_uid(), r)))
+        .collect();
+    for elem in elements.iter_mut() {
+        let ViewElement::Flow(f) = elem else { continue };
+        if !created.contains(&f.uid) || f.points.len() < 2 {
+            continue;
+        }
+        let clear = |p: crate::editing::Point| {
+            shapes
+                .iter()
+                .filter(|(uid, _)| *uid != f.uid)
+                .all(|(_, r)| {
+                    let w = r.right.min(p.x + AUX_RADIUS) - r.left.max(p.x - AUX_RADIUS);
+                    let h = r.bottom.min(p.y + AUX_RADIUS) - r.top.max(p.y - AUX_RADIUS);
+                    w <= 0.0 || h <= 0.0
+                })
+        };
+        let valve = crate::editing::Point::new(f.x, f.y);
+        if clear(valve) {
+            continue;
+        }
+        let length = path_length(&f.points);
+        if length < 2.0 * VALVE_CLAMP_MARGIN {
+            continue;
+        }
+        let at = arc_position(&f.points, valve);
+        let steps = ((length - 2.0 * VALVE_CLAMP_MARGIN) / STEP).floor() as usize;
+        let best = (0..=steps)
+            .map(|i| VALVE_CLAMP_MARGIN + i as f64 * STEP)
+            .filter(|&s| clear(point_at_arc(&f.points, s)))
+            .min_by(|a, b| (a - at).abs().total_cmp(&(b - at).abs()));
+        if let Some(s) = best {
+            let p = point_at_arc(&f.points, s);
+            (f.x, f.y) = (p.x, p.y);
+        }
+    }
+}
+
+/// Record in `state`'s caches where each flow in `flows` is now drawn -- its
+/// valve position and pipe template, and its clouds' positions -- after a
+/// geometry pass moved the elements themselves. Later steps read the caches:
+/// the settled-coordinate copy translates every flow by the offset from its
+/// cached valve position, so a flow whose valve slid with a stale cache comes
+/// back to the old spot with its whole pipe, pulling the ends off their stocks
+/// and clouds.
+fn record_flow_geometry(state: &mut LayoutState, flows: &HashSet<i32>) {
+    let mut moved: Vec<view_element::Flow> = Vec::new();
+    for elem in &state.elements {
+        match elem {
+            ViewElement::Flow(f) if flows.contains(&f.uid) => {
+                state.positions.insert(f.uid, Position::new(f.x, f.y));
+                moved.push(f.clone());
+            }
+            ViewElement::Cloud(c) if flows.contains(&c.flow_uid) => {
+                state.positions.insert(c.uid, Position::new(c.x, c.y));
+            }
+            _ => {}
+        }
+    }
+    for f in &moved {
+        record_flow_template(state, &canonicalize(&f.name), f);
+    }
+}
+
+/// Move each created or rebuilt parameter, module or stock whose shape still
+/// covers another shape to the nearest clear spot: rings a parameter's radius
+/// apart around where it sits, the first clear position by ring and then by
+/// angle. The declutter's relaxation pushes footprints apart but can jam in a
+/// crowded region and leave a created element where it landed, and a variable
+/// redrawn in place as a stock takes a larger body at its old center; nothing
+/// drawn before the sync may move, so the created or rebuilt element takes the
+/// clearance. `moves` accepts the uids this pass created or rebuilt; a stock a
+/// flow attaches to stays, since moving it would tear the pipe.
+fn keep_created_nodes_clear(elements: &mut [ViewElement], moves: impl Fn(i32) -> bool) {
+    use crate::diagram::common::Rect;
+    use crate::diagram::constants::AUX_RADIUS;
+    use crate::layout::metrics::node_shape_box;
+    const MAX_RINGS: usize = 24;
+    let overlaps = |a: &Rect, b: &Rect| {
+        a.right.min(b.right) - a.left.max(b.left) > 0.0
+            && a.bottom.min(b.bottom) - a.top.max(b.top) > 0.0
+    };
+    for i in 0..elements.len() {
+        if !matches!(
+            elements[i],
+            ViewElement::Aux(_) | ViewElement::Module(_) | ViewElement::Stock(_)
+        ) || !moves(elements[i].get_uid())
+        {
+            continue;
+        }
+        let uid = elements[i].get_uid();
+        let attached = elements.iter().any(|e| {
+            matches!(e, ViewElement::Flow(f)
+                if f.points.iter().any(|p| p.attached_to_uid == Some(uid)))
+        });
+        if attached {
+            continue;
+        }
+        let Some(shape) = node_shape_box(&elements[i]) else {
+            continue;
+        };
+        let others: Vec<Rect> = elements
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .filter_map(|(_, e)| node_shape_box(e))
+            .collect();
+        let clear = |dx: f64, dy: f64| {
+            let moved = Rect {
+                left: shape.left + dx,
+                right: shape.right + dx,
+                top: shape.top + dy,
+                bottom: shape.bottom + dy,
+            };
+            !others.iter().any(|r| overlaps(&moved, r))
+        };
+        if clear(0.0, 0.0) {
+            continue;
+        }
+        let found = (1..=MAX_RINGS).find_map(|k| {
+            let radius = k as f64 * AUX_RADIUS;
+            let n = 8 * k;
+            (0..n)
+                .map(|m| {
+                    let angle = std::f64::consts::TAU * m as f64 / n as f64;
+                    (radius * angle.cos(), radius * angle.sin())
+                })
+                .find(|&(dx, dy)| clear(dx, dy))
+        });
+        if let Some((dx, dy)) = found {
+            translate_view_element(&mut elements[i], dx, dy);
+        }
+    }
+}
+
+/// The center of a parameter, module or stock.
+fn element_center(elem: &ViewElement) -> Option<(f64, f64)> {
+    match elem {
+        ViewElement::Aux(a) => Some((a.x, a.y)),
+        ViewElement::Module(m) => Some((m.x, m.y)),
+        ViewElement::Stock(s) => Some((s.x, s.y)),
+        _ => None,
+    }
+}
+
+/// Keep the bow of every curved link the view already drew whose endpoint this
+/// pass moved (a re-attached or rebuilt flow's valve, a variable redrawn in
+/// place that moved off a shape): its takeoff angle turns with the chord
+/// between its ends, so it curves as it did relative to that line.
+fn rebow_moved_links(elements: &mut [ViewElement], old_view: &datamodel::StockFlow) {
+    use crate::diagram::connector::get_visual_center;
+    let not_arrayed = |_: &str| false;
+    let centers = |els: &[ViewElement]| -> HashMap<i32, (f64, f64)> {
+        els.iter()
+            .filter(|e| !matches!(e, ViewElement::Link(_) | ViewElement::Group(_)))
+            .map(|e| (e.get_uid(), get_visual_center(e, &not_arrayed)))
+            .collect()
+    };
+    let before = centers(&old_view.elements);
+    let after = centers(elements);
+    let drawn_before: HashSet<i32> = old_view
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Link(_)))
+        .map(ViewElement::get_uid)
+        .collect();
+    let chord = |a: (f64, f64), b: (f64, f64)| (b.1 - a.1).atan2(b.0 - a.0).to_degrees();
+    for elem in elements.iter_mut() {
+        let ViewElement::Link(link) = elem else {
+            continue;
+        };
+        let LinkShape::Arc(takeoff) = link.shape else {
+            continue;
+        };
+        if !drawn_before.contains(&link.uid) {
+            continue;
+        }
+        let (Some(&f0), Some(&t0), Some(&f1), Some(&t1)) = (
+            before.get(&link.from_uid),
+            before.get(&link.to_uid),
+            after.get(&link.from_uid),
+            after.get(&link.to_uid),
+        ) else {
+            continue;
+        };
+        if (f0, t0) == (f1, t1) {
+            continue;
+        }
+        link.shape = LinkShape::Arc(takeoff + chord(f1, t1) - chord(f0, t0));
+    }
+}
+
 /// Apply a model patch incrementally to an existing diagram view,
 /// preserving existing element positions and only placing new or
 /// modified elements.
@@ -1484,7 +2215,9 @@ fn translate_view_element(elem: &mut ViewElement, dx: f64, dy: f64) {
 /// reference so callers can inspect the operations.
 ///
 /// Contract for elements the patch did not touch: position AND
-/// `label_side` are returned byte-for-byte. A label side is chosen only
+/// `label_side` are returned byte-for-byte. A variable the view does not
+/// draw stays undrawn unless the patch names it, and no connector or cloud the
+/// pass creates references it. A label side is chosen only
 /// for elements created in this pass -- new variables, kind-changed
 /// rebuilds, and flows rebuilt because their attachment changed. The
 /// optimizer never revisits an existing side, even when a connector added
@@ -1576,12 +2309,64 @@ pub fn incremental_layout(
         }
     }
 
+    // What the edit is about, for the connectors it may draw: a dependency the
+    // view does not draw gets a link only into a variable the patch names (it
+    // upserted, renamed, or re-listed that variable), or where either end is an
+    // element drawn for the first time, which carries no author's choice about
+    // its connectors. A connector an author left out anywhere else stays out.
+    let named: HashSet<String> = patch
+        .ops
+        .iter()
+        .filter_map(|op| {
+            let ident = match op {
+                crate::patch::ModelOperation::UpsertStock(s) => &s.ident,
+                crate::patch::ModelOperation::UpsertFlow(f) => &f.ident,
+                crate::patch::ModelOperation::UpsertAux(a) => &a.ident,
+                crate::patch::ModelOperation::UpsertModule(m) => &m.ident,
+                crate::patch::ModelOperation::RenameVariable { to, .. } => to,
+                crate::patch::ModelOperation::UpdateStockFlows { ident, .. } => ident,
+                crate::patch::ModelOperation::DeleteVariable { .. }
+                | crate::patch::ModelOperation::UpsertView { .. }
+                | crate::patch::ModelOperation::DeleteView { .. }
+                | crate::patch::ModelOperation::SetLoopName { .. }
+                | crate::patch::ModelOperation::EditView { .. } => return None,
+            };
+            Some(canonicalize(ident).into_owned())
+        })
+        .collect();
+    let drawn_before: HashSet<String> = state
+        .elements
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ViewElement::Stock(_)
+                    | ViewElement::Flow(_)
+                    | ViewElement::Aux(_)
+                    | ViewElement::Module(_)
+            )
+        })
+        .filter_map(|e| e.get_name().map(|n| canonicalize(n).into_owned()))
+        .collect();
+    let draws_connector = |from: &str, to: &str| {
+        named.contains(to) || !drawn_before.contains(from) || !drawn_before.contains(to)
+    };
+    // Likewise a link the view draws for no dependency the model has goes only
+    // with an edit to its reader, and a variable the view does not draw is
+    // drawn only when the patch names it: an author who left a variable out of
+    // a view keeps it out whatever unrelated edit follows. Whatever the view
+    // drew stays drawn, rebuilt where its kind or attachment changed.
+    let keeps_connector = |to: &str| !named.contains(to);
+    let draws_element = |ident: &str| named.contains(ident) || drawn_before.contains(ident);
+
     // Between steps 3 and 4a: detect variables whose type changed (e.g., Aux -> Stock).
     // When a caller issues UpsertStock for a variable that was previously an Aux, there
     // is no DeleteVariable in the patch and the old Aux element is still in state.
     // identify_new_elements only checks for UID presence, not element type, so the
     // stale element would survive.  We detect type mismatches here and remove the
-    // old element so it is rebuilt with the correct type.
+    // old element so it is rebuilt with the correct type, keeping its uid (so its
+    // links and aliases survive) and recording its center for the rebuild.
+    let mut kind_changed_centers: Vec<(String, Position)> = Vec::new();
     {
         let kind_changed: Vec<String> = model
             .variables
@@ -1603,27 +2388,27 @@ pub fn incremental_layout(
             })
             .collect();
         for ident in kind_changed {
-            // Save the display name before apply_deletion removes it from display_names,
-            // so the rebuilt element can recover the original casing (e.g. "Growth Rate"
-            // instead of "growth_rate").
-            let saved_display = state.display_names.get(&ident).cloned();
-            state.apply_deletion(&ident);
-            // Restore: use the saved original display name when available, otherwise
-            // fall back to the canonical ident so the entry is always present.
-            let display = saved_display.unwrap_or_else(|| ident.clone());
-            state.display_names.insert(ident, display);
+            if let Some(uid) = state.uid_manager.get_uid(&ident)
+                && let Some(&pos) = state.positions.get(&uid)
+            {
+                kind_changed_centers.push((ident.clone(), pos));
+            }
+            state.remove_for_rebuild(&ident);
         }
     }
 
     // Between steps 3 and 4: detect flows whose stock connections changed.
     // A flow element keeps its old attached_to_uid values when preserved in state,
     // so a flow that moved from one stock to another would keep stale endpoints.
-    // Remove such flows (and their clouds) so identify_new_elements picks them
-    // up as new and they get rebuilt with correct endpoints.
+    // Such a flow is re-attached in place (`retarget_flow`): only its changed
+    // ends move. When an end must attach to a stock that has no position yet, the
+    // flow is removed instead, so identify_new_elements picks it up as new and it
+    // is rebuilt with correct endpoints.
     //
     // This also handles transitions between stock and cloud endpoints: if the
     // model now expects a cloud source (from_stock == None) but the preserved
     // flow's source point is still attached to a stock UID, the flow is stale.
+    let mut retargeted: HashSet<i32> = HashSet::new();
     {
         let uid_to_ident: HashMap<i32, String> = model
             .variables
@@ -1699,23 +2484,59 @@ pub fn incremental_layout(
             })
             .collect();
 
+        // The stocks a re-attached pipe routes around and whose bodies a cloud
+        // end stays out of: every drawn stock, plus the stocks a kind change
+        // redraws in place below.
+        let stock_centers: BTreeMap<i32, crate::editing::Point> = state
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                ViewElement::Stock(s) => Some((s.uid, crate::editing::Point::new(s.x, s.y))),
+                _ => None,
+            })
+            .chain(kind_changed_centers.iter().filter_map(|(ident, pos)| {
+                matches!(
+                    model.get_variable(ident),
+                    Some(datamodel::Variable::Stock(_))
+                )
+                .then_some(())?;
+                let uid = state.uid_manager.get_uid(ident)?;
+                Some((uid, crate::editing::Point::new(pos.x, pos.y)))
+            }))
+            .collect();
         for flow_ident in flows_to_reset {
-            // apply_deletion removes the element from state.elements but leaves
-            // the UID in uid_manager. identify_new_elements will see a UID with
-            // no corresponding element and classify the flow as new, causing
-            // create_flow_view_element to rebuild it with correct endpoints.
-            let canonical = canonicalize(&flow_ident).into_owned();
-            // Save the display name before apply_deletion removes it so the
-            // rebuilt element recovers the original casing.
-            let saved_display = state.display_names.get(&canonical).cloned();
-            state.apply_deletion(&flow_ident);
-            let display = saved_display.unwrap_or_else(|| flow_ident.clone());
-            state.display_names.insert(canonical, display);
+            let uid = state.uid_manager.get_uid(&flow_ident);
+            let expected = metadata
+                .flow_to_stocks
+                .get(&flow_ident)
+                .and_then(|(from, to)| {
+                    let stock_uid = |s: &Option<String>| match s {
+                        None => Some(None),
+                        Some(ident) => state.uid_manager.get_uid(ident).map(Some),
+                    };
+                    Some([stock_uid(from)?, stock_uid(to)?])
+                });
+            if let (Some(uid), Some(expected)) = (uid, expected)
+                && retarget_flow(&mut state, uid, expected, &stock_centers)
+            {
+                retargeted.insert(uid);
+                continue;
+            }
+            // identify_new_elements sees the uid with no element and classifies
+            // the flow as new, so create_flow_view_element rebuilds it with
+            // correct endpoints under the same uid, and the links into it
+            // survive.
+            state.remove_for_rebuild(&flow_ident);
         }
     }
+    // A re-attached flow keeps its valve unless a new cloud covered it, when
+    // the valve took the pipe's middle, which may be where a person parked
+    // something.
+    keep_created_valves_clear(&mut state.elements, &retargeted);
+    record_flow_geometry(&mut state, &retargeted);
 
     // Step 4: Identify new elements and compute initial positions
-    let new_elements = state.identify_new_elements(model);
+    let new_elements = state.identify_new_elements(model).filtered(draws_element);
 
     // The face each new flow attaches on, from its stocks' current flow lists
     // and the faces their drawn side flows already take. Only new flows read
@@ -1735,11 +2556,12 @@ pub fn incremental_layout(
     }
 
     // Every element still standing at this point survived the patch untouched
-    // (or was merely renamed): it keeps its position, and a named one its label
-    // side, for the rest of the pass. Whatever gets created from here on -- new
-    // variables, kind-changed rebuilds, flows rebuilt because their attachment
-    // changed -- is absent from this snapshot, so `declutter_part` below chooses
-    // its side and may move it.
+    // (or was merely renamed): it keeps its position, and a labelled one its
+    // label side, for the rest of the pass. Whatever gets created from here on
+    // -- new variables, kind-changed rebuilds, flows rebuilt because their
+    // attachment changed -- is absent from this snapshot, so `declutter_part`
+    // below chooses its side and may move it. An alias is never created or
+    // rebuilt here, so every alias keeps its side.
     let standing_uids: HashSet<i32> = state.elements.iter().map(ViewElement::get_uid).collect();
     let pinned_labels: HashSet<i32> = state
         .elements
@@ -1751,20 +2573,92 @@ pub fn incremental_layout(
                     | ViewElement::Flow(_)
                     | ViewElement::Aux(_)
                     | ViewElement::Module(_)
-            )
+                    | ViewElement::Alias(_)
+            ) && !retargeted.contains(&elem.get_uid())
         })
         .map(ViewElement::get_uid)
         .collect();
     let needs_label_placement = |uid: i32| !pinned_labels.contains(&uid);
+    // A link this pass creates has a uid the view before it did not use.
+    let old_uids: HashSet<i32> = old_view.elements.iter().map(ViewElement::get_uid).collect();
+    let created_link = |uid: i32| !old_uids.contains(&uid);
+
+    // A variable whose kind changed to a stock, a parameter or a module is
+    // redrawn at its old element's center: an agent turning a parameter into a
+    // stock changed what it is, not where a person put it. Its label side is
+    // chosen afresh (it is absent from `pinned_labels`), and no pass below moves
+    // it, unless its new shape covers another shape at that center
+    // (`keep_created_nodes_clear`). A variable that became a flow is placed as a new flow, since its valve
+    // belongs on the pipe between its stocks.
+    let mut rebuilt_in_place: HashSet<i32> = HashSet::new();
+    let mut in_place_idents: HashSet<String> = HashSet::new();
+    for (ident, pos) in &kind_changed_centers {
+        let Some(var) = model.get_variable(ident) else {
+            continue;
+        };
+        let uid = state.get_or_alloc_uid(ident);
+        let name = format_label_with_line_breaks(&state.display_name(ident));
+        let (x, y) = (pos.x, pos.y);
+        let element = match var {
+            datamodel::Variable::Stock(_) => ViewElement::Stock(view_element::Stock {
+                name,
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }),
+            datamodel::Variable::Aux(_) => ViewElement::Aux(view_element::Aux {
+                name,
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }),
+            datamodel::Variable::Module(_) => ViewElement::Module(view_element::Module {
+                name,
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+            }),
+            datamodel::Variable::Flow(_) => continue,
+        };
+        state.elements.push(element);
+        state.positions.insert(uid, *pos);
+        rebuilt_in_place.insert(uid);
+        in_place_idents.insert(ident.clone());
+    }
+    let new_elements = NewElements {
+        new_stocks: without(new_elements.new_stocks, &in_place_idents),
+        new_flows: new_elements.new_flows,
+        new_auxes: without(new_elements.new_auxes, &in_place_idents),
+        new_modules: without(new_elements.new_modules, &in_place_idents),
+    };
+    // What the polish passes may move: what this pass created, less what it
+    // redrew in place.
+    let moves = |uid: i32| !standing_uids.contains(&uid) && !rebuilt_in_place.contains(&uid);
 
     if new_elements.is_empty() {
-        // No new element, so no flow is created or rebuilt: every flow in the
-        // view is untouched, and none of the flow geometry passes runs.
-        diff_connectors(&mut state, &metadata);
+        // No new element, so no flow is created: every flow in the view is
+        // untouched or was re-attached above, and none of the created-flow
+        // geometry passes runs. A re-attached valve or a variable redrawn in
+        // place may still have moved, so the curved links into them turn.
+        diff_connectors(&mut state, &metadata, draws_connector, keeps_connector);
         diff_clouds(&mut state, &metadata);
         declutter::declutter_part(&mut state.elements, needs_label_placement, |_| false);
-        apply_loop_curvature(&mut state, &config, model, &metadata);
-        validate_view_completeness(&state, model)?;
+        keep_created_nodes_clear(&mut state.elements, |uid| rebuilt_in_place.contains(&uid));
+        for elem in &state.elements {
+            if rebuilt_in_place.contains(&elem.get_uid())
+                && let Some((x, y)) = element_center(elem)
+            {
+                state.positions.insert(elem.get_uid(), Position::new(x, y));
+            }
+        }
+        rebow_moved_links(&mut state.elements, old_view);
+        apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
+        validate_view_completeness(&state, model, draws_element)?;
         return Ok(build_stock_flow_from_state(state, old_view));
     }
 
@@ -1956,9 +2850,12 @@ pub fn incremental_layout(
     resnap_flow_endpoints(&mut state, &config, is_created);
     face_slots::place_created_flow_ends(&mut state.elements, &created_flows);
     finish_flow_geometry(&mut state.elements, is_created);
+    route_created_flows_around_stocks(&mut state.elements, &created_flows);
+    keep_created_valves_clear(&mut state.elements, &created_flows);
+    record_flow_geometry(&mut state, &created_flows);
 
     // Step 7: Diff connectors and clouds
-    diff_connectors(&mut state, &metadata);
+    diff_connectors(&mut state, &metadata, draws_connector, keeps_connector);
     diff_clouds(&mut state, &metadata);
 
     // Step 8: Polish. The new free-floating elements step off crossings and
@@ -1966,9 +2863,10 @@ pub fn incremental_layout(
     // label sides chosen by what the metric charges. Pinned elements keep their positions and
     // sides even if a new connector now runs through a label (hand placement
     // wins; the human can move it).
-    polish::polish_crossings_for(&mut state.elements, |uid| !standing_uids.contains(&uid));
-    declutter::declutter_part(&mut state.elements, needs_label_placement, |uid| {
-        !standing_uids.contains(&uid)
+    polish::polish_crossings_for(&mut state.elements, moves);
+    declutter::declutter_part(&mut state.elements, needs_label_placement, moves);
+    keep_created_nodes_clear(&mut state.elements, |uid| {
+        moves(uid) || rebuilt_in_place.contains(&uid)
     });
     // The decluttered free-floating elements' positions, for the loop arcs.
     for elem in &state.elements {
@@ -1976,15 +2874,17 @@ pub fn incremental_layout(
             ViewElement::Aux(a) => (a.uid, a.x, a.y),
             ViewElement::Module(m) => (m.uid, m.x, m.y),
             ViewElement::Alias(a) => (a.uid, a.x, a.y),
+            ViewElement::Stock(s) if rebuilt_in_place.contains(&s.uid) => (s.uid, s.x, s.y),
             _ => continue,
         };
         if let Some(pos) = state.positions.get_mut(&uid) {
             *pos = Position::new(x, y);
         }
     }
-    apply_loop_curvature(&mut state, &config, model, &metadata);
+    rebow_moved_links(&mut state.elements, old_view);
+    apply_loop_curvature(&mut state, &config, model, &metadata, created_link);
 
-    validate_view_completeness(&state, model)?;
+    validate_view_completeness(&state, model, draws_element)?;
 
     // Step 9: Build StockFlow
     Ok(build_stock_flow_from_state(state, old_view))

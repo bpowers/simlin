@@ -170,7 +170,7 @@ pub fn build_report(
 
 /// HTML-escape the five characters special in element text or attribute
 /// values. Model keys and filenames are static, so this is defense in depth.
-fn html_escape(s: &str) -> String {
+pub fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {

@@ -111,8 +111,8 @@ impl<A: ProjectAccess> SimlinMcpServer<A> {
     #[tool(
         name = "EditModel",
         description = "Edit a system dynamics model by applying operations. \
-            Supports upserting stocks, flows, and auxiliaries, removing variables, \
-            and updating simulation specs. Returns a refreshed model snapshot \
+            Supports upserting stocks, flows, and auxiliaries, removing and renaming \
+            variables, and updating simulation specs. Returns a refreshed model snapshot \
             with loop dominance analysis after applying changes. \
             Upsert replaces the full variable definition; omitted optional fields \
             default to empty. Use ReadModel first to get current state, then \
