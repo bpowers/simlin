@@ -270,6 +270,34 @@ fn every_fixture_has_a_test() {
 }
 
 #[test]
+fn scenarios_target_only_variables_the_view_draws() {
+    // A variable the view does not draw is drawn by any edit that names it, so
+    // a scenario about one exercises that rule (pinned by incremental layout's
+    // own tests) rather than the edit, and an edit expected to return the
+    // original view cannot. Population's first flow by ident is births; with
+    // births left out of the view, the restate names deaths instead.
+    let (mut project, mut view) = starting_point(fixture("population"));
+    let births = view
+        .elements
+        .iter()
+        .find(|e| e.get_name().is_some_and(|n| canonicalize(n) == "births"))
+        .map(ViewElement::get_uid)
+        .expect("births drawn");
+    view.elements.retain(|e| match e {
+        ViewElement::Link(l) => l.from_uid != births && l.to_uid != births,
+        ViewElement::Cloud(c) => c.flow_uid != births,
+        other => other.get_uid() != births,
+    });
+    project.get_model_mut("main").expect("main").views = vec![datamodel::View::StockFlow(view)];
+    let restate = build_scenario(&project, "main", ScenarioKind::RestateVariable).expect("applies");
+    assert!(
+        restate.description.contains("deaths"),
+        "{}",
+        restate.description
+    );
+}
+
+#[test]
 fn every_scenario_kind_applies_to_some_fixture() {
     let projects: Vec<datamodel::Project> = FIXTURES.iter().map(|f| load(f.path)).collect();
     for kind in ScenarioKind::ALL {

@@ -425,6 +425,12 @@ struct Targets<'a> {
     model_name: &'a str,
     patch_name: String,
     vars: BTreeMap<String, &'a Variable>,
+    /// The variables the view draws, which are the ones scenarios target: a
+    /// variable the view does not draw is drawn by any edit that names it, so
+    /// a scenario about one exercises that rule instead of the edit, and an
+    /// edit expected to return the original view cannot. `None` when the model
+    /// has no view.
+    drawn: Option<BTreeSet<String>>,
     meta: ComputedMetadata,
 }
 
@@ -432,10 +438,31 @@ impl<'a> Targets<'a> {
     fn new(project: &'a datamodel::Project, model_name: &'a str) -> Option<Targets<'a>> {
         let model = project.get_model(model_name)?;
         let meta = compute_dependency_metadata(project, model_name, None)?;
+        let drawn = model
+            .views
+            .iter()
+            .map(|v| match v {
+                datamodel::View::StockFlow(sf) => sf
+                    .elements
+                    .iter()
+                    .filter(|e| {
+                        matches!(
+                            e,
+                            ViewElement::Stock(_)
+                                | ViewElement::Flow(_)
+                                | ViewElement::Aux(_)
+                                | ViewElement::Module(_)
+                        )
+                    })
+                    .filter_map(|e| e.get_name().map(|n| canonicalize(n).into_owned()))
+                    .collect::<BTreeSet<String>>(),
+            })
+            .next();
         Some(Targets {
             project,
             model_name,
             patch_name: model.name.clone(),
+            drawn,
             vars: model
                 .variables
                 .iter()
@@ -449,11 +476,21 @@ impl<'a> Targets<'a> {
         self.vars.get(ident).copied()
     }
 
+    fn is_drawn(&self, ident: &str) -> bool {
+        self.drawn.as_ref().is_none_or(|d| d.contains(ident))
+    }
+
+    /// The drawn variables that read `ident`.
     fn dependents(&self, ident: &str) -> Vec<String> {
         self.meta
             .reverse_dep_graph
             .get(ident)
-            .map(|s| s.iter().filter(|d| *d != ident).cloned().collect())
+            .map(|s| {
+                s.iter()
+                    .filter(|d| *d != ident && self.is_drawn(d))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -462,7 +499,8 @@ impl<'a> Targets<'a> {
         self.vars
             .iter()
             .filter(|(ident, v)| {
-                matches!(v, Variable::Aux(_))
+                self.is_drawn(ident)
+                    && matches!(v, Variable::Aux(_))
                     && scalar(v).is_some()
                     && !has_table(v)
                     && self.meta.dep_graph.get(*ident).is_none_or(|d| d.is_empty())
@@ -479,7 +517,12 @@ impl<'a> Targets<'a> {
     fn flows(&self) -> Vec<String> {
         self.vars
             .iter()
-            .filter(|(_, v)| matches!(v, Variable::Flow(_)) && scalar(v).is_some() && !has_table(v))
+            .filter(|(ident, v)| {
+                self.is_drawn(ident)
+                    && matches!(v, Variable::Flow(_))
+                    && scalar(v).is_some()
+                    && !has_table(v)
+            })
             .map(|(ident, _)| ident.clone())
             .collect()
     }
@@ -488,7 +531,9 @@ impl<'a> Targets<'a> {
         self.vars
             .iter()
             .filter_map(|(ident, v)| match v {
-                Variable::Stock(s) if scalar(v).is_some() => Some((ident.clone(), s)),
+                Variable::Stock(s) if self.is_drawn(ident) && scalar(v).is_some() => {
+                    Some((ident.clone(), s))
+                }
                 _ => None,
             })
             .collect()
