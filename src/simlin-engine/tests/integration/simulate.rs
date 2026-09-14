@@ -1905,14 +1905,11 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
     // datamodel equality (the reader legitimately normalizes), so simulating
     // the re-read project is the only thing that pins its behaviour.
     {
-        use simlin_engine::prost::Message;
+        use simlin_engine::buffa::Message;
 
-        let pb_project_inner = serialize(&datamodel_project).unwrap();
-        let pb_project = &pb_project_inner;
-        let mut buf = Vec::with_capacity(pb_project.encoded_len());
-        pb_project.encode(&mut buf).unwrap();
+        let buf = serialize(&datamodel_project).unwrap().encode_to_vec();
 
-        let datamodel_project2 = deserialize(project_io::Project::decode(&*buf).unwrap());
+        let datamodel_project2 = deserialize(project_io::Project::decode_from_slice(&buf).unwrap());
         assert_eq!(datamodel_project, datamodel_project2);
     }
 
@@ -2046,12 +2043,10 @@ fn simulate_special_path(xmile_path: &str) {
     // must survive serialization, or the re-compiled model silently loses its
     // pass and drains as an ordinary stock.
     let datamodel_proto = {
-        use simlin_engine::prost::Message;
+        use simlin_engine::buffa::Message;
 
-        let pb_project = serialize(&datamodel_project).unwrap();
-        let mut buf = Vec::with_capacity(pb_project.encoded_len());
-        pb_project.encode(&mut buf).unwrap();
-        deserialize(project_io::Project::decode(&*buf).unwrap())
+        let buf = serialize(&datamodel_project).unwrap().encode_to_vec();
+        deserialize(project_io::Project::decode_from_slice(&buf).unwrap())
     };
     assert_eq!(datamodel_project, datamodel_proto);
     ensure_results(&baseline, &vm_results_for_special(&datamodel_proto, "main"));
@@ -5308,7 +5303,7 @@ fn mark2_mdl_compiles_incrementally() {
 /// import and simulation.
 #[test]
 fn mark2_mdl_compiles_after_protobuf_roundtrip() {
-    use prost::Message;
+    use buffa::Message;
 
     let contents =
         std::fs::read_to_string("../../test/bobby/vdf/econ/mark2.mdl").expect("read mark2.mdl");
@@ -5316,11 +5311,10 @@ fn mark2_mdl_compiles_after_protobuf_roundtrip() {
 
     // Serialize to protobuf (as the app does in NewProject.tsx)
     let pb = serialize(&project).expect("serialize to protobuf");
-    let mut buf = Vec::new();
-    pb.encode(&mut buf).expect("encode protobuf");
+    let buf = pb.encode_to_vec();
 
     // Deserialize from protobuf (as the app does when loading from storage)
-    let pb2 = project_io::Project::decode(buf.as_slice()).expect("decode protobuf");
+    let pb2 = project_io::Project::decode_from_slice(&buf).expect("decode protobuf");
     let project2 = deserialize(pb2);
 
     // Compile the round-tripped project

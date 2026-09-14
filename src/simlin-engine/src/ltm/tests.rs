@@ -1090,12 +1090,12 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
 
 #[test]
 fn test_fishbanks_loops() {
-    use crate::prost::Message;
+    use buffa::Message;
     use std::fs;
 
     let proto_bytes =
         fs::read("../../test/fishbanks.protobin").expect("Failed to read fishbanks.protobin file");
-    let project_io = crate::project_io::Project::decode(&proto_bytes[..])
+    let project_io = crate::project_io::Project::decode_from_slice(&proto_bytes)
         .expect("Failed to decode fishbanks.protobin");
     let datamodel_project = crate::serde::deserialize(project_io);
 
@@ -1167,12 +1167,12 @@ fn test_fishbanks_loops() {
 
 #[test]
 fn test_logistic_growth_loops() {
-    use crate::prost::Message;
+    use buffa::Message;
     use std::fs;
 
     let proto_bytes = fs::read("../../test/logistic-growth.protobin")
         .expect("Failed to read logistic-growth.protobin file");
-    let project_io = crate::project_io::Project::decode(&proto_bytes[..])
+    let project_io = crate::project_io::Project::decode_from_slice(&proto_bytes)
         .expect("Failed to decode logistic-growth.protobin");
     let datamodel_project = crate::serde::deserialize(project_io);
 

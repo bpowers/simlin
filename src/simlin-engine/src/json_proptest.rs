@@ -1092,19 +1092,18 @@ proptest! {
 /// Returns (protobuf_bytes, json_string)
 fn roundtrip_pb_json(json_project: &Project) -> (Vec<u8>, String) {
     use crate::project_io;
-    use crate::prost::Message;
     use crate::serde as project_serde;
+    use buffa::Message;
 
     // json -> datamodel -> protobuf
     let dm_project: datamodel::Project = json_project.clone().into();
     let pb_project: project_io::Project = project_serde::serialize(&dm_project).unwrap();
 
     // Encode to protobuf bytes
-    let mut pb_bytes = Vec::new();
-    pb_project.encode(&mut pb_bytes).unwrap();
+    let pb_bytes = pb_project.encode_to_vec();
 
     // Decode protobuf bytes
-    let pb_decoded = project_io::Project::decode(&pb_bytes[..]).unwrap();
+    let pb_decoded = project_io::Project::decode_from_slice(&pb_bytes).unwrap();
 
     // protobuf -> datamodel -> json -> string
     let dm_decoded: datamodel::Project = project_serde::deserialize(pb_decoded);
@@ -1152,29 +1151,26 @@ proptest! {
     /// migration use case.
     #[test]
     fn protobuf_roundtrip_is_idempotent(project in project_strategy()) {
-        use crate::prost::Message;
         use crate::project_io;
         use crate::serde as project_serde;
+        use buffa::Message;
 
         // First roundtrip: json -> datamodel -> protobuf -> bytes
         let dm1: datamodel::Project = project.clone().into();
         let pb1: project_io::Project = project_serde::serialize(&dm1).unwrap();
-        let mut pb_bytes1 = Vec::new();
-        pb1.encode(&mut pb_bytes1).unwrap();
+        let pb_bytes1 = pb1.encode_to_vec();
 
         // Decode and do second roundtrip
-        let pb1_decoded = project_io::Project::decode(&pb_bytes1[..]).unwrap();
+        let pb1_decoded = project_io::Project::decode_from_slice(&pb_bytes1).unwrap();
         let dm2: datamodel::Project = project_serde::deserialize(pb1_decoded);
         let pb2: project_io::Project = project_serde::serialize(&dm2).unwrap();
-        let mut pb_bytes2 = Vec::new();
-        pb2.encode(&mut pb_bytes2).unwrap();
+        let pb_bytes2 = pb2.encode_to_vec();
 
         // Third roundtrip
-        let pb2_decoded = project_io::Project::decode(&pb_bytes2[..]).unwrap();
+        let pb2_decoded = project_io::Project::decode_from_slice(&pb_bytes2).unwrap();
         let dm3: datamodel::Project = project_serde::deserialize(pb2_decoded);
         let pb3: project_io::Project = project_serde::serialize(&dm3).unwrap();
-        let mut pb_bytes3 = Vec::new();
-        pb3.encode(&mut pb_bytes3).unwrap();
+        let pb_bytes3 = pb3.encode_to_vec();
 
         // After first roundtrip, datamodel and protobuf bytes should be stable
         prop_assert_eq!(&dm2, &dm3);
@@ -1186,8 +1182,8 @@ proptest! {
 mod protobuf_roundtrip_tests {
     use super::*;
     use crate::project_io;
-    use crate::prost::Message;
     use crate::serde as project_serde;
+    use buffa::Message;
     use std::fs;
     use std::path::Path;
 
@@ -1210,7 +1206,7 @@ mod protobuf_roundtrip_tests {
             .unwrap_or_else(|_| panic!("Failed to read {}", proto_path.display()));
 
         // Decode the original protobuf
-        let pb_original = project_io::Project::decode(&proto_bytes[..])
+        let pb_original = project_io::Project::decode_from_slice(&proto_bytes)
             .unwrap_or_else(|_| panic!("Failed to decode {}", filename));
 
         // Convert to datamodel

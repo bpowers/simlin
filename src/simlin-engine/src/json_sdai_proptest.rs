@@ -821,8 +821,8 @@ mod schema_tests {
 mod protobuf_roundtrip_tests {
     use super::*;
     use crate::project_io;
-    use crate::prost::Message;
     use crate::serde as project_serde;
+    use buffa::Message;
 
     /// Performs a full protobuf -> JSON roundtrip for SDAI models:
     /// 1. Converts SdaiModel to datamodel::Project
@@ -837,11 +837,10 @@ mod protobuf_roundtrip_tests {
         let pb_project: project_io::Project = project_serde::serialize(&dm_project).unwrap();
 
         // Encode to protobuf bytes
-        let mut pb_bytes = Vec::new();
-        pb_project.encode(&mut pb_bytes).unwrap();
+        let pb_bytes = pb_project.encode_to_vec();
 
         // Decode protobuf bytes
-        let pb_decoded = project_io::Project::decode(&pb_bytes[..]).unwrap();
+        let pb_decoded = project_io::Project::decode_from_slice(&pb_bytes).unwrap();
 
         // protobuf -> datamodel -> sdai -> string
         let dm_decoded: datamodel::Project = project_serde::deserialize(pb_decoded);

@@ -20,6 +20,7 @@ use std::result::Result as StdResult;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use simlin_engine::buffa::Message;
 use simlin_engine::common::ErrorKind;
 use simlin_engine::data_provider::FilesystemDataProvider;
 use simlin_engine::datamodel::Project as DatamodelProject;
@@ -32,7 +33,6 @@ use simlin_engine::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
     format_simulation_error,
 };
-use simlin_engine::prost::Message;
 use simlin_engine::{Error, ErrorCode, Result, Results, build_sim, datamodel, project_io, serde};
 use simlin_engine::{
     load_csv, load_dat, open_vensim, open_vensim_with_data, open_xmile, to_mdl_with_warnings,
@@ -331,7 +331,7 @@ fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
         )
     })?;
 
-    let project = match project_io::Project::decode(&*contents_buf) {
+    let project = match project_io::Project::decode_from_slice(&contents_buf) {
         Ok(project) => serde::deserialize(project),
         Err(err) => {
             return Err(Error::new(
@@ -824,13 +824,9 @@ fn main() {
                         if pb_project.models.len() != 1 {
                             die!("--model-only specified, but more than 1 model in this project");
                         }
-                        let mut buf = Vec::with_capacity(pb_project.models[0].encoded_len());
-                        pb_project.models[0].encode(&mut buf).unwrap();
-                        buf
+                        pb_project.models[0].encode_to_vec()
                     } else {
-                        let mut buf = Vec::with_capacity(pb_project.encoded_len());
-                        pb_project.encode(&mut buf).unwrap();
-                        buf
+                        pb_project.encode_to_vec()
                     }
                 }
             };

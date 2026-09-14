@@ -6,9 +6,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-use prost::Message;
 use serde_json::Value;
 use simlin::*;
+use simlin_engine::buffa::{Message, MessageField};
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{self as engine};
 
@@ -770,15 +770,15 @@ fn test_model_functions() {
     // Create a project with multiple models
     let project = engine::project_io::Project {
         name: "test_multi_model".to_string(),
-        sim_specs: Some(engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(engine::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: Some(engine::project_io::Dt {
+            dt: MessageField::some(engine::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
-            save_step: None,
-            sim_method: engine::project_io::SimMethod::Euler as i32,
+            save_step: MessageField::none(),
+            sim_method: engine::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
         models: vec![
@@ -789,7 +789,7 @@ fn test_model_functions() {
                         v: Some(engine::project_io::variable::V::Aux(
                             engine::project_io::variable::Aux {
                                 ident: "var1".to_string(),
-                                equation: Some(engine::project_io::variable::Equation {
+                                equation: MessageField::some(engine::project_io::variable::Equation {
                                     equation: Some(
                                         engine::project_io::variable::equation::Equation::Scalar(
                                             engine::project_io::variable::ScalarEquation {
@@ -801,12 +801,12 @@ fn test_model_functions() {
                                 }),
                                 documentation: String::new(),
                                 units: String::new(),
-                                gf: None,
+                                gf: MessageField::none(),
                                 can_be_module_input: false,
                                 visibility: engine::project_io::variable::Visibility::Private
-                                    as i32,
+                                    .into(),
                                 uid: 0,
-                                compat: None,
+                                compat: MessageField::none(),
                             },
                         )),
                     },
@@ -814,7 +814,7 @@ fn test_model_functions() {
                         v: Some(engine::project_io::variable::V::Aux(
                             engine::project_io::variable::Aux {
                                 ident: "var2".to_string(),
-                                equation: Some(engine::project_io::variable::Equation {
+                                equation: MessageField::some(engine::project_io::variable::Equation {
                                     equation: Some(
                                         engine::project_io::variable::equation::Equation::Scalar(
                                             engine::project_io::variable::ScalarEquation {
@@ -826,12 +826,12 @@ fn test_model_functions() {
                                 }),
                                 documentation: String::new(),
                                 units: String::new(),
-                                gf: None,
+                                gf: MessageField::none(),
                                 can_be_module_input: false,
                                 visibility: engine::project_io::variable::Visibility::Private
-                                    as i32,
+                                    .into(),
                                 uid: 0,
-                                compat: None,
+                                compat: MessageField::none(),
                             },
                         )),
                     },
@@ -839,7 +839,7 @@ fn test_model_functions() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
-                macro_spec: None,
+                macro_spec: MessageField::none(),
             },
             engine::project_io::Model {
                 name: "model2".to_string(),
@@ -848,7 +848,7 @@ fn test_model_functions() {
                         v: Some(engine::project_io::variable::V::Stock(
                             engine::project_io::variable::Stock {
                                 ident: "stock".to_string(),
-                                equation: Some(engine::project_io::variable::Equation {
+                                equation: MessageField::some(engine::project_io::variable::Equation {
                                     equation: Some(
                                         engine::project_io::variable::equation::Equation::Scalar(
                                             engine::project_io::variable::ScalarEquation {
@@ -865,9 +865,9 @@ fn test_model_functions() {
                                 non_negative: false,
                                 can_be_module_input: false,
                                 visibility: engine::project_io::variable::Visibility::Private
-                                    as i32,
+                                    .into(),
                                 uid: 0,
-                                compat: None,
+                                compat: MessageField::none(),
                             },
                         )),
                     },
@@ -875,7 +875,7 @@ fn test_model_functions() {
                         v: Some(engine::project_io::variable::V::Flow(
                             engine::project_io::variable::Flow {
                                 ident: "inflow".to_string(),
-                                equation: Some(engine::project_io::variable::Equation {
+                                equation: MessageField::some(engine::project_io::variable::Equation {
                                     equation: Some(
                                         engine::project_io::variable::equation::Equation::Scalar(
                                             engine::project_io::variable::ScalarEquation {
@@ -887,13 +887,13 @@ fn test_model_functions() {
                                 }),
                                 documentation: String::new(),
                                 units: String::new(),
-                                gf: None,
+                                gf: MessageField::none(),
                                 non_negative: false,
                                 can_be_module_input: false,
                                 visibility: engine::project_io::variable::Visibility::Private
-                                    as i32,
+                                    .into(),
                                 uid: 0,
-                                compat: None,
+                                compat: MessageField::none(),
                             },
                         )),
                     },
@@ -901,7 +901,7 @@ fn test_model_functions() {
                         v: Some(engine::project_io::variable::V::Aux(
                             engine::project_io::variable::Aux {
                                 ident: "rate".to_string(),
-                                equation: Some(engine::project_io::variable::Equation {
+                                equation: MessageField::some(engine::project_io::variable::Equation {
                                     equation: Some(
                                         engine::project_io::variable::equation::Equation::Scalar(
                                             engine::project_io::variable::ScalarEquation {
@@ -913,12 +913,12 @@ fn test_model_functions() {
                                 }),
                                 documentation: String::new(),
                                 units: String::new(),
-                                gf: None,
+                                gf: MessageField::none(),
                                 can_be_module_input: false,
                                 visibility: engine::project_io::variable::Visibility::Private
-                                    as i32,
+                                    .into(),
                                 uid: 0,
-                                compat: None,
+                                compat: MessageField::none(),
                             },
                         )),
                     },
@@ -926,16 +926,15 @@ fn test_model_functions() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
-                macro_spec: None,
+                macro_spec: MessageField::none(),
             },
         ],
         dimensions: vec![],
         units: vec![],
-        source: None,
+        source: MessageField::none(),
     };
 
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();

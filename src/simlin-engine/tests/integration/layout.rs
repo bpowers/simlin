@@ -2466,9 +2466,9 @@ fn test_flow_endpoints_geometrically_attached_to_stocks() {
 /// attribute is normalized to a space on read, silently losing the break.
 #[test]
 fn test_incremental_two_word_label_round_trips_every_format() {
+    use simlin_engine::buffa::Message;
     use simlin_engine::datamodel;
     use simlin_engine::layout::incremental_layout;
-    use simlin_engine::prost::Message;
     use simlin_engine::{ModelOperation, ModelPatch, json, project_io, serde as project_serde};
 
     let project = load_project("test/test-models/samples/teacup/teacup_w_diagram.xmile");
@@ -2531,9 +2531,9 @@ fn test_incremental_two_word_label_round_trips_every_format() {
 
     // protobuf
     let pb: project_io::Project = project_serde::serialize(&patched).unwrap();
-    let mut bytes = Vec::new();
-    pb.encode(&mut bytes).unwrap();
-    let from_pb = project_serde::deserialize(project_io::Project::decode(&bytes[..]).unwrap());
+    let bytes = pb.encode_to_vec();
+    let from_pb =
+        project_serde::deserialize(project_io::Project::decode_from_slice(&bytes).unwrap());
     assert_eq!(
         label_of(&first_view(&from_pb)),
         laid_out,

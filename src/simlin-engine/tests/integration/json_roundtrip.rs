@@ -14,7 +14,7 @@
 use std::fs::File;
 use std::io::BufReader;
 
-use simlin_engine::prost::Message;
+use simlin_engine::buffa::Message;
 use simlin_engine::xmile;
 use simlin_engine::{datamodel, json, project_io, serde as project_serde};
 
@@ -23,11 +23,10 @@ use simlin_engine::{datamodel, json, project_io, serde as project_serde};
 fn roundtrip_to_json(dm: &datamodel::Project) -> (Vec<u8>, String) {
     // datamodel -> protobuf -> bytes
     let pb: project_io::Project = project_serde::serialize(dm).unwrap();
-    let mut pb_bytes = Vec::new();
-    pb.encode(&mut pb_bytes).unwrap();
+    let pb_bytes = pb.encode_to_vec();
 
     // bytes -> protobuf -> datamodel -> JSON
-    let pb_decoded = project_io::Project::decode(&pb_bytes[..]).unwrap();
+    let pb_decoded = project_io::Project::decode_from_slice(&pb_bytes).unwrap();
     let dm_decoded: datamodel::Project = project_serde::deserialize(pb_decoded);
     let json_project: json::Project = dm_decoded.into();
     let json_str = serde_json::to_string(&json_project).unwrap();
