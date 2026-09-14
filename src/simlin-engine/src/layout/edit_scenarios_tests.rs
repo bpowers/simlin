@@ -95,44 +95,17 @@ const FIXTURES: [Fixture; 13] = [
     },
 ];
 
-/// Flows that met a deleted stock at one point keep their ends there as
-/// clouds, on top of each other.
-const CLOUDS_MEET_AT_DELETED_STOCK: &str = "clouds of flows through a deleted stock overlap";
-/// A created side flow's cloud is kept off other clouds only, and lands on a
-/// stock.
-const CREATED_CLOUD_ON_SHAPE: &str = "created cloud lands on a shape";
-
 /// A created free-floating element whose footprint the declutter cannot clear
 /// (the relaxation jams in a crowded region) stays on another shape.
 const CREATED_ELEMENT_ON_SHAPE: &str = "created element left on a shape when relaxation jams";
 
 /// `(fixture, scenario, finding kind, the defect behind it)`.
-const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[
-    (
-        "catastrophe",
-        "insert_intermediate",
-        "shape_overlap",
-        CREATED_ELEMENT_ON_SHAPE,
-    ),
-    (
-        "bathtub",
-        "add_side_flow",
-        "shape_overlap",
-        CREATED_CLOUD_ON_SHAPE,
-    ),
-    (
-        "bathtub",
-        "delete_middle_stock",
-        "shape_overlap",
-        CLOUDS_MEET_AT_DELETED_STOCK,
-    ),
-    (
-        "catastrophe",
-        "delete_middle_stock",
-        "shape_overlap",
-        CLOUDS_MEET_AT_DELETED_STOCK,
-    ),
-];
+const KNOWN_DEFECTS: &[(&str, &str, &str, &str)] = &[(
+    "catastrophe",
+    "insert_intermediate",
+    "shape_overlap",
+    CREATED_ELEMENT_ON_SHAPE,
+)];
 
 fn load(rel: &str) -> datamodel::Project {
     let path = format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"));

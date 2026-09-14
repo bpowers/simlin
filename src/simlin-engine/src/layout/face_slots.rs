@@ -380,8 +380,10 @@ pub(crate) fn place_created_flow_ends(elements: &mut [ViewElement], created: &Ha
     separate_created_clouds(elements, created, &stocks, &order);
 }
 /// Push each created flow's free end out along its end segment until the cloud
-/// on it overlaps no other cloud: every other flow's free end, a created one
-/// once it is settled.
+/// on it overlaps no other cloud -- every other flow's free end, a created one
+/// once it is settled -- and covers no other shape: a stock, parameter, module,
+/// alias or another flow's valve, which a person may have parked where the
+/// cloud would go.
 fn separate_created_clouds(
     elements: &mut [ViewElement],
     created: &HashSet<i32>,
@@ -389,6 +391,13 @@ fn separate_created_clouds(
     order: &[(i32, usize)],
 ) {
     let is_free = |p: &FlowPoint| !p.attached_to_uid.is_some_and(|u| stocks.contains_key(&u));
+    // Clouds are measured by the free ends, since the finishing pass recenters
+    // them there.
+    let shapes: Vec<(i32, crate::diagram::common::Rect)> = elements
+        .iter()
+        .filter(|e| !matches!(e, ViewElement::Cloud(_)))
+        .filter_map(|e| crate::layout::metrics::node_shape_box(e).map(|r| (e.get_uid(), r)))
+        .collect();
     let mut settled: HashSet<i32> = HashSet::new();
     for &(uid, idx) in order {
         let ViewElement::Flow(f) = &elements[idx] else {
@@ -435,9 +444,15 @@ fn separate_created_clouds(
             let step = 2.0 * CLOUD_RADIUS;
             for _ in 0..MAX_CLOUD_PUSHES {
                 let p = &f.points[end];
-                let overlaps = others
-                    .iter()
-                    .any(|&(x, y)| (x - p.x).hypot(y - p.y) < step - EPS);
+                let covers_shape = shapes.iter().filter(|(u, _)| *u != uid).any(|(_, r)| {
+                    let w = r.right.min(p.x + CLOUD_RADIUS) - r.left.max(p.x - CLOUD_RADIUS);
+                    let h = r.bottom.min(p.y + CLOUD_RADIUS) - r.top.max(p.y - CLOUD_RADIUS);
+                    w > EPS && h > EPS
+                });
+                let overlaps = covers_shape
+                    || others
+                        .iter()
+                        .any(|&(x, y)| (x - p.x).hypot(y - p.y) < step - EPS);
                 if !overlaps {
                     break;
                 }

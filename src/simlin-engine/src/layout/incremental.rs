@@ -1517,6 +1517,44 @@ fn clear_of_stocks(
     crate::editing::Point::new(p.x + ux * step, p.y + uy * step)
 }
 
+/// Where a cloud end goes when its cloud would cover another shape: slid back
+/// along its pipe toward `adjacent`, a cloud's radius at a time, to the first
+/// position whose cloud covers none of `shapes`, stopping a cloud's radius
+/// short of `adjacent`; `p` itself when it is clear or nothing along the pipe
+/// is. Flows that met a stock at its faces keep their ends there when the
+/// stock is deleted, and clouds on two perpendicular faces cover each other.
+fn clear_of_shapes(
+    p: crate::editing::Point,
+    adjacent: crate::editing::Point,
+    shapes: &[crate::diagram::common::Rect],
+) -> crate::editing::Point {
+    use crate::diagram::constants::CLOUD_RADIUS;
+    let covers = |q: crate::editing::Point| {
+        shapes.iter().any(|r| {
+            let w = r.right.min(q.x + CLOUD_RADIUS) - r.left.max(q.x - CLOUD_RADIUS);
+            let h = r.bottom.min(q.y + CLOUD_RADIUS) - r.top.max(q.y - CLOUD_RADIUS);
+            w > 0.0 && h > 0.0
+        })
+    };
+    if !covers(p) {
+        return p;
+    }
+    let (dx, dy) = (adjacent.x - p.x, adjacent.y - p.y);
+    let len = dx.hypot(dy);
+    if len <= 2.0 * CLOUD_RADIUS {
+        return p;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let steps = ((len - CLOUD_RADIUS) / CLOUD_RADIUS).floor() as usize;
+    (1..=steps)
+        .map(|i| {
+            let s = i as f64 * CLOUD_RADIUS;
+            crate::editing::Point::new(p.x + ux * s, p.y + uy * s)
+        })
+        .find(|&q| !covers(q))
+        .unwrap_or(p)
+}
+
 /// What one end of a re-attached flow becomes.
 enum RetargetedEnd {
     /// Still attached where the model says.
@@ -1567,6 +1605,19 @@ fn retarget_flow(
         return false;
     }
     let stocks: Vec<crate::editing::Point> = stock_centers.values().copied().collect();
+    // Every shape but this flow's own valve and clouds, which a cloud end this
+    // pass creates must not cover: another flow's cloud (one an earlier
+    // re-attachment made included), a valve, a parameter.
+    let shapes: Vec<crate::diagram::common::Rect> = state
+        .elements
+        .iter()
+        .filter(|e| match e {
+            ViewElement::Flow(f) => f.uid != flow_uid,
+            ViewElement::Cloud(c) => c.flow_uid != flow_uid,
+            _ => true,
+        })
+        .filter_map(crate::layout::metrics::node_shape_box)
+        .collect();
 
     let (ends, current) = {
         let by_uid: HashMap<i32, &ViewElement> =
@@ -1584,10 +1635,14 @@ fn retarget_flow(
                     None => return false,
                 },
                 None if own_cloud => RetargetedEnd::Kept,
-                None => RetargetedEnd::Cloud(clear_of_stocks(
-                    point_of(&flow.points[point]),
+                None => RetargetedEnd::Cloud(clear_of_shapes(
+                    clear_of_stocks(
+                        point_of(&flow.points[point]),
+                        point_of(&flow.points[adjacent]),
+                        &stocks,
+                    ),
                     point_of(&flow.points[adjacent]),
-                    &stocks,
+                    &shapes,
                 )),
             });
         }

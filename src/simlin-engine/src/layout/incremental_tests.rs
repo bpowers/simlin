@@ -949,3 +949,99 @@ fn deleting_a_variable_removes_the_links_of_its_aliases() {
         .collect();
     assert_eq!(left, Vec::<i32>::new(), "the alias and its link are gone");
 }
+
+#[test]
+fn clouds_of_flows_through_a_deleted_stock_land_clear_of_each_other() {
+    // middle takes arrivals in on one face and sends departures and losses
+    // out of two others. Deleting middle turns the three ends that touched it
+    // into clouds; left at the old faces' points, the clouds on perpendicular
+    // faces cover each other. Each slides back along its own pipe instead.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("middle", &["arrivals"], &["departures", "losses"])),
+        datamodel::Variable::Flow(flow("arrivals", "1")),
+        datamodel::Variable::Flow(flow("departures", "1")),
+        datamodel::Variable::Flow(flow("losses", "1")),
+    ]);
+    let base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let (_, view) = sync(
+        &project,
+        &base,
+        vec![ModelOperation::DeleteVariable {
+            ident: "middle".to_string(),
+        }],
+    );
+    let mut changed: HashSet<i32> = HashSet::new();
+    let mut flows: HashSet<i32> = HashSet::new();
+    for name in ["arrivals", "departures", "losses"] {
+        let f = flow_named(&view, name);
+        flows.insert(f.uid);
+        changed.insert(f.uid);
+        changed.extend(f.points.iter().filter_map(|p| p.attached_to_uid));
+    }
+    assert_eq!(
+        overlaps_involving(&view, &changed),
+        Vec::<(i32, i32)>::new()
+    );
+    assert_eq!(strict_violations(&view, &flows), "");
+}
+
+#[test]
+fn a_created_side_flow_cloud_lands_clear_of_a_stock() {
+    // A person parked reservoir where a side flow out of tank puts its cloud.
+    // An agent adds drain out of tank: its cloud must not land on reservoir.
+    let project = project_with(vec![
+        datamodel::Variable::Stock(stock("tank", &[], &[])),
+        datamodel::Variable::Stock(stock("reservoir", &[], &[])),
+    ]);
+    let base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
+    let ops = || {
+        vec![
+            ModelOperation::UpsertFlow(flow("drain", "1")),
+            ModelOperation::UpsertStock(stock("tank", &[], &["drain"])),
+        ]
+    };
+    let (_, probe) = sync(&project, &base, ops());
+    let sink = flow_named(&probe, "drain")
+        .points
+        .last()
+        .map(|p| (p.x, p.y))
+        .expect("drain drawn");
+    let mut parked = base.clone();
+    let reservoir = parked
+        .elements
+        .iter_mut()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name) == "reservoir" => Some(s),
+            _ => None,
+        })
+        .expect("reservoir drawn");
+    (reservoir.x, reservoir.y) = sink;
+    let reservoir = reservoir.uid;
+    assert_eq!(
+        overlaps_involving(&parked, &[reservoir].into_iter().collect()),
+        Vec::<(i32, i32)>::new(),
+        "fixture: reservoir is parked clear of tank"
+    );
+
+    let (_, view) = sync(&project, &parked, ops());
+    let drain = flow_named(&view, "drain");
+    let mut changed: HashSet<i32> = [drain.uid].into_iter().collect();
+    changed.extend(drain.points.iter().filter_map(|p| p.attached_to_uid));
+    changed.remove(&uid_named(&view, "tank"));
+    assert_eq!(
+        overlaps_involving(&view, &changed),
+        Vec::<(i32, i32)>::new()
+    );
+    assert_eq!(
+        strict_violations(&view, &[drain.uid].into_iter().collect()),
+        ""
+    );
+}
+
+fn uid_named(view: &datamodel::StockFlow, name: &str) -> i32 {
+    view.elements
+        .iter()
+        .find(|e| e.get_name().is_some_and(|n| canonicalize(n) == name))
+        .map(ViewElement::get_uid)
+        .unwrap_or_else(|| panic!("{name} drawn"))
+}
