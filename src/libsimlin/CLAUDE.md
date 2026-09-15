@@ -80,6 +80,7 @@ Error formatting has no module here: `src/patch.rs` imports `simlin_engine::erro
   - `simlin_model_hit_test(model, x, y, tolerance, out_hit, out_uid, out_part, out_error)` - the view element and `SimlinHitPart` under a canvas point, the tolerance in model units (the host's slop divided by the zoom), answered from the project's cached hit index (`ProjectContents::hit_index`), which the first hit test after a change builds
   - `simlin_model_plan_tap(model, press, ..)` - a tap's plan as JSON (`{kind, commit, selection, handoff, details, label, patch}`) in a `simlin_malloc` buffer
   - `SimlinGesture`, a refcounted drag: `simlin_gesture_begin(model, press, out_error)` (NULL without an error when the press starts no drag -- a finger on the empty canvas pans), `simlin_gesture_frame` (the frame's plan plus `hidden` uids and the scene `elements` it draws in their place, written to a buffer the gesture owns and reuses until its next call, so a drag allocates no output buffer per frame), `simlin_gesture_commit` (the tap's JSON shape for the frame at the release point), `simlin_gesture_{ref,unref}`
+  - `simlin_model_plan_move(model, uids, count, dx, dy, ..)` - a keyboard nudge: the move-selection frame at that offset in model units (`editing::plan_move`, the one move a drag's frames also plan), in the tap's JSON shape with `kind` `moveSelection`. The one commit serializer writes an `Edit` plan with nothing to apply (a drag back to its press, a move that moves nothing) as `commit` `none` with no patch, so an `edit` always carries its patch
   - `simlin_model_plan_delete(model, uids, count, ..)` and `simlin_model_plan_rename(model, old_name, new_name, ..)` - patch JSON; a variable the diagram does not draw is renamed with a direct `renameVariable`
   - `SimlinPress` carries the press: point, hit, armed `SimlinTool`, selection, toggle, `SimlinPointerKind`, target slop
   - Every edit comes back as a patch the host applies with `simlin_project_apply_patch`, so an edit lands through the one patch path and its validation. A gesture plans against its own copy of the view taken when the drag began, locking nothing per frame. Every entry point refuses a model with no stock-and-flow view with `DoesNotExist`: the scene draws such a model through a transient layout, which no edit could change
@@ -99,7 +100,7 @@ Error formatting has no module here: `src/patch.rs` imports `simlin_engine::erro
 
 ## Examples
 
-- **`examples/editing_latency.rs`** - What editing a diagram costs a native host, timed call by call at the FFI: hit tests while hovering, near elements and right after an edit, `simlin_model_plan_tap`, `simlin_gesture_begin`, `simlin_project_render_scene`, and how long an equation edit and the simulation after it hold the datamodel lock. The commands, and how to profile it, are in [docs/dev/benchmarks.md](/docs/dev/benchmarks.md)
+- **`examples/editing_latency.rs`** - What editing a diagram costs a native host, timed call by call at the FFI: hit tests while hovering, near elements and right after an edit, `simlin_model_plan_tap`, `simlin_gesture_begin`, `simlin_model_plan_move`, `simlin_project_render_scene`, and how long an equation edit and the simulation after it hold the datamodel lock. The commands, and how to profile it, are in [docs/dev/benchmarks.md](/docs/dev/benchmarks.md)
 
 ## Tests
 

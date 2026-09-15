@@ -76,8 +76,9 @@ The one mutation stays `simlin_project_apply_patch`, which reads the `editView` 
 - `simlin_model_plan_tap(model, press, out_buf, out_len, out_error)`: `{kind, commit, selection, handoff, details, label, patch}`, `patch` null unless the tap edits.
 - `simlin_gesture_begin(model, press, out_error) -> *mut SimlinGesture`: NULL with no error when the press starts no drag.
 - `simlin_gesture_frame(gesture, x, y, out_buf, out_len, out_error)`: `{kind, commit, selection, target, handoff, details, label, hidden, elements}` in a buffer the gesture owns and reuses, valid until its next call, so a drag allocates no output buffer per frame.
-- `simlin_gesture_commit(gesture, x, y, out_buf, out_len, out_error)`: the tap's shape for the frame at the release point, `patch` null when landing changes nothing.
+- `simlin_gesture_commit(gesture, x, y, out_buf, out_len, out_error)`: the tap's shape for the frame at the release point, `commit` `none` and `patch` null when landing changes nothing.
 - `simlin_gesture_ref` and `simlin_gesture_unref`.
+- `simlin_model_plan_move(model, uids, count, dx, dy, out_buf, out_len, out_error)`: the tap's shape, with `kind` `moveSelection`, for the selection moved by `(dx, dy)` model units: what a keyboard nudge lands.
 - `simlin_model_plan_delete(model, uids, count, out_buf, out_len, out_error)` and `simlin_model_plan_rename(model, old_name, new_name, out_buf, out_len, out_error)`: patch JSON. A variable the diagram does not draw is renamed with a direct `renameVariable`.
 
 Every entry point refuses a model with no stock-and-flow view with `DoesNotExist`: the scene draws such a model through a transient layout, which no edit could change. A session holds its own base view, so it stays valid whatever the project does meanwhile; a host applies an edit only once its gesture has ended.

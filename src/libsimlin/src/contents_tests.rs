@@ -275,10 +275,11 @@ enum Read {
     GestureBegin,
     PlanDelete,
     PlanRename,
+    PlanMove,
 }
 
 impl Read {
-    const ALL: [Read; 10] = [
+    const ALL: [Read; 11] = [
         Read::DryRunPatch,
         Read::RejectedPatch,
         Read::SimNew,
@@ -289,6 +290,7 @@ impl Read {
         Read::GestureBegin,
         Read::PlanDelete,
         Read::PlanRename,
+        Read::PlanMove,
     ];
 
     unsafe fn run(self, proj: *mut SimlinProject, model: *mut SimlinModel) {
@@ -359,6 +361,19 @@ impl Read {
                     model,
                     from.as_ptr(),
                     to.as_ptr(),
+                    &mut buf,
+                    &mut len,
+                    &mut err,
+                );
+            }
+            Read::PlanMove => {
+                let selection = [STOCK];
+                simlin_model_plan_move(
+                    model,
+                    selection.as_ptr(),
+                    1,
+                    10.0,
+                    0.0,
                     &mut buf,
                     &mut len,
                     &mut err,

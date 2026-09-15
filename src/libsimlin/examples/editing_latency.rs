@@ -20,6 +20,8 @@
 //!   `simlin_project_apply_patch`);
 //! - `plan-tap` and `gesture-begin`: a press at every element's position,
 //!   carrying the hit a host would resolve first;
+//! - `plan-move`: every element but a link nudged alone by one unit, what each
+//!   repeat of a held arrow key plans;
 //! - `render-scene`: the scene a host redraws after every edit;
 //! - `apply-equation` and `sim-new`: an equation edit, which validates through a
 //!   compile, and the simulation a host creates after it. Both hold the
@@ -378,6 +380,39 @@ fn main() {
         println!("{hits} of the hover-near calls hit an element");
         report("plan-tap", taps);
         report("gesture-begin", begins);
+
+        // A held arrow key: each element nudged alone, one unit per repeat.
+        let movable: Vec<i32> = view
+            .iter()
+            .filter(|e| e["type"] != "link")
+            .filter_map(|e| e["uid"].as_i64().and_then(|uid| i32::try_from(uid).ok()))
+            .collect();
+        let mut nudges = Vec::new();
+        let repeats = WARMUP + movable.len().min(MAX_PRESSES);
+        for (i, &uid) in movable.iter().cycle().take(repeats).enumerate() {
+            let selection = [uid];
+            let (mut buf, mut len) = (ptr::null_mut(), 0);
+            let samples = if i < WARMUP {
+                &mut Vec::new()
+            } else {
+                &mut nudges
+            };
+            timed(samples, || {
+                simlin_model_plan_move(
+                    model,
+                    selection.as_ptr(),
+                    1,
+                    1.0,
+                    0.0,
+                    &mut buf,
+                    &mut len,
+                    &mut err,
+                )
+            });
+            check(err, "planning a move");
+            simlin_free(buf);
+        }
+        report("plan-move", nudges);
 
         // What a host redraws after every edit.
         let mut scenes = Vec::new();
