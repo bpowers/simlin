@@ -965,6 +965,37 @@ fn stocks_auxes_and_flows_stack_three_copies_when_arrayed() {
 }
 
 #[test]
+fn a_repeated_ident_draws_as_its_first_variable() {
+    // Rows: which of two variables sharing one canonical ident is arrayed. The
+    // first decides, the variable `Model::get_variable` finds, whatever the
+    // second's equation.
+    for first_arrayed in [false, true] {
+        let builder = TestProject::new("repeated").named_dimension("region", &["north", "south"]);
+        let builder = if first_arrayed {
+            builder
+                .array_aux("growth_rate[region]", "0.1")
+                .aux("Growth Rate", "0.1", None)
+        } else {
+            builder
+                .aux("growth_rate", "0.1", None)
+                .array_aux("Growth Rate[region]", "0.1")
+        };
+        let project = with_view(builder, vec![aux("growth_rate", 1, 100.0, 100.0)]);
+        let (scene, svg) = build(&project);
+        let row = if first_arrayed {
+            "arrayed first"
+        } else {
+            "scalar first"
+        };
+        assert_scene_draws_the_svg(&scene, &svg, row);
+        let element = element_by_uid(&scene, 1);
+        assert_eq!(element.is_arrayed, first_arrayed, "{row}");
+        let copies = if first_arrayed { 3 } else { 1 };
+        assert_eq!(paints(element), vec![ScenePaint::Aux; copies], "{row}");
+    }
+}
+
+#[test]
 fn an_alias_shows_its_targets_ident_and_sparkline_and_a_missing_target_neither() {
     // Rows: the target is a scalar aux in the view, an arrayed aux in the
     // view, or absent from the view.
