@@ -2,30 +2,42 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! The hit index a project caches is never older than its datamodel.
+//! A published hit index is never older than the datamodel it answers for, and
+//! a hit test with a current index never waits for the datamodel's lock.
 //!
-//! Every mutable borrow of the datamodel drops the cached indexes
-//! (`ProjectContents`'s `DerefMut`), so no entry point can mutate without
-//! invalidating. The rows pin it for the entry points that mutate a project's
-//! datamodel, found among its lock sites (`grep -n 'datamodel.lock()' src`):
-//! `simlin_project_apply_patch`, through its view-only apply and its staged
-//! commit, `simlin_project_replace_contents`, `simlin_project_add_model` and
-//! `simlin_project_diagram_sync`; every other site reads. Each row warms the
-//! index, mutates through the entry point, and requires that the index was
-//! dropped and that the hit test answers at every probe point what an index
-//! built from the new datamodel answers. For every row but `add_model`, which
-//! changes no model's view, the old index answered differently somewhere, so a
-//! stale index fails the row.
+//! Every mutable borrow of the datamodel advances the project's revision
+//! (`ProjectContents`'s `DerefMut`), so no entry point can mutate without making
+//! the published indexes stale. The rows pin it for the entry points that mutate
+//! a project's datamodel, found among its lock sites
+//! (`grep -n 'datamodel.lock()' src`): `simlin_project_apply_patch`, through its
+//! view-only apply and its staged commit, `simlin_project_replace_contents`,
+//! `simlin_project_add_model` and `simlin_project_diagram_sync`; every other site
+//! reads. Each row warms the index, mutates through the entry point, and requires
+//! that the published index is no longer current and that the hit test answers at
+//! every probe point what an index built from the new datamodel answers. For
+//! every row but `add_model`, which changes no model's view, the old index
+//! answered differently somewhere, so a stale index fails the row.
 //!
-//! The reads keep the index, pinned for a row per kind of read: a dry-run and
-//! a rejected patch, a simulation, diagnostics, a scene, serialization, and the
-//! editing planners. A read that dropped the index would only cost a rebuild,
-//! so these rows pin performance, not freshness.
+//! The reads keep the published index current, pinned for a row per kind of
+//! read: a dry-run and a rejected patch, a simulation, diagnostics, a scene,
+//! serialization, and the editing planners. A read that made the index stale
+//! would only cost a rebuild, so these rows pin performance, not freshness.
+//!
+//! The concurrency tests hold the project on other threads the way an edit
+//! does. While another thread holds the datamodel's lock, a hit test with a
+//! current index answers from it, and one whose index is stale waits and answers
+//! from the datamodel as the holder left it. While an edit stages under both
+//! project locks, a hit test answers from the committed contents, and once the
+//! commit lands it answers from the new contents.
 
 use std::ffi::CString;
 use std::ptr;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{json, Value};
+use simlin_engine::datamodel::{self, ViewElement};
 use simlin_engine::editing::{self, Point};
 
 use crate::ffi_error::SimlinError;
@@ -84,8 +96,9 @@ unsafe fn main_model(proj: *mut SimlinProject) -> *mut SimlinModel {
     model
 }
 
+/// Whether a current hit index of main is published.
 unsafe fn has_index(proj: *mut SimlinProject) -> bool {
-    (*proj).datamodel.lock().unwrap().has_hit_index("main")
+    (*proj).published.hit_index("main").is_some()
 }
 
 /// The points a row asks about: a grid over the diagram and around it.
@@ -227,7 +240,7 @@ impl Mutation {
 }
 
 #[test]
-fn every_mutating_entry_point_drops_the_hit_index() {
+fn every_mutating_entry_point_makes_the_published_hit_index_stale() {
     let mut failures = Vec::new();
     for mutation in Mutation::ALL {
         unsafe {
@@ -236,11 +249,11 @@ fn every_mutating_entry_point_drops_the_hit_index() {
             let before = answers(model);
             assert!(
                 has_index(proj),
-                "{mutation:?}: the hit test caches its index"
+                "{mutation:?}: the hit test publishes its index"
             );
             mutation.run(proj);
             if has_index(proj) {
-                failures.push(format!("{mutation:?} kept the index"));
+                failures.push(format!("{mutation:?} left the published index current"));
             }
             let fresh = fresh_answers(proj);
             if answers(model) != fresh {
@@ -388,7 +401,7 @@ impl Read {
 }
 
 #[test]
-fn an_entry_point_that_reads_keeps_the_hit_index() {
+fn an_entry_point_that_reads_keeps_the_published_hit_index_current() {
     let mut failures = Vec::new();
     for read in Read::ALL {
         unsafe {
@@ -397,7 +410,7 @@ fn an_entry_point_that_reads_keeps_the_hit_index() {
             let before = answers(model);
             read.run(proj, model);
             if !has_index(proj) {
-                failures.push(format!("{read:?} dropped the index"));
+                failures.push(format!("{read:?} made the published index stale"));
             }
             if answers(model) != before {
                 failures.push(format!("{read:?} changed what the diagram answers"));
@@ -410,9 +423,10 @@ fn an_entry_point_that_reads_keeps_the_hit_index() {
 }
 
 #[test]
-fn a_mutable_borrow_drops_every_index_and_a_shared_borrow_keeps_them() {
+fn a_mutable_borrow_makes_every_published_index_stale_and_a_shared_borrow_keeps_them() {
     unsafe {
         let proj = open(100.0, 100.0);
+        let published = &(*proj).published;
         let mut contents = (*proj).datamodel.lock().unwrap();
         let other = {
             let mut model = contents.get_model("main").unwrap().clone();
@@ -421,25 +435,209 @@ fn a_mutable_borrow_drops_every_index_and_a_shared_borrow_keeps_them() {
         };
         contents.models.push(other);
         for name in ["main", "other"] {
-            contents.hit_index(name).expect("the model has a view");
+            contents
+                .publish_hit_index(name)
+                .expect("the model has a view");
         }
-        let _: &simlin_engine::datamodel::Project = &contents;
-        assert!(contents.has_hit_index("main") && contents.has_hit_index("other"));
-        let _: &mut simlin_engine::datamodel::Project = &mut contents;
-        assert!(!contents.has_hit_index("main") && !contents.has_hit_index("other"));
+        let _: &datamodel::Project = &contents;
+        assert!(published.hit_index("main").is_some() && published.hit_index("other").is_some());
+        let _: &mut datamodel::Project = &mut contents;
+        assert!(published.hit_index("main").is_none() && published.hit_index("other").is_none());
         drop(contents);
         simlin_project_unref(proj);
     }
 }
 
 #[test]
-fn a_view_that_does_not_resolve_caches_nothing() {
+fn a_view_that_does_not_resolve_publishes_nothing() {
     unsafe {
         let proj = open(100.0, 100.0);
-        let mut contents = (*proj).datamodel.lock().unwrap();
-        assert!(contents.hit_index("missing").is_err());
-        assert!(!contents.has_hit_index("missing"));
+        let contents = (*proj).datamodel.lock().unwrap();
+        assert!(contents.publish_hit_index("missing").is_err());
+        assert!((*proj).published.hit_index("missing").is_none());
         drop(contents);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A positive wait ("the other thread should get here"), generous for the
+/// reason `tests_concurrency.rs` gives: `recv_timeout` returns as soon as the
+/// message arrives, so the budget is spent only on a genuine failure.
+const POSITIVE_WAIT: Duration = Duration::from_secs(30);
+
+/// A negative wait ("the other thread should not have finished yet"), which
+/// slowness can only make pass.
+const NEGATIVE_WAIT: Duration = Duration::from_millis(200);
+
+/// Moves main's stock to `(x, y)` on its first view.
+fn move_the_stock(project: &mut datamodel::Project, x: f64, y: f64) {
+    let model = project
+        .models
+        .iter_mut()
+        .find(|m| m.name == "main")
+        .expect("the model main");
+    let Some(datamodel::View::StockFlow(view)) = model.views.first_mut() else {
+        panic!("main has a view");
+    };
+    let Some(ViewElement::Stock(stock)) = view.elements.iter_mut().find(|e| e.get_uid() == STOCK)
+    else {
+        panic!("main draws the stock");
+    };
+    stock.x = x;
+    stock.y = y;
+}
+
+/// Locks `proj`'s datamodel on another thread, lets `change` see the contents
+/// (a mutable borrow of the datamodel in it advances the revision), and holds
+/// the lock until the returned sender sends or is dropped. Returns once the lock
+/// is held.
+unsafe fn hold_datamodel(
+    proj: *mut SimlinProject,
+    change: impl FnOnce(&mut ProjectContents) + Send + 'static,
+) -> (mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let addr = proj as usize;
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let holder = thread::spawn(move || {
+        let proj = addr as *mut SimlinProject;
+        let mut contents = unsafe { (*proj).datamodel.lock().unwrap() };
+        change(&mut contents);
+        held_tx.send(()).expect("the test waits for the lock");
+        let _ = release_rx.recv();
+        drop(contents);
+    });
+    held_rx
+        .recv_timeout(POSITIVE_WAIT)
+        .expect("the holder locks the datamodel");
+    (release_tx, holder)
+}
+
+/// What the hit test answers at every probe, asked on another thread and sent
+/// once every answer is in.
+unsafe fn answer_on_another_thread(
+    model: *mut SimlinModel,
+) -> (mpsc::Receiver<Vec<Answer>>, thread::JoinHandle<()>) {
+    let addr = model as usize;
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let answered = unsafe { answers(addr as *mut SimlinModel) };
+        let _ = tx.send(answered);
+    });
+    (rx, reader)
+}
+
+#[test]
+fn a_warm_hit_test_answers_while_another_thread_holds_the_datamodel() {
+    unsafe {
+        let proj = open(100.0, 100.0);
+        let model = main_model(proj);
+        let before = answers(model);
+        // The holder borrows nothing mutably, so the published index stays current.
+        let (release, holder) = hold_datamodel(proj, |_| {});
+        let (answered, reader) = answer_on_another_thread(model);
+        let during = answered
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("a warm hit test answers without waiting for the datamodel's lock");
+        assert_eq!(during, before);
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        reader.join().unwrap();
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn a_cold_hit_test_waits_for_the_datamodel_and_answers_what_it_holds() {
+    unsafe {
+        let proj = open(100.0, 100.0);
+        let model = main_model(proj);
+        let before = answers(model);
+        let (release, holder) =
+            hold_datamodel(proj, |contents| move_the_stock(contents, 400.0, 400.0));
+        let (answered, reader) = answer_on_another_thread(model);
+        assert!(
+            answered.recv_timeout(NEGATIVE_WAIT).is_err(),
+            "a hit test with no current index waits while the datamodel is locked"
+        );
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let after = answered
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("the hit test answers once the datamodel is free");
+        reader.join().unwrap();
+        let fresh = fresh_answers(proj);
+        assert_eq!(
+            after, fresh,
+            "it answers from the datamodel as the holder left it"
+        );
+        assert_ne!(
+            fresh, before,
+            "the probes tell the moved stock from where it was"
+        );
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn a_hit_test_during_a_staged_edit_answers_the_committed_contents_until_the_commit_lands() {
+    use crate::patch::{install_patch_test_hook, PatchHookPoint};
+    unsafe {
+        let proj = open(100.0, 100.0);
+        let model = main_model(proj);
+        let before = answers(model);
+        let proj_addr = proj as usize;
+        let (staging_tx, staging_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let hook = Arc::new(move |point: PatchHookPoint, project: &SimlinProject| {
+            if point == PatchHookPoint::StagedSyncWhileDbLocked
+                && (project as *const SimlinProject as usize) == proj_addr
+            {
+                let _ = staging_tx.send(());
+                let _ = release_rx.lock().unwrap().recv();
+            }
+        });
+        let _hook_guard = install_patch_test_hook(hook);
+
+        // Moves the stock and creates an aux, whose variable makes the edit
+        // validate on a staged copy under both project locks.
+        let patch = json!({"models": [{"name": "main", "ops": [{"type": "editView", "payload": {"index": 0, "upsert": [
+            {"type": "stock", "uid": STOCK, "name": "population", "x": 400.0, "y": 400.0},
+            {"type": "aux", "uid": 10, "name": "fresh", "x": 400.0, "y": 600.0}
+        ], "remove": []}}]}]});
+        let writer = thread::spawn(move || {
+            let err = apply(proj_addr as *mut SimlinProject, &patch, false, true);
+            expect_no_error(err, "the staged edit");
+        });
+        staging_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("the edit reaches staging");
+
+        let (answered, reader) = answer_on_another_thread(model);
+        let during = answered
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("a hit test answers while the edit stages");
+        assert_eq!(
+            during, before,
+            "while the edit stages, a hit test answers from the committed contents"
+        );
+        release_tx.send(()).unwrap();
+        writer.join().unwrap();
+        reader.join().unwrap();
+
+        let after = answers(model);
+        assert_eq!(
+            after,
+            fresh_answers(proj),
+            "once the commit lands, a hit test answers from the new contents"
+        );
+        assert_ne!(
+            after, before,
+            "the probes tell the new contents from the committed ones"
+        );
+        simlin_model_unref(model);
         simlin_project_unref(proj);
     }
 }

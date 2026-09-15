@@ -889,8 +889,10 @@ void simlin_analyze_get_loop_element_count(SimlinSim *sim,
 // view with `DoesNotExist`, as every editing entry point does.
 //
 // The view's index is built by the first hit test after the project changes
-// and reused until it changes again (`ProjectContents`), so a hover at display
-// rate costs in proportion to what is near the point.
+// and published until it changes again (`ProjectContents`), so a hover at
+// display rate costs in proportion to what is near the point, and a hit test
+// with a current index locks only the published indexes: it answers while an
+// edit holds the project through its compile.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel

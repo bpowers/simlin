@@ -103,6 +103,7 @@ mod simulation;
 
 pub use analysis::*;
 pub use contents::ProjectContents;
+use contents::Published;
 pub use editing::*;
 pub use error_api::*;
 pub use layout::*;
@@ -428,10 +429,15 @@ pub struct SimlinErrorDetail {
 
 /// Opaque project structure
 pub struct SimlinProject {
-    /// The datamodel, with the indexes derived from it, which any mutable
-    /// borrow of the datamodel drops (`ProjectContents`). Locked before `db`
-    /// when both are needed.
+    /// The datamodel, whose every mutable borrow advances the revision the
+    /// published indexes are checked against (`ProjectContents`). Locked before
+    /// `published`, and before `db`, when either is needed with it.
     pub datamodel: Mutex<ProjectContents>,
+    /// The indexes derived from the datamodel, each with the revision it was
+    /// built at, readable without the datamodel's lock: a hit test with a
+    /// current index locks only these. Locked after `datamodel`, and never held
+    /// together with `db`.
+    pub(crate) published: Arc<Published>,
     /// The salsa database owns its own sync state (the salsa input handles
     /// from the last sync), so incremental re-syncs are automatic: callers
     /// use `db.sync`/`db.sync_staged`/`db.restore` and read the current
@@ -524,8 +530,10 @@ impl SimlinProject {
     /// derived index yet: the one constructor every open function shares.
     pub(crate) fn new(datamodel: engine::datamodel::Project) -> SimlinProject {
         let db = new_synced_db(&datamodel);
+        let published = Arc::new(Published::default());
         SimlinProject {
-            datamodel: Mutex::new(ProjectContents::new(datamodel)),
+            datamodel: Mutex::new(ProjectContents::new(datamodel, Arc::clone(&published))),
+            published,
             db: Mutex::new(db),
             ltm_requested: AtomicBool::new(false),
             ref_count: AtomicUsize::new(1),

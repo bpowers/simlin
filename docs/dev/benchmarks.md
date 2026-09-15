@@ -103,7 +103,7 @@ The bundles are interleaved (A, B, A, B, ...) so machine drift is shared rather 
 
 ## Editing latency at the libsimlin FFI
 
-`src/libsimlin/examples/editing_latency.rs` times, call by call, what a native host pays to edit a diagram through libsimlin: a hit test for every pointer move and press, the tap, drag and nudge planners, the scene a host redraws after an edit, and how long an equation edit and the simulation after it hold the project's datamodel lock, which is how long a hit test or a press from another thread waits meanwhile.
+`src/libsimlin/examples/editing_latency.rs` times, call by call, what a native host pays to edit a diagram through libsimlin: a hit test for every pointer move and press, the tap, drag and nudge planners, the scene a host redraws after an edit, how long an equation edit and the simulation after it hold the project's datamodel lock, which is how long a press from another thread waits meanwhile, and what a hover at display rate waits while edits land on another thread.
 
 ```bash
 # World3 (864 drawn elements)

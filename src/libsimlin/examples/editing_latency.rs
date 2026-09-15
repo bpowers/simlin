@@ -25,8 +25,15 @@
 //! - `render-scene`: the scene a host redraws after every edit;
 //! - `apply-equation` and `sim-new`: an equation edit, which validates through a
 //!   compile, and the simulation a host creates after it. Both hold the
-//!   datamodel lock throughout, so they are how long a hit test or a press from
-//!   another thread waits meanwhile.
+//!   datamodel lock throughout, so they are how long a press from another
+//!   thread, or a hit test whose index an edit made stale, waits meanwhile;
+//! - `hover-landing` and `hover-landing-warmed`: hit tests one display frame
+//!   apart while another thread lands an equation edit every `LANDING_PERIOD`
+//!   the way a host lands an edit (apply, then simulate, then fetch
+//!   diagnostics, each holding the datamodel lock). A hit test with a current
+//!   index answers without that lock, and the first after a commit rebuilds the
+//!   index under it; `-warmed` hit-tests once on the landing thread right after
+//!   each apply, so the rebuild happens before the simulation takes the lock.
 //!
 //! The harness keeps the system allocator, which a host runs on when it builds
 //! libsimlin without the `mimalloc` feature. Results belong in the PR or chat,
@@ -45,6 +52,9 @@
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -57,6 +67,18 @@ const WARMUP: usize = 20;
 /// Every element position a press lands at, capped so a large model keeps the
 /// run short.
 const MAX_PRESSES: usize = 1000;
+
+/// Hit tests timed while edits land on another thread, one per display frame.
+const HOVERS_WHILE_LANDING: usize = 600;
+
+/// A display frame at 120 Hz, the rate a host sends hover hit tests at.
+const FRAME: Duration = Duration::from_micros(8333);
+
+/// How often the landing thread lands an edit: ten a second, a fast typist
+/// landing every keystroke. Landing back to back would instead measure how long
+/// a waiting hover is passed over by a thread that re-locks at once, not what a
+/// landing costs a hover.
+const LANDING_PERIOD: Duration = Duration::from_millis(100);
 
 struct Options {
     path: String,
@@ -201,6 +223,33 @@ fn timed<T>(samples: &mut Vec<Duration>, f: impl FnOnce() -> T) -> T {
     let value = f();
     samples.push(start.elapsed());
     value
+}
+
+/// The patch upserting `aux` into `model_name`.
+fn aux_patch(model_name: &str, aux: &Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "models": [{"name": model_name, "ops": [{"type": "upsertAux", "payload": {"aux": aux}}]}]
+    }))
+    .unwrap()
+}
+
+/// Applies `patch`, allowing errors as an editor does, and panics with the
+/// error's message when it fails.
+unsafe fn apply(project: *mut SimlinProject, patch: &[u8], what: &str) {
+    let (mut collected, mut err) = (ptr::null_mut(), ptr::null_mut());
+    simlin_project_apply_patch(
+        project,
+        patch.as_ptr(),
+        patch.len(),
+        false,
+        true,
+        &mut collected,
+        &mut err,
+    );
+    if !collected.is_null() {
+        simlin_error_free(collected);
+    }
+    check(err, what);
 }
 
 fn main() {
@@ -461,32 +510,73 @@ fn main() {
                 for i in 0..edits.min(50) {
                     let mut edited = constant.clone();
                     edited["equation"] = json!(format!("{}", value + (i % 2 + 1) as f64));
-                    let patch = serde_json::to_vec(&json!({
-                        "models": [{"name": model_name, "ops": [{"type": "upsertAux", "payload": {"aux": edited}}]}]
-                    }))
-                    .unwrap();
-                    let mut collected = ptr::null_mut();
+                    let patch = aux_patch(&model_name, &edited);
                     timed(&mut applies, || {
-                        simlin_project_apply_patch(
-                            project,
-                            patch.as_ptr(),
-                            patch.len(),
-                            false,
-                            true,
-                            &mut collected,
-                            &mut err,
-                        )
+                        apply(project, &patch, "applying an equation edit")
                     });
-                    if !collected.is_null() {
-                        simlin_error_free(collected);
-                    }
-                    check(err, "applying an equation edit");
                     let sim = timed(&mut sims, || simlin_sim_new(model, false, &mut err));
                     check(err, "creating a simulation");
                     simlin_sim_unref(sim);
                 }
                 report("apply-equation", applies);
                 report("sim-new", sims);
+
+                // A host hovers while edits land off its UI thread.
+                for (name, warmed) in [("hover-landing", false), ("hover-landing-warmed", true)] {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let lander = {
+                        let stop = Arc::clone(&stop);
+                        let (project, model) = (project as usize, model as usize);
+                        let (constant, model_name) = (constant.clone(), model_name.clone());
+                        thread::spawn(move || {
+                            let (project, model) =
+                                (project as *mut SimlinProject, model as *mut SimlinModel);
+                            let mut i = 0;
+                            while !stop.load(Ordering::Acquire) {
+                                let landing = Instant::now();
+                                let mut edited = constant.clone();
+                                edited["equation"] =
+                                    json!(format!("{}", value + (i % 2 + 1) as f64));
+                                i += 1;
+                                apply(
+                                    project,
+                                    &aux_patch(&model_name, &edited),
+                                    "landing an equation edit",
+                                );
+                                let mut err = ptr::null_mut();
+                                if warmed {
+                                    let (mut hit, mut uid, mut part) =
+                                        (false, 0, SimlinHitPart::Body);
+                                    simlin_model_hit_test(
+                                        model, 0.0, 0.0, 6.0, &mut hit, &mut uid, &mut part,
+                                        &mut err,
+                                    );
+                                    check(err, "warming the hit index");
+                                }
+                                let sim = simlin_sim_new(model, false, &mut err);
+                                check(err, "simulating a landed edit");
+                                simlin_sim_unref(sim);
+                                let errors = simlin_project_get_errors(project, &mut err);
+                                check(err, "fetching a landed edit's diagnostics");
+                                if !errors.is_null() {
+                                    simlin_error_free(errors);
+                                }
+                                if let Some(rest) = LANDING_PERIOD.checked_sub(landing.elapsed()) {
+                                    thread::sleep(rest);
+                                }
+                            }
+                        })
+                    };
+                    let mut hovers = Vec::with_capacity(HOVERS_WHILE_LANDING);
+                    for _ in 0..HOVERS_WHILE_LANDING {
+                        thread::sleep(FRAME);
+                        let (x, y) = hover_point();
+                        timed(&mut hovers, || m.hit(x, y));
+                    }
+                    stop.store(true, Ordering::Release);
+                    lander.join().expect("the landing thread lands every edit");
+                    report(name, hovers);
+                }
             }
             None => println!("no constant aux to edit: apply-equation and sim-new skipped"),
         }
