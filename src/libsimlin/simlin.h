@@ -881,12 +881,16 @@ void simlin_analyze_get_loop_element_count(SimlinSim *sim,
                                            SimlinError **out_error);
 
 // The element and part of the model's diagram that `(x, y)` (model
-// coordinates) lands on, decided in `simlin_engine::editing::hit_test`'s tiers:
+// coordinates) lands on, decided in `simlin_engine::editing::HitIndex`'s tiers:
 // a body firmly holding the point, else an end handle within reach, else a
 // label holding the point, else the nearest drawing within `tolerance` model
 // units (the host's touch slop divided by the zoom). Writes `*out_hit = false`
 // when nothing drawn is within reach. Refuses a model with no stock-and-flow
 // view with `DoesNotExist`, as every editing entry point does.
+//
+// The view's index is built by the first hit test after the project changes
+// and reused until it changes again (`ProjectContents`), so a hover at display
+// rate costs in proportion to what is near the point.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel

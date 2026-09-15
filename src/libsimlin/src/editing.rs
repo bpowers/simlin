@@ -324,12 +324,16 @@ unsafe fn require_outputs(
 }
 
 /// The element and part of the model's diagram that `(x, y)` (model
-/// coordinates) lands on, decided in `simlin_engine::editing::hit_test`'s tiers:
+/// coordinates) lands on, decided in `simlin_engine::editing::HitIndex`'s tiers:
 /// a body firmly holding the point, else an end handle within reach, else a
 /// label holding the point, else the nearest drawing within `tolerance` model
 /// units (the host's touch slop divided by the zoom). Writes `*out_hit = false`
 /// when nothing drawn is within reach. Refuses a model with no stock-and-flow
 /// view with `DoesNotExist`, as every editing entry point does.
+///
+/// The view's index is built by the first hit test after the project changes
+/// and reused until it changes again (`ProjectContents`), so a hover at display
+/// rate costs in proportion to what is near the point.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
@@ -365,22 +369,23 @@ pub unsafe extern "C" fn simlin_model_hit_test(
         }
     };
     let project_ref = &*model_ref.project;
-    let datamodel = project_ref.datamodel.lock().unwrap();
+    let mut contents = project_ref.datamodel.lock().unwrap();
     let model_name = model_ref.model_name.as_str();
     // The scene draws a viewless model through a transient layout, which a hit
     // could land on but no edit could change: refused here as the planners
     // refuse it.
-    if let Err(err) = first_view(&datamodel, model_name) {
+    if let Err(err) = first_view(&contents, model_name) {
         store_error(out_error, err);
         return;
     }
-    match editing::hit_test(&datamodel, model_name, editing::Point::new(x, y), tolerance) {
-        Ok(Some(hit)) => {
-            *out_hit = true;
-            *out_uid = hit.uid;
-            *out_part = hit.part.into();
+    match contents.hit_index(model_name) {
+        Ok(index) => {
+            if let Some(hit) = index.hit(editing::Point::new(x, y), tolerance) {
+                *out_hit = true;
+                *out_uid = hit.uid;
+                *out_part = hit.part.into();
+            }
         }
-        Ok(None) => {}
         // The model and its view exist, so what is left to fail is internal.
         Err(message) => store_error(out_error, ffi_error(SimlinErrorCode::Generic, message)),
     }
