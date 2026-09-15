@@ -14,10 +14,16 @@
 //! belongs to what it holds. No row puts an end handle above a firm body (a
 //! flow's end over a later flow's valve): that arm is the same top-down walk
 //! the label-over-body test pins.
+//!
+//! A hit lands only on what the scene draws. Rows are derived from the kinds of
+//! element, each holding a coordinate that is not finite beside a drawn aux,
+//! and at every point of a grid over the scene the element and the part a hit
+//! lands on must be drawn by the production scene (`build_scene`).
 
 use crate::datamodel::ViewElement;
+use crate::diagram::{ScenePaint, SceneShape, build_scene};
 use crate::editing::test_support::{
-    aux, cloud, flow, labeled, link, load, project_of, stock, view_of,
+    alias, aux, cloud, flow, labeled, link, load, project_of, stock, view_of,
 };
 use crate::json;
 
@@ -223,4 +229,126 @@ fn a_label_drawn_over_a_body_is_the_label() {
 #[test]
 fn a_missing_model_is_an_error() {
     assert!(hit_test(&scene(), "no such model", Point::new(0.0, 0.0), TOLERANCE).is_err());
+}
+
+fn shape_paint(shape: &SceneShape) -> ScenePaint {
+    match shape {
+        SceneShape::Rect(r) => r.paint,
+        SceneShape::Circle(c) => c.paint,
+        SceneShape::Path(p) => p.paint,
+    }
+}
+
+/// One kind of element holding a coordinate that is not finite, beside a drawn
+/// aux (uid 1) at (100, 100).
+fn with_undrawn_coordinate(row: &str) -> Vec<json::ViewElement> {
+    let nan = f64::NAN;
+    let mut elements = vec![labeled(aux(1, 100.0, 100.0), "bottom")];
+    elements.extend(match row {
+        "group" => vec![json::ViewElement::Group(json::GroupViewElement {
+            uid: 2,
+            name: "g".to_string(),
+            x: nan,
+            y: 300.0,
+            width: 120.0,
+            height: 80.0,
+            is_mdl_view_marker: false,
+        })],
+        "link" => vec![aux(3, nan, 300.0), link(2, 3, 1, None)],
+        "flow valve" => vec![
+            flow(2, (nan, 300.0), &[(250.0, 300.0, 3), (400.0, 300.0, 4)]),
+            cloud(3, 2, 250.0, 300.0),
+            cloud(4, 2, 400.0, 300.0),
+        ],
+        "flow source" => vec![
+            flow(2, (325.0, 300.0), &[(nan, 300.0, 3), (400.0, 300.0, 4)]),
+            cloud(3, 2, 250.0, 300.0),
+            cloud(4, 2, 400.0, 300.0),
+        ],
+        "flow sink" => vec![
+            flow(2, (325.0, 300.0), &[(250.0, 300.0, 3), (nan, 300.0, 4)]),
+            cloud(3, 2, 250.0, 300.0),
+            cloud(4, 2, 400.0, 300.0),
+        ],
+        "stock" => vec![stock(2, nan, 300.0)],
+        "cloud" => vec![
+            flow(3, (325.0, 300.0), &[(250.0, 300.0, 2), (400.0, 300.0, 4)]),
+            cloud(2, 3, nan, 300.0),
+            cloud(4, 3, 400.0, 300.0),
+        ],
+        "module" => vec![json::ViewElement::Module(json::ModuleViewElement {
+            uid: 2,
+            name: "m".to_string(),
+            x: nan,
+            y: 300.0,
+            label_side: String::new(),
+        })],
+        "aux" => vec![aux(2, nan, 300.0)],
+        "alias" => vec![alias(2, 1, nan, 300.0)],
+        other => panic!("no row for {other}"),
+    });
+    elements
+}
+
+/// Every kind of element, a flow once per part a coordinate can break.
+const UNDRAWN_ROWS: [&str; 10] = [
+    "group",
+    "link",
+    "flow valve",
+    "flow source",
+    "flow sink",
+    "stock",
+    "cloud",
+    "module",
+    "aux",
+    "alias",
+];
+
+#[test]
+fn a_point_lands_only_on_what_the_scene_draws() {
+    let mut failures = Vec::new();
+    for row in UNDRAWN_ROWS {
+        let project = project_of(load(with_undrawn_coordinate(row)));
+        let scene = build_scene(&project, "main").expect("main has a view");
+        let index = HitIndex::new(&project, "main").expect("main has a view");
+        for i in 0..24 {
+            for j in 0..16 {
+                let point = Point::new(-50.0 + 25.0 * i as f64, -50.0 + 25.0 * j as f64);
+                let Some(hit) = index.hit(point, TOLERANCE) else {
+                    continue;
+                };
+                let at = format!(
+                    "{row}: ({}, {}) hits {:?} of {}",
+                    point.x, point.y, hit.part, hit.uid
+                );
+                let Some(drawn) = scene.elements.iter().find(|e| e.uid == hit.uid) else {
+                    failures.push(format!("{at}, which the scene does not draw"));
+                    continue;
+                };
+                // A hit is within the tolerance of what the scene draws of the
+                // element, and the part it lands on is drawn: a label, or a
+                // shape (the pipe a source end starts, the arrowhead a sink end
+                // or a link's end is).
+                let b = &drawn.bounds;
+                let dx = (b.left - point.x).max(0.0).max(point.x - b.right);
+                let dy = (b.top - point.y).max(0.0).max(point.y - b.bottom);
+                if dx.hypot(dy) > TOLERANCE {
+                    failures.push(format!("{at}, beyond what the scene draws of it"));
+                }
+                let paints: Vec<ScenePaint> = drawn.shapes.iter().map(shape_paint).collect();
+                let part_drawn = match hit.part {
+                    HitPart::Label => drawn.label.is_some(),
+                    HitPart::Source => paints.contains(&ScenePaint::FlowPipeOuter),
+                    HitPart::Arrowhead => paints.iter().any(|p| {
+                        matches!(p, ScenePaint::ArrowheadFlow | ScenePaint::ArrowheadLink)
+                    }),
+                    HitPart::Body => !paints.is_empty(),
+                };
+                if !part_drawn {
+                    failures.push(format!("{at}, a part the scene does not draw"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

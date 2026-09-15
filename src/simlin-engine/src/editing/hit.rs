@@ -46,6 +46,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::datamodel;
+use crate::diagram::arrowhead::ArrowheadGeometry;
 use crate::diagram::common::{Circle, Frame, Point as DiagramPoint, Rect};
 use crate::diagram::connector::{
     ARC_POLYLINE_SAMPLES, ConnectorGeometry, connector_geometry, connector_polyline,
@@ -324,58 +325,76 @@ struct Entry {
 }
 
 /// What an element offers a point, read once from the diagram's geometry
-/// functions.
+/// functions. Each part is drawn as one scene shape -- a body as its rectangles
+/// or circles, a pipe and its source end as the pipe path, a sink end or a
+/// link's end as the arrowhead path, a label as the label -- and the scene draws
+/// no shape holding a number that is not finite (`scene::finish`), so an entry
+/// holds only the parts whose numbers are finite.
 enum Shape {
     /// A container: only its outline is its own, so a point inside it reaches
     /// what it holds.
     Group(Rect),
     Link {
-        arrowhead: DiagramPoint,
+        /// The arrowhead's anchor, where the arrowhead is drawn.
+        arrowhead: Option<DiagramPoint>,
+        /// Empty where the line is not drawn.
         line: Vec<DiagramPoint>,
     },
     Flow {
         valves: SmallVec<[Circle; 3]>,
+        /// Empty where the pipe is not drawn, and `source` with it.
         pipe: Vec<DiagramPoint>,
         source: Option<DiagramPoint>,
-        tip: DiagramPoint,
-        label: Rect,
+        tip: Option<DiagramPoint>,
+        label: Option<Rect>,
     },
     /// The rectangles, back to front.
     Stock {
         rects: SmallVec<[Rect; 3]>,
-        label: Rect,
+        label: Option<Rect>,
     },
     Cloud(Rect),
     Module {
         rect: Rect,
-        label: Rect,
+        label: Option<Rect>,
     },
     /// The circles, back to front.
     Aux {
         circles: SmallVec<[Circle; 3]>,
-        label: Rect,
+        label: Option<Rect>,
     },
     Alias {
         circle: Circle,
-        label: Rect,
+        label: Option<Rect>,
     },
 }
 
 impl Entry {
-    /// `None` for an element the scene draws nothing for, which offers nothing.
+    /// `None` for an element the scene draws nothing for -- an undrawable link,
+    /// or an element with no shape whose numbers are all finite -- which offers
+    /// nothing.
     fn new(element: &ResolvedElement<'_>, is_arrayed: &dyn Fn(&str) -> bool) -> Option<Entry> {
         let (uid, shape) = match element {
-            ResolvedElement::Group(group) => (
-                group.uid,
-                Shape::Group(frame_rect(&group_geometry(group).rect)),
-            ),
+            ResolvedElement::Group(group) => {
+                let rect = frame_rect(&group_geometry(group).rect);
+                (group.uid, Shape::Group(finite_rect(rect)?))
+            }
             ResolvedElement::Link { link, from, to } => {
                 let arrowhead = match connector_geometry(link, from, to, is_arrayed) {
-                    ConnectorGeometry::Straight(g) => g.end,
-                    ConnectorGeometry::Arc(g) => g.end,
+                    ConnectorGeometry::Straight(g) => drawn_arrowhead(&g.arrowhead(), g.end),
+                    ConnectorGeometry::Arc(g) => drawn_arrowhead(&g.arrowhead(), g.end),
                     ConnectorGeometry::Undrawable => return None,
                 };
-                let line = connector_polyline(link, from, to, is_arrayed, ARC_POLYLINE_SAMPLES);
+                let line = finite_path(connector_polyline(
+                    link,
+                    from,
+                    to,
+                    is_arrayed,
+                    ARC_POLYLINE_SAMPLES,
+                ));
+                if arrowhead.is_none() && line.is_empty() {
+                    return None;
+                }
                 (link.uid, Shape::Link { arrowhead, line })
             }
             ResolvedElement::Flow {
@@ -384,37 +403,63 @@ impl Entry {
                 is_arrayed,
             } => {
                 let g = flow_geometry(flow, sink, *is_arrayed)?;
+                let valves: SmallVec<[Circle; 3]> =
+                    g.valves.iter().copied().filter(circle_is_finite).collect();
+                let tip = drawn_arrowhead(&g.arrowhead, g.arrowhead.tip);
+                let label = finite_rect(label_bounds(&g.label));
+                let pipe = finite_path(g.pipe);
+                // The source end is the pipe's first point, drawn with the pipe.
+                let source = pipe.first().copied();
+                if valves.is_empty() && pipe.is_empty() && tip.is_none() {
+                    return None;
+                }
                 let shape = Shape::Flow {
-                    valves: g.valves.iter().copied().collect(),
-                    source: flow.points.first().map(|s| DiagramPoint { x: s.x, y: s.y }),
-                    tip: g.arrowhead.tip,
-                    label: label_bounds(&g.label),
-                    pipe: g.pipe,
+                    valves,
+                    pipe,
+                    source,
+                    tip,
+                    label,
                 };
                 (flow.uid, shape)
             }
             ResolvedElement::Stock { stock, is_arrayed } => {
                 let g = stock_geometry(stock, *is_arrayed);
+                let rects: SmallVec<[Rect; 3]> = g
+                    .rects
+                    .iter()
+                    .map(frame_rect)
+                    .filter_map(finite_rect)
+                    .collect();
+                if rects.is_empty() {
+                    return None;
+                }
                 let shape = Shape::Stock {
-                    rects: g.rects.iter().map(frame_rect).collect(),
-                    label: label_bounds(&g.label),
+                    rects,
+                    label: finite_rect(label_bounds(&g.label)),
                 };
                 (stock.uid, shape)
             }
-            ResolvedElement::Cloud(cloud) => (cloud.uid, Shape::Cloud(cloud_bounds(cloud))),
+            ResolvedElement::Cloud(cloud) => {
+                (cloud.uid, Shape::Cloud(finite_rect(cloud_bounds(cloud))?))
+            }
             ResolvedElement::Module(module) => {
                 let g = module_geometry(module);
                 let shape = Shape::Module {
-                    rect: frame_rect(&g.rect),
-                    label: label_bounds(&g.label),
+                    rect: finite_rect(frame_rect(&g.rect))?,
+                    label: finite_rect(label_bounds(&g.label)),
                 };
                 (module.uid, shape)
             }
             ResolvedElement::Aux { aux, is_arrayed } => {
                 let g = aux_geometry(aux, *is_arrayed);
+                let circles: SmallVec<[Circle; 3]> =
+                    g.circles.iter().copied().filter(circle_is_finite).collect();
+                if circles.is_empty() {
+                    return None;
+                }
                 let shape = Shape::Aux {
-                    circles: g.circles.iter().copied().collect(),
-                    label: label_bounds(&g.label),
+                    circles,
+                    label: finite_rect(label_bounds(&g.label)),
                 };
                 (aux.uid, shape)
             }
@@ -423,15 +468,60 @@ impl Entry {
                 alias_of_name,
             } => {
                 let g = alias_geometry(alias, *alias_of_name);
+                if !circle_is_finite(&g.circle) {
+                    return None;
+                }
                 let shape = Shape::Alias {
                     circle: g.circle,
-                    label: label_bounds(&g.label),
+                    label: finite_rect(label_bounds(&g.label)),
                 };
                 (alias.uid, shape)
             }
         };
         Some(Entry { uid, shape })
     }
+}
+
+/// `rect`, where every number of it is finite.
+fn finite_rect(rect: Rect) -> Option<Rect> {
+    [rect.left, rect.top, rect.right, rect.bottom]
+        .iter()
+        .all(|v| v.is_finite())
+        .then_some(rect)
+}
+
+fn circle_is_finite(c: &Circle) -> bool {
+    [c.x, c.y, c.r].iter().all(|v| v.is_finite())
+}
+
+/// `points` where every number is finite, else nothing: the scene draws a path
+/// whole or not at all.
+fn finite_path(points: Vec<DiagramPoint>) -> Vec<DiagramPoint> {
+    if points.iter().all(|p| p.x.is_finite() && p.y.is_finite()) {
+        points
+    } else {
+        Vec::new()
+    }
+}
+
+/// `anchor`, where the arrowhead it anchors is drawn: every number of the
+/// arrowhead's path, and of the anchor, finite.
+fn drawn_arrowhead(g: &ArrowheadGeometry, anchor: DiagramPoint) -> Option<DiagramPoint> {
+    [
+        g.tip.x,
+        g.tip.y,
+        g.back_start.x,
+        g.back_start.y,
+        g.back_end.x,
+        g.back_end.y,
+        g.back_radius,
+        g.rotation_deg,
+        anchor.x,
+        anchor.y,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
+    .then_some(anchor)
 }
 
 /// What one element offers a point: whether a body or the label holds it
@@ -456,7 +546,7 @@ impl Shape {
             Shape::Link { arrowhead, line } => Offer {
                 firm_body: false,
                 firm_label: false,
-                handle: within(HitPart::Arrowhead, distance(p, *arrowhead)),
+                handle: arrowhead.and_then(|a| within(HitPart::Arrowhead, distance(p, a))),
                 nearest: Some((HitPart::Body, polyline_distance(line, p, LINK_HALF_WIDTH))),
             },
             Shape::Flow {
@@ -472,14 +562,14 @@ impl Shape {
                     .fold(f64::INFINITY, f64::min);
                 let pipe = polyline_distance(pipe, p, PIPE_HALF_WIDTH);
                 let source = source.map_or(f64::INFINITY, |s| distance(p, s));
-                let sink_end = distance(p, *tip);
+                let sink_end = tip.map_or(f64::INFINITY, |t| distance(p, t));
                 let handle = if sink_end <= source {
                     within(HitPart::Arrowhead, sink_end)
                 } else {
                     within(HitPart::Source, source)
                 };
                 let firm_valve = valves.iter().any(|c| firm_in_circle(c, p));
-                labeled(firm_valve, handle, valve.min(pipe), label, p)
+                labeled(firm_valve, handle, valve.min(pipe), label.as_ref(), p)
             }
             Shape::Stock { rects, label } => {
                 let body = rects
@@ -487,7 +577,7 @@ impl Shape {
                     .map(|r| rect_distance(r, p))
                     .fold(f64::INFINITY, f64::min);
                 let firm = rects.iter().any(|r| firm_in_rect(r, p));
-                labeled(firm, None, body, label, p)
+                labeled(firm, None, body, label.as_ref(), p)
             }
             Shape::Cloud(rect) => Offer {
                 firm_body: firm_in_rect(rect, p),
@@ -499,7 +589,7 @@ impl Shape {
                 firm_in_rect(rect, p),
                 None,
                 rect_distance(rect, p),
-                label,
+                label.as_ref(),
                 p,
             ),
             Shape::Aux { circles, label } => {
@@ -508,13 +598,13 @@ impl Shape {
                     .map(|c| circle_distance(c, p))
                     .fold(f64::INFINITY, f64::min);
                 let firm = circles.iter().any(|c| firm_in_circle(c, p));
-                labeled(firm, None, body, label, p)
+                labeled(firm, None, body, label.as_ref(), p)
             }
             Shape::Alias { circle, label } => labeled(
                 firm_in_circle(circle, p),
                 None,
                 circle_distance(circle, p),
-                label,
+                label.as_ref(),
                 p,
             ),
         }
@@ -551,11 +641,13 @@ impl Shape {
                     place(edge);
                 }
             }
-            // A reversed or non-finite outline is placed whole, which the grid
-            // cannot place, so it is a candidate everywhere.
+            // A reversed outline is placed whole, which the grid cannot place,
+            // so it is a candidate everywhere.
             Shape::Group(r) => place(*r),
             Shape::Link { arrowhead, line } => {
-                place(point_box(*arrowhead));
+                if let Some(arrowhead) = arrowhead {
+                    place(point_box(*arrowhead));
+                }
                 segment_boxes(line, LINK_HALF_WIDTH, &mut place);
             }
             Shape::Flow {
@@ -567,46 +659,46 @@ impl Shape {
             } => {
                 valves.iter().for_each(|c| place(circle_box(c)));
                 segment_boxes(pipe, PIPE_HALF_WIDTH, &mut place);
-                if let Some(source) = source {
-                    place(point_box(*source));
+                for end in [source, tip].into_iter().flatten() {
+                    place(point_box(*end));
                 }
-                place(point_box(*tip));
-                place(*label);
+                label.iter().for_each(|l| place(*l));
             }
             Shape::Stock { rects, label } => {
                 rects.iter().for_each(|r| place(*r));
-                place(*label);
+                label.iter().for_each(|l| place(*l));
             }
             Shape::Cloud(rect) => place(*rect),
             Shape::Module { rect, label } => {
                 place(*rect);
-                place(*label);
+                label.iter().for_each(|l| place(*l));
             }
             Shape::Aux { circles, label } => {
                 circles.iter().for_each(|c| place(circle_box(c)));
-                place(*label);
+                label.iter().for_each(|l| place(*l));
             }
             Shape::Alias { circle, label } => {
                 place(circle_box(circle));
-                place(*label);
+                label.iter().for_each(|l| place(*l));
             }
         }
     }
 }
 
 /// An element with a body at distance `body` and a label (drawn outside the
-/// body, on top of it): the label is the nearest part where it is nearer.
+/// body, on top of it): the label is the nearest part where it is nearer. An
+/// element whose label is not drawn has no label to offer.
 fn labeled(
     firm_body: bool,
     handle: Option<(HitPart, f64)>,
     body: f64,
-    label: &Rect,
+    label: Option<&Rect>,
     p: DiagramPoint,
 ) -> Offer {
-    let to_label = rect_distance(label, p);
+    let to_label = label.map_or(f64::INFINITY, |l| rect_distance(l, p));
     Offer {
         firm_body,
-        firm_label: firm_in_rect(label, p),
+        firm_label: label.is_some_and(|l| firm_in_rect(l, p)),
         handle,
         nearest: Some(if to_label < body {
             (HitPart::Label, to_label)
