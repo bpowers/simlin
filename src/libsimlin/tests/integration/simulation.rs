@@ -7,8 +7,8 @@ use std::os::raw::{c_char, c_double};
 use std::ptr;
 use std::sync::atomic::Ordering;
 
-use prost::Message;
 use simlin::*;
+use simlin_engine::buffa::{Message, MessageField};
 use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{self as engine};
@@ -1048,15 +1048,15 @@ fn test_sim_lifecycle() {
     // Create a minimal valid protobuf project
     let project = engine::project_io::Project {
         name: "test".to_string(),
-        sim_specs: Some(engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(engine::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: Some(engine::project_io::Dt {
+            dt: MessageField::some(engine::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
-            save_step: None,
-            sim_method: engine::project_io::SimMethod::Euler as i32,
+            save_step: MessageField::none(),
+            sim_method: engine::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
         models: vec![engine::project_io::Model {
@@ -1065,7 +1065,7 @@ fn test_sim_lifecycle() {
                 v: Some(engine::project_io::variable::V::Aux(
                     engine::project_io::variable::Aux {
                         ident: "time".to_string(),
-                        equation: Some(engine::project_io::variable::Equation {
+                        equation: MessageField::some(engine::project_io::variable::Equation {
                             equation: Some(
                                 engine::project_io::variable::equation::Equation::Scalar(
                                     engine::project_io::variable::ScalarEquation {
@@ -1077,25 +1077,24 @@ fn test_sim_lifecycle() {
                         }),
                         documentation: String::new(),
                         units: String::new(),
-                        gf: None,
+                        gf: MessageField::none(),
                         can_be_module_input: false,
-                        visibility: engine::project_io::variable::Visibility::Private as i32,
+                        visibility: engine::project_io::variable::Visibility::Private.into(),
                         uid: 0,
-                        compat: None,
+                        compat: MessageField::none(),
                     },
                 )),
             }],
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
-            macro_spec: None,
+            macro_spec: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
-        source: None,
+        source: MessageField::none(),
     };
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
         let proj = simlin_project_open_protobuf(
@@ -1157,8 +1156,7 @@ fn test_ltm_enabled_sim() {
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
 
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();

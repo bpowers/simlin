@@ -72,7 +72,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(test)]
-use prost::Message;
+use simlin_engine::buffa::Message;
 #[cfg(test)]
 use simlin_engine::serde as engine_serde;
 #[cfg(test)]
@@ -989,9 +989,7 @@ mod tests {
     use engine::test_common::TestProject;
 
     fn open_project_from_datamodel(project: &engine::datamodel::Project) -> *mut SimlinProject {
-        let pb = engine_serde::serialize(project).unwrap();
-        let mut buf = Vec::new();
-        pb.encode(&mut buf).unwrap();
+        let buf = engine_serde::serialize(project).unwrap().encode_to_vec();
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
             let proj = simlin_project_open_protobuf(

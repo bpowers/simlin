@@ -8,7 +8,7 @@
 //! reference counting, querying models, and checking simulatability.
 
 use anyhow::{anyhow, Result};
-use prost::Message;
+use simlin_engine::buffa::Message;
 use simlin_engine::{self as engine, serde as engine_serde};
 use std::ffi::{CStr, CString};
 use std::io::BufReader;
@@ -54,10 +54,16 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
         }
 
         let slice = unsafe { std::slice::from_raw_parts(data, len) };
-        let pb_project = engine::project_io::Project::decode(slice).map_err(|decode_err| {
-            FfiError::new(SimlinErrorCode::ProtobufDecode)
-                .with_message(format!("failed to decode project protobuf: {decode_err}"))
-        })?;
+        // buffa's default decode limits apply, including its 32 MiB budget on
+        // the memory repeated fields may materialize. That budget is what keeps a
+        // crafted payload from amplifying into gigabytes, and real projects sit
+        // far below it: C-LEARN, the largest model in the test corpus, needs
+        // under a twentieth of it.
+        let pb_project =
+            engine::project_io::Project::decode_from_slice(slice).map_err(|decode_err| {
+                FfiError::new(SimlinErrorCode::ProtobufDecode)
+                    .with_message(format!("failed to decode project protobuf: {decode_err}"))
+            })?;
 
         let datamodel_project: engine::datamodel::Project = engine_serde::deserialize(pb_project);
         let db = new_synced_db(&datamodel_project);

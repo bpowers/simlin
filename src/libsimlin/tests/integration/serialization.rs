@@ -5,9 +5,9 @@
 use std::ffi::CStr;
 use std::ptr;
 
-use prost::Message;
 use serde_json::Value;
 use simlin::*;
+use simlin_engine::buffa::{Message, MessageField};
 use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{self as engine};
@@ -321,8 +321,7 @@ fn test_project_serialize() {
     let datamodel_project = test_project.build_datamodel();
     let original_pb = engine_serde::serialize(&datamodel_project).unwrap();
 
-    let mut buf = Vec::new();
-    original_pb.encode(&mut buf).unwrap();
+    let buf = original_pb.encode_to_vec();
 
     unsafe {
         // Open the project
@@ -446,8 +445,7 @@ fn test_project_serialize_with_ltm() {
     let datamodel_project = test_project.build_datamodel();
     let original_pb = engine_serde::serialize(&datamodel_project).unwrap();
 
-    let mut buf = Vec::new();
-    original_pb.encode(&mut buf).unwrap();
+    let buf = original_pb.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -559,15 +557,15 @@ fn test_project_serialize_null_safety() {
         // Test with null output pointer
         let project = engine::project_io::Project {
             name: "test".to_string(),
-            sim_specs: Some(engine::project_io::SimSpecs {
+            sim_specs: MessageField::some(engine::project_io::SimSpecs {
                 start: 0.0,
                 stop: 10.0,
-                dt: Some(engine::project_io::Dt {
+                dt: MessageField::some(engine::project_io::Dt {
                     value: 1.0,
                     is_reciprocal: false,
                 }),
-                save_step: None,
-                sim_method: engine::project_io::SimMethod::Euler as i32,
+                save_step: MessageField::none(),
+                sim_method: engine::project_io::SimMethod::Euler.into(),
                 time_units: None,
             }),
             models: vec![engine::project_io::Model {
@@ -576,14 +574,13 @@ fn test_project_serialize_null_safety() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
-                macro_spec: None,
+                macro_spec: MessageField::none(),
             }],
             dimensions: vec![],
             units: vec![],
-            source: None,
+            source: MessageField::none(),
         };
-        let mut buf = Vec::new();
-        project.encode(&mut buf).unwrap();
+        let buf = project.encode_to_vec();
 
         let mut err: *mut SimlinError = ptr::null_mut();
         let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);

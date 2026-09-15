@@ -42,7 +42,10 @@ layout_eval = []
 
 [dependencies]
 unicode-xid = "0.2"
-prost = "0.14"
+# Protobuf runtime for the checked-in `src/project_io.gen.rs`. The generator in
+# scripts/gen-rust-protobufs.sh pins buffa-build to the version Cargo.lock
+# resolves this to, so bumping it means regenerating.
+buffa = "0.9"
 smallvec = { version = "1", features = [ "union" ] }
 # Fast, deterministic (fixed-seed) hasher for hot internal maps in the
 # dependency-graph cycle gate. Wasm-safe (no getrandom). FxHash's fixed seed

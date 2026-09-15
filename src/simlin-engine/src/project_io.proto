@@ -375,8 +375,8 @@ message Model {
   repeated LoopMetadata loop_metadata = 5;
   repeated ModelGroup groups = 6;
   // Present only when this model is a callable macro template. A singular
-  // proto3 message field is presence-tracked, so prost generates it as
-  // Option<MacroSpec>.
+  // proto3 message field is presence-tracked, so the generated Rust field is a
+  // `buffa::MessageField<MacroSpec>` that distinguishes unset from empty.
   MacroSpec macro_spec = 7;
 }
 

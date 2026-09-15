@@ -6,8 +6,8 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-use prost::Message;
 use simlin::*;
+use simlin_engine::buffa::Message;
 use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
 
@@ -26,8 +26,7 @@ fn test_get_incoming_links() {
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
 
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -451,8 +450,7 @@ fn test_get_incoming_links_with_private_variables() {
 
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -557,8 +555,7 @@ fn test_get_incoming_links_nested_private_vars() {
 
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -688,8 +685,7 @@ fn test_analyze_get_links() {
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
 
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -871,8 +867,7 @@ fn test_link_scored_input_count_reports_group_size() {
 
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -976,8 +971,7 @@ fn test_relative_link_score_normalizes_per_target() {
 
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1090,8 +1084,7 @@ fn test_analyze_get_links_no_loops() {
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
 
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1165,8 +1158,7 @@ fn test_analyze_get_relative_loop_score_renamed() {
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
 
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1261,8 +1253,7 @@ unsafe fn setup_two_loop_sim() -> (*mut SimlinProject, *mut SimlinModel, *mut Si
 
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     let mut err: *mut SimlinError = ptr::null_mut();
     let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
@@ -1478,8 +1469,7 @@ fn test_rel_loop_score_unpartitioned_loops_do_not_cross_normalize() {
     });
 
     let project = engine_serde::serialize(&p).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1723,9 +1713,7 @@ fn build_arrayed_test_sim_protobuf() -> Vec<u8> {
         .array_flow("births[Region]", "population * birth_rate", None);
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
-    buf
+    project.encode_to_vec()
 }
 
 unsafe fn open_arrayed_sim_with_ltm(
@@ -1956,8 +1944,7 @@ fn test_raw_loop_score_per_element_access() {
         .array_flow("deaths[Region]", "population * 0.1", None);
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
     unsafe {
         let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
 
@@ -2155,8 +2142,7 @@ fn test_get_loop_element_count_arrayed_vs_scalar() {
         .flow("births", "population * 0.05", None);
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf2 = Vec::new();
-    project.encode(&mut buf2).unwrap();
+    let buf2 = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -2270,8 +2256,7 @@ fn test_two_a2a_subsystems_per_slot_rel_score_round_trips() {
     );
 
     let pb = engine_serde::serialize(&project).unwrap();
-    let mut buf = Vec::new();
-    pb.encode(&mut buf).unwrap();
+    let buf = pb.encode_to_vec();
 
     unsafe {
         let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
@@ -2390,8 +2375,7 @@ unsafe fn open_reinforcing_loop_model() -> (*mut SimlinProject, *mut SimlinModel
 
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     let mut err: *mut SimlinError = ptr::null_mut();
     let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
@@ -2591,8 +2575,7 @@ fn discover_loops_tiny_budget_truncates() {
             .aux("goal", "1000", None);
         let datamodel_project = test_project.build_datamodel();
         let project = engine_serde::serialize(&datamodel_project).unwrap();
-        let mut buf = Vec::new();
-        project.encode(&mut buf).unwrap();
+        let buf = project.encode_to_vec();
 
         let mut err: *mut SimlinError = ptr::null_mut();
         let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
@@ -2667,8 +2650,7 @@ fn discover_loops_reports_analysis_error_when_ltm_never_ran() {
             .flow("births", "population * nonexistent_variable", None);
         let datamodel_project = test_project.build_datamodel();
         let project = engine_serde::serialize(&datamodel_project).unwrap();
-        let mut buf = Vec::new();
-        project.encode(&mut buf).unwrap();
+        let buf = project.encode_to_vec();
 
         let mut err: *mut SimlinError = ptr::null_mut();
         let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
@@ -2762,9 +2744,7 @@ fn build_smooth_feedback_protobuf() -> Vec<u8> {
         .flow("adjustment", "gap / 5", None);
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
-    buf
+    project.encode_to_vec()
 }
 
 unsafe fn open_project_and_model(buf: &[u8]) -> (*mut SimlinProject, *mut SimlinModel) {
@@ -3005,9 +2985,7 @@ fn build_discovery_with_pin_protobuf() -> Vec<u8> {
     });
 
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
-    buf
+    project.encode_to_vec()
 }
 
 /// The pinned loop must surface through `simlin_analyze_get_loops` and be
@@ -3118,8 +3096,7 @@ fn loop_name_round_trips_through_set_loop_name_patch() {
 
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -3223,8 +3200,7 @@ unsafe fn setup_logistic_sign_flip_sim() -> (*mut SimlinProject, *mut SimlinMode
 
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     let mut err: *mut SimlinError = ptr::null_mut();
     let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
@@ -3416,8 +3392,7 @@ fn competing_sign_flip_through_the_c_abi(
         .flow("f_out", &format!("s * {outflow_gain}"), None);
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -3531,8 +3506,7 @@ fn runtime_loops_without_run_errors() {
         .flow("births", "population * 0.1", None);
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -3630,8 +3604,7 @@ fn gh746_arrayed_cycle_runtime_join_is_sound() {
         .aux("scale", "0.001 * SUM(pool[*]) + 0.01", None);
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
@@ -3740,8 +3713,7 @@ fn runtime_loops_read_slot_width_from_the_sims_own_snapshot() {
         .array_flow("interest[Region]", "cash * 0.1", None);
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
@@ -3936,8 +3908,7 @@ fn test_cross_element_rel_scores_share_one_partition_denominator_via_ffi() {
     let project = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("the cross_element fixture parses");
     let pb = engine_serde::serialize(&project).unwrap();
-    let mut buf = Vec::new();
-    pb.encode(&mut buf).unwrap();
+    let buf = pb.encode_to_vec();
 
     unsafe {
         let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);

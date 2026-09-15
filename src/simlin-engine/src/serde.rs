@@ -11,6 +11,7 @@ use crate::datamodel::{
     StockFlow, Unit, Variable, View, ViewElement, Visibility, view_element,
 };
 use crate::project_io;
+use buffa::{EnumValue, MessageField};
 
 /// Repair a pre-#559 2022-era stored identifier so it survives the
 /// salsa-boundary re-canonicalization unchanged (issue #690).
@@ -120,7 +121,11 @@ fn test_sim_method_roundtrip() {
     // protobuf enums are open, which we should just treat as Euler
     assert_eq!(
         SimMethod::Euler,
-        SimMethod::from(project_io::SimMethod::try_from(666).unwrap_or_default())
+        SimMethod::from(
+            EnumValue::<project_io::SimMethod>::from(666)
+                .as_known()
+                .unwrap_or_default()
+        )
     );
 }
 
@@ -129,9 +134,9 @@ impl From<SimSpecs> for project_io::SimSpecs {
         project_io::SimSpecs {
             start: sim_specs.start,
             stop: sim_specs.stop,
-            dt: Some(project_io::Dt::from(sim_specs.dt)),
-            save_step: sim_specs.save_step.map(project_io::Dt::from),
-            sim_method: project_io::SimMethod::from(sim_specs.sim_method) as i32,
+            dt: MessageField::some(project_io::Dt::from(sim_specs.dt)),
+            save_step: sim_specs.save_step.map(project_io::Dt::from).into(),
+            sim_method: project_io::SimMethod::from(sim_specs.sim_method).into(),
             time_units: sim_specs.time_units,
         }
     }
@@ -142,14 +147,12 @@ impl From<project_io::SimSpecs> for SimSpecs {
         SimSpecs {
             start: sim_specs.start,
             stop: sim_specs.stop,
-            dt: Dt::from(sim_specs.dt.unwrap_or(project_io::Dt {
+            dt: Dt::from(sim_specs.dt.into_option().unwrap_or(project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             })),
             save_step: sim_specs.save_step.map(Dt::from),
-            sim_method: SimMethod::from(
-                project_io::SimMethod::try_from(sim_specs.sim_method).unwrap_or_default(),
-            ),
+            sim_method: SimMethod::from(sim_specs.sim_method.as_known().unwrap_or_default()),
             time_units: sim_specs.time_units.filter(|s| !s.is_empty()),
         }
     }
@@ -218,7 +221,9 @@ fn test_graphical_function_kind_roundtrip() {
 
     assert_eq!(
         project_io::graphical_function::Kind::Continuous,
-        project_io::graphical_function::Kind::try_from(666).unwrap_or_default()
+        EnumValue::<project_io::graphical_function::Kind>::from(666)
+            .as_known()
+            .unwrap_or_default()
     );
 }
 
@@ -258,11 +263,11 @@ fn test_graphical_function_scale_roundtrip() {
 impl From<GraphicalFunction> for project_io::GraphicalFunction {
     fn from(gf: GraphicalFunction) -> Self {
         project_io::GraphicalFunction {
-            kind: project_io::graphical_function::Kind::from(gf.kind) as i32,
+            kind: project_io::graphical_function::Kind::from(gf.kind).into(),
             x_points: gf.x_points.unwrap_or_default(),
             y_points: gf.y_points,
-            x_scale: Some(project_io::graphical_function::Scale::from(gf.x_scale)),
-            y_scale: Some(project_io::graphical_function::Scale::from(gf.y_scale)),
+            x_scale: MessageField::some(project_io::graphical_function::Scale::from(gf.x_scale)),
+            y_scale: MessageField::some(project_io::graphical_function::Scale::from(gf.y_scale)),
         }
     }
 }
@@ -270,9 +275,7 @@ impl From<GraphicalFunction> for project_io::GraphicalFunction {
 impl From<project_io::GraphicalFunction> for GraphicalFunction {
     fn from(gf: project_io::GraphicalFunction) -> Self {
         GraphicalFunction {
-            kind: GraphicalFunctionKind::from(
-                project_io::graphical_function::Kind::try_from(gf.kind).unwrap_or_default(),
-            ),
+            kind: GraphicalFunctionKind::from(gf.kind.as_known().unwrap_or_default()),
             x_points: if gf.x_points.is_empty() {
                 None
             } else {
@@ -318,7 +321,7 @@ fn data_source_to_proto(ds: &DataSource) -> project_io::variable::DataSource {
         DataSourceKind::Subscript => project_io::variable::data_source::Kind::Subscript,
     };
     project_io::variable::DataSource {
-        kind: kind as i32,
+        kind: kind.into(),
         file: ds.file.clone(),
         tab_or_delimiter: ds.tab_or_delimiter.clone(),
         row_or_col: ds.row_or_col.clone(),
@@ -327,12 +330,12 @@ fn data_source_to_proto(ds: &DataSource) -> project_io::variable::DataSource {
 }
 
 fn data_source_from_proto(ds: project_io::variable::DataSource) -> DataSource {
-    let kind = match project_io::variable::data_source::Kind::try_from(ds.kind) {
-        Ok(project_io::variable::data_source::Kind::Data) => DataSourceKind::Data,
-        Ok(project_io::variable::data_source::Kind::Constants) => DataSourceKind::Constants,
-        Ok(project_io::variable::data_source::Kind::Lookups) => DataSourceKind::Lookups,
-        Ok(project_io::variable::data_source::Kind::Subscript) => DataSourceKind::Subscript,
-        Err(_) => DataSourceKind::Data,
+    let kind = match ds.kind.as_known() {
+        Some(project_io::variable::data_source::Kind::Data) => DataSourceKind::Data,
+        Some(project_io::variable::data_source::Kind::Constants) => DataSourceKind::Constants,
+        Some(project_io::variable::data_source::Kind::Lookups) => DataSourceKind::Lookups,
+        Some(project_io::variable::data_source::Kind::Subscript) => DataSourceKind::Subscript,
+        None => DataSourceKind::Data,
     };
     DataSource {
         kind,
@@ -402,7 +405,7 @@ fn spreadflow_to_proto(s: &SpreadFlow) -> project_io::variable::SpreadFlow {
         Source => (Method::Source, None),
     };
     project_io::variable::SpreadFlow {
-        method: method as i32,
+        method: method.into(),
         distrib_eq,
     }
 }
@@ -410,7 +413,7 @@ fn spreadflow_to_proto(s: &SpreadFlow) -> project_io::variable::SpreadFlow {
 fn spreadflow_from_proto(s: project_io::variable::SpreadFlow) -> SpreadFlow {
     use SpreadFlow::*;
     use project_io::variable::spread_flow::Method;
-    match Method::try_from(s.method).unwrap_or(Method::Beginning) {
+    match s.method.as_known().unwrap_or(Method::Beginning) {
         Method::Beginning => Beginning,
         Method::Even => Even,
         Method::Dest => Dest,
@@ -436,37 +439,34 @@ fn compat_to_proto(compat: &Compat) -> Option<project_io::variable::Compat> {
         active_initial: compat.active_initial.clone(),
         non_negative: Some(compat.non_negative),
         can_be_module_input: Some(compat.can_be_module_input),
-        visibility: Some(project_io::variable::Visibility::from(compat.visibility) as i32),
-        data_source: compat.data_source.as_ref().map(data_source_to_proto),
-        conveyor: compat.conveyor.as_ref().map(conveyor_to_proto),
-        leakage: compat.leakage.as_ref().map(leakage_to_proto),
-        spreadflow: compat.spreadflow.as_ref().map(spreadflow_to_proto),
-        queue: compat.queue.as_ref().map(queue_to_proto),
+        visibility: Some(project_io::variable::Visibility::from(compat.visibility).into()),
+        data_source: compat.data_source.as_ref().map(data_source_to_proto).into(),
+        conveyor: compat.conveyor.as_ref().map(conveyor_to_proto).into(),
+        leakage: compat.leakage.as_ref().map(leakage_to_proto).into(),
+        spreadflow: compat.spreadflow.as_ref().map(spreadflow_to_proto).into(),
+        queue: compat.queue.as_ref().map(queue_to_proto).into(),
         overflow: compat.overflow,
     })
 }
 
 fn compat_from_proto(
-    proto_compat: Option<project_io::variable::Compat>,
+    proto_compat: impl Into<Option<project_io::variable::Compat>>,
     legacy_ai: Option<String>,
     legacy_nn: bool,
     legacy_cbmi: bool,
-    legacy_vis: i32,
+    legacy_vis: EnumValue<project_io::variable::Visibility>,
 ) -> Compat {
-    match proto_compat {
+    let legacy_vis = Visibility::from(legacy_vis.as_known().unwrap_or_default());
+    match proto_compat.into() {
         Some(c) => Compat {
             active_initial: c.active_initial.or(legacy_ai),
             non_negative: c.non_negative.unwrap_or(legacy_nn),
             can_be_module_input: c.can_be_module_input.unwrap_or(legacy_cbmi),
             visibility: c
                 .visibility
-                .and_then(|v| project_io::variable::Visibility::try_from(v).ok())
+                .and_then(|v| v.as_known())
                 .map(Visibility::from)
-                .unwrap_or_else(|| {
-                    Visibility::from(
-                        project_io::variable::Visibility::try_from(legacy_vis).unwrap_or_default(),
-                    )
-                }),
+                .unwrap_or(legacy_vis),
             data_source: c.data_source.map(data_source_from_proto),
             conveyor: c.conveyor.map(conveyor_from_proto),
             leakage: c.leakage.map(leakage_from_proto),
@@ -478,9 +478,7 @@ fn compat_from_proto(
             active_initial: legacy_ai,
             non_negative: legacy_nn,
             can_be_module_input: legacy_cbmi,
-            visibility: Visibility::from(
-                project_io::variable::Visibility::try_from(legacy_vis).unwrap_or_default(),
-            ),
+            visibility: legacy_vis,
             data_source: None,
             conveyor: None,
             leakage: None,
@@ -521,7 +519,7 @@ impl From<Equation> for project_io::variable::Equation {
                                         subscript,
                                         equation,
                                         initial_equation,
-                                        gf: gf.map(project_io::GraphicalFunction::from),
+                                        gf: gf.map(project_io::GraphicalFunction::from).into(),
                                     }
                                 })
                                 .collect(),
@@ -669,13 +667,13 @@ fn arrayed_element_subscripts_deserialize_to_the_canonical_key() {
                         subscript: "NYC, Young".to_string(),
                         equation: "100".to_string(),
                         initial_equation: None,
-                        gf: None,
+                        gf: MessageField::none(),
                     },
                     project_io::variable::arrayed_equation::Element {
                         subscript: " boston ,old".to_string(),
                         equation: "80".to_string(),
                         initial_equation: None,
-                        gf: None,
+                        gf: MessageField::none(),
                     },
                 ],
                 default_equation: None,
@@ -700,7 +698,7 @@ fn test_has_except_default_absent_defaults_to_false() {
                     subscript: "a1".to_string(),
                     equation: "5".to_string(),
                     initial_equation: None,
-                    gf: None,
+                    gf: MessageField::none(),
                 }],
                 has_except_default: None,
                 default_equation: None,
@@ -728,7 +726,7 @@ fn test_legacy_proto_with_default_equation_infers_has_except() {
                     subscript: "a1".to_string(),
                     equation: "5".to_string(),
                     initial_equation: None,
-                    gf: None,
+                    gf: MessageField::none(),
                 }],
                 has_except_default: None,
                 default_equation: Some("10".to_string()),
@@ -796,7 +794,9 @@ fn test_visibility_roundtrip() {
 
     assert_eq!(
         project_io::variable::Visibility::Private,
-        project_io::variable::Visibility::try_from(666).unwrap_or_default()
+        EnumValue::<project_io::variable::Visibility>::from(666)
+            .as_known()
+            .unwrap_or_default()
     );
 }
 
@@ -805,16 +805,16 @@ impl From<Stock> for project_io::variable::Stock {
         let compat = compat_to_proto(&stock.compat);
         project_io::variable::Stock {
             ident: stock.ident,
-            equation: Some(stock.equation.into()),
+            equation: MessageField::some(stock.equation.into()),
             documentation: stock.documentation,
             units: stock.units.unwrap_or_default(),
             inflows: stock.inflows,
             outflows: stock.outflows,
             non_negative: stock.compat.non_negative,
             can_be_module_input: stock.compat.can_be_module_input,
-            visibility: project_io::variable::Visibility::from(stock.compat.visibility) as i32,
+            visibility: project_io::variable::Visibility::from(stock.compat.visibility).into(),
             uid: stock.uid.unwrap_or_default(),
-            compat,
+            compat: compat.into(),
         }
     }
 }
@@ -823,7 +823,7 @@ impl From<project_io::variable::Stock> for Stock {
     fn from(stock: project_io::variable::Stock) -> Self {
         let legacy_ai = stock
             .equation
-            .as_ref()
+            .as_option()
             .and_then(extract_legacy_initial_equation);
         let compat = compat_from_proto(
             stock.compat,
@@ -923,17 +923,14 @@ fn test_stock_proto_legacy_fields_populated() {
     let proto = project_io::variable::Stock::from(stock);
     assert!(proto.non_negative);
     assert!(proto.can_be_module_input);
-    assert_eq!(
-        proto.visibility,
-        project_io::variable::Visibility::Public as i32
-    );
+    assert_eq!(proto.visibility, project_io::variable::Visibility::Public);
 }
 
 #[test]
 fn test_stock_proto_legacy_only_deserialization() {
     let proto = project_io::variable::Stock {
         ident: "pop".to_string(),
-        equation: Some(project_io::variable::Equation {
+        equation: MessageField::some(project_io::variable::Equation {
             equation: Some(project_io::variable::equation::Equation::Scalar(
                 project_io::variable::ScalarEquation {
                     equation: "100".to_string(),
@@ -947,9 +944,9 @@ fn test_stock_proto_legacy_only_deserialization() {
         outflows: vec![],
         non_negative: true,
         can_be_module_input: true,
-        visibility: project_io::variable::Visibility::Public as i32,
+        visibility: project_io::variable::Visibility::Public.into(),
         uid: 0,
-        compat: None,
+        compat: MessageField::none(),
     };
     let stock = Stock::from(proto);
     assert!(stock.compat.non_negative);
@@ -1011,15 +1008,15 @@ impl From<Flow> for project_io::variable::Flow {
         let compat = compat_to_proto(&flow.compat);
         project_io::variable::Flow {
             ident: flow.ident,
-            equation: Some(flow.equation.into()),
+            equation: MessageField::some(flow.equation.into()),
             documentation: flow.documentation,
             units: flow.units.unwrap_or_default(),
-            gf: flow.gf.map(project_io::GraphicalFunction::from),
+            gf: flow.gf.map(project_io::GraphicalFunction::from).into(),
             non_negative: flow.compat.non_negative,
             can_be_module_input: flow.compat.can_be_module_input,
-            visibility: project_io::variable::Visibility::from(flow.compat.visibility) as i32,
+            visibility: project_io::variable::Visibility::from(flow.compat.visibility).into(),
             uid: flow.uid.unwrap_or_default(),
-            compat,
+            compat: compat.into(),
         }
     }
 }
@@ -1028,7 +1025,7 @@ impl From<project_io::variable::Flow> for Flow {
     fn from(flow: project_io::variable::Flow) -> Self {
         let legacy_ai = flow
             .equation
-            .as_ref()
+            .as_option()
             .and_then(extract_legacy_initial_equation);
         let compat = compat_from_proto(
             flow.compat,
@@ -1111,14 +1108,14 @@ impl From<Aux> for project_io::variable::Aux {
         let compat = compat_to_proto(&aux.compat);
         project_io::variable::Aux {
             ident: aux.ident,
-            equation: Some(aux.equation.into()),
+            equation: MessageField::some(aux.equation.into()),
             documentation: aux.documentation,
             units: aux.units.unwrap_or_default(),
-            gf: aux.gf.map(project_io::GraphicalFunction::from),
+            gf: aux.gf.map(project_io::GraphicalFunction::from).into(),
             can_be_module_input: aux.compat.can_be_module_input,
-            visibility: project_io::variable::Visibility::from(aux.compat.visibility) as i32,
+            visibility: project_io::variable::Visibility::from(aux.compat.visibility).into(),
             uid: aux.uid.unwrap_or_default(),
-            compat,
+            compat: compat.into(),
         }
     }
 }
@@ -1127,7 +1124,7 @@ impl From<project_io::variable::Aux> for Aux {
     fn from(aux: project_io::variable::Aux) -> Self {
         let legacy_ai = aux
             .equation
-            .as_ref()
+            .as_option()
             .and_then(extract_legacy_initial_equation);
         let compat = compat_from_proto(
             aux.compat,
@@ -1217,7 +1214,7 @@ fn test_aux_roundtrip() {
 fn test_aux_ident_literal_period_migrated_on_deserialize() {
     let proto = project_io::variable::Aux {
         ident: "goal_1.5_for_temperature".to_string(),
-        equation: Some(project_io::variable::Equation {
+        equation: MessageField::some(project_io::variable::Equation {
             equation: Some(project_io::variable::equation::Equation::Scalar(
                 project_io::variable::ScalarEquation {
                     equation: "1.5".to_string(),
@@ -1289,7 +1286,7 @@ fn test_equation_dimension_and_subscript_references_migrated_on_deserialize() {
                     subscript: "elem_1.5".to_string(),
                     equation: "1.5".to_string(),
                     initial_equation: None,
-                    gf: None,
+                    gf: MessageField::none(),
                 }],
                 has_except_default: None,
                 default_equation: None,
@@ -1355,9 +1352,9 @@ impl From<Module> for project_io::variable::Module {
                 .map(project_io::variable::module::Reference::from)
                 .collect(),
             can_be_module_input: module.compat.can_be_module_input,
-            visibility: project_io::variable::Visibility::from(module.compat.visibility) as i32,
+            visibility: project_io::variable::Visibility::from(module.compat.visibility).into(),
             uid: module.uid.unwrap_or_default(),
-            compat,
+            compat: compat.into(),
         }
     }
 }
@@ -1549,7 +1546,9 @@ fn test_label_side_roundtrip() {
 
     assert_eq!(
         project_io::view_element::LabelSide::Top,
-        project_io::view_element::LabelSide::try_from(666).unwrap_or_default()
+        EnumValue::<project_io::view_element::LabelSide>::from(666)
+            .as_known()
+            .unwrap_or_default()
     );
 }
 
@@ -1566,9 +1565,9 @@ fn view_compat_to_proto(
 }
 
 fn view_compat_from_proto(
-    compat: Option<project_io::view_element::ViewElementCompat>,
+    compat: impl Into<Option<project_io::view_element::ViewElementCompat>>,
 ) -> Option<view_element::ViewElementCompat> {
-    compat.and_then(|c| {
+    compat.into().and_then(|c| {
         // Only produce Some if at least one field was explicitly set,
         // otherwise treat a default-valued proto message as absent.
         if c.width.is_none() && c.height.is_none() && c.bits.is_none() {
@@ -1592,9 +1591,7 @@ impl From<project_io::view_element::Aux> for view_element::Aux {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: view_element::LabelSide::from(
-                project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
-            ),
+            label_side: view_element::LabelSide::from(v.label_side.as_known().unwrap_or_default()),
             compat: view_compat_from_proto(v.compat),
         }
     }
@@ -1607,8 +1604,8 @@ impl From<view_element::Aux> for project_io::view_element::Aux {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
-            compat: view_compat_to_proto(&v.compat),
+            label_side: project_io::view_element::LabelSide::from(v.label_side).into(),
+            compat: view_compat_to_proto(&v.compat).into(),
         }
     }
 }
@@ -1637,9 +1634,7 @@ impl From<project_io::view_element::Stock> for view_element::Stock {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: view_element::LabelSide::from(
-                project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
-            ),
+            label_side: view_element::LabelSide::from(v.label_side.as_known().unwrap_or_default()),
             compat: view_compat_from_proto(v.compat),
         }
     }
@@ -1652,8 +1647,8 @@ impl From<view_element::Stock> for project_io::view_element::Stock {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
-            compat: view_compat_to_proto(&v.compat),
+            label_side: project_io::view_element::LabelSide::from(v.label_side).into(),
+            compat: view_compat_to_proto(&v.compat).into(),
         }
     }
 }
@@ -1767,9 +1762,7 @@ impl From<project_io::view_element::Flow> for view_element::Flow {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: view_element::LabelSide::from(
-                project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
-            ),
+            label_side: view_element::LabelSide::from(v.label_side.as_known().unwrap_or_default()),
             points: v
                 .points
                 .into_iter()
@@ -1788,14 +1781,14 @@ impl From<view_element::Flow> for project_io::view_element::Flow {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+            label_side: project_io::view_element::LabelSide::from(v.label_side).into(),
             points: v
                 .points
                 .into_iter()
                 .map(project_io::view_element::FlowPoint::from)
                 .collect(),
-            compat: view_compat_to_proto(&v.compat),
-            label_compat: view_compat_to_proto(&v.label_compat),
+            compat: view_compat_to_proto(&v.compat).into(),
+            label_compat: view_compat_to_proto(&v.label_compat).into(),
         }
     }
 }
@@ -1833,7 +1826,7 @@ fn test_view_element_flow_roundtrip() {
 
 impl From<project_io::view_element::Link> for view_element::Link {
     fn from(v: project_io::view_element::Link) -> Self {
-        let polarity = match v.polarity() {
+        let polarity = match v.polarity.as_known().unwrap_or_default() {
             project_io::view_element::link::Polarity::Positive => {
                 Some(view_element::LinkPolarity::Positive)
             }
@@ -1875,12 +1868,12 @@ impl From<view_element::Link> for project_io::view_element::Link {
     fn from(v: view_element::Link) -> Self {
         let polarity = match v.polarity {
             Some(view_element::LinkPolarity::Positive) => {
-                project_io::view_element::link::Polarity::Positive as i32
+                project_io::view_element::link::Polarity::Positive
             }
             Some(view_element::LinkPolarity::Negative) => {
-                project_io::view_element::link::Polarity::Negative as i32
+                project_io::view_element::link::Polarity::Negative
             }
-            None => project_io::view_element::link::Polarity::Unspecified as i32,
+            None => project_io::view_element::link::Polarity::Unspecified,
         };
         project_io::view_element::Link {
             uid: v.uid,
@@ -1904,7 +1897,7 @@ impl From<view_element::Link> for project_io::view_element::Link {
                     ))
                 }
             },
-            polarity,
+            polarity: polarity.into(),
         }
     }
 }
@@ -1960,9 +1953,7 @@ impl From<project_io::view_element::Module> for view_element::Module {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: view_element::LabelSide::from(
-                project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
-            ),
+            label_side: view_element::LabelSide::from(v.label_side.as_known().unwrap_or_default()),
         }
     }
 }
@@ -1974,7 +1965,7 @@ impl From<view_element::Module> for project_io::view_element::Module {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+            label_side: project_io::view_element::LabelSide::from(v.label_side).into(),
         }
     }
 }
@@ -2003,9 +1994,7 @@ impl From<project_io::view_element::Alias> for view_element::Alias {
             alias_of_uid: v.alias_of_uid,
             x: v.x,
             y: v.y,
-            label_side: view_element::LabelSide::from(
-                project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
-            ),
+            label_side: view_element::LabelSide::from(v.label_side.as_known().unwrap_or_default()),
             compat: view_compat_from_proto(v.compat),
         }
     }
@@ -2018,8 +2007,8 @@ impl From<view_element::Alias> for project_io::view_element::Alias {
             alias_of_uid: v.alias_of_uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
-            compat: view_compat_to_proto(&v.compat),
+            label_side: project_io::view_element::LabelSide::from(v.label_side).into(),
+            compat: view_compat_to_proto(&v.compat).into(),
         }
     }
 }
@@ -2061,7 +2050,7 @@ impl From<view_element::Cloud> for project_io::view_element::Cloud {
             flow_uid: v.flow_uid,
             x: v.x,
             y: v.y,
-            compat: view_compat_to_proto(&v.compat),
+            compat: view_compat_to_proto(&v.compat).into(),
         }
     }
 }
@@ -2212,13 +2201,13 @@ impl From<View> for project_io::View {
                 };
 
                 project_io::View {
-                    kind: project_io::view::ViewType::StockFlow as i32,
+                    kind: project_io::view::ViewType::StockFlow.into(),
                     elements: view
                         .elements
                         .into_iter()
                         .map(project_io::ViewElement::from)
                         .collect(),
-                    view_box: Some(view.view_box.into()),
+                    view_box: MessageField::some(view.view_box.into()),
                     zoom: view.zoom,
                     use_lettered_polarity: view.use_lettered_polarity,
                     name,
@@ -2304,9 +2293,9 @@ fn test_view_roundtrip_preserves_absent_title() {
 #[test]
 fn test_view_deserialize_keeps_nonempty_name_without_presence_flag() {
     let proto = project_io::View {
-        kind: project_io::view::ViewType::StockFlow as i32,
+        kind: project_io::view::ViewType::StockFlow.into(),
         elements: vec![],
-        view_box: Some(project_io::Rect::from(Rect::default())),
+        view_box: MessageField::some(project_io::Rect::from(Rect::default())),
         zoom: 1.0,
         use_lettered_polarity: false,
         name: "Overview".to_string(),
@@ -2353,7 +2342,7 @@ impl From<Model> for project_io::Model {
                 .into_iter()
                 .map(project_io::ModelGroup::from)
                 .collect(),
-            macro_spec: model.macro_spec.map(project_io::MacroSpec::from),
+            macro_spec: model.macro_spec.map(project_io::MacroSpec::from).into(),
         }
     }
 }
@@ -2782,9 +2771,7 @@ impl From<Source> for project_io::Source {
 impl From<project_io::Source> for Source {
     fn from(source: project_io::Source) -> Self {
         Source {
-            extension: project_io::source::Extension::try_from(source.extension)
-                .unwrap_or_default()
-                .into(),
+            extension: source.extension.as_known().unwrap_or_default().into(),
             content: source.content,
         }
     }
@@ -2820,7 +2807,7 @@ impl From<Project> for project_io::Project {
     fn from(project: Project) -> Self {
         project_io::Project {
             name: project.name,
-            sim_specs: Some(project_io::SimSpecs::from(project.sim_specs)),
+            sim_specs: MessageField::some(project_io::SimSpecs::from(project.sim_specs)),
             dimensions: project
                 .dimensions
                 .into_iter()
@@ -2836,7 +2823,7 @@ impl From<Project> for project_io::Project {
                 .into_iter()
                 .map(project_io::Model::from)
                 .collect(),
-            source: project.source.map(|source| source.into()),
+            source: project.source.map(project_io::Source::from).into(),
         }
     }
 }
@@ -3270,7 +3257,7 @@ fn test_protobuf_backward_compat_old_protos() {
                     subscript: "a1".to_string(),
                     equation: "5".to_string(),
                     initial_equation: None,
-                    gf: None,
+                    gf: MessageField::none(),
                 }],
                 has_except_default: None,
                 default_equation: None,
@@ -3291,15 +3278,15 @@ fn test_protobuf_backward_compat_old_protos() {
         active_initial: Some("init".to_string()),
         non_negative: Some(true),
         can_be_module_input: Some(false),
-        visibility: Some(0),
-        data_source: None,
-        conveyor: None,
-        leakage: None,
-        spreadflow: None,
-        queue: None,
+        visibility: Some(0.into()),
+        data_source: MessageField::none(),
+        conveyor: MessageField::none(),
+        leakage: MessageField::none(),
+        spreadflow: MessageField::none(),
+        queue: MessageField::none(),
         overflow: false,
     };
-    let compat = compat_from_proto(Some(old_compat), None, false, false, 0);
+    let compat = compat_from_proto(Some(old_compat), None, false, false, 0.into());
     assert_eq!(compat.data_source, None);
     assert_eq!(compat.active_initial, Some("init".to_string()));
 

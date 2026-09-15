@@ -20,6 +20,7 @@ use std::result::Result as StdResult;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use simlin_engine::buffa::Message;
 use simlin_engine::common::ErrorKind;
 use simlin_engine::data_provider::FilesystemDataProvider;
 use simlin_engine::datamodel::Project as DatamodelProject;
@@ -32,7 +33,6 @@ use simlin_engine::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
     format_simulation_error,
 };
-use simlin_engine::prost::Message;
 use simlin_engine::{Error, ErrorCode, Result, Results, build_sim, datamodel, project_io, serde};
 use simlin_engine::{
     load_csv, load_dat, open_vensim, open_vensim_with_data, open_xmile, to_mdl_with_warnings,
@@ -322,16 +322,18 @@ fn open_vensim_model(path: Option<&Path>, contents: &str) -> Result<datamodel::P
 }
 
 fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
+    // The whole input: a protobuf is binary, and any field holding a zero byte
+    // (a `double` like `dt = 1.0`) would end a delimiter-bounded read early.
     let mut contents_buf: Vec<u8> = vec![];
-    reader.read_until(0, &mut contents_buf).map_err(|_err| {
+    reader.read_to_end(&mut contents_buf).map_err(|err| {
         Error::new(
             ErrorKind::Import,
             ErrorCode::VensimConversion,
-            Some("1".to_owned()),
+            Some(format!("reading protobuf input: {err}")),
         )
     })?;
 
-    let project = match project_io::Project::decode(&*contents_buf) {
+    let project = match project_io::Project::decode_from_slice(&contents_buf) {
         Ok(project) => serde::deserialize(project),
         Err(err) => {
             return Err(Error::new(
@@ -824,13 +826,9 @@ fn main() {
                         if pb_project.models.len() != 1 {
                             die!("--model-only specified, but more than 1 model in this project");
                         }
-                        let mut buf = Vec::with_capacity(pb_project.models[0].encoded_len());
-                        pb_project.models[0].encode(&mut buf).unwrap();
-                        buf
+                        pb_project.models[0].encode_to_vec()
                     } else {
-                        let mut buf = Vec::with_capacity(pb_project.encoded_len());
-                        pb_project.encode(&mut buf).unwrap();
-                        buf
+                        pb_project.encode_to_vec()
                     }
                 }
             };
@@ -903,6 +901,53 @@ mod open_model_tests {
             read_model_file(&present.to_string_lossy()).unwrap(),
             b"<xmile/>"
         );
+    }
+}
+
+#[cfg(test)]
+mod open_binary_tests {
+    use super::*;
+
+    fn teacup_protobuf() -> (DatamodelProject, Vec<u8>) {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/test-models/samples/teacup/teacup_w_diagram.xmile"
+        );
+        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let project = open_xmile(&mut BufReader::new(bytes.as_slice()))
+            .unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+        let encoded = serde::serialize(&project).unwrap().encode_to_vec();
+        (project, encoded)
+    }
+
+    /// A protobuf project reads back whole. Every real project's encoding
+    /// holds zero bytes (`dt = 1.0` alone is six of them), so a reader that
+    /// stops at a delimiter hands the decoder a truncated message.
+    #[test]
+    fn a_protobuf_project_reads_back_whole() {
+        let (project, encoded) = teacup_protobuf();
+        assert!(
+            encoded.contains(&0),
+            "the fixture must carry a zero byte to exercise the whole read"
+        );
+
+        let decoded = open_binary(&mut BufReader::new(encoded.as_slice()))
+            .unwrap_or_else(|e| panic!("the encoded project decodes: {e}"));
+        assert_eq!(
+            decoded,
+            serde::deserialize(serde::serialize(&project).unwrap())
+        );
+    }
+
+    /// Bytes that are not a whole project are refused with the decoder's
+    /// reason, never a panic.
+    #[test]
+    fn a_truncated_protobuf_is_refused() {
+        let (_, encoded) = teacup_protobuf();
+        let truncated = &encoded[..encoded.len() / 2];
+        let err = open_binary(&mut BufReader::new(truncated))
+            .expect_err("half a message is not a project");
+        assert_eq!(err.code, ErrorCode::VensimConversion);
     }
 }
 

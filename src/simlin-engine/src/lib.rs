@@ -10,7 +10,11 @@
 // statically validates that compiled bytecode cannot exceed STACK_CAPACITY.
 #![deny(unsafe_code)]
 
-pub use prost;
+// Re-exported so downstream crates (libsimlin, simlin-cli) encode and decode
+// `project_io` messages through the same runtime the generated code was built
+// against, instead of each declaring a `buffa` version of its own that has to
+// track this crate's.
+pub use buffa;
 // Re-exported so downstream crates (libsimlin, integration tests) can name the
 // `IndexMap` type of `db::LtmVariablesResult.loop_partitions` without taking a
 // direct `indexmap` dependency. The emission-order iteration is load-bearing
@@ -79,7 +83,13 @@ mod parser;
 mod patch;
 #[cfg(test)]
 mod per_element_gf_tests;
-#[allow(clippy::derive_partial_eq_without_eq)]
+// Generated code: silence the lints buffa-codegen's output trips rather than
+// hand-editing a file the freshness test regenerates.
+#[allow(
+    clippy::derive_partial_eq_without_eq,
+    clippy::derivable_impls,
+    clippy::match_single_binding
+)]
 #[path = "project_io.gen.rs"]
 pub mod project_io;
 pub mod queue;

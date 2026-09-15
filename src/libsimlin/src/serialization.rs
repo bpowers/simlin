@@ -8,7 +8,7 @@
 //! systems, SVG, PNG, and scene formats. The memory for the output buffers is allocated via
 //! `simlin_malloc` so that callers free it with `simlin_free`.
 
-use prost::Message;
+use simlin_engine::buffa::Message;
 use simlin_engine::{self as engine, serde as engine_serde};
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -79,15 +79,20 @@ pub unsafe extern "C" fn simlin_project_serialize_protobuf(
         }
     };
 
-    let mut bytes = Vec::new();
-    if pb_project.encode(&mut bytes).is_err() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::ProtobufDecode)
-                .with_message("failed to encode project protobuf"),
-        );
-        return;
-    }
+    // The fallible encode: the only failure is a project past protobuf's 2 GiB
+    // message limit, and the panicking `encode_to_vec` would abort the process
+    // there (release builds are `panic = abort`) instead of reporting it.
+    let bytes = match pb_project.try_encode_to_vec() {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::ProtobufDecode)
+                    .with_message(format!("failed to encode project protobuf: {err}")),
+            );
+            return;
+        }
+    };
 
     let len = bytes.len();
     let buf = simlin_malloc(len);

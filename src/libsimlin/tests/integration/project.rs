@@ -6,8 +6,8 @@ use std::ffi::{CStr, CString};
 use std::ptr;
 use std::sync::atomic::Ordering;
 
-use prost::Message;
 use simlin::*;
+use simlin_engine::buffa::{Message, MessageField};
 use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{self as engine};
@@ -19,15 +19,15 @@ fn test_project_lifecycle() {
     // Create a minimal valid protobuf project
     let project = engine::project_io::Project {
         name: "test".to_string(),
-        sim_specs: Some(engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(engine::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: Some(engine::project_io::Dt {
+            dt: MessageField::some(engine::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
-            save_step: None,
-            sim_method: engine::project_io::SimMethod::Euler as i32,
+            save_step: MessageField::none(),
+            sim_method: engine::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
         models: vec![engine::project_io::Model {
@@ -36,14 +36,13 @@ fn test_project_lifecycle() {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
-            macro_spec: None,
+            macro_spec: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
-        source: None,
+        source: MessageField::none(),
     };
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
         let proj = simlin_project_open_protobuf(
@@ -174,15 +173,15 @@ fn test_project_add_model() {
     // Create a minimal project with just one model
     let project = engine::project_io::Project {
         name: "test_project".to_string(),
-        sim_specs: Some(engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(engine::project_io::SimSpecs {
             start: 0.0,
             stop: 100.0,
-            dt: Some(engine::project_io::Dt {
+            dt: MessageField::some(engine::project_io::Dt {
                 value: 0.25,
                 is_reciprocal: false,
             }),
-            save_step: None,
-            sim_method: engine::project_io::SimMethod::Euler as i32,
+            save_step: MessageField::none(),
+            sim_method: engine::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
         models: vec![engine::project_io::Model {
@@ -191,14 +190,13 @@ fn test_project_add_model() {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
-            macro_spec: None,
+            macro_spec: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
-        source: None,
+        source: MessageField::none(),
     };
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         // Open the project
@@ -330,24 +328,23 @@ fn test_project_add_model_null_safety() {
         // Create a valid project for other null tests
         let project = engine::project_io::Project {
             name: "test".to_string(),
-            sim_specs: Some(engine::project_io::SimSpecs {
+            sim_specs: MessageField::some(engine::project_io::SimSpecs {
                 start: 0.0,
                 stop: 10.0,
-                dt: Some(engine::project_io::Dt {
+                dt: MessageField::some(engine::project_io::Dt {
                     value: 1.0,
                     is_reciprocal: false,
                 }),
-                save_step: None,
-                sim_method: engine::project_io::SimMethod::Euler as i32,
+                save_step: MessageField::none(),
+                sim_method: engine::project_io::SimMethod::Euler.into(),
                 time_units: None,
             }),
             models: vec![],
             dimensions: vec![],
             units: vec![],
-            source: None,
+            source: MessageField::none(),
         };
-        let mut buf = Vec::new();
-        project.encode(&mut buf).unwrap();
+        let buf = project.encode_to_vec();
 
         let mut err: *mut SimlinError = ptr::null_mut();
         let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
@@ -869,8 +866,7 @@ fn test_project_open_roundtrip() {
     let datamodel_project = test_project.build_datamodel();
     let project = engine_serde::serialize(&datamodel_project).unwrap();
 
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1067,15 +1063,15 @@ fn test_error_api_with_valid_project() {
     // Create a project with intentional errors
     let project = engine::project_io::Project {
         name: "test_errors".to_string(),
-        sim_specs: Some(engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(engine::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: Some(engine::project_io::Dt {
+            dt: MessageField::some(engine::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
-            save_step: None,
-            sim_method: engine::project_io::SimMethod::Euler as i32,
+            save_step: MessageField::none(),
+            sim_method: engine::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
         models: vec![engine::project_io::Model {
@@ -1086,7 +1082,7 @@ fn test_error_api_with_valid_project() {
                     v: Some(engine::project_io::variable::V::Aux(
                         engine::project_io::variable::Aux {
                             ident: "error_var".to_string(),
-                            equation: Some(engine::project_io::variable::Equation {
+                            equation: MessageField::some(engine::project_io::variable::Equation {
                                 equation: Some(
                                     engine::project_io::variable::equation::Equation::Scalar(
                                         engine::project_io::variable::ScalarEquation {
@@ -1098,11 +1094,11 @@ fn test_error_api_with_valid_project() {
                             }),
                             documentation: String::new(),
                             units: String::new(),
-                            gf: None,
+                            gf: MessageField::none(),
                             can_be_module_input: false,
-                            visibility: engine::project_io::variable::Visibility::Private as i32,
+                            visibility: engine::project_io::variable::Visibility::Private.into(),
                             uid: 0,
-                            compat: None,
+                            compat: MessageField::none(),
                         },
                     )),
                 },
@@ -1111,7 +1107,7 @@ fn test_error_api_with_valid_project() {
                     v: Some(engine::project_io::variable::V::Aux(
                         engine::project_io::variable::Aux {
                             ident: "bad_units_var".to_string(),
-                            equation: Some(engine::project_io::variable::Equation {
+                            equation: MessageField::some(engine::project_io::variable::Equation {
                                 equation: Some(
                                     engine::project_io::variable::equation::Equation::Scalar(
                                         engine::project_io::variable::ScalarEquation {
@@ -1123,11 +1119,11 @@ fn test_error_api_with_valid_project() {
                             }),
                             documentation: String::new(),
                             units: "bad units here!!!".to_string(),
-                            gf: None,
+                            gf: MessageField::none(),
                             can_be_module_input: false,
-                            visibility: engine::project_io::variable::Visibility::Private as i32,
+                            visibility: engine::project_io::variable::Visibility::Private.into(),
                             uid: 0,
-                            compat: None,
+                            compat: MessageField::none(),
                         },
                     )),
                 },
@@ -1135,14 +1131,13 @@ fn test_error_api_with_valid_project() {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
-            macro_spec: None,
+            macro_spec: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
-        source: None,
+        source: MessageField::none(),
     };
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1202,15 +1197,15 @@ fn test_error_api_with_compilation_errors() {
     // Create a project with compilation errors
     let project = engine::project_io::Project {
         name: "test_compilation_errors".to_string(),
-        sim_specs: Some(engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(engine::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: Some(engine::project_io::Dt {
+            dt: MessageField::some(engine::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
-            save_step: None,
-            sim_method: engine::project_io::SimMethod::Euler as i32,
+            save_step: MessageField::none(),
+            sim_method: engine::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
         models: vec![engine::project_io::Model {
@@ -1221,7 +1216,7 @@ fn test_error_api_with_compilation_errors() {
                     v: Some(engine::project_io::variable::V::Aux(
                         engine::project_io::variable::Aux {
                             ident: "a".to_string(),
-                            equation: Some(engine::project_io::variable::Equation {
+                            equation: MessageField::some(engine::project_io::variable::Equation {
                                 equation: Some(
                                     engine::project_io::variable::equation::Equation::Scalar(
                                         engine::project_io::variable::ScalarEquation {
@@ -1233,11 +1228,11 @@ fn test_error_api_with_compilation_errors() {
                             }),
                             documentation: String::new(),
                             units: String::new(),
-                            gf: None,
+                            gf: MessageField::none(),
                             can_be_module_input: false,
-                            visibility: engine::project_io::variable::Visibility::Private as i32,
+                            visibility: engine::project_io::variable::Visibility::Private.into(),
                             uid: 0,
-                            compat: None,
+                            compat: MessageField::none(),
                         },
                     )),
                 },
@@ -1245,7 +1240,7 @@ fn test_error_api_with_compilation_errors() {
                     v: Some(engine::project_io::variable::V::Aux(
                         engine::project_io::variable::Aux {
                             ident: "b".to_string(),
-                            equation: Some(engine::project_io::variable::Equation {
+                            equation: MessageField::some(engine::project_io::variable::Equation {
                                 equation: Some(
                                     engine::project_io::variable::equation::Equation::Scalar(
                                         engine::project_io::variable::ScalarEquation {
@@ -1257,11 +1252,11 @@ fn test_error_api_with_compilation_errors() {
                             }),
                             documentation: String::new(),
                             units: String::new(),
-                            gf: None,
+                            gf: MessageField::none(),
                             can_be_module_input: false,
-                            visibility: engine::project_io::variable::Visibility::Private as i32,
+                            visibility: engine::project_io::variable::Visibility::Private.into(),
                             uid: 0,
-                            compat: None,
+                            compat: MessageField::none(),
                         },
                     )),
                 },
@@ -1269,14 +1264,13 @@ fn test_error_api_with_compilation_errors() {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
-            macro_spec: None,
+            macro_spec: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
-        source: None,
+        source: MessageField::none(),
     };
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1322,15 +1316,15 @@ fn test_error_api_no_errors() {
     // Create a valid project with no errors
     let project = engine::project_io::Project {
         name: "test_no_errors".to_string(),
-        sim_specs: Some(engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(engine::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: Some(engine::project_io::Dt {
+            dt: MessageField::some(engine::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
-            save_step: None,
-            sim_method: engine::project_io::SimMethod::Euler as i32,
+            save_step: MessageField::none(),
+            sim_method: engine::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
         models: vec![engine::project_io::Model {
@@ -1339,7 +1333,7 @@ fn test_error_api_no_errors() {
                 v: Some(engine::project_io::variable::V::Aux(
                     engine::project_io::variable::Aux {
                         ident: "time_var".to_string(),
-                        equation: Some(engine::project_io::variable::Equation {
+                        equation: MessageField::some(engine::project_io::variable::Equation {
                             equation: Some(
                                 engine::project_io::variable::equation::Equation::Scalar(
                                     engine::project_io::variable::ScalarEquation {
@@ -1351,25 +1345,24 @@ fn test_error_api_no_errors() {
                         }),
                         documentation: String::new(),
                         units: String::new(),
-                        gf: None,
+                        gf: MessageField::none(),
                         can_be_module_input: false,
-                        visibility: engine::project_io::variable::Visibility::Private as i32,
+                        visibility: engine::project_io::variable::Visibility::Private.into(),
                         uid: 0,
-                        compat: None,
+                        compat: MessageField::none(),
                     },
                 )),
             }],
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
-            macro_spec: None,
+            macro_spec: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
-        source: None,
+        source: MessageField::none(),
     };
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1394,15 +1387,15 @@ fn test_get_errors_repeated_calls_reuse_sync_state() {
     // salsa inputs on every call (which would cause unbounded DB growth).
     let project = engine::project_io::Project {
         name: "repeated_errors".to_string(),
-        sim_specs: Some(engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(engine::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: Some(engine::project_io::Dt {
+            dt: MessageField::some(engine::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
-            save_step: None,
-            sim_method: engine::project_io::SimMethod::Euler as i32,
+            save_step: MessageField::none(),
+            sim_method: engine::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
         models: vec![engine::project_io::Model {
@@ -1411,7 +1404,7 @@ fn test_get_errors_repeated_calls_reuse_sync_state() {
                 v: Some(engine::project_io::variable::V::Aux(
                     engine::project_io::variable::Aux {
                         ident: "x".to_string(),
-                        equation: Some(engine::project_io::variable::Equation {
+                        equation: MessageField::some(engine::project_io::variable::Equation {
                             equation: Some(
                                 engine::project_io::variable::equation::Equation::Scalar(
                                     engine::project_io::variable::ScalarEquation {
@@ -1423,27 +1416,25 @@ fn test_get_errors_repeated_calls_reuse_sync_state() {
                         }),
                         documentation: String::new(),
                         units: String::new(),
-                        gf: None,
+                        gf: MessageField::none(),
                         can_be_module_input: false,
-                        visibility: engine::project_io::variable::Visibility::Private as i32,
+                        visibility: engine::project_io::variable::Visibility::Private.into(),
                         uid: 0,
-                        compat: None,
+                        compat: MessageField::none(),
                     },
                 )),
             }],
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
-            macro_spec: None,
+            macro_spec: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
-        source: None,
+        source: MessageField::none(),
     };
 
-    let mut buf = Vec::new();
-    use prost::Message;
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1483,15 +1474,15 @@ fn test_error_offsets() {
     // Create a project with an error at a specific location
     let project = engine::project_io::Project {
         name: "test_offsets".to_string(),
-        sim_specs: Some(engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(engine::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: Some(engine::project_io::Dt {
+            dt: MessageField::some(engine::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
-            save_step: None,
-            sim_method: engine::project_io::SimMethod::Euler as i32,
+            save_step: MessageField::none(),
+            sim_method: engine::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
         models: vec![engine::project_io::Model {
@@ -1500,7 +1491,7 @@ fn test_error_offsets() {
                 v: Some(engine::project_io::variable::V::Aux(
                     engine::project_io::variable::Aux {
                         ident: "var_with_offset_error".to_string(),
-                        equation: Some(engine::project_io::variable::Equation {
+                        equation: MessageField::some(engine::project_io::variable::Equation {
                             equation: Some(
                                 engine::project_io::variable::equation::Equation::Scalar(
                                     engine::project_io::variable::ScalarEquation {
@@ -1512,25 +1503,24 @@ fn test_error_offsets() {
                         }),
                         documentation: String::new(),
                         units: String::new(),
-                        gf: None,
+                        gf: MessageField::none(),
                         can_be_module_input: false,
-                        visibility: engine::project_io::variable::Visibility::Private as i32,
+                        visibility: engine::project_io::variable::Visibility::Private.into(),
                         uid: 0,
-                        compat: None,
+                        compat: MessageField::none(),
                     },
                 )),
             }],
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
-            macro_spec: None,
+            macro_spec: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
-        source: None,
+        source: MessageField::none(),
     };
-    let mut buf = Vec::new();
-    project.encode(&mut buf).unwrap();
+    let buf = project.encode_to_vec();
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1664,8 +1654,8 @@ fn test_stdlib_models_present_after_json_open() {
         assert!(!pb_buf.is_null());
 
         let pb_bytes = std::slice::from_raw_parts(pb_buf, pb_len);
-        let pb_project =
-            engine::project_io::Project::decode(pb_bytes).expect("protobuf decode failed");
+        let pb_project = engine::project_io::Project::decode_from_slice(pb_bytes)
+            .expect("protobuf decode failed");
         let pb_model_names: Vec<&str> = pb_project.models.iter().map(|m| m.name.as_str()).collect();
         assert!(
             !pb_model_names.iter().any(|n| n.starts_with("stdlib")),
