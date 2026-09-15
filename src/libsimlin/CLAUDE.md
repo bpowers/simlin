@@ -96,6 +96,10 @@ Error formatting has no module here: `src/patch.rs` imports `simlin_engine::erro
 - **`src/error_api.rs`** - Error inspection FFI: `simlin_error_{str,free,get_code,get_message,get_detail_count,get_details,get_detail}()`, ABI validation (`simlin_sizeof_*`)
 - **`src/memory.rs`** - Custom allocator for WASM compatibility: `simlin_malloc()`, `simlin_free()`, `simlin_free_string()`
 
+## Examples
+
+- **`examples/editing_latency.rs`** - What editing a diagram costs a native host, timed call by call at the FFI: hit tests while hovering, near elements and right after an edit, `simlin_model_plan_tap`, `simlin_gesture_begin`, `simlin_project_render_scene`, and how long an equation edit and the simulation after it hold the datamodel lock. The commands, and how to profile it, are in [docs/dev/benchmarks.md](/docs/dev/benchmarks.md)
+
 ## Tests
 
 Integration tests live in the single consolidated `tests/integration` harness (one binary instead of one per file; see GH #706 and `tests/integration/main.rs` -- add new integration tests as a `mod` there), organized by FFI module:
