@@ -46,7 +46,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::datamodel;
-use crate::diagram::arrowhead::ArrowheadGeometry;
+use crate::diagram::ScenePaint;
 use crate::diagram::common::{Circle, Frame, Point as DiagramPoint, Rect};
 use crate::diagram::connector::{
     ARC_POLYLINE_SAMPLES, ConnectorGeometry, connector_geometry, connector_polyline,
@@ -55,8 +55,12 @@ use crate::diagram::elements::{
     alias_geometry, aux_geometry, cloud_bounds, group_geometry, module_geometry, stock_geometry,
 };
 use crate::diagram::flow::flow_geometry;
-use crate::diagram::label::label_bounds;
+use crate::diagram::label::{LabelProps, label_bounds};
 use crate::diagram::resolve::{ResolvedElement, resolve_view};
+use crate::diagram::scene::{
+    arrowhead_path, circle_shape, cloud_path, element_label, link_line_path, path_shape,
+    polyline_path, rect_shape,
+};
 
 use super::geometry::Point;
 
@@ -327,9 +331,11 @@ struct Entry {
 /// What an element offers a point, read once from the diagram's geometry
 /// functions. Each part is drawn as one scene shape -- a body as its rectangles
 /// or circles, a pipe and its source end as the pipe path, a sink end or a
-/// link's end as the arrowhead path, a label as the label -- and the scene draws
-/// no shape holding a number that is not finite (`scene::finish`), so an entry
-/// holds only the parts whose numbers are finite.
+/// link's end as the arrowhead path, a label as the label -- and an entry holds
+/// a part only where the scene draws that shape: built by the scene's own
+/// builder, and kept by the predicate `scene::finish` filters with
+/// (`SceneShape::is_finite`, `SceneLabel::is_finite`). A shape's paint never
+/// decides whether it is kept.
 enum Shape {
     /// A container: only its outline is its own, so a point inside it reaches
     /// what it holds.
@@ -371,27 +377,34 @@ enum Shape {
 
 impl Entry {
     /// `None` for an element the scene draws nothing for -- an undrawable link,
-    /// or an element with no shape whose numbers are all finite -- which offers
+    /// or an element every shape of which the scene drops -- which offers
     /// nothing.
     fn new(element: &ResolvedElement<'_>, is_arrayed: &dyn Fn(&str) -> bool) -> Option<Entry> {
         let (uid, shape) = match element {
             ResolvedElement::Group(group) => {
-                let rect = frame_rect(&group_geometry(group).rect);
-                (group.uid, Shape::Group(finite_rect(rect)?))
+                let g = group_geometry(group);
+                if !rect_shape(&g.rect, g.corner_radius, ScenePaint::Group).is_finite() {
+                    return None;
+                }
+                (group.uid, Shape::Group(frame_rect(&g.rect)))
             }
             ResolvedElement::Link { link, from, to } => {
-                let arrowhead = match connector_geometry(link, from, to, is_arrayed) {
-                    ConnectorGeometry::Straight(g) => drawn_arrowhead(&g.arrowhead(), g.end),
-                    ConnectorGeometry::Arc(g) => drawn_arrowhead(&g.arrowhead(), g.end),
+                let geometry = connector_geometry(link, from, to, is_arrayed);
+                let arrowhead = match &geometry {
+                    ConnectorGeometry::Straight(g) => g.arrowhead(),
+                    ConnectorGeometry::Arc(g) => g.arrowhead(),
                     ConnectorGeometry::Undrawable => return None,
                 };
-                let line = finite_path(connector_polyline(
-                    link,
-                    from,
-                    to,
-                    is_arrayed,
-                    ARC_POLYLINE_SAMPLES,
-                ));
+                // An arrowhead is anchored at its tip, the link's end.
+                let arrowhead = path_shape(arrowhead_path(&arrowhead), ScenePaint::ArrowheadLink)
+                    .is_finite()
+                    .then_some(arrowhead.tip);
+                let line =
+                    if path_shape(link_line_path(&geometry), ScenePaint::Connector).is_finite() {
+                        connector_polyline(link, from, to, is_arrayed, ARC_POLYLINE_SAMPLES)
+                    } else {
+                        Vec::new()
+                    };
                 if arrowhead.is_none() && line.is_empty() {
                     return None;
                 }
@@ -403,11 +416,22 @@ impl Entry {
                 is_arrayed,
             } => {
                 let g = flow_geometry(flow, sink, *is_arrayed)?;
-                let valves: SmallVec<[Circle; 3]> =
-                    g.valves.iter().copied().filter(circle_is_finite).collect();
-                let tip = drawn_arrowhead(&g.arrowhead, g.arrowhead.tip);
-                let label = finite_rect(label_bounds(&g.label));
-                let pipe = finite_path(g.pipe);
+                let valves: SmallVec<[Circle; 3]> = g
+                    .valves
+                    .iter()
+                    .copied()
+                    .filter(|c| circle_shape(c, ScenePaint::Valve).is_finite())
+                    .collect();
+                let tip = path_shape(arrowhead_path(&g.arrowhead), ScenePaint::ArrowheadFlow)
+                    .is_finite()
+                    .then_some(g.arrowhead.tip);
+                let label = drawn_label(&g.label);
+                let pipe =
+                    if path_shape(polyline_path(&g.pipe), ScenePaint::FlowPipeOuter).is_finite() {
+                        g.pipe
+                    } else {
+                        Vec::new()
+                    };
                 // The source end is the pipe's first point, drawn with the pipe.
                 let source = pipe.first().copied();
                 if valves.is_empty() && pipe.is_empty() && tip.is_none() {
@@ -427,39 +451,49 @@ impl Entry {
                 let rects: SmallVec<[Rect; 3]> = g
                     .rects
                     .iter()
+                    .filter(|r| rect_shape(r, 0.0, ScenePaint::Stock).is_finite())
                     .map(frame_rect)
-                    .filter_map(finite_rect)
                     .collect();
                 if rects.is_empty() {
                     return None;
                 }
                 let shape = Shape::Stock {
                     rects,
-                    label: finite_rect(label_bounds(&g.label)),
+                    label: drawn_label(&g.label),
                 };
                 (stock.uid, shape)
             }
             ResolvedElement::Cloud(cloud) => {
-                (cloud.uid, Shape::Cloud(finite_rect(cloud_bounds(cloud))?))
+                if !path_shape(cloud_path(cloud), ScenePaint::Cloud).is_finite() {
+                    return None;
+                }
+                (cloud.uid, Shape::Cloud(cloud_bounds(cloud)))
             }
             ResolvedElement::Module(module) => {
                 let g = module_geometry(module);
+                if !rect_shape(&g.rect, g.corner_radius, ScenePaint::Module).is_finite() {
+                    return None;
+                }
                 let shape = Shape::Module {
-                    rect: finite_rect(frame_rect(&g.rect))?,
-                    label: finite_rect(label_bounds(&g.label)),
+                    rect: frame_rect(&g.rect),
+                    label: drawn_label(&g.label),
                 };
                 (module.uid, shape)
             }
             ResolvedElement::Aux { aux, is_arrayed } => {
                 let g = aux_geometry(aux, *is_arrayed);
-                let circles: SmallVec<[Circle; 3]> =
-                    g.circles.iter().copied().filter(circle_is_finite).collect();
+                let circles: SmallVec<[Circle; 3]> = g
+                    .circles
+                    .iter()
+                    .copied()
+                    .filter(|c| circle_shape(c, ScenePaint::Aux).is_finite())
+                    .collect();
                 if circles.is_empty() {
                     return None;
                 }
                 let shape = Shape::Aux {
                     circles,
-                    label: finite_rect(label_bounds(&g.label)),
+                    label: drawn_label(&g.label),
                 };
                 (aux.uid, shape)
             }
@@ -468,12 +502,12 @@ impl Entry {
                 alias_of_name,
             } => {
                 let g = alias_geometry(alias, *alias_of_name);
-                if !circle_is_finite(&g.circle) {
+                if !circle_shape(&g.circle, ScenePaint::Alias).is_finite() {
                     return None;
                 }
                 let shape = Shape::Alias {
                     circle: g.circle,
-                    label: finite_rect(label_bounds(&g.label)),
+                    label: drawn_label(&g.label),
                 };
                 (alias.uid, shape)
             }
@@ -482,46 +516,11 @@ impl Entry {
     }
 }
 
-/// `rect`, where every number of it is finite.
-fn finite_rect(rect: Rect) -> Option<Rect> {
-    [rect.left, rect.top, rect.right, rect.bottom]
-        .iter()
-        .all(|v| v.is_finite())
-        .then_some(rect)
-}
-
-fn circle_is_finite(c: &Circle) -> bool {
-    [c.x, c.y, c.r].iter().all(|v| v.is_finite())
-}
-
-/// `points` where every number is finite, else nothing: the scene draws a path
-/// whole or not at all.
-fn finite_path(points: Vec<DiagramPoint>) -> Vec<DiagramPoint> {
-    if points.iter().all(|p| p.x.is_finite() && p.y.is_finite()) {
-        points
-    } else {
-        Vec::new()
-    }
-}
-
-/// `anchor`, where the arrowhead it anchors is drawn: every number of the
-/// arrowhead's path, and of the anchor, finite.
-fn drawn_arrowhead(g: &ArrowheadGeometry, anchor: DiagramPoint) -> Option<DiagramPoint> {
-    [
-        g.tip.x,
-        g.tip.y,
-        g.back_start.x,
-        g.back_start.y,
-        g.back_end.x,
-        g.back_end.y,
-        g.back_radius,
-        g.rotation_deg,
-        anchor.x,
-        anchor.y,
-    ]
-    .iter()
-    .all(|v| v.is_finite())
-    .then_some(anchor)
+/// The box of a label the scene draws, `None` for one it does not.
+fn drawn_label(props: &LabelProps) -> Option<Rect> {
+    element_label(props)
+        .is_finite()
+        .then(|| label_bounds(props))
 }
 
 /// What one element offers a point: whether a body or the label holds it

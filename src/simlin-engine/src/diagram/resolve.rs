@@ -116,8 +116,8 @@ impl ResolvedView<'_> {
 
 /// Which of a model's variables have an apply-to-all or arrayed equation, by
 /// canonical ident, read once per view. Drawing asks per element, and several
-/// times per link, so an answer must not scan the model's variables: on a view
-/// the size of World3 that scan was nearly all of drawing the view.
+/// times per link, so an answer must never scan the model's variables: a scan
+/// per answer makes drawing a view quadratic in the size of the model.
 struct Arrayed<'a>(HashMap<Cow<'a, str>, bool>);
 
 impl<'a> Arrayed<'a> {

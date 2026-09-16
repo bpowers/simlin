@@ -84,14 +84,17 @@ const SCENE: Sampling = Sampling {
 };
 
 /// World3 is large, and a walk over every element in a debug build is slow, so
-/// it is sampled more thinly.
+/// it is sampled within a debug build's per-test budget (`docs/dev/rust.md`):
+/// one ring around each position, and a finger's slop and a zoomed-out reach,
+/// with box offsets on the edge, just past a finger's end handle and just past
+/// its tolerance. The generated scenes sweep every tolerance.
 const CORPUS: Sampling = Sampling {
     random: 300,
-    radii: &[0.0, 9.0, 20.0],
+    radii: &[9.0],
     angles: 1,
     max_boxes: 128,
     offsets: &[0.0, 8.5, 14.5],
-    tolerances: &[0.0, 14.0, 300.0],
+    tolerances: &[14.0, 300.0],
 };
 
 fn kind(element: &ViewElement) -> &'static str {
