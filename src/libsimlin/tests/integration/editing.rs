@@ -379,6 +379,23 @@ fn a_drag_back_to_its_press_commits_none_without_a_patch() {
         let gesture = simlin_gesture_begin(model, &p, &mut err);
         expect_no_error(err, "beginning the drag");
         assert!(!gesture.is_null(), "a press on a stock starts a drag");
+        let (mut frame_buf, mut frame_len): (*const u8, usize) = (ptr::null(), 0);
+        simlin_gesture_frame(
+            gesture,
+            100.0,
+            100.0,
+            &mut frame_buf,
+            &mut frame_len,
+            &mut err,
+        );
+        expect_no_error(err, "planning the frame at the press");
+        let frame: Value = serde_json::from_slice(std::slice::from_raw_parts(frame_buf, frame_len))
+            .expect("the frame is JSON");
+        assert_eq!(
+            (&frame["commit"], &frame["label"]),
+            (&json!("none"), &json!("")),
+            "the frame at the press says what its release commits: {frame}"
+        );
         let (mut buf, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
         simlin_gesture_commit(gesture, 100.0, 100.0, &mut buf, &mut len, &mut err);
         expect_no_error(err, "committing the drag");
@@ -444,6 +461,21 @@ fn a_move_that_lands_nothing_commits_none_without_a_patch() {
                 "{name}: {plan}"
             );
         }
+        // A nudge as far as a coordinate goes lands, and the next one overflows
+        // the coordinate, which no patch can carry.
+        let to_the_edge = plan_move(model, &[AUX], f64::MAX, 0.0);
+        assert_eq!(to_the_edge["commit"], "edit", "{to_the_edge}");
+        apply(proj, &to_the_edge["patch"]);
+        let past_the_edge = plan_move(model, &[AUX], f64::MAX, 0.0);
+        assert_eq!(
+            (
+                &past_the_edge["commit"],
+                &past_the_edge["label"],
+                &past_the_edge["patch"]
+            ),
+            (&json!("none"), &json!(""), &Value::Null),
+            "a nudge that overflows a coordinate: {past_the_edge}"
+        );
         simlin_model_unref(model);
         simlin_project_unref(proj);
     }

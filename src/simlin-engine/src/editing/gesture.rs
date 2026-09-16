@@ -28,6 +28,11 @@
 //! different stocks, a stock whose variable exists); an invalid drop commits
 //! nothing (E6). Loose imported flow ends get clouds when an edit routes them,
 //! and links whose endpoints moved follow once, from the final elements.
+//!
+//! Every edit is planned through one rule (`Changes::into_plan`): a plan whose
+//! changes leave every element as the base holds it plans nothing, so a frame,
+//! its release and a nudge agree that it lands nothing, and a plan holding a
+//! number no patch can carry commits nothing.
 
 use std::collections::{HashMap, HashSet};
 
@@ -40,7 +45,8 @@ use crate::datamodel::view_element::{
 use crate::diagram::constants::AUX_RADIUS;
 
 use super::base::{
-    BaseView, VariableKind, is_link_source, label_side_of, position_of, translated, with_label_side,
+    BaseView, VariableKind, is_finite, is_link_source, label_side_of, position_of, translated,
+    with_label_side,
 };
 use super::geometry::{Axis, FlowEnd, GEOMETRY_EPSILON, Point};
 use super::heal::heal;
@@ -104,7 +110,8 @@ pub struct Press {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommitKind {
-    /// Nothing: an idle frame, or an invalid drop.
+    /// Nothing: an idle frame, an invalid drop, or an edit holding a number no
+    /// patch can carry.
     None,
     /// Apply the plan's edit (`Plan::edit`) and adopt its selection.
     Edit,
@@ -153,7 +160,8 @@ impl ViewEdit {
 #[derive(Clone, PartialEq)]
 pub struct Plan {
     /// Elements the frame draws in place of the base elements with the same uid,
-    /// or adds: substitutions in view order, then additions in creation order.
+    /// or adds, each differing from what the base holds: substitutions in view
+    /// order, then additions in creation order.
     pub changed: Vec<ViewElement>,
     /// Base elements the frame does not draw.
     pub removed: Vec<i32>,
@@ -198,24 +206,14 @@ impl Plan {
         }
     }
 
-    /// The view edit an `Edit` commit applies: the changed elements that differ
-    /// from the base, and the removals. `None` for any other commit, and for an
-    /// edit that changes nothing (a drag back to where it started).
-    pub fn edit(&self, base: &BaseView) -> Option<ViewEdit> {
-        if self.commit != CommitKind::Edit {
-            return None;
-        }
-        let upsert: Vec<ViewElement> = self
-            .changed
-            .iter()
-            .filter(|e| base.get(e.get_uid()) != Some(*e))
-            .cloned()
-            .collect();
-        let edit = ViewEdit {
-            upsert,
+    /// The view edit an `Edit` commit applies: the changed elements and the
+    /// removals, never both empty (`Changes::into_plan`). `None` for any other
+    /// commit.
+    pub fn edit(&self) -> Option<ViewEdit> {
+        (self.commit == CommitKind::Edit).then(|| ViewEdit {
+            upsert: self.changed.clone(),
             remove: self.removed.clone(),
-        };
-        (!edit.is_empty()).then_some(edit)
+        })
     }
 }
 
@@ -261,20 +259,30 @@ impl Changes {
     }
 
     /// The plan of an edit: the changes plus every link that follows a moved
-    /// endpoint.
+    /// endpoint, less what equals the base. A plan changing nothing is idle, so
+    /// a frame, its release and a nudge that move nothing all plan no edit. A
+    /// plan holding a number no patch can carry (a coordinate an offset
+    /// overflowed) previews and commits nothing.
     fn into_plan(mut self, base: &BaseView, selection: Vec<i32>, label: &'static str) -> Plan {
-        if self.elements.is_empty() && self.removed.is_empty() {
-            return Plan::idle(selection);
-        }
         for link in follow_links(base, &self.elements) {
             self.set(base, ViewElement::Link(link));
         }
+        self.elements
+            .retain(|&uid, element| base.get(uid) != Some(&*element));
+        if self.elements.is_empty() && self.removed.is_empty() {
+            return Plan::idle(selection);
+        }
+        let lands = self.elements.values().all(is_finite);
         let (changed, removed) = self.into_elements(base);
         Plan {
             changed,
             removed,
-            commit: CommitKind::Edit,
-            label,
+            commit: if lands {
+                CommitKind::Edit
+            } else {
+                CommitKind::None
+            },
+            label: if lands { label } else { "" },
             ..Plan::idle(selection)
         }
     }
@@ -476,9 +484,13 @@ fn create_element_plan(base: &BaseView, tool: Tool, at: Point, selection: Vec<i3
 /// link tools draw only by dragging. A tap on an element selects it (a toggle
 /// adds or removes it) and opens its details when it lands on the body or
 /// label; a tap on a cloud, or on a flow's or link's end, selects the flow or
-/// link. A tap on the empty canvas clears the selection.
+/// link. A tap on the empty canvas clears the selection, and a non-finite tap
+/// plans nothing.
 pub fn plan_tap(base: &BaseView, press: &Press) -> Plan {
     let current = &press.selection;
+    if !press.point.is_finite() {
+        return Plan::idle(current.clone());
+    }
     let Some(hit) = press.hit else {
         return match press.tool {
             Some(tool @ (Tool::Aux | Tool::Stock | Tool::Module)) => {
@@ -741,7 +753,8 @@ fn classify_drag(base: &BaseView, press: &Press) -> Option<(Gesture, Vec<i32>)> 
 /// with no moving terminal slides its valve by the travel along its pipe; links
 /// follow their moved endpoints, and have no position of their own to move. A
 /// move in which some routed flow cannot hold G2-G6 (a cloud moved inside another
-/// stock, say) commits nothing, and a non-finite `d` plans nothing.
+/// stock, say), or which overflows a coordinate, commits nothing, and a
+/// non-finite `d` plans nothing.
 pub fn plan_move(base: &BaseView, selection: &[i32], d: Point) -> Plan {
     if !d.is_finite() {
         return Plan::idle(selection.to_vec());
@@ -1243,42 +1256,45 @@ impl GestureSession {
             },
         };
         let obstacles = base.stock_centers();
-        let plan =
-            |flow: Flow, sink_cloud: Option<Cloud>, commit: CommitKind, target: Option<Target>| {
-                let mut changes = Changes::default();
-                if let Some(cloud) = &source_cloud {
-                    let p = point_of(&flow.points[0]);
-                    changes.set(
-                        base,
-                        ViewElement::Cloud(Cloud {
-                            x: p.x,
-                            y: p.y,
-                            ..cloud.clone()
-                        }),
-                    );
-                }
-                if let Some(cloud) = sink_cloud {
-                    let p = point_of(&flow.points[flow.points.len() - 1]);
-                    changes.set(
-                        base,
-                        ViewElement::Cloud(Cloud {
-                            x: p.x,
-                            y: p.y,
-                            ..cloud
-                        }),
-                    );
-                }
-                changes.set(base, ViewElement::Flow(flow));
-                let plan = changes.into_plan(base, vec![flow_uid], "flow creation");
-                let edit = commit == CommitKind::Edit;
-                Plan {
-                    target,
-                    commit,
-                    handoff: edit.then_some(flow_uid),
-                    label: if edit { plan.label } else { "" },
-                    ..plan
-                }
-            };
+        let plan = |flow: Flow, sink_cloud: Option<Cloud>, valid: bool, target: Option<Target>| {
+            let mut changes = Changes::default();
+            if let Some(cloud) = &source_cloud {
+                let p = point_of(&flow.points[0]);
+                changes.set(
+                    base,
+                    ViewElement::Cloud(Cloud {
+                        x: p.x,
+                        y: p.y,
+                        ..cloud.clone()
+                    }),
+                );
+            }
+            if let Some(cloud) = sink_cloud {
+                let p = point_of(&flow.points[flow.points.len() - 1]);
+                changes.set(
+                    base,
+                    ViewElement::Cloud(Cloud {
+                        x: p.x,
+                        y: p.y,
+                        ..cloud
+                    }),
+                );
+            }
+            changes.set(base, ViewElement::Flow(flow));
+            let plan = changes.into_plan(base, vec![flow_uid], "flow creation");
+            let edit = valid && plan.commit == CommitKind::Edit;
+            Plan {
+                target,
+                commit: if edit {
+                    CommitKind::Edit
+                } else {
+                    CommitKind::None
+                },
+                handoff: edit.then_some(flow_uid),
+                label: if edit { plan.label } else { "" },
+                ..plan
+            }
+        };
         let mut mark = None;
         if let Some(target) = base.stock_under(pointer, self.target_slop) {
             let terminal = target_stock_terminal(target.uid, Point::new(target.x, target.y));
@@ -1308,7 +1324,7 @@ impl GestureSession {
                 return plan(
                     g.flow,
                     None,
-                    CommitKind::Edit,
+                    true,
                     Some(Target {
                         uid: target.uid,
                         valid: true,
@@ -1341,16 +1357,7 @@ impl GestureSession {
         let g = route(source, sink, &draft, FlowEnd::Source, &occupied, obstacles);
         let valid = mark.is_none()
             && flow_fault(&path_of(&g.flow), &Terminals { source, sink }, obstacles) == Fault::None;
-        plan(
-            g.flow,
-            Some(sink_cloud),
-            if valid {
-                CommitKind::Edit
-            } else {
-                CommitKind::None
-            },
-            mark,
-        )
+        plan(g.flow, Some(sink_cloud), valid, mark)
     }
 
     /// The element a dragged link's end is over, and whether the link may end

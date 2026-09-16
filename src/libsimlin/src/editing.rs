@@ -280,8 +280,10 @@ fn edit_patch<'a>(model_name: &'a str, edit: editing::ViewEdit) -> PatchJson<'a>
     }
 }
 
-/// The end of a gesture or a tap, as `simlin_gesture_commit` and
-/// `simlin_model_plan_tap` write it.
+/// The end of a gesture or a tap, as `simlin_gesture_commit`,
+/// `simlin_model_plan_tap` and `simlin_model_plan_move` write it: an `"edit"`
+/// always carries its patch, since the engine plans no edit that changes
+/// nothing.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CommitJson<'a> {
@@ -297,25 +299,16 @@ struct CommitJson<'a> {
 fn commit_json<'a>(
     kind: Option<editing::GestureKind>,
     plan: &'a editing::Plan,
-    edit: Option<editing::ViewEdit>,
     model_name: &'a str,
 ) -> Result<Vec<u8>, SimlinError> {
-    // An edit that changes nothing (a drag back to its press, a move of what
-    // cannot move) lands nothing and is written as such, so an `"edit"` always
-    // carries its patch.
-    let lands = plan.commit != editing::CommitKind::Edit || edit.is_some();
     let json = CommitJson {
         kind: kind_name(kind),
-        commit: commit_name(if lands {
-            plan.commit
-        } else {
-            editing::CommitKind::None
-        }),
+        commit: commit_name(plan.commit),
         selection: &plan.selection,
         handoff: plan.handoff,
         details: plan.details,
-        label: if lands { plan.label } else { "" },
-        patch: edit.map(|edit| edit_patch(model_name, edit)),
+        label: plan.label,
+        patch: plan.edit().map(|edit| edit_patch(model_name, edit)),
     };
     serde_json::to_vec(&json)
         .map_err(|e| ffi_error(SimlinErrorCode::Generic, format!("serializing a plan: {e}")))
@@ -460,7 +453,7 @@ pub unsafe extern "C" fn simlin_model_plan_tap(
             }
         };
         let plan = editing::plan_tap(&base, &press);
-        commit_json(None, &plan, plan.edit(&base), model_ref.model_name.as_str())
+        commit_json(None, &plan, model_ref.model_name.as_str())
     };
     match bytes {
         Ok(bytes) => {
@@ -644,13 +637,7 @@ pub unsafe extern "C" fn simlin_gesture_commit(
     let bytes = {
         let mut state = gesture.state.lock().unwrap();
         let plan = state.session.frame(editing::Point::new(x, y));
-        let edit = plan.edit(state.session.base());
-        commit_json(
-            state.session.kind(),
-            &plan,
-            edit,
-            gesture.model_name.as_str(),
-        )
+        commit_json(state.session.kind(), &plan, gesture.model_name.as_str())
     };
     match bytes {
         Ok(bytes) => {
@@ -690,13 +677,14 @@ pub unsafe extern "C" fn simlin_gesture_unref(gesture: *mut SimlinGesture) {
 /// independent of the zoom: the frame a move-selection drag of the selection
 /// plans for that travel (`simlin_engine::editing::plan_move`), which a host
 /// plans to nudge the selection from the keyboard. Positioned elements move,
-/// flows follow their moved ends, a lone selected flow slides its valve along
-/// its pipe, and a link moves only with its endpoints. Writes the same JSON
-/// object as `simlin_model_plan_tap` to a buffer the caller frees with
-/// `simlin_free`, with `kind` `"moveSelection"`, and with `commit` `"none"` and
-/// `patch` null when the move lands nothing: nothing moves (a lone link, an
-/// offset across a lone flow's straight pipe), or a flow the move routes would
-/// break its invariants.
+/// flows follow their moved ends, a selected flow neither of whose ends moves
+/// slides its valve along its pipe, and a link moves only with its endpoints.
+/// Writes the same JSON object as `simlin_model_plan_tap` to a buffer the
+/// caller frees with `simlin_free`, with `kind` `"moveSelection"`, and with
+/// `commit` `"none"` and `patch` null when the move lands nothing: nothing
+/// moves (a lone link, an offset across a selected flow's straight pipe), a
+/// flow the move routes would break its invariants, or the offset overflows a
+/// coordinate.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
@@ -744,12 +732,7 @@ pub unsafe extern "C" fn simlin_model_plan_move(
             }
         };
         let plan = editing::plan_move(&base, selection, editing::Point::new(dx, dy));
-        commit_json(
-            Some(editing::GestureKind::MoveSelection),
-            &plan,
-            plan.edit(&base),
-            model_name,
-        )
+        commit_json(Some(editing::GestureKind::MoveSelection), &plan, model_name)
     };
     match bytes {
         Ok(bytes) => {

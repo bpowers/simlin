@@ -994,13 +994,14 @@ void simlin_gesture_unref(SimlinGesture *gesture);
 // independent of the zoom: the frame a move-selection drag of the selection
 // plans for that travel (`simlin_engine::editing::plan_move`), which a host
 // plans to nudge the selection from the keyboard. Positioned elements move,
-// flows follow their moved ends, a lone selected flow slides its valve along
-// its pipe, and a link moves only with its endpoints. Writes the same JSON
-// object as `simlin_model_plan_tap` to a buffer the caller frees with
-// `simlin_free`, with `kind` `"moveSelection"`, and with `commit` `"none"` and
-// `patch` null when the move lands nothing: nothing moves (a lone link, an
-// offset across a lone flow's straight pipe), or a flow the move routes would
-// break its invariants.
+// flows follow their moved ends, a selected flow neither of whose ends moves
+// slides its valve along its pipe, and a link moves only with its endpoints.
+// Writes the same JSON object as `simlin_model_plan_tap` to a buffer the
+// caller frees with `simlin_free`, with `kind` `"moveSelection"`, and with
+// `commit` `"none"` and `patch` null when the move lands nothing: nothing
+// moves (a lone link, an offset across a selected flow's straight pipe), a
+// flow the move routes would break its invariants, or the offset overflows a
+// coordinate.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel

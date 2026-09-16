@@ -329,7 +329,7 @@ fn every_gesture_starts_from_its_press_and_commits_what_its_frame_previews() {
                 "{kind:?}: a second frame at the release differs from the preview"
             ));
         }
-        match plan.edit(session.base()) {
+        match plan.edit() {
             Some(edit) => {
                 let report = commit_report(&mut project, &edit);
                 if !report.is_empty() {
@@ -361,12 +361,29 @@ fn a_drag_back_to_its_press_commits_nothing_except_placing_an_element() {
         // Move first, so a pipe press latches the way the row's drag does.
         session.frame(r.pointer);
         let back = session.frame(r.press);
-        // A creation tool places its element wherever the drag ends; every
-        // other gesture back at its press changes nothing.
-        let want_edit = kind == GestureKind::CreateElement;
-        let edit = back.edit(session.base());
-        if edit.is_some() != want_edit {
-            failures.push(format!("{kind:?}: back at the press, edit {edit:?}"));
+        // Every gesture back at its press changes nothing, and its frame says
+        // so, as its release does.
+        let want = match kind {
+            // A creation tool places its element wherever the drag ends.
+            GestureKind::CreateElement => CommitKind::Edit,
+            // A band adopts what it holds, which back at its press is nothing.
+            GestureKind::RubberBand => CommitKind::Select,
+            GestureKind::MoveSelection
+            | GestureKind::SlideValve
+            | GestureKind::OffsetSegment
+            | GestureKind::FlowEndpoint
+            | GestureKind::LinkEndpoint
+            | GestureKind::LinkArc
+            | GestureKind::CreateFlow
+            | GestureKind::CreateLink
+            | GestureKind::Label => CommitKind::None,
+        };
+        let edit = back.edit();
+        if back.commit != want || edit.is_some() != (want == CommitKind::Edit) {
+            failures.push(format!(
+                "{kind:?}: back at the press, commit {:?} with edit {edit:?}, want {want:?}",
+                back.commit
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -459,10 +476,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         };
         let plan = session.frame(d.pointer);
         let target = plan.target.map(|t| (t.uid, t.valid));
-        if target != d.target
-            || plan.commit != CommitKind::None
-            || plan.edit(session.base()).is_some()
-        {
+        if target != d.target || plan.commit != CommitKind::None || plan.edit().is_some() {
             failures.push(format!(
                 "{}: target {target:?} commit {:?}, want target {:?} and no commit",
                 d.name, plan.commit, d.target
@@ -512,6 +526,16 @@ fn a_tap_selects_creates_and_opens_details() {
             name: "the flow tool draws only by dragging",
             point: p(700.0, 700.0),
             tool: Some(Tool::Flow),
+            selection: &[2],
+            toggle: false,
+            commit: CommitKind::None,
+            want: Some(&[2]),
+            details: false,
+        },
+        Tap {
+            name: "a non-finite tap plans nothing, a creation tool armed or not",
+            point: p(f64::NAN, 700.0),
+            tool: Some(Tool::Aux),
             selection: &[2],
             toggle: false,
             commit: CommitKind::None,
@@ -628,7 +652,7 @@ fn a_tap_selects_creates_and_opens_details() {
                         t.name, plan.selection
                     ));
                 }
-                match plan.edit(&base) {
+                match plan.edit() {
                     Some(edit) => {
                         let report = commit_report(&mut project, &edit);
                         if !report.is_empty() {
@@ -731,7 +755,7 @@ fn drag_and_commit(
         return false;
     };
     let plan = session.frame(to);
-    let Some(edit) = plan.edit(session.base()) else {
+    let Some(edit) = plan.edit() else {
         return false;
     };
     let mut committed = project.clone();
@@ -954,14 +978,20 @@ fn nudge_report(project: &datamodel::Project, n: &Nudge) -> Vec<String> {
     if plan.selection != n.selection {
         failures.push(format!("{}: selection {:?}", n.name, plan.selection));
     }
-    let edit = plan.edit(&base);
-    if edit.is_some() != n.lands {
-        failures.push(format!("{}: lands {edit:?}, want {}", n.name, n.lands));
+    let edit = plan.edit();
+    // What the plan says it commits agrees with what it lands.
+    let (commit, label) = if n.lands {
+        (CommitKind::Edit, "move")
+    } else {
+        (CommitKind::None, "")
+    };
+    if (plan.commit, plan.label) != (commit, label) || edit.is_some() != n.lands {
+        failures.push(format!(
+            "{}: commits {:?} {:?} with {edit:?}, want {commit:?} {label:?}",
+            n.name, plan.commit, plan.label
+        ));
     }
     if let Some(edit) = &edit {
-        if plan.label != "move" {
-            failures.push(format!("{}: label {:?}", n.name, plan.label));
-        }
         let mut committed = project.clone();
         let report = commit_report(&mut committed, edit);
         if !report.is_empty() {
@@ -1117,10 +1147,24 @@ fn a_nudged_selection_lands_what_its_drag_plans_or_nothing() {
             None,
         ),
     ];
-    let failures: Vec<String> = rows
+    let mut failures: Vec<String> = rows
         .iter()
         .flat_map(|n| nudge_report(&project, n))
         .collect();
+    // An aux as far out as a coordinate goes, so an offset added to it
+    // overflows into a coordinate no patch can carry.
+    let at_the_edge = project_of(load(vec![labeled(aux(7, f64::MAX, 450.0), "bottom")]));
+    failures.extend(nudge_report(
+        &at_the_edge,
+        &nudge(
+            "an offset that overflows a coordinate commits nothing",
+            &[7],
+            p(f64::MAX, 0.0),
+            false,
+            &[],
+            None,
+        ),
+    ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -1149,7 +1193,7 @@ fn a_lone_flow_with_its_own_clouds_nudges_along_its_pipe_as_its_valve_drag_does(
         let mut session = begin_drag(base_of(&project), press)
             .expect("a press on a sole selected flow's pipe starts a drag");
         let plan = session.frame(at.offset(d));
-        (session.kind(), plan.edit(session.base()))
+        (session.kind(), plan.edit())
     };
     let upserted =
         |edit: &ViewEdit| -> Vec<i32> { edit.upsert.iter().map(ViewElement::get_uid).collect() };
@@ -1160,7 +1204,7 @@ fn a_lone_flow_with_its_own_clouds_nudges_along_its_pipe_as_its_valve_drag_does(
     let (kind, dragged) = drag(along);
     assert_eq!(kind, Some(GestureKind::SlideValve));
     let nudged = plan_move(&base, &[4], along)
-        .edit(&base)
+        .edit()
         .expect("the nudge lands");
     assert_eq!(
         Some(&nudged),
@@ -1194,7 +1238,7 @@ fn a_lone_flow_with_its_own_clouds_nudges_along_its_pipe_as_its_valve_drag_does(
         upserted(&dragged)
     );
     assert_eq!(
-        plan_move(&base, &[4], across).edit(&base),
+        plan_move(&base, &[4], across).edit(),
         None,
         "a nudge across a straight pipe lands nothing"
     );
@@ -1236,7 +1280,7 @@ fn generated_scenes_nudge_selections_into_edits_that_hold_the_invariants() {
                 } else {
                     rng.pick(&keys)
                 };
-                let Some(edit) = plan_move(&base, &selection, d).edit(&base) else {
+                let Some(edit) = plan_move(&base, &selection, d).edit() else {
                     continue;
                 };
                 applied += 1;
