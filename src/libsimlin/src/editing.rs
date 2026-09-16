@@ -12,6 +12,10 @@
 //! host applies with `simlin_project_apply_patch`, so an edit lands through the
 //! one patch path with its validation and error collection; a view edit's model
 //! operations are derived when it applies (`ModelOperation::EditView`).
+//!
+//! Every entry point that reads the project locks its datamodel, so it plans
+//! against committed contents and waits for an edit in flight to land: a hit
+//! test and the press planned from its hit read the same contents.
 
 use serde::Serialize;
 use simlin_engine::diagram::SceneElement;
@@ -343,10 +347,11 @@ unsafe fn require_outputs(
 /// view with `DoesNotExist`, as every editing entry point does.
 ///
 /// The view's index is built by the first hit test after the project changes
-/// and published until it changes again (`ProjectContents`), so a hover at
-/// display rate costs in proportion to what is near the point, and a hit test
-/// with a current index locks only the published indexes: it answers while an
-/// edit holds the project through its compile.
+/// and reused until it changes again (`ProjectContents`), so a hover at display
+/// rate costs in proportion to what is near the point. A hit test locks the
+/// project's datamodel, as the planners do, so while an edit holds the project
+/// it waits and answers from the contents the edit leaves: the contents a press
+/// is then planned against.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
@@ -383,33 +388,26 @@ pub unsafe extern "C" fn simlin_model_hit_test(
     };
     let project_ref = &*model_ref.project;
     let model_name = model_ref.model_name.as_str();
-    // A current published index answers without the datamodel's lock, which an
-    // edit holds through its compile; a missing or stale one is built under it.
-    let index = match project_ref.published.hit_index(model_name) {
-        Some(index) => index,
-        None => {
-            let contents = project_ref.datamodel.lock().unwrap();
-            // The scene draws a viewless model through a transient layout, which
-            // a hit could land on but no edit could change: refused here as the
-            // planners refuse it.
-            if let Err(err) = first_view(&contents, model_name) {
-                store_error(out_error, err);
-                return;
-            }
-            match contents.publish_hit_index(model_name) {
-                Ok(index) => index,
-                // The model and its view exist, so what is left to fail is internal.
-                Err(message) => {
-                    store_error(out_error, ffi_error(SimlinErrorCode::Generic, message));
-                    return;
-                }
+    let mut contents = project_ref.datamodel.lock().unwrap();
+    match contents.hit_index(model_name) {
+        Ok(index) => {
+            if let Some(hit) = index.hit(editing::Point::new(x, y), tolerance) {
+                *out_hit = true;
+                *out_uid = hit.uid;
+                *out_part = hit.part.into();
             }
         }
-    };
-    if let Some(hit) = index.hit(editing::Point::new(x, y), tolerance) {
-        *out_hit = true;
-        *out_uid = hit.uid;
-        *out_part = hit.part.into();
+        // An index fails to build exactly where the view does not resolve (a
+        // missing model, or a model with no stock-and-flow view, which the scene
+        // draws through a transient layout no edit could change), so only this
+        // path asks `first_view`, for the code it names; the build's message
+        // stands as `Generic` should the two ever part.
+        Err(message) => store_error(
+            out_error,
+            first_view(&contents, model_name)
+                .err()
+                .unwrap_or_else(|| ffi_error(SimlinErrorCode::Generic, message)),
+        ),
     }
 }
 
