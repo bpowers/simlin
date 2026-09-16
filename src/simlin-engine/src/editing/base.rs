@@ -389,9 +389,8 @@ pub(crate) fn translated(element: &ViewElement, d: Point) -> Option<ViewElement>
     Some(next)
 }
 
-/// Whether every number of the element a patch writes is finite. JSON has no
-/// spelling for a non-finite number, so no patch can carry an element holding
-/// one, and the scene draws nothing for a part holding one.
+/// Whether every number the scene draws the element from is finite: the scene
+/// draws nothing for a part holding a non-finite number (`scene::finish`).
 pub(crate) fn is_finite(element: &ViewElement) -> bool {
     let at = |x: f64, y: f64| x.is_finite() && y.is_finite();
     let along = |points: &[FlowPoint]| points.iter().all(|p| at(p.x, p.y));

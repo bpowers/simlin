@@ -462,7 +462,7 @@ fn a_move_that_lands_nothing_commits_none_without_a_patch() {
             );
         }
         // A nudge as far as a coordinate goes lands, and the next one overflows
-        // the coordinate, which no patch can carry.
+        // the coordinate into one the scene cannot draw.
         let to_the_edge = plan_move(model, &[AUX], f64::MAX, 0.0);
         assert_eq!(to_the_edge["commit"], "edit", "{to_the_edge}");
         apply(proj, &to_the_edge["patch"]);

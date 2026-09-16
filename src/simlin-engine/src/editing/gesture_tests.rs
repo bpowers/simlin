@@ -94,6 +94,35 @@ fn every_kind_scene() -> datamodel::Project {
     project_of(load(elements))
 }
 
+/// Nine tenths of the largest coordinate.
+const FAR: f64 = 0.9 * f64::MAX;
+
+/// Two stocks as far apart as coordinates go, on opposite sides of the origin:
+/// a route between them is longer than the largest coordinate.
+fn far_apart_stocks() -> Vec<json::ViewElement> {
+    vec![
+        labeled(stock(1, -FAR, 0.0), "bottom"),
+        labeled(stock(2, FAR, 0.0), "bottom"),
+    ]
+}
+
+fn far_stocks() -> datamodel::Project {
+    project_of(load(far_apart_stocks()))
+}
+
+/// `far_stocks` with a flow from a cloud at the origin into stock 2.
+fn far_flow() -> datamodel::Project {
+    let mut elements = far_apart_stocks();
+    elements.extend([
+        labeled(
+            flow(3, (FAR / 2.0, 0.0), &[(0.0, 0.0, 4), (FAR, 0.0, 2)]),
+            "bottom",
+        ),
+        cloud(4, 3, 0.0, 0.0),
+    ]);
+    project_of(load(elements))
+}
+
 fn element(project: &datamodel::Project, uid: i32) -> &ViewElement {
     view_of(project)
         .iter()
@@ -362,26 +391,30 @@ fn a_drag_back_to_its_press_commits_nothing_except_placing_an_element() {
         session.frame(r.pointer);
         let back = session.frame(r.press);
         // Every gesture back at its press changes nothing, and its frame says
-        // so, as its release does.
-        let want = match kind {
+        // so, as its release does. A target it is over still says whether a
+        // drop there is allowed, which dropping an end back where it was is.
+        let (want, target) = match kind {
             // A creation tool places its element wherever the drag ends.
-            GestureKind::CreateElement => CommitKind::Edit,
+            GestureKind::CreateElement => (CommitKind::Edit, None),
             // A band adopts what it holds, which back at its press is nothing.
-            GestureKind::RubberBand => CommitKind::Select,
+            GestureKind::RubberBand => (CommitKind::Select, None),
+            // Flow 3's end back on stock 2, and link 8's back on flow 4.
+            GestureKind::FlowEndpoint => (CommitKind::None, Some((2, true))),
+            GestureKind::LinkEndpoint => (CommitKind::None, Some((4, true))),
+            // A flow drawn back onto the stock it starts from is refused.
+            GestureKind::CreateFlow => (CommitKind::None, Some((2, false))),
             GestureKind::MoveSelection
             | GestureKind::SlideValve
             | GestureKind::OffsetSegment
-            | GestureKind::FlowEndpoint
-            | GestureKind::LinkEndpoint
             | GestureKind::LinkArc
-            | GestureKind::CreateFlow
             | GestureKind::CreateLink
-            | GestureKind::Label => CommitKind::None,
+            | GestureKind::Label => (CommitKind::None, None),
         };
         let edit = back.edit();
-        if back.commit != want || edit.is_some() != (want == CommitKind::Edit) {
+        let marked = back.target.map(|t| (t.uid, t.valid));
+        if back.commit != want || edit.is_some() != (want == CommitKind::Edit) || marked != target {
             failures.push(format!(
-                "{kind:?}: back at the press, commit {:?} with edit {edit:?}, want {want:?}",
+                "{kind:?}: back at the press, commit {:?} with edit {edit:?} and target {marked:?}, want {want:?} and {target:?}",
                 back.commit
             ));
         }
@@ -389,10 +422,23 @@ fn a_drag_back_to_its_press_commits_nothing_except_placing_an_element() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A drop the gesture refuses marks its target invalid, commits nothing and
+/// hands off nothing. A stock the route allows a flow onto is still refused
+/// where the routed flow holds a number the scene cannot draw: `flow_fault`
+/// judges the path's points, not the valve placed along the path, which a route
+/// longer than the largest coordinate places at NaN.
+///
+/// No press or drag reaches the other arms a refusal could take, so no row
+/// covers them. A link holds only an arc angle, which `shape_through` makes
+/// only from a finite takeoff, so creating or reattaching a link is never
+/// refused under a valid target. `plan_tap` and `GestureSession::frame` plan
+/// nothing for a non-finite point, and an element created at a finite point
+/// holds only finite numbers, so no refused creation hands off.
 #[test]
 fn a_refused_drop_marks_its_target_and_commits_nothing() {
     struct Drop {
         name: &'static str,
+        scene: fn() -> datamodel::Project,
         press: Point,
         tool: Option<Tool>,
         hit: (i32, HitPart),
@@ -407,6 +453,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
     let drops = [
         Drop {
             name: "a flow's end onto the stock at its other end",
+            scene,
             press: arrowhead_tip(&base, 3),
             tool: None,
             hit: (3, HitPart::Arrowhead),
@@ -416,6 +463,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         },
         Drop {
             name: "a flow's end onto a stock with no variable",
+            scene,
             press: p(300.0, 300.0),
             tool: None,
             hit: (6, HitPart::Body),
@@ -425,6 +473,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         },
         Drop {
             name: "a flow drawn from a stock back onto it",
+            scene,
             press: p(400.0, 100.0),
             tool: Some(Tool::Flow),
             hit: (2, HitPart::Body),
@@ -434,6 +483,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         },
         Drop {
             name: "a link onto its own source",
+            scene,
             press: p(250.0, 450.0),
             tool: Some(Tool::Link),
             hit: (7, HitPart::Body),
@@ -443,6 +493,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         },
         Drop {
             name: "a link duplicating an existing one",
+            scene,
             press: p(250.0, 450.0),
             tool: Some(Tool::Link),
             hit: (7, HitPart::Body),
@@ -450,10 +501,30 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
             target: Some((4, false)),
             without_variable: None,
         },
+        Drop {
+            name: "a flow drawn onto a stock as far off as coordinates go",
+            scene: far_stocks,
+            press: p(-FAR, 0.0),
+            tool: Some(Tool::Flow),
+            hit: (1, HitPart::Body),
+            pointer: p(FAR, 0.0),
+            target: Some((2, false)),
+            without_variable: None,
+        },
+        Drop {
+            name: "a flow's source end onto a stock as far off as coordinates go",
+            scene: far_flow,
+            press: p(0.0, 0.0),
+            tool: None,
+            hit: (4, HitPart::Body),
+            pointer: p(-FAR, 0.0),
+            target: Some((1, false)),
+            without_variable: None,
+        },
     ];
     let mut failures = Vec::new();
     for d in drops {
-        let mut project = scene();
+        let mut project = (d.scene)();
         if let Some(ident) = d.without_variable {
             project.models[0]
                 .variables
@@ -476,10 +547,14 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         };
         let plan = session.frame(d.pointer);
         let target = plan.target.map(|t| (t.uid, t.valid));
-        if target != d.target || plan.commit != CommitKind::None || plan.edit().is_some() {
+        if target != d.target
+            || plan.commit != CommitKind::None
+            || plan.edit().is_some()
+            || plan.handoff.is_some()
+        {
             failures.push(format!(
-                "{}: target {target:?} commit {:?}, want target {:?} and no commit",
-                d.name, plan.commit, d.target
+                "{}: target {target:?} commit {:?} handoff {:?}, want target {:?}, no commit and no handoff",
+                d.name, plan.commit, plan.handoff, d.target
             ));
         }
     }
@@ -1152,7 +1227,7 @@ fn a_nudged_selection_lands_what_its_drag_plans_or_nothing() {
         .flat_map(|n| nudge_report(&project, n))
         .collect();
     // An aux as far out as a coordinate goes, so an offset added to it
-    // overflows into a coordinate no patch can carry.
+    // overflows into a coordinate the scene cannot draw.
     let at_the_edge = project_of(load(vec![labeled(aux(7, f64::MAX, 450.0), "bottom")]));
     failures.extend(nudge_report(
         &at_the_edge,

@@ -32,7 +32,9 @@
 //! Every edit is planned through one rule (`Changes::into_plan`): a plan whose
 //! changes leave every element as the base holds it plans nothing, so a frame,
 //! its release and a nudge agree that it lands nothing, and a plan holding a
-//! number no patch can carry commits nothing.
+//! non-finite number commits nothing: the scene draws nothing for a part holding
+//! one, so landing it would make what the edit moved vanish. A drop target is
+//! valid exactly where the drop is allowed (`Changes::into_drop`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -110,8 +112,8 @@ pub struct Press {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommitKind {
-    /// Nothing: an idle frame, an invalid drop, or an edit holding a number no
-    /// patch can carry.
+    /// Nothing: an idle frame, an invalid drop, or an edit holding a number the
+    /// scene cannot draw.
     None,
     /// Apply the plan's edit (`Plan::edit`) and adopt its selection.
     Edit,
@@ -120,7 +122,10 @@ pub enum CommitKind {
 }
 
 /// A drop target under the pointer, drawn highlighted when valid and as a
-/// refusal when not.
+/// refusal when not. Validity is whether the drop is allowed: a drop that
+/// changes nothing (an end dropped back where it was) is allowed and commits
+/// nothing, and a drop whose result holds a number the scene cannot draw is
+/// not.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq)]
 pub struct Target {
@@ -259,32 +264,61 @@ impl Changes {
     }
 
     /// The plan of an edit: the changes plus every link that follows a moved
-    /// endpoint, less what equals the base. A plan changing nothing is idle, so
-    /// a frame, its release and a nudge that move nothing all plan no edit. A
-    /// plan holding a number no patch can carry (a coordinate an offset
-    /// overflowed) previews and commits nothing.
-    fn into_plan(mut self, base: &BaseView, selection: Vec<i32>, label: &'static str) -> Plan {
+    /// endpoint, less what equals the base (`Changes::settle`).
+    fn into_plan(self, base: &BaseView, selection: Vec<i32>, label: &'static str) -> Plan {
+        self.settle(base, selection, label).0
+    }
+
+    /// The plan of a drop onto `target`, which the gesture allows: the target is
+    /// marked valid unless the plan holds a number the scene cannot draw, which
+    /// refuses the drop. A drop that changes nothing stays allowed and plans
+    /// nothing.
+    fn into_drop(
+        self,
+        base: &BaseView,
+        selection: Vec<i32>,
+        label: &'static str,
+        target: i32,
+    ) -> Plan {
+        let (plan, refused) = self.settle(base, selection, label);
+        Plan {
+            target: Some(Target {
+                uid: target,
+                valid: !refused,
+            }),
+            ..plan
+        }
+    }
+
+    /// The plan of the changes, and whether it refuses them. A plan changing
+    /// nothing is idle, so a frame, its release and a nudge that move nothing
+    /// all plan no edit. A plan holding a non-finite number (a coordinate an
+    /// offset overflowed, a valve placed along a route longer than the largest
+    /// coordinate) is refused and commits nothing: the scene draws nothing for a
+    /// part holding one, so landing it would make what the edit moved vanish.
+    fn settle(mut self, base: &BaseView, selection: Vec<i32>, label: &'static str) -> (Plan, bool) {
         for link in follow_links(base, &self.elements) {
             self.set(base, ViewElement::Link(link));
         }
         self.elements
             .retain(|&uid, element| base.get(uid) != Some(&*element));
         if self.elements.is_empty() && self.removed.is_empty() {
-            return Plan::idle(selection);
+            return (Plan::idle(selection), false);
         }
-        let lands = self.elements.values().all(is_finite);
+        let refused = !self.elements.values().all(is_finite);
         let (changed, removed) = self.into_elements(base);
-        Plan {
+        let plan = Plan {
             changed,
             removed,
-            commit: if lands {
-                CommitKind::Edit
-            } else {
+            commit: if refused {
                 CommitKind::None
+            } else {
+                CommitKind::Edit
             },
-            label: if lands { label } else { "" },
+            label: if refused { "" } else { label },
             ..Plan::idle(selection)
-        }
+        };
+        (plan, refused)
     }
 
     fn into_elements(mut self, base: &BaseView) -> (Vec<ViewElement>, Vec<i32>) {
@@ -1144,13 +1178,7 @@ impl GestureSession {
                 }
                 changes.move_clouds(base, &g.clouds);
                 changes.set(base, ViewElement::Flow(g.flow));
-                return Plan {
-                    target: Some(Target {
-                        uid: target.uid,
-                        valid: true,
-                    }),
-                    ..changes.into_plan(base, self.selection.clone(), "flow attach")
-                };
+                return changes.into_drop(base, self.selection.clone(), "flow attach", target.uid);
             }
             mark = Some(Target {
                 uid: target.uid,
@@ -1281,10 +1309,15 @@ impl GestureSession {
                 );
             }
             changes.set(base, ViewElement::Flow(flow));
-            let plan = changes.into_plan(base, vec![flow_uid], "flow creation");
+            let (plan, refused) = changes.settle(base, vec![flow_uid], "flow creation");
             let edit = valid && plan.commit == CommitKind::Edit;
             Plan {
-                target,
+                // A stock the route allows the drop onto is refused where the
+                // flow holds a number the scene cannot draw.
+                target: target.map(|t| Target {
+                    valid: t.valid && !refused,
+                    ..t
+                }),
                 commit: if edit {
                     CommitKind::Edit
                 } else {
@@ -1417,13 +1450,7 @@ impl GestureSession {
                         polarity: None,
                     }),
                 );
-                Plan {
-                    target: Some(Target {
-                        uid: target.get_uid(),
-                        valid: true,
-                    }),
-                    ..changes.into_plan(base, vec![link_uid], "link creation")
-                }
+                changes.into_drop(base, vec![link_uid], "link creation", target.get_uid())
             }
             t => Plan {
                 target: t.map(|(e, _)| Target {
@@ -1463,13 +1490,12 @@ impl GestureSession {
                         ..link.clone()
                     }),
                 );
-                Plan {
-                    target: Some(Target {
-                        uid: target.get_uid(),
-                        valid: true,
-                    }),
-                    ..changes.into_plan(base, self.selection.clone(), "link attach")
-                }
+                changes.into_drop(
+                    base,
+                    self.selection.clone(),
+                    "link attach",
+                    target.get_uid(),
+                )
             }
             t => Plan {
                 removed: vec![link_uid],
