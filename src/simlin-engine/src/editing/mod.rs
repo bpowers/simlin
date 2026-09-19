@@ -46,9 +46,9 @@ pub use geometry::{
 };
 pub use gesture::{
     CommitKind, DanglingLink, GestureKind, GestureSession, Plan, PointerKind, Press, Target, Tool,
-    ViewEdit, begin_drag, plan_tap,
+    ViewEdit, begin_drag, plan_move, plan_tap,
 };
-pub use hit::{Hit, HitPart, hit_test};
+pub use hit::{Hit, HitIndex, HitPart, hit_test};
 pub use preview::{Preview, preview};
 
 pub(crate) use edit_view::{derived_operations, edited_view};

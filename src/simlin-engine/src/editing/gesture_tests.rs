@@ -12,6 +12,12 @@
 //! model/view agreement. Separate tables pin a drag back to its press (E1), the
 //! refused drops (E6), and what a tap selects, creates and opens. Generated
 //! scenes then drive stock moves and flow-end drags over many views.
+//!
+//! A nudge (`plan_move`) is the move-selection frame at an offset. Its rows are
+//! derived from the kinds of view element, and a nudge of a selection some drag
+//! moves must plan exactly what that drag's frame plans. Generated scenes nudge
+//! random selections into edits that hold the invariants and change only what
+//! the move reaches.
 
 use rayon::prelude::*;
 
@@ -21,12 +27,13 @@ use crate::diagram::connector::{ConnectorGeometry, connector_geometry};
 use crate::diagram::elements::aux_geometry;
 use crate::diagram::flow::flow_geometry;
 use crate::diagram::label::label_bounds;
-use crate::editing::hit::hit_test;
+use crate::editing::hit::{HitIndex, hit_test};
 use crate::editing::scene_gen::{Rng, strict_scene};
 use crate::editing::test_support::{
-    agreement_report, apply_edit, aux, base_of, cloud, flow, labeled, link, load, project_of,
-    stock, strict_report, view_of,
+    agreement_report, alias, apply_edit, aux, base_of, cloud, flow, labeled, link, load,
+    project_of, stock, strict_report, view_of,
 };
+use crate::json;
 
 use super::*;
 
@@ -34,8 +41,8 @@ const TOLERANCE: f64 = 10.0;
 
 /// Two stocks joined by a straight flow, a cloud-to-cloud flow, an aux linked to
 /// that flow, and a stock off to the side.
-fn scene() -> datamodel::Project {
-    project_of(load(vec![
+fn scene_elements() -> Vec<json::ViewElement> {
+    vec![
         labeled(stock(1, 100.0, 100.0), "bottom"),
         labeled(stock(2, 400.0, 100.0), "bottom"),
         labeled(
@@ -51,7 +58,69 @@ fn scene() -> datamodel::Project {
         labeled(aux(7, 250.0, 450.0), "bottom"),
         link(8, 7, 4, None),
         labeled(stock(9, 600.0, 300.0), "bottom"),
-    ]))
+    ]
+}
+
+fn scene() -> datamodel::Project {
+    project_of(load(scene_elements()))
+}
+
+/// `scene` with an element of every kind it lacks, each clear of the rest: a
+/// group, a module, and an alias of the aux.
+fn every_kind_scene() -> datamodel::Project {
+    let mut elements = scene_elements();
+    elements.extend([
+        json::ViewElement::Group(json::GroupViewElement {
+            uid: 10,
+            name: "g".to_string(),
+            x: 500.0,
+            y: 420.0,
+            width: 160.0,
+            height: 80.0,
+            is_mdl_view_marker: false,
+        }),
+        labeled(
+            json::ViewElement::Module(json::ModuleViewElement {
+                uid: 11,
+                name: "m".to_string(),
+                x: 450.0,
+                y: 620.0,
+                label_side: String::new(),
+            }),
+            "bottom",
+        ),
+        labeled(alias(12, 7, 100.0, 550.0), "bottom"),
+    ]);
+    project_of(load(elements))
+}
+
+/// Nine tenths of the largest coordinate.
+const FAR: f64 = 0.9 * f64::MAX;
+
+/// Two stocks as far apart as coordinates go, on opposite sides of the origin:
+/// a route between them is longer than the largest coordinate.
+fn far_apart_stocks() -> Vec<json::ViewElement> {
+    vec![
+        labeled(stock(1, -FAR, 0.0), "bottom"),
+        labeled(stock(2, FAR, 0.0), "bottom"),
+    ]
+}
+
+fn far_stocks() -> datamodel::Project {
+    project_of(load(far_apart_stocks()))
+}
+
+/// `far_stocks` with a flow from a cloud at the origin into stock 2.
+fn far_flow() -> datamodel::Project {
+    let mut elements = far_apart_stocks();
+    elements.extend([
+        labeled(
+            flow(3, (FAR / 2.0, 0.0), &[(0.0, 0.0, 4), (FAR, 0.0, 2)]),
+            "bottom",
+        ),
+        cloud(4, 3, 0.0, 0.0),
+    ]);
+    project_of(load(elements))
 }
 
 fn element(project: &datamodel::Project, uid: i32) -> &ViewElement {
@@ -289,7 +358,7 @@ fn every_gesture_starts_from_its_press_and_commits_what_its_frame_previews() {
                 "{kind:?}: a second frame at the release differs from the preview"
             ));
         }
-        match plan.edit(session.base()) {
+        match plan.edit() {
             Some(edit) => {
                 let report = commit_report(&mut project, &edit);
                 if !report.is_empty() {
@@ -321,21 +390,55 @@ fn a_drag_back_to_its_press_commits_nothing_except_placing_an_element() {
         // Move first, so a pipe press latches the way the row's drag does.
         session.frame(r.pointer);
         let back = session.frame(r.press);
-        // A creation tool places its element wherever the drag ends; every
-        // other gesture back at its press changes nothing.
-        let want_edit = kind == GestureKind::CreateElement;
-        let edit = back.edit(session.base());
-        if edit.is_some() != want_edit {
-            failures.push(format!("{kind:?}: back at the press, edit {edit:?}"));
+        // Every gesture back at its press changes nothing, and its frame says
+        // so, as its release does. A target it is over still says whether a
+        // drop there is allowed, which dropping an end back where it was is.
+        let (want, target) = match kind {
+            // A creation tool places its element wherever the drag ends.
+            GestureKind::CreateElement => (CommitKind::Edit, None),
+            // A band adopts what it holds, which back at its press is nothing.
+            GestureKind::RubberBand => (CommitKind::Select, None),
+            // Flow 3's end back on stock 2, and link 8's back on flow 4.
+            GestureKind::FlowEndpoint => (CommitKind::None, Some((2, true))),
+            GestureKind::LinkEndpoint => (CommitKind::None, Some((4, true))),
+            // A flow drawn back onto the stock it starts from is refused.
+            GestureKind::CreateFlow => (CommitKind::None, Some((2, false))),
+            GestureKind::MoveSelection
+            | GestureKind::SlideValve
+            | GestureKind::OffsetSegment
+            | GestureKind::LinkArc
+            | GestureKind::CreateLink
+            | GestureKind::Label => (CommitKind::None, None),
+        };
+        let edit = back.edit();
+        let marked = back.target.map(|t| (t.uid, t.valid));
+        if back.commit != want || edit.is_some() != (want == CommitKind::Edit) || marked != target {
+            failures.push(format!(
+                "{kind:?}: back at the press, commit {:?} with edit {edit:?} and target {marked:?}, want {want:?} and {target:?}",
+                back.commit
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A drop the gesture refuses marks its target invalid, commits nothing and
+/// hands off nothing. A stock the route allows a flow onto is still refused
+/// where the routed flow holds a number the scene cannot draw: `flow_fault`
+/// judges the path's points, not the valve placed along the path, which a route
+/// longer than the largest coordinate places at NaN.
+///
+/// No press or drag reaches the other arms a refusal could take, so no row
+/// covers them. A link holds only an arc angle, which `shape_through` makes
+/// only from a finite takeoff, so creating or reattaching a link is never
+/// refused under a valid target. `plan_tap` and `GestureSession::frame` plan
+/// nothing for a non-finite point, and an element created at a finite point
+/// holds only finite numbers, so no refused creation hands off.
 #[test]
 fn a_refused_drop_marks_its_target_and_commits_nothing() {
     struct Drop {
         name: &'static str,
+        scene: fn() -> datamodel::Project,
         press: Point,
         tool: Option<Tool>,
         hit: (i32, HitPart),
@@ -350,6 +453,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
     let drops = [
         Drop {
             name: "a flow's end onto the stock at its other end",
+            scene,
             press: arrowhead_tip(&base, 3),
             tool: None,
             hit: (3, HitPart::Arrowhead),
@@ -359,6 +463,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         },
         Drop {
             name: "a flow's end onto a stock with no variable",
+            scene,
             press: p(300.0, 300.0),
             tool: None,
             hit: (6, HitPart::Body),
@@ -368,6 +473,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         },
         Drop {
             name: "a flow drawn from a stock back onto it",
+            scene,
             press: p(400.0, 100.0),
             tool: Some(Tool::Flow),
             hit: (2, HitPart::Body),
@@ -377,6 +483,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         },
         Drop {
             name: "a link onto its own source",
+            scene,
             press: p(250.0, 450.0),
             tool: Some(Tool::Link),
             hit: (7, HitPart::Body),
@@ -386,6 +493,7 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         },
         Drop {
             name: "a link duplicating an existing one",
+            scene,
             press: p(250.0, 450.0),
             tool: Some(Tool::Link),
             hit: (7, HitPart::Body),
@@ -393,10 +501,30 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
             target: Some((4, false)),
             without_variable: None,
         },
+        Drop {
+            name: "a flow drawn onto a stock as far off as coordinates go",
+            scene: far_stocks,
+            press: p(-FAR, 0.0),
+            tool: Some(Tool::Flow),
+            hit: (1, HitPart::Body),
+            pointer: p(FAR, 0.0),
+            target: Some((2, false)),
+            without_variable: None,
+        },
+        Drop {
+            name: "a flow's source end onto a stock as far off as coordinates go",
+            scene: far_flow,
+            press: p(0.0, 0.0),
+            tool: None,
+            hit: (4, HitPart::Body),
+            pointer: p(-FAR, 0.0),
+            target: Some((1, false)),
+            without_variable: None,
+        },
     ];
     let mut failures = Vec::new();
     for d in drops {
-        let mut project = scene();
+        let mut project = (d.scene)();
         if let Some(ident) = d.without_variable {
             project.models[0]
                 .variables
@@ -421,11 +549,12 @@ fn a_refused_drop_marks_its_target_and_commits_nothing() {
         let target = plan.target.map(|t| (t.uid, t.valid));
         if target != d.target
             || plan.commit != CommitKind::None
-            || plan.edit(session.base()).is_some()
+            || plan.edit().is_some()
+            || plan.handoff.is_some()
         {
             failures.push(format!(
-                "{}: target {target:?} commit {:?}, want target {:?} and no commit",
-                d.name, plan.commit, d.target
+                "{}: target {target:?} commit {:?} handoff {:?}, want target {:?}, no commit and no handoff",
+                d.name, plan.commit, plan.handoff, d.target
             ));
         }
     }
@@ -472,6 +601,16 @@ fn a_tap_selects_creates_and_opens_details() {
             name: "the flow tool draws only by dragging",
             point: p(700.0, 700.0),
             tool: Some(Tool::Flow),
+            selection: &[2],
+            toggle: false,
+            commit: CommitKind::None,
+            want: Some(&[2]),
+            details: false,
+        },
+        Tap {
+            name: "a non-finite tap plans nothing, a creation tool armed or not",
+            point: p(f64::NAN, 700.0),
+            tool: Some(Tool::Aux),
             selection: &[2],
             toggle: false,
             commit: CommitKind::None,
@@ -588,7 +727,7 @@ fn a_tap_selects_creates_and_opens_details() {
                         t.name, plan.selection
                     ));
                 }
-                match plan.edit(&base) {
+                match plan.edit() {
                     Some(edit) => {
                         let report = commit_report(&mut project, &edit);
                         if !report.is_empty() {
@@ -691,7 +830,7 @@ fn drag_and_commit(
         return false;
     };
     let plan = session.frame(to);
-    let Some(edit) = plan.edit(session.base()) else {
+    let Some(edit) = plan.edit() else {
         return false;
     };
     let mut committed = project.clone();
@@ -768,6 +907,483 @@ fn generated_scenes_move_stocks_and_drag_flow_ends_into_edits_that_hold_the_inva
     assert!(
         failures.is_empty(),
         "{} of {applied} committed edits violate\n{}",
+        failures.len(),
+        failures
+            .iter()
+            .take(8)
+            .map(|f| f.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// A selection nudged by `d`, and what landing it does.
+struct Nudge {
+    name: &'static str,
+    selection: Vec<i32>,
+    d: Point,
+    /// Whether the nudge lands an edit.
+    lands: bool,
+    /// Elements whose position moves by exactly `d`.
+    translated: Vec<i32>,
+    /// The selected element a move-selection drag of the selection is pressed
+    /// on, for a selection a drag moves.
+    drag_from: Option<i32>,
+}
+
+/// The nudge of a lone element of `element`'s kind. Exhaustive, so a new kind
+/// of element does not compile until it has a row.
+fn lone_nudge(element: &ViewElement) -> Nudge {
+    let uid = element.get_uid();
+    let alone = |name: &'static str, lands: bool| Nudge {
+        name,
+        selection: vec![uid],
+        d: Point::new(10.0, 0.0),
+        lands,
+        translated: Vec::new(),
+        drag_from: None,
+    };
+    let dragged = |name: &'static str| Nudge {
+        translated: vec![uid],
+        drag_from: Some(uid),
+        ..alone(name, true)
+    };
+    match element {
+        ViewElement::Stock(_) => dragged("a stock"),
+        ViewElement::Aux(_) => dragged("an aux"),
+        ViewElement::Module(_) => dragged("a module"),
+        ViewElement::Alias(_) => dragged("an alias"),
+        ViewElement::Group(_) => dragged("a group"),
+        // Its flow's end is routed onto it, which re-centers it on the routed
+        // endpoint; a drag of a lone cloud drags its flow's end instead.
+        ViewElement::Cloud(_) => alone("a cloud", true),
+        // The valve slides along the pipe; a drag of a lone flow latches a slide
+        // or an offset on its first movement (the own-clouds test below).
+        ViewElement::Flow(_) => alone("a flow", true),
+        // A link has no position of its own, and a drag of a lone link curves it.
+        ViewElement::Link(_) => alone("a link", false),
+    }
+}
+
+/// A point whose production hit is `uid`'s body: its position when the hit
+/// there is, else the first such point of a grid around it.
+fn body_point(project: &datamodel::Project, uid: i32) -> Point {
+    let index = HitIndex::new(project, "main").expect("main has a view");
+    let on_body = |p: Point| {
+        index.hit(p, TOLERANCE)
+            == Some(Hit {
+                uid,
+                part: HitPart::Body,
+            })
+    };
+    let at = position_of(element(project, uid)).expect("a positioned element");
+    if on_body(at) {
+        return at;
+    }
+    (0..81)
+        .flat_map(|i| {
+            (0..81).map(move |j| {
+                Point::new(
+                    at.x - 100.0 + 2.5 * f64::from(i),
+                    at.y - 100.0 + 2.5 * f64::from(j),
+                )
+            })
+        })
+        .find(|&p| on_body(p))
+        .unwrap_or_else(|| panic!("no point lands on {uid}'s body"))
+}
+
+/// The uids a move of `selection` may change: the selection, every flow it holds
+/// or with an end on what it holds, those flows' clouds, and the links touching
+/// any of them. A committed move leaves everything else as it was (E4).
+fn may_change(view: &[ViewElement], selection: &[i32]) -> HashSet<i32> {
+    let mut reached: HashSet<i32> = selection.iter().copied().collect();
+    for element in view {
+        let ViewElement::Flow(f) = element else {
+            continue;
+        };
+        let ends_on_selection = [f.points.first(), f.points.last()]
+            .into_iter()
+            .flatten()
+            .any(|p| p.attached_to_uid.is_some_and(|u| selection.contains(&u)));
+        if selection.contains(&f.uid) || ends_on_selection {
+            reached.insert(f.uid);
+            reached.extend(view.iter().filter_map(|e| match e {
+                ViewElement::Cloud(c) if c.flow_uid == f.uid => Some(c.uid),
+                _ => None,
+            }));
+        }
+    }
+    let links: Vec<i32> = view
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Link(l)
+                if reached.contains(&l.from_uid) || reached.contains(&l.to_uid) =>
+            {
+                Some(l.uid)
+            }
+            _ => None,
+        })
+        .collect();
+    reached.extend(links);
+    reached
+}
+
+/// The base elements a move of `selection` may not change that `committed`
+/// changed or dropped.
+fn changed_outside_the_move(
+    before: &[ViewElement],
+    committed: &[ViewElement],
+    selection: &[i32],
+) -> Vec<i32> {
+    let reached = may_change(before, selection);
+    before
+        .iter()
+        .filter(|b| !reached.contains(&b.get_uid()))
+        .filter(|b| committed.iter().find(|e| e.get_uid() == b.get_uid()) != Some(*b))
+        .map(ViewElement::get_uid)
+        .collect()
+}
+
+/// What a nudge row's plan violates, empty when it holds.
+fn nudge_report(project: &datamodel::Project, n: &Nudge) -> Vec<String> {
+    let base = base_of(project);
+    let plan = plan_move(&base, &n.selection, n.d);
+    let mut failures = Vec::new();
+    if plan.selection != n.selection {
+        failures.push(format!("{}: selection {:?}", n.name, plan.selection));
+    }
+    let edit = plan.edit();
+    // What the plan says it commits agrees with what it lands.
+    let (commit, label) = if n.lands {
+        (CommitKind::Edit, "move")
+    } else {
+        (CommitKind::None, "")
+    };
+    if (plan.commit, plan.label) != (commit, label) || edit.is_some() != n.lands {
+        failures.push(format!(
+            "{}: commits {:?} {:?} with {edit:?}, want {commit:?} {label:?}",
+            n.name, plan.commit, plan.label
+        ));
+    }
+    if let Some(edit) = &edit {
+        let mut committed = project.clone();
+        let report = commit_report(&mut committed, edit);
+        if !report.is_empty() {
+            failures.push(format!("{}: {report}", n.name));
+        }
+        let outside = changed_outside_the_move(view_of(project), view_of(&committed), &n.selection);
+        if !outside.is_empty() {
+            failures.push(format!(
+                "{}: changes {outside:?}, which the move does not reach",
+                n.name
+            ));
+        }
+        for &uid in &n.translated {
+            let before = position_of(element(project, uid));
+            let after = position_of(element(&committed, uid));
+            if after != before.map(|p| p.offset(n.d)) {
+                failures.push(format!(
+                    "{}: {uid} moves from {before:?} to {after:?}, not by the offset",
+                    n.name
+                ));
+            }
+        }
+    }
+    if let Some(from) = n.drag_from {
+        let at = body_point(project, from);
+        let press = Press {
+            point: at,
+            hit: Some(Hit {
+                uid: from,
+                part: HitPart::Body,
+            }),
+            tool: None,
+            selection: n.selection.clone(),
+            toggle: false,
+            pointer: PointerKind::Mouse,
+            target_slop: TOLERANCE,
+        };
+        match begin_drag(base_of(project), press) {
+            Some(mut session) => {
+                let pointer = at.offset(n.d);
+                let frame = session.frame(pointer);
+                if session.kind() != Some(GestureKind::MoveSelection) {
+                    failures.push(format!("{}: the drag latched {:?}", n.name, session.kind()));
+                }
+                // The travel the frame reads, as the frame computes it.
+                if frame != plan_move(&base, &n.selection, pointer.minus(at)) {
+                    failures.push(format!(
+                        "{}: the drag's frame plans other than the nudge",
+                        n.name
+                    ));
+                }
+            }
+            None => failures.push(format!("{}: the press starts no drag", n.name)),
+        }
+    }
+    failures
+}
+
+#[test]
+fn a_lone_element_of_each_kind_nudges_as_its_move_plans() {
+    let project = every_kind_scene();
+    let mut kinds = HashSet::new();
+    let mut failures = Vec::new();
+    for element in view_of(&project) {
+        if kinds.insert(std::mem::discriminant(element)) {
+            failures.extend(nudge_report(&project, &lone_nudge(element)));
+        }
+    }
+    assert_eq!(kinds.len(), 8, "the scene holds an element of every kind");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_nudged_selection_lands_what_its_drag_plans_or_nothing() {
+    let project = every_kind_scene();
+    let p = Point::new;
+    let nudge = |name: &'static str,
+                 selection: &[i32],
+                 d: Point,
+                 lands: bool,
+                 translated: &[i32],
+                 drag_from: Option<i32>| Nudge {
+        name,
+        selection: selection.to_vec(),
+        d,
+        lands,
+        translated: translated.to_vec(),
+        drag_from,
+    };
+    let rows = [
+        nudge(
+            "a flow with both its clouds translates whole",
+            &[4, 5, 6],
+            p(10.0, 20.0),
+            true,
+            &[4, 5, 6],
+            Some(5),
+        ),
+        nudge(
+            "two stocks carry the flow between them",
+            &[1, 2],
+            p(0.0, 30.0),
+            true,
+            &[1, 2, 3],
+            Some(1),
+        ),
+        nudge(
+            "a stock re-routes its flow, and a moved aux's link follows",
+            &[1, 7],
+            p(0.0, 30.0),
+            true,
+            &[1, 7],
+            Some(1),
+        ),
+        nudge(
+            "a move putting a cloud inside a stock commits nothing",
+            &[6, 7],
+            p(300.0, 0.0),
+            false,
+            &[],
+            Some(7),
+        ),
+        nudge(
+            "an empty selection moves nothing",
+            &[],
+            p(10.0, 0.0),
+            false,
+            &[],
+            None,
+        ),
+        nudge(
+            "a zero offset moves nothing",
+            &[7],
+            p(0.0, 0.0),
+            false,
+            &[],
+            Some(7),
+        ),
+        nudge(
+            "a non-finite offset moves nothing",
+            &[7],
+            p(f64::NAN, 0.0),
+            false,
+            &[],
+            None,
+        ),
+        nudge(
+            "a uid the view lacks moves nothing",
+            &[99],
+            p(10.0, 0.0),
+            false,
+            &[],
+            None,
+        ),
+    ];
+    let mut failures: Vec<String> = rows
+        .iter()
+        .flat_map(|n| nudge_report(&project, n))
+        .collect();
+    // An aux as far out as a coordinate goes, so an offset added to it
+    // overflows into a coordinate the scene cannot draw.
+    let at_the_edge = project_of(load(vec![labeled(aux(7, f64::MAX, 450.0), "bottom")]));
+    failures.extend(nudge_report(
+        &at_the_edge,
+        &nudge(
+            "an offset that overflows a coordinate commits nothing",
+            &[7],
+            p(f64::MAX, 0.0),
+            false,
+            &[],
+            None,
+        ),
+    ));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_lone_flow_with_its_own_clouds_nudges_along_its_pipe_as_its_valve_drag_does() {
+    let project = scene();
+    let base = base_of(&project);
+    // On flow 4's pipe, between its source cloud and its valve.
+    let at = Point::new(150.0, 300.0);
+    let hit = hit_test(&project, "main", at, TOLERANCE).expect("main has a view");
+    assert_eq!(
+        hit.map(|h| (h.uid, h.part)),
+        Some((4, HitPart::Body)),
+        "the press lands on the pipe"
+    );
+    let drag = |d: Point| {
+        let press = Press {
+            point: at,
+            hit,
+            tool: None,
+            selection: vec![4],
+            toggle: false,
+            pointer: PointerKind::Mouse,
+            target_slop: TOLERANCE,
+        };
+        let mut session = begin_drag(base_of(&project), press)
+            .expect("a press on a sole selected flow's pipe starts a drag");
+        let plan = session.frame(at.offset(d));
+        (session.kind(), plan.edit())
+    };
+    let upserted =
+        |edit: &ViewEdit| -> Vec<i32> { edit.upsert.iter().map(ViewElement::get_uid).collect() };
+
+    // Along the pipe the drag latches a valve slide, and the nudge lands the
+    // same edit: the valve moves along, and both clouds stay.
+    let along = Point::new(20.0, 0.0);
+    let (kind, dragged) = drag(along);
+    assert_eq!(kind, Some(GestureKind::SlideValve));
+    let nudged = plan_move(&base, &[4], along)
+        .edit()
+        .expect("the nudge lands");
+    assert_eq!(
+        Some(&nudged),
+        dragged.as_ref(),
+        "the nudge lands what the valve drag lands"
+    );
+    assert_eq!(
+        upserted(&nudged),
+        [4],
+        "only the flow changes; its clouds stay"
+    );
+    let Some(ViewElement::Flow(f)) = nudged.upsert.first() else {
+        panic!("the flow is upserted");
+    };
+    assert_eq!(
+        (f.x, f.y),
+        (220.0, 300.0),
+        "the valve slides by the travel along the pipe"
+    );
+
+    // Across the pipe the drag latches a segment offset, which carries both
+    // clouds with the pipe. A nudge has no pressed segment, and a valve slides
+    // only along its pipe, so it lands nothing.
+    let across = Point::new(0.0, 20.0);
+    let (kind, dragged) = drag(across);
+    assert_eq!(kind, Some(GestureKind::OffsetSegment));
+    let dragged = dragged.expect("the offset lands");
+    assert!(
+        [5, 6].iter().all(|c| upserted(&dragged).contains(c)),
+        "the offset carries both clouds: {:?}",
+        upserted(&dragged)
+    );
+    assert_eq!(
+        plan_move(&base, &[4], across).edit(),
+        None,
+        "a nudge across a straight pipe lands nothing"
+    );
+}
+
+#[test]
+fn generated_scenes_nudge_selections_into_edits_that_hold_the_invariants() {
+    const SEEDS: u32 = 40;
+    const NUDGES: usize = 12;
+    let keys = [
+        Point::new(1.0, 0.0),
+        Point::new(-1.0, 0.0),
+        Point::new(0.0, 1.0),
+        Point::new(0.0, -1.0),
+        Point::new(10.0, 0.0),
+        Point::new(-10.0, 0.0),
+        Point::new(0.0, 10.0),
+        Point::new(0.0, -10.0),
+    ];
+    let results: Vec<(usize, Vec<String>)> = (1..=SEEDS)
+        .into_par_iter()
+        .map(|seed| {
+            let project = project_of(strict_scene(seed).elements);
+            let base = base_of(&project);
+            let view = view_of(&project);
+            let movable: Vec<i32> = view
+                .iter()
+                .filter(|e| !matches!(e, ViewElement::Link(_)))
+                .map(ViewElement::get_uid)
+                .collect();
+            let mut rng = Rng::new(seed.wrapping_mul(131).wrapping_add(17));
+            let (mut applied, mut failures) = (0, Vec::new());
+            for n in 0..NUDGES {
+                let size = rng.int(1.0, 4.0) as usize;
+                let selection: Vec<i32> = (0..size).map(|_| rng.pick(&movable)).collect();
+                // Arrow keys, and now and then a travel as large as a drag's.
+                let d = if n % 3 == 2 {
+                    random_delta(&mut rng)
+                } else {
+                    rng.pick(&keys)
+                };
+                let Some(edit) = plan_move(&base, &selection, d).edit() else {
+                    continue;
+                };
+                applied += 1;
+                let context = format!("seed {seed} nudge {selection:?} by ({}, {})", d.x, d.y);
+                let mut committed = project.clone();
+                let report = commit_report(&mut committed, &edit);
+                if !report.is_empty() {
+                    failures.push(format!("{context}: {report}"));
+                }
+                let outside = changed_outside_the_move(view, view_of(&committed), &selection);
+                if !outside.is_empty() {
+                    failures.push(format!(
+                        "{context}: changes {outside:?}, which the move does not reach"
+                    ));
+                }
+            }
+            (applied, failures)
+        })
+        .collect();
+    let applied: usize = results.iter().map(|(a, _)| a).sum();
+    let failures: Vec<&String> = results.iter().flat_map(|(_, f)| f).collect();
+    assert!(
+        applied > 300,
+        "only {applied} nudges landed over {SEEDS} seeds"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} of {applied} landed nudges violate\n{}",
         failures.len(),
         failures
             .iter()

@@ -654,7 +654,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // `sync_staged`, so only the canonical datamodel needs to be written. The
     // memos the staged diagnostics and compile superseded are freed when the
     // db lock drops (`DbLock`), inside this edit rather than the next.
-    *datamodel_locked = staged_datamodel;
+    **datamodel_locked = staged_datamodel;
 }
 
 // ── FFI entry point ────────────────────────────────────────────────────

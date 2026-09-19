@@ -1781,7 +1781,7 @@ fn test_replace_contents_live_model_handle_observes_new_contents() {
         assert_eq!((*dst).ref_count.load(Ordering::SeqCst), dst_refs_before);
         assert_eq!((*src).ref_count.load(Ordering::SeqCst), src_refs_before);
         assert!(
-            *(*src).datamodel.lock().unwrap() == src_snapshot,
+            **(*src).datamodel.lock().unwrap() == src_snapshot,
             "source project must be left untouched"
         );
 
@@ -1990,7 +1990,7 @@ fn test_replace_contents_self_and_null_safety() {
     unsafe {
         let snapshot = (*proj).datamodel.lock().unwrap().clone();
         replace_contents_ok(proj, proj);
-        assert!(*(*proj).datamodel.lock().unwrap() == snapshot);
+        assert!(**(*proj).datamodel.lock().unwrap() == snapshot);
 
         let mut err: *mut SimlinError = ptr::null_mut();
         simlin_project_replace_contents(ptr::null_mut(), proj, &mut err);
@@ -1999,7 +1999,7 @@ fn test_replace_contents_self_and_null_safety() {
         err = ptr::null_mut();
         simlin_project_replace_contents(proj, ptr::null(), &mut err);
         expect_error_code(err, SimlinErrorCode::Generic, "NULL src");
-        assert!(*(*proj).datamodel.lock().unwrap() == snapshot);
+        assert!(**(*proj).datamodel.lock().unwrap() == snapshot);
 
         simlin_project_unref(proj);
     }

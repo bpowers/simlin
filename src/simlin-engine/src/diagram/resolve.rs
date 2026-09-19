@@ -10,8 +10,10 @@
 //! can never disagree about whether a flow with a dangling endpoint is drawn,
 //! which layer a module sits in, or what folds into the fit-to-content box.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
+use crate::common::canonicalize;
 use crate::datamodel::{self, Equation, View, ViewElement, view_element};
 use crate::diagram::common::{Rect, calc_view_box};
 use crate::diagram::elements::{
@@ -101,22 +103,47 @@ pub(crate) struct ResolvedView<'a> {
     /// The union of the elements' fit-to-content boxes (the SVG viewBox before
     /// its padding), `None` when no element contributes one.
     pub content_bounds: Option<Rect>,
+    arrayed: Arrayed<'a>,
 }
 
 impl ResolvedView<'_> {
     /// Whether the named variable has an apply-to-all or arrayed equation, and
     /// so draws stacked copies.
     pub(crate) fn is_arrayed(&self, name: &str) -> bool {
-        is_arrayed(self.model, name)
+        self.arrayed.is_arrayed(name)
     }
 }
 
-fn is_arrayed(model: &datamodel::Model, name: &str) -> bool {
-    model
-        .get_variable(name)
-        .and_then(|v| v.get_equation())
-        .map(|eq| matches!(eq, Equation::ApplyToAll(..) | Equation::Arrayed(..)))
-        .unwrap_or(false)
+/// Which of a model's variables have an apply-to-all or arrayed equation, by
+/// canonical ident, read once per view. Drawing asks per element, and several
+/// times per link, so an answer must never scan the model's variables: a scan
+/// per answer makes drawing a view quadratic in the size of the model.
+struct Arrayed<'a>(HashMap<Cow<'a, str>, bool>);
+
+impl<'a> Arrayed<'a> {
+    fn of(model: &'a datamodel::Model) -> Arrayed<'a> {
+        let mut by_ident = HashMap::with_capacity(model.variables.len());
+        for variable in &model.variables {
+            // The first variable of an ident decides, the one
+            // `Model::get_variable` finds.
+            by_ident
+                .entry(canonicalize(variable.get_ident()))
+                .or_insert_with(|| {
+                    matches!(
+                        variable.get_equation(),
+                        Some(Equation::ApplyToAll(..) | Equation::Arrayed(..))
+                    )
+                });
+        }
+        Arrayed(by_ident)
+    }
+
+    fn is_arrayed(&self, name: &str) -> bool {
+        self.0
+            .get(canonicalize(name).as_ref())
+            .copied()
+            .unwrap_or(false)
+    }
 }
 
 /// Resolves `model_name`'s first stock-and-flow view.
@@ -147,11 +174,12 @@ pub(crate) fn resolve_view<'a>(
         .collect();
     let lookup = |uid: i32| -> Option<&'a ViewElement> { uid_to_element.get(&uid).copied() };
 
-    let arrayed = |name: &str| is_arrayed(model, name);
+    let arrayed = Arrayed::of(model);
+    let is_arrayed = |name: &str| arrayed.is_arrayed(name);
     let elements: Vec<ResolvedElement<'a>> = stock_flow
         .elements
         .iter()
-        .filter_map(|element| resolve_element(element, &lookup, &arrayed))
+        .filter_map(|element| resolve_element(element, &lookup, &is_arrayed))
         .collect();
 
     let content_bounds = calc_view_box(
@@ -168,6 +196,7 @@ pub(crate) fn resolve_view<'a>(
         model,
         elements,
         content_bounds,
+        arrayed,
     })
 }
 

@@ -2,8 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Diagram editing FFI: hit testing, taps, drag gestures, and the patches a
-//! delete and a rename imply.
+//! Diagram editing FFI: hit testing, taps, drag gestures, moves of the
+//! selection, and the patches a delete and a rename imply.
 //!
 //! A host draws a model's scene (`simlin_project_render_scene`) and routes its
 //! input through these entry points, which plan against the model's first
@@ -12,6 +12,10 @@
 //! host applies with `simlin_project_apply_patch`, so an edit lands through the
 //! one patch path with its validation and error collection; a view edit's model
 //! operations are derived when it applies (`ModelOperation::EditView`).
+//!
+//! Every entry point that reads the project locks its datamodel, so it plans
+//! against committed contents and waits for an edit in flight to land: a hit
+//! test and the press planned from its hit read the same contents.
 
 use serde::Serialize;
 use simlin_engine::diagram::SceneElement;
@@ -149,6 +153,18 @@ fn ffi_error(code: SimlinErrorCode, message: impl Into<String>) -> SimlinError {
     SimlinError::new(code).with_message(message.into())
 }
 
+/// The `len` uids at `selection`, which may be NULL only when `len` is zero.
+unsafe fn selection_of<'a>(selection: *const i32, len: usize) -> Result<&'a [i32], SimlinError> {
+    match (selection.is_null(), len) {
+        (_, 0) => Ok(&[]),
+        (true, _) => Err(ffi_error(
+            SimlinErrorCode::Generic,
+            "selection must not be NULL when selection_len is non-zero",
+        )),
+        (false, len) => Ok(std::slice::from_raw_parts(selection, len)),
+    }
+}
+
 unsafe fn press_of(press: *const SimlinPress) -> Result<editing::Press, SimlinError> {
     if press.is_null() {
         return Err(ffi_error(
@@ -157,16 +173,7 @@ unsafe fn press_of(press: *const SimlinPress) -> Result<editing::Press, SimlinEr
         ));
     }
     let p = &*press;
-    let selection = match (p.selection.is_null(), p.selection_len) {
-        (_, 0) => Vec::new(),
-        (true, _) => {
-            return Err(ffi_error(
-                SimlinErrorCode::Generic,
-                "selection must not be NULL when selection_len is non-zero",
-            ))
-        }
-        (false, len) => std::slice::from_raw_parts(p.selection, len).to_vec(),
-    };
+    let selection = selection_of(p.selection, p.selection_len)?.to_vec();
     Ok(editing::Press {
         point: editing::Point::new(p.x, p.y),
         hit: p.has_hit.then_some(editing::Hit {
@@ -273,8 +280,10 @@ fn edit_patch<'a>(model_name: &'a str, edit: editing::ViewEdit) -> PatchJson<'a>
     }
 }
 
-/// The end of a gesture or a tap, as `simlin_gesture_commit` and
-/// `simlin_model_plan_tap` write it.
+/// The end of a gesture or a tap, as `simlin_gesture_commit`,
+/// `simlin_model_plan_tap` and `simlin_model_plan_move` write it: an `"edit"`
+/// always carries its patch, since the engine plans no edit that changes
+/// nothing.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CommitJson<'a> {
@@ -290,7 +299,6 @@ struct CommitJson<'a> {
 fn commit_json<'a>(
     kind: Option<editing::GestureKind>,
     plan: &'a editing::Plan,
-    edit: Option<editing::ViewEdit>,
     model_name: &'a str,
 ) -> Result<Vec<u8>, SimlinError> {
     let json = CommitJson {
@@ -300,7 +308,7 @@ fn commit_json<'a>(
         handoff: plan.handoff,
         details: plan.details,
         label: plan.label,
-        patch: edit.map(|edit| edit_patch(model_name, edit)),
+        patch: plan.edit().map(|edit| edit_patch(model_name, edit)),
     };
     serde_json::to_vec(&json)
         .map_err(|e| ffi_error(SimlinErrorCode::Generic, format!("serializing a plan: {e}")))
@@ -324,12 +332,19 @@ unsafe fn require_outputs(
 }
 
 /// The element and part of the model's diagram that `(x, y)` (model
-/// coordinates) lands on, decided in `simlin_engine::editing::hit_test`'s tiers:
+/// coordinates) lands on, decided in `simlin_engine::editing::HitIndex`'s tiers:
 /// a body firmly holding the point, else an end handle within reach, else a
 /// label holding the point, else the nearest drawing within `tolerance` model
 /// units (the host's touch slop divided by the zoom). Writes `*out_hit = false`
 /// when nothing drawn is within reach. Refuses a model with no stock-and-flow
 /// view with `DoesNotExist`, as every editing entry point does.
+///
+/// The view's index is built by the first hit test after the project changes
+/// and reused until it changes again (`ProjectContents`), so a hover at display
+/// rate costs in proportion to what is near the point. A hit test locks the
+/// project's datamodel, as the planners do, so while an edit holds the project
+/// it waits and answers from the contents the edit leaves: the contents a press
+/// is then planned against.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
@@ -365,24 +380,27 @@ pub unsafe extern "C" fn simlin_model_hit_test(
         }
     };
     let project_ref = &*model_ref.project;
-    let datamodel = project_ref.datamodel.lock().unwrap();
     let model_name = model_ref.model_name.as_str();
-    // The scene draws a viewless model through a transient layout, which a hit
-    // could land on but no edit could change: refused here as the planners
-    // refuse it.
-    if let Err(err) = first_view(&datamodel, model_name) {
-        store_error(out_error, err);
-        return;
-    }
-    match editing::hit_test(&datamodel, model_name, editing::Point::new(x, y), tolerance) {
-        Ok(Some(hit)) => {
-            *out_hit = true;
-            *out_uid = hit.uid;
-            *out_part = hit.part.into();
+    let mut contents = project_ref.datamodel.lock().unwrap();
+    match contents.hit_index(model_name) {
+        Ok(index) => {
+            if let Some(hit) = index.hit(editing::Point::new(x, y), tolerance) {
+                *out_hit = true;
+                *out_uid = hit.uid;
+                *out_part = hit.part.into();
+            }
         }
-        Ok(None) => {}
-        // The model and its view exist, so what is left to fail is internal.
-        Err(message) => store_error(out_error, ffi_error(SimlinErrorCode::Generic, message)),
+        // An index fails to build exactly where the view does not resolve (a
+        // missing model, or a model with no stock-and-flow view, which the scene
+        // draws through a transient layout no edit could change), so only this
+        // path asks `first_view`, for the code it names; the build's message
+        // stands as `Generic` should the two ever part.
+        Err(message) => store_error(
+            out_error,
+            first_view(&contents, model_name)
+                .err()
+                .unwrap_or_else(|| ffi_error(SimlinErrorCode::Generic, message)),
+        ),
     }
 }
 
@@ -435,7 +453,7 @@ pub unsafe extern "C" fn simlin_model_plan_tap(
             }
         };
         let plan = editing::plan_tap(&base, &press);
-        commit_json(None, &plan, plan.edit(&base), model_ref.model_name.as_str())
+        commit_json(None, &plan, model_ref.model_name.as_str())
     };
     match bytes {
         Ok(bytes) => {
@@ -588,8 +606,9 @@ pub unsafe extern "C" fn simlin_gesture_frame(
 
 /// Plan the release with the pointer at `(x, y)`: the frame the preview showed
 /// there. Writes the same JSON object as `simlin_model_plan_tap` to a buffer the
-/// caller frees with `simlin_free`, with `patch` null when the release changes
-/// nothing (an invalid drop, a drag back to where it started).
+/// caller frees with `simlin_free`, with `commit` `"none"` and `patch` null when
+/// the release changes nothing (an invalid drop, a drag back to where it
+/// started).
 ///
 /// # Safety
 /// - `gesture` must be a valid pointer to a SimlinGesture
@@ -618,13 +637,7 @@ pub unsafe extern "C" fn simlin_gesture_commit(
     let bytes = {
         let mut state = gesture.state.lock().unwrap();
         let plan = state.session.frame(editing::Point::new(x, y));
-        let edit = plan.edit(state.session.base());
-        commit_json(
-            state.session.kind(),
-            &plan,
-            edit,
-            gesture.model_name.as_str(),
-        )
+        commit_json(state.session.kind(), &plan, gesture.model_name.as_str())
     };
     match bytes {
         Ok(bytes) => {
@@ -660,6 +673,75 @@ pub unsafe extern "C" fn simlin_gesture_unref(gesture: *mut SimlinGesture) {
     }
 }
 
+/// Plan moving `selection` (`selection_len` uids) by `(dx, dy)` model units,
+/// independent of the zoom: the frame a move-selection drag of the selection
+/// plans for that travel (`simlin_engine::editing::plan_move`), which a host
+/// plans to nudge the selection from the keyboard. Positioned elements move,
+/// flows follow their moved ends, a selected flow neither of whose ends moves
+/// slides its valve along its pipe, and a link moves only with its endpoints.
+/// Writes the same JSON object as `simlin_model_plan_tap` to a buffer the
+/// caller frees with `simlin_free`, with `kind` `"moveSelection"`, and with
+/// `commit` `"none"` and `patch` null when the move lands nothing: nothing
+/// moves (a lone link, an offset across a selected flow's straight pipe), a
+/// flow the move routes would break its invariants, or the offset overflows a
+/// coordinate.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `selection` must point to `selection_len` uids, or be NULL when it is zero
+/// - `out_buf` and `out_len` must be valid, non-null pointers
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_plan_move(
+    model: *mut SimlinModel,
+    selection: *const i32,
+    selection_len: usize,
+    dx: f64,
+    dy: f64,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if !require_outputs(out_buf, out_len, out_error) {
+        return;
+    }
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return;
+        }
+    };
+    let selection = match selection_of(selection, selection_len) {
+        Ok(s) => s,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
+    };
+    let model_name = model_ref.model_name.as_str();
+    let bytes = {
+        let project_ref = &*model_ref.project;
+        let datamodel = project_ref.datamodel.lock().unwrap();
+        let base = match base_view(&datamodel, model_name) {
+            Ok(base) => base,
+            Err(err) => {
+                store_error(out_error, err);
+                return;
+            }
+        };
+        let plan = editing::plan_move(&base, selection, editing::Point::new(dx, dy));
+        commit_json(Some(editing::GestureKind::MoveSelection), &plan, model_name)
+    };
+    match bytes {
+        Ok(bytes) => {
+            write_bytes_to_ffi_output(&bytes, out_buf, out_len, out_error, "a move plan");
+        }
+        Err(err) => store_error(out_error, err),
+    }
+}
+
 /// The patch deleting `selection` (`selection_len` uids) from the model's
 /// diagram: the selected elements, the clouds of removed flows, the aliases of
 /// removed elements, every link touching a removed element, and a new cloud at
@@ -692,20 +774,12 @@ pub unsafe extern "C" fn simlin_model_plan_delete(
             return;
         }
     };
-    if selection.is_null() && selection_len > 0 {
-        store_error(
-            out_error,
-            ffi_error(
-                SimlinErrorCode::Generic,
-                "selection must not be NULL when selection_len is non-zero",
-            ),
-        );
-        return;
-    }
-    let selection: &[i32] = if selection_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(selection, selection_len)
+    let selection = match selection_of(selection, selection_len) {
+        Ok(s) => s,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
     };
     let model_name = model_ref.model_name.as_str();
     let result = {

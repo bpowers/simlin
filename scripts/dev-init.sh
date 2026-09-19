@@ -36,13 +36,27 @@ build_node_deps_stamp() {
 # 1. Git hooks
 #
 # Hooks live in the repository's COMMON git dir, shared by every linked
-# worktree. The symlink target must resolve against the MAIN checkout (the
-# common dir's parent), not this worktree's REPO_ROOT: running dev-init in a
-# temporary worktree would otherwise re-point the shared hook at the
-# worktree's copy, leaving a dangling symlink -- and git silently skipping
-# pre-commit -- once the worktree is removed (GH #700).
+# worktree. The symlink target must resolve against the MAIN checkout, not this
+# worktree's REPO_ROOT: running dev-init in a temporary worktree would otherwise
+# re-point the shared hook at the worktree's copy, leaving a dangling symlink --
+# and git silently skipping pre-commit -- once the worktree is removed (GH #700).
+#
+# The main checkout is the common dir's parent, except in a submodule: its git
+# dir lives under the superproject's `.git/modules/`, and `core.worktree` (a path
+# relative to that git dir) names the checkout. Without that rule the target
+# would be `.git/modules/.../scripts/pre-commit`, which does not exist, so the
+# hook would never be installed and every commit would skip the checks. git
+# keeps `core.worktree` in the git dir's `config`, or in its `config.worktree`
+# under `extensions.worktreeConfig`, so it is read through git with the common
+# dir as the git dir, never from one of those files; a checkout that does not
+# resolve leaves the parent in place instead of stopping the script.
 if HOOK_PATH="$(git rev-parse --git-path hooks/pre-commit 2>/dev/null)"; then
-    MAIN_ROOT="$(dirname "$(cd "$(git rev-parse --git-common-dir)" && pwd)")"
+    COMMON_DIR="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
+    MAIN_ROOT="$(dirname "$COMMON_DIR")"
+    if SUBMODULE_WORKTREE="$(git --git-dir="$COMMON_DIR" config --get core.worktree 2>/dev/null)" \
+        && CHECKOUT="$(cd "$COMMON_DIR" && cd "$SUBMODULE_WORKTREE" 2>/dev/null && pwd)"; then
+        MAIN_ROOT="$CHECKOUT"
+    fi
     DESIRED="$MAIN_ROOT/scripts/pre-commit"
     if [ -f "$DESIRED" ] \
         && ! { [ -L "$HOOK_PATH" ] && [ "$(readlink "$HOOK_PATH")" = "$DESIRED" ]; }; then

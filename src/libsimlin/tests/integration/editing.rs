@@ -145,6 +145,29 @@ fn uids(values: &Value) -> Vec<i64> {
         .collect()
 }
 
+/// The plan of moving `selection` by `(dx, dy)`.
+unsafe fn plan_move(model: *mut SimlinModel, selection: &[i32], dx: f64, dy: f64) -> Value {
+    let (mut buf, mut len, mut err): (*mut u8, usize, *mut SimlinError) =
+        (ptr::null_mut(), 0, ptr::null_mut());
+    let uids = if selection.is_empty() {
+        ptr::null()
+    } else {
+        selection.as_ptr()
+    };
+    simlin_model_plan_move(
+        model,
+        uids,
+        selection.len(),
+        dx,
+        dy,
+        &mut buf,
+        &mut len,
+        &mut err,
+    );
+    expect_no_error(err, "planning a move");
+    take_json(buf, len)
+}
+
 #[test]
 fn a_hit_lands_on_what_is_drawn_there() {
     let proj = project();
@@ -341,6 +364,124 @@ fn a_press_that_starts_no_drag_is_null_without_an_error() {
 }
 
 #[test]
+fn a_drag_back_to_its_press_commits_none_without_a_patch() {
+    let proj = project();
+    let model = main_model(proj);
+    unsafe {
+        let p = press(
+            100.0,
+            100.0,
+            Some((STOCK, SimlinHitPart::Body)),
+            SimlinTool::None,
+            &[STOCK],
+        );
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let gesture = simlin_gesture_begin(model, &p, &mut err);
+        expect_no_error(err, "beginning the drag");
+        assert!(!gesture.is_null(), "a press on a stock starts a drag");
+        let (mut frame_buf, mut frame_len): (*const u8, usize) = (ptr::null(), 0);
+        simlin_gesture_frame(
+            gesture,
+            100.0,
+            100.0,
+            &mut frame_buf,
+            &mut frame_len,
+            &mut err,
+        );
+        expect_no_error(err, "planning the frame at the press");
+        let frame: Value = serde_json::from_slice(std::slice::from_raw_parts(frame_buf, frame_len))
+            .expect("the frame is JSON");
+        assert_eq!(
+            (&frame["commit"], &frame["label"]),
+            (&json!("none"), &json!("")),
+            "the frame at the press says what its release commits: {frame}"
+        );
+        let (mut buf, mut len): (*mut u8, usize) = (ptr::null_mut(), 0);
+        simlin_gesture_commit(gesture, 100.0, 100.0, &mut buf, &mut len, &mut err);
+        expect_no_error(err, "committing the drag");
+        simlin_gesture_unref(gesture);
+        let plan = take_json(buf, len);
+        assert_eq!(plan["commit"], "none", "{plan}");
+        assert_eq!(plan["patch"], Value::Null, "{plan}");
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn a_planned_move_moves_the_selection_and_its_flow_follows() {
+    let proj = project();
+    let model = main_model(proj);
+    unsafe {
+        let plan = plan_move(model, &[STOCK], 10.0, 20.0);
+        assert_eq!(plan["kind"], "moveSelection", "{plan}");
+        assert_eq!(plan["commit"], "edit", "{plan}");
+        assert_eq!(plan["label"], "move", "{plan}");
+        assert_eq!(uids(&plan["selection"]), [STOCK as i64], "{plan}");
+        apply(proj, &plan["patch"]);
+        inspect(proj, |model, view| {
+            let Some(ViewElement::Stock(stock)) = view.iter().find(|e| e.get_uid() == STOCK) else {
+                panic!("the stock is still drawn");
+            };
+            assert_eq!((stock.x, stock.y), (110.0, 120.0));
+            let Some(ViewElement::Flow(flow)) = view.iter().find(|e| e.get_uid() == FLOW) else {
+                panic!("the flow is still drawn");
+            };
+            assert_eq!(
+                flow.points.last().and_then(|p| p.attached_to_uid),
+                Some(STOCK),
+                "the flow still fills the stock it followed"
+            );
+            let Some(Variable::Stock(population)) = model.get_variable("population") else {
+                panic!("population is a stock");
+            };
+            assert_eq!(population.inflows, ["births"]);
+        });
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn a_move_that_lands_nothing_commits_none_without_a_patch() {
+    let proj = project();
+    let model = main_model(proj);
+    unsafe {
+        let rows: [(&str, &[i32], f64, f64); 4] = [
+            ("a lone link", &[LINK], 10.0, 0.0),
+            ("an empty selection", &[], 10.0, 0.0),
+            ("a zero offset", &[AUX], 0.0, 0.0),
+            ("a non-finite offset", &[AUX], f64::NAN, 0.0),
+        ];
+        for (name, selection, dx, dy) in rows {
+            let plan = plan_move(model, selection, dx, dy);
+            assert_eq!(
+                (&plan["commit"], &plan["label"], &plan["patch"]),
+                (&json!("none"), &json!(""), &Value::Null),
+                "{name}: {plan}"
+            );
+        }
+        // A nudge as far as a coordinate goes lands, and the next one overflows
+        // the coordinate into one the scene cannot draw.
+        let to_the_edge = plan_move(model, &[AUX], f64::MAX, 0.0);
+        assert_eq!(to_the_edge["commit"], "edit", "{to_the_edge}");
+        apply(proj, &to_the_edge["patch"]);
+        let past_the_edge = plan_move(model, &[AUX], f64::MAX, 0.0);
+        assert_eq!(
+            (
+                &past_the_edge["commit"],
+                &past_the_edge["label"],
+                &past_the_edge["patch"]
+            ),
+            (&json!("none"), &json!(""), &Value::Null),
+            "a nudge that overflows a coordinate: {past_the_edge}"
+        );
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
 fn a_planned_delete_removes_the_variable_and_every_link_touching_it() {
     let proj = project();
     let model = main_model(proj);
@@ -453,6 +594,18 @@ fn a_model_with_no_diagram_is_refused_with_does_not_exist() {
         simlin_model_plan_delete(model, selection.as_ptr(), 1, &mut buf, &mut len, &mut err);
         expect_error_code(err, SimlinErrorCode::DoesNotExist, "a delete");
 
+        simlin_model_plan_move(
+            model,
+            selection.as_ptr(),
+            1,
+            1.0,
+            0.0,
+            &mut buf,
+            &mut len,
+            &mut err,
+        );
+        expect_error_code(err, SimlinErrorCode::DoesNotExist, "a move");
+
         simlin_model_unref(model);
         simlin_project_unref(proj);
     }
@@ -501,6 +654,35 @@ fn null_inputs_are_errors_not_crashes() {
             SimlinErrorCode::Generic,
             "a NULL selection with a length",
         );
+
+        simlin_model_plan_move(
+            model,
+            ptr::null(),
+            2,
+            1.0,
+            0.0,
+            &mut buf,
+            &mut len,
+            &mut err,
+        );
+        expect_error_code(
+            err,
+            SimlinErrorCode::Generic,
+            "a NULL selection with a length to move",
+        );
+
+        let selection = [STOCK];
+        simlin_model_plan_move(
+            model,
+            selection.as_ptr(),
+            1,
+            1.0,
+            0.0,
+            ptr::null_mut(),
+            &mut len,
+            &mut err,
+        );
+        expect_error_code(err, SimlinErrorCode::Generic, "a NULL output buffer");
 
         simlin_model_plan_rename(
             model,

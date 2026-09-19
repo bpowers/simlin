@@ -83,6 +83,7 @@ mod ffi;
 mod ffi_error;
 
 mod analysis;
+mod contents;
 mod editing;
 mod error_api;
 mod layout;
@@ -101,6 +102,7 @@ mod simulation;
 // `use super::*;` in the test module keeps working.
 
 pub use analysis::*;
+pub use contents::ProjectContents;
 pub use editing::*;
 pub use error_api::*;
 pub use layout::*;
@@ -426,7 +428,10 @@ pub struct SimlinErrorDetail {
 
 /// Opaque project structure
 pub struct SimlinProject {
-    pub datamodel: Mutex<engine::datamodel::Project>,
+    /// The datamodel, with the indexes derived from it, which any mutable
+    /// borrow of the datamodel drops (`ProjectContents`). Locked before `db`
+    /// when both are needed.
+    pub datamodel: Mutex<ProjectContents>,
     /// The salsa database owns its own sync state (the salsa input handles
     /// from the last sync), so incremental re-syncs are automatic: callers
     /// use `db.sync`/`db.sync_staged`/`db.restore` and read the current
@@ -515,6 +520,18 @@ impl Drop for DbLock<'_> {
 }
 
 impl SimlinProject {
+    /// A project holding `datamodel`, with a database synced to it and no
+    /// derived index yet: the one constructor every open function shares.
+    pub(crate) fn new(datamodel: engine::datamodel::Project) -> SimlinProject {
+        let db = new_synced_db(&datamodel);
+        SimlinProject {
+            datamodel: Mutex::new(ProjectContents::new(datamodel)),
+            db: Mutex::new(db),
+            ltm_requested: AtomicBool::new(false),
+            ref_count: AtomicUsize::new(1),
+        }
+    }
+
     /// Lock the salsa database for a run of queries; see [`DbLock`]. The only
     /// accessor of the database, `pub` so the integration-test crate reads it
     /// through the same guard as every entry point.

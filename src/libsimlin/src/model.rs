@@ -11,7 +11,6 @@ use simlin_engine::{self as engine, canonicalize, datamodel};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::MutexGuard;
 
 use crate::ffi::SimlinLinks;
 use crate::ffi_error::SimlinError;
@@ -216,9 +215,9 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
     }
 }
 
-/// Find a model by name in a locked datamodel.
+/// Find a model by name in a datamodel, matching canonical names.
 pub(crate) fn find_model_in_datamodel<'a>(
-    datamodel: &'a MutexGuard<'_, datamodel::Project>,
+    datamodel: &'a datamodel::Project,
     model_name: &str,
 ) -> Option<&'a datamodel::Model> {
     let canonical = canonicalize(model_name);

@@ -101,6 +101,28 @@ node --expose-gc src/engine/bench/clearn-alloc.mjs --ltm off --iters 20 --count-
 
 The bundles are interleaved (A, B, A, B, ...) so machine drift is shared rather than attributed to whichever ran last. Each iteration runs on a fresh instance of a module compiled once per bundle: every iteration starts from a cold heap, the state a page load leaves the allocator in, and no iteration inherits fragmentation from the one before, while V8 keeps its optimized code for the shared module, so the warm-up iterations warm the JIT and only the JIT. Instantiation is not timed. Run it under both node 22 and node 24 (V8 12 and 13), with `--expose-gc` so it can collect between iterations and pinned with `taskset` to reduce drift; like the eval benchmark, its results belong in the PR or chat, never in a committed file.
 
+## Editing latency at the libsimlin FFI
+
+`src/libsimlin/examples/editing_latency.rs` times, call by call, what a native host pays to edit a diagram through libsimlin: a hit test for every pointer move and press, the tap, drag and nudge planners, the scene a host redraws after an edit, how long an equation edit and the simulation after it hold the project's datamodel lock, which is how long a hit test or a press from another thread waits meanwhile, and what a hover at display rate waits while edits land on another thread.
+
+```bash
+# World3 (864 drawn elements)
+cargo run --release -p simlin --example editing_latency -- test/metasd/WRLD3-03/wrld3-03.mdl
+
+# C-LEARN (4059 drawn elements); fewer samples keep the slow scenarios short
+cargo run --release -p simlin --example editing_latency -- "test/xmutil_test_models/C-LEARN v77 for Vensim.mdl" --samples 40
+```
+
+It prints the p50, p90, p99, max and mean of every scenario. It keeps the system allocator, which a host runs on when it builds libsimlin without the `mimalloc` feature, and its results belong in the PR or chat, never in a committed file.
+
+To see where the time goes, build it with symbols and record it under a sampling profiler, as [Profiling](#profiling) describes. The `bench` profile is `release` with debug info and no stripping, and cargo writes its examples to `target/release/examples/`:
+
+```bash
+cargo build --profile bench -p simlin --example editing_latency
+perf record -g -- target/release/examples/editing_latency test/metasd/WRLD3-03/wrld3-03.mdl --samples 600
+perf report
+```
+
 ## Profiling
 
 ### Build a benchmark binary for profiling

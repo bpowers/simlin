@@ -881,12 +881,19 @@ void simlin_analyze_get_loop_element_count(SimlinSim *sim,
                                            SimlinError **out_error);
 
 // The element and part of the model's diagram that `(x, y)` (model
-// coordinates) lands on, decided in `simlin_engine::editing::hit_test`'s tiers:
+// coordinates) lands on, decided in `simlin_engine::editing::HitIndex`'s tiers:
 // a body firmly holding the point, else an end handle within reach, else a
 // label holding the point, else the nearest drawing within `tolerance` model
 // units (the host's touch slop divided by the zoom). Writes `*out_hit = false`
 // when nothing drawn is within reach. Refuses a model with no stock-and-flow
 // view with `DoesNotExist`, as every editing entry point does.
+//
+// The view's index is built by the first hit test after the project changes
+// and reused until it changes again (`ProjectContents`), so a hover at display
+// rate costs in proportion to what is near the point. A hit test locks the
+// project's datamodel, as the planners do, so while an edit holds the project
+// it waits and answers from the contents the edit leaves: the contents a press
+// is then planned against.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
@@ -956,8 +963,9 @@ void simlin_gesture_frame(SimlinGesture *gesture,
 
 // Plan the release with the pointer at `(x, y)`: the frame the preview showed
 // there. Writes the same JSON object as `simlin_model_plan_tap` to a buffer the
-// caller frees with `simlin_free`, with `patch` null when the release changes
-// nothing (an invalid drop, a drag back to where it started).
+// caller frees with `simlin_free`, with `commit` `"none"` and `patch` null when
+// the release changes nothing (an invalid drop, a drag back to where it
+// started).
 //
 // # Safety
 // - `gesture` must be a valid pointer to a SimlinGesture
@@ -981,6 +989,33 @@ void simlin_gesture_ref(SimlinGesture *gesture);
 // # Safety
 // - `gesture` must be a valid pointer to a SimlinGesture, or NULL
 void simlin_gesture_unref(SimlinGesture *gesture);
+
+// Plan moving `selection` (`selection_len` uids) by `(dx, dy)` model units,
+// independent of the zoom: the frame a move-selection drag of the selection
+// plans for that travel (`simlin_engine::editing::plan_move`), which a host
+// plans to nudge the selection from the keyboard. Positioned elements move,
+// flows follow their moved ends, a selected flow neither of whose ends moves
+// slides its valve along its pipe, and a link moves only with its endpoints.
+// Writes the same JSON object as `simlin_model_plan_tap` to a buffer the
+// caller frees with `simlin_free`, with `kind` `"moveSelection"`, and with
+// `commit` `"none"` and `patch` null when the move lands nothing: nothing
+// moves (a lone link, an offset across a selected flow's straight pipe), a
+// flow the move routes would break its invariants, or the offset overflows a
+// coordinate.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `selection` must point to `selection_len` uids, or be NULL when it is zero
+// - `out_buf` and `out_len` must be valid, non-null pointers
+// - `out_error` may be null
+void simlin_model_plan_move(SimlinModel *model,
+                            const int32_t *selection,
+                            uintptr_t selection_len,
+                            double dx,
+                            double dy,
+                            uint8_t **out_buf,
+                            uintptr_t *out_len,
+                            SimlinError **out_error);
 
 // The patch deleting `selection` (`selection_len` uids) from the model's
 // diagram: the selected elements, the clouds of removed flows, the aliases of

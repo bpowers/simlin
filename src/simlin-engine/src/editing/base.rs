@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use smallvec::SmallVec;
 
 use crate::common::canonicalize;
-use crate::datamodel::view_element::{Flow, LabelSide, Link, Stock};
+use crate::datamodel::view_element::{Flow, FlowPoint, LabelSide, Link, LinkShape, Stock};
 use crate::datamodel::{self, Equation, StockFlow, Variable, ViewElement};
 use crate::diagram::constants::{
     AUX_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
@@ -387,4 +387,25 @@ pub(crate) fn translated(element: &ViewElement, d: Point) -> Option<ViewElement>
     *x += d.x;
     *y += d.y;
     Some(next)
+}
+
+/// Whether every number the scene draws the element from is finite: the scene
+/// draws nothing for a part holding a non-finite number (`scene::finish`).
+pub(crate) fn is_finite(element: &ViewElement) -> bool {
+    let at = |x: f64, y: f64| x.is_finite() && y.is_finite();
+    let along = |points: &[FlowPoint]| points.iter().all(|p| at(p.x, p.y));
+    match element {
+        ViewElement::Aux(e) => at(e.x, e.y),
+        ViewElement::Stock(e) => at(e.x, e.y),
+        ViewElement::Module(e) => at(e.x, e.y),
+        ViewElement::Alias(e) => at(e.x, e.y),
+        ViewElement::Cloud(e) => at(e.x, e.y),
+        ViewElement::Group(e) => at(e.x, e.y) && at(e.width, e.height),
+        ViewElement::Flow(e) => at(e.x, e.y) && along(&e.points),
+        ViewElement::Link(e) => match &e.shape {
+            LinkShape::Straight => true,
+            LinkShape::Arc(angle) => angle.is_finite(),
+            LinkShape::MultiPoint(points) => along(points),
+        },
+    }
 }

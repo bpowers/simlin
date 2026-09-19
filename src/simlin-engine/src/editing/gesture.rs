@@ -18,7 +18,9 @@
 //! commits nothing. The session holds the one decision a function of the
 //! pointer could not keep once the pointer comes back: which way a press on a
 //! pipe latched, sliding the valve or offsetting the segment, decided by the
-//! first movement.
+//! first movement. A move of the selection by an offset (`plan_move`) is the
+//! move-selection frame at that offset, which a host plans without a session to
+//! nudge the selection from the keyboard.
 //!
 //! Flow geometry comes only from the core (`route`, `route_end`,
 //! `offset_segment`, `slide_valve`, `heal`). A drop is valid exactly when the
@@ -26,6 +28,13 @@
 //! different stocks, a stock whose variable exists); an invalid drop commits
 //! nothing (E6). Loose imported flow ends get clouds when an edit routes them,
 //! and links whose endpoints moved follow once, from the final elements.
+//!
+//! Every edit is planned through one rule (`Changes::into_plan`): a plan whose
+//! changes leave every element as the base holds it plans nothing, so a frame,
+//! its release and a nudge agree that it lands nothing, and a plan holding a
+//! non-finite number commits nothing: the scene draws nothing for a part holding
+//! one, so landing it would make what the edit moved vanish. A drop target is
+//! valid exactly where the drop is allowed (`Changes::into_drop`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,7 +47,8 @@ use crate::datamodel::view_element::{
 use crate::diagram::constants::AUX_RADIUS;
 
 use super::base::{
-    BaseView, VariableKind, is_link_source, label_side_of, position_of, translated, with_label_side,
+    BaseView, VariableKind, is_finite, is_link_source, label_side_of, position_of, translated,
+    with_label_side,
 };
 use super::geometry::{Axis, FlowEnd, GEOMETRY_EPSILON, Point};
 use super::heal::heal;
@@ -102,7 +112,8 @@ pub struct Press {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommitKind {
-    /// Nothing: an idle frame, or an invalid drop.
+    /// Nothing: an idle frame, an invalid drop, or an edit holding a number the
+    /// scene cannot draw.
     None,
     /// Apply the plan's edit (`Plan::edit`) and adopt its selection.
     Edit,
@@ -111,7 +122,10 @@ pub enum CommitKind {
 }
 
 /// A drop target under the pointer, drawn highlighted when valid and as a
-/// refusal when not.
+/// refusal when not. Validity is whether the drop is allowed: a drop that
+/// changes nothing (an end dropped back where it was) is allowed and commits
+/// nothing, and a drop whose result holds a number the scene cannot draw is
+/// not.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq)]
 pub struct Target {
@@ -151,7 +165,8 @@ impl ViewEdit {
 #[derive(Clone, PartialEq)]
 pub struct Plan {
     /// Elements the frame draws in place of the base elements with the same uid,
-    /// or adds: substitutions in view order, then additions in creation order.
+    /// or adds, each differing from what the base holds: substitutions in view
+    /// order, then additions in creation order.
     pub changed: Vec<ViewElement>,
     /// Base elements the frame does not draw.
     pub removed: Vec<i32>,
@@ -196,24 +211,14 @@ impl Plan {
         }
     }
 
-    /// The view edit an `Edit` commit applies: the changed elements that differ
-    /// from the base, and the removals. `None` for any other commit, and for an
-    /// edit that changes nothing (a drag back to where it started).
-    pub fn edit(&self, base: &BaseView) -> Option<ViewEdit> {
-        if self.commit != CommitKind::Edit {
-            return None;
-        }
-        let upsert: Vec<ViewElement> = self
-            .changed
-            .iter()
-            .filter(|e| base.get(e.get_uid()) != Some(*e))
-            .cloned()
-            .collect();
-        let edit = ViewEdit {
-            upsert,
+    /// The view edit an `Edit` commit applies: the changed elements and the
+    /// removals, never both empty (`Changes::into_plan`). `None` for any other
+    /// commit.
+    pub fn edit(&self) -> Option<ViewEdit> {
+        (self.commit == CommitKind::Edit).then(|| ViewEdit {
+            upsert: self.changed.clone(),
             remove: self.removed.clone(),
-        };
-        (!edit.is_empty()).then_some(edit)
+        })
     }
 }
 
@@ -259,22 +264,61 @@ impl Changes {
     }
 
     /// The plan of an edit: the changes plus every link that follows a moved
-    /// endpoint.
-    fn into_plan(mut self, base: &BaseView, selection: Vec<i32>, label: &'static str) -> Plan {
-        if self.elements.is_empty() && self.removed.is_empty() {
-            return Plan::idle(selection);
+    /// endpoint, less what equals the base (`Changes::settle`).
+    fn into_plan(self, base: &BaseView, selection: Vec<i32>, label: &'static str) -> Plan {
+        self.settle(base, selection, label).0
+    }
+
+    /// The plan of a drop onto `target`, which the gesture allows: the target is
+    /// marked valid unless the plan holds a number the scene cannot draw, which
+    /// refuses the drop. A drop that changes nothing stays allowed and plans
+    /// nothing.
+    fn into_drop(
+        self,
+        base: &BaseView,
+        selection: Vec<i32>,
+        label: &'static str,
+        target: i32,
+    ) -> Plan {
+        let (plan, refused) = self.settle(base, selection, label);
+        Plan {
+            target: Some(Target {
+                uid: target,
+                valid: !refused,
+            }),
+            ..plan
         }
+    }
+
+    /// The plan of the changes, and whether it refuses them. A plan changing
+    /// nothing is idle, so a frame, its release and a nudge that move nothing
+    /// all plan no edit. A plan holding a non-finite number (a coordinate an
+    /// offset overflowed, a valve placed along a route longer than the largest
+    /// coordinate) is refused and commits nothing: the scene draws nothing for a
+    /// part holding one, so landing it would make what the edit moved vanish.
+    fn settle(mut self, base: &BaseView, selection: Vec<i32>, label: &'static str) -> (Plan, bool) {
         for link in follow_links(base, &self.elements) {
             self.set(base, ViewElement::Link(link));
         }
+        self.elements
+            .retain(|&uid, element| base.get(uid) != Some(&*element));
+        if self.elements.is_empty() && self.removed.is_empty() {
+            return (Plan::idle(selection), false);
+        }
+        let refused = !self.elements.values().all(is_finite);
         let (changed, removed) = self.into_elements(base);
-        Plan {
+        let plan = Plan {
             changed,
             removed,
-            commit: CommitKind::Edit,
-            label,
+            commit: if refused {
+                CommitKind::None
+            } else {
+                CommitKind::Edit
+            },
+            label: if refused { "" } else { label },
             ..Plan::idle(selection)
-        }
+        };
+        (plan, refused)
     }
 
     fn into_elements(mut self, base: &BaseView) -> (Vec<ViewElement>, Vec<i32>) {
@@ -474,9 +518,13 @@ fn create_element_plan(base: &BaseView, tool: Tool, at: Point, selection: Vec<i3
 /// link tools draw only by dragging. A tap on an element selects it (a toggle
 /// adds or removes it) and opens its details when it lands on the body or
 /// label; a tap on a cloud, or on a flow's or link's end, selects the flow or
-/// link. A tap on the empty canvas clears the selection.
+/// link. A tap on the empty canvas clears the selection, and a non-finite tap
+/// plans nothing.
 pub fn plan_tap(base: &BaseView, press: &Press) -> Plan {
     let current = &press.selection;
+    if !press.point.is_finite() {
+        return Plan::idle(current.clone());
+    }
     let Some(hit) = press.hit else {
         return match press.tool {
             Some(tool @ (Tool::Aux | Tool::Stock | Tool::Module)) => {
@@ -730,6 +778,193 @@ fn classify_drag(base: &BaseView, press: &Press) -> Option<(Gesture, Vec<i32>)> 
     Some((gesture, effective))
 }
 
+/// Move `selection` by `d`: the frame a move-selection drag plans for pointer
+/// travel `d`, and what a host plans to nudge the selection from the keyboard,
+/// so a nudge lands what dragging the selection that far would. Positioned
+/// elements translate; a flow whose two terminals both move translates; a flow
+/// with one moving terminal is routed to it (a stock carries the base face and
+/// offset along, a cloud is re-centered on the routed endpoint); a selected flow
+/// with no moving terminal slides its valve by the travel along its pipe; links
+/// follow their moved endpoints, and have no position of their own to move. A
+/// move in which some routed flow cannot hold G2-G6 (a cloud moved inside another
+/// stock, say), or which overflows a coordinate, commits nothing, and a
+/// non-finite `d` plans nothing.
+pub fn plan_move(base: &BaseView, selection: &[i32], d: Point) -> Plan {
+    if !d.is_finite() {
+        return Plan::idle(selection.to_vec());
+    }
+    let mut changes = Changes::default();
+    let mut moving: HashSet<i32> = HashSet::new();
+    for &uid in selection {
+        if let Some(moved) = base.get(uid).and_then(|e| translated(e, d)) {
+            changes.set(base, moved);
+            moving.insert(uid);
+        }
+    }
+    let frame_stocks: Vec<Point> = base
+        .stock_uids()
+        .iter()
+        .zip(base.stock_centers())
+        .map(|(uid, c)| {
+            if moving.contains(uid) {
+                c.offset(d)
+            } else {
+                *c
+            }
+        })
+        .collect();
+    let mut flows: Vec<usize> = Vec::new();
+    for &uid in &moving {
+        if matches!(
+            base.get(uid),
+            Some(ViewElement::Stock(_) | ViewElement::Cloud(_))
+        ) {
+            flows.extend_from_slice(base.attached_flow_indices(uid));
+        }
+    }
+    for &uid in selection {
+        if base.flow(uid).is_some() {
+            flows.extend(base.index_of(uid));
+        }
+    }
+    flows.sort_unstable();
+    flows.dedup();
+    let mut next_uid = base.next_uid();
+    let mut valid = true;
+    let terminal_moves = |uid: Option<i32>| {
+        uid.is_some_and(|u| {
+            moving.contains(&u)
+                && matches!(
+                    base.get(u),
+                    Some(ViewElement::Stock(_) | ViewElement::Cloud(_))
+                )
+        })
+    };
+    for index in flows {
+        let ViewElement::Flow(flow) = &base.elements()[index] else {
+            continue;
+        };
+        if flow.points.len() < 2 {
+            continue;
+        }
+        let source_moves = terminal_moves(flow.points[0].attached_to_uid);
+        let sink_moves = terminal_moves(flow.points[flow.points.len() - 1].attached_to_uid);
+        if source_moves && sink_moves {
+            changes.set(base, ViewElement::Flow(translate(flow, d)));
+        } else if source_moves || sink_moves {
+            let end = if source_moves {
+                FlowEnd::Source
+            } else {
+                FlowEnd::Sink
+            };
+            valid &= route_moved_end(
+                base,
+                flow,
+                end,
+                d,
+                &mut changes,
+                &moving,
+                &frame_stocks,
+                &mut next_uid,
+            );
+        } else if selection.contains(&flow.uid) {
+            let h = healed(base, flow, &mut next_uid);
+            for cloud in h.clouds.iter().cloned() {
+                changes.set(base, cloud);
+            }
+            changes.set(base, ViewElement::Flow(slide_valve(&h.flow, d)));
+        }
+    }
+    let plan = changes.into_plan(base, selection.to_vec(), "move");
+    if valid {
+        plan
+    } else {
+        Plan {
+            commit: CommitKind::None,
+            label: "",
+            ..plan
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_moved_end(
+    base: &BaseView,
+    flow: &Flow,
+    end: FlowEnd,
+    d: Point,
+    changes: &mut Changes,
+    moving: &HashSet<i32>,
+    frame_stocks: &[Point],
+    next_uid: &mut i32,
+) -> bool {
+    let h = healed(base, flow, next_uid);
+    let n = h.flow.points.len();
+    let (end_index, adjacent_index) = match end {
+        FlowEnd::Source => (0, 1),
+        FlowEnd::Sink => (n - 1, n - 2),
+    };
+    let Some(end_uid) = h.flow.points[end_index].attached_to_uid else {
+        return false;
+    };
+    let terminals = h.terminals(base);
+    let fixed = match end {
+        FlowEnd::Source => terminals.sink,
+        FlowEnd::Sink => terminals.source,
+    };
+    let (terminal, moved_cloud) = match h.get(base, end_uid) {
+        Some(ViewElement::Stock(stock)) => {
+            let from = Point::new(stock.x, stock.y);
+            let t = stock_terminal(
+                stock.uid,
+                from.offset(d),
+                Some(point_of(&h.flow.points[end_index])),
+                Some(point_of(&h.flow.points[adjacent_index])),
+                from,
+            );
+            (t, None)
+        }
+        Some(ViewElement::Cloud(cloud)) => {
+            let at = Point::new(cloud.x + d.x, cloud.y + d.y);
+            (
+                free_terminal(at, Some(CloudRef { uid: cloud.uid, at })),
+                Some(cloud.clone()),
+            )
+        }
+        _ => return false,
+    };
+    let occupied = base.endpoints_on(&stock_uids_of(&[terminal, fixed]), flow.uid, |uid| {
+        if moving.contains(&uid) {
+            d
+        } else {
+            Point::new(0.0, 0.0)
+        }
+    });
+    let g = route_end(&h.flow, end, terminal, fixed, &occupied, frame_stocks);
+    for cloud in h.clouds {
+        changes.set(base, cloud);
+    }
+    changes.move_clouds(base, &g.clouds);
+    if let Some(cloud) = moved_cloud {
+        let p = endpoint(&g.flow, end);
+        changes.set(
+            base,
+            ViewElement::Cloud(Cloud {
+                x: p.x,
+                y: p.y,
+                ..cloud
+            }),
+        );
+    }
+    let valid = flow_fault(
+        &path_of(&g.flow),
+        &with_end(end, terminal, fixed),
+        frame_stocks,
+    ) == Fault::None;
+    changes.set(base, ViewElement::Flow(g.flow));
+    valid
+}
+
 impl GestureSession {
     pub fn base(&self) -> &BaseView {
         &self.base
@@ -767,7 +1002,7 @@ impl GestureSession {
         }
         let d = pointer.minus(self.press);
         match self.gesture {
-            Gesture::MoveSelection => self.plan_move(d),
+            Gesture::MoveSelection => plan_move(&self.base, &self.selection, d),
             Gesture::Pipe { .. } => Plan::idle(self.selection.clone()),
             Gesture::SlideValve { flow } => self.plan_slide_valve(flow, d),
             Gesture::OffsetSegment { flow, segment } => self.plan_offset_segment(flow, segment, d),
@@ -814,186 +1049,6 @@ impl GestureSession {
 
     fn idle(&self) -> Plan {
         Plan::idle(self.selection.clone())
-    }
-
-    /// Move the selection: positioned elements translate; a flow whose two
-    /// terminals both move translates; a flow with one moving terminal is
-    /// routed to it (a stock carries the base face and offset along, a cloud is
-    /// re-centered on the routed endpoint); a selected flow with no moving
-    /// terminal slides its valve. A frame in which some routed flow cannot hold
-    /// G2-G6 (a dragged cloud inside another stock, say) commits nothing.
-    fn plan_move(&self, d: Point) -> Plan {
-        let base = &self.base;
-        let mut changes = Changes::default();
-        let mut moving: HashSet<i32> = HashSet::new();
-        for &uid in &self.selection {
-            if let Some(moved) = base.get(uid).and_then(|e| translated(e, d)) {
-                changes.set(base, moved);
-                moving.insert(uid);
-            }
-        }
-        let frame_stocks: Vec<Point> = base
-            .stock_uids()
-            .iter()
-            .zip(base.stock_centers())
-            .map(|(uid, c)| {
-                if moving.contains(uid) {
-                    c.offset(d)
-                } else {
-                    *c
-                }
-            })
-            .collect();
-        let mut flows: Vec<usize> = Vec::new();
-        for &uid in &moving {
-            if matches!(
-                base.get(uid),
-                Some(ViewElement::Stock(_) | ViewElement::Cloud(_))
-            ) {
-                flows.extend_from_slice(base.attached_flow_indices(uid));
-            }
-        }
-        for &uid in &self.selection {
-            if base.flow(uid).is_some() {
-                flows.extend(base.index_of(uid));
-            }
-        }
-        flows.sort_unstable();
-        flows.dedup();
-        let mut next_uid = base.next_uid();
-        let mut valid = true;
-        let terminal_moves = |uid: Option<i32>| {
-            uid.is_some_and(|u| {
-                moving.contains(&u)
-                    && matches!(
-                        base.get(u),
-                        Some(ViewElement::Stock(_) | ViewElement::Cloud(_))
-                    )
-            })
-        };
-        for index in flows {
-            let ViewElement::Flow(flow) = &base.elements()[index] else {
-                continue;
-            };
-            if flow.points.len() < 2 {
-                continue;
-            }
-            let source_moves = terminal_moves(flow.points[0].attached_to_uid);
-            let sink_moves = terminal_moves(flow.points[flow.points.len() - 1].attached_to_uid);
-            if source_moves && sink_moves {
-                changes.set(base, ViewElement::Flow(translate(flow, d)));
-            } else if source_moves || sink_moves {
-                let end = if source_moves {
-                    FlowEnd::Source
-                } else {
-                    FlowEnd::Sink
-                };
-                valid &= self.route_moved_end(
-                    flow,
-                    end,
-                    d,
-                    &mut changes,
-                    &moving,
-                    &frame_stocks,
-                    &mut next_uid,
-                );
-            } else if self.selection.contains(&flow.uid) {
-                let h = healed(base, flow, &mut next_uid);
-                for cloud in h.clouds.iter().cloned() {
-                    changes.set(base, cloud);
-                }
-                changes.set(base, ViewElement::Flow(slide_valve(&h.flow, d)));
-            }
-        }
-        let plan = changes.into_plan(base, self.selection.clone(), "move");
-        if valid {
-            plan
-        } else {
-            Plan {
-                commit: CommitKind::None,
-                label: "",
-                ..plan
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn route_moved_end(
-        &self,
-        flow: &Flow,
-        end: FlowEnd,
-        d: Point,
-        changes: &mut Changes,
-        moving: &HashSet<i32>,
-        frame_stocks: &[Point],
-        next_uid: &mut i32,
-    ) -> bool {
-        let base = &self.base;
-        let h = healed(base, flow, next_uid);
-        let n = h.flow.points.len();
-        let (end_index, adjacent_index) = match end {
-            FlowEnd::Source => (0, 1),
-            FlowEnd::Sink => (n - 1, n - 2),
-        };
-        let Some(end_uid) = h.flow.points[end_index].attached_to_uid else {
-            return false;
-        };
-        let terminals = h.terminals(base);
-        let fixed = match end {
-            FlowEnd::Source => terminals.sink,
-            FlowEnd::Sink => terminals.source,
-        };
-        let (terminal, moved_cloud) = match h.get(base, end_uid) {
-            Some(ViewElement::Stock(stock)) => {
-                let from = Point::new(stock.x, stock.y);
-                let t = stock_terminal(
-                    stock.uid,
-                    from.offset(d),
-                    Some(point_of(&h.flow.points[end_index])),
-                    Some(point_of(&h.flow.points[adjacent_index])),
-                    from,
-                );
-                (t, None)
-            }
-            Some(ViewElement::Cloud(cloud)) => {
-                let at = Point::new(cloud.x + d.x, cloud.y + d.y);
-                (
-                    free_terminal(at, Some(CloudRef { uid: cloud.uid, at })),
-                    Some(cloud.clone()),
-                )
-            }
-            _ => return false,
-        };
-        let occupied = base.endpoints_on(&stock_uids_of(&[terminal, fixed]), flow.uid, |uid| {
-            if moving.contains(&uid) {
-                d
-            } else {
-                Point::new(0.0, 0.0)
-            }
-        });
-        let g = route_end(&h.flow, end, terminal, fixed, &occupied, frame_stocks);
-        for cloud in h.clouds {
-            changes.set(base, cloud);
-        }
-        changes.move_clouds(base, &g.clouds);
-        if let Some(cloud) = moved_cloud {
-            let p = endpoint(&g.flow, end);
-            changes.set(
-                base,
-                ViewElement::Cloud(Cloud {
-                    x: p.x,
-                    y: p.y,
-                    ..cloud
-                }),
-            );
-        }
-        let valid = flow_fault(
-            &path_of(&g.flow),
-            &with_end(end, terminal, fixed),
-            frame_stocks,
-        ) == Fault::None;
-        changes.set(base, ViewElement::Flow(g.flow));
-        valid
     }
 
     /// Slide a sole selected flow's valve along its (healed) path by the pointer
@@ -1123,13 +1178,7 @@ impl GestureSession {
                 }
                 changes.move_clouds(base, &g.clouds);
                 changes.set(base, ViewElement::Flow(g.flow));
-                return Plan {
-                    target: Some(Target {
-                        uid: target.uid,
-                        valid: true,
-                    }),
-                    ..changes.into_plan(base, self.selection.clone(), "flow attach")
-                };
+                return changes.into_drop(base, self.selection.clone(), "flow attach", target.uid);
             }
             mark = Some(Target {
                 uid: target.uid,
@@ -1235,42 +1284,50 @@ impl GestureSession {
             },
         };
         let obstacles = base.stock_centers();
-        let plan =
-            |flow: Flow, sink_cloud: Option<Cloud>, commit: CommitKind, target: Option<Target>| {
-                let mut changes = Changes::default();
-                if let Some(cloud) = &source_cloud {
-                    let p = point_of(&flow.points[0]);
-                    changes.set(
-                        base,
-                        ViewElement::Cloud(Cloud {
-                            x: p.x,
-                            y: p.y,
-                            ..cloud.clone()
-                        }),
-                    );
-                }
-                if let Some(cloud) = sink_cloud {
-                    let p = point_of(&flow.points[flow.points.len() - 1]);
-                    changes.set(
-                        base,
-                        ViewElement::Cloud(Cloud {
-                            x: p.x,
-                            y: p.y,
-                            ..cloud
-                        }),
-                    );
-                }
-                changes.set(base, ViewElement::Flow(flow));
-                let plan = changes.into_plan(base, vec![flow_uid], "flow creation");
-                let edit = commit == CommitKind::Edit;
-                Plan {
-                    target,
-                    commit,
-                    handoff: edit.then_some(flow_uid),
-                    label: if edit { plan.label } else { "" },
-                    ..plan
-                }
-            };
+        let plan = |flow: Flow, sink_cloud: Option<Cloud>, valid: bool, target: Option<Target>| {
+            let mut changes = Changes::default();
+            if let Some(cloud) = &source_cloud {
+                let p = point_of(&flow.points[0]);
+                changes.set(
+                    base,
+                    ViewElement::Cloud(Cloud {
+                        x: p.x,
+                        y: p.y,
+                        ..cloud.clone()
+                    }),
+                );
+            }
+            if let Some(cloud) = sink_cloud {
+                let p = point_of(&flow.points[flow.points.len() - 1]);
+                changes.set(
+                    base,
+                    ViewElement::Cloud(Cloud {
+                        x: p.x,
+                        y: p.y,
+                        ..cloud
+                    }),
+                );
+            }
+            changes.set(base, ViewElement::Flow(flow));
+            let (plan, refused) = changes.settle(base, vec![flow_uid], "flow creation");
+            let edit = valid && plan.commit == CommitKind::Edit;
+            Plan {
+                // A stock the route allows the drop onto is refused where the
+                // flow holds a number the scene cannot draw.
+                target: target.map(|t| Target {
+                    valid: t.valid && !refused,
+                    ..t
+                }),
+                commit: if edit {
+                    CommitKind::Edit
+                } else {
+                    CommitKind::None
+                },
+                handoff: edit.then_some(flow_uid),
+                label: if edit { plan.label } else { "" },
+                ..plan
+            }
+        };
         let mut mark = None;
         if let Some(target) = base.stock_under(pointer, self.target_slop) {
             let terminal = target_stock_terminal(target.uid, Point::new(target.x, target.y));
@@ -1300,7 +1357,7 @@ impl GestureSession {
                 return plan(
                     g.flow,
                     None,
-                    CommitKind::Edit,
+                    true,
                     Some(Target {
                         uid: target.uid,
                         valid: true,
@@ -1333,16 +1390,7 @@ impl GestureSession {
         let g = route(source, sink, &draft, FlowEnd::Source, &occupied, obstacles);
         let valid = mark.is_none()
             && flow_fault(&path_of(&g.flow), &Terminals { source, sink }, obstacles) == Fault::None;
-        plan(
-            g.flow,
-            Some(sink_cloud),
-            if valid {
-                CommitKind::Edit
-            } else {
-                CommitKind::None
-            },
-            mark,
-        )
+        plan(g.flow, Some(sink_cloud), valid, mark)
     }
 
     /// The element a dragged link's end is over, and whether the link may end
@@ -1402,13 +1450,7 @@ impl GestureSession {
                         polarity: None,
                     }),
                 );
-                Plan {
-                    target: Some(Target {
-                        uid: target.get_uid(),
-                        valid: true,
-                    }),
-                    ..changes.into_plan(base, vec![link_uid], "link creation")
-                }
+                changes.into_drop(base, vec![link_uid], "link creation", target.get_uid())
             }
             t => Plan {
                 target: t.map(|(e, _)| Target {
@@ -1448,13 +1490,12 @@ impl GestureSession {
                         ..link.clone()
                     }),
                 );
-                Plan {
-                    target: Some(Target {
-                        uid: target.get_uid(),
-                        valid: true,
-                    }),
-                    ..changes.into_plan(base, self.selection.clone(), "link attach")
-                }
+                changes.into_drop(
+                    base,
+                    self.selection.clone(),
+                    "link attach",
+                    target.get_uid(),
+                )
             }
             t => Plan {
                 removed: vec![link_uid],

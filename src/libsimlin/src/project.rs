@@ -14,16 +14,15 @@ use std::ffi::{CStr, CString};
 use std::io::BufReader;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ffi;
 use crate::ffi_error::{FfiError, SimlinError};
 use crate::ffi_try;
 use crate::patch::gather_error_details_with_db;
 use crate::{
-    build_simlin_error, clear_out_error, drop_c_string, new_synced_db, require_project,
-    store_anyhow_error, store_error, SimlinErrorCode, SimlinModel, SimlinProject,
+    build_simlin_error, clear_out_error, drop_c_string, require_project, store_anyhow_error,
+    store_error, SimlinErrorCode, SimlinModel, SimlinProject,
 };
 
 /// Open a project from binary protobuf data
@@ -66,13 +65,9 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
             })?;
 
         let datamodel_project: engine::datamodel::Project = engine_serde::deserialize(pb_project);
-        let db = new_synced_db(&datamodel_project);
-        Ok(Box::into_raw(Box::new(SimlinProject {
-            datamodel: Mutex::new(datamodel_project),
-            db: Mutex::new(db),
-            ltm_requested: AtomicBool::new(false),
-            ref_count: AtomicUsize::new(1),
-        })))
+        Ok(Box::into_raw(Box::new(SimlinProject::new(
+            datamodel_project,
+        ))))
     })();
 
     match result {
@@ -146,13 +141,9 @@ pub unsafe extern "C" fn simlin_project_open_json(
             }
         };
 
-        let db = new_synced_db(&datamodel_project);
-        Ok(Box::into_raw(Box::new(SimlinProject {
-            datamodel: Mutex::new(datamodel_project),
-            db: Mutex::new(db),
-            ltm_requested: AtomicBool::new(false),
-            ref_count: AtomicUsize::new(1),
-        })))
+        Ok(Box::into_raw(Box::new(SimlinProject::new(
+            datamodel_project,
+        ))))
     })();
 
     match result {
@@ -524,7 +515,7 @@ pub unsafe extern "C" fn simlin_project_replace_contents(
     let mut datamodel_locked = dst_ref.datamodel.lock().unwrap();
     let mut db_locked = dst_ref.lock_db();
     db_locked.sync(&new_datamodel);
-    *datamodel_locked = new_datamodel;
+    **datamodel_locked = new_datamodel;
 }
 
 /// Open a project from XMILE/STMX format data
@@ -559,16 +550,7 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     let mut reader = BufReader::new(slice);
 
     match simlin_engine::open_xmile(&mut reader) {
-        Ok(datamodel_project) => {
-            let db = new_synced_db(&datamodel_project);
-            let boxed = Box::new(SimlinProject {
-                datamodel: Mutex::new(datamodel_project),
-                db: Mutex::new(db),
-                ltm_requested: AtomicBool::new(false),
-                ref_count: AtomicUsize::new(1),
-            });
-            Box::into_raw(boxed)
-        }
+        Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
                 out_error,
@@ -619,16 +601,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     };
 
     match simlin_engine::open_vensim(contents) {
-        Ok(datamodel_project) => {
-            let db = new_synced_db(&datamodel_project);
-            let boxed = Box::new(SimlinProject {
-                datamodel: Mutex::new(datamodel_project),
-                db: Mutex::new(db),
-                ltm_requested: AtomicBool::new(false),
-                ref_count: AtomicUsize::new(1),
-            });
-            Box::into_raw(boxed)
-        }
+        Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
                 out_error,
@@ -715,16 +688,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
     };
 
     match result {
-        Ok(datamodel_project) => {
-            let db = new_synced_db(&datamodel_project);
-            let boxed = Box::new(SimlinProject {
-                datamodel: Mutex::new(datamodel_project),
-                db: Mutex::new(db),
-                ltm_requested: AtomicBool::new(false),
-                ref_count: AtomicUsize::new(1),
-            });
-            Box::into_raw(boxed)
-        }
+        Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
                 out_error,
@@ -776,16 +740,7 @@ pub unsafe extern "C" fn simlin_project_open_systems(
     };
 
     match simlin_engine::open_systems(contents) {
-        Ok(datamodel_project) => {
-            let db = new_synced_db(&datamodel_project);
-            let boxed = Box::new(SimlinProject {
-                datamodel: Mutex::new(datamodel_project),
-                db: Mutex::new(db),
-                ltm_requested: AtomicBool::new(false),
-                ref_count: AtomicUsize::new(1),
-            });
-            Box::into_raw(boxed)
-        }
+        Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
                 out_error,
