@@ -48,6 +48,7 @@ mod mdl_equivalence;
 mod mdl_roundtrip;
 mod metasd_macros;
 mod roundtrip;
+mod save_meaning;
 mod simulate;
 mod simulate_ltm;
 mod simulate_ltm_pinned;
