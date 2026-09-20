@@ -9,7 +9,7 @@ use crate::common::{Canonical, Ident, Result, canonicalize};
 use crate::datamodel;
 use crate::datamodel::Visibility;
 use crate::xmile::variables::{Var, ai_state_from};
-use crate::xmile::views::{UnreadElement, View, ViewType};
+use crate::xmile::views::{View, ViewType};
 use crate::xmile::{
     SimSpecs, ToXml, XmlWriter, write_tag, write_tag_end, write_tag_start,
     write_tag_start_with_attrs, write_tag_with_attrs,
@@ -502,7 +502,6 @@ impl From<Model> for datamodel::Model {
         let xmile_views = model.views.clone().unwrap_or(Views {
             view: None,
             groups: None,
-            stories: Vec::new(),
         });
         let views = xmile_views
             .view
@@ -564,7 +563,7 @@ impl From<Model> for datamodel::Model {
                 variables: vars, ..
             }) => vars
                 .into_iter()
-                .filter(|v| !matches!(v, Var::Unhandled(_)))
+                .filter(|v| !matches!(v, Var::Unhandled))
                 .map(datamodel::Variable::from)
                 .collect(),
             _ => vec![],
@@ -678,7 +677,6 @@ impl From<datamodel::Model> for Model {
                         Some(views.into_iter().map(View::from).collect())
                     },
                     groups: semantic_groups,
-                    stories: Vec::new(),
                 })
             },
             loop_metadata: xmile_loop_metadata,
@@ -720,50 +718,6 @@ pub struct Views {
     /// Semantic groups appear in views section when there are no diagram views
     #[serde(rename = "group", default)]
     pub groups: Option<Vec<SemanticGroup>>,
-    /// Stella's story mode (`isee:stories`), which the datamodel does not
-    /// hold: read only so the import can report what it held. A list, so a
-    /// file holding the element twice still opens.
-    #[serde(rename = "stories", default, skip_serializing)]
-    pub stories: Vec<UnreadChildren>,
-}
-
-/// The children of an element the datamodel does not hold, each by tag and
-/// what it is called (see [`UnreadElement`]).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Default)]
-pub struct UnreadChildren {
-    #[serde(rename = "$value", default)]
-    pub children: Vec<AnyElement>,
-}
-
-/// Any element, kept by its tag and what it is called. Text between
-/// elements arrives as one too, tagged `$text`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
-pub struct AnyElement(pub UnreadElement);
-
-impl<'de> Deserialize<'de> for AnyElement {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        struct AnyVisitor;
-        impl<'de> serde::de::Visitor<'de> for AnyVisitor {
-            type Value = AnyElement;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("an element")
-            }
-
-            fn visit_enum<A: serde::de::EnumAccess<'de>>(
-                self,
-                data: A,
-            ) -> std::result::Result<AnyElement, A::Error> {
-                let (tag, element): (String, A::Variant) = data.variant()?;
-                UnreadElement::read(tag, element).map(AnyElement)
-            }
-        }
-        deserializer.deserialize_enum("AnyElement", &[], AnyVisitor)
-    }
 }
 
 impl Model {

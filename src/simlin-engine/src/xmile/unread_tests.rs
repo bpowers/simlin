@@ -151,3 +151,143 @@ fn a_file_of_only_what_the_project_keeps_reports_nothing() {
     let (_, warnings) = project_from_reader_with_warnings(&mut file.as_bytes()).unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
 }
+
+/// A file of one auxiliary, drawn, with `variables` added among its
+/// variables and `views` among its views after the diagram, whose own
+/// objects `diagram` adds to.
+fn file_with(variables: &str, diagram: &str, views: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE">
+<header><name>t</name><vendor>isee systems, inc.</vendor><product version="3.0" lang="en">Stella Architect</product></header>
+<sim_specs method="Euler" time_units="Months"><start>0</start><stop>10</stop><dt>1</dt></sim_specs>
+<model>
+<variables><aux name="a"><eqn>1</eqn></aux>{variables}</variables>
+<views><view><aux x="1" y="1" name="a"/>{diagram}</view>{views}</views>
+</model></xmile>"#
+    )
+}
+
+/// The reporting open of `file` reads what the plain open reads, and its
+/// warnings.
+fn report(file: &str) -> Vec<String> {
+    let plain = project_from_reader(&mut file.as_bytes()).expect("the plain open");
+    let (project, warnings) =
+        project_from_reader_with_warnings(&mut file.as_bytes()).expect("the reporting open");
+    assert!(project == plain, "the report changed the project of {file}");
+    warnings.into_iter().map(|w| w.message).collect()
+}
+
+#[test]
+fn ill_formed_content_the_read_skips_opens_and_is_reported_without_a_label() {
+    // Each file opens without the report, so each opens with it, and each
+    // unread element is counted. What does not unescape names nothing.
+    let text_box = "1 text box on the diagram is not kept";
+    let cases: [(&str, &str, &str, &[&str]); 13] = [
+        (
+            "",
+            "<text_box uid=\"2\">caf&nbsp;e</text_box>",
+            "",
+            &[text_box],
+        ),
+        (
+            "",
+            "<text_box uid=\"2\" label=\"a &bogus; b\"/>",
+            "",
+            &[text_box],
+        ),
+        (
+            "",
+            "",
+            "<isee:stories><isee:story name=\"x &bogus;\"/></isee:stories>",
+            &["1 story in story mode is not kept"],
+        ),
+        (
+            "<gf name=\"t &bogus;\"><xscale min=\"0\" max=\"1\"/><ypts>0,1</ypts></gf>",
+            "",
+            "",
+            &["1 graphical function in the model is not kept"],
+        ),
+        ("", "<text_box>&#0;</text_box>", "", &[text_box]),
+        ("", "<text_box>&#xD800;</text_box>", "", &[text_box]),
+        ("", "<text_box title=\"a & b\"/>", "", &[text_box]),
+        (
+            "",
+            "<stacked_container><graph title=\"&nbsp;\"/></stacked_container>",
+            "",
+            &["1 graph or table on the diagram is not kept"],
+        ),
+        (
+            "",
+            "<text_box><entity name=\"&nbsp;\"/></text_box>",
+            "",
+            &[text_box],
+        ),
+        (
+            "",
+            "<text_box><other>&nbsp;</other></text_box>",
+            "",
+            &[text_box],
+        ),
+        (
+            "",
+            "",
+            "<view type=\"interface\"><text_box>&nbsp;</text_box></view>",
+            &["1 text box on the interface page is not kept"],
+        ),
+        // What the report leaves out is not looked at.
+        ("", "<style>&nbsp;</style>", "", &[]),
+        (
+            "<isee:dependencies><var name=\"&nbsp;\"/></isee:dependencies>",
+            "",
+            "",
+            &[],
+        ),
+    ];
+    for (variables, diagram, views, expected) in cases {
+        let file = file_with(variables, diagram, views);
+        assert_eq!(report(&file), expected, "{variables}{diagram}{views}");
+    }
+
+    // A file the read refuses, the report refuses the same way.
+    let file = file_with("", "<text_box>a & b</text_box>", "");
+    let plain = project_from_reader(&mut file.as_bytes()).err();
+    let reporting = project_from_reader_with_warnings(&mut file.as_bytes()).err();
+    assert!(plain.is_some());
+    assert_eq!(format!("{plain:?}"), format!("{reporting:?}"));
+
+    // The same elements, well formed, are named.
+    let file = file_with(
+        "",
+        "<text_box>caf&#233; &amp; bar</text_box><text_box title=\"a &amp; b\"/>",
+        "",
+    );
+    assert_eq!(
+        report(&file),
+        ["2 text boxes on the diagram are not kept: 'café & bar' and 'a & b'"]
+    );
+}
+
+#[test]
+fn an_element_nested_ten_thousand_deep_opens_on_a_small_stack() {
+    // A secondary thread's usual stack. The label is read no deeper than a
+    // Stella graph's plotted variable, so the title at the bottom is not
+    // reached.
+    const STACK: usize = 512 * 1024;
+    const DEPTH: usize = 10_000;
+    for tag in ["graph", "zz"] {
+        let nested = format!(
+            "<text_box>{}<{tag} title=\"deep\"/>{}</text_box>",
+            format!("<{tag}>").repeat(DEPTH),
+            format!("</{tag}>").repeat(DEPTH)
+        );
+        let file = file_with("", &nested, "");
+        let warnings = std::thread::Builder::new()
+            .stack_size(STACK)
+            .spawn(move || report(&file))
+            .expect("a thread")
+            .join()
+            .expect("the open returns");
+        assert_eq!(warnings, ["1 text box on the diagram is not kept"], "{tag}");
+    }
+}

@@ -1576,11 +1576,14 @@ SimlinProject *simlin_project_open_xmile(const uint8_t *data,
 // Each kind of loss, in each place it occurs, is one `Warning`-severity,
 // wire-`Generic`, kind-`Model` detail on the aggregate `SimlinError` stored
 // in `out_collected_errors` (NULL when the file loses nothing; pass NULL to
-// discard them). `message` is `"XMILE import: <reason>"` and `details` the
-// bare reason, such as `2 sliders on interface page 1 are not kept: 'Birth
-// Rate' and 'Population'`. The warnings describe the file as it was read,
-// and the project does not keep them, so a host that shows them holds them
-// itself.
+// discard them, and the open then costs what `simlin_project_open_xmile`
+// costs). `message` is `"XMILE import: <reason>"` and `details` the bare
+// reason, such as `2 sliders on interface page 1 are not kept: 'Birth Rate'
+// and 'Population'`. The aggregate's own message counts the losses by kind
+// over the whole file, for a host to show where a row per place would be
+// too many: `3 graphs, 2 sliders, and 1 text box in this file are not
+// kept`. The warnings describe the file as it was read, and the project
+// does not keep them, so a host that shows them holds them itself.
 //
 // Returns NULL and populates `out_error` on failure, with
 // `out_collected_errors` NULL.
@@ -1619,14 +1622,18 @@ SimlinProject *simlin_project_open_vensim(const uint8_t *data,
 //
 // Each kind of loss is one `Warning`-severity, wire-`Generic`, kind-`Model`
 // detail on the aggregate `SimlinError` stored in `out_collected_errors`
-// (NULL when the file loses nothing; pass NULL to discard them): one per
-// kind and sketch view for what a modeler put on a view, and one per kind
-// over the whole sketch for what follows from what the diagram does not
-// draw (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is
-// `"MDL import: <reason>"` and `details` the bare reason, such as `29
-// comments on view 'View 1' are not kept, such as 'The World3 Model'`. The
-// warnings describe the file as it was read, and the project does not keep
-// them, so a host that shows them holds them itself.
+// (NULL when the file loses nothing; pass NULL to discard them, and the
+// open then costs what `simlin_project_open_vensim` costs): one per kind
+// and sketch view for what a modeler put on a view, and one per kind over
+// the whole sketch for what follows from what the diagram does not draw
+// (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is `"MDL
+// import: <reason>"` and `details` the bare reason, such as `29 comments on
+// view 'View 1' are not kept, such as 'The World3 Model'`. The aggregate's
+// own message counts the losses by kind over the whole file, for a host to
+// show where a row per place would be too many: `29 comments, 3 graphs, and
+// 7 sliders in this file are not kept`. The warnings describe the file as
+// it was read, and the project does not keep them, so a host that shows
+// them holds them itself.
 //
 // Returns NULL and populates `out_error` on failure, with
 // `out_collected_errors` NULL.

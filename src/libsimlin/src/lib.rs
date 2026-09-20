@@ -857,7 +857,8 @@ pub(crate) fn build_simlin_error(
 /// and no engine `ErrorCode` names a loss, so each rides the wire `Generic`
 /// code with `Warning` severity -- the severity is what tells a caller the
 /// call succeeded. `message` is `"<source>: <reason>"` and `details` the bare
-/// reason.
+/// reason. The aggregate's own message is `summary` when there is one, and
+/// otherwise the first detail's message.
 ///
 /// # Safety
 /// - `out_collected_errors` must be NULL or valid for writing
@@ -865,6 +866,7 @@ pub(crate) unsafe fn store_warnings(
     out_collected_errors: *mut *mut SimlinError,
     source: &str,
     reasons: impl IntoIterator<Item = String>,
+    summary: Option<String>,
 ) {
     if out_collected_errors.is_null() {
         return;
@@ -882,7 +884,11 @@ pub(crate) unsafe fn store_warnings(
     *out_collected_errors = if details.is_empty() {
         ptr::null_mut()
     } else {
-        build_simlin_error(SimlinErrorCode::Generic, &details).into_raw()
+        let mut error = build_simlin_error(SimlinErrorCode::Generic, &details);
+        if summary.is_some() {
+            error.set_message(summary);
+        }
+        error.into_raw()
     };
 }
 

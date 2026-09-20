@@ -19,6 +19,53 @@ pub struct ImportWarning {
     /// What is not kept and where, as a sentence a person reads: `29
     /// comments on view 'View 1' are not kept, such as 'The World3 Model'`.
     pub message: String,
+    /// How many things of its kind the warning counts.
+    pub count: usize,
+    /// Its kind, in words for one thing and for several: `comment`,
+    /// `comments`.
+    pub one: String,
+    pub many: String,
+}
+
+impl ImportWarning {
+    /// What `warnings` say the file loses, by kind over the whole file, in
+    /// the order each kind first appears: `746 comments, 245 graphs, and 3
+    /// images in this file are not kept`. None when there are none. A host
+    /// shows this where a row per place would be too many to read.
+    pub fn summary(warnings: &[ImportWarning]) -> Option<String> {
+        let mut kinds: Vec<(&str, &str, usize)> = Vec::new();
+        for warning in warnings {
+            match kinds.iter_mut().find(|(one, _, _)| *one == warning.one) {
+                Some((_, _, n)) => *n += warning.count,
+                None => kinds.push((&warning.one, &warning.many, warning.count)),
+            }
+        }
+        let verb = match kinds.as_slice() {
+            [] => return None,
+            [(_, _, 1)] => "is",
+            _ => "are",
+        };
+        let counted: Vec<String> = kinds
+            .iter()
+            .map(|(one, many, n)| count(*n, one, many))
+            .collect();
+        Some(format!(
+            "{} in this file {verb} not kept",
+            join_words(&counted)
+        ))
+    }
+}
+
+/// Words joined for a sentence, as `join_quoted_names` joins names but
+/// without the quotes and without cutting the list short: `a`, `a and b`,
+/// `a, b, and c`.
+fn join_words(words: &[String]) -> String {
+    match words {
+        [] => String::new(),
+        [a] => a.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [init @ .., last] => format!("{}, and {last}", init.join(", ")),
+    }
 }
 
 /// How many examples a warning names.
@@ -80,7 +127,12 @@ pub(crate) fn not_kept(
         message.push_str(joiner);
         message.push_str(&join_quoted_names(&listed));
     }
-    ImportWarning { message }
+    ImportWarning {
+        message,
+        count: n,
+        one: one.to_owned(),
+        many: many.to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -161,5 +213,24 @@ mod tests {
         );
         let long = "x".repeat(60);
         assert_eq!(shown_names(&[long]), vec![format!("{}...", "x".repeat(40))]);
+    }
+
+    #[test]
+    fn a_summary_counts_each_kind_over_every_place() {
+        let warnings = [
+            not_kept(15, "comment", "comments", "on view 'A'", &[]),
+            not_kept(3, "graph", "graphs", "on view 'A'", &[]),
+            not_kept(1, "comment", "comments", "on view 'B'", &[]),
+            not_kept(1, "image", "images", "on view 'B'", &[]),
+        ];
+        assert_eq!(
+            ImportWarning::summary(&warnings).as_deref(),
+            Some("16 comments, 3 graphs, and 1 image in this file are not kept")
+        );
+        assert_eq!(
+            ImportWarning::summary(&warnings[3..]).as_deref(),
+            Some("1 image in this file is not kept")
+        );
+        assert_eq!(ImportWarning::summary(&[]), None);
     }
 }

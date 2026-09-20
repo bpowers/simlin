@@ -1695,9 +1695,14 @@ unsafe fn open_reporting(
 
 /// The bare reasons of a warnings handle, each checked to be a warning in
 /// the shape `serialize_mdl`'s are, with `message` the reason after
-/// `source`. Frees the handle.
+/// `source`, and the handle's own message the engine's summary of them.
+/// Frees the handle.
 unsafe fn warning_reasons(collected: *mut SimlinError, source: &str) -> Vec<String> {
     assert!(!collected.is_null(), "expected warnings");
+    let summary = CStr::from_ptr(simlin_error_get_message(collected))
+        .to_str()
+        .unwrap()
+        .to_string();
     let count = simlin_error_get_detail_count(collected);
     let reasons = (0..count)
         .map(|i| {
@@ -1710,8 +1715,13 @@ unsafe fn warning_reasons(collected: *mut SimlinError, source: &str) -> Vec<Stri
             assert_eq!(message, format!("{source}: {reason}"));
             reason
         })
-        .collect();
+        .collect::<Vec<String>>();
     simlin_error_free(collected);
+    assert!(
+        summary.ends_with(" in this file are not kept")
+            || summary.ends_with(" in this file is not kept"),
+        "{summary}"
+    );
     reasons
 }
 
@@ -1729,6 +1739,11 @@ fn test_open_vensim_with_warnings_reports_what_the_file_does_not_keep() {
 
     unsafe {
         let (proj, collected) = open_reporting(simlin_project_open_vensim_with_warnings, &data);
+        let summary = engine::ImportWarning::summary(&expected).unwrap();
+        assert_eq!(
+            CStr::from_ptr(simlin_error_get_message(collected)).to_str(),
+            Ok(summary.as_str())
+        );
         let expected: Vec<String> = expected.into_iter().map(|w| w.message).collect();
         assert_eq!(warning_reasons(collected, "MDL import"), expected);
 
@@ -1755,6 +1770,10 @@ fn test_open_xmile_with_warnings_reports_what_the_file_does_not_keep() {
     unsafe {
         let (proj, collected) =
             open_reporting(simlin_project_open_xmile_with_warnings, lossy.as_bytes());
+        assert_eq!(
+            CStr::from_ptr(simlin_error_get_message(collected)).to_str(),
+            Ok("1 graphical function in this file is not kept")
+        );
         assert_eq!(
             warning_reasons(collected, "XMILE import"),
             ["1 graphical function in the model is not kept: 'lookup function table'"]

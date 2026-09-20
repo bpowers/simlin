@@ -171,9 +171,11 @@ fn convert_views(
 /// What a modeler put on the view (comments, input/output objects, images)
 /// is reported view by view, since where it sat is part of what it was. What
 /// follows from what the diagram does not draw (the drawings of Time and the
-/// control variables, the arrows drawn to anything not kept, the clouds of a
-/// flow's copy) is counted over every view ([`SketchConsequences`]), since
-/// one row per view would repeat the same fact across the whole sketch.
+/// control variables, the arrows drawn to anything not kept) is counted over
+/// every view ([`SketchConsequences`]), since one row per view would repeat
+/// the same fact across the whole sketch. A cloud is not reported, even one
+/// no kept flow ends in: it holds nothing, and a writer draws a cloud
+/// wherever a flow it writes needs one.
 #[derive(Default)]
 struct SketchLosses {
     /// Each comment that is not a flow's cloud: a title, a note, a label, a
@@ -194,10 +196,6 @@ struct SketchLosses {
     unplaced: Vec<String>,
     /// How many arrows (not pipes) are drawn to or from something above.
     arrows: usize,
-    /// How many clouds a pipe is drawn to that no flow the view keeps ends
-    /// in (a ghost copy's pipe, or a pipe end the model's stock lists
-    /// overrule).
-    clouds: usize,
     /// How many records are of a type the parser does not know.
     unknown: usize,
 }
@@ -231,7 +229,6 @@ impl SketchLosses {
         let unplaced = self.unplaced.len();
         consequences.unplaced.add(title, unplaced, self.unplaced);
         consequences.arrows.add(title, self.arrows, Vec::new());
-        consequences.clouds.add(title, self.clouds, Vec::new());
         consequences.unknown.add(title, self.unknown, Vec::new());
     }
 
@@ -268,8 +265,6 @@ struct SketchConsequences {
     unplaced: Tally,
     /// The arrows drawn to or from anything not kept.
     arrows: Tally,
-    /// The clouds no kept flow ends in.
-    clouds: Tally,
     /// The records of a type the parser does not know.
     unknown: Tally,
 }
@@ -303,7 +298,6 @@ impl SketchConsequences {
                 "drawings of variables",
             ),
             (self.arrows, "arrow", "arrows"),
-            (self.clouds, "cloud", "clouds"),
             (
                 self.unknown,
                 "record of an unknown type",
@@ -522,13 +516,12 @@ fn convert_view(
     for (comment, local_uid, uid) in deferred_comments {
         if let Some(&flow_uid) = cloud_owners.get(&local_uid) {
             elements.push(convert_comment_as_cloud(comment, uid, flow_uid));
+        } else if piped.contains(&local_uid) && comment.io_object().is_none() {
+            // A cloud no kept flow ends in (a ghost copy's pipe, or a pipe
+            // end the model's stock lists overrule) is no loss.
         } else if let Some(losses) = losses.as_deref_mut() {
             dropped.insert(local_uid);
-            if piped.contains(&local_uid) && comment.io_object().is_none() {
-                losses.clouds += 1;
-            } else {
-                losses.add_comment(comment);
-            }
+            losses.add_comment(comment);
         }
     }
     if let Some(losses) = losses {

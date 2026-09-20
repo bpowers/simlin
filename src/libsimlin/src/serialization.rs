@@ -390,6 +390,7 @@ pub unsafe extern "C" fn simlin_project_serialize_mdl(
         out_collected_errors,
         "MDL export",
         warnings.into_iter().map(|w| w.message),
+        None,
     );
 }
 

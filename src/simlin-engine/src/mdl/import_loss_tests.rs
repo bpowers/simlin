@@ -47,8 +47,9 @@ V300  Do not put anything below this section - it will be ignored
 /// A sketch holding one of each thing the reader does not keep: comments,
 /// input/output objects, images, a drawing of Time, arrows to them, a
 /// record of a type Vensim does not document, and, on a second view, a copy
-/// of the flow whose pipe ends in a cloud no kept flow ends in, and Time
-/// again. After the sketch, a custom graph, a custom table and a report.
+/// of the flow whose pipe ends in a cloud no kept flow ends in (which is no
+/// loss: a cloud holds nothing), and Time again. After the sketch, a custom
+/// graph, a custom table and a report.
 const SKETCH: &str = "*View 1
 $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
 10,1,Stock,300,200,40,20,3,3,0,0,0,0,0,0
@@ -121,7 +122,6 @@ fn a_sketch_reports_its_content_view_by_view_and_its_consequences_once() {
             // whole sketch.
             "2 drawings of variables on 2 views are not kept, such as 'Time'",
             "2 arrows on view 'View 1' are not kept",
-            "1 cloud on view 'View 2' is not kept",
             "1 record of an unknown type on view 'View 1' is not kept",
             "1 custom graph in the model is not kept: 'Stock_graph'",
             "1 custom table in the model is not kept: 'Stock_table'",
