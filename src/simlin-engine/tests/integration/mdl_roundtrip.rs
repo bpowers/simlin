@@ -1688,126 +1688,31 @@ const EXPECTED_REPARSE_FAILURES: &[&str] = &[];
 
 /// Re-parseable fixtures whose writer output is NOT a fixpoint: writing the
 /// re-parsed model a second time changes the text. Calibrated empirically by
-/// running `writer_output_idempotence_ratchet`. Grouped by the dominant
-/// observed diff class (a file may exhibit more than one; it is listed under
-/// its primary cause):
+/// running `writer_output_idempotence_ratchet` -- do NOT edit by guesswork.
 ///
-///   - sketch instability: the sketch (diagram) section is not a fixpoint --
-///     connector UIDs/ordering, coordinates, or element name-quoting shift on
-///     the second write. The equations are stable.
-///   - CRLF free-text accumulation: a multi-line comment/units/doc field
-///     gains an extra trailing carriage return each round -- the writer does
-///     not strip embedded `\r` from free text before re-emitting it (GH #849).
-///   - arrayed element order: the order of an arrayed variable's per-element
-///     sub-equations is not stable across a round trip.
-///   - builtin-call spacing: `SIZE(x)` is re-emitted as `SIZE ( x )`.
-///   - unary-minus parenthesization: `-x ^ y` is re-emitted as `-(x ^ y)`.
-///   - escape doubling: backslashes/quotes inside a quoted identifier are
-///     re-escaped on each pass, so the escaping grows.
-///   - control-variable value substitution: a reference to a control variable
-///     (`TIME STEP`) is replaced by its literal value on the second write.
-const EXPECTED_NON_IDEMPOTENT: &[&str] = &[
-    // sketch instability
-    "test/bobby/vdf/econ/mark2.mdl",
-    "test/sdeverywhere/models/smooth3/smooth3.mdl",
-    "test/test-models/samples/Population/Subscripted Population Model.mdl",
-    "test/test-models/samples/Roessler_Chaos/roessler_chaos.mdl",
-    "test/test-models/samples/Workforce/workforce.mdl",
-    "test/test-models/tests/arguments/test_arguments.mdl",
-    "test/test-models/tests/data_from_other_model/model_to_generate_data.mdl",
-    "test/test-models/tests/data_from_other_model/test_data_from_other_model.mdl",
-    "test/test-models/tests/delay_fixed/test_delay_fixed.mdl",
-    "test/test-models/tests/delays/test_delays.mdl",
-    "test/test-models/tests/except/test_except.mdl",
-    "test/test-models/tests/function_capitalization/test_function_capitalization.mdl",
-    "test/test-models/tests/logicals/test_logicals.mdl",
-    "test/test-models/tests/lookups_inline_bounded/test_lookups_inline_bounded.mdl",
-    "test/test-models/tests/macro_cross_reference/test_macro_cross_reference.mdl",
-    "test/test-models/tests/macro_expression/test_macro_expression.mdl",
-    "test/test-models/tests/macro_multi_expression/test_macro_multi_expression.mdl",
-    "test/test-models/tests/macro_multi_macros/test_macro_multi_macros.mdl",
-    "test/test-models/tests/macro_stock/test_macro_stock.mdl",
-    "test/test-models/tests/macro_trailing_definition/test_macro_trailing_definition.mdl",
-    "test/test-models/tests/rounding/test_rounding.mdl",
-    "test/test-models/tests/sample_if_true/test_sample_if_true.mdl",
-    "test/test-models/tests/smooth/test_smooth.mdl",
-    "test/test-models/tests/subrange_merge/test_subrange_merge.mdl",
-    "test/test-models/tests/subscript_multiples/test_multiple_subscripts.mdl",
-    "test/test-models/tests/subscript_selection/subscript_selection.mdl",
-    "test/test-models/tests/subscripted_if_then_else/test_subscripted_if_then_else.mdl",
-    "test/test-models/tests/subscripted_logicals/test_subscripted_logicals.mdl",
-    "test/test-models/tests/subscripted_lookups/test_subscripted_lookups.mdl",
-    "test/test-models/tests/subscripted_round/test_subscripted_round.mdl",
-    "test/test-models/tests/subscripted_xidz/test_subscripted_xidz.mdl",
-    "test/test-models/tests/xidz_zidz/xidz_zidz.mdl",
-    // CRLF free-text accumulation (GH #849). The free-text sanitization choke
-    // point (`mdl::writer::sanitize_free_text`) normalizes embedded carriage
-    // returns, so the fixtures whose ONLY non-idempotence was CR accumulation
-    // are now fixpoints and have been removed from this list. The entries that
-    // remain here still fail for a SEPARATE reason (a sketch-instability or
-    // arrayed-order diff co-occurring in the same file); the CR class alone no
-    // longer keeps any fixture non-idempotent.
-    "test/metasd/WRLD3-03/wrld3-03.mdl",
-    "test/metasd/bathtub-statistics/integration3.mdl",
-    "test/metasd/covid19-us-homer/homer v8/Covid19US v8.mdl",
-    "test/metasd/early-warnings-catastrophe/catastropeWarning2.mdl",
-    "test/metasd/pink-noise/PinkNoise2010.mdl",
-    "test/metasd/theil-statistics/Theil_2011.mdl",
-    "test/metasd/wonderland/Wonderland3.mdl",
-    "test/sdeverywhere/models/active_initial/active_initial.mdl",
-    "test/test-models/samples/Query_file/Query_file.mdl",
-    "test/test-models/tests/delay_pipeline/test_pipeline_delays.mdl",
-    // arrayed element order
-    "test/metasd/social-network-valuation/groupon 1.mdl",
-    "test/metasd/social-network-valuation/groupon 2.mdl",
-    "test/metasd/social-network-valuation/groupon 3.mdl",
-    "test/test-models/tests/allocate_available/test_allocate_available.mdl",
-    "test/test-models/tests/allocate_by_priority/test_allocate_by_priority.mdl",
-    "test/test-models/tests/array_with_line_break/test_array_with_line_break.mdl",
-    "test/test-models/tests/invert_matrix/test_invert_matrix.mdl",
-    "test/test-models/tests/subscript_element_name/test_subscript_element_name.mdl",
-    "test/test-models/tests/subscript_mapping_simple/test_subscript_mapping_simple.mdl",
-    "test/test-models/tests/subscript_mapping_vensim/test_subscript_mapping_vensim.mdl",
-    "test/test-models/tests/subscripted_delays/test_subscripted_delays.mdl",
-    "test/test-models/tests/subscripted_smooth/test_subscripted_smooth.mdl",
-    "test/test-models/tests/tabbed_arrays/tabbed_arrays.mdl",
-    // builtin-call spacing (`SIZE(x)` -> `SIZE ( x )`)
-    "test/sdeverywhere/models/elmcount/elmcount.mdl",
-    "test/test-models/tests/elm_count/test_elm_count.mdl",
-    "test/test-models/tests/subscript_definition/test_subscript_definition.mdl",
-    // unary-minus parenthesization (`-x ^ y` -> `-(x ^ y)`)
-    "test/test-models/tests/arithmetics/test_arithmetics.mdl",
-    "test/test-models/tests/arithmetics_exp/test_arithmetics_exp.mdl",
-    // escape doubling inside quoted identifiers
-    "test/test-models/tests/special_characters/test_special_variable_names.mdl",
-    // control-variable value substitution (`TIME STEP` -> its literal value)
-    "test/test-models/tests/control_vars/test_control_vars.mdl",
-    // Newly re-parseable after the context-aware writer landed (#847/#850/#853):
-    // these fixtures used to fail the RE-PARSE ratchet (wildcard/subrange
-    // subscripts or a PI collision), so their idempotence was never measured.
-    // Now that they re-parse, a pre-existing non-idempotence surfaces -- almost
-    // entirely CRLF free-text accumulation (#849) and/or sketch connector
-    // control-point instability; the equations themselves round-trip. They are
-    // recorded here (not a regression: they were never in the idempotent set)
-    // and shrink as #849 and the sketch fixes land.
-    "test/metasd/FREE/FREE6/FREE6-corrected/conversion.mdl",
-    "test/metasd/FREE/FREE6/FREE6-corrected/conversion2.mdl",
-    "test/metasd/FREE/FREE6/FREE6-original/conversion.mdl",
-    "test/metasd/FREE/FREE6/FREE6-original/conversion2.mdl",
-    "test/metasd/FREE/FREE6/FREE6-original/free 6.mdl",
-    "test/metasd/beer-game/RealBeer4-Sterman13.mdl",
-    "test/metasd/industrial-dynamics/IDch15/IDch15d.mdl",
-    "test/metasd/interpolating-arrays/InterpolatingArrays.mdl",
-    "test/metasd/scientific-revolution/scirev7.mdl",
-    "test/metasd/scientific-revolution/scirev8.mdl",
-    "test/metasd/thyroid-dynamics/thyroid-2008-d.mdl",
-    "test/sdeverywhere/models/allocate/allocate.mdl",
-    "test/sdeverywhere/models/arrays_cname/arrays_cname.mdl",
-    "test/sdeverywhere/models/arrays_varname/arrays_varname.mdl",
-    "test/sdeverywhere/models/vector/vector.mdl",
-    "test/test-models/tests/subscript_aggregation/test_subscript_aggregation.mdl",
-    "test/test-models/tests/subscript_transposition/test_subscript_transposition.mdl",
-];
+/// This list is EMPTY: a save is a fixed point for every re-parseable corpus
+/// fixture, so the first save of a file is the last one that changes it. The
+/// rules that make it so are pinned one by one in `mdl::writer`'s
+/// `fixpoint_tests`:
+///
+///   - a connector keeps the control point its file gave it while that point
+///     still reads as the link's shape, and a point the writer computes reads
+///     back as the shape it was computed for;
+///   - a bent pipe's ends are snapped along their own segments, and a flow
+///     whose model stock another view draws is written into a cloud;
+///   - a cloud placed after the views merged is written with its flow;
+///   - arrayed elements are written in canonical key order, whatever their
+///     stored order;
+///   - every builtin the reader knows is written back under a name the reader
+///     knows (`ELMCOUNT`, not `SIZE`);
+///   - quoted names are escaped idempotently and display newlines collapse in
+///     every identifier the writer prints;
+///   - a save step equal to the time step is written as `TIME STEP`;
+///   - the importer resolves element ownership and dimension order the same
+///     way on every run (GH #859).
+///
+/// A fixture that stops being a fixpoint is a regression in one of these.
+const EXPECTED_NON_IDEMPOTENT: &[&str] = &[];
 
 /// Recursively collect every `.mdl` fixture under `test/`, returned as sorted,
 /// repo-relative paths (e.g. `test/test-models/tests/abs/test_abs.mdl`). Uses
@@ -2070,5 +1975,23 @@ fn writer_output_idempotence_ratchet() {
         reparseable.len(),
         non_idempotent.len(),
         problems.join("\n")
+    );
+}
+
+/// The corpus ratchets skip C-LEARN (1.4 MB) to fit a debug build's budget;
+/// this gate holds it to the same fixed point in a release run
+/// (`cargo test --release -- --ignored`).
+#[test]
+#[ignore]
+fn clearn_save_is_a_fixed_point() {
+    let path = resolve_path("test/xmutil_test_models/C-LEARN v77 for Vensim.mdl");
+    let source = fs::read_to_string(&path).expect("C-LEARN reads");
+    let first = mdl::parse_mdl(&source).expect("C-LEARN parses");
+    let save1 = mdl::project_to_mdl(&first).expect("C-LEARN writes");
+    let second = mdl::parse_mdl(&save1).expect("C-LEARN's save reads back");
+    let save2 = mdl::project_to_mdl(&second).expect("C-LEARN's save writes");
+    assert!(
+        save1 == save2,
+        "C-LEARN's second save differs from its first"
     );
 }

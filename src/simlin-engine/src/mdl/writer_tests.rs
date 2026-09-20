@@ -65,8 +65,21 @@ fn variable_references_quote_special_identifiers() {
 #[test]
 fn quoted_identifiers_escape_embedded_quotes_and_backslashes() {
     assert_eq!(escape_mdl_quoted_ident(r#"it"s"#), r#"it\"s"#);
-    assert_eq!(escape_mdl_quoted_ident(r"back\slash"), r"back\\slash");
-    assert_eq!(escape_mdl_quoted_ident(r#"a"b\c"#), r#"a\"b\\c"#,);
+    // A backslash starts a two-char escape the lexer keeps as written, so it
+    // is written as it stands; only a trailing one is doubled, so it cannot
+    // escape the closing quote.
+    assert_eq!(escape_mdl_quoted_ident(r"back\slash"), r"back\slash");
+    assert_eq!(escape_mdl_quoted_ident(r#"a"b\c"#), r#"a\"b\c"#,);
+    assert_eq!(escape_mdl_quoted_ident(r"trailing\"), r"trailing\\");
+    // Spelling is a fixed point: an escaped name spells as itself.
+    for name in [
+        r#"it\"s"#,
+        r"back\\slash",
+        r#"a \"b\" c"#,
+        r"Maximum\nfishery",
+    ] {
+        assert_eq!(escape_mdl_quoted_ident(name), name, "{name}");
+    }
 
     assert_eq!(format_mdl_ident(r#"it"s_a_test"#), r#""it\"s a test""#,);
 }
@@ -83,10 +96,15 @@ fn quoted_identifiers_handle_newlines() {
         escape_mdl_quoted_ident(r"Maximum\nfishery size"),
         r"Maximum\nfishery size"
     );
-    // Full round through format_mdl_ident: name with literal newline
+    // An identifier the writer prints collapses its display newline, as the
+    // sketch does, so a reference and its definition spell one name.
     assert_eq!(
         format_mdl_ident("Maximum\nfishery_size"),
-        r#""Maximum\nfishery size""#
+        "Maximum fishery size"
+    );
+    assert_eq!(
+        format_mdl_ident(r#""Maximum \n fishery size""#),
+        r#""Maximum fishery size""#
     );
 }
 

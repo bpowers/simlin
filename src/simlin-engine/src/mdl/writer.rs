@@ -199,24 +199,32 @@ fn needs_mdl_quoting(name: &str) -> bool {
     false
 }
 
+/// Spell a name's text as the interior of an MDL quoted name.
+///
+/// The MDL lexer reads a backslash inside quotes as the start of a two-char
+/// escape and keeps the pair as written, which is also how an imported name
+/// stores it: `"a \"b\" c"` imports as the name `a \"b\" c`. So a backslash and
+/// the character after it are written as they stand, a bare quote gains its
+/// backslash, and a real newline becomes the two-char `\n` display newline.
+/// That makes the spelling a fixed point -- spelling a spelled name changes
+/// nothing, so a name read back from the file is written as it was -- where
+/// doubling every backslash grew the escaping on each save. A trailing
+/// backslash is doubled so it cannot escape the closing quote. What Vensim
+/// makes of a backslash before anything but a quote or `n` is unverified.
 fn escape_mdl_quoted_ident(name: &str) -> String {
     let mut escaped = String::with_capacity(name.len());
-    let mut chars = name.chars().peekable();
+    let mut chars = name.chars();
     while let Some(c) = chars.next() {
         match c {
             // Literal newlines must become the two-character escape `\n`.
             '\n' => escaped.push_str("\\n"),
-            '\\' => {
-                if chars.peek() == Some(&'n') {
-                    // XMILE name attributes may contain the literal two-char
-                    // sequence `\n` (backslash + 'n') as a display newline.
-                    // Preserve it as-is rather than double-escaping to `\\n`.
-                    escaped.push_str("\\n");
-                    chars.next();
-                } else {
-                    escaped.push_str("\\\\");
+            '\\' => match chars.next() {
+                Some(next) => {
+                    escaped.push('\\');
+                    escaped.push(next);
                 }
-            }
+                None => escaped.push_str("\\\\"),
+            },
             '"' => escaped.push_str("\\\""),
             _ => escaped.push(c),
         }
@@ -226,17 +234,24 @@ fn escape_mdl_quoted_ident(name: &str) -> String {
 
 /// Format a canonical identifier for MDL output, preserving spaces and
 /// adding quotes when the bare form would not round-trip through MDL parsing.
+///
+/// A display newline collapses first (`collapse_display_newlines`), in every
+/// identifier the writer prints -- a definition, a reference, a sketch
+/// element's name -- so each spells a name the MDL reader matches to the
+/// others: the reader does not read `\n` as a space, so a reference that kept
+/// it while its definition collapsed it would name nothing.
 fn format_mdl_ident(name: &str) -> String {
+    let name = collapse_display_newlines(name);
     // An already-quoted identifier is literal to Vensim -- its interior is
     // verbatim. Detect it BEFORE any transformation: running
     // `underbar_to_space` over the whole string would turn interior
     // underscores into spaces (changing which variable Vensim resolves,
     // e.g. `"rate_of_change!"` vs `"rate of change!"`) and re-escaping would
     // grow the escaping each pass. Pass it through unchanged (#846).
-    if is_mdl_quoted_ident(name) {
-        return name.to_string();
+    if is_mdl_quoted_ident(&name) {
+        return name;
     }
-    let display = underbar_to_space(name);
+    let display = underbar_to_space(&name);
     if needs_mdl_quoting(&display) {
         format!("\"{}\"", escape_mdl_quoted_ident(&display))
     } else {
@@ -251,8 +266,33 @@ fn format_mdl_ident(name: &str) -> String {
 /// such names with the newline collapsed, so the sketch and equation must
 /// agree on this collapsed form or Vensim cannot link the sketch element to
 /// its variable definition (it silently drops or mispositions the element).
+///
+/// The break and the whitespace around it become one space, so `Stock with \n
+/// Newline` collapses to `Stock with Newline`, not to a run of spaces the
+/// reader would take for a different name.
 fn collapse_display_newlines(name: &str) -> String {
-    name.replace("\\n", " ").replace('\n', " ")
+    let lines = split_display_lines(name);
+    let last = lines.len() - 1;
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            // Only the whitespace at a break goes (an ident spells a space
+            // `_`); a name's own leading or trailing space is part of it.
+            let is_space = |c: char| c.is_whitespace() || c == '_';
+            let line = if i > 0 {
+                line.trim_start_matches(is_space)
+            } else {
+                line
+            };
+            if i < last {
+                line.trim_end_matches(is_space)
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Split a display name on its line breaks -- the literal two-character `\n`
@@ -295,10 +335,14 @@ fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
     map
 }
 
-/// Look up the display name for a canonical ident, falling back to
-/// `format_mdl_ident` if no view element provides original casing.
+/// The display name for an ident: a view element's spelling of it, or the
+/// ident itself when no view element draws it. Either way display newlines
+/// collapse (`collapse_display_newlines`), as the sketch collapses them, so an
+/// equation and the sketch element drawing its variable spell one name.
 fn display_name_for_ident(ident: &str, display_names: &HashMap<String, String>) -> String {
-    match display_names.get(ident) {
+    // Keyed as `build_display_name_map` keys: the collapsed name, canonical.
+    let collapsed = collapse_display_newlines(ident);
+    match display_names.get(crate::common::canonicalize(&collapsed).as_ref()) {
         Some(name) => {
             let name = collapse_display_newlines(name);
             if needs_mdl_quoting(&name) {
@@ -633,6 +677,7 @@ fn xmile_to_mdl_function_name(xmile_name: &str) -> String {
         "normal" => "RANDOM NORMAL".to_owned(),
         "lookup" => "LOOKUP".to_owned(),
         "integ" => "INTEG".to_owned(),
+        "size" => "ELMCOUNT".to_owned(),
         // Built-in function names are always plain ASCII identifiers.
         _ => underbar_to_space(xmile_name).to_uppercase(),
     }
@@ -2331,9 +2376,10 @@ fn write_single_entry(
 /// AST layer applies it at compile time). The prior writer dropped it, so those
 /// implicit elements silently became 0 on re-import. Here we materialize each
 /// missing declared element as an explicit entry carrying the default equation,
-/// then emit the whole (explicit + filled) set in the importer's key-sorted
-/// order. That preserves the fill's effect AND is idempotent -- re-importing the
-/// output yields the same fully-listed element set, which re-writes identically.
+/// then emit the whole (explicit + filled) set in key order
+/// ([`order_arrayed_entries`]). That preserves the fill's effect AND is
+/// idempotent -- re-importing the output yields the same fully-listed element
+/// set, which re-writes identically.
 ///
 /// Reconstruction is declined (kept explicit-only, with an [`ExportWarning`])
 /// when dimension membership is unavailable or the default references the
@@ -2365,11 +2411,10 @@ fn write_arrayed_entries(
     write_arrayed_element_entries(buf, name, &entries, compat, units, doc, ctx, warnings);
 }
 
-/// Apply the EXCEPT-default plan and return the element list to emit: either
-/// the input elements unchanged, or the input plus the default-filled missing
-/// declared elements, sorted by key to match the importer (so the output is a
-/// re-import fixpoint). Pushes an [`ExportWarning`] when reconstruction is
-/// declined.
+/// Apply the EXCEPT-default plan and return the element list to emit: the
+/// input elements, plus the default-filled missing declared elements when the
+/// plan fills them, in the order [`order_arrayed_entries`] gives. Pushes an
+/// [`ExportWarning`] when reconstruction is declined.
 fn resolve_arrayed_entries(
     name: &str,
     dims: &[String],
@@ -2379,6 +2424,7 @@ fn resolve_arrayed_entries(
     ctx: &WriterContext,
     warnings: &mut Vec<ExportWarning>,
 ) -> Vec<(String, String, Option<String>, Option<GraphicalFunction>)> {
+    let mut entries = elements.to_vec();
     match plan_except_default(
         name,
         dims,
@@ -2387,25 +2433,38 @@ fn resolve_arrayed_entries(
         has_except_default,
         ctx,
     ) {
-        ExceptDefaultPlan::None => elements.to_vec(),
-        ExceptDefaultPlan::Warn(msg) => {
-            warnings.push(ExportWarning::new(msg));
-            elements.to_vec()
-        }
+        ExceptDefaultPlan::None => {}
+        ExceptDefaultPlan::Warn(msg) => warnings.push(ExportWarning::new(msg)),
         ExceptDefaultPlan::Fill(missing) => {
             let default = default_equation
                 .as_ref()
                 .expect("Fill plan implies a default equation is present");
-            let mut combined = elements.to_vec();
             for key in missing {
-                combined.push((key, default.clone(), None, None));
+                entries.push((key, default.clone(), None, None));
             }
-            // Match the importer's element ordering (it sorts by key) so a
-            // second write of the re-imported model is byte-identical.
-            combined.sort_by(|a, b| a.0.cmp(&b.0));
-            combined
         }
     }
+    order_arrayed_entries(&mut entries);
+    entries
+}
+
+/// Put an arrayed variable's entries in order of their canonical element keys
+/// (`canonical_element_key`), ties broken by the key as written.
+///
+/// The order is a function of the element set alone, never of the order the
+/// entries are stored in or the dimension they are stored under. That is what
+/// makes a write a fixed point: the MDL importer stores the elements a number
+/// list defines in the list's order and sorts the elements of separate
+/// equations by key, and a file of separate element equations names no
+/// dimension, so the re-imported variable can sit over another dimension of
+/// the same elements in another order (`x[DimX] = 1, 2, 3` beside `DimA: A1,
+/// A2, A3` and `DimX: A2, A3, A1` re-imports over `DimA`). Canonical keys are
+/// compared because the writer respells elements, and a respelled key can sort
+/// elsewhere as written (`_` and a space).
+fn order_arrayed_entries(
+    entries: &mut [(String, String, Option<String>, Option<GraphicalFunction>)],
+) {
+    entries.sort_by_cached_key(|(key, _, _, _)| (canonical_element_key(key), key.clone()));
 }
 
 /// Emit one MDL entry per arrayed element. A per-variable ACTIVE INITIAL wrap
@@ -2958,23 +3017,28 @@ fn write_dimension_def_warn(
 /// names containing characters that would otherwise break the record (`$`,
 /// `|`, `/`, ...).
 fn format_sketch_name(name: &str) -> String {
-    format_mdl_ident(&collapse_display_newlines(name))
+    format_mdl_ident(name)
 }
 
 /// Number of `type 1` pipe-connector records `write_flow_pipe_connectors`
-/// emits for `flow`.
+/// emits for `flow`, whose ends `cut` says the segment cannot draw.
 ///
 /// This MUST stay in lockstep with `write_flow_pipe_connectors_with_context`:
 /// `SketchUidRemap::dense_for_segment` reserves a contiguous UID block of this
 /// size for the flow's pipes, so an off-by-one here corrupts the whole
 /// segment's UID numbering.
-fn flow_pipe_connector_count(flow: &view_element::Flow) -> usize {
+fn flow_pipe_connector_count(flow: &view_element::Flow, cut: CutEnds) -> usize {
     let n = flow.points.len();
     // Endpoint connector to the last point's attachment (the sink), emitted
     // only when the flow has more than one point.
     let sink = usize::from(n > 1 && flow.points.last().and_then(|p| p.attached_to_uid).is_some());
-    // One self-connector per interior bend point.
-    let bends = n.saturating_sub(2);
+    // One self-connector per interior bend point, unless an end is cut: a cut
+    // flow is written straight from its valve to each end.
+    let bends = if cut.source.is_some() || cut.sink.is_some() {
+        0
+    } else {
+        n.saturating_sub(2)
+    };
     // Endpoint connector to the first point's attachment (the source).
     let source = usize::from(
         flow.points
@@ -2983,6 +3047,49 @@ fn flow_pipe_connector_count(flow: &view_element::Flow) -> usize {
             .is_some(),
     );
     sink + bends + source
+}
+
+/// The clouds a flow's pipe ends in, in place of ends its segment cannot
+/// draw: an end attached to an element the segment holds no record of. The
+/// importer routes a flow to its model's stock after
+/// the views merge, so a flow drawn in one view can end on a stock drawn only
+/// in another, and an MDL pipe names an element of its own view. Each field is
+/// the new UID of the cloud written for that end.
+///
+/// Such a flow is written straight, from its valve to each end: its bends lead
+/// toward the other view, and a point there would grow this view's extent,
+/// which composition stacks the later views by. Reading the file back, the
+/// model still links the stock, so the importer routes the flow to it again
+/// from the same valve and drawn end, and leaves the cloud, which then ends
+/// nothing, out of the view; the next save cuts the flow the same way.
+#[derive(Clone, Copy, Default)]
+struct CutEnds {
+    source: Option<i32>,
+    sink: Option<i32>,
+}
+
+/// How far from its valve a cut end's cloud is written.
+const CUT_CLOUD_DISTANCE: f64 = 40.0;
+
+/// Where the cloud for a cut end (`end`, a point of `flow` in view
+/// coordinates) is written, in the segment's coordinates: `CUT_CLOUD_DISTANCE`
+/// from the valve, along the axis the end lies further along and toward it.
+fn cut_cloud_point(
+    flow: &view_element::Flow,
+    end: &view_element::FlowPoint,
+    is_sink: bool,
+    transform: SketchTransform,
+) -> (i32, i32) {
+    let (dx, dy) = (end.x - flow.x, end.y - flow.y);
+    let (x, y) = if dx == 0.0 && dy == 0.0 {
+        let side = if is_sink { 1.0 } else { -1.0 };
+        (flow.x + side * CUT_CLOUD_DISTANCE, flow.y)
+    } else if dx.abs() >= dy.abs() {
+        (flow.x + dx.signum() * CUT_CLOUD_DISTANCE, flow.y)
+    } else {
+        (flow.x, flow.y + dy.signum() * CUT_CLOUD_DISTANCE)
+    };
+    transform.point(x, y)
 }
 
 /// Remap merged/global datamodel UIDs into dense, view-local sketch IDs.
@@ -3010,6 +3117,8 @@ struct SketchUidRemap {
     pipe_start_uids: HashMap<i32, i32>,
     /// One past the highest UID allocated -- the smallest still-free UID.
     next_uid: i32,
+    /// Old flow UID -> the clouds its cut ends are written with.
+    cut_ends: HashMap<i32, CutEnds>,
 }
 
 impl SketchUidRemap {
@@ -3024,9 +3133,34 @@ impl SketchUidRemap {
         elements: &[&ViewElement],
         flow_clouds: &HashMap<i32, Vec<&view_element::Cloud>>,
     ) -> Self {
+        // What the segment's records draw.
+        let mut drawn: HashSet<i32> = HashSet::new();
+        for element in elements {
+            match element {
+                ViewElement::Aux(_)
+                | ViewElement::Stock(_)
+                | ViewElement::Link(_)
+                | ViewElement::Alias(_) => {
+                    drawn.insert(element.get_uid());
+                }
+                ViewElement::Flow(flow) => {
+                    drawn.insert(flow.uid);
+                    for cloud in flow_clouds.get(&flow.uid).into_iter().flatten() {
+                        drawn.insert(cloud.uid);
+                    }
+                }
+                ViewElement::Cloud(_) | ViewElement::Module(_) | ViewElement::Group(_) => {}
+            }
+        }
+        let is_cut = |end: Option<&view_element::FlowPoint>| {
+            end.and_then(|point| point.attached_to_uid)
+                .is_some_and(|uid| !drawn.contains(&uid))
+        };
+
         let mut element_uids = HashMap::new();
         let mut valve_uids = HashMap::new();
         let mut pipe_start_uids = HashMap::new();
+        let mut cut_ends: HashMap<i32, CutEnds> = HashMap::new();
         let mut next_uid = 1;
 
         for element in elements {
@@ -3050,8 +3184,21 @@ impl SketchUidRemap {
                             next_uid += 1;
                         }
                     }
+                    // A cut end's cloud follows the flow's own clouds.
+                    let mut cut = CutEnds::default();
+                    if is_cut(flow.points.first()) {
+                        cut.source = Some(next_uid);
+                        next_uid += 1;
+                    }
+                    if flow.points.len() > 1 && is_cut(flow.points.last()) {
+                        cut.sink = Some(next_uid);
+                        next_uid += 1;
+                    }
+                    if cut.source.is_some() || cut.sink.is_some() {
+                        cut_ends.insert(flow.uid, cut);
+                    }
                     pipe_start_uids.insert(flow.uid, next_uid);
-                    next_uid += flow_pipe_connector_count(flow) as i32;
+                    next_uid += flow_pipe_connector_count(flow, cut) as i32;
                     valve_uids.insert(flow.uid, next_uid);
                     next_uid += 1;
                     element_uids.insert(flow.uid, next_uid);
@@ -3077,7 +3224,14 @@ impl SketchUidRemap {
             valve_uids,
             pipe_start_uids,
             next_uid,
+            cut_ends,
         }
+    }
+
+    /// The clouds `flow_uid`'s cut ends are written with; none for a flow the
+    /// segment draws whole.
+    fn cut_ends(&self, flow_uid: i32) -> CutEnds {
+        self.cut_ends.get(&flow_uid).copied().unwrap_or_default()
     }
 
     fn element_uid(&self, old_uid: i32) -> i32 {
@@ -3583,16 +3737,32 @@ fn write_flow_pipe_connectors_with_context(
         point_xy
     };
 
+    let cut = ctx
+        .uid_remap
+        .map_or_else(CutEnds::default, |ids| ids.cut_ends(flow.uid));
+    // An end the segment cannot draw runs into its cut cloud.
+    let end_target =
+        |point: &view_element::FlowPoint, cloud: Option<i32>, is_sink: bool| match cloud {
+            Some(cloud_uid) => (
+                cloud_uid,
+                cut_cloud_point(flow, point, is_sink, ctx.transform),
+            ),
+            None => {
+                let endpoint_uid = point.attached_to_uid.unwrap_or_default();
+                let endpoint_uid = ctx
+                    .uid_remap
+                    .map_or(endpoint_uid, |ids| ids.element_uid(endpoint_uid));
+                (endpoint_uid, connector_point(point))
+            }
+        };
+
     if flow.points.len() > 1
         && let Some(last) = flow.points.last()
-        && let Some(endpoint_uid) = last.attached_to_uid
+        && last.attached_to_uid.is_some()
     {
-        let (x, y) = connector_point(last);
+        let (endpoint_uid, (x, y)) = end_target(last, cut.sink, true);
         // The last point is the sink/downstream endpoint.
         let direction = 4;
-        let endpoint_uid = ctx
-            .uid_remap
-            .map_or(endpoint_uid, |ids| ids.element_uid(endpoint_uid));
         write_pipe(
             buf,
             !wrote_any,
@@ -3607,12 +3777,12 @@ fn write_flow_pipe_connectors_with_context(
         *next_connector_uid += 1;
     }
 
-    for point in flow
-        .points
-        .iter()
-        .skip(1)
-        .take(flow.points.len().saturating_sub(2))
-    {
+    let bends = if cut.source.is_some() || cut.sink.is_some() {
+        0
+    } else {
+        flow.points.len().saturating_sub(2)
+    };
+    for point in flow.points.iter().skip(1).take(bends) {
         let (x, y) = connector_point(point);
         write_pipe(
             buf,
@@ -3629,14 +3799,11 @@ fn write_flow_pipe_connectors_with_context(
     }
 
     if let Some(first) = flow.points.first()
-        && let Some(endpoint_uid) = first.attached_to_uid
+        && first.attached_to_uid.is_some()
     {
-        let (x, y) = connector_point(first);
+        let (endpoint_uid, (x, y)) = end_target(first, cut.source, false);
         // The first point is the source/upstream endpoint.
         let direction = 100;
-        let endpoint_uid = ctx
-            .uid_remap
-            .map_or(endpoint_uid, |ids| ids.element_uid(endpoint_uid));
         write_pipe(
             buf,
             !wrote_any,
@@ -3801,16 +3968,10 @@ fn write_link_element_with_context(
 
     // Field 9 = 64 marks influence (causal) connectors in Vensim sketches.
     match &link.shape {
-        LinkShape::Straight => {
-            write!(
-                buf,
-                "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,1|(0,0)|",
-                link_uid, from_uid, to_uid, field4, polarity_val, field10,
-            )
-            .unwrap();
-        }
-        LinkShape::Arc(canvas_angle) => {
-            let (ctrl_x, ctrl_y) = compute_control_point(from_pos, to_pos, *canvas_angle);
+        LinkShape::Straight | LinkShape::Arc(_) => {
+            let recorded = link_compat.and_then(|compat| compat.control_point);
+            let (ctrl_x, ctrl_y) =
+                connector_control_point(&link.shape, recorded, from_pos, to_pos, transform);
             write!(
                 buf,
                 "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,1|({},{})|",
@@ -3831,6 +3992,53 @@ fn write_link_element_with_context(
                 write!(buf, "({},{})|", x, y).unwrap();
             }
         }
+    }
+}
+
+/// The control point a straight or arc connector is written with, in its
+/// segment's coordinates: `from` and `to` are the endpoints it is written
+/// between there, and `transform` places the segment in the view, where the
+/// importer reads the point (`connector_shape`).
+///
+/// The point the sketch gave the connector (`recorded`, in the view's
+/// coordinates) is written back while it still reads as the link's shape
+/// between those endpoints, so an untouched connector keeps its line as the
+/// file had it. Otherwise the point is computed from the shape: `(0, 0)` for a
+/// straight link, and the arc's bisector point, rounded, for an arc.
+///
+/// Either way the next import records the point written here and reads the
+/// link's shape from it, from the same endpoints in the same frame, so the
+/// save after it finds the recorded point still reads as the shape and writes
+/// it unchanged: the sketch is a fixed point of saving after one save. (A
+/// rounded point can read back as a slightly different arc, or as straight
+/// for an arc too flat for a whole point to bend; that reading is what the
+/// next save keeps.)
+fn connector_control_point(
+    shape: &LinkShape,
+    recorded: Option<(i32, i32)>,
+    from: (i32, i32),
+    to: (i32, i32),
+    transform: SketchTransform,
+) -> (i32, i32) {
+    if let Some(point) = recorded {
+        let in_view = |p: (i32, i32)| {
+            (
+                p.0 as f64 + transform.x_offset,
+                p.1 as f64 + transform.y_offset,
+            )
+        };
+        let written = transform.point(point.0 as f64, point.1 as f64);
+        let reads_as = super::view::processing::connector_shape(in_view(from), in_view(to), point);
+        // A written (0, 0) is the straight sentinel, so an arc's recorded point
+        // that lands there in the segment cannot be written back.
+        let is_sentinel = written == (0, 0) && matches!(shape, LinkShape::Arc(_));
+        if reads_as == *shape && !is_sentinel {
+            return written;
+        }
+    }
+    match shape {
+        LinkShape::Arc(canvas_angle) => compute_control_point(from, to, *canvas_angle),
+        LinkShape::Straight | LinkShape::MultiPoint(_) => (0, 0),
     }
 }
 
@@ -4124,8 +4332,19 @@ impl MdlWriter {
         )
         .unwrap();
 
-        // SAVEPER
+        // SAVEPER. A save step equal to the time step is written as the
+        // reference Vensim defaults it to: the importer reads a SAVEPER it
+        // cannot evaluate to a number (`TIME STEP` among them) as the time
+        // step's value, so writing that value instead would change the file on
+        // the next save.
+        let step_length = |dt: &datamodel::Dt| match dt {
+            datamodel::Dt::Dt(v) => *v,
+            datamodel::Dt::Reciprocal(v) => 1.0 / v,
+        };
         let saveper_value = match &sim_specs.save_step {
+            Some(save_step) if step_length(save_step) == step_length(&sim_specs.dt) => {
+                "TIME STEP".to_owned()
+            }
             Some(datamodel::Dt::Dt(v)) => format_f64(*v),
             Some(datamodel::Dt::Reciprocal(v)) => format!("1/{}", format_f64(*v)),
             None => "TIME STEP".to_owned(),
@@ -4371,6 +4590,7 @@ impl MdlWriter {
                 );
                 self.write_view_segment(
                     view_name,
+                    &sf.elements,
                     elements,
                     font.as_deref(),
                     sf.use_lettered_polarity,
@@ -4399,6 +4619,7 @@ impl MdlWriter {
     fn write_view_segment(
         &mut self,
         view_name: &str,
+        view_elements: &[ViewElement],
         elements: &[&ViewElement],
         font: Option<&str>,
         use_lettered_polarity: bool,
@@ -4413,10 +4634,15 @@ impl MdlWriter {
         // cloud is emitted just before its flow's pipe connectors (Vensim
         // requires this ordering). Built before UID allocation so the remap
         // and the emit loop below agree on the per-flow cloud order.
+        //
+        // The clouds come from the whole view, not the segment: a cloud the
+        // importer placed after the views merged (`routes`) sits at the end of
+        // the element list, in the last segment, whichever segment its flow is
+        // drawn in, and it is written with its flow.
         let mut cloud_uids: HashSet<i32> = HashSet::new();
         let mut flow_clouds: HashMap<i32, Vec<&view_element::Cloud>> = HashMap::new();
-        for elem in elements {
-            if let ViewElement::Cloud(c) = *elem {
+        for elem in view_elements {
+            if let ViewElement::Cloud(c) = elem {
                 cloud_uids.insert(c.uid);
                 flow_clouds.entry(c.flow_uid).or_default().push(c);
             }
@@ -4461,6 +4687,18 @@ impl MdlWriter {
                                 Some(&uid_remap),
                             );
                             self.buf.push('\n');
+                        }
+                    }
+                    let cut = uid_remap.cut_ends(flow.uid);
+                    let cut_clouds = [
+                        (cut.source, flow.points.first(), false),
+                        (cut.sink, flow.points.last(), true),
+                    ];
+                    for (uid, end, is_sink) in cut_clouds {
+                        if let (Some(uid), Some(end)) = (uid, end) {
+                            let (x, y) = cut_cloud_point(flow, end, is_sink, transform);
+                            writeln!(self.buf, "12,{uid},48,{x},{y},10,8,0,3,0,0,-1,0,0,0")
+                                .unwrap();
                         }
                     }
                     write_flow_element_with_context(
@@ -4677,3 +4915,9 @@ mod sketch_tests;
 #[cfg(test)]
 #[path = "writer_proptest.rs"]
 mod proptest_tests;
+
+// The rules that make a save a fixed point (own file per the per-file line
+// cap).
+#[cfg(test)]
+#[path = "writer_fixpoint_tests.rs"]
+mod fixpoint_tests;

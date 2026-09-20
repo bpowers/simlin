@@ -72,12 +72,24 @@ impl<'input> ConversionContext<'input> {
             }
         }
 
-        // Phase 4: establish element ownership (larger dimension owns elements)
-        let mut dims_by_size: Vec<_> = self
-            .dimension_elements
+        // Phase 4: establish element ownership. The largest dimension holding an
+        // element owns it, and of dimensions of one size, the one declared
+        // first. The rule has to be total: an element two dimensions of one
+        // size both hold (`DimA: A1, A2, A3` beside `DimX: SubA, A1`) used to go
+        // to whichever a hash map yielded first, so one file imported with a
+        // variable over either dimension from run to run, and a save of it
+        // re-imported over the other (GH #859).
+        let mut dims_by_size: Vec<(String, Vec<String>)> = self
+            .dimensions
             .iter()
-            .map(|(name, elems)| (name.clone(), elems.clone()))
+            .filter_map(|dim| match &dim.elements {
+                DimensionElements::Named(elements) => {
+                    Some((canonical_name(&dim.name), elements.clone()))
+                }
+                _ => None,
+            })
             .collect();
+        // A stable sort, so declaration order breaks ties.
         dims_by_size.sort_by_key(|(_, elems)| std::cmp::Reverse(elems.len()));
 
         for (dim_name, elements) in dims_by_size {
@@ -94,8 +106,21 @@ impl<'input> ConversionContext<'input> {
         // Built first and applied after: `push_dimension` takes `&mut self`
         // (it invalidates the memoized dimension context), which cannot be
         // called while `self.equivalences` is borrowed by the loop.
+        // In the order the equivalences are declared, so the project lists its
+        // dimensions in one order whatever the hash seed.
+        let mut declared_equivalences: Vec<&String> = Vec::new();
+        for item in &self.items {
+            if let MdlItem::Equation(eq) = item
+                && let MdlEquation::Equivalence(src, _, _) = &eq.equation
+                && let Some((src, _)) = self.equivalences.get_key_value(&canonical_name(src))
+                && !declared_equivalences.contains(&src)
+            {
+                declared_equivalences.push(src);
+            }
+        }
         let mut aliases: Vec<(String, Dimension)> = Vec::new();
-        for (src, dst) in &self.equivalences {
+        for src in declared_equivalences {
+            let dst = &self.equivalences[src];
             if let Some(target_dim) = self
                 .dimensions
                 .iter()

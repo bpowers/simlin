@@ -74,7 +74,7 @@ For design history and detailed implementation notes, see [docs/design/mdl-parse
 
 ### Writer tests
 
-`writer_tests.rs` (unit) and `writer_lossiness_tests.rs` (semantic-loss + warnings) are the curated cases; `writer_proptest.rs` adds property-based coverage (free-text never corrupts the variable set, equation write is a re-parse fixpoint, whole-model write is idempotent). All three are mounted `#[cfg(test)] #[path]` from `writer.rs` to stay under the per-file line cap. Integration round-trips live in [tests/integration/mdl_roundtrip.rs](/src/simlin-engine/tests/integration/mdl_roundtrip.rs); the corpus round-trip ratchet gates guard against regressions.
+`writer_tests.rs` (unit) and `writer_lossiness_tests.rs` (semantic-loss + warnings) are the curated cases; `writer_proptest.rs` adds property-based coverage (free-text never corrupts the variable set, equation write is a re-parse fixpoint, whole-model write is idempotent); `writer_fixpoint_tests.rs` pins each rule that makes a save a fixed point (below). All four are mounted `#[cfg(test)] #[path]` from `writer.rs` to stay under the per-file line cap. Integration round-trips live in [tests/integration/mdl_roundtrip.rs](/src/simlin-engine/tests/integration/mdl_roundtrip.rs); the corpus round-trip ratchet gates guard against regressions.
 
 ## Known Gaps
 
@@ -93,13 +93,18 @@ That property's generator (`expr0_strategy`) is restricted to arithmetic (`+ - *
 
 Closing the property required three `print_eqn` fixes: parenthesizing an `If` sitting directly under a unary/binary operator (`-(if (a) then (1) else (0))` -- an `if` is only grammatical at the top of an expression or already delimited); parenthesizing an equal-precedence RIGHT child of every left-associative operator, `+` and `*` included (floating-point addition is not associative, so re-printing `a + (b + c)` as `a + b + c` silently reassociates the sum); and the `^` left-child / prefixed-base rules above. A nested unary negative is deliberately NOT parenthesized -- the parser accepts `--x` now, and adding parens would churn every MDL equation the writer emits.
 
-The remaining non-fixpoint classes are tracked and deliberately excluded from the property tests (which compare only the equations section of view-free models):
+A save is a fixed point for the whole file too: `writer_output_idempotence_ratchet` holds `write(parse(write(parse(x)))) == write(parse(x))` for every re-parseable corpus `.mdl` (its allowlist is empty), and `clearn_save_is_a_fixed_point` holds C-LEARN to it in a release run. The first save of a file is therefore the last one that changes it. The rules behind that, each pinned in `writer_fixpoint_tests.rs` or beside the importer code it constrains:
 
-- **Sketch instability**: a re-emitted sketch section is not yet byte-stable across a round trip.
-- **Arrayed element order**: an arrayed variable's element list may reorder on the first re-import.
-- **LHS / view-name escape doubling**: quoted names on the LHS / in the sketch can accrete escaping across passes.
-- **Control-variable value substitution**: the `.Control` group's sim-specs / control-variable values are re-substituted on re-import (why the proptest fixpoint compares only the pre-`.Control` equations section).
-- **Importer non-determinism** (tracked as #859): a separately-tracked source of first-import variance.
+- **Connector points.** `LinkSketchCompat::control_point` keeps the point the sketch gave a connector, and the writer writes it back while it still reads as the link's shape between the endpoints it writes (`connector_control_point`, reading through the importer's own `view::processing::connector_shape`); a moved or reshaped link gets the arc's rounded bisector point. Either way the next import records the written point, so the save after writes it unchanged. This matters beyond the connector: multi-view composition stacks views by their extents, which include connector points (`VensimElement::y`), so a point that moved on save moved every later view.
+- **Pipe ends** snap along their own segment (`resolve_flow_ends`), so a bent pipe's ends stay where it was written; a side the model gives no stock takes the pipe end its connector's field 4 marks for it when the view does not draw the other side's stock.
+- **Flows across views.** A cloud the importer places after the views merge (`routes`) is written with its flow, and a flow end on an element its segment holds no record of -- a stock only another view draws -- is written into a cloud (`CutEnds`): an MDL pipe names an element of its own view, and the importer routes the flow to its stock again.
+- **Arrayed elements** are written in canonical key order whatever their stored order (`order_arrayed_entries`): a number list imports in declared order, separate element equations in key order, and element equations name no dimension.
+- **Builtins** are written back under a name the reader knows (`xmile_to_mdl_function_name`; every entry of `builtins::BUILTINS` has a row in `every_builtin_the_reader_knows_is_saved_as_it_reads`).
+- **Names.** Quoted-name escaping is idempotent (`escape_mdl_quoted_ident` keeps a backslash pair as the lexer reads it), and every identifier the writer prints collapses a display newline the same way (`format_mdl_ident`, `collapse_display_newlines`), since the reader does not read `\n` as a space.
+- **The save step** equal to the time step is written as `TIME STEP`, which the importer reads back as the time step's value.
+- **The importer resolves a file one way** on every run: element ownership among dimensions of one size goes to the one declared first, and alias dimensions follow declaration order (GH #859).
+
+The first save still normalizes what the datamodel does not hold: a flow label's own position (it is written at its label side's default offset), a control variable the importer cannot evaluate (written as its value), a display newline in a name (written as a space).
 
 ## Commands
 

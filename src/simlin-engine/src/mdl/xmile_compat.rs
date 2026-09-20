@@ -640,7 +640,9 @@ impl XmileFormatter {
             "vector sort order" => "VECTOR SORT ORDER".to_string(),
             "allocate available" => "ALLOCATE AVAILABLE".to_string(),
             "vector reorder" => "VECTOR_REORDER".to_string(),
-            "vector lookup" => "VECTOR LOOKUP".to_string(),
+            // Underscored, as VECTOR_REORDER is: a name with a space does not
+            // parse as equation text, so a save wrote it back as raw text.
+            "vector lookup" => "VECTOR_LOOKUP".to_string(),
             _ => canonical.to_uppercase().replace(' ', "_"),
         }
     }
@@ -1701,7 +1703,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_vector_lookup_preserves_spaces() {
+    fn test_format_vector_lookup_uses_underscore() {
         let formatter = XmileFormatter::new();
         let expr = Expr::App(
             Cow::Borrowed("VECTOR LOOKUP"),
@@ -1717,8 +1719,8 @@ mod tests {
         );
         let result = formatter.format_expr(&expr);
         assert!(
-            result.starts_with("VECTOR LOOKUP("),
-            "Should be 'VECTOR LOOKUP(...)': {}",
+            result.starts_with("VECTOR_LOOKUP("),
+            "Should be 'VECTOR_LOOKUP(...)' with underscore: {}",
             result
         );
     }

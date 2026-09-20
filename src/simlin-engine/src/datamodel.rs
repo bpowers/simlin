@@ -711,20 +711,33 @@ pub mod view_element {
         pub y_offset: f64,
     }
 
-    /// Connector fields the MDL writer roundtrips verbatim but does not derive
-    /// from the datamodel `Link`: `field4` (whether the connector carries a
-    /// meaningful control point -- Vensim re-routes it straight when 0) and
-    /// `field10`. Geometry (the control point, endpoint positions, whether an
-    /// endpoint is an attached valve) is intentionally *not* kept here: the
-    /// writer recomputes the control point from `Link::shape` (so edited models
-    /// get the same fidelity as imported ones) and resolves attached-valve
-    /// endpoints to the flow variable's UID at parse time.
+    /// Connector fields the MDL writer roundtrips but does not derive from the
+    /// datamodel `Link`: `field4` (whether the connector carries a meaningful
+    /// control point -- Vensim re-routes it straight when 0), `field10`, and
+    /// the control point the sketch gave the connector. `Link::shape` stays
+    /// the connector's geometry: the writer writes `control_point` back only
+    /// while it still reads as that shape between the endpoints it writes, and
+    /// computes a point from the shape otherwise, so an edited or moved link
+    /// gets a point of its own.
+    ///
+    /// The recorded point is what makes a save a fixed point. An arc's point
+    /// is not a function of its angle -- Vensim puts it anywhere on the arc,
+    /// and a point computed from the angle is rounded to whole units -- so
+    /// writing only a computed point moves an untouched connector on the first
+    /// save, and can move it again on the next. Writing the recorded point
+    /// keeps an untouched connector's line as the file had it, and a point the
+    /// writer computed is recorded when the file is read again, so the save
+    /// after it writes that point unchanged.
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
     #[derive(Clone, PartialEq)]
     pub struct LinkSketchCompat {
         pub uid: i32,
         pub field4: i32,
         pub field10: i32,
+        /// The control point as the sketch was read, in the view's
+        /// coordinates (after multi-view composition); None for the `(0, 0)`
+        /// sentinel of a straight connector.
+        pub control_point: Option<(i32, i32)>,
     }
 
     /// Per-view MDL sketch metadata the writer needs but the datamodel `View`

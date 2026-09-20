@@ -245,7 +245,7 @@ pub fn eq_lower_space(s: &str, target: &str) -> bool {
 /// Built-in function names in their canonicalized form (via `to_lower_space`).
 ///
 /// This table is derived from the C++ `Function.h` class definitions.
-static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+pub(in crate::mdl) static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
         // Mathematical functions
         "abs",

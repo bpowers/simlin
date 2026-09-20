@@ -11,9 +11,9 @@ use crate::datamodel::{self, View, ViewElement, view_element};
 use std::collections::HashSet;
 
 use super::processing::{
-    EffectiveGhosts, FlowEnd, PipeTarget, PrimaryMap, angle_from_points, associate_variables,
-    build_attached_valve_flow_maps, compose_views, flow_valve, resolve_flow_ends,
-    resolve_flow_uid_for_valve, xmile_angle_to_canvas,
+    EffectiveGhosts, FlowEnd, PipeTarget, PrimaryMap, associate_variables,
+    build_attached_valve_flow_maps, compose_views, connector_shape, flow_valve, resolve_flow_ends,
+    resolve_flow_uid_for_valve,
 };
 use super::routes::{PendingFlowRoute, RouteEnd, route_pending_flows};
 use super::types::{VensimComment, VensimElement, VensimVariable, VensimView};
@@ -783,8 +783,9 @@ fn convert_connector(
         }
     }
 
-    // Calculate angle
-    let shape = calculate_link_shape(actual_from, actual_to, conn);
+    let from_position = (actual_from.x() as f64, actual_from.y() as f64);
+    let to_position = (actual_to.x() as f64, actual_to.y() as f64);
+    let shape = connector_shape(from_position, to_position, conn.control_point);
 
     let polarity = match conn.polarity {
         Some('+') => Some(view_element::LinkPolarity::Positive),
@@ -804,50 +805,9 @@ fn convert_connector(
             uid,
             field4: conn.field4,
             field10: conn.field10,
+            control_point: (conn.control_point != (0, 0)).then_some(conn.control_point),
         },
     ))
-}
-
-/// Epsilon for comparing angles - angles within this threshold are considered equal.
-/// This is tight to ensure roundtrip fidelity (matching xmile.rs behavior).
-const ANGLE_EPSILON_DEGREES: f64 = 0.01;
-
-/// Calculate the link shape (straight or arc) based on element positions and control point.
-fn calculate_link_shape(
-    from: &VensimElement,
-    to: &VensimElement,
-    conn: &super::types::VensimConnector,
-) -> view_element::LinkShape {
-    let from_x = from.x() as f64;
-    let from_y = from.y() as f64;
-    let to_x = to.x() as f64;
-    let to_y = to.y() as f64;
-    let ctrl_x = conn.control_point.0 as f64;
-    let ctrl_y = conn.control_point.1 as f64;
-
-    // If control point is (0, 0), it's a straight line sentinel
-    if ctrl_x == 0.0 && ctrl_y == 0.0 {
-        return view_element::LinkShape::Straight;
-    }
-
-    // Calculate angle using AngleFromPoints algorithm
-    let xmile_angle = angle_from_points(from_x, from_y, ctrl_x, ctrl_y, to_x, to_y);
-    let canvas_angle = xmile_angle_to_canvas(xmile_angle);
-
-    // Check if the angle is close to the straight line angle
-    let dx = to_x - from_x;
-    let dy = to_y - from_y;
-    let straight_angle = dy.atan2(dx).to_degrees();
-
-    // Handle wrap-around (e.g., -179 vs 179 should be close)
-    let diff = (canvas_angle - straight_angle).abs();
-    let diff = if diff > 180.0 { 360.0 - diff } else { diff };
-
-    if diff < ANGLE_EPSILON_DEGREES {
-        view_element::LinkShape::Straight
-    } else {
-        view_element::LinkShape::Arc(canvas_angle)
-    }
 }
 
 /// Create a sector/group element for multi-view composition.

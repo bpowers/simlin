@@ -953,8 +953,12 @@ impl<'input> ConversionContext<'input> {
 
             // Case 2: a sibling subrange of the same parent is in substitutions.
             // E.g., LHS is upper (subrange of layers), RHS references lower
-            // (also subrange of layers). Map through the sibling.
-            for sub_dim in substitutions.keys() {
+            // (also subrange of layers). Map through the sibling -- the first
+            // by name when the LHS holds several, so the choice does not
+            // depend on a hash map's order.
+            let mut lhs_dims: Vec<&String> = substitutions.keys().collect();
+            lhs_dims.sort();
+            for sub_dim in lhs_dims {
                 let sub_parent = self.resolve_subrange_to_parent(sub_dim);
                 if sub_parent == parent_canonical
                     && let Some(sibling_elements) = self.dimension_elements.get(sub_dim.as_str())

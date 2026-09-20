@@ -75,10 +75,9 @@ artifact: `CompiledSimulation::bytecode_profile()` on C-LEARN, plain and under
 compiler-unification ledger's artifact column). (4) The differential CLI
 sweep: the base and the tree `simlin simulate` over every model under `test/`,
 once plain and once with `--ltm`, diffing stdout and stderr; a model refused on
-one side only is a finding, a mover is either a named divergence or one of the
-GH #859 importer flippers (`arrays_cname`, `arrays_varname`,
-`subscript_transposition` alternate between two outputs on BOTH binaries, so
-a flipper is separated from a mover by resampling each binary several times).
+one side only is a finding, and a mover is a named divergence (the MDL
+importer resolves a file one way on every run, so no model alternates between
+outputs; `mdl::writer`'s `a_file_imports_its_dimensions_one_way` pins it).
 The sweep's stderr is also the diagnostics corpus: the rows counted per
 `(model, variable, code)` and per code, so a diagnostics change is measured as
 which rows moved rather than as a row count. (5) When the change touches

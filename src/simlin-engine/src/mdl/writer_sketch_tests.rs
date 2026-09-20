@@ -416,6 +416,7 @@ fn sketch_link_with_field_hints_preserves_nonsemantic_flags() {
         uid: 3,
         field4: 1,
         field10: 7,
+        control_point: None,
     };
     let mut buf = String::new();
     write_link_element_with_context(
@@ -440,12 +441,13 @@ fn sketch_link_with_field_hints_still_uses_link_geometry() {
         polarity: None,
     };
     let positions = HashMap::from([(1, (110, 100)), (2, (210, 100))]);
-    // A recorded compat carries only field4/field10; the control point is always
-    // recomputed from the link's Arc angle and the current endpoint positions.
+    // A compat with no recorded point keeps field4/field10; the control point is
+    // computed from the link's Arc angle and the current endpoint positions.
     let compat = view_element::LinkSketchCompat {
         uid: 3,
         field4: 0,
         field10: 0,
+        control_point: None,
     };
     let mut buf = String::new();
     write_link_element_with_context(

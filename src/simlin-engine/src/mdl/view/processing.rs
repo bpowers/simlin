@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use super::types::{VensimElement, VensimValve, VensimVariable, VensimView};
+use crate::datamodel::view_element::LinkShape;
 
 /// Calculate angle from three points (AngleFromPoints from xmutil).
 ///
@@ -143,6 +144,60 @@ pub fn angle_from_points(
     }
 
     normalize_angle(theta)
+}
+
+/// How close to its chord an arc may leave its start, in degrees, and still be
+/// read as a straight connector. Tight, so an arc a sketch gives a visible bend
+/// keeps it.
+pub const ANGLE_EPSILON_DEGREES: f64 = 0.01;
+
+/// The arc a connector's control point bends it into between two element
+/// positions: the canvas angle it leaves `from` at, and how many degrees that
+/// is off the chord to `to`. None for the `(0, 0)` sentinel of a straight
+/// connector.
+fn connector_bend(
+    from: (f64, f64),
+    to: (f64, f64),
+    control_point: (i32, i32),
+) -> Option<(f64, f64)> {
+    if control_point == (0, 0) {
+        return None;
+    }
+    let xmile_angle = angle_from_points(
+        from.0,
+        from.1,
+        control_point.0 as f64,
+        control_point.1 as f64,
+        to.0,
+        to.1,
+    );
+    let canvas_angle = xmile_angle_to_canvas(xmile_angle);
+    let chord_angle = (to.1 - from.1).atan2(to.0 - from.0).to_degrees();
+    Some((canvas_angle, angle_between(canvas_angle, chord_angle)))
+}
+
+/// The shape a connector's control point gives it between two element
+/// positions: straight for the `(0, 0)` sentinel or an arc within
+/// [`ANGLE_EPSILON_DEGREES`] of its chord, otherwise the arc leaving `from` at
+/// the canvas angle `angle_from_points` derives.
+///
+/// The one reading of a control point: the importer reads a sketch's
+/// connectors with it, and the writer asks it of every point it would write,
+/// so a written point reads back as the shape it was written for.
+pub fn connector_shape(from: (f64, f64), to: (f64, f64), control_point: (i32, i32)) -> LinkShape {
+    match connector_bend(from, to, control_point) {
+        Some((canvas_angle, off_chord)) if off_chord >= ANGLE_EPSILON_DEGREES => {
+            LinkShape::Arc(canvas_angle)
+        }
+        _ => LinkShape::Straight,
+    }
+}
+
+/// The difference between two angles in `[-180, 180]` degrees, allowing for
+/// wrap-around: 179 and -179 are 2 apart.
+pub fn angle_between(a: f64, b: f64) -> f64 {
+    let diff = (a - b).abs();
+    if diff > 180.0 { 360.0 - diff } else { diff }
 }
 
 /// Normalize angle to [0, 360) range.
@@ -445,7 +500,9 @@ fn model_stock(
 /// the sides the model gives no stock. When exactly one side is open and the
 /// other side's stock is not a pipe end, the route to that stock continues
 /// through the valve, so the open side takes the pipe end on the valve's far
-/// side from the stock. When both sides are open (a flow that touches no
+/// side from the stock; when the view does not draw that stock, the open side
+/// takes the pipe end whose connector field 4 marks it (100 upstream, 4
+/// downstream). When both sides are open (a flow that touches no
 /// stock), sketch order decides the source: unverified against Vensim, and it
 /// decides only which end of a stockless flow carries the arrowhead.
 pub fn resolve_flow_ends(
@@ -461,6 +518,10 @@ pub fn resolve_flow_ends(
         control: (i32, i32),
         anchor: (i32, i32),
         target: PipeTarget,
+        /// The connector's field 4: 100 on the pipe's upstream (source) end, 4
+        /// on its downstream (sink) end, as Vensim writes it and as the writer
+        /// writes it back.
+        direction: i32,
     }
 
     let mut raw: Vec<RawEnd> = Vec::new();
@@ -490,6 +551,7 @@ pub fn resolve_flow_ends(
                 control: conn.control_point,
                 anchor,
                 target,
+                direction: conn.field4,
             });
             if raw.len() == 2 {
                 break;
@@ -502,8 +564,46 @@ pub fn resolve_flow_ends(
         [a] => valve.is_some_and(|v| a.control.0 == v.x),
         _ => false,
     };
+    // The pipe's interior bends, which Vensim encodes as the valve's
+    // self-connectors, and the valve: the points a pipe end's segment can run
+    // to.
+    let neighbors: Vec<(i32, i32)> = valve
+        .map(|valve| {
+            view.iter()
+                .filter_map(|elem| match elem {
+                    VensimElement::Connector(conn)
+                        if conn.from_uid == valve.uid && conn.to_uid == valve.uid =>
+                    {
+                        Some(conn.control_point)
+                    }
+                    _ => None,
+                })
+                .chain(std::iter::once((valve.x, valve.y)))
+                .collect()
+        })
+        .unwrap_or_default();
+    // Whether an end's own segment is vertical. A straight pipe's two ends
+    // answer as the pipe does; a bent pipe's end runs to the bend or valve
+    // nearest it, which is how an L-shaped pipe's vertical end keeps its x
+    // while its horizontal end keeps its y. Deciding for the whole pipe from
+    // its two ends instead snaps a bent pipe's ends across their own
+    // segments, so a pipe the writer wrote moved when read again.
+    let end_vertical = |end: &RawEnd| -> bool {
+        if neighbors.len() <= 1 {
+            return vertical;
+        }
+        let distance = |p: (i32, i32)| {
+            let (dx, dy) = ((p.0 - end.control.0) as f64, (p.1 - end.control.1) as f64);
+            dx.hypot(dy)
+        };
+        neighbors
+            .iter()
+            .copied()
+            .min_by(|a, b| distance(*a).total_cmp(&distance(*b)))
+            .is_some_and(|nearest| nearest.0 == end.control.0)
+    };
     let point_of = |end: &RawEnd| -> (i32, i32) {
-        if vertical {
+        if end_vertical(end) {
             (end.control.0, end.anchor.1)
         } else {
             (end.anchor.0, end.control.1)
@@ -579,7 +679,13 @@ pub fn resolve_flow_ends(
             }),
             _ => None,
         };
-        let chosen = far_side.or_else(|| spare.first().copied()).map(spare_end);
+        // Without the other side's stock in the view to measure from, the end
+        // the connector marks as this side's serves it.
+        let marked = if source_open { 100 } else { 4 };
+        let chosen = far_side
+            .or_else(|| spare.iter().copied().find(|end| end.direction == marked))
+            .or_else(|| spare.first().copied())
+            .map(spare_end);
         if source_open {
             source = chosen;
         } else {
@@ -1165,6 +1271,79 @@ mod tests {
                     target: PipeTarget::Stock("stock b".to_string())
                 }
             );
+        }
+
+        /// A bent pipe's ends snap along their own segments: here the pipe
+        /// runs down from Stock A to a bend, then right into Stock B, so the
+        /// end at A keeps its x and takes A's y, and the end at B keeps its y
+        /// and takes B's x -- although the two ends' x differ, which alone
+        /// would call the whole pipe horizontal.
+        #[test]
+        fn a_bent_pipes_ends_snap_along_their_own_segments() {
+            let symbols = symbols(vec![
+                ("stock a", stock(&[], &["flow rate"])),
+                ("stock b", stock(&["flow rate"], &[])),
+            ]);
+            let view = view_of(vec![
+                variable(1, "Stock A", 101, 50, false, false),
+                variable(2, "Stock B", 300, 252, false, false),
+                valve(3, 100, 150),
+                variable(4, "Flow Rate", 120, 150, true, false),
+                connector(5, 3, 1, (100, 70)),
+                connector(6, 3, 3, (100, 250)),
+                connector(7, 3, 2, (260, 250)),
+            ]);
+            let ends = ends_of(&view, &symbols);
+            assert_eq!(
+                ends.source,
+                FlowEnd::Pipe {
+                    x: 100,
+                    y: 50,
+                    target: PipeTarget::Stock("stock a".to_string())
+                }
+            );
+            assert_eq!(
+                ends.sink,
+                FlowEnd::Pipe {
+                    x: 300,
+                    y: 250,
+                    target: PipeTarget::Stock("stock b".to_string())
+                }
+            );
+        }
+
+        /// A side the model gives no stock, when the view does not draw the
+        /// other side's stock to measure the valve's far side from, takes the
+        /// pipe end its connector marks for that side (field 4: 100 upstream),
+        /// not the first in sketch order.
+        #[test]
+        fn an_open_side_takes_the_end_marked_for_it_when_the_view_lacks_the_stock() {
+            let symbols = symbols(vec![("stock b", stock(&["flow rate"], &[]))]);
+            let marked = |uid, to, control, field4| match connector(uid, 3, to, control) {
+                VensimElement::Connector(conn) => {
+                    VensimElement::Connector(VensimConnector { field4, ..conn })
+                }
+                _ => unreachable!(),
+            };
+            let view = view_of(vec![
+                cloud(1, 100, 100),
+                cloud(2, 300, 100),
+                valve(3, 200, 100),
+                variable(4, "Flow Rate", 200, 120, true, false),
+                // The sink's cloud comes first in sketch order.
+                marked(5, 2, (280, 100), 4),
+                marked(6, 1, (120, 100), 100),
+            ]);
+            let ends = ends_of(&view, &symbols);
+            assert_eq!(
+                ends.source,
+                FlowEnd::Pipe {
+                    x: 100,
+                    y: 100,
+                    target: PipeTarget::Cloud(1)
+                }
+            );
+            assert_eq!(ends.sink, FlowEnd::Stock("stock b".to_string()));
         }
 
         /// A pipe with one end: its axis is read off the valve, so a control
