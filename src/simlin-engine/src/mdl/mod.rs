@@ -183,10 +183,9 @@ pub fn parse_mdl(source: &str) -> Result<Project> {
 /// that the project does not keep, so a caller can say what an MDL save of the
 /// project would lose. From each sketch view: its comments, graphs, sliders
 /// and other input/output objects, its images, the drawings of variables the
-/// diagram does not place (Time, the control variables), the arrows drawn to
-/// any of those, and clouds no kept flow ends in. From the file: its custom
-/// graphs, custom tables and reports. The project is the one [`parse_mdl`]
-/// returns.
+/// diagram does not place (Time, the control variables), and the arrows drawn
+/// to any of those. From the file: its custom graphs, custom tables and
+/// reports. The project is the one [`parse_mdl`] returns.
 pub fn parse_mdl_with_warnings(source: &str) -> Result<(Project, Vec<ImportWarning>)> {
     convert_mdl_reporting(source, None).map_err(|e| {
         Error::new(

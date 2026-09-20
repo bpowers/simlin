@@ -220,12 +220,12 @@ mod tests {
         let warnings = [
             not_kept(15, "comment", "comments", "on view 'A'", &[]),
             not_kept(3, "graph", "graphs", "on view 'A'", &[]),
-            not_kept(1, "comment", "comments", "on view 'B'", &[]),
+            not_kept(4, "comment", "comments", "on view 'B'", &[]),
             not_kept(1, "image", "images", "on view 'B'", &[]),
         ];
         assert_eq!(
             ImportWarning::summary(&warnings).as_deref(),
-            Some("16 comments, 3 graphs, and 1 image in this file are not kept")
+            Some("19 comments, 3 graphs, and 1 image in this file are not kept")
         );
         assert_eq!(
             ImportWarning::summary(&warnings[3..]).as_deref(),
