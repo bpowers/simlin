@@ -44,11 +44,11 @@ export function ErrorDetails({
       if (err.code === ErrorCode.VariablesHaveErrors && varErrors.size > 0) {
         return;
       }
-      const details = err.details;
+      // The engine's reason already says what the code means, so the code
+      // description is only the fallback for an error without one.
       errors.push(
         <div key={`model-${i}-${err.code}`} className={styles.list}>
-          model error: {errorCodeDescription(err.code)}
-          {details ? `: ${details}` : undefined}
+          model error: {err.details ?? errorCodeDescription(err.code)}
         </div>,
       );
     });

@@ -297,24 +297,28 @@ fn main() {
     // Normalize each reason to its shape (variable names and offsets differ
     // per fragment) so the distinct root causes are countable.
     fn reason_shape(r: &str) -> String {
-        // `SimulationError{code: <per-fragment detail>}` -> `... {code}`; the
-        // detail is a variable name and would make every fragment its own
-        // bucket.
-        if let Some(open) = r.find('{')
-            && let Some(colon) = r[open..].find(':')
-        {
-            let head = &r[..open];
-            let code = &r[open + 1..open + colon];
-            let detail = r[open + colon + 1..]
-                .trim_end_matches(['}', '.', ' '])
-                .trim();
-            return format!("{head}{{{code}}}: {detail}");
-        }
         // `<Code> at <start>..<end>` -- the byte span is per-fragment noise.
         if let Some(at) = r.find(" at ") {
             return r[..at].to_string();
         }
-        r.to_string()
+        // A reason names the variables it is about in quotes; each name would
+        // make every fragment its own bucket, so it is blanked. A quote after a
+        // letter or digit is an apostrophe ("the conveyor's"), not a name.
+        let mut shape = String::with_capacity(r.len());
+        let mut quoted = false;
+        let mut prev: Option<char> = None;
+        for c in r.chars() {
+            if quoted {
+                quoted = c != '\'';
+            } else if c == '\'' && !prev.is_some_and(char::is_alphanumeric) {
+                shape.push_str("'_'");
+                quoted = true;
+            } else {
+                shape.push(c);
+            }
+            prev = Some(c);
+        }
+        shape.trim_end_matches(['.', ' ']).to_string()
     }
 
     println!("\n=== compiler reasons, by shape ===");

@@ -1540,8 +1540,24 @@ pub struct ResolvedScc {
 
 impl ModelDepGraphResult {
     pub fn has_cycle(&self) -> bool {
-        !self.cycle_variables.is_empty()
+        !self.cycles.is_empty()
     }
+}
+
+/// A genuine cycle one phase's dependency walk found: the fact behind a
+/// `CircularDependency` diagnostic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyCycle {
+    /// The variable the walk found the back-edge on, which the diagnostic is
+    /// filed under.
+    pub variable: String,
+    /// The cycle from `variable` back to itself, each name followed by one
+    /// its equation reads: `[a, b, a]` for `a = b + 1, b = a * 2`, `[a, a]`
+    /// for `a = a + 1`.
+    pub path: Vec<String>,
+    /// Whether the cycle is among initial values, which stocks do not break,
+    /// rather than among the equations evaluated every time step.
+    pub initial: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1558,13 +1574,13 @@ pub struct ModelDepGraphResult {
     pub runlist_initials: Vec<String>,
     pub runlist_flows: Vec<String>,
     pub runlist_stocks: Vec<String>,
-    /// The variable each phase's dependency walk reported a genuine back-edge
+    /// The cycle each phase's dependency walk reported a genuine back-edge
     /// on (the dt phase's, then the init phase's): the model's
     /// `CircularDependency` facts, which `db::model_all_diagnostics` reports
     /// under the empty input set. Empty exactly when the cycle gate passes
     /// ([`ModelDepGraphResult::has_cycle`]); a model with no cycle can still
     /// fail to compile.
-    pub cycle_variables: Vec<String>,
+    pub cycles: Vec<DependencyCycle>,
     /// Recurrence SCCs whose induced element graph the cycle gate proved
     /// acyclic and element-sourceable, so they are resolved rather than
     /// rejected with `CircularDependency`. Empty on the acyclic happy
@@ -1871,6 +1887,29 @@ struct ClosureWalk<'a> {
     /// The DFS stack as a membership vector: a successor that is still
     /// being closed is a back-edge.
     processing: Vec<bool>,
+    /// The DFS stack in order, one entry per `closure_of` frame (a resolved
+    /// SCC's frame is the member it was entered through), so a back-edge can
+    /// name the cycle it closes.
+    stack: Vec<u32>,
+}
+
+/// The cycle a back-edge from `from` to `to` closes, `to` being on the DFS
+/// stack: `from`, then the stack from `to` up to `from`, then `from` again.
+/// A resolved SCC holds only its entry member on the stack, so a `to` inside
+/// one is found by its SCC.
+fn back_edge_cycle(w: &ClosureWalk<'_>, from: u32, to: u32) -> Vec<String> {
+    let start = w
+        .stack
+        .iter()
+        .position(|&n| n == to || same_resolved_scc_at(&w.scc.scc_of, n, to))
+        .unwrap_or(0);
+    let name = |n: u32| w.ordered[n as usize].as_str().to_string();
+    let mut path = vec![name(from)];
+    path.extend(w.stack[start..].iter().map(|&n| name(n)));
+    if path.last() != Some(&path[0]) {
+        path.push(name(from));
+    }
+    path
 }
 
 /// Whether two nodes are members of the SAME resolved recurrence SCC.
@@ -1890,10 +1929,14 @@ fn same_resolved_scc_at(scc_of: &[Option<usize>], a: u32, b: u32) -> bool {
     )
 }
 
+/// A genuine back-edge a dependency walk found: the variable it was found on
+/// and the cycle it closes ([`back_edge_cycle`]).
+type BackEdge = (String, Vec<String>);
+
 /// Close `node`'s dependency set (see `compute_transitive` in
 /// `model_dependency_graph_impl` for the two SCC-aware behaviors). `Err`
-/// carries the name of the node whose successor was a genuine back-edge.
-fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), String> {
+/// carries the genuine back-edge a successor was.
+fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), BackEdge> {
     let at = node as usize;
     if w.closed[at].is_some() {
         return Ok(());
@@ -1962,6 +2005,7 @@ fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), String> {
         for &m in members {
             w.processing[m as usize] = true;
         }
+        w.stack.push(node);
         let mut external = NodeSet::empty(w.ordered.len());
         let succ = w.succ;
         for &m in members {
@@ -1980,7 +2024,8 @@ fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), String> {
                     // distinct resolved SCCs cannot form a cycle (they would
                     // be one SCC), so no same-SCC exemption applies here --
                     // fatal (loud-safe).
-                    return Err(w.ordered[m as usize].as_str().to_string());
+                    let cycle = back_edge_cycle(w, m, dep);
+                    return Err((w.ordered[m as usize].as_str().to_string(), cycle));
                 }
                 if w.closed[dep as usize].is_none() {
                     closure_of(w, dep)?;
@@ -1996,6 +2041,7 @@ fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), String> {
         for &m in members {
             w.processing[m as usize] = false;
         }
+        w.stack.pop();
         // Assign the identical member-free set to EVERY member so the SCC
         // is one condensed node in the topological sort.
         for &m in members {
@@ -2005,6 +2051,7 @@ fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), String> {
     }
 
     w.processing[at] = true;
+    w.stack.push(node);
 
     // The successor set this normal node contributes to cycle detection AND
     // the transitive/ordering map, sourced from the SINGLE shared cycle
@@ -2032,7 +2079,8 @@ fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), String> {
             if same_resolved_scc_at(&scc.scc_of, dep, node) {
                 continue;
             }
-            return Err(name.as_str().to_string()); // circular dependency
+            // circular dependency
+            return Err((name.as_str().to_string(), back_edge_cycle(w, node, dep)));
         }
 
         if w.closed[dep as usize].is_none() {
@@ -2048,6 +2096,7 @@ fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), String> {
     }
 
     w.processing[at] = false;
+    w.stack.pop();
     w.closed[at] = Some(Closed::Reached(transitive));
     Ok(())
 }
@@ -2121,7 +2170,7 @@ pub(crate) fn model_dependency_graph_impl(
     let compute_transitive =
         |is_initial: bool,
          scc: &SccIndex|
-         -> Result<HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>, String> {
+         -> Result<HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>, BackEdge> {
             let n = index.ordered.len();
             let mut walk = ClosureWalk {
                 ordered: &index.ordered,
@@ -2131,6 +2180,7 @@ pub(crate) fn model_dependency_graph_impl(
                 is_initial,
                 closed: (0..n).map(|_| None).collect(),
                 processing: vec![false; n],
+                stack: Vec::new(),
             };
 
             // Iterate every node once, in `var_info`'s key order.
@@ -2160,7 +2210,12 @@ pub(crate) fn model_dependency_graph_impl(
                 .collect())
         };
 
-    let mut cycle_variables: Vec<String> = Vec::new();
+    let mut cycles: Vec<DependencyCycle> = Vec::new();
+    let cycle = |(variable, path): BackEdge, initial: bool| DependencyCycle {
+        variable,
+        path,
+        initial,
+    };
     let mut resolved_sccs: Vec<ResolvedScc> = Vec::new();
 
     let no_scc = SccIndex::none(index.ordered.len());
@@ -2206,19 +2261,19 @@ pub(crate) fn model_dependency_graph_impl(
 
     let dt_dependencies = match dt_first {
         Ok(deps) => deps,
-        Err(first_cycle_var) => {
+        Err(first_cycle) => {
             if dt_scc.is_empty() {
                 // Unresolved: keep the conservative `CircularDependency`.
-                cycle_variables.push(first_cycle_var);
+                cycles.push(cycle(first_cycle, false));
                 HashMap::new()
             } else {
                 // Re-run with every resolved SCC treated as one collapsed
                 // node (intra-SCC edges -- N=1 self-edge and N>=2 cross-
                 // edges alike -- broken; every other back-edge still
                 // errors). A residual genuine cycle is still loud-safe.
-                compute_transitive(false, &dt_scc).unwrap_or_else(|var_name| {
+                compute_transitive(false, &dt_scc).unwrap_or_else(|found| {
                     resolved_sccs.clear();
-                    cycle_variables.push(var_name);
+                    cycles.push(cycle(found, false));
                     HashMap::new()
                 })
             }
@@ -2239,7 +2294,7 @@ pub(crate) fn model_dependency_graph_impl(
 
     let initial_dependencies = match init_first {
         Ok(deps) => deps,
-        Err(first_init_cycle_var) => {
+        Err(first_init_cycle) => {
             // A back-edge remains AFTER the dt-resolved set's init
             // self-edges are broken => a *structurally distinct*
             // init-only cycle (e.g. a per-element forward recurrence in
@@ -2282,7 +2337,7 @@ pub(crate) fn model_dependency_graph_impl(
                 // identified init SCC was already dt-covered yet the
                 // gate still errs (a genuine residual cycle). Loud-safe:
                 // keep the conservative `CircularDependency`.
-                cycle_variables.push(first_init_cycle_var);
+                cycles.push(cycle(first_init_cycle, true));
                 HashMap::new()
             } else {
                 // Break the init-only resolved SCCs' intra edges too (in
@@ -2301,9 +2356,9 @@ pub(crate) fn model_dependency_graph_impl(
                         resolved_sccs.extend(init_only_resolved);
                         deps
                     }
-                    Err(var_name) => {
+                    Err(found) => {
                         resolved_sccs.clear();
-                        cycle_variables.push(var_name);
+                        cycles.push(cycle(found, true));
                         HashMap::new()
                     }
                 }
@@ -2669,7 +2724,7 @@ pub(crate) fn model_dependency_graph_impl(
         runlist_initials,
         runlist_flows,
         runlist_stocks,
-        cycle_variables,
+        cycles,
         // Populated by the element-cycle refinement
         // (`resolve_recurrence_sccs`) when a cycle gate's back-edge is
         // fully explained by resolvable single-variable self-recurrences:

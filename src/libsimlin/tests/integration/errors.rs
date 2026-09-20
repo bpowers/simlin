@@ -1200,3 +1200,195 @@ fn test_duplicate_canonical_idents_surface_through_get_errors() {
         simlin_project_unref(proj);
     }
 }
+
+/// Copy a C string out, or `None` for NULL.
+unsafe fn c_text(ptr: *const std::os::raw::c_char) -> Option<String> {
+    (!ptr.is_null()).then(|| CStr::from_ptr(ptr).to_string_lossy().into_owned())
+}
+
+/// The top-level message of `err`, freeing it; `None` when there is no error.
+unsafe fn take_message(err: *mut SimlinError) -> Option<String> {
+    if err.is_null() {
+        return None;
+    }
+    let message = c_text(simlin_error_get_message(err));
+    simlin_error_free(err);
+    message
+}
+
+/// What a host reads as a reason has no Rust-shaped wrapper around it.
+fn assert_bare(text: &str, ctx: &str) {
+    for wrapper in ["Error{", "Error {", "Some(", "details:"] {
+        assert!(
+            !text.contains(wrapper),
+            "{ctx}: {text:?} contains {wrapper:?}"
+        );
+    }
+}
+
+/// Every diagnostic a host reads carries a bare reason in `details`: a
+/// sentence without the code's name, the snippet or the summary line, which
+/// stay in `message` for terminals and language-model clients. A parse error,
+/// whose raising site writes no reason, says what its code means.
+#[test]
+fn every_diagnostic_carries_a_bare_reason() {
+    let datamodel = TestProject::new("reasons")
+        .unit("Person", None)
+        .unit("Dollar", None)
+        .aux("parse", "1 +", None)
+        .aux("unknown", "nosuch * 2", None)
+        .aux("loop_a", "loop_b", None)
+        .aux("loop_b", "loop_a", None)
+        .aux("people", "1", Some("Person"))
+        .aux("money", "people", Some("Dollar"))
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err);
+        assert!(err.is_null());
+        assert!(!all_errors.is_null());
+        let count = simlin_error_get_detail_count(all_errors);
+        let details = std::slice::from_raw_parts(simlin_error_get_details(all_errors), count);
+        let mut seen = std::collections::BTreeSet::new();
+        for detail in details {
+            let code_name = CStr::from_ptr(simlin_error_str(detail.code as u32))
+                .to_string_lossy()
+                .into_owned();
+            let reason =
+                c_text(detail.details).unwrap_or_else(|| panic!("{code_name}: details is NULL"));
+            let message = c_text(detail.message).expect("message");
+            assert!(!reason.is_empty(), "{code_name}: empty reason");
+            assert!(
+                !reason.contains('\n'),
+                "{code_name}: {reason:?} carries a snippet"
+            );
+            assert_bare(&reason, &code_name);
+            assert_bare(&message, &code_name);
+            if detail.code != SimlinErrorCode::Generic {
+                assert!(!reason.contains(&code_name), "{code_name}: {reason:?}");
+                assert!(message.contains(&code_name), "{code_name}: {message:?}");
+            }
+            seen.insert(code_name);
+        }
+        // The rows exercised: a parse error, a reference, a cycle, units.
+        for code in [
+            "unrecognized_eof",
+            "unknown_dependency",
+            "circular_dependency",
+            "unit_mismatch",
+        ] {
+            assert!(seen.contains(code), "no {code} row: {seen:?}");
+        }
+        let cycle = details
+            .iter()
+            .find(|d| d.code == SimlinErrorCode::CircularDependency)
+            .and_then(|d| c_text(d.details))
+            .expect("a cycle reason");
+        assert!(
+            cycle.contains("loop_a → loop_b") || cycle.contains("loop_b → loop_a"),
+            "the cycle's reason names its loop: {cycle:?}"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A failure a host is told about through `out_error` reads as a sentence
+/// naming what went wrong: the model or variable an edit named, why a
+/// simulation cannot run.
+#[test]
+fn refused_edits_and_runs_say_why() {
+    let datamodel = TestProject::new("refusals")
+        .aux("kept", "1", None)
+        .aux("taken", "2", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    let refusal = |patch: &str| unsafe {
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch.as_ptr(),
+            patch.len(),
+            true,
+            true,
+            &mut collected,
+            &mut err,
+        );
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        take_message(err).expect("the patch is refused")
+    };
+    let op = |model: &str, op: &str| format!(r#"{{"models":[{{"name":"{model}","ops":[{op}]}}]}}"#);
+
+    let cases = [
+        (
+            op(
+                "main",
+                r#"{"type":"deleteVariable","payload":{"ident":"gone"}}"#,
+            ),
+            "there is no variable named 'gone'",
+        ),
+        (
+            op(
+                "main",
+                r#"{"type":"renameVariable","payload":{"from":"kept","to":"taken"}}"#,
+            ),
+            "a variable named 'taken' already exists",
+        ),
+        (
+            op(
+                "nosuch",
+                r#"{"type":"deleteVariable","payload":{"ident":"kept"}}"#,
+            ),
+            "there is no model named 'nosuch'",
+        ),
+    ];
+    for (patch, reason) in cases {
+        let message = refusal(&patch);
+        assert_bare(&message, &patch);
+        assert!(message.contains(reason), "{patch}: {message:?}");
+    }
+    unsafe { simlin_project_unref(proj) };
+
+    // A run refused for a model that cannot compile.
+    let broken = TestProject::new("broken")
+        .aux("a", "b", None)
+        .aux("b", "a", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&broken);
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let sim = simlin_sim_new(model, false, &mut err);
+        assert!(err.is_null());
+        simlin_sim_run_to_end(sim, &mut err);
+        let message = take_message(err).expect("the run is refused");
+        assert_bare(&message, "run");
+        assert!(!message.is_empty());
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// Every wire code stands for the engine code of its name, so a reason
+/// derived from a wire code says what that code means.
+#[test]
+fn every_wire_code_round_trips_through_its_engine_code() {
+    for raw in 0u32.. {
+        let Ok(code) = SimlinErrorCode::try_from(raw) else {
+            break;
+        };
+        let engine_code = engine::ErrorCode::from(code);
+        assert_eq!(SimlinErrorCode::from(engine_code), code, "{raw}");
+        let name = unsafe { CStr::from_ptr(simlin_error_str(raw)) }.to_string_lossy();
+        assert_eq!(engine_code.to_string(), name, "{raw}");
+    }
+}

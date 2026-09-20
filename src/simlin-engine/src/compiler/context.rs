@@ -29,6 +29,24 @@ use super::subscript::{
 };
 use crate::builtins::ArgKind;
 
+/// The reason a reference is refused `MismatchedDimensions` when no narrower
+/// one is at hand: its dimensions do not line up with the equation reading it.
+fn dimensions_do_not_match(ident: &str) -> String {
+    format!("the dimensions of '{ident}' do not match the dimensions of the equation that uses it")
+}
+
+/// The reason a reference is refused `ArrayReferenceNeedsExplicitSubscripts`:
+/// an array read where there is no element to take it at.
+fn needs_subscripts(ident: &str) -> String {
+    format!("'{ident}' is an array, so it needs subscripts where it is used here")
+}
+
+/// The reason a `@N` position subscript on `ident` is refused: the dimension
+/// it indexes has no Nth element.
+fn no_such_position(ident: &str, position: usize, len: usize) -> String {
+    format!("@{position} is out of range for '{ident}', whose dimension has {len} elements")
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub(crate) struct Context<'a> {
@@ -153,7 +171,10 @@ impl Context<'_> {
             .iter()
             .map(|name| match self.dimensions_ctx.get(name) {
                 Some(dim) => Ok(dim.clone()),
-                None => sim_err!(BadDimensionName, name.as_str().to_string()),
+                None => sim_err!(
+                    BadDimensionName,
+                    format!("there is no dimension named '{}'", name.as_str())
+                ),
             })
             .collect::<Result<_>>()?;
         let elements: Vec<&str> = scope.element.iter().map(|e| e.as_str()).collect();
@@ -164,7 +185,13 @@ impl Context<'_> {
                 dim.get_offset(element).map(|off| acc * dim.len() + off)
             })
         else {
-            return sim_err!(MismatchedDimensions, elements.join(","));
+            return sim_err!(
+                MismatchedDimensions,
+                format!(
+                    "[{}] is not an element of the variable's dimensions",
+                    elements.join(", ")
+                )
+            );
         };
         let elem_ctx =
             self.with_active_subscripts(Arc::<[Dimension]>::from(dims.clone()), &elements);
@@ -400,7 +427,10 @@ impl Context<'_> {
     /// ordinary expression can reach this allocation at all.
     fn get_implicit_subscripts(&self, dims: &[Dimension], ident: &str) -> Result<Vec<&str>> {
         if self.active_dimension.is_none() {
-            return sim_err!(ArrayReferenceNeedsExplicitSubscripts, ident.to_owned());
+            return sim_err!(
+                ArrayReferenceNeedsExplicitSubscripts,
+                needs_subscripts(ident)
+            );
         }
         let active_dims = self.active_dimension.as_ref().unwrap();
         let active_subscripts = self.active_subscript.as_ref().unwrap();
@@ -411,7 +441,7 @@ impl Context<'_> {
                 .into_iter()
                 .map(|i| active_subscripts[i].as_str())
                 .collect()),
-            None => sim_err!(MismatchedDimensions, ident.to_owned()),
+            None => sim_err!(MismatchedDimensions, dimensions_do_not_match(ident)),
         }
     }
 
@@ -504,7 +534,16 @@ impl Context<'_> {
     /// segment names no sub-model variable -- is a loud `DoesNotExist`, never a
     /// silent slot 0.
     fn resolve<'d, 'n>(&'d self, ident: &'n Ident<Canonical>) -> Result<Resolved<'d, 'n>> {
-        let does_not_exist = || Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None);
+        let does_not_exist = || {
+            Error::new(
+                ErrorKind::Simulation,
+                ErrorCode::DoesNotExist,
+                Some(format!(
+                    "'{}' is not a variable this equation can read",
+                    ident.as_str()
+                )),
+            )
+        };
         let ident_str = ident.as_str();
         let Some(pos) = ident_str.find('\u{00B7}') else {
             let shape = self.deps.get(ident).ok_or_else(does_not_exist)?;
@@ -1419,7 +1458,15 @@ impl Context<'_> {
         let dims = self.subscript_dims(id)?;
 
         if indices.len() != dims.len() {
-            return sim_err!(MismatchedDimensions, id.as_str().to_string());
+            return sim_err!(
+                MismatchedDimensions,
+                format!(
+                    "'{}' has {} dimension(s) but is subscripted with {}",
+                    id.as_str(),
+                    dims.len(),
+                    indices.len()
+                )
+            );
         }
 
         // An ARRAY-valued index (`a[b[*]]`) has no meaning: an index selects
@@ -1475,7 +1522,10 @@ impl Context<'_> {
                     // `normalize_subscripts3` already rejects `@0`; guarded
                     // here too because the subtraction below would wrap.
                     if pos_1based == 0 || pos_1based > dims[i].len() {
-                        return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                        return sim_err!(
+                            MismatchedDimensions,
+                            no_such_position(id.as_str(), pos_1based, dims[i].len())
+                        );
                     }
                     *op = IndexOp::Single(pos_1based - 1);
                 }
@@ -1708,7 +1758,7 @@ impl Context<'_> {
             && !self.promote_active_dim_ref
             && view.dims.len() != active_dims.len()
         {
-            return sim_err!(MismatchedDimensions, id.as_str().to_string());
+            return sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()));
         }
 
         // Which view axes came from a Range, so a size mismatch is allowed and
@@ -1743,7 +1793,7 @@ impl Context<'_> {
                     && !range_view_dims.contains(&view_idx)
                     && view_dim != active_dims[view_idx].len()
                 {
-                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                    return sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()));
                 }
             }
         }
@@ -1757,14 +1807,16 @@ impl Context<'_> {
                 None if view_idx < active_subscripts.len() => {
                     (view_idx, &active_subscripts[view_idx], None)
                 }
-                None => return sim_err!(MismatchedDimensions, id.as_str().to_string()),
+                None => {
+                    return sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()));
+                }
             };
 
             let Some(Some(dim_idx)) = dim_mapping.get(view_idx).copied() else {
-                return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                return sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()));
             };
             if dim_idx >= dims.len() {
-                return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                return sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()));
             }
 
             let source_dim = &dims[dim_idx];
@@ -1881,12 +1933,12 @@ impl Context<'_> {
                     )
                 );
             } else {
-                return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                return sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()));
             };
 
             let rel_offset = if is_sparse {
                 if !offset_from_source {
-                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                    return sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()));
                 }
                 abs_offset
             } else if offset_from_source {
@@ -1898,7 +1950,12 @@ impl Context<'_> {
                     None if range_view_dims.contains(&view_idx) => {
                         return Ok(Expr::Const(f64::NAN, loc));
                     }
-                    None => return sim_err!(MismatchedDimensions, id.as_str().to_string()),
+                    None => {
+                        return sim_err!(
+                            MismatchedDimensions,
+                            dimensions_do_not_match(id.as_str())
+                        );
+                    }
                 }
             } else {
                 abs_offset
@@ -2197,7 +2254,7 @@ impl Context<'_> {
                 if self.active_dimension.is_none() {
                     return sim_err!(
                         ArrayReferenceNeedsExplicitSubscripts,
-                        id.as_str().to_string()
+                        needs_subscripts(id.as_str())
                     );
                 }
                 let active_dims = self.active_dimension.as_ref().unwrap();
@@ -2232,7 +2289,13 @@ impl Context<'_> {
                 }
 
                 // Subdimension case - not yet supported in dynamic context
-                sim_err!(TodoStarRange, id.as_str().to_string())
+                sim_err!(
+                    TodoStarRange,
+                    format!(
+                        "a subrange subscript on '{}' is not supported where the element varies",
+                        id.as_str()
+                    )
+                )
             }
 
             // StaticRange - should have been handled by normalize_subscripts3,
@@ -2258,7 +2321,10 @@ impl Context<'_> {
                 // to a concrete 1-based element offset in the target dimension.
                 if self.active_dimension.is_none() {
                     if pos_val == 0 || pos_val > dims[i].len() {
-                        return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                        return sim_err!(
+                            MismatchedDimensions,
+                            no_such_position(id.as_str(), pos_val, dims[i].len())
+                        );
                     }
                     return Ok(SubscriptIndex::Single(Expr::Const(
                         pos_val as f64,
@@ -2297,7 +2363,10 @@ impl Context<'_> {
                 // the active subscript doesn't match the target dimension.
                 // Resolve to a concrete 1-based offset, same as scalar context.
                 if pos_val == 0 || pos_val > dims[i].len() {
-                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                    return sim_err!(
+                        MismatchedDimensions,
+                        no_such_position(id.as_str(), pos_val, dims[i].len())
+                    );
                 }
                 Ok(SubscriptIndex::Single(Expr::Const(
                     pos_val as f64,
@@ -2347,7 +2416,7 @@ impl Context<'_> {
                         if self.active_dimension.is_none() {
                             return sim_err!(
                                 ArrayReferenceNeedsExplicitSubscripts,
-                                id.as_str().to_string()
+                                needs_subscripts(id.as_str())
                             );
                         }
                         let active_dims = self.active_dimension.as_ref().unwrap();
@@ -2398,7 +2467,7 @@ impl Context<'_> {
                 if self.active_dimension.is_none() {
                     return sim_err!(
                         ArrayReferenceNeedsExplicitSubscripts,
-                        id.as_str().to_string()
+                        needs_subscripts(id.as_str())
                     );
                 }
                 let active_dims = self.active_dimension.as_ref().unwrap();
@@ -2455,7 +2524,7 @@ impl Context<'_> {
                     }
                 }
 
-                sim_err!(MismatchedDimensions, id.as_str().to_string())
+                sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()))
             }
         }
     }

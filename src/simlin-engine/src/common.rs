@@ -739,6 +739,117 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+impl ErrorCode {
+    /// What this class of failure means, in plain words: the reason a user is
+    /// shown when the raising site wrote none of its own. A parse error is the
+    /// common case, since its reason is otherwise the source snippet (see
+    /// [`EquationError::details`]).
+    ///
+    /// `Display` is the code's name (`unknown_dependency`), which terminals and
+    /// language-model clients match on; this is the sentence a person reads.
+    pub fn description(self) -> &'static str {
+        use ErrorCode::*;
+        match self {
+            NoError => "no error",
+            DoesNotExist => "the named item does not exist",
+            XmlDeserialization => "the file is not a readable XMILE document",
+            VensimConversion => "the Vensim model could not be converted",
+            ProtobufDecode => "the project data could not be decoded",
+            InvalidToken => "the equation contains invalid input",
+            UnrecognizedEof => "the equation ends unexpectedly",
+            UnrecognizedToken => "the equation contains unexpected input",
+            ExtraToken => "the equation continues past its end",
+            UnclosedComment => "a comment is not closed",
+            UnclosedQuotedIdent => "a quoted name is not closed",
+            ExpectedNumber => "a number is expected",
+            UnknownBuiltin => "the equation calls an unknown function",
+            BadBuiltinArgs => "a function is called with the wrong arguments",
+            EmptyEquation => "the variable has no equation",
+            BadModuleInputSrc => "a module input's source is unknown",
+            BadModuleInputDst => "a module input's destination is unknown",
+            NotSimulatable => "the model has errors and cannot be simulated",
+            BadTable => "the graphical function is missing or invalid",
+            BadSimSpecs => "the simulation specs are invalid",
+            NoAbsoluteReferences => "absolute references are not supported",
+            CircularDependency => "the equations depend on each other in a cycle",
+            ArraysNotImplemented => "arrays are not supported here",
+            MultiDimensionalArraysNotImplemented => {
+                "arrays with more than one dimension are not supported here"
+            }
+            BadDimensionName => "the dimension is unknown",
+            BadModelName => "the model is unknown",
+            MismatchedDimensions => "the dimensions do not match",
+            ArrayReferenceNeedsExplicitSubscripts => "a reference to an array needs subscripts",
+            DuplicateVariable => "the name is already in use",
+            UnknownDependency => "the equation refers to an unknown variable",
+            VariablesHaveErrors => "some variables have equation errors",
+            UnitDefinitionErrors => "the project's unit definitions have errors",
+            Generic => "the engine reported an error",
+            NoAppInUnits => "units cannot contain a function call",
+            NoSubscriptInUnits => "units cannot contain a subscript",
+            NoIfInUnits => "units cannot contain an if-then-else",
+            NoUnaryOpInUnits => "units cannot be negated; write 1/people rather than -people",
+            BadBinaryOpInUnits => "units can only be multiplied and divided",
+            NoConstInUnits => "units cannot contain a constant",
+            ExpectedInteger => "an integer is expected",
+            ExpectedIntegerOne => "the integer 1 is expected",
+            DuplicateUnit => "the unit is defined more than once",
+            ExpectedModule => "a module is expected",
+            ExpectedIdent => "a name is expected",
+            UnitMismatch => "the units do not match",
+            TodoWildcard => "this wildcard subscript is not supported yet",
+            TodoStarRange => "this subrange subscript is not supported yet",
+            TodoRange => "this range subscript is not supported yet",
+            TodoArrayBuiltin => "this array function is not supported yet",
+            CantSubscriptScalar => "a variable that is not an array cannot be subscripted",
+            DimensionInScalarContext => "a dimension is used where a single value is needed",
+            BadOverride => "the value cannot be overridden",
+            UnsupportedForSerialization => "the project cannot be saved in this format",
+            DuplicateMacroName => "the macro name is already in use",
+            LookupReferencedWithoutArgument => "a graphical function is used without an argument",
+            ConveyorWithoutOutflow => "the conveyor has no outflow",
+            ConveyorNonEulerMethod => "conveyors require Euler integration",
+            ConveyorQueueUpstreamNotDiscrete => "a queue feeds a conveyor that is not discrete",
+            ConveyorTransitNotPositive => "the conveyor's transit time is not positive",
+            ConveyorTransitTooLong => "the conveyor's transit time needs too many time steps",
+            ConveyorTransitNotDtMultiple => {
+                "the conveyor's transit time is not a whole number of time steps"
+            }
+            ConveyorLeakFractionsExceedOne => "the conveyor's leak fractions add up to more than 1",
+            ConveyorLtmDegraded => "loop analysis does not score a conveyor's internal dynamics",
+            ConveyorDrivenFlowRead => "an equation reads a flow that a conveyor drives",
+            ConveyorNotExpanded => "internal error: a conveyor was not expanded",
+            ConveyorSpreadflowUnsupported => "this conveyor inflow placement is not supported yet",
+            ConveyorArrayedDimensionUnresolved => "the arrayed conveyor's dimension is unknown",
+            ConveyorContainerAccessUnsupported => {
+                "this use of a conveyor's contents is not supported"
+            }
+            QueueNotExpanded => "internal error: a queue was not expanded",
+            QueueNonEulerMethod => "queues require Euler integration",
+            QueueDrivenFlowRead => "an equation reads a flow that a queue drives",
+            QueueOverflowNotOnQueue => {
+                "only a queue's outflows after its first can be marked as overflows"
+            }
+            QueueLtmDegraded => "loop analysis may score a queue incorrectly",
+            RepeatedStockFlow => "a stock lists the same flow more than once",
+            ConveyorInSubmodelUnsupported => "conveyors are supported only in the main model",
+            QueueInSubmodelUnsupported => "queues are supported only in the main model",
+            QueueSecondaryOutflowToConveyor => "only a queue's first outflow can feed a conveyor",
+            ConveyorMultipleNonLeakOutflows => {
+                "the conveyor has more than one outflow that is not a leak"
+            }
+            StockBothConveyorAndQueue => "a stock cannot be both a conveyor and a queue",
+            ConveyorInitListUnsupported => "the conveyor's initial list cannot be used as written",
+            UnknownElementSubscript => {
+                "an element equation names an element the variable does not have"
+            }
+            MacroContainsModule => "a macro cannot contain a module",
+            UnfilledEquation => "the equation has not been written yet",
+            MissingElementEquation => "some of the variable's elements have no equation",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EquationError {
     pub start: u16,
@@ -830,6 +941,11 @@ pub enum ErrorKind {
 pub struct Error {
     pub kind: ErrorKind,
     pub code: ErrorCode,
+    /// The reason the raising site had in hand, as a complete phrase a user can
+    /// read on its own ("there is no model named 'x'", not "x"); `None` when
+    /// the code's [`ErrorCode::description`] says everything. It reaches users
+    /// unchanged, through [`Error::reason`] and, when the error becomes a
+    /// diagnostic, `FormattedError::details`.
     pub details: Option<String>,
 }
 
@@ -855,20 +971,23 @@ impl Error {
     pub fn get_details(&self) -> Option<String> {
         self.details.clone()
     }
+
+    /// What went wrong, in plain words: the raising site's reason, or the
+    /// code's description when the site wrote none.
+    pub fn reason(&self) -> &str {
+        self.details
+            .as_deref()
+            .unwrap_or_else(|| self.code.description())
+    }
 }
 
+/// An error displays as its [`Error::reason`] alone, so an error wrapped into
+/// another's message ("failed to import MDL: {err}") reads as one sentence.
+/// Its code is not repeated: a caller that shows the code does so from
+/// `Error::code`.
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let kind = match self.kind {
-            ErrorKind::Import => "ImportError",
-            ErrorKind::Model => "ModelError",
-            ErrorKind::Simulation => "SimulationError",
-            ErrorKind::Variable => "VariableError",
-        };
-        match self.details {
-            Some(ref details) => write!(f, "{}{{{}: {}}}", kind, self.code, details),
-            None => write!(f, "{}{{{}}}", kind, self.code),
-        }
+        f.write_str(self.reason())
     }
 }
 
@@ -3253,6 +3372,37 @@ macro_rules! sim_err {
         use $crate::common::{Error, ErrorCode, ErrorKind};
         Err(Error::new(ErrorKind::Simulation, ErrorCode::$code, None))
     }};
+}
+
+/// An error displays as the reason a user reads -- the raising site's, else
+/// what the code means -- with no code name or kind wrapped around it, so an
+/// error quoted into another's message reads as one sentence rather than
+/// nesting `Kind{code: ...}` wrappers.
+#[test]
+fn an_error_displays_as_its_reason() {
+    let bare = Error::new(ErrorKind::Model, ErrorCode::CircularDependency, None);
+    assert_eq!(
+        bare.to_string(),
+        "the equations depend on each other in a cycle"
+    );
+    assert_eq!(bare.reason(), ErrorCode::CircularDependency.description());
+
+    let inner = Error::new(
+        ErrorKind::Import,
+        ErrorCode::Generic,
+        Some("cannot resolve data file 'missing.csv'".to_string()),
+    );
+    let outer = Error::new(
+        ErrorKind::Import,
+        ErrorCode::Generic,
+        Some(format!("Failed to parse MDL: {inner}")),
+    );
+    assert_eq!(
+        outer.to_string(),
+        "Failed to parse MDL: cannot resolve data file 'missing.csv'"
+    );
+    // The code's name is `ErrorCode`'s `Display`, kept for summaries.
+    assert_eq!(bare.code.to_string(), "circular_dependency");
 }
 
 #[test]

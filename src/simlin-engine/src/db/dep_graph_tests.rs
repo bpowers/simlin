@@ -363,6 +363,81 @@ fn dt_cycle_sccs_self_reference_is_a_self_loop() {
     );
 }
 
+/// The cycles `model_dependency_graph` records for `vars`.
+fn recorded_cycles(vars: Vec<datamodel::Variable>) -> Vec<DependencyCycle> {
+    let db = SimlinDb::default();
+    let project = single_model_project(vars);
+    let result = sync_from_datamodel(&db, &project);
+    crate::db::model_dependency_graph(
+        &db,
+        result.models["main"].source,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    )
+    .cycles
+    .clone()
+}
+
+/// A recorded cycle runs from its variable back to it, each name followed by
+/// one its equation reads, so the modeller is told which equations to break
+/// it in -- through every variable of a longer loop, and once around.
+#[test]
+fn a_cycle_is_recorded_as_the_path_that_closes_it() {
+    // A loop no stock breaks closes in both phases' walks.
+    let cycles = recorded_cycles(vec![
+        aux_var("a", "b + 1"),
+        aux_var("b", "c * 2"),
+        aux_var("c", "a - 1"),
+        aux_var("d", "a"),
+    ]);
+    let [cycle, initial] = cycles.as_slice() else {
+        panic!("one cycle in each phase: {cycles:?}");
+    };
+    assert!(!cycle.initial && initial.initial, "{cycles:?}");
+    assert_eq!(initial.path, cycle.path);
+    let reads = |from: &str, to: &str| matches!((from, to), ("a", "b") | ("b", "c") | ("c", "a"));
+    assert_eq!(cycle.path.first(), Some(&cycle.variable), "{cycle:?}");
+    assert_eq!(cycle.path.last(), Some(&cycle.variable), "{cycle:?}");
+    assert_eq!(cycle.path.len(), 4, "once around the loop: {cycle:?}");
+    assert!(
+        cycle.path.windows(2).all(|w| reads(&w[0], &w[1])),
+        "each name reads the next: {cycle:?}"
+    );
+
+    let cycles = recorded_cycles(vec![aux_var("a", "a + 1")]);
+    assert!(!cycles.is_empty());
+    for cycle in &cycles {
+        assert_eq!(cycle.path, ["a", "a"], "{cycles:?}");
+    }
+}
+
+/// A loop through a stock is broken every time step, but not in the initial
+/// values, and a cycle there is recorded as one.
+#[test]
+fn a_cycle_among_initial_values_is_recorded_as_one() {
+    let stock = datamodel::Variable::Stock(datamodel::Stock {
+        ident: "s".to_string(),
+        equation: datamodel::Equation::Scalar("t".to_string()),
+        documentation: String::new(),
+        units: None,
+        inflows: vec![],
+        outflows: vec![],
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    let cycles = recorded_cycles(vec![stock, aux_var("t", "s * 2")]);
+    let [cycle] = cycles.as_slice() else {
+        panic!("one cycle: {cycles:?}");
+    };
+    assert!(cycle.initial, "{cycle:?}");
+    assert_eq!(cycle.path.first(), cycle.path.last());
+    let mut members: Vec<&str> = cycle.path.iter().map(String::as_str).collect();
+    members.sort_unstable();
+    members.dedup();
+    assert_eq!(members, ["s", "t"], "{cycle:?}");
+}
+
 #[test]
 fn dt_cycle_sccs_is_byte_stable_across_runs() {
     // The accessor output must be byte-stable across runs (sorted
@@ -1247,7 +1322,7 @@ fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
 
     // No CircularDependency was recorded.
     assert!(
-        dep_graph.cycle_variables.is_empty(),
+        dep_graph.cycles.is_empty(),
         "no CircularDependency must be raised for the resolved init-only \
          recurrence"
     );
@@ -1708,7 +1783,7 @@ fn model_dep_graph_result_equality_observes_resolved_sccs() {
         runlist_initials: Vec::new(),
         runlist_flows: Vec::new(),
         runlist_stocks: Vec::new(),
-        cycle_variables: Vec::new(),
+        cycles: Vec::new(),
         resolved_sccs: Vec::new(),
     };
 
@@ -2173,7 +2248,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
     // The fallback must surface the loud `CircularDependency` diagnostic
     // (the model is rejected, not silently miscompiled).
     assert!(
-        !dep_graph.cycle_variables.is_empty(),
+        !dep_graph.cycles.is_empty(),
         "the loud-safe fallback must record a CircularDependency \
          (model rejected, not silently miscompiled)"
     );

@@ -130,8 +130,8 @@ pub(crate) use assemble::{
 pub(crate) use assemble::combine_scc_fragment;
 
 pub use dep_graph::{
-    ModelDepGraphResult, ResolvedScc, RunlistMembership, SccPhase, model_dependency_graph,
-    var_runlist_membership,
+    DependencyCycle, ModelDepGraphResult, ResolvedScc, RunlistMembership, SccPhase,
+    model_dependency_graph, var_runlist_membership,
 };
 
 mod ltm;

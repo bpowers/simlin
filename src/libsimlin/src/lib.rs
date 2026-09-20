@@ -237,6 +237,66 @@ impl TryFrom<u32> for SimlinErrorCode {
     }
 }
 
+impl From<SimlinErrorCode> for engine::ErrorCode {
+    /// The engine code a wire code stands for: the one of the same name. A
+    /// wire code the engine's tail collapses into (`Generic`,
+    /// `DuplicateVariable`) maps to that code itself.
+    fn from(code: SimlinErrorCode) -> Self {
+        match code {
+            SimlinErrorCode::NoError => engine::ErrorCode::NoError,
+            SimlinErrorCode::DoesNotExist => engine::ErrorCode::DoesNotExist,
+            SimlinErrorCode::XmlDeserialization => engine::ErrorCode::XmlDeserialization,
+            SimlinErrorCode::VensimConversion => engine::ErrorCode::VensimConversion,
+            SimlinErrorCode::ProtobufDecode => engine::ErrorCode::ProtobufDecode,
+            SimlinErrorCode::InvalidToken => engine::ErrorCode::InvalidToken,
+            SimlinErrorCode::UnrecognizedEof => engine::ErrorCode::UnrecognizedEof,
+            SimlinErrorCode::UnrecognizedToken => engine::ErrorCode::UnrecognizedToken,
+            SimlinErrorCode::ExtraToken => engine::ErrorCode::ExtraToken,
+            SimlinErrorCode::UnclosedComment => engine::ErrorCode::UnclosedComment,
+            SimlinErrorCode::UnclosedQuotedIdent => engine::ErrorCode::UnclosedQuotedIdent,
+            SimlinErrorCode::ExpectedNumber => engine::ErrorCode::ExpectedNumber,
+            SimlinErrorCode::UnknownBuiltin => engine::ErrorCode::UnknownBuiltin,
+            SimlinErrorCode::BadBuiltinArgs => engine::ErrorCode::BadBuiltinArgs,
+            SimlinErrorCode::EmptyEquation => engine::ErrorCode::EmptyEquation,
+            SimlinErrorCode::BadModuleInputDst => engine::ErrorCode::BadModuleInputDst,
+            SimlinErrorCode::BadModuleInputSrc => engine::ErrorCode::BadModuleInputSrc,
+            SimlinErrorCode::NotSimulatable => engine::ErrorCode::NotSimulatable,
+            SimlinErrorCode::BadTable => engine::ErrorCode::BadTable,
+            SimlinErrorCode::BadSimSpecs => engine::ErrorCode::BadSimSpecs,
+            SimlinErrorCode::NoAbsoluteReferences => engine::ErrorCode::NoAbsoluteReferences,
+            SimlinErrorCode::CircularDependency => engine::ErrorCode::CircularDependency,
+            SimlinErrorCode::ArraysNotImplemented => engine::ErrorCode::ArraysNotImplemented,
+            SimlinErrorCode::MultiDimensionalArraysNotImplemented => {
+                engine::ErrorCode::MultiDimensionalArraysNotImplemented
+            }
+            SimlinErrorCode::BadDimensionName => engine::ErrorCode::BadDimensionName,
+            SimlinErrorCode::BadModelName => engine::ErrorCode::BadModelName,
+            SimlinErrorCode::MismatchedDimensions => engine::ErrorCode::MismatchedDimensions,
+            SimlinErrorCode::ArrayReferenceNeedsExplicitSubscripts => {
+                engine::ErrorCode::ArrayReferenceNeedsExplicitSubscripts
+            }
+            SimlinErrorCode::DuplicateVariable => engine::ErrorCode::DuplicateVariable,
+            SimlinErrorCode::UnknownDependency => engine::ErrorCode::UnknownDependency,
+            SimlinErrorCode::VariablesHaveErrors => engine::ErrorCode::VariablesHaveErrors,
+            SimlinErrorCode::UnitDefinitionErrors => engine::ErrorCode::UnitDefinitionErrors,
+            SimlinErrorCode::Generic => engine::ErrorCode::Generic,
+            SimlinErrorCode::UnitMismatch => engine::ErrorCode::UnitMismatch,
+            SimlinErrorCode::BadOverride => engine::ErrorCode::BadOverride,
+            SimlinErrorCode::NoAppInUnits => engine::ErrorCode::NoAppInUnits,
+            SimlinErrorCode::NoSubscriptInUnits => engine::ErrorCode::NoSubscriptInUnits,
+            SimlinErrorCode::NoIfInUnits => engine::ErrorCode::NoIfInUnits,
+            SimlinErrorCode::NoUnaryOpInUnits => engine::ErrorCode::NoUnaryOpInUnits,
+            SimlinErrorCode::BadBinaryOpInUnits => engine::ErrorCode::BadBinaryOpInUnits,
+            SimlinErrorCode::NoConstInUnits => engine::ErrorCode::NoConstInUnits,
+            SimlinErrorCode::ExpectedInteger => engine::ErrorCode::ExpectedInteger,
+            SimlinErrorCode::ExpectedIntegerOne => engine::ErrorCode::ExpectedIntegerOne,
+            SimlinErrorCode::DuplicateUnit => engine::ErrorCode::DuplicateUnit,
+            SimlinErrorCode::ExpectedModule => engine::ErrorCode::ExpectedModule,
+            SimlinErrorCode::ExpectedIdent => engine::ErrorCode::ExpectedIdent,
+        }
+    }
+}
+
 impl From<engine::ErrorCode> for SimlinErrorCode {
     fn from(code: engine::ErrorCode) -> Self {
         match code {
@@ -420,9 +480,11 @@ pub struct SimlinErrorDetail {
     /// The bare human-readable reason without the source snippet or the
     /// model/variable summary line that `message` carries (e.g. "the equation
     /// computes to units 'people', but the variable's specified units are
-    /// 'person'"). NULL when the error has
-    /// no separate reason string. Appended additively: existing field offsets
-    /// are unchanged.
+    /// 'person'"), and without the code's name. Never NULL on a detail
+    /// libsimlin reports: when the raising site wrote no reason of its own (a
+    /// parse error, whose reason `message` shows as a snippet), it says what
+    /// the code means. Appended additively: existing field offsets are
+    /// unchanged.
     pub details: *const c_char,
 }
 
@@ -828,11 +890,13 @@ pub(crate) fn build_simlin_error(
 ) -> SimlinError {
     let mut error = SimlinError::new(code);
 
-    // Set top-level message from first detail's message, or construct from code
+    // The top-level message is the first detail's message; with none, the
+    // first detail's reason, then what the code means.
     let message = details
         .iter()
         .find_map(|d| d.message.clone())
-        .unwrap_or_else(|| format!("{:?}", code));
+        .or_else(|| details.iter().find_map(|d| d.details.clone()))
+        .unwrap_or_else(|| engine::ErrorCode::from(code).description().to_owned());
     error.set_message(Some(message));
 
     error.extend_details(details.iter().cloned());

@@ -65,7 +65,8 @@ fn dump_graph(
 ) {
     let g = model_dependency_graph(db, model, project, module_inputs);
     writeln!(out, "== {header}{wiring}").unwrap();
-    writeln!(out, "cycle: {:?}", g.cycle_variables).unwrap();
+    let cycle_variables: Vec<&String> = g.cycles.iter().map(|c| &c.variable).collect();
+    writeln!(out, "cycle: {cycle_variables:?}").unwrap();
     writeln!(out, "initials: {:?}", g.runlist_initials).unwrap();
     writeln!(out, "flows: {:?}", g.runlist_flows).unwrap();
     writeln!(out, "stocks: {:?}", g.runlist_stocks).unwrap();

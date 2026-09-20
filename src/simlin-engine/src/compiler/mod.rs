@@ -602,7 +602,10 @@ impl Var {
                     VarKind::Stock { init_ast: ast, .. } => {
                         let base = ctx.get_base_ref(&Ident::new(var.ident()))?;
                         let Some(ast) = ast.as_ref() else {
-                            return sim_err!(EmptyEquation, var.ident().to_string());
+                            return sim_err!(
+                                EmptyEquation,
+                                format!("'{}' has no equation", var.ident())
+                            );
                         };
                         if ctx.is_initial {
                             match ast {
@@ -697,7 +700,10 @@ impl Var {
                             var.ast()
                         };
                         let Some(ast) = ast.as_ref() else {
-                            return sim_err!(EmptyEquation, var.ident().to_string());
+                            return sim_err!(
+                                EmptyEquation,
+                                format!("'{}' has no equation", var.ident())
+                            );
                         };
                         let (exprs, target) = match ast {
                             // A per-element helper's scalar body is one

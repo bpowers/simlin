@@ -729,7 +729,7 @@ fn test_ac2_7_assembly_errors_accumulated() {
     // the circular dependency detected by `model_dependency_graph`, so that is
     // what `collect_all_diagnostics` returns here.
     let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
-    let has_circular = diags.iter().any(|d| {
+    let circular = diags.iter().find(|d| {
         matches!(
             &d.error,
             DiagnosticError::Model(crate::common::Error {
@@ -738,10 +738,17 @@ fn test_ac2_7_assembly_errors_accumulated() {
             })
         )
     });
-    assert!(
-        has_circular,
-        "accumulator should contain CircularDependency diagnostic; got: {diags:?}"
-    );
+    let Some(circular) = circular else {
+        panic!("accumulator should contain CircularDependency diagnostic; got: {diags:?}");
+    };
+    // The reason names the loop, starting from the variable it is filed
+    // under, so the modeller knows which equations form it.
+    let reason = match circular.variable.as_deref() {
+        Some("a") => "'a' depends on itself: a → b → a",
+        Some("b") => "'b' depends on itself: b → a → b",
+        other => panic!("filed under a variable of the loop, not {other:?}"),
+    };
+    assert_eq!(circular.reason(), Some(reason));
 }
 
 // ---- compile_var_fragment per-site diagnostic behavior pins ----

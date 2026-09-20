@@ -63,10 +63,12 @@ pub struct FormattedError {
     /// 'person'"). `message` is formatted for terminal output; GUI consumers
     /// that already show the variable in context render this instead.
     ///
-    /// Populated whenever the diagnostic carries one (`Diagnostic::reason`;
-    /// an inference error's is rewritten by `unit_inference_reason`). `None`
-    /// when the raising site had nothing to add beyond the code and the span
-    /// -- a parse error, whose reason IS the snippet.
+    /// Always `Some` on what this module formats: the reason the raising site
+    /// wrote (`Diagnostic::reason`; an inference error's is rewritten by
+    /// `unit_inference_reason`), else the code's
+    /// [`ErrorCode::description`] -- a parse error's, whose own reason is the
+    /// snippet. It never repeats the code's name, which `message` carries for
+    /// terminals and language-model clients.
     pub details: Option<String>,
 }
 
@@ -108,7 +110,10 @@ impl FormattedErrors {
 /// A failure to build the VM is always fatal, so this is unconditionally
 /// `Error`-severity (there is no `Diagnostic` to read a severity from).
 pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedError {
-    let message = format!("error compiling model '{model_name}': {error}");
+    let message = format!(
+        "error compiling model '{model_name}': {}",
+        code_and_reason(error.code, error.details.as_deref())
+    );
     FormattedError {
         code: error.code,
         message: Some(message),
@@ -119,7 +124,7 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
         kind: FormattedErrorKind::Simulation,
         severity: DiagnosticSeverity::Error,
         category: None,
-        details: None,
+        details: Some(error.reason().to_owned()),
     }
 }
 
@@ -267,12 +272,13 @@ fn format_diagnostic_inner(diag: &db::Diagnostic, var: Option<&Variable>) -> For
         DiagnosticCategory::Assembly => (FormattedErrorKind::Simulation, "assembly ", None),
     };
     let summary = match &diag.error {
-        // A model-level error renders whole (`ModelError{code: reason}`), and
-        // an assembly refusal's message is its whole payload, so neither
-        // carries a separate reason.
-        DiagnosticError::Model(err) => format!("{word} in model '{model}': {err}"),
+        // A model-level error's summary names no variable, and an assembly
+        // refusal's message is its whole payload, which is also its reason.
+        DiagnosticError::Model(_) => format!(
+            "{word} in model '{model}': {}",
+            code_and_reason(code, diag.reason())
+        ),
         DiagnosticError::Assembly(message) => {
-            details = None;
             format!("{noun}{word} in model '{model}': {message}")
         }
         DiagnosticError::Unit(UnitError::InferenceError {
@@ -318,7 +324,7 @@ fn format_diagnostic_inner(diag: &db::Diagnostic, var: Option<&Variable>) -> For
         kind,
         severity: diag.severity,
         category: Some(diag.category()),
-        details,
+        details: Some(details.unwrap_or_else(|| code.description().to_owned())),
     }
 }
 
@@ -1036,6 +1042,125 @@ mod tests {
                 "{label}: model_name"
             );
             assert_eq!(fe.variable_name.as_deref(), Some("v"), "{label}: variable");
+        }
+    }
+
+    /// `details` is the bare reason on every arm, and never the code's name:
+    /// the raising site's reason where it wrote one, the code's description
+    /// where it did not (a parse error, whose reason is otherwise only the
+    /// snippet). The code's name stays in `message`'s summary, joined to the
+    /// raising site's reason, for terminals and language-model clients.
+    #[test]
+    fn details_is_always_the_bare_reason() {
+        use crate::common::{Error as CommonError, ErrorKind, UnitError};
+
+        let model_error = |code, details: Option<&str>| {
+            DiagnosticError::Model(CommonError {
+                kind: ErrorKind::Model,
+                code,
+                details: details.map(str::to_owned),
+            })
+        };
+        // (label, error, expected details, expected summary tail)
+        let rows: Vec<(&str, DiagnosticError, String, String)> = vec![
+            (
+                "a parse error",
+                DiagnosticError::Equation(EquationError::new(ErrorCode::UnrecognizedEof, 3, 3)),
+                ErrorCode::UnrecognizedEof.description().to_string(),
+                "unrecognized_eof".to_string(),
+            ),
+            (
+                "an equation error with a reason",
+                DiagnosticError::Equation(EquationError::detailed(
+                    ErrorCode::UnknownDependency,
+                    0,
+                    1,
+                    "'x' is not a variable of model 'main'",
+                )),
+                "'x' is not a variable of model 'main'".to_string(),
+                "unknown_dependency -- 'x' is not a variable of model 'main'".to_string(),
+            ),
+            (
+                "a model error without a reason",
+                model_error(ErrorCode::CircularDependency, None),
+                ErrorCode::CircularDependency.description().to_string(),
+                "circular_dependency".to_string(),
+            ),
+            (
+                "a model error with a reason",
+                model_error(
+                    ErrorCode::CircularDependency,
+                    Some("'v' depends on itself: v → v"),
+                ),
+                "'v' depends on itself: v → v".to_string(),
+                "circular_dependency -- 'v' depends on itself: v → v".to_string(),
+            ),
+            (
+                "a unit mismatch without a reason",
+                DiagnosticError::Unit(UnitError::ConsistencyError(
+                    ErrorCode::UnitMismatch,
+                    Loc::new(0, 1),
+                    None,
+                )),
+                ErrorCode::UnitMismatch.description().to_string(),
+                "unit_mismatch".to_string(),
+            ),
+            (
+                "an assembly refusal",
+                DiagnosticError::Assembly("variable 'v' failed to compile: no".to_string()),
+                "variable 'v' failed to compile: no".to_string(),
+                "variable 'v' failed to compile: no".to_string(),
+            ),
+        ];
+        for (label, error, details, tail) in rows {
+            let code = error.code();
+            let fe = format_diagnostic(&Diagnostic {
+                model: "main".to_string(),
+                variable: Some("v".to_string()),
+                owner: None,
+                severity: DiagnosticSeverity::Error,
+                error,
+            });
+            assert_eq!(
+                fe.details.as_deref(),
+                Some(details.as_str()),
+                "{label}: details"
+            );
+            let message = fe.message.expect("message");
+            assert!(message.ends_with(&tail), "{label}: summary {message:?}");
+            if !matches!(code, ErrorCode::NotSimulatable) {
+                assert!(
+                    !details.contains(&code.to_string()),
+                    "{label}: details names the code"
+                );
+            }
+        }
+
+        for (details, reason, tail) in [
+            (
+                None,
+                ErrorCode::BadSimSpecs.description(),
+                "bad_sim_specs".to_string(),
+            ),
+            (
+                Some("dt must be greater than 0"),
+                "dt must be greater than 0",
+                "bad_sim_specs -- dt must be greater than 0".to_string(),
+            ),
+        ] {
+            let fe = format_simulation_error(
+                "main",
+                &CommonError::new(
+                    ErrorKind::Simulation,
+                    ErrorCode::BadSimSpecs,
+                    details.map(str::to_owned),
+                ),
+            );
+            assert_eq!(fe.details.as_deref(), Some(reason));
+            assert_eq!(
+                fe.message.as_deref(),
+                Some(format!("error compiling model 'main': {tail}").as_str())
+            );
         }
     }
 

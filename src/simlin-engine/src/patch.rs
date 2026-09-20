@@ -377,6 +377,16 @@ fn upsert_variable(model: &mut datamodel::Model, mut variable: Variable) {
     }
 }
 
+/// The `DoesNotExist` an operation on a variable the model does not hold
+/// fails with, naming the variable as the operation spelled it.
+fn no_such_variable(ident: &str) -> Error {
+    Error::new(
+        ErrorKind::Model,
+        ErrorCode::DoesNotExist,
+        Some(format!("there is no variable named '{ident}'")),
+    )
+}
+
 fn get_model_mut<'a>(
     project: &'a mut datamodel::Project,
     model_name: &str,
@@ -385,7 +395,7 @@ fn get_model_mut<'a>(
         Error::new(
             ErrorKind::Model,
             ErrorCode::BadModelName,
-            Some(model_name.to_string()),
+            Some(format!("there is no model named '{model_name}'")),
         )
     })
 }
@@ -528,7 +538,7 @@ fn apply_delete_variable(model: &mut datamodel::Model, ident_str: &str) -> Resul
         .iter()
         .position(|var| canonicalize(var.get_ident()) == ident)
     else {
-        return Err(Error::new(ErrorKind::Model, ErrorCode::DoesNotExist, None));
+        return Err(no_such_variable(ident_str));
     };
 
     let removed = model.variables.remove(pos);
@@ -613,7 +623,7 @@ fn apply_rename_variable(
         let model = get_model_mut(project, model_name)?;
         let var = model
             .get_variable_mut(from)
-            .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::DoesNotExist, None))?;
+            .ok_or_else(|| no_such_variable(from))?;
         if var.get_ident() != to {
             var.set_ident(to.to_string());
         }
@@ -626,7 +636,9 @@ fn apply_rename_variable(
         return Err(Error::new(
             ErrorKind::Model,
             ErrorCode::DuplicateVariable,
-            None,
+            Some(format!(
+                "cannot rename '{from}' to '{to}': a variable named '{to}' already exists"
+            )),
         ));
     }
 
@@ -641,7 +653,7 @@ fn apply_rename_variable(
                 None
             }
         })
-        .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::DoesNotExist, None))?;
+        .ok_or_else(|| no_such_variable(from))?;
 
     rename_model_equations(model, &old_ident, &new_ident);
 

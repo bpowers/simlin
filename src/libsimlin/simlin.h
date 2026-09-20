@@ -512,9 +512,11 @@ typedef struct {
   // The bare human-readable reason without the source snippet or the
   // model/variable summary line that `message` carries (e.g. "the equation
   // computes to units 'people', but the variable's specified units are
-  // 'person'"). NULL when the error has
-  // no separate reason string. Appended additively: existing field offsets
-  // are unchanged.
+  // 'person'"), and without the code's name. Never NULL on a detail
+  // libsimlin reports: when the raising site wrote no reason of its own (a
+  // parse error, whose reason `message` shows as a snippet), it says what
+  // the code means. Appended additively: existing field offsets are
+  // unchanged.
   const char *details;
 } SimlinErrorDetail;
 

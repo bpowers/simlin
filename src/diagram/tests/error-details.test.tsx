@@ -47,6 +47,15 @@ describe('ErrorDetails', () => {
   test('renders model error details when present', () => {
     render(<ErrorDetails {...noErrors} modelErrors={[{ code: ErrorCode.BadSimSpecs, details: 'dt is zero' }]} />);
     expect(screen.getByText(/dt is zero/)).not.toBeNull();
+    // The reason replaces the code description rather than following it, so
+    // an engine reason that restates the code is not shown twice.
+    expect(screen.getByText(/^model error: dt is zero$/)).not.toBeNull();
+    expect(screen.queryByText(/simulation specs are not valid/i)).toBeNull();
+  });
+
+  test('falls back to the code description for model errors without details', () => {
+    render(<ErrorDetails {...noErrors} modelErrors={[{ code: ErrorCode.BadSimSpecs, details: undefined }]} />);
+    expect(screen.getByText(/model error: simulation specs are not valid/i)).not.toBeNull();
   });
 
   test('suppresses the VariablesHaveErrors umbrella when per-variable errors exist', () => {

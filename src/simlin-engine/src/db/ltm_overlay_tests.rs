@@ -680,7 +680,7 @@ fn a_recurrence_verdict_taken_plain_holds_under_the_overlay() {
         }],
         "the {{ce, ecc}} recurrence resolves to the chain's element order"
     );
-    assert!(!graph.has_cycle(), "{:?}", graph.cycle_variables);
+    assert!(!graph.has_cycle(), "{:?}", graph.cycles);
 
     let mut module_read_moved = false;
     for member in ["ce", "ecc"] {

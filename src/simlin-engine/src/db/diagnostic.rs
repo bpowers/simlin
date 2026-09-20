@@ -314,23 +314,37 @@ pub fn model_all_diagnostics(
 }
 
 /// The `CircularDependency` diagnostics the dependency graph recorded for
-/// `model` under the empty input set (`ModelDepGraphResult::cycle_variables`),
-/// accumulated on this child so they follow the variables' rows.
+/// `model` under the empty input set (`ModelDepGraphResult::cycles`),
+/// accumulated on this child so they follow the variables' rows. Each names
+/// the cycle it found, so the modeller sees which equations to break it in.
 #[salsa::tracked]
 pub(crate) fn model_cycle_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
     use crate::common::{ErrorCode, ErrorKind};
 
     let dep_graph = model_dependency_graph(db, model, project, ModuleInputSet::empty(db));
-    for var_name in &dep_graph.cycle_variables {
+    for cycle in &dep_graph.cycles {
+        // A loop no stock breaks closes in both phases' walks, found at the
+        // same variable; the time step's report covers it.
+        let reported = |c: &crate::db::DependencyCycle| !c.initial && c.variable == cycle.variable;
+        if cycle.initial && dep_graph.cycles.iter().any(reported) {
+            continue;
+        }
+        let var = &cycle.variable;
+        let path = cycle.path.join(" → ");
+        let reason = if cycle.initial {
+            format!("the initial value of '{var}' depends on itself: {path}")
+        } else {
+            format!("'{var}' depends on itself: {path}")
+        };
         Diagnostic {
             model: model.name(db).clone(),
-            variable: Some(var_name.clone()),
+            variable: Some(var.clone()),
             owner: None,
             severity: DiagnosticSeverity::Error,
             error: DiagnosticError::Model(Error::new(
                 ErrorKind::Model,
                 ErrorCode::CircularDependency,
-                None,
+                Some(reason),
             )),
         }
         .accumulate(db);

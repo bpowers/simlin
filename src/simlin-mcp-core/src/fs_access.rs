@@ -145,7 +145,10 @@ fn serialize_project(
     match format {
         SourceFormat::Xmile => {
             let xml = simlin_engine::to_xmile(project).map_err(|e| {
-                AccessError::ParseError(anyhow::anyhow!("failed to serialize XMILE: {e:?}"))
+                AccessError::ParseError(anyhow::anyhow!(
+                    "failed to serialize XMILE: {}",
+                    crate::errors::engine_error_text(&e)
+                ))
             })?;
             Ok((xml.into_bytes(), Vec::new()))
         }

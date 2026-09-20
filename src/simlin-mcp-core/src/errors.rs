@@ -19,6 +19,13 @@ use std::path::PathBuf;
 
 use crate::types::ErrorOutput;
 
+/// An engine error as the MCP layer words it for a client: the code's name,
+/// which a language model can match on, then the reason, the same
+/// `code -- reason` the engine's diagnostic summaries use.
+pub(crate) fn engine_error_text(err: &simlin_engine::Error) -> String {
+    format!("{} -- {}", err.code, err.reason())
+}
+
 /// Failure modes for [`crate::access::ProjectAccess`].
 #[derive(Debug)]
 pub enum AccessError {

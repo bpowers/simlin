@@ -137,13 +137,19 @@ pub fn open_project(
         Some(SourceFormat::Xmile) => {
             let mut reader = BufReader::new(contents.as_bytes());
             let project = simlin_engine::open_xmile(&mut reader).map_err(|e| {
-                AccessError::ParseError(anyhow::anyhow!("failed to parse XMILE: {e:?}"))
+                AccessError::ParseError(anyhow::anyhow!(
+                    "failed to parse XMILE: {}",
+                    crate::errors::engine_error_text(&e)
+                ))
             })?;
             (project, SourceFormat::Xmile)
         }
         Some(SourceFormat::Mdl) => {
             let project = simlin_engine::open_vensim(contents).map_err(|e| {
-                AccessError::ParseError(anyhow::anyhow!("failed to parse Vensim: {e:?}"))
+                AccessError::ParseError(anyhow::anyhow!(
+                    "failed to parse Vensim: {}",
+                    crate::errors::engine_error_text(&e)
+                ))
             })?;
             (project, SourceFormat::Mdl)
         }

@@ -108,7 +108,14 @@ pub struct Table {
 impl Table {
     pub(crate) fn new(ident: &str, t: &crate::variable::Table) -> Result<Self> {
         if t.x.len() != t.y.len() {
-            return sim_err!(BadTable, ident.to_string());
+            return sim_err!(
+                BadTable,
+                format!(
+                    "the graphical function for '{ident}' has {} x values but {} y values",
+                    t.x.len(),
+                    t.y.len()
+                )
+            );
         }
 
         let data: Vec<(f64, f64)> = t.x.iter().copied().zip(t.y.iter().copied()).collect();

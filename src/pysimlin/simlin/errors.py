@@ -101,8 +101,9 @@ class ErrorDetail:
     severity: ErrorSeverity = ErrorSeverity.ERROR
     # The bare human-readable reason without the source snippet or summary
     # line that `message` carries (e.g. "the equation computes to units
-    # 'people', but the variable's specified units are 'person'"). None when
-    # the error has no separate reason string.
+    # 'people', but the variable's specified units are 'person'"). The engine
+    # sets it on every diagnostic, saying what the code means when the raising
+    # site wrote no reason of its own; None only on a detail built without one.
     details: str | None = None
 
     def __str__(self) -> str:

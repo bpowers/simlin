@@ -166,7 +166,7 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
     let artifact = match build
         .map_err(|e| {
             engine::wasmgen::WasmGenError::Unsupported(format!(
-                "wasmgen: incremental compile failed: {e:?}"
+                "wasmgen: incremental compile failed: {e}"
             ))
         })
         .and_then(|build| {
