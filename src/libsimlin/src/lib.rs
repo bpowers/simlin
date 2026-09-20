@@ -237,66 +237,6 @@ impl TryFrom<u32> for SimlinErrorCode {
     }
 }
 
-impl From<SimlinErrorCode> for engine::ErrorCode {
-    /// The engine code a wire code stands for: the one of the same name. A
-    /// wire code the engine's tail collapses into (`Generic`,
-    /// `DuplicateVariable`) maps to that code itself.
-    fn from(code: SimlinErrorCode) -> Self {
-        match code {
-            SimlinErrorCode::NoError => engine::ErrorCode::NoError,
-            SimlinErrorCode::DoesNotExist => engine::ErrorCode::DoesNotExist,
-            SimlinErrorCode::XmlDeserialization => engine::ErrorCode::XmlDeserialization,
-            SimlinErrorCode::VensimConversion => engine::ErrorCode::VensimConversion,
-            SimlinErrorCode::ProtobufDecode => engine::ErrorCode::ProtobufDecode,
-            SimlinErrorCode::InvalidToken => engine::ErrorCode::InvalidToken,
-            SimlinErrorCode::UnrecognizedEof => engine::ErrorCode::UnrecognizedEof,
-            SimlinErrorCode::UnrecognizedToken => engine::ErrorCode::UnrecognizedToken,
-            SimlinErrorCode::ExtraToken => engine::ErrorCode::ExtraToken,
-            SimlinErrorCode::UnclosedComment => engine::ErrorCode::UnclosedComment,
-            SimlinErrorCode::UnclosedQuotedIdent => engine::ErrorCode::UnclosedQuotedIdent,
-            SimlinErrorCode::ExpectedNumber => engine::ErrorCode::ExpectedNumber,
-            SimlinErrorCode::UnknownBuiltin => engine::ErrorCode::UnknownBuiltin,
-            SimlinErrorCode::BadBuiltinArgs => engine::ErrorCode::BadBuiltinArgs,
-            SimlinErrorCode::EmptyEquation => engine::ErrorCode::EmptyEquation,
-            SimlinErrorCode::BadModuleInputDst => engine::ErrorCode::BadModuleInputDst,
-            SimlinErrorCode::BadModuleInputSrc => engine::ErrorCode::BadModuleInputSrc,
-            SimlinErrorCode::NotSimulatable => engine::ErrorCode::NotSimulatable,
-            SimlinErrorCode::BadTable => engine::ErrorCode::BadTable,
-            SimlinErrorCode::BadSimSpecs => engine::ErrorCode::BadSimSpecs,
-            SimlinErrorCode::NoAbsoluteReferences => engine::ErrorCode::NoAbsoluteReferences,
-            SimlinErrorCode::CircularDependency => engine::ErrorCode::CircularDependency,
-            SimlinErrorCode::ArraysNotImplemented => engine::ErrorCode::ArraysNotImplemented,
-            SimlinErrorCode::MultiDimensionalArraysNotImplemented => {
-                engine::ErrorCode::MultiDimensionalArraysNotImplemented
-            }
-            SimlinErrorCode::BadDimensionName => engine::ErrorCode::BadDimensionName,
-            SimlinErrorCode::BadModelName => engine::ErrorCode::BadModelName,
-            SimlinErrorCode::MismatchedDimensions => engine::ErrorCode::MismatchedDimensions,
-            SimlinErrorCode::ArrayReferenceNeedsExplicitSubscripts => {
-                engine::ErrorCode::ArrayReferenceNeedsExplicitSubscripts
-            }
-            SimlinErrorCode::DuplicateVariable => engine::ErrorCode::DuplicateVariable,
-            SimlinErrorCode::UnknownDependency => engine::ErrorCode::UnknownDependency,
-            SimlinErrorCode::VariablesHaveErrors => engine::ErrorCode::VariablesHaveErrors,
-            SimlinErrorCode::UnitDefinitionErrors => engine::ErrorCode::UnitDefinitionErrors,
-            SimlinErrorCode::Generic => engine::ErrorCode::Generic,
-            SimlinErrorCode::UnitMismatch => engine::ErrorCode::UnitMismatch,
-            SimlinErrorCode::BadOverride => engine::ErrorCode::BadOverride,
-            SimlinErrorCode::NoAppInUnits => engine::ErrorCode::NoAppInUnits,
-            SimlinErrorCode::NoSubscriptInUnits => engine::ErrorCode::NoSubscriptInUnits,
-            SimlinErrorCode::NoIfInUnits => engine::ErrorCode::NoIfInUnits,
-            SimlinErrorCode::NoUnaryOpInUnits => engine::ErrorCode::NoUnaryOpInUnits,
-            SimlinErrorCode::BadBinaryOpInUnits => engine::ErrorCode::BadBinaryOpInUnits,
-            SimlinErrorCode::NoConstInUnits => engine::ErrorCode::NoConstInUnits,
-            SimlinErrorCode::ExpectedInteger => engine::ErrorCode::ExpectedInteger,
-            SimlinErrorCode::ExpectedIntegerOne => engine::ErrorCode::ExpectedIntegerOne,
-            SimlinErrorCode::DuplicateUnit => engine::ErrorCode::DuplicateUnit,
-            SimlinErrorCode::ExpectedModule => engine::ErrorCode::ExpectedModule,
-            SimlinErrorCode::ExpectedIdent => engine::ErrorCode::ExpectedIdent,
-        }
-    }
-}
-
 impl From<engine::ErrorCode> for SimlinErrorCode {
     fn from(code: engine::ErrorCode) -> Self {
         match code {
@@ -891,12 +831,18 @@ pub(crate) fn build_simlin_error(
     let mut error = SimlinError::new(code);
 
     // The top-level message is the first detail's message; with none, the
-    // first detail's reason, then what the code means.
+    // first detail's reason, then the code's wire name (`simlin_error_str`).
     let message = details
         .iter()
         .find_map(|d| d.message.clone())
         .or_else(|| details.iter().find_map(|d| d.details.clone()))
-        .unwrap_or_else(|| engine::ErrorCode::from(code).description().to_owned());
+        .unwrap_or_else(|| {
+            // SAFETY: `simlin_error_str` returns a pointer to a static,
+            // NUL-terminated string.
+            unsafe { std::ffi::CStr::from_ptr(error_api::simlin_error_str(code as u32)) }
+                .to_string_lossy()
+                .into_owned()
+        });
     error.set_message(Some(message));
 
     error.extend_details(details.iter().cloned());
@@ -1092,6 +1038,27 @@ mod tests {
             }
             proj
         }
+    }
+
+    /// An aggregate's message is its first detail's message, else its first
+    /// detail's reason, else the code's wire name.
+    #[test]
+    fn an_aggregate_message_falls_back_to_a_reason_then_the_wire_name() {
+        let message = |details: &[ErrorDetailData]| {
+            let error = build_simlin_error(SimlinErrorCode::DoesNotExist, details);
+            unsafe { CStr::from_ptr(error.message_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let reason_only = ErrorDetailData {
+            details: Some("there is no variable named 'x'".to_owned()),
+            ..ErrorDetailData::new(SimlinErrorCode::DoesNotExist)
+        };
+        assert_eq!(
+            message(std::slice::from_ref(&reason_only)),
+            "there is no variable named 'x'"
+        );
+        assert_eq!(message(&[]), "does_not_exist");
     }
 
     include!("tests_concurrency.rs");

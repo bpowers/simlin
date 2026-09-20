@@ -1377,18 +1377,3 @@ fn refused_edits_and_runs_say_why() {
         simlin_project_unref(proj);
     }
 }
-
-/// Every wire code stands for the engine code of its name, so a reason
-/// derived from a wire code says what that code means.
-#[test]
-fn every_wire_code_round_trips_through_its_engine_code() {
-    for raw in 0u32.. {
-        let Ok(code) = SimlinErrorCode::try_from(raw) else {
-            break;
-        };
-        let engine_code = engine::ErrorCode::from(code);
-        assert_eq!(SimlinErrorCode::from(engine_code), code, "{raw}");
-        let name = unsafe { CStr::from_ptr(simlin_error_str(raw)) }.to_string_lossy();
-        assert_eq!(engine_code.to_string(), name, "{raw}");
-    }
-}

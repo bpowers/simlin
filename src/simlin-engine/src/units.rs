@@ -982,6 +982,30 @@ fn test_pretty_print_unit() {
     }
 }
 
+#[test]
+fn a_unit_definition_error_says_what_is_wrong_and_in_which_units() {
+    let (ctx, _) = Context::new(&[], &Default::default());
+    let reasons = |units: &str| -> Vec<String> {
+        parse_units(&ctx, Some(units))
+            .expect_err("the units do not parse")
+            .into_iter()
+            .map(|err| match err {
+                UnitError::DefinitionError(err) => err.details.expect("every reason is written"),
+                other => panic!("expected a definition error, got {other:?}"),
+            })
+            .collect()
+    };
+    // A parse error has no reason of its own: its code's meaning leads.
+    assert_eq!(
+        reasons("kg/"),
+        ["the equation ends unexpectedly (in units 'kg/')"]
+    );
+    assert_eq!(
+        reasons("kg*-1"),
+        ["units cannot be negated; write 1/people rather than -people (in units 'kg*-1')"]
+    );
+}
+
 // we have 3 problems here: the first (and simpler) is evaluating unit equations and turning them in to UnitMaps (done)
 // the second is: given a context of unitmaps, can we _check_ the types of variables.  This won't work if there are builtins in use.
 // the third is: if we only have _some_ units filled in, can we _infer_ the rest? This will also enable units for builtins

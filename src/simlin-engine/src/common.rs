@@ -890,17 +890,20 @@ impl EquationError {
         }
     }
 
-    /// Add `context` to whatever reason this error already carries.
+    /// Add `context` to this error's reason: the one it carries, or, when it
+    /// carries none, what its code means, so the result is always a sentence
+    /// and never the bare context (`in units 'kg/'`).
     ///
     /// Composing rather than replacing is what lets an ANNOTATING layer -- the
     /// unit-string parse, which tags every error out of one `<units>` string
     /// with that string -- run over a producer that may or may not have written
     /// its own reason, without either one silently winning.
     pub fn in_context(mut self, context: impl fmt::Display) -> Self {
-        self.details = Some(match self.details {
-            Some(reason) => format!("{reason} ({context})"),
-            None => context.to_string(),
-        });
+        let reason = match self.details {
+            Some(reason) => reason,
+            None => self.code.description().to_owned(),
+        };
+        self.details = Some(format!("{reason} ({context})"));
         self
     }
 }
