@@ -509,6 +509,10 @@ impl From<Equation> for project_io::variable::Equation {
                     )
                 }
                 Equation::Arrayed(dimension_names, elements, default_eq, has_except_default) => {
+                    // Written true or false: the reader takes an absent flag
+                    // beside a default to mean the default applies, as the
+                    // protos that predate the flag meant, so a false left out
+                    // would read back as true.
                     project_io::variable::equation::Equation::Arrayed(
                         project_io::variable::ArrayedEquation {
                             dimension_names,
@@ -523,7 +527,7 @@ impl From<Equation> for project_io::variable::Equation {
                                     }
                                 })
                                 .collect(),
-                            has_except_default: if has_except_default { Some(true) } else { None },
+                            has_except_default: Some(has_except_default),
                             default_equation: default_eq,
                         },
                     )
@@ -632,6 +636,30 @@ fn test_equation_roundtrip() {
         let actual = Equation::from(project_io::variable::Equation::from(expected.clone()));
         assert_eq!(expected, actual);
     }
+}
+
+/// A default that applies only where an :EXCEPT: equation coexists with
+/// others (the MDL importer's rule) is stored with the flag false when an
+/// EXCEPT equation is the variable's only definition: `g[DimA] :EXCEPT: [A1] =
+/// 7` leaves g[A1] undefined. The flag must survive, or the reader's inference
+/// for protos that predate it makes the default fill g[A1].
+#[test]
+fn a_default_that_does_not_apply_still_does_not_after_a_round_trip() {
+    let eq = Equation::Arrayed(
+        vec!["dim_a".to_string()],
+        vec![
+            ("a2".to_string(), "7".to_string(), None, None),
+            ("a3".to_string(), "7".to_string(), None, None),
+        ],
+        Some("7".to_string()),
+        false,
+    );
+    let proto = project_io::variable::Equation::from(eq.clone());
+    let Some(project_io::variable::equation::Equation::Arrayed(arrayed)) = &proto.equation else {
+        panic!("expected Arrayed proto");
+    };
+    assert_eq!(arrayed.has_except_default, Some(false));
+    assert_eq!(Equation::from(proto), eq);
 }
 
 #[test]

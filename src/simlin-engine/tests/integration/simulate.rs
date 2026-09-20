@@ -2499,6 +2499,40 @@ fn simulates_except2() {
     simulate_mdl_path("../../test/sdeverywhere/models/except2/except2.mdl");
 }
 
+/// A model read back from its protobuf simulates as the model did, where a
+/// variable's only definition is an :EXCEPT: equation (`g[DimA] :EXCEPT: [A1]
+/// = 7`, which leaves g[A1] undefined) beside ones whose :EXCEPT: default
+/// fills what the other equations leave. The web editor stores projects, and
+/// its undo history, as protobuf, so a default that came back applying where
+/// it did not would change the model under a person's edits.
+#[test]
+fn except_defaults_survive_a_protobuf_round_trip() {
+    use simlin_engine::buffa::Message;
+
+    for path in [
+        "../../test/sdeverywhere/models/except/except.mdl",
+        "../../test/sdeverywhere/models/except2/except2.mdl",
+    ] {
+        let contents = std::fs::read_to_string(path).unwrap();
+        let project = open_vensim(&contents).unwrap();
+        let buf = serialize(&project).unwrap().encode_to_vec();
+        let decoded = deserialize(project_io::Project::decode_from_slice(&buf).unwrap());
+
+        let run = |project: &simlin_engine::datamodel::Project| {
+            let mut vm = Vm::new(compile_vm(project)).unwrap();
+            vm.run_to_end().unwrap();
+            vm.into_results()
+        };
+        let (before, after) = (run(&project), run(&decoded));
+        assert_eq!(before.offsets, after.offsets, "{path}");
+        let bits = |r: &Results| r.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert!(
+            bits(&before) == bits(&after),
+            "{path}: the round trip changed what it simulates"
+        );
+    }
+}
+
 /// End-to-end test for EXCEPT through the MDL->simulation pipeline.
 /// Uses a model without cross-dimension mappings so it doesn't hit the
 /// DimD->DimA mapping limitation that blocks the full except/except2 models.
