@@ -13,6 +13,8 @@
 pub mod ast;
 mod builtins;
 mod convert;
+#[cfg(test)]
+mod import_loss_tests;
 mod lexer;
 mod normalizer;
 mod parser;
@@ -29,8 +31,9 @@ pub use writer::ExportWarning;
 
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::{Project, Variable};
+use crate::import_losses::ImportWarning;
 
-use convert::convert_mdl_with_data;
+use convert::{convert_mdl_reporting, convert_mdl_with_data};
 use writer::MdlWriter;
 
 /// Sentinel equation `"0+0"` used by the MDL converter for a variable with an
@@ -174,6 +177,24 @@ pub(crate) const MAIN_MODEL_EXPECT: &str = "main_model: callers must run after t
 /// string and converts it to the internal datamodel representation.
 pub fn parse_mdl(source: &str) -> Result<Project> {
     parse_mdl_with_data(source, None)
+}
+
+/// Parse a Vensim MDL file into a Project, also returning what the file holds
+/// that the project does not keep, so a caller can say what an MDL save of the
+/// project would lose. From each sketch view: its comments, graphs, sliders
+/// and other input/output objects, its images, the drawings of variables the
+/// diagram does not place (Time, the control variables), the arrows drawn to
+/// any of those, and clouds no kept flow ends in. From the file: its custom
+/// graphs, custom tables and reports. The project is the one [`parse_mdl`]
+/// returns.
+pub fn parse_mdl_with_warnings(source: &str) -> Result<(Project, Vec<ImportWarning>)> {
+    convert_mdl_reporting(source, None).map_err(|e| {
+        Error::new(
+            ErrorKind::Import,
+            ErrorCode::Generic,
+            Some(format!("Failed to parse MDL: {}", e)),
+        )
+    })
 }
 
 /// Parse a Vensim MDL file into a Project with an optional DataProvider

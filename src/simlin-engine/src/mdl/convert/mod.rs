@@ -31,6 +31,7 @@ use crate::mdl::view::{self, VensimView};
 use std::collections::{HashMap, HashSet};
 
 use crate::datamodel::{Dimension, Project, SimMethod, Unit};
+use crate::import_losses::ImportWarning;
 
 use crate::mdl::ast::{Equation as MdlEquation, MdlItem, SubscriptElement};
 
@@ -102,6 +103,12 @@ pub struct ConversionContext<'input> {
     data_provider: Option<&'input dyn crate::data_provider::DataProvider>,
     /// File aliases from type 30 settings (e.g. "?data" -> "data.xlsx")
     file_aliases: HashMap<String, String>,
+    /// The source after the equations (the sketch and the settings), empty
+    /// for a macro body's sub-context
+    post_equations: &'input str,
+    /// Whether to find what the file holds that the project does not keep.
+    /// Only a caller that asks for the losses pays to find them.
+    report_losses: bool,
 }
 
 impl<'input> ConversionContext<'input> {
@@ -130,7 +137,7 @@ impl<'input> ConversionContext<'input> {
         let settings_parser = PostEquationParser::new(remaining);
         let settings = settings_parser.parse_settings();
 
-        Ok(Self::new_from_items(
+        let mut ctx = Self::new_from_items(
             items,
             Vec::new(),
             XmileFormatter::new(),
@@ -143,7 +150,9 @@ impl<'input> ConversionContext<'input> {
             settings.unit_equivs,
             views,
             settings.file_aliases,
-        ))
+        );
+        ctx.post_equations = remaining;
+        Ok(ctx)
     }
 
     /// Construct a `ConversionContext` over a caller-supplied item list.
@@ -192,6 +201,8 @@ impl<'input> ConversionContext<'input> {
             views,
             data_provider,
             file_aliases,
+            post_equations: "",
+            report_losses: false,
         }
     }
 
@@ -213,8 +224,10 @@ impl<'input> ConversionContext<'input> {
             .get_or_init(|| crate::dimensions::DimensionsContext::from(self.dimensions.as_slice()))
     }
 
-    /// Convert the MDL to a Project.
-    pub fn convert(mut self) -> Result<Project, ConvertError> {
+    /// Convert the MDL to a Project, also returning what the file holds that
+    /// the project does not keep ([`ImportWarning`]) when `report_losses`
+    /// is set, and nothing when it is not.
+    pub fn convert(mut self) -> Result<(Project, Vec<ImportWarning>), ConvertError> {
         // Pass 1: Collect symbols and build initial symbol table
         self.collect_symbols();
 
@@ -288,9 +301,9 @@ impl<'input> ConversionContext<'input> {
 
         // Pass 7: Build the final project (the "main" model) and attach the
         // macro-marked models alongside it.
-        let mut project = self.build_project(&materialization)?;
+        let (mut project, losses) = self.build_project(&materialization)?;
         project.models.extend(macro_models);
-        Ok(project)
+        Ok((project, losses))
     }
 
     /// Pass 1: Collect all symbols from the parsed items.
@@ -421,6 +434,17 @@ pub fn convert_mdl_with_data(
     data_provider: Option<&dyn crate::data_provider::DataProvider>,
 ) -> Result<Project, ConvertError> {
     let ctx = ConversionContext::new_with_data(source, data_provider)?;
+    ctx.convert().map(|(project, _)| project)
+}
+
+/// [`convert_mdl_with_data`], also returning what the file holds that the
+/// project does not keep.
+pub fn convert_mdl_reporting(
+    source: &str,
+    data_provider: Option<&dyn crate::data_provider::DataProvider>,
+) -> Result<(Project, Vec<ImportWarning>), ConvertError> {
+    let mut ctx = ConversionContext::new_with_data(source, data_provider)?;
+    ctx.report_losses = true;
     ctx.convert()
 }
 

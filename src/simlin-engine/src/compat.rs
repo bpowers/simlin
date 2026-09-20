@@ -70,6 +70,12 @@ pub fn open_vensim(contents: &str) -> Result<Project> {
     open_vensim_with_data(contents, None)
 }
 
+/// Parse a Vensim MDL file, also returning the [`crate::ImportWarning`]s for
+/// what the file holds that the project does not keep.
+pub fn open_vensim_with_warnings(contents: &str) -> Result<(Project, Vec<crate::ImportWarning>)> {
+    mdl::parse_mdl_with_warnings(contents)
+}
+
 /// Parse a Vensim MDL file with an optional DataProvider for resolving
 /// GET DIRECT external data references (CSV, Excel).
 pub fn open_vensim_with_data(
@@ -81,6 +87,14 @@ pub fn open_vensim_with_data(
 
 pub fn open_xmile(reader: &mut dyn BufRead) -> Result<Project> {
     xmile::project_from_reader(reader)
+}
+
+/// Read an XMILE project, also returning the [`crate::ImportWarning`]s for
+/// what the file holds that the project does not keep.
+pub fn open_xmile_with_warnings(
+    reader: &mut dyn BufRead,
+) -> Result<(Project, Vec<crate::ImportWarning>)> {
+    xmile::project_from_reader_with_warnings(reader)
 }
 
 /// Parse a systems format file and translate it to a Project.

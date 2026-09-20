@@ -143,7 +143,8 @@ impl<'input> ConversionContext<'input> {
         ctx.link_stocks_and_flows();
         // A macro body cannot contain a multi-output macro invocation, so the
         // scoped sub-context builds with an empty materialization.
-        let model = ctx.build_model(macro_name, &Default::default())?;
+        // A macro body has no sketch, so nothing of one can be lost.
+        let (model, _) = ctx.build_model(macro_name, &Default::default())?;
 
         Ok(model.variables)
     }

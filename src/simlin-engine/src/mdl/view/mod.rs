@@ -13,10 +13,10 @@ pub mod processing;
 mod routes;
 pub mod types;
 
-pub use convert::build_views;
+pub use convert::{build_views, build_views_reporting};
 pub use types::{
-    VensimComment, VensimConnector, VensimElement, VensimValve, VensimVariable, VensimView,
-    ViewError, ViewHeader, ViewVersion,
+    SkippedRecord, VensimComment, VensimConnector, VensimElement, VensimValve, VensimVariable,
+    VensimView, ViewError, ViewHeader, ViewVersion,
 };
 
 use elements::parse_element_line;
@@ -238,7 +238,13 @@ impl<'a> ViewSectionParser<'a> {
                     }
                 }
                 Ok(None) => {
-                    // Ignored element type (e.g., type 30)
+                    // A record the parser does not read: an image (type 30
+                    // or 31) or a type it does not know. Kept for the loss
+                    // report.
+                    let (kind, rest) = elements::parse_int_field(line);
+                    let (_uid, rest) = elements::parse_int_field(rest);
+                    let (name, _) = elements::parse_string_field(rest);
+                    view.skipped.push(SkippedRecord { kind, name });
                 }
                 Err(e) => return Err(e),
             }

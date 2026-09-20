@@ -9,6 +9,7 @@ use crate::common::{Result, canonicalize};
 use crate::datamodel;
 use crate::datamodel::Equation;
 use crate::xmile::dimensions::Gf;
+use crate::xmile::views::UnreadElement;
 use crate::xmile::{
     ToXml, VarDimension, VarDimensions, XmlWriter, write_tag, write_tag_empty_with_attrs,
     write_tag_end, write_tag_start, write_tag_start_with_attrs,
@@ -1016,16 +1017,50 @@ impl From<datamodel::Aux> for Aux {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Var {
     Stock(Stock),
     Flow(Flow),
     Aux(Aux),
     Module(Module),
-    // for things we don't care about like 'isee:dependencies'
-    #[serde(other)]
-    Unhandled,
+    /// Anything else the variables hold: a standalone graphical function,
+    /// a group's member list, a tool's `isee:dependencies`.
+    Unhandled(UnreadElement),
+}
+
+/// Read by tag, keeping an unread element's tag (see
+/// [`crate::xmile::views::ViewObject`]'s `Deserialize`).
+impl<'de> Deserialize<'de> for Var {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct VarVisitor;
+        impl<'de> serde::de::Visitor<'de> for VarVisitor {
+            type Value = Var;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a variable")
+            }
+
+            fn visit_enum<A: serde::de::EnumAccess<'de>>(
+                self,
+                data: A,
+            ) -> std::result::Result<Var, A::Error> {
+                use serde::de::VariantAccess;
+                let (tag, var): (String, A::Variant) = data.variant()?;
+                Ok(match tag.as_str() {
+                    "stock" => Var::Stock(var.newtype_variant()?),
+                    "flow" => Var::Flow(var.newtype_variant()?),
+                    "aux" => Var::Aux(var.newtype_variant()?),
+                    "module" => Var::Module(var.newtype_variant()?),
+                    _ => Var::Unhandled(UnreadElement::read(tag, var)?),
+                })
+            }
+        }
+        const VARS: &[&str] = &["stock", "flow", "aux", "module"];
+        deserializer.deserialize_enum("Var", VARS, VarVisitor)
+    }
 }
 
 impl Var {
@@ -1035,7 +1070,7 @@ impl Var {
             Var::Flow(flow) => flow.name.as_str(),
             Var::Aux(aux) => aux.name.as_str(),
             Var::Module(module) => module.name.as_str(),
-            Var::Unhandled => unreachable!(),
+            Var::Unhandled(_) => unreachable!(),
         }
     }
 }
@@ -1047,7 +1082,7 @@ impl ToXml<XmlWriter> for Var {
             Var::Flow(flow) => flow.write_xml(writer),
             Var::Aux(aux) => aux.write_xml(writer),
             Var::Module(module) => module.write_xml(writer),
-            Var::Unhandled => Ok(()),
+            Var::Unhandled(_) => Ok(()),
         }
     }
 }
@@ -1059,7 +1094,7 @@ impl From<Var> for datamodel::Variable {
             Var::Flow(flow) => datamodel::Variable::Flow(datamodel::Flow::from(flow)),
             Var::Aux(aux) => datamodel::Variable::Aux(datamodel::Aux::from(aux)),
             Var::Module(module) => datamodel::Variable::Module(datamodel::Module::from(module)),
-            Var::Unhandled => unreachable!(),
+            Var::Unhandled(_) => unreachable!(),
         }
     }
 }

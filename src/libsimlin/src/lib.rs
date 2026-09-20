@@ -849,6 +849,43 @@ pub(crate) fn build_simlin_error(
     error
 }
 
+/// Stores a call's warnings in `out_collected_errors`: an aggregate
+/// `SimlinError` with one `Warning`-severity detail per reason, or NULL when
+/// there are none. A NULL `out_collected_errors` discards them.
+///
+/// A warning (an `ExportWarning`, an `ImportWarning`) carries only a reason,
+/// and no engine `ErrorCode` names a loss, so each rides the wire `Generic`
+/// code with `Warning` severity -- the severity is what tells a caller the
+/// call succeeded. `message` is `"<source>: <reason>"` and `details` the bare
+/// reason.
+///
+/// # Safety
+/// - `out_collected_errors` must be NULL or valid for writing
+pub(crate) unsafe fn store_warnings(
+    out_collected_errors: *mut *mut SimlinError,
+    source: &str,
+    reasons: impl IntoIterator<Item = String>,
+) {
+    if out_collected_errors.is_null() {
+        return;
+    }
+    let details: Vec<ErrorDetailData> = reasons
+        .into_iter()
+        .map(|reason| ErrorDetailData {
+            message: Some(format!("{source}: {reason}")),
+            kind: SimlinErrorKind::Model,
+            severity: SimlinErrorSeverity::Warning,
+            details: Some(reason),
+            ..ErrorDetailData::new(SimlinErrorCode::Generic)
+        })
+        .collect();
+    *out_collected_errors = if details.is_empty() {
+        ptr::null_mut()
+    } else {
+        build_simlin_error(SimlinErrorCode::Generic, &details).into_raw()
+    };
+}
+
 /// Macro for unwrapping a `Result` inside an FFI function, storing the
 /// error into `out_error` and returning early on `Err`.
 #[macro_export]

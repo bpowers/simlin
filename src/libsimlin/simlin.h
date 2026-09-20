@@ -1563,6 +1563,38 @@ SimlinProject *simlin_project_open_xmile(const uint8_t *data,
                                          uintptr_t len,
                                          SimlinError **out_error);
 
+// Open a project from XMILE/STMX format data, also reporting what the file
+// holds that the project does not keep
+//
+// The same open as `simlin_project_open_xmile`. The XMILE reader does not
+// keep everything a file can hold: the objects on a view besides its
+// diagram (a graph, a text box), interface pages, story mode, a standalone
+// graphical function. So a save of the project, over the file or in any
+// other format, leaves those out, and a host that saves needs to say so
+// when the file opens.
+//
+// Each kind of loss, in each place it occurs, is one `Warning`-severity,
+// wire-`Generic`, kind-`Model` detail on the aggregate `SimlinError` stored
+// in `out_collected_errors` (NULL when the file loses nothing; pass NULL to
+// discard them). `message` is `"XMILE import: <reason>"` and `details` the
+// bare reason, such as `2 sliders on interface page 1 are not kept: 'Birth
+// Rate' and 'Population'`. The warnings describe the file as it was read,
+// and the project does not keep them, so a host that shows them holds them
+// itself.
+//
+// Returns NULL and populates `out_error` on failure, with
+// `out_collected_errors` NULL.
+//
+// # Safety
+// - `data` must be a valid pointer to at least `len` bytes
+// - `out_collected_errors` may be null
+// - `out_error` may be null
+// - The returned project must be freed with `simlin_project_unref`
+SimlinProject *simlin_project_open_xmile_with_warnings(const uint8_t *data,
+                                                       uintptr_t len,
+                                                       SimlinError **out_collected_errors,
+                                                       SimlinError **out_error);
+
 // Open a project from Vensim MDL format data
 //
 // Parses and imports a system dynamics model from Vensim's MDL format.
@@ -1575,6 +1607,39 @@ SimlinProject *simlin_project_open_xmile(const uint8_t *data,
 SimlinProject *simlin_project_open_vensim(const uint8_t *data,
                                           uintptr_t len,
                                           SimlinError **out_error);
+
+// Open a project from Vensim MDL format data, also reporting what the file
+// holds that the project does not keep
+//
+// The same open as `simlin_project_open_vensim`. The MDL reader does not
+// keep everything a file can hold: a sketch's comments, graphs, sliders and
+// images, and the custom graphs, tables and reports the file defines. So a
+// save of the project, over the file or in any other format, leaves those
+// out, and a host that saves needs to say so when the file opens.
+//
+// Each kind of loss is one `Warning`-severity, wire-`Generic`, kind-`Model`
+// detail on the aggregate `SimlinError` stored in `out_collected_errors`
+// (NULL when the file loses nothing; pass NULL to discard them): one per
+// kind and sketch view for what a modeler put on a view, and one per kind
+// over the whole sketch for what follows from what the diagram does not
+// draw (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is
+// `"MDL import: <reason>"` and `details` the bare reason, such as `29
+// comments on view 'View 1' are not kept, such as 'The World3 Model'`. The
+// warnings describe the file as it was read, and the project does not keep
+// them, so a host that shows them holds them itself.
+//
+// Returns NULL and populates `out_error` on failure, with
+// `out_collected_errors` NULL.
+//
+// # Safety
+// - `data` must be a valid pointer to at least `len` bytes
+// - `out_collected_errors` may be null
+// - `out_error` may be null
+// - The returned project must be freed with `simlin_project_unref`
+SimlinProject *simlin_project_open_vensim_with_warnings(const uint8_t *data,
+                                                        uintptr_t len,
+                                                        SimlinError **out_collected_errors,
+                                                        SimlinError **out_error);
 
 // Open a Vensim MDL model with external data file support.
 //

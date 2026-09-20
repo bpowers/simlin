@@ -1668,6 +1668,148 @@ fn test_stdlib_models_present_after_json_open() {
     }
 }
 
+// ── simlin_project_open_{vensim,xmile}_with_warnings ───────────────────
+
+/// The signature both reporting opens share.
+type ReportingOpen = unsafe extern "C" fn(
+    *const u8,
+    usize,
+    *mut *mut SimlinError,
+    *mut *mut SimlinError,
+) -> *mut SimlinProject;
+
+/// Open `data` through a reporting open, asserting it succeeds, and return
+/// the project with the (possibly NULL) warnings handle for the caller to
+/// inspect and free.
+unsafe fn open_reporting(
+    open: ReportingOpen,
+    data: &[u8],
+) -> (*mut SimlinProject, *mut SimlinError) {
+    let mut collected: *mut SimlinError = ptr::null_mut();
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let proj = open(data.as_ptr(), data.len(), &mut collected, &mut err);
+    expect_no_error(err, "reporting open");
+    assert!(!proj.is_null());
+    (proj, collected)
+}
+
+/// The bare reasons of a warnings handle, each checked to be a warning in
+/// the shape `serialize_mdl`'s are, with `message` the reason after
+/// `source`. Frees the handle.
+unsafe fn warning_reasons(collected: *mut SimlinError, source: &str) -> Vec<String> {
+    assert!(!collected.is_null(), "expected warnings");
+    let count = simlin_error_get_detail_count(collected);
+    let reasons = (0..count)
+        .map(|i| {
+            let detail = &*simlin_error_get_detail(collected, i);
+            assert_eq!(detail.severity, SimlinErrorSeverity::Warning);
+            assert_eq!(detail.kind, SimlinErrorKind::Model);
+            assert_eq!(detail.code, SimlinErrorCode::Generic);
+            let reason = CStr::from_ptr(detail.details).to_str().unwrap().to_string();
+            let message = CStr::from_ptr(detail.message).to_str().unwrap();
+            assert_eq!(message, format!("{source}: {reason}"));
+            reason
+        })
+        .collect();
+    simlin_error_free(collected);
+    reasons
+}
+
+/// A Vensim file's sketch comments are reported as the engine words them,
+/// and the project is the one the plain open gives.
+#[test]
+fn test_open_vensim_with_warnings_reports_what_the_file_does_not_keep() {
+    let data = std::fs::read("testdata/SIR.mdl").expect("SIR.mdl fixture must exist");
+    let text = std::str::from_utf8(&data).unwrap();
+    let (_, expected) = engine::open_vensim_with_warnings(text).unwrap();
+    assert!(
+        !expected.is_empty(),
+        "SIR.mdl's loop markers and their labels are comments the reader does not keep"
+    );
+
+    unsafe {
+        let (proj, collected) = open_reporting(simlin_project_open_vensim_with_warnings, &data);
+        let expected: Vec<String> = expected.into_iter().map(|w| w.message).collect();
+        assert_eq!(warning_reasons(collected, "MDL import"), expected);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let plain = simlin_project_open_vensim(data.as_ptr(), data.len(), &mut err);
+        expect_no_error(err, "open_vensim");
+        assert!(
+            **(*proj).datamodel.lock().unwrap() == **(*plain).datamodel.lock().unwrap(),
+            "the reporting open reads the project the plain open reads"
+        );
+        simlin_project_unref(plain);
+        simlin_project_unref(proj);
+    }
+}
+
+/// An XMILE file's standalone graphical function is reported, a file that
+/// loses nothing reports NULL, and a caller may pass NULL to discard the
+/// warnings.
+#[test]
+fn test_open_xmile_with_warnings_reports_what_the_file_does_not_keep() {
+    let lossy = include_str!("../../../../test/test-models/tests/lookups/test_lookups.xmile");
+    let whole = std::fs::read("testdata/SIR.stmx").expect("SIR.stmx fixture must exist");
+
+    unsafe {
+        let (proj, collected) =
+            open_reporting(simlin_project_open_xmile_with_warnings, lossy.as_bytes());
+        assert_eq!(
+            warning_reasons(collected, "XMILE import"),
+            ["1 graphical function in the model is not kept: 'lookup function table'"]
+        );
+        simlin_project_unref(proj);
+
+        let (proj, collected) = open_reporting(simlin_project_open_xmile_with_warnings, &whole);
+        assert!(
+            collected.is_null(),
+            "SIR.stmx holds nothing the reader drops"
+        );
+        simlin_project_unref(proj);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_xmile_with_warnings(
+            lossy.as_ptr(),
+            lossy.len(),
+            ptr::null_mut(),
+            &mut err,
+        );
+        expect_no_error(err, "open_xmile_with_warnings, warnings discarded");
+        assert!(!proj.is_null());
+        simlin_project_unref(proj);
+    }
+}
+
+/// A file that fails to open fails as the plain open does, and leaves the
+/// warnings channel NULL rather than whatever it held.
+#[test]
+fn test_open_with_warnings_failures_leave_no_warnings() {
+    let cases: [(ReportingOpen, &[u8]); 2] = [
+        (
+            simlin_project_open_xmile_with_warnings,
+            b"<xmile><model><variables><aux name=",
+        ),
+        (
+            simlin_project_open_vensim_with_warnings,
+            b"\xff\xfe not UTF-8",
+        ),
+    ];
+    unsafe {
+        for (open, bad) in cases {
+            for data in [bad.as_ptr(), ptr::null()] {
+                let mut collected: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
+                let mut err: *mut SimlinError = ptr::null_mut();
+                let proj = open(data, bad.len(), &mut collected, &mut err);
+                assert!(proj.is_null());
+                assert!(collected.is_null(), "a failed open reports no warnings");
+                assert!(!err.is_null(), "a failed open says why");
+                simlin_error_free(err);
+            }
+        }
+    }
+}
+
 // ── simlin_project_replace_contents ────────────────────────────────────
 
 /// Sorted variable names of `model` via the public FFI (what a live handle

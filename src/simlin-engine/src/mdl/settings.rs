@@ -11,10 +11,15 @@
 //! - Type 15: Integration type (comma-separated values, 4th is method code)
 //! - Type 22: Unit equivalence strings
 //! - Type 30: File aliases (e.g. `?data=data.xlsx`)
+//!
+//! Between the sketch and the settings, a file may define custom graphs,
+//! custom tables and reports ([`CustomOutput`]), which are read only to
+//! report that they are not kept.
 
 use std::collections::HashMap;
 
 use crate::datamodel::{SimMethod, Unit};
+use crate::import_losses::{ImportWarning, not_kept};
 
 /// Parsed settings from an MDL file's settings section.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -26,6 +31,55 @@ pub struct MdlSettings {
     pub unit_equivs: Vec<Unit>,
     /// File aliases extracted from type 30 lines (e.g. "?data" -> "data.xlsx")
     pub file_aliases: HashMap<String, String>,
+}
+
+/// A custom graph, custom table or report the file defines (`:GRAPH name`,
+/// `:TABLE name`, `:REPORT name`). Vensim shows one from its control panel,
+/// or on the sketch through a graph object that names it. The datamodel has
+/// no place for one.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
+pub struct CustomOutput {
+    pub kind: CustomOutputKind,
+    pub name: String,
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CustomOutputKind {
+    Graph,
+    Table,
+    Report,
+}
+
+impl CustomOutputKind {
+    /// The keyword that opens a definition of this kind.
+    const KEYWORDS: [(&'static str, CustomOutputKind); 3] = [
+        (":GRAPH", CustomOutputKind::Graph),
+        (":TABLE", CustomOutputKind::Table),
+        (":REPORT", CustomOutputKind::Report),
+    ];
+}
+
+/// One warning per kind of custom output in `outputs`, none of which the
+/// project keeps.
+pub fn custom_output_losses(outputs: &[CustomOutput]) -> Vec<ImportWarning> {
+    let kinds = [
+        (CustomOutputKind::Graph, "custom graph", "custom graphs"),
+        (CustomOutputKind::Table, "custom table", "custom tables"),
+        (CustomOutputKind::Report, "report", "reports"),
+    ];
+    kinds
+        .into_iter()
+        .filter_map(|(kind, one, many)| {
+            let names: Vec<String> = outputs
+                .iter()
+                .filter(|output| output.kind == kind)
+                .map(|output| output.name.clone())
+                .collect();
+            (!names.is_empty()).then(|| not_kept(names.len(), one, many, "in the model", &names))
+        })
+        .collect()
 }
 
 /// Parser for the post-equation section of MDL files (views and settings).
@@ -75,6 +129,57 @@ impl<'input> PostEquationParser<'input> {
         }
 
         settings
+    }
+
+    /// The custom outputs the file defines, in file order.
+    ///
+    /// They follow the sketch's terminator (a line starting `///---\\\`) and
+    /// come before the settings block. Each opens with a line holding its
+    /// keyword and its name. The lines after it, up to the next definition,
+    /// describe it (`:TITLE`, `:SCALE`, `:VAR`, ...), and a report's text runs
+    /// to `:END-OF-REPORT`, so a report line that happens to start with a
+    /// keyword opens nothing.
+    pub fn custom_outputs(&self) -> Vec<CustomOutput> {
+        let mut outputs = Vec::new();
+        let Some(after_sketch) = self.after_sketch() else {
+            return outputs;
+        };
+        let mut in_report = false;
+        for line in split_lines(after_sketch) {
+            if is_settings_marker(line) {
+                break;
+            }
+            if in_report {
+                in_report = !line.starts_with(":END-OF-REPORT");
+                continue;
+            }
+            for (keyword, kind) in CustomOutputKind::KEYWORDS {
+                if let Some(rest) = line.strip_prefix(keyword)
+                    && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+                {
+                    outputs.push(CustomOutput {
+                        kind,
+                        name: rest.trim().to_string(),
+                    });
+                    in_report = kind == CustomOutputKind::Report;
+                }
+            }
+        }
+        outputs
+    }
+
+    /// The source after the sketch's terminator: the line after the first
+    /// line that starts with `///---\\\`. Found by substring search, since
+    /// the sketch before it can run to thousands of lines.
+    fn after_sketch(&self) -> Option<&'input str> {
+        const TERMINATOR: &str = "///---\\\\\\";
+        let starts_line =
+            |at: usize| at == 0 || matches!(self.source.as_bytes()[at - 1], b'\n' | b'\r');
+        let (at, _) = self
+            .source
+            .match_indices(TERMINATOR)
+            .find(|&(at, _)| starts_line(at))?;
+        Some(skip_to_next_line(&self.source[at..]))
     }
 
     /// Find the settings block marker `:L<%^E!@` and return the source after it.
@@ -186,6 +291,13 @@ impl<'input> PostEquationParser<'input> {
             });
         }
     }
+}
+
+/// Whether a line holds the settings block marker, as permissively as
+/// `find_settings_block` finds it: `:L<%^E!@`, with or without a DEL after
+/// `:L`, anywhere in the line.
+fn is_settings_marker(line: &str) -> bool {
+    line.contains(":L<%^E!@") || line.contains(":L\x7F<%^E!@")
 }
 
 /// Skip to the start of the next line.
@@ -597,6 +709,64 @@ mod tests {
         assert_eq!(
             settings.file_aliases.get("?data"),
             Some(&"data.xlsx".to_string())
+        );
+    }
+
+    #[test]
+    fn custom_outputs_are_the_definitions_between_the_sketch_and_the_settings() {
+        // As world3 writes them: a report's text is its own, even a line of it
+        // that starts with a keyword, and nothing after the settings marker
+        // is a definition.
+        let source = "\n\
+            V300  Do not put anything below this section\n\
+            *View 1\n\
+            ///---\\\\\\\n\
+            :GRAPH STATE_OF_WORLD\n\
+            :TITLE State of the World\n\
+            :SCALE\n\
+            :VAR population\n\
+            \n\
+            :TABLE Summary_Statistics\n\
+            :VAR food\n\
+            :REPORT COMM1\n\
+            :FONT Times New Roman|10||0-0-0\n\
+            :GRAPH not a graph, a line of the report\n\
+            :END-OF-REPORT\n\
+            :GRAPHIC is no keyword\n\
+            :L\x7F<%^E!@\n\
+            :GRAPH after_the_settings\n";
+        let outputs = PostEquationParser::new(source).custom_outputs();
+        let found: Vec<(CustomOutputKind, &str)> = outputs
+            .iter()
+            .map(|output| (output.kind, output.name.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (CustomOutputKind::Graph, "STATE_OF_WORLD"),
+                (CustomOutputKind::Table, "Summary_Statistics"),
+                (CustomOutputKind::Report, "COMM1"),
+            ]
+        );
+        let messages: Vec<String> = custom_output_losses(&outputs)
+            .into_iter()
+            .map(|warning| warning.message)
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "1 custom graph in the model is not kept: 'STATE_OF_WORLD'",
+                "1 custom table in the model is not kept: 'Summary_Statistics'",
+                "1 report in the model is not kept: 'COMM1'",
+            ]
+        );
+
+        // Before the sketch's terminator nothing is a definition.
+        let no_sketch_end = "\n:GRAPH early\n:L<%^E!@\n";
+        assert!(
+            PostEquationParser::new(no_sketch_end)
+                .custom_outputs()
+                .is_empty()
         );
     }
 }

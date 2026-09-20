@@ -303,7 +303,7 @@ fn parse_points(s: &str) -> (i32, i32) {
 /// - 10: Variable
 /// - 11: Valve
 /// - 12: Comment
-/// - 30: Ignored (returns None)
+/// - anything else, such as an image (30 or 31): not read (returns None)
 ///
 /// Returns (element, scratch_name_flag). If scratch_name_flag is true,
 /// the caller must read the next line to get the comment text.
@@ -332,8 +332,8 @@ pub fn parse_element_line(line: &str) -> Result<Option<(VensimElement, bool)>, V
             let (comment, scratch_name) = parse_comment(uid, rest)?;
             Ok(Some((VensimElement::Comment(comment), scratch_name)))
         }
-        30 => Ok(None), // Ignored element type
-        _ => Ok(None),  // Unknown element type - ignore
+        // An image (30, 31) or a record type the parser does not know.
+        _ => Ok(None),
     }
 }
 

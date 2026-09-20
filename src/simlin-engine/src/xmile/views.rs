@@ -1502,8 +1502,194 @@ pub mod view_element {
     }
 }
 
+/// An element the reader meets where it reads view objects or variables but
+/// does not read, kept by its tag and what it is called so the import can
+/// report it as lost.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
+pub struct UnreadElement {
+    /// The element's tag without its namespace prefix: `text_box`,
+    /// `stacked_container`, `group`.
+    pub tag: String,
+    /// What a person would call it, when it says (see [`Label`]).
+    pub label: Option<String>,
+}
+
+impl UnreadElement {
+    /// The unread elements the import does not report, since the files a
+    /// tool writes carry them whatever the model is: a view's settings (its
+    /// style, Stella's simulation delay) and a tool's own bookkeeping, which
+    /// it rebuilds (Stella's record of each variable's dependencies).
+    const UNREPORTED: &[&str] = &["style", "simulation_delay", "dependencies"];
+
+    /// Consume the element's content through `access`, keeping its tag and,
+    /// for an element the import reports, what it is called.
+    pub(crate) fn read<'de, A: serde::de::VariantAccess<'de>>(
+        tag: String,
+        access: A,
+    ) -> std::result::Result<Self, A::Error> {
+        let tag = match tag.rsplit_once(':') {
+            Some((_, local)) => local.to_string(),
+            None => tag,
+        };
+        let label = if Self::UNREPORTED.contains(&tag.as_str()) {
+            access.newtype_variant::<serde::de::IgnoredAny>()?;
+            None
+        } else {
+            access.newtype_variant::<Label>()?.best()
+        };
+        Ok(UnreadElement { tag, label })
+    }
+
+    /// Whether the import reports the element as not kept: it is an element,
+    /// not the text between elements, and not one every file carries.
+    pub(crate) fn is_reported(&self) -> bool {
+        !self.tag.starts_with('$') && !Self::UNREPORTED.contains(&self.tag.as_str())
+    }
+}
+
+/// What an element the reader does not read is called, from what it holds:
+/// its `name`, else its `title` or `label` (Stella's `isee:page_title`
+/// counts as a title), else the variable its first entity names, else what
+/// the first child that describes it is called (a graph, a graph's plot, an
+/// annotation's popup and its text), else its own text. A slider has a
+/// title and the variable it sets; a text box has only its text; an untitled
+/// graph is known by what it plots.
+///
+/// It is read key by key, taking each key any number of times and ignoring
+/// every other, so no content can fail the read. A derived struct would not
+/// do: it rejects text on both sides of a child element (`duplicate field
+/// $text`), and an element this reader skipped used to open, and must go on
+/// opening.
+#[derive(Default)]
+struct Label {
+    name: Option<String>,
+    title: Option<String>,
+    entity: Option<String>,
+    child: Option<String>,
+    text: String,
+}
+
+impl Label {
+    /// The children whose own label describes the element holding them.
+    const DESCRIBING_CHILDREN: &[&str] = &["graph", "plot", "popup", "text"];
+
+    /// The first of what the element is called that says anything.
+    fn best(self) -> Option<String> {
+        let text = Some(self.text).filter(|text| !text.trim().is_empty());
+        self.name
+            .or(self.title)
+            .or(self.entity)
+            .or(self.child)
+            .or(text)
+    }
+}
+
+/// Keeps the first `value` that says anything.
+fn keep_first(slot: &mut Option<String>, value: String) {
+    if slot.is_none() && !value.trim().is_empty() {
+        *slot = Some(value);
+    }
+}
+
+impl<'de> Deserialize<'de> for Label {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct LabelVisitor;
+        impl<'de> serde::de::Visitor<'de> for LabelVisitor {
+            type Value = Label;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an element")
+            }
+
+            fn visit_unit<E>(self) -> std::result::Result<Label, E> {
+                Ok(Label::default())
+            }
+
+            fn visit_str<E>(self, text: &str) -> std::result::Result<Label, E> {
+                Ok(Label {
+                    text: text.to_string(),
+                    ..Label::default()
+                })
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Label, A::Error> {
+                let mut label = Label::default();
+                while let Some(key) = map.next_key::<LabelKey>()? {
+                    match key {
+                        LabelKey::Name => keep_first(&mut label.name, map.next_value()?),
+                        LabelKey::Title => keep_first(&mut label.title, map.next_value()?),
+                        LabelKey::Entity => {
+                            let entity: Label = map.next_value()?;
+                            if let Some(name) = entity.name {
+                                keep_first(&mut label.entity, name);
+                            }
+                        }
+                        LabelKey::Child => {
+                            let child: Label = map.next_value()?;
+                            if let Some(called) = child.best() {
+                                keep_first(&mut label.child, called);
+                            }
+                        }
+                        LabelKey::Text => label.text.push_str(&map.next_value::<String>()?),
+                        LabelKey::Other => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(label)
+            }
+        }
+        deserializer.deserialize_map(LabelVisitor)
+    }
+}
+
+/// What a key of an element being labeled is to [`Label`], read from the
+/// key without keeping it: most keys are attributes and children the label
+/// ignores, and an element can have dozens.
+enum LabelKey {
+    Name,
+    Title,
+    Entity,
+    Child,
+    Text,
+    Other,
+}
+
+impl<'de> Deserialize<'de> for LabelKey {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct KeyVisitor;
+        impl serde::de::Visitor<'_> for KeyVisitor {
+            type Value = LabelKey;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an attribute or child element name")
+            }
+
+            fn visit_str<E>(self, key: &str) -> std::result::Result<LabelKey, E> {
+                Ok(match key {
+                    "@name" => LabelKey::Name,
+                    "@title" | "@page_title" | "@label" => LabelKey::Title,
+                    "entity" => LabelKey::Entity,
+                    "$text" => LabelKey::Text,
+                    key if Label::DESCRIBING_CHILDREN.contains(&key) => LabelKey::Child,
+                    _ => LabelKey::Other,
+                })
+            }
+        }
+        deserializer.deserialize_identifier(KeyVisitor)
+    }
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewObject {
     Aux(view_element::Aux),
@@ -1515,9 +1701,57 @@ pub enum ViewObject {
     Cloud(view_element::Cloud),
     Alias(view_element::Alias),
     Group(view_element::Group),
-    // Style(Style),
-    #[serde(other)]
-    Unhandled,
+    /// Anything else a view holds: a text box, a graph, a slider, the view's
+    /// style.
+    Unhandled(UnreadElement),
+}
+
+/// Read by tag, like the derive would, except that an element of any other
+/// tag becomes [`ViewObject::Unhandled`] with its tag kept, where
+/// `#[serde(other)]` would forget which element it was.
+impl<'de> Deserialize<'de> for ViewObject {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct ObjectVisitor;
+        impl<'de> serde::de::Visitor<'de> for ObjectVisitor {
+            type Value = ViewObject;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a view object")
+            }
+
+            fn visit_enum<A: serde::de::EnumAccess<'de>>(
+                self,
+                data: A,
+            ) -> std::result::Result<ViewObject, A::Error> {
+                use serde::de::VariantAccess;
+                let (tag, object): (String, A::Variant) = data.variant()?;
+                Ok(match tag.as_str() {
+                    "aux" => ViewObject::Aux(object.newtype_variant()?),
+                    "stock" => ViewObject::Stock(object.newtype_variant()?),
+                    "flow" => ViewObject::Flow(object.newtype_variant()?),
+                    "connector" => ViewObject::Link(object.newtype_variant()?),
+                    "module" => ViewObject::Module(object.newtype_variant()?),
+                    "cloud" => ViewObject::Cloud(object.newtype_variant()?),
+                    "alias" => ViewObject::Alias(object.newtype_variant()?),
+                    "group" => ViewObject::Group(object.newtype_variant()?),
+                    _ => ViewObject::Unhandled(UnreadElement::read(tag, object)?),
+                })
+            }
+        }
+        const OBJECTS: &[&str] = &[
+            "aux",
+            "stock",
+            "flow",
+            "connector",
+            "module",
+            "cloud",
+            "alias",
+            "group",
+        ];
+        deserializer.deserialize_enum("ViewObject", OBJECTS, ObjectVisitor)
+    }
 }
 
 impl ToXml<XmlWriter> for ViewObject {
@@ -1534,7 +1768,7 @@ impl ToXml<XmlWriter> for ViewObject {
             }
             ViewObject::Alias(alias) => alias.write_xml(writer),
             ViewObject::Group(group) => group.write_xml(writer),
-            ViewObject::Unhandled => {
+            ViewObject::Unhandled(_) => {
                 // explicitly ignore unhandled things
                 Ok(())
             }
@@ -1553,7 +1787,7 @@ impl ViewObject {
             ViewObject::Cloud(cloud) => cloud.uid = uid,
             ViewObject::Alias(alias) => alias.uid = Some(uid),
             ViewObject::Group(group) => group.uid = Some(uid),
-            ViewObject::Unhandled => {
+            ViewObject::Unhandled(_) => {
                 return false;
             }
         };
@@ -1570,7 +1804,7 @@ impl ViewObject {
             ViewObject::Cloud(cloud) => Some(cloud.uid),
             ViewObject::Alias(alias) => alias.uid,
             ViewObject::Group(group) => group.uid,
-            ViewObject::Unhandled => None,
+            ViewObject::Unhandled(_) => None,
         }
     }
 
@@ -1585,7 +1819,7 @@ impl ViewObject {
             ViewObject::Alias(_alias) => None,
             // Groups are organizational containers, not model variables
             ViewObject::Group(_group) => None,
-            ViewObject::Unhandled => None,
+            ViewObject::Unhandled(_) => None,
         }
     }
 
@@ -1601,7 +1835,7 @@ impl ViewObject {
             ViewObject::Cloud(cloud) => Some((cloud.x, cloud.y)),
             ViewObject::Alias(alias) => Some((alias.x, alias.y)),
             ViewObject::Group(group) => Some((group.x, group.y)),
-            ViewObject::Unhandled => None,
+            ViewObject::Unhandled(_) => None,
         }
     }
 }
@@ -1633,7 +1867,7 @@ impl From<ViewObject> for datamodel::ViewElement {
             ViewObject::Group(v) => {
                 datamodel::ViewElement::Group(datamodel::view_element::Group::from(v))
             }
-            ViewObject::Unhandled => unreachable!("must filter out unhandled"),
+            ViewObject::Unhandled(_) => unreachable!("must filter out unhandled"),
         }
     }
 }
@@ -1648,7 +1882,11 @@ impl ViewObject {
             ViewElement::Link(v) => ViewObject::Link(view_element::Link::from(v, view)),
             ViewElement::Module(v) => ViewObject::Module(view_element::Module::from(v)),
             ViewElement::Alias(v) => ViewObject::Alias(view_element::Alias::from(v, view)),
-            ViewElement::Cloud(_v) => ViewObject::Unhandled,
+            // Clouds are not in the spec, so none is written.
+            ViewElement::Cloud(_v) => ViewObject::Unhandled(UnreadElement {
+                tag: "cloud".to_string(),
+                label: None,
+            }),
             ViewElement::Group(v) => ViewObject::Group(view_element::Group::from(v)),
         }
     }
@@ -1969,7 +2207,7 @@ fn view_object_to_element(
         ViewObject::Group(v) => {
             datamodel::ViewElement::Group(datamodel::view_element::Group::from(v))
         }
-        ViewObject::Unhandled => unreachable!("must filter out unhandled"),
+        ViewObject::Unhandled(_) => unreachable!("must filter out unhandled"),
     }
 }
 
@@ -2047,7 +2285,7 @@ impl From<View> for datamodel::View {
                 elements: v
                     .objects
                     .into_iter()
-                    .filter(|v| !matches!(v, ViewObject::Unhandled))
+                    .filter(|v| !matches!(v, ViewObject::Unhandled(_)))
                     .map(|obj| view_object_to_element(obj, &positions))
                     .collect(),
                 view_box,

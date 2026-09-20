@@ -11,7 +11,9 @@ use crate::datamodel::{
     GraphicalFunctionScale, Model, ModelGroup, Project, Variable, View,
 };
 
+use crate::import_losses::ImportWarning;
 use crate::mdl::LOOKUP_SENTINEL;
+use crate::mdl::settings::{PostEquationParser, custom_output_losses};
 use crate::mdl::view;
 
 use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs, Subscript};
@@ -25,7 +27,9 @@ use super::types::{ConvertError, SymbolInfo, VariableType};
 use crate::mdl::xmile_compat::format_number;
 
 impl<'input> ConversionContext<'input> {
-    /// Build the final Project from collected symbols.
+    /// Build the final Project from collected symbols, with what the file
+    /// holds that it does not keep: the sketch's losses, view by view, then
+    /// the custom graphs, tables and reports.
     ///
     /// `materialization` carries the multi-output macro-invocation
     /// materialization computed in Pass 6.5 (Module + binding Auxes to add,
@@ -33,18 +37,25 @@ impl<'input> ConversionContext<'input> {
     pub(super) fn build_project(
         self,
         materialization: &MultiOutputMaterialization,
-    ) -> Result<Project, ConvertError> {
-        let model = self.build_model("main", materialization)?;
+    ) -> Result<(Project, Vec<ImportWarning>), ConvertError> {
+        let (model, mut losses) = self.build_model("main", materialization)?;
+        if self.report_losses {
+            let outputs = PostEquationParser::new(self.post_equations).custom_outputs();
+            losses.extend(custom_output_losses(&outputs));
+        }
 
-        Ok(Project {
-            name: String::new(),
-            sim_specs: self.sim_specs.build(),
-            dimensions: self.dimensions,
-            units: self.unit_equivs,
-            models: vec![model],
-            source: None,
-            ai_information: None,
-        })
+        Ok((
+            Project {
+                name: String::new(),
+                sim_specs: self.sim_specs.build(),
+                dimensions: self.dimensions,
+                units: self.unit_equivs,
+                models: vec![model],
+                source: None,
+                ai_information: None,
+            },
+            losses,
+        ))
     }
 
     /// Build a single `datamodel::Model` (named `name`) from the collected
@@ -68,7 +79,7 @@ impl<'input> ConversionContext<'input> {
         &self,
         name: &str,
         materialization: &MultiOutputMaterialization,
-    ) -> Result<Model, ConvertError> {
+    ) -> Result<(Model, Vec<ImportWarning>), ConvertError> {
         let mut variables: Vec<Variable> = Vec::with_capacity(self.symbols.len());
 
         for (var_name, info) in &self.symbols {
@@ -143,17 +154,20 @@ impl<'input> ConversionContext<'input> {
         let groups = self.build_groups();
 
         // Build views from parsed sketch data
-        let views = self.build_views();
+        let (views, losses) = self.build_views();
 
-        Ok(Model {
-            name: name.to_string(),
-            sim_specs: None,
-            variables,
-            views,
-            loop_metadata: vec![],
-            groups,
-            macro_spec: None,
-        })
+        Ok((
+            Model {
+                name: name.to_string(),
+                sim_specs: None,
+                variables,
+                views,
+                loop_metadata: vec![],
+                groups,
+                macro_spec: None,
+            },
+            losses,
+        ))
     }
 
     /// Build ModelGroup instances from collected group info.
@@ -226,10 +240,11 @@ impl<'input> ConversionContext<'input> {
             .collect()
     }
 
-    /// Build views from parsed sketch data.
-    fn build_views(&self) -> Vec<View> {
+    /// Build views from parsed sketch data, with what the sketch holds that
+    /// they do not keep when `report_losses` is set.
+    fn build_views(&self) -> (Vec<View>, Vec<ImportWarning>) {
         if self.views.is_empty() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
 
         // Build symbol namespace for view title deduplication:
@@ -243,7 +258,12 @@ impl<'input> ConversionContext<'input> {
             all_names.insert(to_lower_space(&dim.name));
         }
 
-        view::build_views(self.views.clone(), &self.symbols, &all_names)
+        if self.report_losses {
+            view::build_views_reporting(self.views.clone(), &self.symbols, &all_names)
+        } else {
+            let views = view::build_views(self.views.clone(), &self.symbols, &all_names);
+            (views, Vec::new())
+        }
     }
 
     /// Select the appropriate equation from a list, implementing PurgeAFOEq logic.

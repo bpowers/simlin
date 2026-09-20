@@ -16,7 +16,9 @@ use super::processing::{
     resolve_flow_uid_for_valve,
 };
 use super::routes::{PendingFlowRoute, RouteEnd, route_pending_flows};
-use super::types::{VensimComment, VensimElement, VensimVariable, VensimView};
+use super::types::{IoObject, VensimComment, VensimElement, VensimVariable, VensimView};
+
+use crate::import_losses::{ImportWarning, not_kept};
 
 use crate::mdl::builtins::to_lower_space;
 use crate::mdl::convert::VariableType;
@@ -39,12 +41,33 @@ mod flow_resolution_tests;
 /// `all_names` includes variable names, dimension names, and group names
 /// for collision-free view title deduplication (matching xmutil's full namespace).
 pub fn build_views(
-    mut views: Vec<VensimView>,
+    views: Vec<VensimView>,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
     all_names: &HashSet<String>,
 ) -> Vec<View> {
+    convert_views(views, symbols, all_names, false).0
+}
+
+/// [`build_views`], also reporting what the sketch holds that the views do
+/// not keep ([`SketchLosses`]).
+pub fn build_views_reporting(
+    views: Vec<VensimView>,
+    symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
+    all_names: &HashSet<String>,
+) -> (Vec<View>, Vec<ImportWarning>) {
+    convert_views(views, symbols, all_names, true)
+}
+
+/// [`build_views`], finding the losses only when `report` asks, since
+/// finding them walks every view again.
+fn convert_views(
+    mut views: Vec<VensimView>,
+    symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
+    all_names: &HashSet<String>,
+    report: bool,
+) -> (Vec<View>, Vec<ImportWarning>) {
     if views.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // Compute model-level letter polarity flag: true if any connector
@@ -78,6 +101,8 @@ pub fn build_views(
     // Track start positions for group geometry (matches compose_views logic)
     let is_multi_view = views.len() > 1;
     let mut result = Vec::with_capacity(views.len());
+    let mut warnings: Vec<ImportWarning> = Vec::new();
+    let mut consequences = SketchConsequences::default();
     let mut pending_routes: Vec<PendingFlowRoute> = Vec::new();
     let start_x = 100;
     let mut start_y = 100;
@@ -87,6 +112,7 @@ pub fn build_views(
             .get(view_idx)
             .map(std::string::String::as_str)
             .unwrap_or(view.title());
+        let mut losses = SketchLosses::default();
         if let Some(dm_view) = convert_view(
             view,
             original_title,
@@ -100,13 +126,16 @@ pub fn build_views(
             start_y,
             use_lettered_polarity,
             &mut pending_routes,
+            report.then_some(&mut losses),
         ) {
             result.push(dm_view);
         }
+        losses.report(original_title, &mut warnings, &mut consequences);
         // Advance start_y for next view (same formula as compose_views)
         let height = view.max_y(start_y + 80) - start_y;
         start_y += height + 80;
     }
+    consequences.report(&mut warnings);
 
     // If multiple views, merge into one with group wrappers
     let mut result = if result.len() > 1 {
@@ -131,7 +160,165 @@ pub fn build_views(
         }
     }
 
-    result
+    (result, warnings)
+}
+
+/// What one view's sketch holds that its datamodel view does not keep, so an
+/// MDL save of the project would not write it back. Each list holds what a
+/// person would call one of its records, empty where there is nothing to
+/// call it.
+///
+/// What a modeler put on the view (comments, input/output objects, images)
+/// is reported view by view, since where it sat is part of what it was. What
+/// follows from what the diagram does not draw (the drawings of Time and the
+/// control variables, the arrows drawn to anything not kept, the clouds of a
+/// flow's copy) is counted over every view ([`SketchConsequences`]), since
+/// one row per view would repeat the same fact across the whole sketch.
+#[derive(Default)]
+struct SketchLosses {
+    /// Each comment that is not a flow's cloud: a title, a note, a label, a
+    /// loop marker, a shape.
+    comments: Vec<String>,
+    /// Each graph: a custom graph by its name, or a variable's graph.
+    graphs: Vec<String>,
+    /// Each slider, by the variable it sets.
+    sliders: Vec<String>,
+    /// Each other input/output object (a variable's table or statistics),
+    /// by its variable.
+    io_objects: Vec<String>,
+    /// Each image, by the file it shows.
+    images: Vec<String>,
+    /// Each variable the sketch draws but the view does not place: Time and
+    /// the control variables, which the model keeps as its sim specs, and a
+    /// name the equations do not define.
+    unplaced: Vec<String>,
+    /// How many arrows (not pipes) are drawn to or from something above.
+    arrows: usize,
+    /// How many clouds a pipe is drawn to that no flow the view keeps ends
+    /// in (a ghost copy's pipe, or a pipe end the model's stock lists
+    /// overrule).
+    clouds: usize,
+    /// How many records are of a type the parser does not know.
+    unknown: usize,
+}
+
+impl SketchLosses {
+    /// One warning per kind of content lost, placing each on the view by its
+    /// sketch title, and the view's consequences added to `consequences`.
+    fn report(
+        self,
+        title: &str,
+        warnings: &mut Vec<ImportWarning>,
+        consequences: &mut SketchConsequences,
+    ) {
+        let on = format!("on view '{title}'");
+        let content = [
+            (&self.comments, "comment", "comments"),
+            (&self.graphs, "graph", "graphs"),
+            (&self.sliders, "slider", "sliders"),
+            (
+                &self.io_objects,
+                "input/output object",
+                "input/output objects",
+            ),
+            (&self.images, "image", "images"),
+        ];
+        for (names, one, many) in content {
+            if !names.is_empty() {
+                warnings.push(not_kept(names.len(), one, many, &on, names));
+            }
+        }
+        let unplaced = self.unplaced.len();
+        consequences.unplaced.add(title, unplaced, self.unplaced);
+        consequences.arrows.add(title, self.arrows, Vec::new());
+        consequences.clouds.add(title, self.clouds, Vec::new());
+        consequences.unknown.add(title, self.unknown, Vec::new());
+    }
+
+    /// Adds a comment record the view does not keep to the list its kind
+    /// belongs in.
+    fn add_comment(&mut self, comment: &VensimComment) {
+        match comment.io_object() {
+            None => {
+                // A comment's text marks its line breaks with a two-character
+                // `\n`. Only a text with a letter in it is a name a person
+                // would recognize; an inline comment's text is its icon's
+                // number.
+                let text = comment.text.replace("\\n", " ");
+                let named = text.chars().any(char::is_alphabetic);
+                self.comments.push(if named { text } else { String::new() });
+            }
+            Some(IoObject::Slider) => self.sliders.push(comment.io_object_name()),
+            Some(IoObject::CustomGraph) => self.graphs.push(comment.io_object_name()),
+            Some(IoObject::Tool) if comment.io_object_tool().eq_ignore_ascii_case("graph") => {
+                self.graphs.push(comment.io_object_name())
+            }
+            Some(IoObject::Tool | IoObject::Other) => {
+                self.io_objects.push(comment.io_object_name())
+            }
+        }
+    }
+}
+
+/// The losses that follow from what the diagram does not draw, counted over
+/// every view of the sketch (see [`SketchLosses`]).
+#[derive(Default)]
+struct SketchConsequences {
+    /// The drawings of variables the diagram does not place, by name.
+    unplaced: Tally,
+    /// The arrows drawn to or from anything not kept.
+    arrows: Tally,
+    /// The clouds no kept flow ends in.
+    clouds: Tally,
+    /// The records of a type the parser does not know.
+    unknown: Tally,
+}
+
+/// How many of one kind of loss there are, what they are called, and the
+/// views they are on, in sketch order.
+#[derive(Default)]
+struct Tally {
+    count: usize,
+    names: Vec<String>,
+    views: Vec<String>,
+}
+
+impl Tally {
+    fn add(&mut self, view: &str, count: usize, names: Vec<String>) {
+        if count > 0 {
+            self.count += count;
+            self.names.extend(names);
+            self.views.push(view.to_string());
+        }
+    }
+}
+
+impl SketchConsequences {
+    /// One warning per kind, placed on its view when only one view has it.
+    fn report(self, warnings: &mut Vec<ImportWarning>) {
+        let kinds = [
+            (
+                self.unplaced,
+                "drawing of a variable",
+                "drawings of variables",
+            ),
+            (self.arrows, "arrow", "arrows"),
+            (self.clouds, "cloud", "clouds"),
+            (
+                self.unknown,
+                "record of an unknown type",
+                "records of an unknown type",
+            ),
+        ];
+        for (tally, one, many) in kinds {
+            let place = match tally.views.as_slice() {
+                [] => continue,
+                [view] => format!("on view '{view}'"),
+                views => format!("on {} views", views.len()),
+            };
+            warnings.push(not_kept(tally.count, one, many, &place, &tally.names));
+        }
+    }
 }
 
 /// Reassign UIDs sequentially starting from 1 and update all cross-references.
@@ -251,6 +438,7 @@ fn convert_view(
     start_y: i32,
     use_lettered_polarity: bool,
     pending_routes: &mut Vec<PendingFlowRoute>,
+    mut losses: Option<&mut SketchLosses>,
 ) -> Option<View> {
     let mut elements = Vec::new();
     let mut link_sketch_compat = Vec::new();
@@ -270,6 +458,9 @@ fn convert_view(
     // model's stock lists overrule) is not a cloud of anything.
     let mut cloud_owners: HashMap<i32, i32> = HashMap::new();
     let mut deferred_comments: Vec<(&VensimComment, i32, i32)> = Vec::new();
+    // The local uids of the elements the view does not keep, whose arrows go
+    // with them.
+    let mut dropped: HashSet<i32> = HashSet::new();
 
     for (local_uid, elem) in view.iter_with_uids() {
         let uid = uid_offset + local_uid;
@@ -291,6 +482,9 @@ fn convert_view(
                     pending_routes,
                 ) {
                     elements.push(view_elem);
+                } else if let Some(losses) = losses.as_deref_mut() {
+                    losses.unplaced.push(var.name.clone());
+                    dropped.insert(local_uid);
                 }
             }
             VensimElement::Valve(_) => {
@@ -310,9 +504,48 @@ fn convert_view(
         }
     }
 
+    // A pipe is a connector drawn from a valve, and the comments pipes are
+    // drawn to are clouds (`resolve_flow_ends` reads a pipe the same way).
+    let is_pipe = |conn: &super::types::VensimConnector| {
+        matches!(view.get(conn.from_uid), Some(VensimElement::Valve(_)))
+    };
+    let piped: HashSet<i32> = match losses {
+        Some(_) => view
+            .iter()
+            .filter_map(|elem| match elem {
+                VensimElement::Connector(conn) if is_pipe(conn) => Some(conn.to_uid),
+                _ => None,
+            })
+            .collect(),
+        None => HashSet::new(),
+    };
     for (comment, local_uid, uid) in deferred_comments {
         if let Some(&flow_uid) = cloud_owners.get(&local_uid) {
             elements.push(convert_comment_as_cloud(comment, uid, flow_uid));
+        } else if let Some(losses) = losses.as_deref_mut() {
+            dropped.insert(local_uid);
+            if piped.contains(&local_uid) && comment.io_object().is_none() {
+                losses.clouds += 1;
+            } else {
+                losses.add_comment(comment);
+            }
+        }
+    }
+    if let Some(losses) = losses {
+        losses.arrows = view
+            .iter()
+            .filter(|elem| {
+                matches!(elem, VensimElement::Connector(conn)
+                    if !is_pipe(conn)
+                        && (dropped.contains(&conn.from_uid) || dropped.contains(&conn.to_uid)))
+            })
+            .count();
+        for record in &view.skipped {
+            if record.is_image() {
+                losses.images.push(record.name.clone());
+            } else {
+                losses.unknown += 1;
+            }
         }
     }
 

@@ -72,7 +72,9 @@ pub struct VensimValve {
 }
 
 /// A comment element in the view (type 12).
-/// Comments include text annotations and clouds (flow boundaries).
+/// Comments include text annotations and clouds (flow boundaries). Vensim
+/// stores an input/output object (a slider, a graph) as a comment too; see
+/// [`VensimComment::io_object`].
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct VensimComment {
@@ -90,6 +92,54 @@ pub struct VensimComment {
     pub bits: i32,
     /// Raw sketch fields following `bits`.
     pub tail: String,
+}
+
+/// What an input/output object shows, from the `tpos` field of its record.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IoObject {
+    /// An input that sets a variable (`tpos` 0).
+    Slider,
+    /// A custom graph the file defines by name (`tpos` 1).
+    CustomGraph,
+    /// A tool applied to one variable (`tpos` 2), such as its graph.
+    Tool,
+    /// A `tpos` the format does not document.
+    Other,
+}
+
+impl VensimComment {
+    /// The input/output object this record is, or None for a comment.
+    ///
+    /// Vensim's sketch format stores an input/output object as a comment
+    /// with bit 4 of `bits` (8) set, its kind in `tpos` (the third field
+    /// after `bits`), and its text on the line after the record: a slider's
+    /// `variable,min,max,increment`, a custom graph's name, or a tool's
+    /// `variable,tool`.
+    pub fn io_object(&self) -> Option<IoObject> {
+        if self.bits & (1 << 3) == 0 {
+            return None;
+        }
+        Some(match self.tail.split(',').nth(2).map(str::trim) {
+            Some("0") => IoObject::Slider,
+            Some("1") => IoObject::CustomGraph,
+            Some("2") => IoObject::Tool,
+            _ => IoObject::Other,
+        })
+    }
+
+    /// What a person would call an input/output object: the variable a
+    /// slider sets or a tool shows, or a custom graph's name. It is the
+    /// first field of the record's text, which may be quoted.
+    pub fn io_object_name(&self) -> String {
+        super::elements::parse_string_field(&self.text).0
+    }
+
+    /// The tool an [`IoObject::Tool`] applies (`Graph`, `Table`, `Gantt`,
+    /// ...): the last field of the record's text.
+    pub fn io_object_tool(&self) -> &str {
+        self.text.rsplit(',').next().unwrap_or("").trim()
+    }
 }
 
 /// A connector element in the view (type 1).
@@ -228,6 +278,27 @@ pub struct VensimView {
     /// Translation applied by MDL view composition.
     pub x_offset: i32,
     pub y_offset: i32,
+    /// The records of this view the parser does not read (an embedded
+    /// image, a record type it does not know), kept so the import can report
+    /// them as lost.
+    pub skipped: Vec<SkippedRecord>,
+}
+
+/// A sketch record the parser does not read: its type number and its third
+/// field, which for an image is the file it shows.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
+pub struct SkippedRecord {
+    pub kind: i32,
+    pub name: String,
+}
+
+impl SkippedRecord {
+    /// Whether the record places an image: a bitmap (type 30) or a
+    /// metafile (type 31), each named by its file.
+    pub fn is_image(&self) -> bool {
+        matches!(self.kind, 30 | 31)
+    }
 }
 
 impl VensimView {
@@ -239,6 +310,7 @@ impl VensimView {
             uid_offset: 0,
             x_offset: 0,
             y_offset: 0,
+            skipped: Vec::new(),
         }
     }
 

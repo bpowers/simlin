@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub mod dimensions;
 pub mod model;
+mod unread;
 pub mod variables;
 pub mod views;
 
@@ -1509,15 +1510,25 @@ pub fn project_to_xmile(project: &datamodel::Project) -> Result<String> {
 }
 
 pub fn project_from_reader(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
-    use quick_xml::de;
-    let file: File = match de::from_reader(reader) {
-        Ok(file) => file,
-        Err(err) => {
-            return import_err!(XmlDeserialization, err.to_string());
-        }
-    };
+    convert_file_to_project(read_file(reader)?)
+}
 
-    convert_file_to_project(file)
+/// [`project_from_reader`], also returning what the file holds that the
+/// project does not keep ([`crate::ImportWarning`], see `unread`).
+pub fn project_from_reader_with_warnings(
+    reader: &mut dyn BufRead,
+) -> Result<(datamodel::Project, Vec<crate::ImportWarning>)> {
+    let file = read_file(reader)?;
+    let warnings = unread::unread_content(&file);
+    Ok((convert_file_to_project(file)?, warnings))
+}
+
+fn read_file(reader: &mut dyn BufRead) -> Result<File> {
+    use quick_xml::de;
+    match de::from_reader(reader) {
+        Ok(file) => Ok(file),
+        Err(err) => import_err!(XmlDeserialization, err.to_string()),
+    }
 }
 
 /// Convert a parsed XMILE `File` into a `datamodel::Project`.
@@ -1607,7 +1618,7 @@ fn macro_to_datamodel(mac: Macro) -> Result<datamodel::Model> {
     let mut body_variables: Vec<datamodel::Variable> = match mac.variables {
         Some(Variables { variables: vars }) => vars
             .into_iter()
-            .filter(|v| !matches!(v, Var::Unhandled))
+            .filter(|v| !matches!(v, Var::Unhandled(_)))
             .map(datamodel::Variable::from)
             .map(canonicalize_body_variable_idents)
             .collect(),

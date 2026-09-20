@@ -22,7 +22,7 @@ use crate::ffi_try;
 use crate::patch::gather_error_details_with_db;
 use crate::{
     build_simlin_error, clear_out_error, drop_c_string, require_project, store_anyhow_error,
-    store_error, SimlinErrorCode, SimlinModel, SimlinProject,
+    store_error, store_warnings, SimlinErrorCode, SimlinModel, SimlinProject,
 };
 
 /// Open a project from binary protobuf data
@@ -536,7 +536,47 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     len: usize,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinProject {
+    simlin_project_open_xmile_with_warnings(data, len, ptr::null_mut(), out_error)
+}
+
+/// Open a project from XMILE/STMX format data, also reporting what the file
+/// holds that the project does not keep
+///
+/// The same open as `simlin_project_open_xmile`. The XMILE reader does not
+/// keep everything a file can hold: the objects on a view besides its
+/// diagram (a graph, a text box), interface pages, story mode, a standalone
+/// graphical function. So a save of the project, over the file or in any
+/// other format, leaves those out, and a host that saves needs to say so
+/// when the file opens.
+///
+/// Each kind of loss, in each place it occurs, is one `Warning`-severity,
+/// wire-`Generic`, kind-`Model` detail on the aggregate `SimlinError` stored
+/// in `out_collected_errors` (NULL when the file loses nothing; pass NULL to
+/// discard them). `message` is `"XMILE import: <reason>"` and `details` the
+/// bare reason, such as `2 sliders on interface page 1 are not kept: 'Birth
+/// Rate' and 'Population'`. The warnings describe the file as it was read,
+/// and the project does not keep them, so a host that shows them holds them
+/// itself.
+///
+/// Returns NULL and populates `out_error` on failure, with
+/// `out_collected_errors` NULL.
+///
+/// # Safety
+/// - `data` must be a valid pointer to at least `len` bytes
+/// - `out_collected_errors` may be null
+/// - `out_error` may be null
+/// - The returned project must be freed with `simlin_project_unref`
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_open_xmile_with_warnings(
+    data: *const u8,
+    len: usize,
+    out_collected_errors: *mut *mut SimlinError,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinProject {
     clear_out_error(out_error);
+    if !out_collected_errors.is_null() {
+        *out_collected_errors = ptr::null_mut();
+    }
     if data.is_null() {
         store_error(
             out_error,
@@ -549,8 +589,21 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     let slice = std::slice::from_raw_parts(data, len);
     let mut reader = BufReader::new(slice);
 
-    match simlin_engine::open_xmile(&mut reader) {
-        Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
+    // A caller that discards the warnings does not pay for them.
+    let opened = if out_collected_errors.is_null() {
+        simlin_engine::open_xmile(&mut reader).map(|project| (project, Vec::new()))
+    } else {
+        simlin_engine::open_xmile_with_warnings(&mut reader)
+    };
+    match opened {
+        Ok((datamodel_project, warnings)) => {
+            store_warnings(
+                out_collected_errors,
+                "XMILE import",
+                warnings.into_iter().map(|w| w.message),
+            );
+            Box::into_raw(Box::new(SimlinProject::new(datamodel_project)))
+        }
         Err(err) => {
             store_error(
                 out_error,
@@ -577,7 +630,48 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     len: usize,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinProject {
+    simlin_project_open_vensim_with_warnings(data, len, ptr::null_mut(), out_error)
+}
+
+/// Open a project from Vensim MDL format data, also reporting what the file
+/// holds that the project does not keep
+///
+/// The same open as `simlin_project_open_vensim`. The MDL reader does not
+/// keep everything a file can hold: a sketch's comments, graphs, sliders and
+/// images, and the custom graphs, tables and reports the file defines. So a
+/// save of the project, over the file or in any other format, leaves those
+/// out, and a host that saves needs to say so when the file opens.
+///
+/// Each kind of loss is one `Warning`-severity, wire-`Generic`, kind-`Model`
+/// detail on the aggregate `SimlinError` stored in `out_collected_errors`
+/// (NULL when the file loses nothing; pass NULL to discard them): one per
+/// kind and sketch view for what a modeler put on a view, and one per kind
+/// over the whole sketch for what follows from what the diagram does not
+/// draw (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is
+/// `"MDL import: <reason>"` and `details` the bare reason, such as `29
+/// comments on view 'View 1' are not kept, such as 'The World3 Model'`. The
+/// warnings describe the file as it was read, and the project does not keep
+/// them, so a host that shows them holds them itself.
+///
+/// Returns NULL and populates `out_error` on failure, with
+/// `out_collected_errors` NULL.
+///
+/// # Safety
+/// - `data` must be a valid pointer to at least `len` bytes
+/// - `out_collected_errors` may be null
+/// - `out_error` may be null
+/// - The returned project must be freed with `simlin_project_unref`
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_open_vensim_with_warnings(
+    data: *const u8,
+    len: usize,
+    out_collected_errors: *mut *mut SimlinError,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinProject {
     clear_out_error(out_error);
+    if !out_collected_errors.is_null() {
+        *out_collected_errors = ptr::null_mut();
+    }
     if data.is_null() {
         store_error(
             out_error,
@@ -600,8 +694,17 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
         }
     };
 
-    match simlin_engine::open_vensim(contents) {
-        Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
+    // The MDL reader finds its losses as it converts, so a caller that
+    // discards them pays nothing to be told.
+    match simlin_engine::open_vensim_with_warnings(contents) {
+        Ok((datamodel_project, warnings)) => {
+            store_warnings(
+                out_collected_errors,
+                "MDL import",
+                warnings.into_iter().map(|w| w.message),
+            );
+            Box::into_raw(Box::new(SimlinProject::new(datamodel_project)))
+        }
         Err(err) => {
             store_error(
                 out_error,

@@ -144,7 +144,7 @@ fn code_and_reason(code: ErrorCode, details: Option<&str>) -> String {
 /// `'a', 'b', and 'c'`. Long lists are truncated to the first three names
 /// plus a count, so a macro-instantiated conflict with dozens of sources
 /// stays readable.
-fn join_quoted_names(names: &[&str]) -> String {
+pub(crate) fn join_quoted_names(names: &[&str]) -> String {
     match names {
         [] => String::new(),
         [a] => format!("'{a}'"),

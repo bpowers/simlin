@@ -15,13 +15,12 @@ use std::os::raw::c_char;
 use std::ptr;
 
 use crate::ffi;
-use crate::ffi_error::{ErrorDetail, SimlinError};
+use crate::ffi_error::SimlinError;
 use crate::ffi_try;
 use crate::memory::simlin_malloc;
 use crate::{
-    build_simlin_error, clear_out_error, require_project, store_anyhow_error, store_error,
-    write_bytes_to_ffi_output, SimlinErrorCode, SimlinErrorKind, SimlinErrorSeverity,
-    SimlinProject,
+    clear_out_error, require_project, store_anyhow_error, store_error, store_warnings,
+    write_bytes_to_ffi_output, SimlinErrorCode, SimlinProject,
 };
 
 /// Serialize a project to binary protobuf format
@@ -385,25 +384,13 @@ pub unsafe extern "C" fn simlin_project_serialize_mdl(
         return;
     }
 
-    if out_collected_errors.is_null() || warnings.is_empty() {
-        return;
-    }
-
     // An `ExportWarning` carries only a message naming the affected variable,
-    // dimension, or group; there is no engine `ErrorCode` for lossiness, so
-    // each rides the wire `Generic` code with `Warning` severity -- the
-    // severity is what tells a caller the export succeeded.
-    let details: Vec<ErrorDetail> = warnings
-        .into_iter()
-        .map(|w| ErrorDetail {
-            message: Some(format!("MDL export: {}", w.message)),
-            kind: SimlinErrorKind::Model,
-            severity: SimlinErrorSeverity::Warning,
-            details: Some(w.message),
-            ..ErrorDetail::new(SimlinErrorCode::Generic)
-        })
-        .collect();
-    *out_collected_errors = build_simlin_error(SimlinErrorCode::Generic, &details).into_raw();
+    // dimension, or group.
+    store_warnings(
+        out_collected_errors,
+        "MDL export",
+        warnings.into_iter().map(|w| w.message),
+    );
 }
 
 /// Serialize a project to systems format
