@@ -447,8 +447,9 @@ y = x * 2
     }
 
     #[test]
-    fn test_simspecs_saveper_defaults_to_dt() {
-        // No SAVEPER defined, should default to DT
+    fn an_absent_saveper_follows_the_time_step() {
+        // No SAVEPER defined: the save step follows the time step, which the
+        // datamodel says with no save step (simulated as the time step).
         let mdl = "INITIAL TIME = 0
 ~ ~|
 FINAL TIME = 100
@@ -462,10 +463,10 @@ x = 1
         let project = convert_mdl(mdl).unwrap();
 
         assert_eq!(project.sim_specs.dt, Dt::Dt(0.5));
+        assert_eq!(project.sim_specs.save_step, None);
         assert_eq!(
-            project.sim_specs.save_step,
-            Some(Dt::Dt(0.5)),
-            "save_step should default to dt when SAVEPER not defined"
+            crate::results::Specs::from(&project.sim_specs).save_step,
+            0.5
         );
     }
 

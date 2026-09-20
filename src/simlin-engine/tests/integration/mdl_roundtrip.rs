@@ -1707,7 +1707,8 @@ const EXPECTED_REPARSE_FAILURES: &[&str] = &[];
 ///     knows (`ELMCOUNT`, not `SIZE`);
 ///   - quoted names are escaped idempotently and display newlines collapse in
 ///     every identifier the writer prints;
-///   - a save step equal to the time step is written as `TIME STEP`;
+///   - a save step is written as it was read: one that follows the time step
+///     as `TIME STEP`, a number as that number;
 ///   - the importer resolves element ownership, dimension order and mapped
 ///     dimensions' elements the same way on every run (GH #859).
 ///

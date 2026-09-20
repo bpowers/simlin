@@ -451,10 +451,18 @@ y[d] = 7, 8, 9 ~~|
 }
 
 #[test]
-fn a_save_step_equal_to_the_time_step_is_written_as_the_time_step() {
-    // The importer reads a SAVEPER it cannot evaluate as the time step's
-    // value, so the three spellings must all write back one way.
-    for saveper in ["TIME STEP", "0.5", "IF THEN ELSE(Time < 1, TIME STEP, 0.5)"] {
+fn a_save_step_is_written_as_it_was_read() {
+    // A SAVEPER that follows the time step stays `TIME STEP`, including one the
+    // importer cannot evaluate; a number stays that number, even the time
+    // step's own, so a later change to TIME STEP in Vensim moves only the
+    // SAVEPERs that followed it. Each is a fixed point.
+    let cases = [
+        ("TIME STEP", "TIME STEP"),
+        ("IF THEN ELSE(Time < 1, TIME STEP, 0.5)", "TIME STEP"),
+        ("0.5", "0.5"),
+        ("2", "2"),
+    ];
+    for (saveper, written) in cases {
         let source = format!(
             "x = 1 ~~|\nINITIAL TIME = 0 ~~|\nFINAL TIME = 10 ~~|\nTIME STEP = 0.5 ~~|\nSAVEPER = {saveper} ~~|\n"
         );
@@ -463,18 +471,10 @@ fn a_save_step_equal_to_the_time_step_is_written_as_the_time_step() {
         assert!(
             save1
                 .replace("\r\n", "\n")
-                .contains("SAVEPER  = \n\tTIME STEP"),
+                .contains(&format!("SAVEPER  = \n\t{written}\n")),
             "SAVEPER = {saveper}:\n{save1}"
         );
     }
-    let (_, save1, _, save2) = two_saves(
-        "x = 1 ~~|\nINITIAL TIME = 0 ~~|\nFINAL TIME = 10 ~~|\nTIME STEP = 0.5 ~~|\nSAVEPER = 2 ~~|\n",
-    );
-    assert_eq!(save1, save2);
-    assert!(
-        save1.replace("\r\n", "\n").contains("SAVEPER  = \n\t2"),
-        "{save1}"
-    );
 }
 
 #[test]

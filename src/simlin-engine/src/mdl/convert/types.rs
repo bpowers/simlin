@@ -133,8 +133,12 @@ impl SimSpecsBuilder {
             start: self.start.unwrap_or(0.0),
             stop: self.stop.unwrap_or(200.0),
             dt: self.dt.map(Dt::Dt).unwrap_or_default(),
-            // Saveper defaults to dt if not specified (per xmutil behavior)
-            save_step: self.save_step.or(self.dt).map(Dt::Dt),
+            // A SAVEPER that is a number is that number. Any other SAVEPER
+            // (`TIME STEP` itself, one the importer cannot evaluate, or none)
+            // follows the time step, which the datamodel says with no save
+            // step, so the writer writes it back as `TIME STEP` and a number
+            // as that number: a save never changes which one the file means.
+            save_step: self.save_step.map(Dt::Dt),
             sim_method: self.sim_method.unwrap_or(SimMethod::Euler),
             // Default to "Months" to match xmutil
             time_units: self.time_units.or_else(|| Some("Months".to_string())),

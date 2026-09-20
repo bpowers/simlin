@@ -4332,19 +4332,12 @@ impl MdlWriter {
         )
         .unwrap();
 
-        // SAVEPER. A save step equal to the time step is written as the
-        // reference Vensim defaults it to: the importer reads a SAVEPER it
-        // cannot evaluate to a number (`TIME STEP` among them) as the time
-        // step's value, so writing that value instead would change the file on
-        // the next save.
-        let step_length = |dt: &datamodel::Dt| match dt {
-            datamodel::Dt::Dt(v) => *v,
-            datamodel::Dt::Reciprocal(v) => 1.0 / v,
-        };
+        // SAVEPER. No save step means the save step follows the time step,
+        // which is `SAVEPER = TIME STEP`, the form the importer reads back as
+        // no save step. A save step is written as its number even when it
+        // equals the time step's, so a file keeps its meaning when TIME STEP
+        // is later changed.
         let saveper_value = match &sim_specs.save_step {
-            Some(save_step) if step_length(save_step) == step_length(&sim_specs.dt) => {
-                "TIME STEP".to_owned()
-            }
             Some(datamodel::Dt::Dt(v)) => format_f64(*v),
             Some(datamodel::Dt::Reciprocal(v)) => format!("1/{}", format_f64(*v)),
             None => "TIME STEP".to_owned(),

@@ -501,10 +501,11 @@ fn model_stock(
 /// other side's stock is not a pipe end, the route to that stock continues
 /// through the valve, so the open side takes the pipe end on the valve's far
 /// side from the stock; when the view does not draw that stock, the open side
-/// takes the pipe end whose connector field 4 marks it (100 upstream, 4
-/// downstream). When both sides are open (a flow that touches no
-/// stock), sketch order decides the source: unverified against Vensim, and it
-/// decides only which end of a stockless flow carries the arrowhead.
+/// takes the pipe end whose connector field 4 marks it: usually 100 upstream
+/// and 4 downstream, and otherwise the first pipe end in sketch order. When
+/// both sides are open (a flow that touches no stock), sketch order decides
+/// the source: unverified against Vensim, and it decides only which end of a
+/// stockless flow carries the arrowhead.
 pub fn resolve_flow_ends(
     valve: Option<&VensimValve>,
     view: &VensimView,
@@ -518,9 +519,10 @@ pub fn resolve_flow_ends(
         control: (i32, i32),
         anchor: (i32, i32),
         target: PipeTarget,
-        /// The connector's field 4: 100 on the pipe's upstream (source) end, 4
-        /// on its downstream (sink) end, as Vensim writes it and as the writer
-        /// writes it back.
+        /// The connector's field 4, which usually marks the pipe's upstream
+        /// (source) end with 100 and its downstream (sink) end with 4. The
+        /// corpus also has 36 and 68 on source ends and 68 on a sink end,
+        /// which mark neither, so such an end is chosen by sketch order.
         direction: i32,
     }
 
@@ -1314,7 +1316,8 @@ mod tests {
 
         /// A side the model gives no stock, when the view does not draw the
         /// other side's stock to measure the valve's far side from, takes the
-        /// pipe end its connector marks for that side (field 4: 100 upstream),
+        /// pipe end its connector marks for that side (field 4: usually 100
+        /// upstream),
         /// not the first in sketch order.
         #[test]
         fn an_open_side_takes_the_end_marked_for_it_when_the_view_lacks_the_stock() {
