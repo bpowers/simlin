@@ -48,6 +48,12 @@ mimalloc = { version = "0.1", optional = true }
 wasmalloc = "0.1.1"
 
 [dev-dependencies]
+# Self dev-dependency, as the engine has one: turns on `file_io` for this
+# crate's own test targets, so the tests of what reads external data files
+# (a `data_dir`) run under a plain `cargo test`, without turning it on for
+# any production build. `default-features = false` keeps the edge to exactly
+# that feature, since features unify over every edge.
+simlin = { path = ".", default-features = false, features = ["file_io"] }
 # Second edge onto the engine, adding EXACTLY `test-support` (the `TestProject`
 # model builder its integration tests use as `engine::test_common`). Keeping it
 # in dev-dependencies is what stops that builder from being compiled into the

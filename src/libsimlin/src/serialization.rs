@@ -15,12 +15,13 @@ use std::os::raw::c_char;
 use std::ptr;
 
 use crate::ffi;
-use crate::ffi_error::SimlinError;
+use crate::ffi_error::{ErrorDetail, SimlinError};
 use crate::ffi_try;
 use crate::memory::simlin_malloc;
 use crate::{
-    clear_out_error, require_project, store_anyhow_error, store_error, store_warnings,
-    write_bytes_to_ffi_output, ProjectContents, SimlinErrorCode, SimlinProject,
+    build_simlin_error, clear_out_error, require_project, store_anyhow_error, store_error,
+    store_warnings, write_bytes_to_ffi_output, ProjectContents, SimlinErrorCode, SimlinErrorKind,
+    SimlinErrorSeverity, SimlinProject,
 };
 
 /// Serialize a project to binary protobuf format
@@ -392,6 +393,160 @@ pub unsafe extern "C" fn simlin_project_serialize_mdl(
         warnings.into_iter().map(|w| w.message),
         None,
     );
+}
+
+/// Check whether saving a project in a format keeps what its model means
+///
+/// Saves the project in `format` (a `SimlinSaveFormat`), reads the save back
+/// as a host would open it, and compares the model the save holds with the
+/// project's two ways (see `simlin_engine::save_check`):
+///
+/// - its definition: the simulation specs, each dimension's elements, parent
+///   and mappings, and each variable's kind, dimensions, elements, equations
+///   (in the spelling the engine resolves them by), `:EXCEPT:` default,
+///   initial values, graphical functions, flows and the flags that change a
+///   simulation, whether or not the project simulates;
+/// - when the project simulates, every variable's series, value for value.
+///
+/// When the check cannot be sure a save keeps the meaning, it reports a
+/// change. Units, documentation and views are not meaning; a save that
+/// loses them reports them through the writers' own warnings.
+///
+/// Each change is a wire-`Generic` detail on the aggregate `SimlinError`
+/// stored in `out_changes`: kind `Variable` with `variable_name` set when one
+/// variable is at fault, else kind `Model`, with `model_name` set when the
+/// change is in one model. `message` is `"<format> save: <reason>"` and
+/// `details` the bare reason, such as `'demands1' is defined over dim2, not
+/// dim`. The aggregate's own message counts them: `Saving as Vensim MDL
+/// changes what this model means in 3 ways`.
+///
+/// The verdict is `out_changes` itself: NULL when the save keeps the model's
+/// meaning, and otherwise the save must not be made in place. A detail's
+/// severity only grades its change: `Error` when the save's results differ
+/// from the project's now, `Warning` when only its definition does (an
+/// equation the run never reaches, a flag it never exercises). When neither
+/// the project nor its save simulates, every detail is a `Warning`, since
+/// there are no results to compare.
+///
+/// `data_dir` is the directory the project's external data files are found
+/// in, as `simlin_project_open_vensim_with_data` takes it, so an MDL save's
+/// data references resolve as the project's did. Pass NULL for a project
+/// opened without one. As there, it is read only when the `file_io` feature
+/// is enabled.
+///
+/// Fails, with `out_error` set and `out_changes` NULL, when `format` is not a
+/// `SimlinSaveFormat` or cannot hold the project at all (MDL holds one model),
+/// as the serialize functions fail.
+///
+/// The check saves, reads and simulates the project and its save, so it
+/// takes as long as those do: a host runs it off its main thread. It holds
+/// the project's lock only to share its datamodel.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `data_dir` may be null; when non-null it must point to `data_dir_len`
+///   bytes of valid UTF-8 naming a directory
+/// - `out_changes` must be a valid pointer
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_check_save(
+    project: *mut SimlinProject,
+    format: u32,
+    data_dir: *const u8,
+    data_dir_len: usize,
+    out_changes: *mut *mut SimlinError,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_changes.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic).with_message("out_changes must not be NULL"),
+        );
+        return;
+    }
+    *out_changes = ptr::null_mut();
+    let Ok(format) = ffi::SimlinSaveFormat::try_from(format) else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message(format!("invalid save format discriminant: {format}")),
+        );
+        return;
+    };
+    let data_dir = if data_dir.is_null() {
+        None
+    } else {
+        match std::str::from_utf8(std::slice::from_raw_parts(data_dir, data_dir_len)) {
+            Ok(dir) => Some(dir),
+            Err(_) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("data_dir is not valid UTF-8"),
+                );
+                return;
+            }
+        }
+    };
+    let proj = ffi_try!(out_error, require_project(project));
+    let datamodel = proj.datamodel.lock().unwrap().shared();
+    let format: engine::save_check::SaveFormat = format.into();
+    #[cfg(feature = "file_io")]
+    let provider = data_dir.map(simlin_engine::FilesystemDataProvider::new);
+    #[cfg(feature = "file_io")]
+    let data = provider
+        .as_ref()
+        .map(|p| p as &dyn simlin_engine::DataProvider);
+    #[cfg(not(feature = "file_io"))]
+    let data: Option<&dyn simlin_engine::DataProvider> = {
+        let _ = data_dir;
+        None
+    };
+    let changes = match engine::save_check::check_save_with_data(&datamodel, format, data) {
+        Ok(changes) => changes,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::from(err.code))
+                    .with_message(format!("{} cannot hold this project: {err}", format.name())),
+            );
+            return;
+        }
+    };
+    if changes.is_empty() {
+        return;
+    }
+    let details: Vec<ErrorDetail> = changes
+        .iter()
+        .map(|change| ErrorDetail {
+            message: Some(format!("{} save: {}", format.name(), change.reason)),
+            model_name: change.model.clone(),
+            variable_name: change.variable.clone(),
+            kind: if change.variable.is_some() {
+                SimlinErrorKind::Variable
+            } else {
+                SimlinErrorKind::Model
+            },
+            severity: match change.kind {
+                engine::save_check::ChangeKind::Results => SimlinErrorSeverity::Error,
+                engine::save_check::ChangeKind::Structure => SimlinErrorSeverity::Warning,
+            },
+            details: Some(change.reason.clone()),
+            ..ErrorDetail::new(SimlinErrorCode::Generic)
+        })
+        .collect();
+    let mut error = build_simlin_error(SimlinErrorCode::Generic, &details);
+    let ways = if changes.len() == 1 {
+        "one way".to_string()
+    } else {
+        format!("{} ways", changes.len())
+    };
+    error.set_message(Some(format!(
+        "Saving as {} changes what this model means in {ways}",
+        format.name()
+    )));
+    *out_changes = error.into_raw();
 }
 
 /// Serialize a project to systems format

@@ -181,6 +181,15 @@ typedef enum {
   SIMLIN_JSON_FORMAT_SDAI = 1,
 } SimlinJsonFormat;
 
+// The format `simlin_project_check_save` checks a save in.
+typedef enum {
+  SIMLIN_SAVE_FORMAT_MDL = 0,
+  SIMLIN_SAVE_FORMAT_XMILE = 1,
+  SIMLIN_SAVE_FORMAT_JSON = 2,
+  SIMLIN_SAVE_FORMAT_JSON_SDAI = 3,
+  SIMLIN_SAVE_FORMAT_PROTOBUF = 4,
+} SimlinSaveFormat;
+
 // A live drag over the view as it was when the drag began.
 typedef struct SimlinGesture SimlinGesture;
 
@@ -1911,6 +1920,66 @@ void simlin_project_serialize_mdl(SimlinProject *project,
                                   uintptr_t *out_len,
                                   SimlinError **out_collected_errors,
                                   SimlinError **out_error);
+
+// Check whether saving a project in a format keeps what its model means
+//
+// Saves the project in `format` (a `SimlinSaveFormat`), reads the save back
+// as a host would open it, and compares the model the save holds with the
+// project's two ways (see `simlin_engine::save_check`):
+//
+// - its definition: the simulation specs, each dimension's elements, parent
+//   and mappings, and each variable's kind, dimensions, elements, equations
+//   (in the spelling the engine resolves them by), `:EXCEPT:` default,
+//   initial values, graphical functions, flows and the flags that change a
+//   simulation, whether or not the project simulates;
+// - when the project simulates, every variable's series, value for value.
+//
+// When the check cannot be sure a save keeps the meaning, it reports a
+// change. Units, documentation and views are not meaning; a save that
+// loses them reports them through the writers' own warnings.
+//
+// Each change is a wire-`Generic` detail on the aggregate `SimlinError`
+// stored in `out_changes`: kind `Variable` with `variable_name` set when one
+// variable is at fault, else kind `Model`, with `model_name` set when the
+// change is in one model. `message` is `"<format> save: <reason>"` and
+// `details` the bare reason, such as `'demands1' is defined over dim2, not
+// dim`. The aggregate's own message counts them: `Saving as Vensim MDL
+// changes what this model means in 3 ways`.
+//
+// The verdict is `out_changes` itself: NULL when the save keeps the model's
+// meaning, and otherwise the save must not be made in place. A detail's
+// severity only grades its change: `Error` when the save's results differ
+// from the project's now, `Warning` when only its definition does (an
+// equation the run never reaches, a flag it never exercises). When neither
+// the project nor its save simulates, every detail is a `Warning`, since
+// there are no results to compare.
+//
+// `data_dir` is the directory the project's external data files are found
+// in, as `simlin_project_open_vensim_with_data` takes it, so an MDL save's
+// data references resolve as the project's did. Pass NULL for a project
+// opened without one. As there, it is read only when the `file_io` feature
+// is enabled.
+//
+// Fails, with `out_error` set and `out_changes` NULL, when `format` is not a
+// `SimlinSaveFormat` or cannot hold the project at all (MDL holds one model),
+// as the serialize functions fail.
+//
+// The check saves, reads and simulates the project and its save, so it
+// takes as long as those do: a host runs it off its main thread. It holds
+// the project's lock only to share its datamodel.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `data_dir` may be null; when non-null it must point to `data_dir_len`
+//   bytes of valid UTF-8 naming a directory
+// - `out_changes` must be a valid pointer
+// - `out_error` may be null
+void simlin_project_check_save(SimlinProject *project,
+                               uint32_t format,
+                               const uint8_t *data_dir,
+                               uintptr_t data_dir_len,
+                               SimlinError **out_changes,
+                               SimlinError **out_error);
 
 // Serialize a project to systems format
 //

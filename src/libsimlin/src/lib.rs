@@ -118,7 +118,7 @@ pub use simulation::*;
 pub use ffi::{
     SimlinDiscoveredLoop, SimlinDiscoveryResult, SimlinDominantPeriod, SimlinJsonFormat,
     SimlinLink, SimlinLinkPolarity, SimlinLinks, SimlinLoop, SimlinLoopPolarity, SimlinLoops,
-    SimlinLtmMode,
+    SimlinLtmMode, SimlinSaveFormat,
 };
 pub use ffi_error::{ErrorDetail as ErrorDetailData, FfiError, SimlinError};
 

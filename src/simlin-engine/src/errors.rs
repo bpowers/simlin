@@ -133,7 +133,7 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
 /// One helper, so the equation and unit arms cannot drift on how a reason is
 /// joined to its code -- the joiner is the ` -- ` every summary in this module
 /// uses.
-fn code_and_reason(code: ErrorCode, details: Option<&str>) -> String {
+pub(crate) fn code_and_reason(code: ErrorCode, details: Option<&str>) -> String {
     match details {
         Some(details) => format!("{code} -- {details}"),
         None => code.to_string(),

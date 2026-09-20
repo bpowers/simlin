@@ -103,6 +103,46 @@ pub enum SimlinJsonFormat {
     Sdai = 1,
 }
 
+/// The format `simlin_project_check_save` checks a save in.
+#[repr(C)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SimlinSaveFormat {
+    Mdl = 0,
+    Xmile = 1,
+    Json = 2,
+    JsonSdai = 3,
+    Protobuf = 4,
+}
+
+impl TryFrom<u32> for SimlinSaveFormat {
+    type Error = ();
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(SimlinSaveFormat::Mdl),
+            1 => Ok(SimlinSaveFormat::Xmile),
+            2 => Ok(SimlinSaveFormat::Json),
+            3 => Ok(SimlinSaveFormat::JsonSdai),
+            4 => Ok(SimlinSaveFormat::Protobuf),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<SimlinSaveFormat> for simlin_engine::save_check::SaveFormat {
+    fn from(format: SimlinSaveFormat) -> Self {
+        use simlin_engine::save_check::SaveFormat;
+        match format {
+            SimlinSaveFormat::Mdl => SaveFormat::Mdl,
+            SimlinSaveFormat::Xmile => SaveFormat::Xmile,
+            SimlinSaveFormat::Json => SaveFormat::Json,
+            SimlinSaveFormat::JsonSdai => SaveFormat::SdaiJson,
+            SimlinSaveFormat::Protobuf => SaveFormat::Protobuf,
+        }
+    }
+}
+
 impl TryFrom<u32> for SimlinJsonFormat {
     type Error = ();
 

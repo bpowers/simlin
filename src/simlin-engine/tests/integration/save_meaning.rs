@@ -14,8 +14,9 @@
 //! entries it repairs.
 //!
 //! A save in another format (an XMILE model saved as MDL) is not gated here:
-//! a format can hold less than another, and a host asks before it saves
-//! across formats.
+//! a format can hold less than another, and a host asks `check_save`
+//! (`simlin_engine::save_check`) before it saves across formats. The second
+//! test holds that check to what the gate finds, across formats too.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -211,7 +212,16 @@ fn columns(results: &Results) -> BTreeMap<String, Vec<u64>> {
 /// How the save's results differ from the original's; None when they are the
 /// same, value for value, in every column.
 fn difference(original: &Results, save: &Results) -> Option<String> {
-    let (a, b) = (columns(original), columns(save));
+    difference_leaving_out(original, save, &[])
+}
+
+/// [`difference`], leaving out the columns named in `left_out`.
+fn difference_leaving_out(original: &Results, save: &Results, left_out: &[&str]) -> Option<String> {
+    let (mut a, mut b) = (columns(original), columns(save));
+    for name in left_out {
+        a.remove(*name);
+        b.remove(*name);
+    }
     let lost: Vec<&String> = a.keys().filter(|k| !b.contains_key(*k)).collect();
     let gained: Vec<&String> = b.keys().filter(|k| !a.contains_key(*k)).collect();
     let changed: Vec<&String> = a
@@ -300,4 +310,197 @@ fn a_save_keeps_what_the_model_simulates() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The saves `check_save` reports changing though the gate's run shows no
+/// difference: what only the structure shows, found by running this test.
+const EXPECTED_STRUCTURE_ONLY: &[(&str, Format)] = &[
+    // MDL cannot mark a variable non-negative, and these runs never go
+    // below zero.
+    (
+        "test/ai-information/GeneratedByAIThenEdited.stmx",
+        Format::Mdl,
+    ),
+    ("test/test-models/samples/teacup/teacup.stmx", Format::Mdl),
+    (
+        "test/test-models/tests/delay_xmile/test_delay_xmile.xmile",
+        Format::Mdl,
+    ),
+    (
+        "test/test-models/tests/non_negative_flows/test_non_negative_flows.xmile",
+        Format::Mdl,
+    ),
+    (
+        "test/test-models/tests/non_negative_flows/test_non_negative_flows_behavior.xmile",
+        Format::Mdl,
+    ),
+    // MDL drops an :EXCEPT: default the compiler applies where every
+    // element is written out, so no element takes it today, though one a
+    // dimension gained would.
+    ("test/test-models/tests/except/test_except.mdl", Format::Mdl),
+    (
+        "test/test-models/tests/except_multiple/test_except_multiple.mdl",
+        Format::Mdl,
+    ),
+    // A macro's input with no equation is written back as `0`; the macro
+    // is always called with it bound.
+    (
+        "test/test-models/tests/macro_stock/test_macro_stock.xmile",
+        Format::Xmile,
+    ),
+    (
+        "test/test-models/tests/macro_stock/test_macro_stock.xmile",
+        Format::Mdl,
+    ),
+    // A variable reads back over another dimension of the same elements,
+    // which these runs cannot tell apart (the element-only definitions
+    // `EXPECTED_CHANGES` lists first).
+    (
+        "test/sdeverywhere/models/subalias/subalias.mdl",
+        Format::Mdl,
+    ),
+    (
+        "test/test-models/tests/subscript_copy/test_subscript_copy.mdl",
+        Format::Mdl,
+    ),
+    (
+        "test/test-models/tests/subscript_copy/test_subscript_copy2.mdl",
+        Format::Mdl,
+    ),
+    (
+        "test/test-models/tests/subscript_subranges_equal/test_subscript_subrange_equal.mdl",
+        Format::Mdl,
+    ),
+    (
+        "test/test-models/tests/subscript_transposition/test_subscript_transposition.mdl",
+        Format::Mdl,
+    ),
+    (
+        "test/test-models/tests/subset_duplicated_coord/test_subset_duplicated_coord.mdl",
+        Format::Mdl,
+    ),
+];
+
+/// The control variables a model can hold as variables, which a format that
+/// keeps them as its specs reads back as specs: the check calls that no
+/// change when the values agree, so their columns are left out here.
+const CONTROL_COLUMNS: &[&str] = &["initial_time", "final_time", "time_step", "saveper"];
+
+/// `check_save` holds to what this gate finds, in the formats the gate saves
+/// in and as MDL for an XMILE model (the Save As a host would refuse): a
+/// save the gate finds changing a model has a change to its results, a save
+/// the gate finds keeping it has none, and a change to its definition only
+/// where the structure shows what the run does not (`EXPECTED_STRUCTURE_ONLY`).
+#[test]
+fn the_check_names_every_save_the_gate_finds_changing() {
+    use rayon::prelude::*;
+    use simlin_engine::save_check::{ChangeKind, SaveFormat, check_save};
+
+    let check_format = |format: Format| match format {
+        Format::Mdl => SaveFormat::Mdl,
+        Format::Xmile => SaveFormat::Xmile,
+        Format::Json => SaveFormat::Json,
+        Format::Protobuf => SaveFormat::Protobuf,
+    };
+    // Each save's gate verdict, and the check's changes to results and to
+    // the definition alone.
+    type Checked = (String, Format, bool, Result<(usize, usize), String>);
+    let results: Vec<Checked> = corpus()
+        .into_par_iter()
+        .flat_map_iter(|path| {
+            let Some(project) = open(&path) else {
+                return Vec::new();
+            };
+            let Ok(results) = simulate(&project) else {
+                return Vec::new();
+            };
+            let formats: &[Format] = if is_mdl(&path) {
+                &[Format::Mdl, Format::Json, Format::Protobuf]
+            } else {
+                &[Format::Xmile, Format::Json, Format::Protobuf, Format::Mdl]
+            };
+            formats
+                .iter()
+                .filter_map(|&format| {
+                    let gate_change = match saved(&project, format) {
+                        // A format that cannot hold the model: the check refuses it too.
+                        Err(why) if why.starts_with("writing") => return None,
+                        Err(_) => true,
+                        Ok(save) => match simulate(&save) {
+                            Err(_) => true,
+                            Ok(save_results) => {
+                                difference_leaving_out(&results, &save_results, CONTROL_COLUMNS)
+                                    .is_some()
+                            }
+                        },
+                    };
+                    let check = check_save(&project, check_format(format))
+                        .map(|changes| {
+                            let results = changes
+                                .iter()
+                                .filter(|c| c.kind == ChangeKind::Results)
+                                .count();
+                            (results, changes.len() - results)
+                        })
+                        .map_err(|e| e.to_string());
+                    Some((path.clone(), format, gate_change, check))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    assert!(
+        results.len() >= MIN_COMPARED,
+        "only {} saves were checked",
+        results.len()
+    );
+    let structure_only: BTreeSet<(&str, Format)> =
+        EXPECTED_STRUCTURE_ONLY.iter().copied().collect();
+    let mut failures = Vec::new();
+    for (path, format, gate_change, check) in &results {
+        let listed = structure_only.contains(&(path.as_str(), *format));
+        match (gate_change, check) {
+            (_, Err(why)) => failures.push(format!("{path} as {format:?}: the check refused: {why}")),
+            (true, Ok((0, _))) => failures.push(format!(
+                "{path} as {format:?} changes the model's results, and the check says they do not change"
+            )),
+            (false, Ok((n, _))) if *n > 0 => failures.push(format!(
+                "{path} as {format:?}: the check reports {n} changes to results the run does not show"
+            )),
+            (false, Ok((0, n))) if *n > 0 && !listed => failures.push(format!(
+                "{path} as {format:?}: the check reports {n} changes to the definition the run does not show"
+            )),
+            (false, Ok((0, 0))) if listed => failures.push(format!(
+                "{path} as {format:?}: the check reports none now; remove it from EXPECTED_STRUCTURE_ONLY"
+            )),
+            _ => {}
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A model that reads external data is read back with the data provider it
+/// was opened with, so its save's references resolve as the model's did.
+/// Without it, the save does not read back.
+#[test]
+fn a_save_that_reads_data_is_read_back_with_its_provider() {
+    use simlin_engine::save_check::{ChangeKind, SaveFormat, check_save, check_save_with_data};
+    let path = "../../test/test-models/tests/get_data/test_get_data.mdl";
+    let dir = std::path::Path::new(path).parent().unwrap();
+    let provider = simlin_engine::FilesystemDataProvider::new(dir);
+    let text = fs::read_to_string(path).unwrap();
+    let project = simlin_engine::open_vensim_with_data(&text, Some(&provider)).unwrap();
+
+    let changes = check_save_with_data(&project, SaveFormat::Mdl, Some(&provider)).unwrap();
+    assert!(changes.is_empty(), "{changes:?}");
+
+    let changes = check_save(&project, SaveFormat::Mdl).unwrap();
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert!(
+        changes[0]
+            .reason
+            .starts_with("the save does not read back: "),
+        "{changes:?}"
+    );
+    assert_eq!(changes[0].kind, ChangeKind::Results);
 }

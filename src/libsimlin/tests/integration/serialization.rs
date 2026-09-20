@@ -897,3 +897,275 @@ fn test_serialize_mdl_null_safety() {
         simlin_project_unref(proj);
     }
 }
+
+// ── simlin_project_check_save ──────────────────────────────────────────
+
+/// Open `mdl` through the FFI.
+unsafe fn open_mdl(mdl: &str) -> *mut SimlinProject {
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let proj = simlin_project_open_vensim(mdl.as_ptr(), mdl.len(), &mut err);
+    expect_no_error(err, "open_vensim");
+    assert!(!proj.is_null());
+    proj
+}
+
+/// A variable over a subrange of `dim2`: an MDL save writes it one element
+/// equation each, which reads back over `dim2`.
+const OVER_A_SUBRANGE: &str = "dim: A, B, C ~~|
+dim2: A, B, C, D, E ~~|
+demands[dim] = 10, 6, 3 ~~|
+total = SUM(demands[dim!]) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 4 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|
+";
+
+#[test]
+fn test_check_save_names_each_change_as_an_error_detail() {
+    unsafe {
+        let proj = open_mdl(OVER_A_SUBRANGE);
+        let mut changes: *mut SimlinError = ptr::null_mut();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_check_save(
+            proj,
+            SimlinSaveFormat::Mdl as u32,
+            ptr::null(),
+            0,
+            &mut changes,
+            &mut err,
+        );
+        expect_no_error(err, "check_save");
+        assert!(!changes.is_null(), "the MDL save changes the model");
+        assert_eq!(
+            CStr::from_ptr(simlin_error_get_message(changes)).to_str(),
+            Ok("Saving as Vensim MDL changes what this model means in one way")
+        );
+        assert_eq!(simlin_error_get_detail_count(changes), 1);
+        let detail = &*simlin_error_get_detail(changes, 0);
+        // The save simulates series for D and E: its results change.
+        assert_eq!(detail.severity, SimlinErrorSeverity::Error);
+        assert_eq!(detail.kind, SimlinErrorKind::Variable);
+        assert_eq!(detail.code, SimlinErrorCode::Generic);
+        let reason = CStr::from_ptr(detail.details).to_str().unwrap();
+        assert_eq!(reason, "'demands' is defined over dim2, not dim");
+        assert_eq!(
+            CStr::from_ptr(detail.message).to_str().unwrap(),
+            format!("Vensim MDL save: {reason}")
+        );
+        assert_eq!(CStr::from_ptr(detail.variable_name).to_str(), Ok("demands"));
+        assert_eq!(CStr::from_ptr(detail.model_name).to_str(), Ok("main"));
+        simlin_error_free(changes);
+
+        // XMILE and JSON name the dimension, so they keep the model.
+        for format in [
+            SimlinSaveFormat::Xmile,
+            SimlinSaveFormat::Json,
+            SimlinSaveFormat::Protobuf,
+        ] {
+            let mut changes: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_project_check_save(proj, format as u32, ptr::null(), 0, &mut changes, &mut err);
+            expect_no_error(err, "check_save");
+            assert!(changes.is_null(), "a save that keeps the model leaves NULL");
+        }
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_check_save_fails_for_a_format_that_cannot_hold_the_project() {
+    let mut datamodel = TestProject::new("check_multi")
+        .aux("a", "1", None)
+        .build_datamodel();
+    datamodel.models.push(engine::datamodel::Model {
+        name: "second".to_string(),
+        sim_specs: None,
+        variables: vec![].into(),
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let mut changes: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_check_save(
+            proj,
+            SimlinSaveFormat::Mdl as u32,
+            ptr::null(),
+            0,
+            &mut changes,
+            &mut err,
+        );
+        assert!(!err.is_null(), "MDL holds one model");
+        let message = CStr::from_ptr(simlin_error_get_message(err))
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            message.starts_with("Vensim MDL cannot hold this project"),
+            "{message}"
+        );
+        simlin_error_free(err);
+        assert!(changes.is_null(), "a failed check leaves no changes");
+        simlin_project_unref(proj);
+    }
+}
+
+/// A pulse after FINAL TIME, which MDL writes as another pulse.
+const A_LATE_PULSE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+<header><name>t</name><vendor>v</vendor><product version="1">p</product></header>
+<sim_specs><start>0</start><stop>5</stop><dt>1</dt></sim_specs>
+<model><variables><aux name="p"><eqn>PULSE(20, 20, 0)</eqn></aux></variables></model></xmile>"#;
+
+#[test]
+fn test_check_save_names_a_change_the_run_does_not_show_as_a_warning() {
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_xmile(A_LATE_PULSE.as_ptr(), A_LATE_PULSE.len(), &mut err);
+        expect_no_error(err, "open_xmile");
+        let mut changes: *mut SimlinError = ptr::null_mut();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_check_save(
+            proj,
+            SimlinSaveFormat::Mdl as u32,
+            ptr::null(),
+            0,
+            &mut changes,
+            &mut err,
+        );
+        expect_no_error(err, "check_save");
+        assert!(!changes.is_null(), "the MDL save writes another pulse");
+        assert_eq!(simlin_error_get_detail_count(changes), 1);
+        let detail = &*simlin_error_get_detail(changes, 0);
+        assert_eq!(detail.severity, SimlinErrorSeverity::Warning);
+        assert_eq!(CStr::from_ptr(detail.variable_name).to_str(), Ok("p"));
+        let reason = CStr::from_ptr(detail.details).to_str().unwrap();
+        assert!(reason.ends_with(", not as 'pulse(20, 20, 0)'"), "{reason}");
+        simlin_error_free(changes);
+        simlin_project_unref(proj);
+    }
+}
+
+/// With `file_io` (on for this crate's tests), the check reads an MDL save
+/// back with the data dir the project was opened with.
+#[cfg(feature = "file_io")]
+#[test]
+fn test_check_save_reads_an_mdl_save_back_with_the_data_dir() {
+    let path = "../../test/test-models/tests/get_data/test_get_data.mdl";
+    let mdl = std::fs::read_to_string(path).unwrap();
+    let dir = "../../test/test-models/tests/get_data";
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_vensim_with_data(
+            mdl.as_ptr(),
+            mdl.len(),
+            dir.as_ptr(),
+            dir.len(),
+            &mut err,
+        );
+        expect_no_error(err, "open_vensim_with_data");
+
+        let mut changes: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_check_save(
+            proj,
+            SimlinSaveFormat::Mdl as u32,
+            dir.as_ptr(),
+            dir.len(),
+            &mut changes,
+            &mut err,
+        );
+        expect_no_error(err, "check_save with the data dir");
+        assert!(changes.is_null(), "with its data, the save keeps the model");
+
+        let mut changes: *mut SimlinError = ptr::null_mut();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_check_save(
+            proj,
+            SimlinSaveFormat::Mdl as u32,
+            ptr::null(),
+            0,
+            &mut changes,
+            &mut err,
+        );
+        expect_no_error(err, "check_save without the data dir");
+        assert_eq!(simlin_error_get_detail_count(changes), 1);
+        let detail = &*simlin_error_get_detail(changes, 0);
+        let reason = CStr::from_ptr(detail.details).to_str().unwrap();
+        assert!(
+            reason.starts_with("the save does not read back: "),
+            "{reason}"
+        );
+        simlin_error_free(changes);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_check_save_refuses_a_data_dir_that_is_not_utf8() {
+    unsafe {
+        let proj = open_mdl(OVER_A_SUBRANGE);
+        let bad = [0xffu8, 0xfe];
+        let mut changes: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_check_save(
+            proj,
+            SimlinSaveFormat::Mdl as u32,
+            bad.as_ptr(),
+            bad.len(),
+            &mut changes,
+            &mut err,
+        );
+        expect_error_code(
+            err,
+            SimlinErrorCode::Generic,
+            "a data_dir that is not UTF-8",
+        );
+        assert!(changes.is_null());
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_check_save_null_safety_and_bad_format() {
+    unsafe {
+        let proj = open_mdl(OVER_A_SUBRANGE);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_check_save(
+            proj,
+            SimlinSaveFormat::Mdl as u32,
+            ptr::null(),
+            0,
+            ptr::null_mut(),
+            &mut err,
+        );
+        expect_error_code(err, SimlinErrorCode::Generic, "NULL out_changes");
+
+        let mut changes: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_check_save(proj, 99, ptr::null(), 0, &mut changes, &mut err);
+        expect_error_code(err, SimlinErrorCode::Generic, "bad format");
+        assert!(changes.is_null());
+
+        let mut changes: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_check_save(
+            ptr::null_mut(),
+            SimlinSaveFormat::Mdl as u32,
+            ptr::null(),
+            0,
+            &mut changes,
+            &mut err,
+        );
+        assert!(!err.is_null(), "a NULL project is an error");
+        simlin_error_free(err);
+        assert!(changes.is_null());
+
+        simlin_project_unref(proj);
+    }
+}

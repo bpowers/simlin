@@ -104,6 +104,7 @@ mod results;
 mod rk_integration_tests;
 #[cfg(test)]
 mod round_builtin_tests;
+pub mod save_check;
 pub mod serde;
 mod shared_vec;
 mod snapshot_arg;

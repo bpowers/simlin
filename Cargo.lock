@@ -3287,6 +3287,7 @@ dependencies = [
  "mimalloc",
  "serde",
  "serde_json",
+ "simlin",
  "simlin-engine",
  "wasm-interpreter",
  "wasmalloc",
