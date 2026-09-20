@@ -155,6 +155,87 @@ pub unsafe extern "C" fn simlin_project_open_json(
     }
 }
 
+/// Create a new project: what a modeler starts from, and what a host copies a
+/// project into.
+///
+/// The project is named `name` (NULL for no name) and holds one model, `main`,
+/// with an empty stock-and-flow view -- the editing entry points refuse a
+/// model that has none -- simulated from time 0 to 100 with a time step of 1
+/// by Euler's method. It is exactly the empty project the server creates for a
+/// new model (`src/server/project-creation.ts`, opened from its JSON), so
+/// every host starts from the same project.
+///
+/// Nothing is compiled or synced until a query needs it, so a host copies a
+/// project with `simlin_project_replace_contents(simlin_project_new(..), src)`
+/// for the price of the handle: the copy shares `src`'s datamodel.
+///
+/// Returns NULL and populates `out_error` when `name` is not valid UTF-8.
+///
+/// # Safety
+/// - `name` must be NULL or a valid NUL-terminated C string
+/// - `out_error` may be null
+/// - The returned project must be freed with `simlin_project_unref`
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_new(
+    name: *const c_char,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinProject {
+    clear_out_error(out_error);
+    let name = if name.is_null() {
+        String::new()
+    } else {
+        match CStr::from_ptr(name).to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("project name is not valid UTF-8"),
+                );
+                return ptr::null_mut();
+            }
+        }
+    };
+    Box::into_raw(Box::new(SimlinProject::new(new_datamodel(name))))
+}
+
+/// The datamodel `simlin_project_new` creates.
+fn new_datamodel(name: String) -> engine::datamodel::Project {
+    use engine::datamodel;
+    datamodel::Project {
+        name,
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 100.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![],
+            views: vec![datamodel::View::StockFlow(datamodel::StockFlow {
+                name: None,
+                elements: vec![],
+                view_box: datamodel::Rect::default(),
+                zoom: 1.0,
+                use_lettered_polarity: false,
+                font: None,
+                sketch_compat: None,
+            })],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
 /// Increment the reference count of a project
 ///
 /// Call this when you want to share a project handle with another component
@@ -350,13 +431,14 @@ pub unsafe extern "C" fn simlin_project_add_model(
     // Add to datamodel
     datamodel_locked.models.push(new_model);
 
-    // Re-sync the persistent salsa DB incrementally. The db owns its sync
+    // Re-sync the persistent salsa DB incrementally, when one has been built
+    // (one built later is built from this datamodel). The db owns its sync
     // state, so `db.sync` reuses the prior handles automatically; holding the
     // db lock across the call keeps concurrent readers (simlin_sim_new) from
     // observing a half-synced db.
-    let mut db = proj.lock_db();
-    db.sync(&datamodel_locked);
-    drop(db);
+    if let Some(mut db) = proj.built_db() {
+        db.sync(&datamodel_locked);
+    }
 
     drop(datamodel_locked);
 }
@@ -437,10 +519,14 @@ pub unsafe extern "C" fn simlin_project_get_model(
     Box::into_raw(Box::new(model))
 }
 
-/// Replace the contents of `dst` with a copy of the contents of `src`.
+/// Replace the contents of `dst` with the contents of `src`.
 ///
-/// `dst`'s `datamodel::Project` becomes a deep clone of `src`'s, and `dst`'s
-/// salsa db is re-synced to it incrementally, so unchanged variables keep
+/// `dst` shares `src`'s `datamodel::Project` rather than copying it: the two
+/// hold one datamodel until either is edited, and the edit copies it first, so
+/// neither ever sees the other's changes. A copy of a project, such as a host
+/// keeps for each undo step, therefore costs a reference count, and a project
+/// that is only copied, read or written never builds a salsa database. When
+/// `dst` has one, it is re-synced incrementally, so unchanged variables keep
 /// their cached compile fragments. `src` is only read (its refcount is not
 /// touched) and may be freed immediately afterwards.
 ///
@@ -477,14 +563,15 @@ pub unsafe extern "C" fn simlin_project_get_model(
 ///
 /// # Locking
 ///
-/// `src`'s datamodel lock is taken alone, just long enough to clone, and
-/// released BEFORE `dst`'s locks are acquired -- so two threads replacing in
-/// opposite directions cannot deadlock, and `dst == src` (a permitted no-op
-/// re-sync) does not self-deadlock. `dst`'s datamodel and db locks are then
-/// held together, in the datamodel-then-db order used project-wide, across
-/// both the db re-sync and the datamodel swap, so no concurrent reader
-/// (`simlin_sim_new`, `simlin_project_get_errors`, `simlin_project_apply_patch`)
-/// observes the datamodel and the db disagreeing.
+/// `src`'s datamodel lock is taken alone, just long enough to share its
+/// datamodel, and released BEFORE `dst`'s locks are acquired -- so two threads
+/// replacing in opposite directions cannot deadlock, and `dst == src` (a
+/// permitted no-op re-sync) does not self-deadlock. `dst`'s datamodel and db
+/// locks are then held together, in the datamodel-then-db order used
+/// project-wide, across both the db re-sync and the datamodel swap, so no
+/// concurrent reader (`simlin_sim_new`, `simlin_project_get_errors`,
+/// `simlin_project_apply_patch`) observes the datamodel and the db
+/// disagreeing.
 ///
 /// # Safety
 /// - `dst` must be a valid pointer to a SimlinProject
@@ -508,14 +595,16 @@ pub unsafe extern "C" fn simlin_project_replace_contents(
     }
     let src_ref = &*src;
 
-    // Clone under src's lock alone, then release it before touching dst (see
+    // Share under src's lock alone, then release it before touching dst (see
     // the locking notes above).
-    let new_datamodel = src_ref.datamodel.lock().unwrap().clone();
+    let new_datamodel = src_ref.datamodel.lock().unwrap().shared();
 
     let mut datamodel_locked = dst_ref.datamodel.lock().unwrap();
-    let mut db_locked = dst_ref.lock_db();
-    db_locked.sync(&new_datamodel);
-    **datamodel_locked = new_datamodel;
+    let mut db_locked = dst_ref.built_db();
+    if let Some(db) = &mut db_locked {
+        db.sync(&new_datamodel);
+    }
+    datamodel_locked.replace(new_datamodel);
 }
 
 /// Open a project from XMILE/STMX format data
@@ -911,7 +1000,7 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
     // expansion build path -- which needs the datamodel -- rather than tripping
     // the `Conveyor/QueueNotExpanded` guard on the ordinary compile path.
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    let mut db_locked = proj.lock_db();
+    let mut db_locked = proj.lock_db_with(&datamodel_locked);
     let Some(source_project) = db_locked.current_source_project() else {
         return false;
     };
@@ -951,7 +1040,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     };
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    let mut db_locked = proj.lock_db();
+    let mut db_locked = proj.lock_db_with(&datamodel_locked);
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => return ptr::null_mut(),

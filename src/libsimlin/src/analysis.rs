@@ -817,7 +817,7 @@ pub unsafe extern "C" fn simlin_analyze_discover_loops(
             return ptr::null_mut();
         }
     };
-    let mut db_locked = (*model_ref.project).lock_db();
+    let mut db_locked = (*model_ref.project).lock_db_with(&datamodel_guard);
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {

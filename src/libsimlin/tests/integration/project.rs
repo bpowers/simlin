@@ -1892,7 +1892,7 @@ fn population_project(stop: f64) -> engine::datamodel::Project {
 /// keeps working and observes the new contents (variables, sim specs), so a
 /// host reloading a model file in place does not have to invalidate its
 /// model objects. The source project is untouched and, once its own
-/// refcount is dropped, the destination still holds an independent copy.
+/// refcount is dropped, the destination still holds the contents.
 #[test]
 fn test_replace_contents_live_model_handle_observes_new_contents() {
     let dst = open_project_from_datamodel(&population_project(10.0));
@@ -1937,7 +1937,7 @@ fn test_replace_contents_live_model_handle_observes_new_contents() {
         assert_eq!(ffi_stepcount(sim), 21);
         simlin_sim_unref(sim);
 
-        // Replacing copies contents only: neither refcount moves, and the
+        // Replacing shares contents only: neither refcount moves, and the
         // source project is left exactly as it was.
         assert_eq!((*dst).ref_count.load(Ordering::SeqCst), dst_refs_before);
         assert_eq!((*src).ref_count.load(Ordering::SeqCst), src_refs_before);
@@ -1946,7 +1946,8 @@ fn test_replace_contents_live_model_handle_observes_new_contents() {
             "source project must be left untouched"
         );
 
-        // The copy is deep: freeing the source leaves the destination usable.
+        // The destination holds what it shares: freeing the source leaves it
+        // usable.
         simlin_project_unref(src);
         assert_eq!(
             ffi_var_names(model),

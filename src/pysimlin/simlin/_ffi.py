@@ -434,10 +434,11 @@ def serialize_mdl(project_ptr: Any) -> tuple[bytes, list[ErrorDetail]]:
 
 
 def replace_contents(dst_project_ptr: Any, src_project_ptr: Any) -> None:
-    """Replace the contents of one project in place with a copy of another's.
+    """Replace the contents of one project in place with another's.
 
-    ``dst``'s datamodel becomes a deep clone of ``src``'s and its salsa db is
-    re-synced, so ``Model`` objects already obtained from ``dst`` (which hold
+    ``dst`` shares ``src``'s datamodel until either is edited (the edit copies
+    it first), and its salsa db, when one has been built, is re-synced, so
+    ``Model`` objects already obtained from ``dst`` (which hold
     the project pointer plus a model name) stay valid and observe the new
     contents on their next call. ``src`` is only read: its refcount is
     untouched and it may be closed immediately afterwards. This is the

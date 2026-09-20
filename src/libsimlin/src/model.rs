@@ -132,7 +132,7 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
         // until the snapshot is assembled so special-stock dispatch cannot
         // observe markers from a different revision than its source inputs.
         let datamodel = project_ref.datamodel.lock().unwrap();
-        let mut db = project_ref.lock_db();
+        let mut db = project_ref.lock_db_with(&datamodel);
         if let Some(source_project) = db.current_source_project() {
             if ltm_enabled {
                 project_ref

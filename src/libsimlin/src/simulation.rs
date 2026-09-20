@@ -76,7 +76,7 @@ pub unsafe extern "C" fn simlin_sim_new(
     // that datamodel readers block for the length of a compile; the db lock was
     // already held that long, and a compile is exactly what it exists to serialize.
     let datamodel_locked = project_ref.datamodel.lock().unwrap();
-    let mut db_locked = project_ref.lock_db();
+    let mut db_locked = project_ref.lock_db_with(&datamodel_locked);
 
     // Salsa-based incremental compilation. Both LTM and non-LTM paths use the
     // same pipeline, keyed on the requested overlay, so the two variants stay

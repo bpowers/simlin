@@ -490,9 +490,9 @@ fn collect_models_with_unit_warnings(
 
 /// Internal helper that applies a ProjectPatch to a project.
 ///
-/// This is the core patch application logic. It handles datamodel cloning,
-/// patch application, error gathering, validation, and committing changes
-/// (unless dry_run is true).
+/// This is the core patch application logic. It handles staging a copy of
+/// the datamodel, patch application, error gathering, validation, and
+/// committing changes (unless dry_run is true).
 ///
 /// The datamodel lock is held for the entire operation to prevent
 /// concurrent patchers from snapshotting a stale datamodel between
@@ -529,7 +529,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
 
     // Snapshot the pre-patch warning baseline while holding the db lock.
     let models_with_existing_warnings = {
-        let db_locked = project_ref.lock_db();
+        let db_locked = project_ref.lock_db_with(&datamodel_locked);
         if let Some(source_project) = db_locked.current_source_project() {
             let diags = engine::db::collect_all_diagnostics(
                 &db_locked,
@@ -542,8 +542,11 @@ pub(crate) unsafe fn apply_project_patch_internal(
         }
     };
 
-    let original_datamodel = datamodel_locked.clone();
-    let mut staged_datamodel = original_datamodel.clone();
+    // The one copy an edit makes: the original stays shared (with the project
+    // and any copy of it), so a rejected or dry-run patch restores it as it
+    // was, and a committed one replaces it with the staged copy.
+    let original_datamodel = datamodel_locked.shared();
+    let mut staged_datamodel = (*original_datamodel).clone();
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::SnapshotWhileProjectLocked, project_ref);
 
@@ -562,7 +565,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // are dry runs. `sync_staged` stages the patched datamodel into the db's
     // own sync state and hands back the PRE-staging handles (`prev`) so a
     // rejected/dry-run patch can be rolled back exactly.
-    let mut db = project_ref.lock_db();
+    let mut db = project_ref.lock_db_with(&datamodel_locked);
     let (staged_sp, prev) = db.sync_staged(&staged_datamodel);
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::StagedSyncWhileDbLocked, project_ref);
@@ -654,7 +657,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // `sync_staged`, so only the canonical datamodel needs to be written. The
     // memos the staged diagnostics and compile superseded are freed when the
     // db lock drops (`DbLock`), inside this edit rather than the next.
-    **datamodel_locked = staged_datamodel;
+    datamodel_locked.replace(std::sync::Arc::new(staged_datamodel));
 }
 
 // ── FFI entry point ────────────────────────────────────────────────────

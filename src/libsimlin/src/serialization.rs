@@ -20,7 +20,7 @@ use crate::ffi_try;
 use crate::memory::simlin_malloc;
 use crate::{
     clear_out_error, require_project, store_anyhow_error, store_error, store_warnings,
-    write_bytes_to_ffi_output, SimlinErrorCode, SimlinProject,
+    write_bytes_to_ffi_output, ProjectContents, SimlinErrorCode, SimlinProject,
 };
 
 /// Serialize a project to binary protobuf format
@@ -475,13 +475,15 @@ pub unsafe extern "C" fn simlin_project_serialize_systems(
 /// generated view is never written back to the project. Callers that want
 /// a persisted view use `simlin_project_diagram_sync`.
 ///
-/// Locking: the caller holds the datamodel lock; this takes the db lock,
-/// matching the datamodel-then-db order used project-wide.
+/// Locking: the caller holds the datamodel lock and passes the contents it
+/// locked; this takes the db lock, matching the datamodel-then-db order used
+/// project-wide.
 fn datamodel_with_generated_layout(
     proj: &SimlinProject,
-    datamodel: &engine::datamodel::Project,
+    contents: &ProjectContents,
     model_name: &str,
 ) -> Result<Option<engine::datamodel::Project>, String> {
+    let datamodel: &engine::datamodel::Project = contents;
     let Some(model) = datamodel.get_model(model_name) else {
         return Ok(None);
     };
@@ -494,7 +496,7 @@ fn datamodel_with_generated_layout(
         return Ok(None);
     }
 
-    let db_locked = proj.lock_db();
+    let db_locked = proj.lock_db_with(contents);
     let db_state = db_locked
         .current_source_project()
         .map(|sp| (&*db_locked, sp));

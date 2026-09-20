@@ -22,6 +22,12 @@
 //! editing planners. A read that dropped the index would only cost a rebuild,
 //! so these rows pin performance, not freshness.
 //!
+//! A copy shares the datamodel until either side is edited. The rows take a
+//! project and a copy of it (`simlin_project_replace_contents` into
+//! `simlin_project_new`), mutate one side through each mutating entry point,
+//! and require that the other side is exactly as it was; the reads, a dry run
+//! and a rejected patch, leave the two sharing one datamodel.
+//!
 //! A hit test locks the datamodel as the planners do, so a press issued while an
 //! edit holds the project waits for the edit to land. The contract test holds an
 //! edit at its staging point, under both project locks, and presses from another
@@ -420,6 +426,100 @@ fn an_entry_point_that_reads_keeps_the_hit_index() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A copy of `proj`, made as a host copies a project: its contents replaced
+/// with `proj`'s in a new project.
+unsafe fn copy_of(proj: *mut SimlinProject) -> *mut SimlinProject {
+    let mut err = ptr::null_mut();
+    let copy = simlin_project_new(ptr::null(), &mut err);
+    expect_no_error(err, "a new project");
+    simlin_project_replace_contents(copy, proj, &mut err);
+    expect_no_error(err, "copying the project");
+    copy
+}
+
+unsafe fn shares_datamodel(a: *mut SimlinProject, b: *mut SimlinProject) -> bool {
+    let a = (*a).datamodel.lock().unwrap().shared();
+    let b = (*b).datamodel.lock().unwrap().shared();
+    Arc::ptr_eq(&a, &b)
+}
+
+unsafe fn datamodel_of(proj: *mut SimlinProject) -> simlin_engine::datamodel::Project {
+    (**(*proj).datamodel.lock().unwrap()).clone()
+}
+
+#[test]
+fn a_copy_shares_the_datamodel_until_an_edit_of_either_side_copies_it() {
+    let mut failures = Vec::new();
+    for mutation in Mutation::ALL {
+        for edit_the_copy in [true, false] {
+            let side = if edit_the_copy {
+                "the copy"
+            } else {
+                "the original"
+            };
+            unsafe {
+                let original = open(100.0, 100.0);
+                let copy = copy_of(original);
+                if !shares_datamodel(original, copy) {
+                    failures.push(format!("{mutation:?}: a copy holds a datamodel of its own"));
+                }
+                let before = datamodel_of(original);
+                let (edited, other) = if edit_the_copy {
+                    (copy, original)
+                } else {
+                    (original, copy)
+                };
+                mutation.run(edited);
+                if datamodel_of(other) != before {
+                    failures.push(format!("{mutation:?} of {side} reached the other side"));
+                }
+                // What makes the row able to catch an edit reaching the other
+                // side at all: the edit changed the side it was made on.
+                if datamodel_of(edited) == before {
+                    failures.push(format!("{mutation:?} of {side} changed nothing"));
+                }
+                if shares_datamodel(original, copy) {
+                    failures.push(format!("{mutation:?} of {side} left both sides sharing"));
+                }
+                simlin_project_unref(copy);
+                simlin_project_unref(original);
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_dry_run_or_a_rejected_patch_leaves_a_copy_sharing_the_datamodel() {
+    for read in [Read::DryRunPatch, Read::RejectedPatch] {
+        unsafe {
+            let original = open(100.0, 100.0);
+            let copy = copy_of(original);
+            let model = main_model(copy);
+            read.run(copy, model);
+            assert!(
+                shares_datamodel(original, copy),
+                "{read:?} copied a datamodel it did not change"
+            );
+            simlin_model_unref(model);
+            simlin_project_unref(copy);
+            simlin_project_unref(original);
+        }
+    }
+}
+
+#[test]
+fn a_copy_outlives_the_project_it_was_copied_from() {
+    unsafe {
+        let original = open(100.0, 100.0);
+        let before = datamodel_of(original);
+        let copy = copy_of(original);
+        simlin_project_unref(original);
+        assert!(datamodel_of(copy) == before);
+        simlin_project_unref(copy);
+    }
 }
 
 #[test]

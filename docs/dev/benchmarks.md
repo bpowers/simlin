@@ -123,6 +123,20 @@ perf record -g -- target/release/examples/editing_latency test/metasd/WRLD3-03/w
 perf report
 ```
 
+## Memory at the libsimlin FFI
+
+`src/libsimlin/examples/memory_census.rs` measures what a native host holds while it works on a model, step by step through the entry points a host calls. A counting global allocator over the system allocator reports the heap each step leaves live and the peak reached during it, and a retained size is attributed by dropping one owner at a time (a run, an undo copy, the compiled project) and reading how far the live count falls.
+
+```bash
+# Every workload in one process
+cargo run --release -p simlin --example memory_census -- "test/xmutil_test_models/C-LEARN v77 for Vensim.mdl"
+
+# One workload per process, beside the process's own peak (GNU time on Linux)
+/usr/bin/time -v target/release/examples/memory_census test/metasd/WRLD3-03/wrld3-03.mdl --workload undo --edits 50
+```
+
+The workloads are `open`, `simulate` (compile, run and read the series a diagram's sparklines draw), `diagnostics`, `loops` (structural loops, a Loops That Matter run and its links, loop discovery), `undo` (`--edits` equation edits landed the way a host lands them, each copied for the undo history, then all undone) and `draft` (an equation draft previewed on a scratch copy). The live count covers the heap alone: the allocator's own retention and anything outside the heap show only in the process's peak. Like the other harnesses, its results belong in the PR or chat, never in a committed file.
+
 ## Profiling
 
 ### Build a benchmark binary for profiling

@@ -14,15 +14,25 @@
 //! (`SimlinProject::datamodel`), so an entry point reads an index built from
 //! exactly the datamodel it locked, and they add no lock of their own to the
 //! project-wide datamodel-then-db order.
+//!
+//! The datamodel is shared: `simlin_project_replace_contents` gives the
+//! destination the source's datamodel itself, not a copy, so a host's copy of a
+//! project (an undo step's snapshot, a save's) costs a reference count until
+//! one of the two is edited. The same mutable borrow that drops the indexes
+//! copies a shared datamodel first (`Arc::make_mut`), so an edit of one project
+//! never reaches another, and a datamodel nothing else holds is edited in place.
 
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 use simlin_engine::{datamodel, editing};
 
 /// A project's datamodel and the indexes derived from it.
 pub struct ProjectContents {
-    datamodel: datamodel::Project,
+    /// Shared with every project whose contents were replaced from this one,
+    /// until one of them is edited.
+    datamodel: Arc<datamodel::Project>,
     /// Hit indexes by model name, each built from `datamodel` when first asked
     /// for, and all dropped by any mutable borrow of `datamodel`.
     hit_indexes: HashMap<String, editing::HitIndex>,
@@ -31,9 +41,22 @@ pub struct ProjectContents {
 impl ProjectContents {
     pub(crate) fn new(datamodel: datamodel::Project) -> ProjectContents {
         ProjectContents {
-            datamodel,
+            datamodel: Arc::new(datamodel),
             hit_indexes: HashMap::new(),
         }
+    }
+
+    /// The datamodel itself, for another project to share or for a caller
+    /// that needs it after releasing the lock.
+    pub(crate) fn shared(&self) -> Arc<datamodel::Project> {
+        Arc::clone(&self.datamodel)
+    }
+
+    /// Makes `datamodel` these contents, dropping every index: a replacement
+    /// that shares the datamodel it is given rather than copying it.
+    pub(crate) fn replace(&mut self, datamodel: Arc<datamodel::Project>) {
+        self.hit_indexes.clear();
+        self.datamodel = datamodel;
     }
 
     /// The hit index of `model_name`'s first stock-and-flow view: the one
@@ -64,11 +87,13 @@ impl Deref for ProjectContents {
 }
 
 impl DerefMut for ProjectContents {
-    /// Drops every index before the datamodel is lent out: whatever the
-    /// borrower changes, no index built from the datamodel as it was survives.
+    /// Drops every index before the datamodel is lent out, and copies the
+    /// datamodel first when another project shares it: whatever the borrower
+    /// changes, no index built from the datamodel as it was survives, and no
+    /// other project sees the change.
     fn deref_mut(&mut self) -> &mut datamodel::Project {
         self.hit_indexes.clear();
-        &mut self.datamodel
+        Arc::make_mut(&mut self.datamodel)
     }
 }
 

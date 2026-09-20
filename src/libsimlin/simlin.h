@@ -1428,6 +1428,28 @@ SimlinProject *simlin_project_open_json(const uint8_t *data,
                                         uint32_t format,
                                         SimlinError **out_error);
 
+// Create a new project: what a modeler starts from, and what a host copies a
+// project into.
+//
+// The project is named `name` (NULL for no name) and holds one model, `main`,
+// with an empty stock-and-flow view -- the editing entry points refuse a
+// model that has none -- simulated from time 0 to 100 with a time step of 1
+// by Euler's method. It is exactly the empty project the server creates for a
+// new model (`src/server/project-creation.ts`, opened from its JSON), so
+// every host starts from the same project.
+//
+// Nothing is compiled or synced until a query needs it, so a host copies a
+// project with `simlin_project_replace_contents(simlin_project_new(..), src)`
+// for the price of the handle: the copy shares `src`'s datamodel.
+//
+// Returns NULL and populates `out_error` when `name` is not valid UTF-8.
+//
+// # Safety
+// - `name` must be NULL or a valid NUL-terminated C string
+// - `out_error` may be null
+// - The returned project must be freed with `simlin_project_unref`
+SimlinProject *simlin_project_new(const char *name, SimlinError **out_error);
+
 // Increment the reference count of a project
 //
 // Call this when you want to share a project handle with another component
@@ -1490,10 +1512,14 @@ SimlinModel *simlin_project_get_model(SimlinProject *project,
                                       const char *model_name,
                                       SimlinError **out_error);
 
-// Replace the contents of `dst` with a copy of the contents of `src`.
+// Replace the contents of `dst` with the contents of `src`.
 //
-// `dst`'s `datamodel::Project` becomes a deep clone of `src`'s, and `dst`'s
-// salsa db is re-synced to it incrementally, so unchanged variables keep
+// `dst` shares `src`'s `datamodel::Project` rather than copying it: the two
+// hold one datamodel until either is edited, and the edit copies it first, so
+// neither ever sees the other's changes. A copy of a project, such as a host
+// keeps for each undo step, therefore costs a reference count, and a project
+// that is only copied, read or written never builds a salsa database. When
+// `dst` has one, it is re-synced incrementally, so unchanged variables keep
 // their cached compile fragments. `src` is only read (its refcount is not
 // touched) and may be freed immediately afterwards.
 //
@@ -1530,14 +1556,15 @@ SimlinModel *simlin_project_get_model(SimlinProject *project,
 //
 // # Locking
 //
-// `src`'s datamodel lock is taken alone, just long enough to clone, and
-// released BEFORE `dst`'s locks are acquired -- so two threads replacing in
-// opposite directions cannot deadlock, and `dst == src` (a permitted no-op
-// re-sync) does not self-deadlock. `dst`'s datamodel and db locks are then
-// held together, in the datamodel-then-db order used project-wide, across
-// both the db re-sync and the datamodel swap, so no concurrent reader
-// (`simlin_sim_new`, `simlin_project_get_errors`, `simlin_project_apply_patch`)
-// observes the datamodel and the db disagreeing.
+// `src`'s datamodel lock is taken alone, just long enough to share its
+// datamodel, and released BEFORE `dst`'s locks are acquired -- so two threads
+// replacing in opposite directions cannot deadlock, and `dst == src` (a
+// permitted no-op re-sync) does not self-deadlock. `dst`'s datamodel and db
+// locks are then held together, in the datamodel-then-db order used
+// project-wide, across both the db re-sync and the datamodel swap, so no
+// concurrent reader (`simlin_sim_new`, `simlin_project_get_errors`,
+// `simlin_project_apply_patch`) observes the datamodel and the db
+// disagreeing.
 //
 // # Safety
 // - `dst` must be a valid pointer to a SimlinProject

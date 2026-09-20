@@ -69,7 +69,7 @@ use std::ops::{Deref, DerefMut};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 #[cfg(test)]
 use simlin_engine::buffa::Message;
@@ -434,17 +434,24 @@ pub struct SimlinProject {
     /// borrow of the datamodel drops (`ProjectContents`). Locked before `db`
     /// when both are needed.
     pub datamodel: Mutex<ProjectContents>,
-    /// The salsa database owns its own sync state (the salsa input handles
-    /// from the last sync), so incremental re-syncs are automatic: callers
-    /// use `db.sync`/`db.sync_staged`/`db.restore` and read the current
-    /// `SourceProject` via `db.current_source_project()`. There is no
-    /// separate `sync_state` mutex to keep in lockstep.
+    /// The salsa database, built from the datamodel the first time an entry
+    /// point runs a query (`SimlinProject::lock_db`): a project that is only
+    /// read, written or copied, such as a host's undo snapshot or a file read
+    /// that lands in another project, never builds one. Once built it is kept
+    /// synced by every entry point that changes the datamodel.
     ///
-    /// Crate-private so that [`SimlinProject::lock_db`] is the only way to
-    /// reach it: the [`DbLock`] it returns is what releases superseded memos,
-    /// and a raw `db.lock()` would run queries whose garbage no entry point
-    /// sweeps until an unrelated one happens to.
-    pub(crate) db: Mutex<engine::db::SimlinDb>,
+    /// The database owns its own sync state (the salsa input handles from the
+    /// last sync), so incremental re-syncs are automatic: callers use
+    /// `db.sync`/`db.sync_staged`/`db.restore` and read the current
+    /// `SourceProject` via `db.current_source_project()`. There is no separate
+    /// `sync_state` mutex to keep in lockstep.
+    ///
+    /// Private so that the lock accessors are the only way to reach it: the
+    /// [`DbLock`] they return is what releases superseded memos, and a raw
+    /// lock would run queries whose garbage no entry point sweeps until an
+    /// unrelated one happens to. The `OnceLock` is also the set-once flag that
+    /// lets a query skip the datamodel lock once the database exists.
+    db: OnceLock<Mutex<engine::db::SimlinDb>>,
     /// Latches true the first time any simulation is created on this project
     /// with `enable_ltm = true`. `simlin_project_get_errors` reads it to
     /// decide whether to collect diagnostics under the LTM overlay, so the
@@ -463,12 +470,12 @@ pub struct SimlinProject {
 /// The project's salsa database, locked.
 ///
 /// Every entry point that runs queries locks the database through
-/// [`SimlinProject::lock_db`] -- the field is `pub(crate)` and this is its
-/// only guard -- and dropping the lock releases the memos those queries
-/// superseded (`SimlinDb::release_replaced_memos`, whose rustdoc holds the
-/// salsa mechanics), so the policy has one owner and no entry point can
-/// forget it. Lock the datamodel FIRST when both are needed: the
-/// project-wide order is datamodel-then-db.
+/// [`SimlinProject::lock_db`] or [`SimlinProject::lock_db_with`] -- the field
+/// is private and these are its only guards -- and dropping the lock releases
+/// the memos those queries superseded (`SimlinDb::release_replaced_memos`,
+/// whose rustdoc holds the salsa mechanics), so the policy has one owner and
+/// no entry point can forget it. Lock the datamodel FIRST when both are
+/// needed: the project-wide order is datamodel-then-db.
 ///
 /// The release runs on every drop, read-only entry points included. When
 /// nothing was superseded it costs one exclusive salsa access -- a
@@ -522,23 +529,56 @@ impl Drop for DbLock<'_> {
 }
 
 impl SimlinProject {
-    /// A project holding `datamodel`, with a database synced to it and no
-    /// derived index yet: the one constructor every open function shares.
+    /// A project holding `datamodel`, with no database and no derived index
+    /// yet: the one constructor every open function shares.
     pub(crate) fn new(datamodel: engine::datamodel::Project) -> SimlinProject {
-        let db = new_synced_db(&datamodel);
         SimlinProject {
             datamodel: Mutex::new(ProjectContents::new(datamodel)),
-            db: Mutex::new(db),
+            db: OnceLock::new(),
             ltm_requested: AtomicBool::new(false),
             ref_count: AtomicUsize::new(1),
         }
     }
 
-    /// Lock the salsa database for a run of queries; see [`DbLock`]. The only
-    /// accessor of the database, `pub` so the integration-test crate reads it
-    /// through the same guard as every entry point.
+    /// Lock the salsa database for a run of queries, from an entry point
+    /// that holds no datamodel lock; see [`DbLock`].
+    ///
+    /// Once the database exists this takes its lock alone, so a query never
+    /// waits on the datamodel lock. The first call builds the database from
+    /// the datamodel, which it locks first, as the project-wide order
+    /// requires, and releases once the database is built. An entry point
+    /// that holds the datamodel lock calls [`SimlinProject::lock_db_with`]
+    /// instead: this would wait on the lock it holds. `pub` so the
+    /// integration-test crate reads the database through the same guard as
+    /// every entry point.
     pub fn lock_db(&self) -> DbLock<'_> {
-        DbLock(self.db.lock().unwrap())
+        if let Some(db) = self.db.get() {
+            return DbLock(db.lock().unwrap());
+        }
+        let contents = self.datamodel.lock().unwrap();
+        self.lock_db_with(&contents)
+    }
+
+    /// Lock the salsa database for a run of queries, from an entry point
+    /// that holds the datamodel lock and passes the contents it locked; see
+    /// [`DbLock`]. Builds the database from those contents the first time.
+    pub(crate) fn lock_db_with(&self, contents: &ProjectContents) -> DbLock<'_> {
+        let db = self.db.get_or_init(|| Mutex::new(new_synced_db(contents)));
+        DbLock(db.lock().unwrap())
+    }
+
+    /// The database, locked, when one has been built: what an entry point
+    /// that changes the datamodel re-syncs. It holds the datamodel lock, so
+    /// no database can be built meanwhile, and one built later is built from
+    /// the datamodel the change leaves.
+    pub(crate) fn built_db(&self) -> Option<DbLock<'_>> {
+        self.db.get().map(|db| DbLock(db.lock().unwrap()))
+    }
+
+    /// Whether the database has been built.
+    #[cfg(test)]
+    pub(crate) fn has_db(&self) -> bool {
+        self.db.get().is_some()
     }
 }
 
@@ -1052,6 +1092,10 @@ pub(crate) unsafe fn sim_unref(sim: *mut SimlinSim) {
 }
 
 // ── tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "database_tests.rs"]
+mod database_tests;
 
 #[cfg(test)]
 mod tests {
