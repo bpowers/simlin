@@ -21,11 +21,15 @@
 //! the read. The reader goes on skipping what it does not model exactly as it
 //! always has, so a report can neither change the project nor fail the open.
 //! The pass holds no recursion, so an element nested ten thousand deep costs
-//! it no stack. It reads only as far into an unread element as a label needs
-//! (`LABEL_DEPTH`), and a label leaves out whatever does not unescape. If the
-//! XML stops parsing, the report ends there, with what it found.
+//! it no stack. It finds each view's number and each tag's warning by hash,
+//! so its time grows with the file and not with the file's square: a file can
+//! hold fifty thousand pages or a hundred thousand kinds of element. It reads
+//! only as far into an unread element as a label needs (`LABEL_DEPTH`), and a
+//! label leaves out whatever does not unescape. If the XML stops parsing, the
+//! report ends there, with what it found.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesStart, Event};
@@ -92,19 +96,15 @@ pub(crate) fn unread_content(xml: &[u8]) -> Vec<ImportWarning> {
 
         // An unnamed view is called by its number among the views of its
         // kind; the only view of its kind has no number.
-        let of_kind = |kind: ViewKind| model.views.iter().filter(|v| v.kind == kind).count();
-        let mut numbered: Vec<(ViewKind, usize)> = Vec::new();
+        let mut of_kind: HashMap<ViewKind, usize> = HashMap::new();
         for view in &model.views {
-            let number = match numbered.iter_mut().find(|(k, _)| *k == view.kind) {
-                Some((_, n)) => {
-                    *n += 1;
-                    *n
-                }
-                None => {
-                    numbered.push((view.kind, 1));
-                    1
-                }
-            };
+            *of_kind.entry(view.kind).or_default() += 1;
+        }
+        let mut numbered: HashMap<ViewKind, usize> = HashMap::new();
+        for view in &model.views {
+            let number = numbered.entry(view.kind).or_default();
+            *number += 1;
+            let number = *number;
             let noun = match view.kind {
                 ViewKind::StockFlow if view.name.is_some() => "view",
                 ViewKind::StockFlow => "diagram",
@@ -114,7 +114,7 @@ pub(crate) fn unread_content(xml: &[u8]) -> Vec<ImportWarning> {
             };
             let place = match &view.name {
                 Some(name) => format!("on {noun} '{name}'"),
-                None if of_kind(view.kind) > 1 => format!("on {noun} {number}"),
+                None if of_kind[&view.kind] > 1 => format!("on {noun} {number}"),
                 None => format!("on the {noun}"),
             };
             report_by_tag(&of_model(place), &view.unread, false, &mut warnings);
@@ -141,7 +141,7 @@ struct Unread {
 }
 
 /// A view's type, as its `type` attribute names it.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum ViewKind {
     StockFlow,
     Interface,
@@ -524,13 +524,15 @@ fn report_by_tag(
     among_variables: bool,
     warnings: &mut Vec<ImportWarning>,
 ) {
+    // Each tag's labels, in first appearance, found by tag.
     let mut tags: Vec<(&str, Vec<String>)> = Vec::new();
+    let mut index: HashMap<&str, usize> = HashMap::new();
     for element in elements {
-        let label = element.label.clone().unwrap_or_default();
-        match tags.iter_mut().find(|(tag, _)| *tag == element.tag) {
-            Some((_, labels)) => labels.push(label),
-            None => tags.push((element.tag.as_str(), vec![label])),
-        }
+        let at = *index.entry(&element.tag).or_insert_with(|| {
+            tags.push((&element.tag, Vec::new()));
+            tags.len() - 1
+        });
+        tags[at].1.push(element.label.clone().unwrap_or_default());
     }
     for (tag, labels) in tags {
         let (one, many) = noun(tag, among_variables);

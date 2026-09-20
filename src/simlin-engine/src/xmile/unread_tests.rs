@@ -291,3 +291,27 @@ fn an_element_nested_ten_thousand_deep_opens_on_a_small_stack() {
         assert_eq!(warnings, ["1 text box on the diagram is not kept"], "{tag}");
     }
 }
+
+#[test]
+fn a_file_of_many_pages_and_many_kinds_reports_each_once() {
+    // Twenty thousand unnamed interface pages, each numbered among its
+    // kind, and as many distinct kinds of element on the diagram.
+    const MANY: usize = 20_000;
+    let pages = "<view type=\"interface\"><text_box>t</text_box></view>".repeat(MANY);
+    let kinds: String = (0..MANY).map(|i| format!("<t{i}>x</t{i}>")).collect();
+    let warnings = report(&file_with("", &kinds, &pages));
+    assert_eq!(warnings.len(), 2 * MANY);
+    assert_eq!(warnings[0], "1 t0 on the diagram is not kept: 'x'");
+    assert_eq!(
+        warnings[MANY - 1],
+        format!("1 t{} on the diagram is not kept: 'x'", MANY - 1)
+    );
+    assert_eq!(
+        warnings[MANY],
+        "1 text box on interface page 1 is not kept: 't'"
+    );
+    assert_eq!(
+        warnings[2 * MANY - 1],
+        format!("1 text box on interface page {MANY} is not kept: 't'")
+    );
+}

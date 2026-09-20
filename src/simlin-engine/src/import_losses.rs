@@ -5,6 +5,8 @@
 //! What a reader reports it does not keep ([`ImportWarning`]), and the
 //! wording the readers share.
 
+use std::collections::HashMap;
+
 use crate::errors::join_quoted_names;
 
 /// Something a file holds that its reader does not bring into the project,
@@ -33,12 +35,15 @@ impl ImportWarning {
     /// images in this file are not kept`. None when there are none. A host
     /// shows this where a row per place would be too many to read.
     pub fn summary(warnings: &[ImportWarning]) -> Option<String> {
+        // Each kind's words and total, in first appearance, found by kind.
         let mut kinds: Vec<(&str, &str, usize)> = Vec::new();
+        let mut index: HashMap<&str, usize> = HashMap::new();
         for warning in warnings {
-            match kinds.iter_mut().find(|(one, _, _)| *one == warning.one) {
-                Some((_, _, n)) => *n += warning.count,
-                None => kinds.push((&warning.one, &warning.many, warning.count)),
-            }
+            let at = *index.entry(&warning.one).or_insert_with(|| {
+                kinds.push((&warning.one, &warning.many, 0));
+                kinds.len() - 1
+            });
+            kinds[at].2 += warning.count;
         }
         let verb = match kinds.as_slice() {
             [] => return None,
@@ -85,10 +90,15 @@ fn count(n: usize, one: &str, many: &str) -> String {
 
 /// The names a warning can show, in the order given: each on one line and
 /// cut to a readable length, each once, and none that is empty (an empty
-/// name is nothing a person would recognize).
+/// name is nothing a person would recognize). It stops at as many as a
+/// warning names (`EXAMPLES`), so finding them is one pass over `names` at
+/// most, however many there are.
 fn shown_names(names: &[String]) -> Vec<String> {
     let mut shown: Vec<String> = Vec::new();
     for name in names {
+        if shown.len() == EXAMPLES {
+            break;
+        }
         let line = name.split_whitespace().collect::<Vec<_>>().join(" ");
         let line = match line.char_indices().nth(LONGEST) {
             Some((end, _)) => format!("{}...", line[..end].trim_end()),
@@ -121,8 +131,9 @@ pub(crate) fn not_kept(
     let mut message = format!("{} {where_} {verb} not kept", count(n, one, many));
     let shown = shown_names(names);
     if !shown.is_empty() {
-        let listed: Vec<&str> = shown.iter().take(EXAMPLES).map(String::as_str).collect();
-        let every_one = shown.len() == n && n <= EXAMPLES;
+        let listed: Vec<&str> = shown.iter().map(String::as_str).collect();
+        // Every one is named only when there are no more than a warning names.
+        let every_one = shown.len() == n;
         let joiner = if every_one { ": " } else { ", such as " };
         message.push_str(joiner);
         message.push_str(&join_quoted_names(&listed));
@@ -213,6 +224,13 @@ mod tests {
         );
         let long = "x".repeat(60);
         assert_eq!(shown_names(&[long]), vec![format!("{}...", "x".repeat(40))]);
+
+        // However many are counted, three are named.
+        let many: Vec<String> = (0..100_000).map(|i| format!("c{i}")).collect();
+        assert_eq!(
+            not_kept(many.len(), "comment", "comments", "on view 'Main'", &many).message,
+            "100000 comments on view 'Main' are not kept, such as 'c0', 'c1', and 'c2'"
+        );
     }
 
     #[test]
