@@ -1316,9 +1316,8 @@ mod tests {
 
         /// A side the model gives no stock, when the view does not draw the
         /// other side's stock to measure the valve's far side from, takes the
-        /// pipe end its connector marks for that side (field 4: usually 100
-        /// upstream),
-        /// not the first in sketch order.
+        /// pipe end its connector marks for that side (field 4, usually 100
+        /// upstream), not the first in sketch order.
         #[test]
         fn an_open_side_takes_the_end_marked_for_it_when_the_view_lacks_the_stock() {
             let symbols = symbols(vec![("stock b", stock(&["flow rate"], &[]))]);
