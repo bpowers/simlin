@@ -1708,8 +1708,8 @@ const EXPECTED_REPARSE_FAILURES: &[&str] = &[];
 ///   - quoted names are escaped idempotently and display newlines collapse in
 ///     every identifier the writer prints;
 ///   - a save step equal to the time step is written as `TIME STEP`;
-///   - the importer resolves element ownership and dimension order the same
-///     way on every run (GH #859).
+///   - the importer resolves element ownership, dimension order and mapped
+///     dimensions' elements the same way on every run (GH #859).
 ///
 /// A fixture that stops being a fixpoint is a regression in one of these.
 const EXPECTED_NON_IDEMPOTENT: &[&str] = &[];

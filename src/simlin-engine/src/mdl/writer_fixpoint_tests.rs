@@ -531,6 +531,57 @@ fn a_file_imports_its_dimensions_one_way() {
     }
 }
 
+#[test]
+fn a_mapped_dimension_takes_one_element_on_every_parse() {
+    // `DimD` maps to both of `x`'s dimensions, and `DimC` maps to `DimD`
+    // alone. At `x[A2, B1]`, `DimD` takes its element through the first
+    // dimension `x` names (`A2` is `D2`; `B1` would be `D1`), and `DimC`
+    // takes its element through `DimD`'s, on every parse.
+    let source = format!(
+        "DimA: A1, A2 ~~|\nDimB: B1, B2 ~~|\nDimD: D1, D2 -> DimA, DimB ~~|\nDimC: C1, C2 -> DimD ~~|\ny[DimD] = 10, 20 ~~|\nz[DimC] = 1, 2 ~~|\nx[DimA, DimB] :EXCEPT: [A1, B1] = y[DimD] + z[DimC] ~~|\nx[A1, B1] = 0 ~~|\n{CONTROL}"
+    );
+    for _ in 0..12 {
+        let project = parse_mdl(&source).expect("parses");
+        let Some(datamodel::Equation::Arrayed(_, elements, _, _)) =
+            variable(&project, "x").and_then(|v| v.get_equation())
+        else {
+            panic!("x is arrayed");
+        };
+        let equation = |key: &str| {
+            elements
+                .iter()
+                .find(|(k, _, _, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, text, _, _)| text.to_lowercase())
+        };
+        assert_eq!(equation("a2,b1").as_deref(), Some("y[d2] + z[c2]"));
+        assert_eq!(equation("a1,b2").as_deref(), Some("y[d1] + z[c1]"));
+    }
+}
+
+#[test]
+fn a_sibling_subrange_takes_its_element_through_the_first_the_lhs_names() {
+    // `Mid` is a subrange of `x`'s two dimensions' parent. At `x[L2, L3]` it
+    // takes its element by position through `Upper`, which `x` names first
+    // (`L2` is Upper's 2nd, so Mid's 2nd, `L3`), not through `Lower`, which
+    // sorts first by name (`L3` is Lower's 1st, so `L2`).
+    let source = format!(
+        "Layers: L1, L2, L3, L4 ~~|\nUpper: L1, L2 ~~|\nLower: L3, L4 ~~|\nMid: L2, L3 ~~|\ny[Layers] = 1, 2, 3, 4 ~~|\nx[Upper, Lower] :EXCEPT: [L1, L3] = y[Mid] ~~|\nx[L1, L3] = 0 ~~|\n{CONTROL}"
+    );
+    for _ in 0..12 {
+        let project = parse_mdl(&source).expect("parses");
+        let Some(datamodel::Equation::Arrayed(_, elements, _, _)) =
+            variable(&project, "x").and_then(|v| v.get_equation())
+        else {
+            panic!("x is arrayed");
+        };
+        let equation = elements
+            .iter()
+            .find(|(k, _, _, _)| k.eq_ignore_ascii_case("l2,l3"))
+            .map(|(_, text, _, _)| text.to_lowercase());
+        assert_eq!(equation.as_deref(), Some("y[l3]"));
+    }
+}
+
 // ---- Flows drawn in one view ending on a stock drawn in another ----
 
 const SKETCH_HEADER: &str = "\\\\\\---/// Sketch information - do not modify anything except names

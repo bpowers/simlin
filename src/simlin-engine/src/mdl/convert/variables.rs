@@ -855,6 +855,10 @@ impl<'input> ConversionContext<'input> {
         );
 
         let mut substitutions = HashMap::new();
+        // The LHS's dimensions in the order it names them: where several
+        // could give a dimension the LHS does not name its element, the first
+        // does.
+        let mut lhs_dims: Vec<String> = Vec::new();
 
         for (sub_name, elem_name) in lhs_subscripts.iter().zip(element_parts.iter()) {
             let dim_canonical = canonical_name(sub_name);
@@ -862,42 +866,71 @@ impl<'input> ConversionContext<'input> {
             // specific element). If it's already an element, the equation already
             // references it by name and no substitution is needed.
             if self.dimension_elements.contains_key(&dim_canonical) {
+                if !lhs_dims.contains(&dim_canonical) {
+                    lhs_dims.push(dim_canonical.clone());
+                }
                 substitutions.insert(dim_canonical, space_to_underbar(elem_name));
             }
         }
 
         // Build subrange mappings for dimensions not directly on the LHS
-        let subrange_mappings = self.build_subrange_mappings(&substitutions);
+        let subrange_mappings = self.build_subrange_mappings(&substitutions, &lhs_dims);
 
-        // Build cross-dimension mapping substitutions: for dimensions that
-        // have a `maps_to` relationship with a LHS dimension, resolve the
-        // specific element via the mapping. For example, if DimD maps to
-        // DimA and we're iterating at DimA=A2, then DimD -> D1 (where
-        // D1 is the DimD element that maps to A2).
+        // Build cross-dimension mapping substitutions: a dimension that maps
+        // to or from a dimension with an element takes the element the
+        // mapping gives. For example, if DimD maps to DimA and we're
+        // iterating at DimA=A2, then DimD -> D1 (where D1 is the DimD
+        // element that maps to A2). This resolves in rounds, each consulting
+        // only the dimensions resolved before it -- the LHS's own first, in
+        // its order, then each earlier round's by name -- so a dimension
+        // mapped to another resolved one resolves too, along the fewest
+        // mappings, and the result never depends on the order a hash map
+        // yields the dimensions in.
         let dims_ctx = self.dimensions_context();
-        for dim_canonical in self.dimension_elements.keys() {
-            if substitutions.contains_key(dim_canonical)
-                || subrange_mappings.contains_key(dim_canonical)
-            {
-                continue;
+        let mut resolved: Vec<(CanonicalDimensionName, CanonicalElementName)> = lhs_dims
+            .iter()
+            .map(|dim| {
+                (
+                    CanonicalDimensionName::from_raw(dim),
+                    CanonicalElementName::from_raw(&substitutions[dim]),
+                )
+            })
+            .collect();
+        let mut pending: Vec<(&String, CanonicalDimensionName)> = self
+            .dimension_elements
+            .keys()
+            .filter(|dim| {
+                !substitutions.contains_key(*dim) && !subrange_mappings.contains_key(*dim)
+            })
+            .map(|dim| (dim, CanonicalDimensionName::from_raw(dim)))
+            .collect();
+        loop {
+            let mut round: Vec<(&String, CanonicalDimensionName, CanonicalElementName)> =
+                Vec::new();
+            pending.retain(|(dim_canonical, dim_name)| {
+                let mapped = resolved.iter().find_map(|(from_name, from_elem)| {
+                    if !dims_ctx.has_mapping_to(dim_name, from_name)
+                        && !dims_ctx.has_mapping_to(from_name, dim_name)
+                    {
+                        return None;
+                    }
+                    dims_ctx.translate_via_mapping(dim_name, from_name, from_elem)
+                });
+                match mapped {
+                    Some(elem) => {
+                        round.push((dim_canonical, dim_name.clone(), elem));
+                        false
+                    }
+                    None => true,
+                }
+            });
+            if round.is_empty() {
+                break;
             }
-
-            let dim_name = CanonicalDimensionName::from_raw(dim_canonical);
-            for (lhs_dim, lhs_elem) in &substitutions {
-                let lhs_dim_name = CanonicalDimensionName::from_raw(lhs_dim);
-                if !dims_ctx.has_mapping_to(&dim_name, &lhs_dim_name)
-                    && !dims_ctx.has_mapping_to(&lhs_dim_name, &dim_name)
-                {
-                    continue;
-                }
-
-                let lhs_elem_canonical = CanonicalElementName::from_raw(lhs_elem);
-                if let Some(mapped_elem) =
-                    dims_ctx.translate_via_mapping(&dim_name, &lhs_dim_name, &lhs_elem_canonical)
-                {
-                    substitutions.insert(dim_canonical.clone(), mapped_elem.as_str().to_string());
-                    break;
-                }
+            round.sort_by(|a, b| a.0.cmp(b.0));
+            for (dim, dim_name, elem) in round {
+                substitutions.insert(dim.clone(), elem.as_str().to_string());
+                resolved.push((dim_name, elem));
             }
         }
 
@@ -909,10 +942,12 @@ impl<'input> ConversionContext<'input> {
 
     /// Build subrange mappings for dimensions that are not directly on the LHS
     /// but can be resolved positionally through a parent or sibling subrange
-    /// that IS on the LHS.
+    /// that IS on the LHS. `lhs_dims` are the keys of `substitutions` in the
+    /// order the LHS names them.
     fn build_subrange_mappings(
         &self,
         substitutions: &HashMap<String, String>,
+        lhs_dims: &[String],
     ) -> HashMap<String, crate::mdl::xmile_compat::SubrangeMapping> {
         use crate::mdl::xmile_compat::SubrangeMapping;
 
@@ -954,10 +989,7 @@ impl<'input> ConversionContext<'input> {
             // Case 2: a sibling subrange of the same parent is in substitutions.
             // E.g., LHS is upper (subrange of layers), RHS references lower
             // (also subrange of layers). Map through the sibling -- the first
-            // by name when the LHS holds several, so the choice does not
-            // depend on a hash map's order.
-            let mut lhs_dims: Vec<&String> = substitutions.keys().collect();
-            lhs_dims.sort();
+            // the LHS names when it holds several.
             for sub_dim in lhs_dims {
                 let sub_parent = self.resolve_subrange_to_parent(sub_dim);
                 if sub_parent == parent_canonical

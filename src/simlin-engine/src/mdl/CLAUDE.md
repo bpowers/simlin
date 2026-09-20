@@ -102,7 +102,7 @@ A save is a fixed point for the whole file too: `writer_output_idempotence_ratch
 - **Builtins** are written back under a name the reader knows (`xmile_to_mdl_function_name`; every entry of `builtins::BUILTINS` has a row in `every_builtin_the_reader_knows_is_saved_as_it_reads`).
 - **Names.** Quoted-name escaping is idempotent (`escape_mdl_quoted_ident` keeps a backslash pair as the lexer reads it), and every identifier the writer prints collapses a display newline the same way (`format_mdl_ident`, `collapse_display_newlines`), since the reader does not read `\n` as a space.
 - **The save step** equal to the time step is written as `TIME STEP`, which the importer reads back as the time step's value.
-- **The importer resolves a file one way** on every run: element ownership among dimensions of one size goes to the one declared first, and alias dimensions follow declaration order (GH #859).
+- **The importer resolves a file one way** on every run: element ownership among dimensions of one size goes to the one declared first, alias dimensions follow declaration order, and in a per-element equation a dimension the LHS does not name takes its element through the first LHS dimension, in the LHS's order, that it maps to or from, or through a dimension resolved that way (`build_element_context`; GH #859).
 
 The first save still normalizes what the datamodel does not hold: a flow label's own position (it is written at its label side's default offset), a control variable the importer cannot evaluate (written as its value), a display newline in a name (written as a space).
 
