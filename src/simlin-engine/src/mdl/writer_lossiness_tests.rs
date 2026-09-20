@@ -938,3 +938,101 @@ fn no_transpose_does_not_warn() {
         "an ordinary equation must not warn"
     );
 }
+
+// ---- a save keeps what the model means ----
+
+const CONTROL: &str = "
+INITIAL TIME = 0 ~~|
+FINAL TIME = 10 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|
+";
+
+/// `source` as it reads, and as its save reads back, with the save's warnings.
+fn read_and_reread(source: &str) -> (datamodel::Project, datamodel::Project, Vec<ExportWarning>) {
+    let original = crate::mdl::parse_mdl(source).expect("the source parses");
+    let (save, warnings) = project_to_mdl_with_warnings(&original).expect("the save writes");
+    let reread = crate::mdl::parse_mdl(&save)
+        .unwrap_or_else(|err| panic!("the save reads back: {err}\n{save}"));
+    (original, reread, warnings)
+}
+
+/// Each element of an arrayed variable with its initial equation, by key.
+fn element_initials(project: &datamodel::Project, ident: &str) -> Vec<(String, Option<String>)> {
+    let var = project.models[0]
+        .variables
+        .iter()
+        .find(|v| v.get_ident() == ident)
+        .unwrap_or_else(|| panic!("no variable {ident}"));
+    let Variable::Aux(Aux {
+        equation: Equation::Arrayed(_, elements, _, _),
+        ..
+    }) = var
+    else {
+        panic!("{ident} is not an arrayed auxiliary");
+    };
+    let mut initials: Vec<(String, Option<String>)> = elements
+        .iter()
+        .map(|(key, _, initial, _)| (key.to_lowercase(), initial.clone()))
+        .collect();
+    initials.sort();
+    initials
+}
+
+/// The importer stores an arrayed ACTIVE INITIAL on each element, whether the
+/// file wrote it over the dimension or element by element; a save that left
+/// the initials out made the variable start from its active equation, and
+/// in C-LEARN made the initial values depend on themselves.
+#[test]
+fn an_arrayed_active_initial_keeps_each_elements_initial_through_a_save() {
+    let source = format!(
+        "DimA: a1, a2, a3 ~~|
+y[DimA] = 1, 2, 3 ~~|
+x[DimA] = ACTIVE INITIAL(y[DimA] * 2, 100) ~~|
+z[a1] = ACTIVE INITIAL(y[a1], 10) ~~|
+z[a2] = ACTIVE INITIAL(y[a2] * 2, 20) ~~|
+{CONTROL}"
+    );
+    let (original, reread, warnings) = read_and_reread(&source);
+    for ident in ["x", "z"] {
+        let before = element_initials(&original, ident);
+        assert!(
+            before.iter().all(|(_, initial)| initial.is_some()),
+            "{before:?}"
+        );
+        assert_eq!(element_initials(&reread, ident), before, "{ident}");
+    }
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// `DimB: B1, B2 -> (DimA: SubA, A3)` maps B1 to every element of SubA. The
+/// save writes the subrange's name back where the element map has several
+/// targets for one element; writing only `-> DimA` lost the map, and a
+/// mapped reference then named an element DimB does not have.
+#[test]
+fn a_mapping_through_a_subrange_keeps_its_element_map_through_a_save() {
+    let source = format!(
+        "DimA: A1, A2, A3 ~~|
+SubA: A1, A2 ~~|
+DimB: B1, B2 -> (DimA: SubA, A3) ~~|
+b[DimB] = 1, 2 ~~|
+a[DimA] = b[DimB] * 10 ~~|
+{CONTROL}"
+    );
+    let (original, reread, warnings) = read_and_reread(&source);
+    let mappings = |project: &datamodel::Project| {
+        let dim = project
+            .dimensions
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case("DimB"))
+            .expect("DimB");
+        dim.mappings.clone()
+    };
+    assert_eq!(
+        mappings(&original)[0].element_map.len(),
+        3,
+        "B1 maps to A1 and A2"
+    );
+    assert_eq!(mappings(&reread), mappings(&original));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}

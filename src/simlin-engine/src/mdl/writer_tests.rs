@@ -1137,7 +1137,7 @@ fn dimension_def_named() {
         vec!["a1".to_owned(), "a2".to_owned(), "a3".to_owned()],
     );
     let mut buf = String::new();
-    write_dimension_def(&mut buf, &dim);
+    write_dimension_def(&mut buf, &dim, &[]);
     assert_eq!(buf, "dim a:\n\ta1, a2, a3\n\t~~|\n");
 }
 
@@ -1145,7 +1145,7 @@ fn dimension_def_named() {
 fn dimension_def_indexed() {
     let dim = datamodel::Dimension::indexed("dim_b".to_owned(), 5);
     let mut buf = String::new();
-    write_dimension_def(&mut buf, &dim);
+    write_dimension_def(&mut buf, &dim, &[]);
     assert_eq!(buf, "dim b:\n\t(1-5)\n\t~~|\n");
 }
 
@@ -1157,7 +1157,7 @@ fn dimension_def_with_mapping() {
     );
     dim.set_maps_to("dim_b".to_owned());
     let mut buf = String::new();
-    write_dimension_def(&mut buf, &dim);
+    write_dimension_def(&mut buf, &dim, &[]);
     assert_eq!(buf, "dim c:\n\tdc1, dc2, dc3 -> dim b\n\t~~|\n");
 }
 
@@ -3315,7 +3315,7 @@ fn write_dimension_with_element_level_mapping() {
     };
 
     let mut buf = String::new();
-    write_dimension_def(&mut buf, &dim);
+    write_dimension_def(&mut buf, &dim, &[]);
 
     assert!(
         buf.contains("-> (dim b: b2, b1)"),
@@ -3342,7 +3342,7 @@ fn write_dimension_with_multi_target_positional_mapping() {
     };
 
     let mut buf = String::new();
-    write_dimension_def(&mut buf, &dim);
+    write_dimension_def(&mut buf, &dim, &[]);
 
     assert!(
         buf.contains("dim b") && buf.contains("dim c"),
@@ -3374,7 +3374,7 @@ fn write_dimension_element_mapping_sorted_by_source_position() {
     };
 
     let mut buf = String::new();
-    write_dimension_def(&mut buf, &dim);
+    write_dimension_def(&mut buf, &dim, &[]);
 
     assert!(
         buf.contains("-> (dim b: b1, b2, b3)"),
@@ -3405,7 +3405,7 @@ fn write_dimension_element_mapping_case_insensitive_lookup() {
     };
 
     let mut buf = String::new();
-    write_dimension_def(&mut buf, &dim);
+    write_dimension_def(&mut buf, &dim, &[]);
 
     assert!(
         buf.contains("-> (zone: z1, z2, z3)"),
@@ -3436,7 +3436,7 @@ fn write_dimension_element_mapping_underscored_names() {
     };
 
     let mut buf = String::new();
-    write_dimension_def(&mut buf, &dim);
+    write_dimension_def(&mut buf, &dim, &[]);
 
     assert!(
         buf.contains("-> (zone: z1, z2, z3)"),
@@ -3444,12 +3444,10 @@ fn write_dimension_element_mapping_underscored_names() {
     );
 }
 
-#[test]
-fn write_dimension_one_to_many_falls_back_to_positional() {
-    // When a source element maps to multiple targets (from subdimension
-    // expansion), the element-level notation can't round-trip correctly.
-    // The writer should fall back to a positional dimension-name mapping.
-    let dim = datamodel::Dimension {
+/// `DimB: B1, B2 -> (DimA: SubA, A3)`: B1 maps to every element of SubA, and
+/// the reader stores that as B1 mapping to A1 and to A2.
+fn one_to_many_mapping() -> datamodel::Dimension {
+    datamodel::Dimension {
         name: "dim_b".to_string(),
         elements: datamodel::DimensionElements::Named(vec!["b1".to_string(), "b2".to_string()]),
         mappings: vec![datamodel::DimensionMapping {
@@ -3461,15 +3459,56 @@ fn write_dimension_one_to_many_falls_back_to_positional() {
             ],
         }],
         parent: None,
-    };
+    }
+}
 
+fn named_dimension(name: &str, elements: &[&str], parent: Option<&str>) -> datamodel::Dimension {
+    datamodel::Dimension {
+        name: name.to_string(),
+        elements: datamodel::DimensionElements::Named(
+            elements.iter().map(|e| e.to_string()).collect(),
+        ),
+        mappings: vec![],
+        parent: parent.map(str::to_string),
+    }
+}
+
+#[test]
+fn an_element_mapped_to_several_is_written_as_the_subrange_that_holds_them() {
+    let dim = one_to_many_mapping();
+    let dimensions = [
+        named_dimension("dim_a", &["A1", "A2", "A3"], None),
+        dim.clone(),
+        // A dimension of the same elements that is not a subrange of the
+        // target loses to one that is.
+        named_dimension("other", &["A2", "A1"], None),
+        named_dimension("sub_a", &["A2", "A1"], Some("dim_a")),
+    ];
+    let mut warnings = Vec::new();
     let mut buf = String::new();
-    write_dimension_def(&mut buf, &dim);
+    write_dimension_def_warn(&mut buf, &dim, &dimensions, &mut warnings);
+    assert!(
+        buf.contains("-> (dim a: sub a, a3)"),
+        "the subrange names b1's targets, got: {buf}"
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
 
+#[test]
+fn an_element_mapped_to_several_no_dimension_names_falls_back_and_warns() {
+    let dim = one_to_many_mapping();
+    let dimensions = [
+        named_dimension("dim_a", &["A1", "A2", "A3"], None),
+        dim.clone(),
+    ];
+    let mut warnings = Vec::new();
+    let mut buf = String::new();
+    write_dimension_def_warn(&mut buf, &dim, &dimensions, &mut warnings);
     assert!(
         buf.contains("-> dim a") && !buf.contains("(dim a:"),
-        "one-to-many mapping should fall back to positional notation, got: {buf}"
+        "with no dimension to name a1 and a2, the mapping falls back to the dimension, got: {buf}"
     );
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
 }
 
 #[test]

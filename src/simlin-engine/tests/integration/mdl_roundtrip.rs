@@ -1996,3 +1996,38 @@ fn clearn_save_is_a_fixed_point() {
         "C-LEARN's second save differs from its first"
     );
 }
+
+/// C-LEARN's MDL save simulates as C-LEARN does, series for series and bit
+/// for bit, in a release run (`cargo test --release -- --ignored`). The save
+/// used to lose its regional mappings' element maps (`-> (COP: ..., COP
+/// Remaining Developing)`, one element to a subrange) and the initial values
+/// of four arrayed ACTIVE INITIAL variables, so it did not compile.
+#[test]
+#[ignore]
+fn clearn_save_simulates_as_clearn_does() {
+    use simlin_engine::db::{
+        LtmOverlay, SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
+    };
+
+    let run = |project: &simlin_engine::datamodel::Project| {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, project, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main", LtmOverlay::Off)
+            .expect("compiles");
+        let mut vm = simlin_engine::Vm::new(compiled).expect("a VM");
+        vm.run_to_end().expect("runs");
+        vm.into_results()
+    };
+    let path = resolve_path("test/xmutil_test_models/C-LEARN v77 for Vensim.mdl");
+    let source = fs::read_to_string(&path).expect("C-LEARN reads");
+    let original = mdl::parse_mdl(&source).expect("C-LEARN parses");
+    let save = mdl::project_to_mdl(&original).expect("C-LEARN writes");
+    let reread = mdl::parse_mdl(&save).expect("C-LEARN's save reads back");
+    let (before, after) = (run(&original), run(&reread));
+    assert_eq!(before.offsets, after.offsets, "the save has other series");
+    let bits = |r: &simlin_engine::Results| r.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    assert!(
+        bits(&before) == bits(&after),
+        "C-LEARN's save simulates differently"
+    );
+}

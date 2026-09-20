@@ -2176,13 +2176,17 @@ fn write_arrayed_stock_entries(
 /// - `compat.active_initial` = Some(init) (the initial value)
 fn wrap_active_initial(eqn: &str, compat: &datamodel::Compat) -> String {
     match &compat.active_initial {
-        // Both eqn and init are in XMILE format (underscores).  Wrap with
-        // init(...) in XMILE form so the whole thing can be parsed by
-        // equation_to_mdl, which will map init -> ACTIVE INITIAL and
-        // convert all identifiers to spaced MDL form.
-        Some(init) => format!("init({eqn}, {init})"),
+        Some(init) => wrap_initial(eqn, init),
         None => eqn.to_owned(),
     }
+}
+
+/// `eqn` with the initial equation `init`, as ACTIVE INITIAL. Both are in
+/// XMILE form (underscores), so the wrap is `init(eqn, init)` in XMILE form,
+/// which `equation_to_mdl` parses as a whole, maps to ACTIVE INITIAL, and
+/// respells in spaced MDL form.
+fn wrap_initial(eqn: &str, init: &str) -> String {
+    format!("init({eqn}, {init})")
 }
 
 /// Split an MDL equation string into tokens suitable for line wrapping.
@@ -2467,9 +2471,12 @@ fn order_arrayed_entries(
     entries.sort_by_cached_key(|(key, _, _, _)| (canonical_element_key(key), key.clone()));
 }
 
-/// Emit one MDL entry per arrayed element. A per-variable ACTIVE INITIAL wrap
-/// (`compat.active_initial`) is applied to every element equation (#857), the
-/// same way the Scalar / Apply-to-All paths wrap it.
+/// Emit one MDL entry per arrayed element. An element's own initial equation
+/// wraps its equation in ACTIVE INITIAL: the importer stores an arrayed
+/// variable's ACTIVE INITIAL on each element, `X[COP] = ACTIVE INITIAL(expr,
+/// init)` as every element of COP with initial `init`. An element without one
+/// takes the per-variable wrap (`compat.active_initial`, #857), the same way
+/// the Scalar / Apply-to-All paths wrap it.
 // An emit helper: every parameter is a local of the one `write_variable` arm that
 // calls it, threaded straight through to the per-element entry it writes.
 #[allow(clippy::too_many_arguments)]
@@ -2484,9 +2491,12 @@ fn write_arrayed_element_entries(
     warnings: &mut Vec<ExportWarning>,
 ) {
     let last_idx = elements.len().saturating_sub(1);
-    for (i, (elem_name, raw_eqn, _comment, elem_gf)) in elements.iter().enumerate() {
+    for (i, (elem_name, raw_eqn, elem_initial, elem_gf)) in elements.iter().enumerate() {
         let elem_display = format_mdl_element_key(elem_name);
-        let eqn = wrap_active_initial(raw_eqn, compat);
+        let eqn = match elem_initial {
+            Some(initial) => wrap_initial(raw_eqn, initial),
+            None => wrap_active_initial(raw_eqn, compat),
+        };
         let eqn = eqn.as_str();
 
         if let Some(gf) = elem_gf {
@@ -2910,19 +2920,58 @@ fn build_multi_output_reconstructions(
 /// Named:   `DimName: Elem1, Elem2, Elem3 ~~|`
 /// Indexed: `DimName: (1-N) ~~|`
 /// Mapped:  `DimName: Elem1, Elem2 -> MappedDim ~~|`
-/// Element-mapped: `DimName: A1, A2 -> MappedDim: B2, B1 ~~|`
+/// Element-mapped: `DimName: A1, A2 -> (MappedDim: B2, B1) ~~|`
+/// Mapped through a subrange: `DimB: B1, B2 -> (DimA: SubA, A3) ~~|`, where
+/// B1 maps to every element of SubA
 ///
 /// Test-only wrapper that discards any [`ExportWarning`]s; production emission
 /// uses [`write_dimension_def_warn`] (#856). Not public, so no caller can lose
 /// the warning channel by accident.
 #[cfg(test)]
-fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
-    write_dimension_def_warn(buf, dim, &mut Vec::new());
+fn write_dimension_def(
+    buf: &mut String,
+    dim: &datamodel::Dimension,
+    dimensions: &[datamodel::Dimension],
+) {
+    write_dimension_def_warn(buf, dim, dimensions, &mut Vec::new());
+}
+
+/// The dimension, of `dimensions`, whose named elements are exactly
+/// `elements` (canonical spellings), preferring a subrange of `target`: the
+/// name a mapping writes for a source element that maps to several of
+/// `target`'s elements. None when no dimension names exactly those elements.
+fn dimension_naming<'a>(
+    elements: &[&str],
+    target: &str,
+    dimensions: &'a [datamodel::Dimension],
+) -> Option<&'a datamodel::Dimension> {
+    let wanted: HashSet<String> = elements.iter().map(|e| to_lower_space(e)).collect();
+    let target = to_lower_space(target);
+    let names_them = |dim: &&datamodel::Dimension| match &dim.elements {
+        DimensionElements::Named(named) => {
+            to_lower_space(&dim.name) != target
+                && named.len() == wanted.len()
+                && named.iter().all(|e| wanted.contains(&to_lower_space(e)))
+        }
+        DimensionElements::Indexed(_) => false,
+    };
+    let is_subrange_of_target = |dim: &datamodel::Dimension| {
+        dim.parent
+            .as_deref()
+            .is_some_and(|parent| to_lower_space(parent) == target)
+    };
+    let candidates: Vec<&datamodel::Dimension> = dimensions.iter().filter(names_them).collect();
+    candidates
+        .iter()
+        .find(|dim| is_subrange_of_target(dim))
+        .or_else(|| candidates.first())
+        .copied()
 }
 
 fn write_dimension_def_warn(
     buf: &mut String,
     dim: &datamodel::Dimension,
+    dimensions: &[datamodel::Dimension],
     warnings: &mut Vec<ExportWarning>,
 ) {
     let name = format_mdl_ident(&dim.name);
@@ -2957,46 +3006,51 @@ fn write_dimension_def_warn(
             .iter()
             .map(|mapping| {
                 if mapping.element_map.is_empty() {
-                    format_mdl_ident(&mapping.target)
-                } else {
-                    // Detect one-to-many mappings (from subdimension
-                    // expansion) by checking for duplicate source keys.
-                    // MDL positional notation can't represent these, so
-                    // fall back to a plain dimension-name mapping. This
-                    // loses element-level mapping detail on re-import;
-                    // use protobuf serialization for lossless roundtrips.
-                    let mut seen_sources = std::collections::HashSet::new();
-                    let has_one_to_many = mapping
-                        .element_map
-                        .iter()
-                        .any(|(src, _)| !seen_sources.insert(src.as_str()));
-                    if has_one_to_many {
-                        warnings.push(ExportWarning::new(format!(
-                            "dimension '{}' has a one-to-many element mapping to '{}' \
-                             that MDL positional notation cannot represent; exported as \
-                             a plain dimension-name mapping (element-level detail lost)",
-                            dim.name, mapping.target
-                        )));
-                        format_mdl_ident(&mapping.target)
-                    } else {
-                        let mut sorted_map = mapping.element_map.clone();
-                        sorted_map.sort_by_key(|(src, _)| {
-                            source_positions
-                                .get(src.as_str())
-                                .copied()
-                                .unwrap_or(usize::MAX)
-                        });
-                        let target_elems: Vec<String> = sorted_map
-                            .iter()
-                            .map(|(_, tgt)| format_mdl_ident(tgt))
-                            .collect();
-                        format!(
-                            "({}: {})",
-                            format_mdl_ident(&mapping.target),
-                            target_elems.join(", ")
-                        )
+                    return format_mdl_ident(&mapping.target);
+                }
+                // Each source element's targets, in the order the map
+                // first names them, then in source element order. A source
+                // element mapping to several targets (the reader expands a
+                // subrange named in the list) is written as the dimension
+                // that holds exactly those targets.
+                let mut by_source: Vec<(&str, Vec<&str>)> = Vec::new();
+                let mut index: HashMap<&str, usize> = HashMap::new();
+                for (src, tgt) in &mapping.element_map {
+                    let at = *index.entry(src).or_insert_with(|| {
+                        by_source.push((src, Vec::new()));
+                        by_source.len() - 1
+                    });
+                    by_source[at].1.push(tgt);
+                }
+                by_source.sort_by_key(|(src, _)| {
+                    source_positions.get(*src).copied().unwrap_or(usize::MAX)
+                });
+                let mut target_names = Vec::with_capacity(by_source.len());
+                for (_, targets) in &by_source {
+                    match targets.as_slice() {
+                        [one] => target_names.push(format_mdl_ident(one)),
+                        several => {
+                            let Some(subrange) =
+                                dimension_naming(several, &mapping.target, dimensions)
+                            else {
+                                warnings.push(ExportWarning::new(format!(
+                                    "dimension '{}' maps an element to several elements of \
+                                     '{}' that no dimension names, which MDL cannot write; \
+                                     exported as a plain dimension-name mapping \
+                                     (element-level detail lost)",
+                                    dim.name, mapping.target
+                                )));
+                                return format_mdl_ident(&mapping.target);
+                            };
+                            target_names.push(format_mdl_ident(&subrange.name));
+                        }
                     }
                 }
+                format!(
+                    "({}: {})",
+                    format_mdl_ident(&mapping.target),
+                    target_names.join(", ")
+                )
             })
             .collect();
         write!(buf, " -> {}", parts.join(", ")).unwrap();
@@ -4358,7 +4412,7 @@ impl MdlWriter {
     ) -> Result<()> {
         // 1. Dimension definitions
         for dim in &project.dimensions {
-            write_dimension_def_warn(&mut self.buf, dim, &mut self.warnings);
+            write_dimension_def_warn(&mut self.buf, dim, &project.dimensions, &mut self.warnings);
         }
 
         let display_names = build_display_name_map(&model.views);
