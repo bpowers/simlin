@@ -37,6 +37,8 @@ impl ViewType {
 }
 
 pub mod view_element {
+    use std::collections::HashMap;
+
     use super::super::datamodel;
     use crate::common::Result;
     #[cfg(test)]
@@ -81,20 +83,51 @@ pub mod view_element {
         (360.0 - out_degrees) % 360.0
     }
 
-    /// Get the position (x, y) of a view element by its uid.
-    fn get_element_position(view: &datamodel::StockFlow, uid: i32) -> Option<(f64, f64)> {
-        for element in &view.elements {
-            match element {
-                datamodel::ViewElement::Aux(e) if e.uid == uid => return Some((e.x, e.y)),
-                datamodel::ViewElement::Stock(e) if e.uid == uid => return Some((e.x, e.y)),
-                datamodel::ViewElement::Flow(e) if e.uid == uid => return Some((e.x, e.y)),
-                datamodel::ViewElement::Module(e) if e.uid == uid => return Some((e.x, e.y)),
-                datamodel::ViewElement::Alias(e) if e.uid == uid => return Some((e.x, e.y)),
-                datamodel::ViewElement::Cloud(e) if e.uid == uid => return Some((e.x, e.y)),
-                _ => {}
-            }
+    /// The position (x, y) of an element that has one: every kind but a link
+    /// and a group.
+    fn element_position(element: &datamodel::ViewElement) -> Option<(f64, f64)> {
+        match element {
+            datamodel::ViewElement::Aux(e) => Some((e.x, e.y)),
+            datamodel::ViewElement::Stock(e) => Some((e.x, e.y)),
+            datamodel::ViewElement::Flow(e) => Some((e.x, e.y)),
+            datamodel::ViewElement::Module(e) => Some((e.x, e.y)),
+            datamodel::ViewElement::Alias(e) => Some((e.x, e.y)),
+            datamodel::ViewElement::Cloud(e) => Some((e.x, e.y)),
+            datamodel::ViewElement::Link(_) | datamodel::ViewElement::Group(_) => None,
         }
-        None
+    }
+
+    /// What converting a view's elements looks up in the view, indexed once
+    /// per view so each link and alias finds its ends without scanning it:
+    /// the position of the first element with a position for each uid (what
+    /// `get_element_position` finds), and the name of the first element with
+    /// each uid (what `StockFlow::get_variable_name` finds).
+    pub struct ViewIndex<'a> {
+        positions: HashMap<i32, (f64, f64)>,
+        names: HashMap<i32, Option<&'a str>>,
+    }
+
+    impl<'a> ViewIndex<'a> {
+        pub fn of(view: &'a datamodel::StockFlow) -> Self {
+            let mut positions = HashMap::with_capacity(view.elements.len());
+            let mut names = HashMap::with_capacity(view.elements.len());
+            for element in &view.elements {
+                let uid = element.get_uid();
+                if let Some(position) = element_position(element) {
+                    positions.entry(uid).or_insert(position);
+                }
+                names.entry(uid).or_insert(element.get_name());
+            }
+            ViewIndex { positions, names }
+        }
+
+        fn position(&self, uid: i32) -> Option<(f64, f64)> {
+            self.positions.get(&uid).copied()
+        }
+
+        fn name(&self, uid: i32) -> Option<&'a str> {
+            self.names.get(&uid).copied().flatten()
+        }
     }
 
     /// Calculate the straight-line angle (in canvas coordinates, degrees) between two points.
@@ -788,27 +821,23 @@ pub mod view_element {
         v: Link,
         view: &datamodel::StockFlow,
     ) -> datamodel::view_element::Link {
-        let positions: std::collections::HashMap<i32, (f64, f64)> = view
-            .elements
-            .iter()
-            .filter_map(|e| {
-                let uid = e.get_uid();
-                get_element_position(view, uid).map(|pos| (uid, pos))
-            })
-            .collect();
+        let positions = ViewIndex::of(view).positions;
         link_from_xmile_with_positions(v, &positions)
     }
 
     impl Link {
         pub fn from(v: datamodel::view_element::Link, view: &datamodel::StockFlow) -> Self {
+            Link::from_indexed(v, &ViewIndex::of(view))
+        }
+
+        pub fn from_indexed(v: datamodel::view_element::Link, index: &ViewIndex<'_>) -> Self {
             let (is_straight, angle, points) = match v.shape {
                 LinkShape::Straight => {
                     // Calculate the straight-line angle from element positions so other
                     // SD software (like Stella) can read the XMILE file correctly.
-                    if let (Some((from_x, from_y)), Some((to_x, to_y))) = (
-                        get_element_position(view, v.from_uid),
-                        get_element_position(view, v.to_uid),
-                    ) {
+                    if let (Some((from_x, from_y)), Some((to_x, to_y))) =
+                        (index.position(v.from_uid), index.position(v.to_uid))
+                    {
                         // Calculate in canvas coords, convert to XMILE format
                         let canvas_angle =
                             calculate_straight_line_angle(from_x, from_y, to_x, to_y);
@@ -834,8 +863,8 @@ pub mod view_element {
                     }),
                 ),
             };
-            let from_name = view.get_variable_name(v.from_uid).unwrap_or("");
-            let to_name = view.get_variable_name(v.to_uid).unwrap_or("");
+            let from_name = index.name(v.from_uid).unwrap_or("");
+            let to_name = index.name(v.to_uid).unwrap_or("");
             Link {
                 uid: Some(v.uid),
                 from: if from_name.is_empty() {
@@ -1334,12 +1363,13 @@ pub mod view_element {
 
     impl Alias {
         pub fn from(v: datamodel::view_element::Alias, view: &datamodel::StockFlow) -> Self {
+            Alias::from_indexed(v, &ViewIndex::of(view))
+        }
+
+        pub fn from_indexed(v: datamodel::view_element::Alias, index: &ViewIndex<'_>) -> Self {
             Alias {
                 uid: Some(v.uid),
-                of: view
-                    .get_variable_name(v.alias_of_uid)
-                    .unwrap_or("")
-                    .to_owned(),
+                of: index.name(v.alias_of_uid).unwrap_or("").to_owned(),
                 of_uid: Some(v.alias_of_uid),
                 x: v.x,
                 y: v.y,
@@ -1644,15 +1674,15 @@ impl From<ViewObject> for datamodel::ViewElement {
 }
 
 impl ViewObject {
-    fn from(v: datamodel::ViewElement, view: &datamodel::StockFlow) -> Self {
+    fn from(v: datamodel::ViewElement, index: &view_element::ViewIndex<'_>) -> Self {
         match v {
             // TODO: rename ViewObject to ViewElement for consistency
             ViewElement::Aux(v) => ViewObject::Aux(view_element::Aux::from(v)),
             ViewElement::Stock(v) => ViewObject::Stock(view_element::Stock::from(v)),
             ViewElement::Flow(v) => ViewObject::Flow(view_element::Flow::from(v)),
-            ViewElement::Link(v) => ViewObject::Link(view_element::Link::from(v, view)),
+            ViewElement::Link(v) => ViewObject::Link(view_element::Link::from_indexed(v, index)),
             ViewElement::Module(v) => ViewObject::Module(view_element::Module::from(v)),
-            ViewElement::Alias(v) => ViewObject::Alias(view_element::Alias::from(v, view)),
+            ViewElement::Alias(v) => ViewObject::Alias(view_element::Alias::from_indexed(v, index)),
             ViewElement::Cloud(_v) => ViewObject::Unhandled,
             ViewElement::Group(v) => ViewObject::Group(view_element::Group::from(v)),
         }
@@ -2070,26 +2100,29 @@ impl From<View> for datamodel::View {
 impl From<datamodel::View> for View {
     fn from(v: datamodel::View) -> Self {
         match v {
-            datamodel::View::StockFlow(v) => View {
-                next_uid: None,
-                kind: Some(ViewType::StockFlow),
-                name: v.name.clone(),
-                background: None,
-                page_width: None,
-                page_height: None,
-                show_pages: None,
-                objects: v
-                    .elements
-                    .iter()
-                    .cloned()
-                    .map(|element| ViewObject::from(element, &v))
-                    .collect(),
-                zoom: xmile_percent_from_zoom_factor(v.zoom),
-                offset_x: Some(v.view_box.x),
-                offset_y: Some(v.view_box.y),
-                width: Some(v.view_box.width),
-                height: Some(v.view_box.height),
-            },
+            datamodel::View::StockFlow(v) => {
+                let index = view_element::ViewIndex::of(&v);
+                View {
+                    next_uid: None,
+                    kind: Some(ViewType::StockFlow),
+                    name: v.name.clone(),
+                    background: None,
+                    page_width: None,
+                    page_height: None,
+                    show_pages: None,
+                    objects: v
+                        .elements
+                        .iter()
+                        .cloned()
+                        .map(|element| ViewObject::from(element, &index))
+                        .collect(),
+                    zoom: xmile_percent_from_zoom_factor(v.zoom),
+                    offset_x: Some(v.view_box.x),
+                    offset_y: Some(v.view_box.y),
+                    width: Some(v.view_box.width),
+                    height: Some(v.view_box.height),
+                }
+            }
         }
     }
 }
