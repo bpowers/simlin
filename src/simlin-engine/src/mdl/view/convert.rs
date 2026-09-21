@@ -152,13 +152,13 @@ fn convert_views(
     // also runs), and UIDs are reassigned sequentially.
     for view in &mut result {
         let View::StockFlow(sf) = view;
-        sf.elements
-            .rewrite(|elements| route_pending_flows(elements, &pending_routes));
-        sf.elements
-            .rewrite(|elements| crate::diagram::flow_geometry::normalize_flow_geometry(elements));
-        let uid_map = sf
-            .elements
-            .rewrite(|elements| reassign_uids_sequential(elements));
+        // One pass over a plain vector: nothing shares the imported elements
+        // yet, and each `rewrite` allocates every element afresh.
+        let uid_map = sf.elements.rewrite(|elements| {
+            route_pending_flows(elements, &pending_routes);
+            crate::diagram::flow_geometry::normalize_flow_geometry(elements);
+            reassign_uids_sequential(elements)
+        });
         if let Some(sketch_compat) = sf.sketch_compat.as_mut() {
             remap_sketch_compat_uids(sketch_compat, &uid_map);
         }
