@@ -74,9 +74,11 @@ fn edit_each_keeps_what_it_leaves_unchanged_shared() {
     // The edit visits every element but changes only those holding an `o`
     // after their first letter; the others come out equal and stay shared.
     copy.edit_each(|s| {
-        if s[1..].contains('o') {
-            *s = s.replace('o', "0");
+        if !s[1..].contains('o') {
+            return false;
         }
+        *s = s.replace('o', "0");
+        true
     });
     assert_eq!(copy.to_vec(), ["zer0", "one", "tw0", "three", "f0ur"]);
     assert_eq!(shared(&original, &copy), 2);
@@ -86,7 +88,10 @@ fn edit_each_keeps_what_it_leaves_unchanged_shared() {
 fn edit_each_edits_an_element_nothing_else_holds_in_place() {
     let mut alone = numbers();
     let before = alone.addresses();
-    alone.edit_each(|s| s.push('!'));
+    alone.edit_each(|s| {
+        s.push('!');
+        true
+    });
     assert_eq!(alone[4], "four!");
     assert_eq!(alone.addresses(), before, "no element was copied");
 }
@@ -189,4 +194,26 @@ fn share_identical_compares_the_first_of_a_repeated_key() {
     let a = after.addresses();
     assert_eq!(a[0], b[0]);
     assert_ne!(a[1], b[1], "only the key's first element is compared");
+}
+
+#[test]
+fn edit_each_keeps_a_change_eq_cannot_see() {
+    // `0.0 == -0.0`, so a copy kept only when it compared unequal would lose
+    // this edit on a shared element, the one an undo history holds.
+    let original: SharedVec<f64> = vec![0.0, 1.0].into();
+    let mut copy = original.clone();
+    copy.edit_each(|x| {
+        if *x != 0.0 {
+            return false;
+        }
+        *x = -0.0;
+        true
+    });
+    assert!(copy[0].is_sign_negative(), "the edit was kept");
+    assert!(original[0].is_sign_positive(), "the original is untouched");
+    assert_eq!(
+        copy.addresses()[1],
+        original.addresses()[1],
+        "an element the edit left alone is still shared"
+    );
 }

@@ -556,25 +556,30 @@ pub fn expand_queues(
     // shares with the one it was cloned from only if the pass changes it.
     let model = &mut project.models[model_idx];
     model.variables.edit_each(|v| {
+        let mut changed = false;
         if let Some(new_eqn) = rewritten_equations.remove(&canon(v.get_ident())) {
             set_variable_equation(v, new_eqn);
+            changed = true;
         }
-        match v {
-            datamodel::Variable::Flow(f) if driven.contains(&canon(&f.ident)) => {
-                // The queue stock now drives this outflow via the pass; give it a
-                // writable placeholder slot and drop the overflow marker (it is an
-                // ordinary flow after expansion).
-                f.equation = placeholder_zero_equation(&f.equation);
-                f.compat.overflow = false;
+        changed
+            | match v {
+                datamodel::Variable::Flow(f) if driven.contains(&canon(&f.ident)) => {
+                    // The queue stock now drives this outflow via the pass; give it a
+                    // writable placeholder slot and drop the overflow marker (it is an
+                    // ordinary flow after expansion).
+                    f.equation = placeholder_zero_equation(&f.equation);
+                    f.compat.overflow = false;
+                    true
+                }
+                datamodel::Variable::Stock(s) if s.compat.queue.is_some() => {
+                    // The FIFO is now driven by the pass; the expanded stock is an
+                    // ordinary INTEG whose Δ = Σ inflow − Σ outflow (§4.1), so drop
+                    // the queue marker.
+                    s.compat.queue = None;
+                    true
+                }
+                _ => false,
             }
-            datamodel::Variable::Stock(s) if s.compat.queue.is_some() => {
-                // The FIFO is now driven by the pass; the expanded stock is an
-                // ordinary INTEG whose Δ = Σ inflow − Σ outflow (§4.1), so drop
-                // the queue marker.
-                s.compat.queue = None;
-            }
-            _ => {}
-        }
     });
     // Append the synthesized container stocks (no-flow INTEGs the pass drives).
     for stock in container_stocks {

@@ -18,7 +18,7 @@
 //! - The elements a test picks: [`SharedVec::edit_where`].
 //! - A pass that can't tell beforehand which elements it changes (an equation
 //!   rewrite has to parse to know): [`SharedVec::edit_each`], which edits a
-//!   copy and keeps it only if it differs.
+//!   copy and keeps it only if the edit reports a change.
 //! - A pass that changes every element, on a vector nothing shares yet (an
 //!   import, a generated layout): [`SharedVec::rewrite`], over a plain `Vec`.
 //!
@@ -171,22 +171,19 @@ impl<T: Clone> SharedVec<T> {
             }
         }
     }
-    /// Changes every element through `edit`, keeping shared each one the edit
-    /// leaves as it was. An element nothing else holds is edited in place; a
-    /// shared one is edited in a copy, which replaces it only if the two
-    /// differ.
-    pub fn edit_each(&mut self, mut edit: impl FnMut(&mut T))
-    where
-        T: PartialEq,
-    {
+    /// Changes every element through `edit`, which returns whether it
+    /// changed the element it was given, and keeps shared each one it left as
+    /// it was. An element nothing else holds is edited in place; a shared one
+    /// is edited in a copy, which replaces it only when `edit` reports a
+    /// change, so an edit that returns `false` must have changed nothing.
+    pub fn edit_each(&mut self, mut edit: impl FnMut(&mut T) -> bool) {
         for element in &mut self.0 {
             if let Some(unique) = Arc::get_mut(element) {
                 edit(unique);
                 continue;
             }
             let mut copy = T::clone(element);
-            edit(&mut copy);
-            if copy != **element {
+            if edit(&mut copy) {
                 *element = Arc::new(copy);
             }
         }

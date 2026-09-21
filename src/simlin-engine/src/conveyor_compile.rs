@@ -1571,35 +1571,40 @@ pub fn expand_conveyors(
     model.variables.edit_each(|v| {
         // Replace a reader's equation with its container-access-rewritten form
         // (the container subexpressions now reference the synthesized stocks).
+        let mut changed = false;
         if let Some(new_eqn) = rewritten_equations.remove(&canon(v.get_ident())) {
             set_variable_equation(v, new_eqn);
+            changed = true;
         }
-        match v {
-            datamodel::Variable::Flow(f) if driven_set.contains(&canon(&f.ident)) => {
-                // Preserve the flow's array shape so an arrayed driven flow keeps
-                // its per-element slots (§10); the pass overwrites every slot.
-                f.equation = placeholder_zero_equation(&f.equation);
-                // The fraction now lives in a hidden aux; the flow slot is
-                // pass-driven, so its own leak/gf metadata plays no runtime role.
-                f.gf = None;
-                // Clear the leak marker so the expanded flow is plain.
-                f.compat.leakage = None;
-            }
-            datamodel::Variable::Stock(s) if s.compat.conveyor.is_some() => {
-                // A §7.2 explicit-list <eqn> compiles as its constant
-                // normalized-total placeholder (recorded in Pass 1); the belt
-                // itself fills from the meta's `init_values` in init_belts,
-                // whose write-back of the identical total is defense in depth.
-                if let Some(placeholder) = init_list_rewrites.remove(&canon(&s.ident)) {
-                    s.equation = placeholder;
+        changed
+            | match v {
+                datamodel::Variable::Flow(f) if driven_set.contains(&canon(&f.ident)) => {
+                    // Preserve the flow's array shape so an arrayed driven flow keeps
+                    // its per-element slots (§10); the pass overwrites every slot.
+                    f.equation = placeholder_zero_equation(&f.equation);
+                    // The fraction now lives in a hidden aux; the flow slot is
+                    // pass-driven, so its own leak/gf metadata plays no runtime role.
+                    f.gf = None;
+                    // Clear the leak marker so the expanded flow is plain.
+                    f.compat.leakage = None;
+                    true
                 }
-                // The belt is now driven by the pass; the expanded stock is an
-                // ordinary INTEG whose Δ = admitted - out - leak (the §4.3
-                // conservation identity), so drop the conveyor marker.
-                s.compat.conveyor = None;
+                datamodel::Variable::Stock(s) if s.compat.conveyor.is_some() => {
+                    // A §7.2 explicit-list <eqn> compiles as its constant
+                    // normalized-total placeholder (recorded in Pass 1); the belt
+                    // itself fills from the meta's `init_values` in init_belts,
+                    // whose write-back of the identical total is defense in depth.
+                    if let Some(placeholder) = init_list_rewrites.remove(&canon(&s.ident)) {
+                        s.equation = placeholder;
+                    }
+                    // The belt is now driven by the pass; the expanded stock is an
+                    // ordinary INTEG whose Δ = admitted - out - leak (the §4.3
+                    // conservation identity), so drop the conveyor marker.
+                    s.compat.conveyor = None;
+                    true
+                }
+                _ => false,
             }
-            _ => {}
-        }
     });
     for aux in new_auxes {
         model.variables.push(datamodel::Variable::Aux(aux));

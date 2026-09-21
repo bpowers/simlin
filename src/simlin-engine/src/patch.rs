@@ -760,64 +760,79 @@ fn rename_model_equations(
     model.variables.edit_each(|var| match var {
         Variable::Stock(stock) => rename_equation(&mut stock.equation, old_ident, new_ident),
         Variable::Flow(flow) => {
-            rename_equation(&mut flow.equation, old_ident, new_ident);
-            rename_active_initial(&mut flow.compat, old_ident, new_ident);
+            let equation = rename_equation(&mut flow.equation, old_ident, new_ident);
+            let initial = rename_active_initial(&mut flow.compat, old_ident, new_ident);
+            equation || initial
         }
         Variable::Aux(aux) => {
-            rename_equation(&mut aux.equation, old_ident, new_ident);
-            rename_active_initial(&mut aux.compat, old_ident, new_ident);
+            let equation = rename_equation(&mut aux.equation, old_ident, new_ident);
+            let initial = rename_active_initial(&mut aux.compat, old_ident, new_ident);
+            equation || initial
         }
-        Variable::Module(_) => {}
+        Variable::Module(_) => false,
     });
 }
 
 /// Every equation string a `datamodel::Equation` holds: the scalar or
 /// apply-to-all text, and an arrayed equation's per-element texts, per-element
 /// initial texts and default.
+/// Renames every reference in `equation`, returning whether any changed.
 fn rename_equation(
     equation: &mut datamodel::Equation,
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
-) {
+) -> bool {
     match equation {
         datamodel::Equation::Scalar(text) | datamodel::Equation::ApplyToAll(_, text) => {
-            rename_text(text, old_ident, new_ident);
+            rename_text(text, old_ident, new_ident)
         }
         datamodel::Equation::Arrayed(_, elements, default_eq, _) => {
+            let mut changed = false;
             for (_, text, initial, _) in elements.iter_mut() {
-                rename_text(text, old_ident, new_ident);
+                changed |= rename_text(text, old_ident, new_ident);
                 if let Some(initial) = initial.as_mut() {
-                    rename_text(initial, old_ident, new_ident);
+                    changed |= rename_text(initial, old_ident, new_ident);
                 }
             }
             if let Some(default_eq) = default_eq.as_mut() {
-                rename_text(default_eq, old_ident, new_ident);
+                changed |= rename_text(default_eq, old_ident, new_ident);
             }
+            changed
         }
     }
 }
 
+/// Renames every reference in an `ACTIVE INITIAL`, returning whether any
+/// changed.
 fn rename_active_initial(
     compat: &mut datamodel::Compat,
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
-) {
-    if let Some(text) = compat.active_initial.as_mut() {
-        rename_text(text, old_ident, new_ident);
-    }
+) -> bool {
+    compat
+        .active_initial
+        .as_mut()
+        .is_some_and(|text| rename_text(text, old_ident, new_ident))
 }
 
 /// One equation string: parsed as written, renamed, and printed back only if
-/// a reference changed. An empty or unparseable string is left as it is; the
-/// parse errors are the variable's own diagnostics, reported by the compile.
-fn rename_text(text: &mut String, old_ident: &Ident<Canonical>, new_ident: &Ident<Canonical>) {
+/// a reference changed, which it returns. An empty or unparseable string is
+/// left as it is; the parse errors are the variable's own diagnostics,
+/// reported by the compile.
+fn rename_text(
+    text: &mut String,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) -> bool {
     let Ok(Some(expr)) = Expr0::new(text, LexerType::Equation) else {
-        return;
+        return false;
     };
     let renamed = rename_expr(&expr, old_ident, new_ident);
-    if renamed != expr {
-        *text = print_eqn(&renamed);
+    if renamed == expr {
+        return false;
     }
+    *text = print_eqn(&renamed);
+    true
 }
 
 fn rename_expr(expr: &Expr0, old_ident: &Ident<Canonical>, new_ident: &Ident<Canonical>) -> Expr0 {
@@ -1035,20 +1050,23 @@ fn update_stock_flow_references(
     new_ident: &Ident<Canonical>,
 ) {
     model.variables.edit_each(|var| {
-        if let Variable::Stock(stock) = var {
-            for inflow in stock.inflows.iter_mut() {
-                if canonicalize(inflow.as_str()) == old_ident.as_str() {
-                    *inflow = new_ident.to_source_repr();
-                }
+        let Variable::Stock(stock) = var else {
+            return false;
+        };
+        let mut changed = false;
+        for flow in stock.inflows.iter_mut().chain(stock.outflows.iter_mut()) {
+            if canonicalize(flow.as_str()) == old_ident.as_str() {
+                *flow = new_ident.to_source_repr();
+                changed = true;
             }
-            for outflow in stock.outflows.iter_mut() {
-                if canonicalize(outflow.as_str()) == old_ident.as_str() {
-                    *outflow = new_ident.to_source_repr();
-                }
-            }
-            stock.inflows.sort_unstable();
-            stock.outflows.sort_unstable();
         }
+        for flows in [&mut stock.inflows, &mut stock.outflows] {
+            if !flows.is_sorted() {
+                flows.sort_unstable();
+                changed = true;
+            }
+        }
+        changed
     });
 }
 
