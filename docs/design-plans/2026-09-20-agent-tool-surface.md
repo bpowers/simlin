@@ -237,8 +237,8 @@ The entry points are behind libsimlin's `agent_tools` feature (the engine's feat
 
 ## MCP and pysimlin
 
-- **pysimlin** binds the catalog and a `ToolSession` (`Model.tools()`, `call(name, **input) -> dict`), for its users and for evaluation harnesses, which then exercise the same functions a native host ships.
-- **simlin-mcp-core** mounts the catalog as MCP tools, each input schema extended with `projectPath` and `modelName`, holding one session per project path; `FileSystemAccess` supplies a content hash as the revision. A plan is landed by the MCP host in its file. Whether these tools join `ReadModel`/`EditModel`/`CreateModel` or replace them is a wire decision for the MCP surface's owner.
+- **pysimlin** binds the catalog (`simlin.tools.catalog()`) and a `simlin.ToolSession(model)` for its users and for evaluation harnesses, which then exercise the same functions a native host ships. `call(tool, input)` answers a `ToolOutput(data, is_error)`: a refusal is output the harness scores like any other, and only a tool the catalog lacks raises. `run(name)` reads a session run as the DataFrame `Run.results` gives, `runs()` lists the session's runs with their revisions and staleness, and `land(id)` lands a plan through `simlin_tool_session_land_plan`, as a host does once the person approves, and commits it as the project commits any edit; a plan that cannot land says why.
+- **simlin-mcp-core** mounts the catalog as MCP tools, each input schema extended with `projectPath` and `modelName`, holding one session per project path; `FileSystemAccess` supplies a content hash as the revision. The MCP host lands a plan with `Session::land_plan` and writes the project to its file. The catalog's tools replace `ReadModel` and `EditModel`; `CreateModel`, which makes a file, stays a tool of the host's own.
 
 ## Relationship to other plans
 
@@ -262,4 +262,5 @@ The entry points are behind libsimlin's `agent_tools` feature (the engine's feat
 4. **The battery.** `run_tests`.
 5. **Editing.** `edit_model`, the gate and plans; `simlin_tool_session_land_plan`; the patch JSON types in the engine.
 6. **Verification.** `verify_findings`.
-7. **Hosts.** The pysimlin binding and the MCP mount.
+7. **pysimlin.** `simlin.ToolSession` and the catalog.
+8. **The MCP mount.** The catalog as MCP tools, as above.

@@ -1338,6 +1338,37 @@ class Project:
             raise write_error
         return diagnostics
 
+    def _land_tool_plan(self, session: Any, id: str) -> dict[str, Any]:
+        """Land the plan ``id`` of the tool session ``session`` (a
+        ``ToolSession``), as :meth:`_apply_patch_json` lands an edit: the
+        engine lands the plan on the contents as they are, and an accepted
+        landing is committed (revision, model caches, autosave) and announced.
+        The plan places what it adds on the diagram itself. Returns the
+        engine's answer: ``{"landed": True}``, or ``{"landed": False,
+        "reason": ...}``.
+        """
+        out_buf = ffi.new("uint8_t **")
+        out_len = ffi.new("uintptr_t *")
+        err_ptr = ffi.new("SimlinError **")
+        with self._file_lock:
+            with self._lock, session._lock:
+                self._check_alive()
+                lib.simlin_tool_session_land_plan(
+                    session._ptr, string_to_c(id), out_buf, out_len, err_ptr
+                )
+            check_out_error(err_ptr, f"Land plan {id}")
+            try:
+                answer: dict[str, Any] = json.loads(bytes(ffi.buffer(out_buf[0], out_len[0])))
+            finally:
+                lib.simlin_free(out_buf[0])
+            if not answer.get("landed"):
+                return answer
+            revision, write_error = self._commit_change_locked()
+        self._notify(ChangeEvent("edit", revision))
+        if write_error is not None:
+            raise write_error
+        return answer
+
     def serialize_json(self, format: str = JSON_FORMAT_SIMLIN) -> bytes:
         """Serialize the project to JSON.
 

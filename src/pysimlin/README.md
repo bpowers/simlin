@@ -16,6 +16,9 @@ Python bindings for [Simlin](https://simlin.com), a system dynamics simulation e
 - Display a model in a notebook cell to edit its diagram interactively; the
   editor writes to the model file and follows changes made to it
 - Import Vensim `.vdf` binary output as DataFrames
+- Give an AI agent the engine's modeling tools -- read a model, run
+  experiments, analyze loops, test, plan edits, check the evidence for its
+  claims -- with a `ToolSession`, and evaluate agents on the same tools
 - Generate SVG and PNG diagrams of the model's structure
 - Full type hints
 
@@ -652,6 +655,64 @@ variable's inputs matters most" -- not "which link matters most globally".
 A link into a target with a single scored input reads 1 by construction.
 (The raw `link.score` series is normalized differently for each target and
 is not comparable across targets at all.)
+
+### Agent Tools
+
+`simlin.ToolSession` gives an agent the engine's tool surface: reading a
+model, running what-if experiments, analyzing loops, running validation
+tests, planning edits, and checking the evidence behind its findings. Each
+tool takes and answers JSON-shaped data, and `simlin.tools.catalog()` lists
+every tool with its description and the JSON Schema of its input and
+output, ready to hand to a model's tool-use API. An evaluation harness
+drives the same tools its agent does.
+
+```python
+session = simlin.ToolSession(model)
+
+outline = session.call("read_model")
+print([stock["name"] for stock in outline.data["stocks"]])   # ['population']
+
+loops = session.call("analyze_loops")
+for span in loops.data["partitions"][0]["dominance"]:
+    print(span["from"], span["to"], [leader["loop"] for leader in span["leaders"]])
+
+session.call("run_experiment", {
+    "name": "faster",
+    "set": [{"variable": "max_growth_rate", "value": 0.12}],
+})
+faster = session.run("faster")   # a DataFrame shaped like Run.results
+(listed,) = session.runs()
+print(listed.name, listed.from_run, listed.changes)
+# faster current ({'variable': 'max_growth_rate', 'value': 0.12},)
+```
+
+Input a tool's schema does not allow comes back as output with `is_error`
+set and a message saying what was wrong, for the agent to read and repair;
+only a tool the catalog does not list raises. A call that stopped because
+the person's work on the project was waiting for it says so
+(`ToolOutput.interrupted`) and kept nothing: call it again once that work
+is done, not in a loop.
+
+`edit_model` plans an edit without applying it: the plan says what would
+change and whether the model would still simulate. `land()` lands a ready
+plan, and the project commits it as it does `model.edit()` (a file-backed
+model writes it back to its file). A plan made before the model changed is
+planned again on the model as it is; when what it changes has changed, or
+it would no longer pass the engine's checks, it does not land, and says
+why.
+
+```python
+plan = session.call("edit_model", {
+    "summary": "Raise the carrying capacity.",
+    "operations": [
+        {"op": "set_equation", "variable": "carrying_capacity", "equation": "12000"},
+    ],
+})
+if plan.data["verdict"] == "ready":
+    landing = session.land(plan.data["plan"])
+    if not landing.landed:
+        print(landing.reason)   # for the agent, which plans the edit again
+```
 
 ### Model Export
 

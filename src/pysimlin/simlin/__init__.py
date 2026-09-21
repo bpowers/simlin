@@ -49,6 +49,7 @@ from .run import (
     Run,
 )
 from .sim import Sim
+from .tools import ToolOutput, ToolSession
 from .types import (
     Aux,
     Compat,
@@ -218,6 +219,8 @@ __all__ = [
     "SpreadFlow",
     "Stock",
     "TimeSpec",
+    "ToolOutput",
+    "ToolSession",
     "UnitIssue",
     "Variable",
     "links_by_target",
