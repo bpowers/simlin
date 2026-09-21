@@ -9,7 +9,7 @@ edition = "2024"
 crate-type = ["rlib"]
 
 [features]
-default = ["schema", "ai_info", "debug-derive"]
+default = ["schema", "ai_info", "debug-derive", "agent_tools"]
 # Gates derive(Debug) on most types. Types that implement std::error::Error,
 # are used with .unwrap(), or appear in assert_eq!() keep unconditional Debug.
 # New types should use: #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -19,6 +19,11 @@ ai_info = ["dep:ed25519", "dep:base64"]
 file_io = ["dep:csv"]
 ext_data = ["dep:calamine"]
 png_render = ["dep:resvg"]
+# The agent tool surface (`tools`): a session per model that answers an
+# agent's tool calls with JSON. On by default; libsimlin's browser wasm bundle
+# leaves it out, since no browser code calls it (it is about 5% of that
+# bundle).
+agent_tools = []
 xmutil = ["dep:xmutil"]
 # Compiles in the `generate_loop_score_variables` loop-score tracing
 # instrumentation (per-loop cumulative equation bytes + RSS sampling), a

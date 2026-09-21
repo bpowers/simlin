@@ -1,0 +1,1343 @@
+{
+  "tools": [
+    {
+      "name": "read_model",
+      "description": "Outlines the model: its sim specs; each stock with its initial value, inflows and outflows; the flows, computed variables, constants, lookup tables and modules, each with its equation and units; and the engine's diagnostics, each with an id (D1, D2, ...) that later calls and claims can cite. Also says what changed since you last read it. Read the model before saying anything about it.",
+      "effect": "read",
+      "inputSchema": {
+        "additionalProperties": false,
+        "title": "ReadModelInput",
+        "description": "`read_model` takes nothing: a session is bound to its model.",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "SpecsOutline": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "number",
+                "format": "double"
+              },
+              "stop": {
+                "type": "number",
+                "format": "double"
+              },
+              "dt": {
+                "type": "number",
+                "format": "double"
+              },
+              "saveStep": {
+                "description": "How often results are saved, when it differs from DT.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "method": {
+                "$ref": "#/$defs/IntegrationMethod"
+              },
+              "timeUnits": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "start",
+              "stop",
+              "dt",
+              "method"
+            ]
+          },
+          "IntegrationMethod": {
+            "type": "string",
+            "enum": [
+              "euler",
+              "rk2",
+              "rk4"
+            ]
+          },
+          "Counts": {
+            "description": "How many of each kind of variable the model has, and of each severity of\ndiagnostic: always whole, whatever the outline lists.",
+            "type": "object",
+            "properties": {
+              "stocks": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "flows": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "variables": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "constants": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "lookups": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "modules": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "errors": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "warnings": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "stocks",
+              "flows",
+              "variables",
+              "constants",
+              "lookups",
+              "modules",
+              "errors",
+              "warnings"
+            ]
+          },
+          "StockOutline": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "units": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "initial": {
+                "description": "The initial value's equation; absent in a sector outline.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "inflows": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "outflows": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "dimensions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "nonNegative": {
+                "type": "boolean"
+              },
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "inflows",
+              "outflows"
+            ]
+          },
+          "VariableOutline": {
+            "description": "A flow or a computed auxiliary.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "units": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "equation": {
+                "description": "The equation, cut at 240 characters (`truncated` says so).",
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              },
+              "dimensions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "lookup": {
+                "description": "The graphical function the equation's value is looked up in, if any.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/LookupSummary"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "nonNegative": {
+                "type": "boolean"
+              },
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "equation"
+            ]
+          },
+          "LookupSummary": {
+            "description": "A graphical function's extent; `read_variables` has its points.",
+            "type": "object",
+            "properties": {
+              "points": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "xMin": {
+                "type": "number",
+                "format": "double"
+              },
+              "xMax": {
+                "type": "number",
+                "format": "double"
+              },
+              "yMin": {
+                "type": "number",
+                "format": "double"
+              },
+              "yMax": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "points",
+              "xMin",
+              "xMax",
+              "yMin",
+              "yMax"
+            ]
+          },
+          "ConstantOutline": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "units": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "value": {
+                "description": "The value as written; for an arrayed constant, each element's.",
+                "type": "string"
+              },
+              "dimensions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ]
+          },
+          "LookupOutline": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "units": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "lookup": {
+                "$ref": "#/$defs/LookupSummary"
+              },
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "lookup"
+            ]
+          },
+          "ModuleOutline": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "model": {
+                "description": "The model the module instantiates.",
+                "type": "string"
+              },
+              "inputs": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModuleInputOutline"
+                }
+              },
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "model"
+            ]
+          },
+          "ModuleInputOutline": {
+            "description": "One wire into a module: the variable it reads, and the module's input it\nfeeds.",
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ]
+          },
+          "DiagnosticReport": {
+            "description": "A diagnostic as a tool reports it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The session's id for this diagnostic (`D1`, ...), stable while it exists.",
+                "type": "string"
+              },
+              "severity": {
+                "$ref": "#/$defs/Severity"
+              },
+              "category": {
+                "$ref": "#/$defs/DiagnosticCategoryName"
+              },
+              "code": {
+                "description": "The engine's code for the class of failure, in snake_case.",
+                "type": "string"
+              },
+              "variable": {
+                "description": "The variable to fix, as the model names it; absent for a problem with\nthe model or the project as a whole.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why, in words: the raising site's reason, and the text it points at\nwhenever it has a span; what its code means only when neither.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "severity",
+              "category",
+              "code"
+            ]
+          },
+          "Severity": {
+            "description": "Whether a diagnostic stops the model from simulating or only warns.",
+            "type": "string",
+            "enum": [
+              "error",
+              "warning"
+            ]
+          },
+          "DiagnosticCategoryName": {
+            "description": "Where a diagnostic was raised: the engine's [`DiagnosticCategory`], named\nfor a reader.",
+            "oneOf": [
+              {
+                "description": "An equation that does not parse, names something that does not\nexist, or cannot be compiled.",
+                "type": "string",
+                "const": "equation"
+              },
+              {
+                "description": "A problem with the model as a whole: a cycle, a duplicate name, a bad\ntable.",
+                "type": "string",
+                "const": "model"
+              },
+              {
+                "description": "A units string that does not parse.",
+                "type": "string",
+                "const": "unit_definition"
+              },
+              {
+                "description": "An equation whose computed units disagree with its declared units.",
+                "type": "string",
+                "const": "unit_consistency"
+              },
+              {
+                "description": "A contradiction among the units the model's equations imply.",
+                "type": "string",
+                "const": "unit_inference"
+              },
+              {
+                "description": "A construct the compiler refuses.",
+                "type": "string",
+                "const": "assembly"
+              }
+            ]
+          },
+          "Changes": {
+            "description": "What changed since a read. Each list is capped at 30 names, with the total\ncounted beside it when the cap binds.",
+            "type": "object",
+            "properties": {
+              "sinceRevision": {
+                "description": "The revision the agent last read at.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "added": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "addedCount": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0
+              },
+              "removed": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "removedCount": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0
+              },
+              "changed": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ChangedVariable"
+                }
+              },
+              "changedCount": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0
+              },
+              "specsChanged": {
+                "description": "Whether the start, stop, DT, save step, integration method or time\nunits changed.",
+                "type": "boolean"
+              },
+              "dimensionsChanged": {
+                "description": "Whether the project's dimensions changed: an element added, removed\nor renamed, or a dimension added or removed.",
+                "type": "boolean"
+              },
+              "unitDefinitionsChanged": {
+                "description": "Whether the project's unit definitions changed.",
+                "type": "boolean"
+              },
+              "modelsChanged": {
+                "description": "The project's other models whose variables or sim specs changed (the\nmodels a module instantiates among them), and those added or removed.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "sinceRevision"
+            ]
+          },
+          "ChangedVariable": {
+            "description": "One variable whose record changed, and which of its fields did.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ChangedField"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "fields"
+            ]
+          },
+          "ChangedField": {
+            "description": "A variable's fields, as a change report names them.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "units",
+                  "documentation",
+                  "lookup",
+                  "inflows",
+                  "outflows",
+                  "non_negative"
+                ]
+              },
+              {
+                "description": "It became a different kind of variable (an auxiliary became a stock).",
+                "type": "string",
+                "const": "kind"
+              },
+              {
+                "description": "Its equation, or for a stock its initial value.",
+                "type": "string",
+                "const": "equation"
+              },
+              {
+                "description": "A module's model or its input wiring.",
+                "type": "string",
+                "const": "module"
+              },
+              {
+                "description": "How its name is written, when only case or spacing changed; a rename\nis a removal and an addition.",
+                "type": "string",
+                "const": "name"
+              },
+              {
+                "description": "Anything else an import carries (an active initial value, a data\nsource, a conveyor or queue marker, visibility).",
+                "type": "string",
+                "const": "other"
+              }
+            ]
+          },
+          "SectorOutline": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "variables": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "stocks": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "variables"
+            ]
+          },
+          "Omitted": {
+            "type": "object",
+            "properties": {
+              "stocks": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "diagnostics": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "otherNames": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "stocks",
+              "diagnostics",
+              "otherNames"
+            ]
+          }
+        },
+        "title": "ReadModelOutput",
+        "description": "The outline of a model.",
+        "type": "object",
+        "properties": {
+          "revision": {
+            "description": "The project revision this outline read.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "model": {
+            "type": "string"
+          },
+          "specs": {
+            "$ref": "#/$defs/SpecsOutline"
+          },
+          "counts": {
+            "$ref": "#/$defs/Counts"
+          },
+          "stocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/StockOutline"
+            }
+          },
+          "flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/VariableOutline"
+            }
+          },
+          "variables": {
+            "description": "The computed auxiliaries.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/VariableOutline"
+            }
+          },
+          "constants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ConstantOutline"
+            }
+          },
+          "lookups": {
+            "description": "Standalone lookup tables, which other equations call.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/LookupOutline"
+            }
+          },
+          "modules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ModuleOutline"
+            }
+          },
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/DiagnosticReport"
+            }
+          },
+          "changes": {
+            "description": "What changed since this session last read the model, when anything did.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Changes"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sectors": {
+            "description": "Present when the model is outlined by sector: its sectors, each with\nhow many variables it holds and which stocks.",
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/SectorOutline"
+            }
+          },
+          "otherNames": {
+            "description": "In a sector outline, the names of the variables that are not stocks,\nin model order, as many as fit beside the stocks.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "omitted": {
+            "description": "How many stocks, diagnostics and other names a sector outline left out.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Omitted"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "note": {
+            "description": "What an outline by sector leaves to `read_variables`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "revision",
+          "model",
+          "specs",
+          "counts"
+        ]
+      }
+    },
+    {
+      "name": "read_variables",
+      "description": "Reads up to 12 variables whole: kind, units, documentation, equation or initial value, per-element equations, lookup points, a stock's flows or the stocks a flow fills and drains, the variables each reads and is read by with every link's polarity, and its diagnostic ids. A name that matches nothing comes back with the closest names.",
+      "effect": "read",
+      "inputSchema": {
+        "required": [
+          "names"
+        ],
+        "title": "ReadVariablesInput",
+        "type": "object",
+        "properties": {
+          "names": {
+            "description": "The variables to read, by name (case, spaces and underscores do not\nmatter), or one element of an arrayed variable (`population[north]`);\nat most 12.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 12
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "$defs": {
+          "VariableRecord": {
+            "description": "Everything a variable's definition holds, and its causal neighbors.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "element": {
+                "description": "The element read, when one was named (`population[north]`): the\nrecord's equation or initial value is that element's.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/$defs/VariableKind"
+              },
+              "units": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "documentation": {
+                "description": "The documentation, cut at 480 characters.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "equation": {
+                "description": "A flow's or auxiliary's equation; absent for per-element equations,\nwhich `elements` lists.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "initial": {
+                "description": "A stock's initial value; absent for per-element initial values.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "dimensions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "elements": {
+                "description": "Per-element equations (or a stock's per-element initial values): at\nmost 24, each cut at 240 characters and 2,400 in all; name an element\nto read its equation whole.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ElementEquation"
+                }
+              },
+              "moreElements": {
+                "description": "How many more per-element equations there are than `elements` lists.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0
+              },
+              "otherElements": {
+                "description": "The equation of every element `elements` does not list.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "lookup": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Lookup"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "nonNegative": {
+                "type": "boolean"
+              },
+              "inflows": {
+                "description": "A stock's inflows.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "outflows": {
+                "description": "A stock's outflows.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "fills": {
+                "description": "The stocks a flow fills.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "drains": {
+                "description": "The stocks a flow drains.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "module": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModuleRecord"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inputs": {
+                "description": "The variables this one reads, each link with its polarity, at most 24.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LinkRef"
+                }
+              },
+              "moreInputs": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0
+              },
+              "readers": {
+                "description": "The variables that read this one, each link with its polarity, at\nmost 24.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LinkRef"
+                }
+              },
+              "moreReaders": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0
+              },
+              "diagnostics": {
+                "description": "This variable's diagnostics, each under the id `read_model` gives it.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/DiagnosticReport"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "kind"
+            ]
+          },
+          "VariableKind": {
+            "description": "What a variable is, as a modeler would say it.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "stock",
+                  "flow"
+                ]
+              },
+              {
+                "description": "A computed auxiliary.",
+                "type": "string",
+                "const": "auxiliary"
+              },
+              {
+                "description": "An auxiliary whose equation is a number.",
+                "type": "string",
+                "const": "constant"
+              },
+              {
+                "description": "A standalone table other equations call.",
+                "type": "string",
+                "const": "lookup"
+              },
+              {
+                "description": "An instance of another model.",
+                "type": "string",
+                "const": "module"
+              }
+            ]
+          },
+          "ElementEquation": {
+            "type": "object",
+            "properties": {
+              "element": {
+                "type": "string"
+              },
+              "equation": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "element",
+              "equation"
+            ]
+          },
+          "Lookup": {
+            "description": "A graphical function's points.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/LookupKind"
+              },
+              "x": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "y": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "morePoints": {
+                "description": "How many more points the table has than the 64 listed.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "x",
+              "y"
+            ]
+          },
+          "LookupKind": {
+            "oneOf": [
+              {
+                "description": "Interpolates between points and holds the end values beyond them.",
+                "type": "string",
+                "const": "continuous"
+              },
+              {
+                "description": "Interpolates between points and extends the end segments beyond them.",
+                "type": "string",
+                "const": "extrapolate"
+              },
+              {
+                "description": "Steps from point to point.",
+                "type": "string",
+                "const": "discrete"
+              }
+            ]
+          },
+          "ModuleRecord": {
+            "description": "The wiring of a module instance.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "The model the module instantiates.",
+                "type": "string"
+              },
+              "inputs": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModuleInputOutline"
+                }
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "ModuleInputOutline": {
+            "description": "One wire into a module: the variable it reads, and the module's input it\nfeeds.",
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ]
+          },
+          "LinkRef": {
+            "description": "One end of a causal link, from the variable a record describes.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "polarity": {
+                "$ref": "#/$defs/LinkPolarityName"
+              }
+            },
+            "required": [
+              "name",
+              "polarity"
+            ]
+          },
+          "LinkPolarityName": {
+            "description": "A link's sign as system dynamics writes it: `+` when the target moves with\nthe source, `-` when against it, `?` when the engine cannot tell from the\nequation.",
+            "type": "string",
+            "enum": [
+              "+",
+              "-",
+              "?"
+            ]
+          },
+          "DiagnosticReport": {
+            "description": "A diagnostic as a tool reports it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The session's id for this diagnostic (`D1`, ...), stable while it exists.",
+                "type": "string"
+              },
+              "severity": {
+                "$ref": "#/$defs/Severity"
+              },
+              "category": {
+                "$ref": "#/$defs/DiagnosticCategoryName"
+              },
+              "code": {
+                "description": "The engine's code for the class of failure, in snake_case.",
+                "type": "string"
+              },
+              "variable": {
+                "description": "The variable to fix, as the model names it; absent for a problem with\nthe model or the project as a whole.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why, in words: the raising site's reason, and the text it points at\nwhenever it has a span; what its code means only when neither.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "severity",
+              "category",
+              "code"
+            ]
+          },
+          "Severity": {
+            "description": "Whether a diagnostic stops the model from simulating or only warns.",
+            "type": "string",
+            "enum": [
+              "error",
+              "warning"
+            ]
+          },
+          "DiagnosticCategoryName": {
+            "description": "Where a diagnostic was raised: the engine's [`DiagnosticCategory`], named\nfor a reader.",
+            "oneOf": [
+              {
+                "description": "An equation that does not parse, names something that does not\nexist, or cannot be compiled.",
+                "type": "string",
+                "const": "equation"
+              },
+              {
+                "description": "A problem with the model as a whole: a cycle, a duplicate name, a bad\ntable.",
+                "type": "string",
+                "const": "model"
+              },
+              {
+                "description": "A units string that does not parse.",
+                "type": "string",
+                "const": "unit_definition"
+              },
+              {
+                "description": "An equation whose computed units disagree with its declared units.",
+                "type": "string",
+                "const": "unit_consistency"
+              },
+              {
+                "description": "A contradiction among the units the model's equations imply.",
+                "type": "string",
+                "const": "unit_inference"
+              },
+              {
+                "description": "A construct the compiler refuses.",
+                "type": "string",
+                "const": "assembly"
+              }
+            ]
+          },
+          "NotFound": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "suggestions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name"
+            ]
+          }
+        },
+        "title": "ReadVariablesOutput",
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/VariableRecord"
+            }
+          },
+          "notFound": {
+            "description": "Names that matched no variable, each with the closest names.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/NotFound"
+            }
+          },
+          "omitted": {
+            "description": "Variables left out to keep the answer within its budget, to read in\nanother call.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "revision",
+          "variables"
+        ]
+      }
+    },
+    {
+      "name": "find_variables",
+      "description": "Finds variables by a name, part of a name, a misspelling, or a few words of description, closest first. Use it when a name the person said or wrote does not match the model's.",
+      "effect": "read",
+      "inputSchema": {
+        "required": [
+          "phrase"
+        ],
+        "title": "FindVariablesInput",
+        "type": "object",
+        "properties": {
+          "phrase": {
+            "description": "A name, part of one, a misspelling, or a few words of description.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "$defs": {
+          "VariableMatch": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/VariableKind"
+              },
+              "units": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "score": {
+                "description": "How closely the phrase matches, from 0 to 1.",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "score"
+            ]
+          },
+          "VariableKind": {
+            "description": "What a variable is, as a modeler would say it.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "stock",
+                  "flow"
+                ]
+              },
+              {
+                "description": "A computed auxiliary.",
+                "type": "string",
+                "const": "auxiliary"
+              },
+              {
+                "description": "An auxiliary whose equation is a number.",
+                "type": "string",
+                "const": "constant"
+              },
+              {
+                "description": "A standalone table other equations call.",
+                "type": "string",
+                "const": "lookup"
+              },
+              {
+                "description": "An instance of another model.",
+                "type": "string",
+                "const": "module"
+              }
+            ]
+          }
+        },
+        "title": "FindVariablesOutput",
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "matches": {
+            "description": "Up to 10 variables, closest first.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/VariableMatch"
+            }
+          }
+        },
+        "required": [
+          "revision",
+          "matches"
+        ]
+      }
+    }
+  ]
+}

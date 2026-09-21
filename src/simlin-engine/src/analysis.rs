@@ -710,6 +710,171 @@ fn build_time_array(results: &crate::results::Results) -> Vec<f64> {
         .collect()
 }
 
+/// One causal link of a model, as [`model_links`] reports it: its endpoints,
+/// its statically analyzed polarity, and, for a run under the LTM overlay, its
+/// link-score series.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub struct ModelLink {
+    pub from: String,
+    pub to: String,
+    pub polarity: crate::ltm::LinkPolarity,
+    /// The link's LTM link-score series, or `None` when the results carry no
+    /// score for it (no results, or a run without the LTM overlay).
+    pub score: Option<Vec<f64>>,
+    /// The relative link score series (GH #652): the link's raw `score`
+    /// normalized, per target and per timestep, against the sum of `|score|`
+    /// over all of `to`'s scored inputs -- a value in `[-1, 1]` comparable
+    /// across targets (unlike the raw `score`, which is incomparable because
+    /// it divides by the change in `to`). `None` exactly when `score` is
+    /// `None`. Computed over the *final* (post-collapse) link set, so the
+    /// per-target denominator matches the links the caller receives.
+    pub relative_score: Option<Vec<f64>>,
+    /// The size of `relative_score`'s normalization group (GH #998): how many
+    /// scored links share this link's `to` target, itself included; 0 for an
+    /// unscored link. A group of ONE reads `±1` at every step by construction,
+    /// so this is what lets callers detect that degeneracy when ranking links.
+    pub scored_input_count: usize,
+}
+
+/// A model's unique causal links with their static polarities and, when
+/// `results` is `Some`, each link's LTM link-score series: the one owner of
+/// "which links does this model have", shared by every surface that reports
+/// them (libsimlin's model- and sim-level link queries, the wasm-results twin,
+/// the agent tools), so the structural and scored link sets cannot drift apart.
+///
+/// `results` is `Option` because a run without the LTM overlay, or no run at
+/// all, has no score series; a link whose score is absent from `results` keeps
+/// `score: None`.
+///
+/// `include_internal` controls whether macro/module-internal synthetic nodes
+/// (`$⁚{var}⁚{n}⁚{func}`, `$⁚ltm⁚agg⁚{n}`, etc.) are surfaced. When `false`
+/// (the default user-facing view) the raw graph is run through
+/// [`crate::ltm_finding::collapse_synthetic_links`], which collapses each chain
+/// `X -> $⁚…internal… -> Y` into one composite edge `X -> Y` whose polarity is
+/// the product of the collapsed links and whose score is the composite link
+/// score (the largest-magnitude path score through the macro/module -- LTM ref
+/// 6.3/6.4). When `true` the raw causal graph is returned unchanged.
+///
+/// Owned strings and series, so the value outlives the db borrow: the edges
+/// are materialized before `results` is read, and a caller can drop its locks
+/// the moment this returns.
+pub fn model_links(
+    db: &dyn crate::db::Db,
+    model: crate::db::SourceModel,
+    project: SourceProject,
+    results: Option<&crate::results::Results>,
+    include_internal: bool,
+) -> Vec<ModelLink> {
+    let causal = crate::db::model_causal_edges(db, model, project);
+    let polarities = crate::db::compute_link_polarities(db, model, project);
+
+    let mut unique_links: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for (from_name, to_set) in &causal.edges {
+        for to_name in to_set {
+            let key = (from_name.clone(), to_name.clone());
+            if seen.insert(key.clone()) {
+                unique_links.push(key);
+            }
+        }
+    }
+
+    let raw: Vec<ModelLink> = unique_links
+        .into_iter()
+        .map(|(from, to)| {
+            let score = results.and_then(|r| {
+                let link_score_var =
+                    format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}");
+                let var_ident = crate::canonicalize(&link_score_var);
+                r.offsets
+                    .get(&*var_ident)
+                    .map(|&off| r.iter().map(|row| row[off]).collect::<Vec<f64>>())
+            });
+            let polarity = polarities
+                .get(&(from.clone(), to.clone()))
+                .copied()
+                .unwrap_or(crate::ltm::LinkPolarity::Unknown);
+            ModelLink {
+                from,
+                to,
+                polarity,
+                score,
+                relative_score: None,
+                scored_input_count: 0,
+            }
+        })
+        .collect();
+
+    if include_internal {
+        // The raw graph is the final returned set in this view, so normalize
+        // its relative scores per target before returning.
+        return attach_relative_scores(raw);
+    }
+
+    let collapsible: Vec<crate::ltm_finding::CollapsibleLink> = raw
+        .into_iter()
+        .map(|l| crate::ltm_finding::CollapsibleLink {
+            from: crate::common::Ident::new(&l.from),
+            to: crate::common::Ident::new(&l.to),
+            polarity: l.polarity,
+            score: l.score,
+        })
+        .collect();
+    let collapsed: Vec<ModelLink> = crate::ltm_finding::collapse_synthetic_links(collapsible)
+        .into_iter()
+        .map(|l| ModelLink {
+            from: l.from.as_str().to_string(),
+            to: l.to.as_str().to_string(),
+            polarity: l.polarity,
+            score: l.score,
+            relative_score: None,
+            scored_input_count: 0,
+        })
+        .collect();
+    // Normalize relative scores over the *collapsed* set: a collapsed
+    // `X -> Y` composite edge is one input of `Y` in the user-facing view, so
+    // the per-target denominator must group on the post-collapse `to`.
+    attach_relative_scores(collapsed)
+}
+
+/// Fill in each link's `relative_score` from its raw `score`, normalizing per
+/// `to` target via the shared core (`ltm_post::compute_rel_link_scores`).
+///
+/// Runs on the *final* link set (post synthetic-collapse for the user-facing
+/// view, or the raw graph for `include_internal`) so the per-target
+/// denominator -- the sum of `|score|` over all of a target's scored inputs --
+/// matches the links the caller receives. Links with no `score` series get
+/// `relative_score = None` (they also contribute nothing to any denominator).
+fn attach_relative_scores(links: Vec<ModelLink>) -> Vec<ModelLink> {
+    // The longest score series is the saved-step count; an all-`None` set
+    // (no LTM results) has step_count 0 and every link stays `None`.
+    let step_count = links
+        .iter()
+        .filter_map(|l| l.score.as_ref().map(|s| s.len()))
+        .max()
+        .unwrap_or(0);
+    let inputs: Vec<crate::ltm_post::RelLinkInput> = links
+        .iter()
+        .map(|l| crate::ltm_post::RelLinkInput {
+            to: l.to.as_str(),
+            score: l.score.as_deref(),
+        })
+        .collect();
+    let rel = crate::ltm_post::compute_rel_link_scores(&inputs, step_count);
+    let group_sizes = crate::ltm_post::rel_link_group_sizes(&inputs);
+    links
+        .into_iter()
+        .zip(rel)
+        .zip(group_sizes)
+        .map(|((mut link, relative_score), scored_input_count)| {
+            link.relative_score = relative_score;
+            link.scored_input_count = scored_input_count;
+            link
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

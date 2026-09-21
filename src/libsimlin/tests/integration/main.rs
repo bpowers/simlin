@@ -29,4 +29,6 @@ mod rendering;
 mod results;
 mod serialization;
 mod simulation;
+#[cfg(feature = "agent_tools")]
+mod tools;
 mod wasm;

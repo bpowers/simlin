@@ -193,6 +193,11 @@ typedef enum {
 // A live drag over the view as it was when the drag began.
 typedef struct SimlinGesture SimlinGesture;
 
+// One agent's work on one model: the evidence ids it has been given and what
+// it last read (`simlin_engine::tools::Session`), over the model it was made
+// for.
+typedef struct SimlinToolSession SimlinToolSession;
+
 // A single feedback loop
 typedef struct {
   char *id;
@@ -689,7 +694,7 @@ SimlinLtmMode simlin_sim_get_ltm_mode(SimlinSim *sim, SimlinError **out_error);
 // reading the `Results` off a `SimlinSim`'s `SimState`, it rebuilds them
 // from a `(slab, WasmLayout)` pair produced by running the blob returned
 // from `simlin_model_compile_to_wasm(model, ltm_enabled=true, ..)`.  Both
-// FFI functions funnel through the same `analyze_links_core` so the link
+// FFI functions funnel through the same `engine::analysis::model_links` so the link
 // set and per-link score series agree to within the underlying VM/wasm
 // numeric tolerance.
 //
@@ -1294,7 +1299,7 @@ void simlin_model_get_incoming_links(SimlinModel *model,
 // The view matches `simlin_analyze_get_links`'s default
 // (`include_internal = false`): macro/module-internal synthetic nodes are
 // collapsed into composite real-variable edges. Both functions funnel
-// through the same `analyze_links_core`, so the model-level (structural,
+// through the same `engine::analysis::model_links`, so the model-level (structural,
 // score-less) and sim-level (scored) link sets cannot drift apart.
 //
 // # Safety
@@ -1481,6 +1486,20 @@ void simlin_project_unref(SimlinProject *project);
 void simlin_project_get_model_count(SimlinProject *project,
                                     uintptr_t *out_count,
                                     SimlinError **out_error);
+
+// Gets the project's revision: a counter every change to its contents
+// advances (a committed patch, a view edit, a replace, an added model, a
+// diagram sync), and no read does. Two calls that return the same revision
+// saw the same contents, so a host that caches anything derived from the
+// project -- an agent's last read of it, a chart of its last run -- can tell
+// whether that cache still describes it. The converse does not hold: a
+// revision may advance without a visible change.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+void simlin_project_get_revision(SimlinProject *project,
+                                 uint64_t *out_revision,
+                                 SimlinError **out_error);
 
 // Gets the list of model names in the project
 //
@@ -2241,6 +2260,87 @@ void simlin_sim_get_series(SimlinSim *sim,
                            uintptr_t len,
                            uintptr_t *out_written,
                            SimlinError **out_error);
+
+// Write the tool catalog -- every tool's name, description, effect, and the
+// JSON Schema of its input and of its output -- as UTF-8 JSON to a buffer the
+// caller frees with `simlin_free`: `{"tools": [{"name", "description",
+// "effect", "inputSchema", "outputSchema"}, ...]}`.
+//
+// # Safety
+// - `out_buf` and `out_len` must be valid pointers
+void simlin_tools_describe(uint8_t **out_buf, uintptr_t *out_len, SimlinError **out_error);
+
+// Make a tool session over `model`, which it keeps alive until the session's
+// last reference is dropped with `simlin_tool_session_unref`.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+SimlinToolSession *simlin_tool_session_new(SimlinModel *model, SimlinError **out_error);
+
+// Increment a tool session's reference count.
+//
+// # Safety
+// - `session` must be a valid pointer to a SimlinToolSession, or NULL
+void simlin_tool_session_ref(SimlinToolSession *session);
+
+// Decrement a tool session's reference count, releasing it (and its reference
+// to its model) at zero.
+//
+// # Safety
+// - `session` must be a valid pointer to a SimlinToolSession, or NULL
+void simlin_tool_session_unref(SimlinToolSession *session);
+
+// Answer a call of the tool named `name` with `input` (`input_len` bytes of
+// UTF-8 JSON; empty means `{}`), writing the output JSON to a buffer the
+// caller frees with `simlin_free` and whether it is a refusal to
+// `out_is_error`. A refusal names the rule the call broke and the repair,
+// for the agent to read: a host hands it back as the tool's result, never as
+// an exception that ends the agent's turn.
+//
+// A call reads the project as it is when the call starts, at that revision.
+// It holds the session for the call, and the project's datamodel only while
+// it takes the contents it answers from (shared, not copied) and their
+// revision: it then answers under the database lock alone, so a host's hit
+// tests, planners and revision reads, which lock only the datamodel, never
+// wait behind an analysis. An entry point that holds the datamodel and waits
+// for the database meanwhile -- an edit landing (`simlin_project_apply_patch`,
+// or an undo's `simlin_project_replace_contents`), a simulation
+// (`simlin_sim_new`), a read of the diagnostics, the others
+// `SimlinProject::waiting_for_db` lists -- keeps those readers waiting with
+// it, so the call stops for it between units of its work (a simulation, a
+// stage of an analysis) and answers a refusal with `"interrupted": true` that
+// kept nothing: the entry point waits at most one unit. A host that retries
+// by itself does so once that work is done -- after an edit, at the next
+// revision -- and never in a loop against a project that stays busy.
+//
+// # Safety
+// - `session` must be a valid pointer to a SimlinToolSession
+// - `name` must be a valid C string
+// - `input` must point to `input_len` bytes, or be NULL when it is zero
+// - `out_buf`, `out_len` and `out_is_error` must be valid pointers
+void simlin_tool_session_call(SimlinToolSession *session,
+                              const char *name,
+                              const uint8_t *input,
+                              uintptr_t input_len,
+                              uint8_t **out_buf,
+                              uintptr_t *out_len,
+                              bool *out_is_error,
+                              SimlinError **out_error);
+
+// Write what changed in the session's model since the session's last
+// `read_model` -- variables added, removed and changed (with which fields),
+// and whether the sim specs changed -- as UTF-8 JSON to a buffer the caller
+// frees with `simlin_free`, or `null` before the first read and when nothing
+// did. A view edit changes nothing an agent read, so it is no change here.
+// What a host tells an agent about the person's work before its next turn.
+//
+// # Safety
+// - `session` must be a valid pointer to a SimlinToolSession
+// - `out_buf` and `out_len` must be valid pointers
+void simlin_tool_session_get_changes(SimlinToolSession *session,
+                                     uint8_t **out_buf,
+                                     uintptr_t *out_len,
+                                     SimlinError **out_error);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -11,7 +11,9 @@
 //! `simlin_project_get_errors`, `simlin_project_is_simulatable`,
 //! `simlin_project_apply_patch` (every patch that validates),
 //! `simlin_model_compile_to_wasm`, `simlin_analyze_discover_loops`,
-//! `simlin_project_diagram_sync` and the renderings of a model with no view.
+//! `simlin_project_diagram_sync`, the renderings of a model with no view, and
+//! the tool entry points (`simlin_tool_session_call`), which take the contents
+//! they answer from under the datamodel lock.
 //! Those that do not take the database alone (`lock_db`), which locks the
 //! datamodel only to build it: `simlin_analyze_get_loops`,
 //! `simlin_model_get_incoming_links`, `simlin_model_get_links` and
@@ -161,10 +163,12 @@ enum Query {
     IncomingLinks,
     Links,
     LatexEquation,
+    #[cfg(feature = "agent_tools")]
+    ToolCall,
 }
 
 impl Query {
-    const ALL: [Query; 12] = [
+    const ALL: &[Query] = &[
         Query::SimNew,
         Query::GetErrors,
         Query::IsSimulatable,
@@ -177,6 +181,8 @@ impl Query {
         Query::IncomingLinks,
         Query::Links,
         Query::LatexEquation,
+        #[cfg(feature = "agent_tools")]
+        Query::ToolCall,
     ];
 
     /// Whether the row runs on the project with no stock-and-flow view.
@@ -356,6 +362,28 @@ impl Query {
                 births.as_ptr(),
                 &mut err,
             )),
+            #[cfg(feature = "agent_tools")]
+            Query::ToolCall => {
+                let session = crate::tools::simlin_tool_session_new(model, &mut err);
+                expect_no_error(err, "making a tool session");
+                let tool = CString::new("read_model").unwrap();
+                let (mut buf, mut len, mut is_error) = (ptr::null_mut(), 0, false);
+                crate::tools::simlin_tool_session_call(
+                    session,
+                    tool.as_ptr(),
+                    ptr::null(),
+                    0,
+                    &mut buf,
+                    &mut len,
+                    &mut is_error,
+                    &mut err,
+                );
+                crate::tools::simlin_tool_session_unref(session);
+                format!(
+                    "{is_error} {}",
+                    String::from_utf8_lossy(&take_bytes(buf, len))
+                )
+            }
         };
         let error = take_error(err);
         format!("{answer} / {error:?}")
@@ -377,7 +405,7 @@ fn answer_on_a_thread(query: Query, proj: *mut SimlinProject, wait: Duration) ->
 #[test]
 fn every_entry_point_that_queries_builds_the_database_and_answers_as_one_built_at_open_does() {
     let mut failures = Vec::new();
-    for query in Query::ALL {
+    for &query in Query::ALL {
         unsafe {
             let built = open(!query.viewless());
             drop((*built).lock_db());

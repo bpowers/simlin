@@ -1209,7 +1209,7 @@ fn links_from_wasm_match_vm() {
         simlin_free_links(vm_links_ptr);
 
         // The link *set* (from, to, polarity) must be identical; the VM and
-        // wasm both drive the same `analyze_links_core` over the same
+        // wasm both drive the same `engine::analysis::model_links` over the same
         // structure, so any divergence here is a regression.  Map the C-ABI
         // polarity enum to an Ord-able u8 for sorting.
         let polarity_to_u8 = |p: SimlinLinkPolarity| -> u8 {
@@ -1236,7 +1236,7 @@ fn links_from_wasm_match_vm() {
 
         // Build (from, to) → (raw, relative) score-series maps for the
         // comparison.  Both series must match the VM backend by construction
-        // (the shared `analyze_links_core` -> `attach_relative_scores` runs
+        // (the shared `engine::analysis::model_links` relative-score pass runs
         // identically for both backends), so this is the AC5.1 parity guard
         // extended to the GH #652 relative series.
         let mut wasm_map: std::collections::HashMap<(String, String), (Vec<f64>, Vec<f64>)> =

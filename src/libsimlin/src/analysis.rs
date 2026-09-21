@@ -29,191 +29,6 @@ use crate::{
     require_sim, store_anyhow_error, store_error, SimlinErrorCode, SimlinModel, SimlinSim,
 };
 
-/// Backend-agnostic per-link result emitted by [`analyze_links_core`].
-///
-/// Owned `String`s and an owned `Vec<f64>` score series, so the value
-/// survives the db lock drop -- the FFI boundary takes ownership
-/// of the strings (into `CString`) and the score buffer (into a `Box<[f64]>`
-/// freed by `simlin_free_links`).
-///
-/// This shape is shared by the VM-backed FFI (`simlin_analyze_get_links`)
-/// and by the from-wasm-results FFI added in a later task; concentrating
-/// the structure-and-scoring logic in one core (driven by `Option<&Results>`)
-/// guarantees the two backends cannot diverge.  See the divergence note in
-/// docs/implementation-plans/2026-05-26-wasm-ltm/phase_02.md (line 75) for
-/// why the design's single over-broad core is split into two focused cores
-/// (links here; relative-loop-score below): the links analysis is driven
-/// purely by structure + `Option<&Results>` and has no use for the LTM
-/// snapshots that the relative-loop-score core needs.
-pub(crate) struct OwnedLink {
-    pub(crate) from: String,
-    pub(crate) to: String,
-    pub(crate) polarity: engine::ltm::LinkPolarity,
-    pub(crate) score: Option<Vec<f64>>,
-    /// The relative link score series (GH #652): the link's raw `score`
-    /// normalized, per target and per timestep, against the sum of `|score|`
-    /// over all of `to`'s scored inputs -- a value in `[-1, 1]` comparable
-    /// across targets (unlike the raw `score`, which is incomparable because
-    /// it divides by the change in `to`).  `None` exactly when `score` is
-    /// `None`.  Computed by `attach_relative_scores` over the *final*
-    /// (post-collapse) link set, so the per-target denominator matches the
-    /// links the caller actually receives.
-    pub(crate) relative_score: Option<Vec<f64>>,
-    /// The size of `relative_score`'s normalization group (GH #998): how many
-    /// scored links share this link's `to` target, itself included; 0 for an
-    /// unscored link.  A group of ONE reads `±1` at every step by
-    /// construction, so this is what lets callers detect that degeneracy
-    /// when ranking links.  Computed alongside `relative_score`.
-    pub(crate) scored_input_count: usize,
-}
-
-/// Resolve the model's unique causal edges and, when `results` is `Some`,
-/// look up each edge's LTM link-score series.
-///
-/// `model_causal_edges` returns `&CausalEdgesResult` borrowed against the
-/// db; callers (the VM FFI and the future from-wasm FFI) drop the db
-/// lock immediately after this core returns, so this function
-/// materializes `unique_links` into owned `(String, String)` pairs while
-/// the borrow is still live and *only then* iterates over `results`.
-/// `compute_link_polarities` returns owned data, so the polarity map
-/// outlives the lock drop without further copying.
-///
-/// `results` is `Option` because non-LTM sims have no score series; the
-/// from-wasm callers always pass `Some(&results)` since they hold the
-/// rebuilt `Results` on the stack and only reach this core when LTM was
-/// part of the wasm compile.
-///
-/// `include_internal` controls whether macro/module-internal synthetic nodes
-/// (`$⁚{var}⁚{n}⁚{func}`, `$⁚ltm⁚agg⁚{n}`, etc.) are surfaced.  When `false`
-/// (the default user-facing view) the raw graph is run through
-/// `engine::ltm_finding::collapse_synthetic_links`, which collapses each chain
-/// `X -> $⁚…internal… -> Y` into one composite edge `X -> Y` whose polarity is
-/// the product of the collapsed links and whose score is the composite link
-/// score (the largest-magnitude path score through the macro/module -- LTM ref
-/// 6.3/6.4).  When `true` the raw causal graph is returned unchanged.  The
-/// collapse runs in the engine so every binding shares one implementation and
-/// it mirrors the loop-level `trim_synthetic_aggs_from_loop_links` trimming.
-pub(crate) fn analyze_links_core(
-    db: &dyn engine::db::Db,
-    model: SourceModel,
-    project: SourceProject,
-    results: Option<&engine::Results>,
-    include_internal: bool,
-) -> Vec<OwnedLink> {
-    let causal = engine::db::model_causal_edges(db, model, project);
-    let polarities = engine::db::compute_link_polarities(db, model, project);
-
-    // Materialize edges into owned Strings before touching `results`, so the
-    // db borrow held by `causal` is no longer needed past this point.  The
-    // caller can (and does) drop its locks the moment this function returns.
-    let mut unique_links: Vec<(String, String)> = Vec::new();
-    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    for (from_name, to_set) in &causal.edges {
-        for to_name in to_set {
-            let key = (from_name.clone(), to_name.clone());
-            if seen.insert(key.clone()) {
-                unique_links.push(key);
-            }
-        }
-    }
-
-    let raw: Vec<OwnedLink> = unique_links
-        .into_iter()
-        .map(|(from, to)| {
-            let score = results.and_then(|r| {
-                let link_score_var =
-                    format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}");
-                let var_ident = canonicalize(&link_score_var);
-                r.offsets
-                    .get(&*var_ident)
-                    .map(|&off| r.iter().map(|row| row[off]).collect::<Vec<f64>>())
-            });
-            let polarity = polarities
-                .get(&(from.clone(), to.clone()))
-                .copied()
-                .unwrap_or(engine::ltm::LinkPolarity::Unknown);
-            OwnedLink {
-                from,
-                to,
-                polarity,
-                score,
-                relative_score: None,
-                scored_input_count: 0,
-            }
-        })
-        .collect();
-
-    if include_internal {
-        // The raw graph is the final returned set in this view, so normalize
-        // its relative scores per target before returning.
-        return attach_relative_scores(raw);
-    }
-
-    // Collapse macro/module-internal synthetic nodes via the engine, then map
-    // the engine's `CollapsibleLink` shape back to `OwnedLink`.
-    let collapsible: Vec<engine::ltm_finding::CollapsibleLink> = raw
-        .into_iter()
-        .map(|l| engine::ltm_finding::CollapsibleLink {
-            from: Ident::<Canonical>::new(&l.from),
-            to: Ident::<Canonical>::new(&l.to),
-            polarity: l.polarity,
-            score: l.score,
-        })
-        .collect();
-    let collapsed: Vec<OwnedLink> = engine::ltm_finding::collapse_synthetic_links(collapsible)
-        .into_iter()
-        .map(|l| OwnedLink {
-            from: l.from.as_str().to_string(),
-            to: l.to.as_str().to_string(),
-            polarity: l.polarity,
-            score: l.score,
-            relative_score: None,
-            scored_input_count: 0,
-        })
-        .collect();
-    // Normalize relative scores over the *collapsed* set: a collapsed
-    // `X -> Y` composite edge is one input of `Y` in the user-facing view, so
-    // the per-target denominator must group on the post-collapse `to`.
-    attach_relative_scores(collapsed)
-}
-
-/// Fill in each link's `relative_score` from its raw `score`, normalizing per
-/// `to` target via the shared engine core (`ltm_post::compute_rel_link_scores`).
-///
-/// Runs on the *final* link set (post synthetic-collapse for the user-facing
-/// view, or the raw graph for `include_internal=true`) so the per-target
-/// denominator -- the sum of `|score|` over all of a target's scored inputs --
-/// matches the links the caller receives.  Links with no `score` series get
-/// `relative_score = None` (they also contribute nothing to any denominator).
-fn attach_relative_scores(links: Vec<OwnedLink>) -> Vec<OwnedLink> {
-    // The longest score series is the saved-step count; an all-`None` set
-    // (non-LTM sim) has step_count 0 and every link stays `None`.
-    let step_count = links
-        .iter()
-        .filter_map(|l| l.score.as_ref().map(|s| s.len()))
-        .max()
-        .unwrap_or(0);
-    let inputs: Vec<engine::ltm_post::RelLinkInput> = links
-        .iter()
-        .map(|l| engine::ltm_post::RelLinkInput {
-            to: l.to.as_str(),
-            score: l.score.as_deref(),
-        })
-        .collect();
-    let rel = engine::ltm_post::compute_rel_link_scores(&inputs, step_count);
-    let group_sizes = engine::ltm_post::rel_link_group_sizes(&inputs);
-    links
-        .into_iter()
-        .zip(rel)
-        .zip(group_sizes)
-        .map(|((mut link, relative_score), scored_input_count)| {
-            link.relative_score = relative_score;
-            link.scored_input_count = scored_input_count;
-            link
-        })
-        .collect()
-}
-
 /// Leak an `Option<Vec<f64>>` as a `(ptr, len)` pair owned by the C ABI.
 ///
 /// `Some(v)` becomes a `Box<[f64]>` leaked via `as_mut_ptr` + `mem::forget`,
@@ -233,7 +48,8 @@ unsafe fn vec_to_f64_array(v: Option<Vec<f64>>) -> (*mut f64, usize) {
     }
 }
 
-/// Convert a vector of `OwnedLink` into the C-ABI `*mut SimlinLinks`.
+/// Convert a model's links (`engine::analysis::model_links`) into the C-ABI
+/// `*mut SimlinLinks`.
 ///
 /// On a `CString::new` failure (interior NUL) the partial allocations are
 /// freed via `drop_links_vec`, a generic error is reported through
@@ -243,7 +59,7 @@ unsafe fn vec_to_f64_array(v: Option<Vec<f64>>) -> (*mut f64, usize) {
 /// `vec_to_f64_array`) so the existing `simlin_free_links` -> `drop_link` ->
 /// `drop_f64_array` ownership chain frees them correctly.
 pub(crate) unsafe fn owned_links_to_ffi(
-    links: Vec<OwnedLink>,
+    links: Vec<engine::analysis::ModelLink>,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLinks {
     if links.is_empty() {
@@ -1117,17 +933,16 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
 
     // Hold the sim state lock only as long as needed to evaluate the
     // (enable_ltm && state.results.is_some()) gate and borrow `&Results`.
-    // `analyze_links_core`'s structure-resolution step still needs the db
-    // borrow, but the polarity map and the unique-links list are owned, so
-    // by the time this function returns to its callers all three locks are
-    // dropped along with this scope.
+    // `model_links`' structure-resolution step still needs the db borrow,
+    // but what it returns is owned, so by the time this function returns to
+    // its callers all three locks are dropped along with this scope.
     let state_guard = sim_ref.state.lock().unwrap();
     let results: Option<&engine::Results> = if sim_ref.enable_ltm {
         state_guard.results.as_ref()
     } else {
         None
     };
-    let owned = analyze_links_core(
+    let owned = engine::analysis::model_links(
         &*db_locked,
         source_model,
         source_project,
@@ -1221,7 +1036,7 @@ unsafe fn slab_from_bytes(slab_ptr: *const u8, slab_len: usize) -> Result<Vec<f6
 /// reading the `Results` off a `SimlinSim`'s `SimState`, it rebuilds them
 /// from a `(slab, WasmLayout)` pair produced by running the blob returned
 /// from `simlin_model_compile_to_wasm(model, ltm_enabled=true, ..)`.  Both
-/// FFI functions funnel through the same `analyze_links_core` so the link
+/// FFI functions funnel through the same `engine::analysis::model_links` so the link
 /// set and per-link score series agree to within the underlying VM/wasm
 /// numeric tolerance.
 ///
@@ -1347,7 +1162,7 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
         }
     };
 
-    let owned = analyze_links_core(
+    let owned = engine::analysis::model_links(
         &*db_locked,
         source_model,
         source_project,
@@ -1454,7 +1269,7 @@ pub(crate) fn rel_loop_score_series(
 /// building `engine::SimSpecs::from` it.  The shape mirrors `Vm::into_results()`:
 /// `offsets` is the layout's canonical-name → slot map, `step_size` is
 /// `n_slots`, `step_count` is `slab.len() / n_slots`, `is_vensim` is false.
-/// Neither analytic core (`analyze_links_core`, `rel_loop_score_series`)
+/// Neither analytic core (`engine::analysis::model_links`, `rel_loop_score_series`)
 /// reads `results.specs`, so the reconstructed `Specs` is only there to
 /// keep the `Results` value structurally well-formed -- there is no analytic
 /// sensitivity to its contents from these FFIs.

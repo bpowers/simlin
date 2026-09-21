@@ -2,25 +2,30 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! The hit index a project caches is never older than its datamodel.
+//! The hit index a project caches is never older than its datamodel, and its
+//! revision advances with every change.
 //!
-//! Every mutable borrow of the datamodel drops the cached indexes
-//! (`ProjectContents`'s `DerefMut`), so no entry point can mutate without
-//! invalidating. The rows pin it for the entry points that mutate a project's
-//! datamodel, found among its lock sites (`grep -n 'datamodel.lock()' src`):
-//! `simlin_project_apply_patch`, through its view-only apply and its staged
-//! commit, `simlin_project_replace_contents`, `simlin_project_add_model` and
+//! Every mutable borrow of the datamodel drops the cached indexes and advances
+//! the revision (`ProjectContents`'s `DerefMut`), so no entry point can mutate
+//! without invalidating or without counting the change. The rows pin both for
+//! the entry points that mutate a project's datamodel, found among its lock
+//! sites (`grep -n 'datamodel.lock()' src`): `simlin_project_apply_patch`,
+//! through its view-only apply and its staged commit,
+//! `simlin_project_replace_contents`, `simlin_project_add_model` and
 //! `simlin_project_diagram_sync`; every other site reads. Each row warms the
 //! index, mutates through the entry point, and requires that the index was
-//! dropped and that the hit test answers at every probe point what an index
-//! built from the new datamodel answers. For every row but `add_model`, which
-//! changes no model's view, the old index answered differently somewhere, so a
-//! stale index fails the row.
+//! dropped, that the revision advanced, and that the hit test answers at every
+//! probe point what an index built from the new datamodel answers. For every
+//! row but `add_model`, which changes no model's view, the old index answered
+//! differently somewhere, so a stale index fails the row.
 //!
-//! The reads keep the index, pinned for a row per kind of read: a dry-run and
-//! a rejected patch, a simulation, diagnostics, a scene, serialization, and the
-//! editing planners. A read that dropped the index would only cost a rebuild,
-//! so these rows pin performance, not freshness.
+//! The reads keep the index and the revision, pinned for a row per kind of
+//! read: a dry-run and a rejected patch, a simulation, diagnostics, a scene,
+//! serialization, the editing planners, and a tool session's call and change
+//! report. A read that
+//! dropped the index would only cost a rebuild, but a read that advanced the
+//! revision would tell every host caching against it that the project had
+//! changed when it had not.
 //!
 //! A copy shares the datamodel until either side is edited. The rows take a
 //! project and a copy of it (`simlin_project_replace_contents` into
@@ -102,6 +107,14 @@ unsafe fn main_model(proj: *mut SimlinProject) -> *mut SimlinModel {
 
 unsafe fn has_index(proj: *mut SimlinProject) -> bool {
     (*proj).datamodel.lock().unwrap().has_hit_index("main")
+}
+
+/// The project's revision, through the FFI.
+unsafe fn revision(proj: *mut SimlinProject) -> u64 {
+    let (mut revision, mut err) = (0, ptr::null_mut());
+    simlin_project_get_revision(proj, &mut revision, &mut err);
+    expect_no_error(err, "reading the revision");
+    revision
 }
 
 /// The points a row asks about: a grid over the diagram and around it.
@@ -246,7 +259,7 @@ impl Mutation {
 }
 
 #[test]
-fn every_mutating_entry_point_drops_the_hit_index() {
+fn every_mutating_entry_point_drops_the_hit_index_and_advances_the_revision() {
     let mut failures = Vec::new();
     for mutation in Mutation::ALL {
         unsafe {
@@ -257,9 +270,13 @@ fn every_mutating_entry_point_drops_the_hit_index() {
                 has_index(proj),
                 "{mutation:?}: the hit test caches its index"
             );
+            let revision_before = revision(proj);
             mutation.run(proj);
             if has_index(proj) {
                 failures.push(format!("{mutation:?} kept the index"));
+            }
+            if revision(proj) <= revision_before {
+                failures.push(format!("{mutation:?} did not advance the revision"));
             }
             let fresh = fresh_answers(proj);
             if answers(model) != fresh {
@@ -295,10 +312,14 @@ enum Read {
     PlanDelete,
     PlanRename,
     PlanMove,
+    #[cfg(feature = "agent_tools")]
+    ToolCall,
+    #[cfg(feature = "agent_tools")]
+    ToolChanges,
 }
 
 impl Read {
-    const ALL: [Read; 11] = [
+    const ALL: &[Read] = &[
         Read::DryRunPatch,
         Read::RejectedPatch,
         Read::SimNew,
@@ -310,6 +331,10 @@ impl Read {
         Read::PlanDelete,
         Read::PlanRename,
         Read::PlanMove,
+        #[cfg(feature = "agent_tools")]
+        Read::ToolCall,
+        #[cfg(feature = "agent_tools")]
+        Read::ToolChanges,
     ];
 
     unsafe fn run(self, proj: *mut SimlinProject, model: *mut SimlinModel) {
@@ -398,6 +423,30 @@ impl Read {
                     &mut err,
                 );
             }
+            #[cfg(feature = "agent_tools")]
+            Read::ToolCall | Read::ToolChanges => {
+                let session = simlin_tool_session_new(model, &mut err);
+                expect_no_error(err, "making a tool session");
+                err = ptr::null_mut();
+                if matches!(self, Read::ToolCall) {
+                    let tool = CString::new("read_model").unwrap();
+                    let mut is_error = false;
+                    simlin_tool_session_call(
+                        session,
+                        tool.as_ptr(),
+                        ptr::null(),
+                        0,
+                        &mut buf,
+                        &mut len,
+                        &mut is_error,
+                        &mut err,
+                    );
+                    assert!(!is_error, "read_model answers");
+                } else {
+                    simlin_tool_session_get_changes(session, &mut buf, &mut len, &mut err);
+                }
+                simlin_tool_session_unref(session);
+            }
         }
         expect_no_error(err, &format!("{self:?}"));
         if !buf.is_null() {
@@ -407,16 +456,20 @@ impl Read {
 }
 
 #[test]
-fn an_entry_point_that_reads_keeps_the_hit_index() {
+fn an_entry_point_that_reads_keeps_the_hit_index_and_the_revision() {
     let mut failures = Vec::new();
     for read in Read::ALL {
         unsafe {
             let proj = open(100.0, 100.0);
             let model = main_model(proj);
             let before = answers(model);
+            let revision_before = revision(proj);
             read.run(proj, model);
             if !has_index(proj) {
                 failures.push(format!("{read:?} dropped the index"));
+            }
+            if revision(proj) != revision_before {
+                failures.push(format!("{read:?} advanced the revision"));
             }
             if answers(model) != before {
                 failures.push(format!("{read:?} changed what the diagram answers"));
@@ -449,6 +502,8 @@ unsafe fn datamodel_of(proj: *mut SimlinProject) -> simlin_engine::datamodel::Pr
     (**(*proj).datamodel.lock().unwrap()).clone()
 }
 
+/// A copy shares the datamodel until either side is edited, and keeps a
+/// revision of its own: an edit of one side advances that side's alone.
 #[test]
 fn a_copy_shares_the_datamodel_until_an_edit_of_either_side_copies_it() {
     let mut failures = Vec::new();
@@ -471,7 +526,16 @@ fn a_copy_shares_the_datamodel_until_an_edit_of_either_side_copies_it() {
                 } else {
                     (original, copy)
                 };
+                let (edited_revision, other_revision) = (revision(edited), revision(other));
                 mutation.run(edited);
+                if revision(edited) <= edited_revision {
+                    failures.push(format!("{mutation:?} of {side} left its revision"));
+                }
+                if revision(other) != other_revision {
+                    failures.push(format!(
+                        "{mutation:?} of {side} advanced the other's revision"
+                    ));
+                }
                 if datamodel_of(other) != before {
                     failures.push(format!("{mutation:?} of {side} reached the other side"));
                 }
@@ -536,11 +600,41 @@ fn a_mutable_borrow_drops_every_index_and_a_shared_borrow_keeps_them() {
         for name in ["main", "other"] {
             contents.hit_index(name).expect("the model has a view");
         }
+        let revision = contents.revision();
         let _: &simlin_engine::datamodel::Project = &contents;
         assert!(contents.has_hit_index("main") && contents.has_hit_index("other"));
+        assert_eq!(
+            contents.revision(),
+            revision,
+            "a shared borrow keeps the revision"
+        );
         let _: &mut simlin_engine::datamodel::Project = &mut contents;
         assert!(!contents.has_hit_index("main") && !contents.has_hit_index("other"));
+        assert_eq!(
+            contents.revision(),
+            revision + 1,
+            "a mutable borrow advances the revision once"
+        );
         drop(contents);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn a_project_opens_at_revision_zero_and_the_revision_refuses_a_null_out_pointer() {
+    unsafe {
+        let proj = open(100.0, 100.0);
+        assert_eq!(revision(proj), 0);
+        let mut err = ptr::null_mut();
+        simlin_project_get_revision(proj, ptr::null_mut(), &mut err);
+        assert!(!err.is_null(), "a NULL out pointer is refused");
+        simlin_error_free(err);
+        let mut revision = 7;
+        let mut err = ptr::null_mut();
+        simlin_project_get_revision(ptr::null_mut(), &mut revision, &mut err);
+        assert!(!err.is_null(), "a NULL project is refused");
+        assert_eq!(revision, 7, "a refused read writes nothing");
+        simlin_error_free(err);
         simlin_project_unref(proj);
     }
 }

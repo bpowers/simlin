@@ -810,3 +810,359 @@ fn test_replace_contents_lock_order_matches_readers() {
         simlin_project_unref(b);
     }
 }
+
+/// A tool call holds the datamodel only while it takes the contents it
+/// answers from: a host's hit test and revision read, which lock only the
+/// datamodel, answer while a call is under way, as hover must while an agent
+/// analyzes a large model.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn a_tool_call_holds_the_datamodel_only_while_it_takes_the_contents() {
+    use crate::tools::install_tool_test_hook;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+
+    let datamodel = TestProject::new("tool_lock")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    let proj_addr = proj as usize;
+
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let release = Arc::new(AtomicBool::new(false));
+    let release_for_hook = Arc::clone(&release);
+    let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+        if project as *const SimlinProject as usize == proj_addr {
+            let _ = entered_tx.send(());
+            while !release_for_hook.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        }
+    }));
+    // Released however the test ends, so no thread is left spinning.
+    struct Release(Arc<AtomicBool>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let release_guard = Release(Arc::clone(&release));
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let session = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let session_addr = session as usize;
+        let caller = thread::spawn(move || {
+            let name = CString::new("read_model").unwrap();
+            let (mut buf, mut len, mut is_error) = (ptr::null_mut(), 0usize, false);
+            let mut err: *mut SimlinError = ptr::null_mut();
+            crate::tools::simlin_tool_session_call(
+                session_addr as *mut crate::tools::SimlinToolSession,
+                name.as_ptr(),
+                ptr::null(),
+                0,
+                &mut buf,
+                &mut len,
+                &mut is_error,
+                &mut err,
+            );
+            assert!(err.is_null() && !is_error);
+            simlin_free(buf);
+        });
+        entered_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("the tool call reached its database-only section");
+
+        let (done_tx, done_rx) = mpsc::channel::<u64>();
+        let model_addr = model as usize;
+        let reader = thread::spawn(move || {
+            let model = model_addr as *mut SimlinModel;
+            let (mut hit, mut uid, mut part) = (false, 0, SimlinHitPart::Body);
+            let mut err: *mut SimlinError = ptr::null_mut();
+            // The model has no diagram, so the hit test reports that; what
+            // matters is that it returns.
+            simlin_model_hit_test(model, 0.0, 0.0, 1.0, &mut hit, &mut uid, &mut part, &mut err);
+            if !err.is_null() {
+                simlin_error_free(err);
+            }
+            let mut revision = u64::MAX;
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_project_get_revision(proj_addr as *mut SimlinProject, &mut revision, &mut err);
+            assert!(err.is_null());
+            let _ = done_tx.send(revision);
+        });
+        let revision = done_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("a hit test and a revision read answer while a tool call is under way");
+        assert_eq!(revision, 0);
+
+        drop(release_guard);
+        caller.join().expect("the tool call finished");
+        reader.join().expect("the reader finished");
+        crate::tools::simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A tool call that finds the database held -- by another session's call on
+/// the project, or a host's query that holds only the database -- waits for
+/// it with the datamodel released: a host's hit test and revision read answer
+/// meanwhile, as they do behind the first call alone. A call's wait is not
+/// counted, so one that waited with the datamodel held would keep them, and a
+/// person's edit, waiting for the whole of the other work.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn a_tool_call_waiting_for_the_database_leaves_the_datamodel_to_others() {
+    use crate::tools::install_tool_test_hook;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+
+    let datamodel = TestProject::new("tool_lock_two_sessions")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    let proj_addr = proj as usize;
+
+    // The first call to take the database holds it until released.
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let hold = Arc::new(AtomicBool::new(true));
+    let release = Arc::new(AtomicBool::new(false));
+    let (hold_in_hook, release_in_hook) = (Arc::clone(&hold), Arc::clone(&release));
+    let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+        if project as *const SimlinProject as usize == proj_addr
+            && hold_in_hook.swap(false, Ordering::SeqCst)
+        {
+            let _ = entered_tx.send(());
+            while !release_in_hook.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        }
+    }));
+    // Released however the test ends, so no thread is left spinning.
+    struct Release(Arc<AtomicBool>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let release_guard = Release(Arc::clone(&release));
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        // Two sessions on one model, as two agents on one project have.
+        let first = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let second = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let call = |session_addr: usize| {
+            thread::spawn(move || {
+                let name = CString::new("read_model").unwrap();
+                let (mut buf, mut len, mut is_error) = (ptr::null_mut(), 0usize, false);
+                let mut err: *mut SimlinError = ptr::null_mut();
+                crate::tools::simlin_tool_session_call(
+                    session_addr as *mut crate::tools::SimlinToolSession,
+                    name.as_ptr(),
+                    ptr::null(),
+                    0,
+                    &mut buf,
+                    &mut len,
+                    &mut is_error,
+                    &mut err,
+                );
+                assert!(err.is_null() && !is_error);
+                simlin_free(buf);
+            })
+        };
+        let answering = call(first as usize);
+        entered_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("the first session's call holds the database");
+        let waiting = call(second as usize);
+        // Time for the second call to reach the database and wait for it. Were
+        // it slower, the test would pass without having tested the wait; it
+        // could not fail.
+        thread::sleep(std::time::Duration::from_millis(200));
+
+        let (done_tx, done_rx) = mpsc::channel::<u64>();
+        let model_addr = model as usize;
+        let reader = thread::spawn(move || {
+            let model = model_addr as *mut SimlinModel;
+            let (mut hit, mut uid, mut part) = (false, 0, SimlinHitPart::Body);
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_model_hit_test(model, 0.0, 0.0, 1.0, &mut hit, &mut uid, &mut part, &mut err);
+            if !err.is_null() {
+                simlin_error_free(err);
+            }
+            let mut revision = u64::MAX;
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_project_get_revision(proj_addr as *mut SimlinProject, &mut revision, &mut err);
+            assert!(err.is_null());
+            let _ = done_tx.send(revision);
+        });
+        let revision = done_rx.recv_timeout(POSITIVE_WAIT).expect(
+            "a hit test and a revision read answer while a second session's call waits for the database",
+        );
+        assert_eq!(revision, 0);
+
+        drop(release_guard);
+        answering.join().expect("the first call answered");
+        waiting.join().expect("the second call answered");
+        reader.join().expect("the reader finished");
+        crate::tools::simlin_tool_session_unref(first);
+        crate::tools::simlin_tool_session_unref(second);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A tool call that finds the database's lock poisoned panics, as every lock
+/// site does, rather than locking it again under the poisoned guard and
+/// waiting on itself.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn a_tool_call_on_a_poisoned_database_panics_rather_than_waits() {
+    use std::sync::mpsc;
+    use std::thread;
+
+    let datamodel = TestProject::new("tool_poisoned")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    let proj_addr = proj as usize;
+    // A panic while the database is held poisons its lock.
+    let poisoner = thread::spawn(move || {
+        let project = unsafe { &*(proj_addr as *const SimlinProject) };
+        let _db = project.lock_db();
+        panic!("a panic that poisons the database's lock");
+    });
+    assert!(poisoner.join().is_err(), "the thread panicked");
+
+    let (done_tx, done_rx) = mpsc::channel::<bool>();
+    thread::spawn(move || {
+        let project = unsafe { &*(proj_addr as *const SimlinProject) };
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let datamodel = project.datamodel.lock().unwrap();
+            let _db = project.try_lock_db_for_call(&datamodel);
+        }))
+        .is_err();
+        let _ = done_tx.send(panicked);
+    });
+    let panicked = done_rx
+        .recv_timeout(POSITIVE_WAIT)
+        .expect("a call on a poisoned database answers rather than waits on itself");
+    assert!(panicked, "a poisoned database's lock panics");
+    unsafe { simlin_project_unref(proj) };
+}
+
+/// A tool call stops for an edit that waits for the database: the edit holds
+/// the datamodel while it waits, so every hit test waits with it, and a call
+/// that ran on would keep them waiting for the rest of its work. The call
+/// answers that it stopped and kept nothing, and the edit lands.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn a_tool_call_stops_for_an_edit_that_waits_for_it() {
+    use crate::tools::install_tool_test_hook;
+    use std::sync::mpsc;
+    use std::thread;
+
+    let datamodel = TestProject::new("tool_yield")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    let proj_addr = proj as usize;
+
+    // Inside the call, with the database held, wait until the edit is
+    // waiting for it.
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+        if project as *const SimlinProject as usize == proj_addr {
+            let _ = entered_tx.send(());
+            let deadline = std::time::Instant::now() + POSITIVE_WAIT;
+            while !project.is_waited_on() && std::time::Instant::now() < deadline {
+                thread::yield_now();
+            }
+        }
+    }));
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let session = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let session_addr = session as usize;
+        let caller = thread::spawn(move || {
+            let name = CString::new("read_model").unwrap();
+            let (mut buf, mut len, mut is_error) = (ptr::null_mut(), 0usize, false);
+            let mut err: *mut SimlinError = ptr::null_mut();
+            crate::tools::simlin_tool_session_call(
+                session_addr as *mut crate::tools::SimlinToolSession,
+                name.as_ptr(),
+                ptr::null(),
+                0,
+                &mut buf,
+                &mut len,
+                &mut is_error,
+                &mut err,
+            );
+            assert!(err.is_null());
+            let output: serde_json::Value =
+                serde_json::from_slice(std::slice::from_raw_parts(buf, len)).unwrap();
+            simlin_free(buf);
+            (is_error, output)
+        });
+        entered_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("the tool call reached its database-only section");
+
+        let editor = thread::spawn(move || {
+            let patch = br#"{"models": [{"name": "main", "ops": [
+                {"type": "upsertAux", "payload": {"aux": {"name": "rate", "equation": "0.03"}}}
+            ]}]}"#;
+            let (mut collected, mut err) = (ptr::null_mut(), ptr::null_mut());
+            simlin_project_apply_patch(
+                proj_addr as *mut SimlinProject,
+                patch.as_ptr(),
+                patch.len(),
+                false,
+                false,
+                &mut collected,
+                &mut err,
+            );
+            if !collected.is_null() {
+                simlin_error_free(collected);
+            }
+            assert!(err.is_null(), "the edit lands");
+        });
+
+        let (is_error, output) = caller.join().expect("the tool call finished");
+        assert!(is_error, "{output}");
+        assert_eq!(output["interrupted"], true, "{output}");
+        editor.join().expect("the edit finished");
+        let mut revision = 0;
+        simlin_project_get_revision(proj, &mut revision, &mut err);
+        assert!(err.is_null());
+        assert_eq!(revision, 1, "the edit landed");
+        assert!(!(*proj).is_waited_on(), "nothing waits once the edit is in");
+
+        crate::tools::simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

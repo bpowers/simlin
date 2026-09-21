@@ -19,6 +19,7 @@
 //! | `serialization` | Serialize to protobuf, JSON, XMILE, MDL, SVG        |
 //! | `analysis`      | Feedback-loop / causal-link analysis, LTM scores    |
 //! | `patch`         | JSON patch application and error collection          |
+//! | `tools`         | The agent tool catalog and tool sessions             |
 //!
 //! Shared types (enums, structs, helpers) live here in `lib.rs` and are
 //! imported by the modules via `crate::`.
@@ -95,6 +96,8 @@ pub mod project;
 mod results;
 mod serialization;
 mod simulation;
+#[cfg(feature = "agent_tools")]
+mod tools;
 
 // ── re-exports ─────────────────────────────────────────────────────────
 // Re-export every `#[no_mangle] pub extern "C"` function so that the
@@ -114,6 +117,8 @@ pub use project::*;
 pub use results::*;
 pub use serialization::*;
 pub use simulation::*;
+#[cfg(feature = "agent_tools")]
+pub use tools::*;
 
 pub use ffi::{
     SimlinDiscoveredLoop, SimlinDiscoveryResult, SimlinDominantPeriod, SimlinJsonFormat,
@@ -464,6 +469,19 @@ pub struct SimlinProject {
     /// toggle or restore is involved. An `AtomicBool` (not a mutex) because
     /// the value is set-once-and-monotone.
     pub(crate) ltm_requested: AtomicBool,
+    /// How many entry points hold the datamodel lock while they wait for the
+    /// database, each through `lock_db_with` or `built_db`: an edit
+    /// (`simlin_project_apply_patch`, `simlin_project_add_model`,
+    /// `simlin_project_diagram_sync`, an undo's
+    /// `simlin_project_replace_contents`), a simulation (`simlin_sim_new`), a
+    /// read of the diagnostics (`simlin_project_get_errors`,
+    /// `simlin_project_is_simulatable`), loop discovery, a wasm compile, and a
+    /// render that lays out a model with no view. Each one keeps
+    /// every datamodel reader (a hit test, a revision read) waiting with it,
+    /// so a tool call, which holds the database for its answer, checks this
+    /// between units of its work and stops while it is not zero
+    /// (`simlin_engine::tools::Workspace::waiting`).
+    waiting_for_db: AtomicUsize,
     pub ref_count: AtomicUsize,
 }
 
@@ -536,6 +554,7 @@ impl SimlinProject {
             datamodel: Mutex::new(ProjectContents::new(datamodel)),
             db: OnceLock::new(),
             ltm_requested: AtomicBool::new(false),
+            waiting_for_db: AtomicUsize::new(0),
             ref_count: AtomicUsize::new(1),
         }
     }
@@ -562,17 +581,84 @@ impl SimlinProject {
     /// Lock the salsa database for a run of queries, from an entry point
     /// that holds the datamodel lock and passes the contents it locked; see
     /// [`DbLock`]. Builds the database from those contents the first time.
+    /// While it waits, it counts among the entry points a tool call stops for
+    /// (`waiting_for_db`).
     pub(crate) fn lock_db_with(&self, contents: &ProjectContents) -> DbLock<'_> {
         let db = self.db.get_or_init(|| Mutex::new(new_synced_db(contents)));
-        DbLock(db.lock().unwrap())
+        DbLock(self.lock_counted(db))
     }
 
     /// The database, locked, when one has been built: what an entry point
     /// that changes the datamodel re-syncs. It holds the datamodel lock, so
     /// no database can be built meanwhile, and one built later is built from
-    /// the datamodel the change leaves.
+    /// the datamodel the change leaves. While it waits, it counts among the
+    /// entry points a tool call stops for.
     pub(crate) fn built_db(&self) -> Option<DbLock<'_>> {
-        self.db.get().map(|db| DbLock(db.lock().unwrap()))
+        self.db.get().map(|db| DbLock(self.lock_counted(db)))
+    }
+
+    /// Lock the salsa database for a tool call, which holds the datamodel
+    /// lock while it takes the contents it answers from, when no one else
+    /// holds it: as [`SimlinProject::lock_db_with`], but never counted among
+    /// the waiters a call stops for, since two calls that stopped for each
+    /// other would never finish. `None` when someone holds it, since a call
+    /// that waited uncounted with the datamodel held would keep every
+    /// datamodel reader, and an edit, waiting for whatever holds the database:
+    /// the call waits with the datamodel released
+    /// ([`SimlinProject::wait_for_db`]) and takes its contents again.
+    #[cfg(feature = "agent_tools")]
+    pub(crate) fn try_lock_db_for_call(&self, contents: &ProjectContents) -> Option<DbLock<'_>> {
+        let db = self.db.get_or_init(|| Mutex::new(new_synced_db(contents)));
+        match db.try_lock() {
+            Ok(db) => Some(DbLock(db)),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            // The panic every other lock site gives. The error holds the
+            // guard, so locking again here would wait on itself.
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => panic!("{poisoned}"),
+        }
+    }
+
+    /// Wait until no one holds the database, holding no lock: how a tool call
+    /// waits for another holder ([`SimlinProject::try_lock_db_for_call`]).
+    #[cfg(feature = "agent_tools")]
+    pub(crate) fn wait_for_db(&self) {
+        if let Some(db) = self.db.get() {
+            // Taken and released at once; a poisoned lock is the next lock
+            // site's panic.
+            drop(db.lock());
+        }
+    }
+
+    /// Whether an entry point holding the datamodel lock waits for the
+    /// database: what a tool call stops for.
+    #[cfg(feature = "agent_tools")]
+    pub(crate) fn is_waited_on(&self) -> bool {
+        self.waiting_for_db
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+    }
+
+    /// `db` locked, counted in `waiting_for_db` for as long as the lock is
+    /// held by someone else.
+    fn lock_counted<'a>(
+        &self,
+        db: &'a Mutex<engine::db::SimlinDb>,
+    ) -> MutexGuard<'a, engine::db::SimlinDb> {
+        if let Ok(guard) = db.try_lock() {
+            return guard;
+        }
+        /// Uncounts the waiter however the wait ends, a poisoned lock's panic
+        /// included.
+        struct Waiting<'c>(&'c AtomicUsize);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        self.waiting_for_db
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _waiting = Waiting(&self.waiting_for_db);
+        db.lock().unwrap()
     }
 
     /// Whether the database has been built.

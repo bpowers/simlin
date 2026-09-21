@@ -641,7 +641,7 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
 /// The view matches `simlin_analyze_get_links`'s default
 /// (`include_internal = false`): macro/module-internal synthetic nodes are
 /// collapsed into composite real-variable edges. Both functions funnel
-/// through the same `analyze_links_core`, so the model-level (structural,
+/// through the same `engine::analysis::model_links`, so the model-level (structural,
 /// score-less) and sim-level (scored) link sets cannot drift apart.
 ///
 /// # Safety
@@ -692,7 +692,7 @@ pub unsafe extern "C" fn simlin_model_get_links(
     // Structural-only call into the shared links core: no Results (so no
     // scores), synthetic nodes collapsed.
     let owned =
-        crate::analysis::analyze_links_core(&*db_locked, source_model, source_project, None, false);
+        engine::analysis::model_links(&*db_locked, source_model, source_project, None, false);
     drop(db_locked);
 
     crate::analysis::owned_links_to_ffi(owned, out_error)

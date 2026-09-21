@@ -122,6 +122,8 @@ mod test_open_vensim;
 mod test_sir_xmile;
 #[cfg(test)]
 mod testutils;
+#[cfg(feature = "agent_tools")]
+pub mod tools;
 #[cfg(test)]
 mod unfilled_equation_tests;
 #[cfg(test)]

@@ -21,11 +21,15 @@ crate-type = ["staticlib", "rlib", "cdylib"]
 # --no-default-features for the browser artifact): the resvg + text-shaping
 # stack plus an embedded font is ~17% of the optimized wasm binary, and no
 # browser code calls simlin_project_render_png.
-default = ["png_render"]
+default = ["png_render", "agent_tools"]
 debug-derive = ["simlin-engine/debug-derive"]
 file_io = ["simlin-engine/file_io"]
 ext_data = ["simlin-engine/ext_data"]
 png_render = ["simlin-engine/png_render"]
+# The agent tool entry points (`simlin_tools_describe`,
+# `simlin_tool_session_*`). On by default for native hosts; the browser wasm
+# bundle's --no-default-features build leaves them out, as it does png_render.
+agent_tools = ["simlin-engine/agent_tools"]
 # Use mimalloc as the global allocator. Off by default; enabled by native
 # consumers of the cdylib/staticlib (pysimlin via cffi, C/C++ FFI) where the
 # allocation-heavy engine compile path benefits. Irrelevant to the wasm32

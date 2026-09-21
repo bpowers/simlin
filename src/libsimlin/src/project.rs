@@ -282,6 +282,37 @@ pub unsafe extern "C" fn simlin_project_get_model_count(
     *out_count = datamodel_locked.models.len();
 }
 
+/// Gets the project's revision: a counter every change to its contents
+/// advances (a committed patch, a view edit, a replace, an added model, a
+/// diagram sync), and no read does. Two calls that return the same revision
+/// saw the same contents, so a host that caches anything derived from the
+/// project -- an agent's last read of it, a chart of its last run -- can tell
+/// whether that cache still describes it. The converse does not hold: a
+/// revision may advance without a visible change.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_get_revision(
+    project: *mut SimlinProject,
+    out_revision: *mut u64,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_revision.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("out_revision pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let project_ref = ffi_try!(out_error, require_project(project));
+    let datamodel_locked = project_ref.datamodel.lock().unwrap();
+    *out_revision = datamodel_locked.revision();
+}
+
 /// Gets the list of model names in the project
 ///
 /// # Safety
