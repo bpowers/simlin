@@ -4437,6 +4437,748 @@
           "simulates"
         ]
       }
+    },
+    {
+      "name": "verify_findings",
+      "description": "Checks the evidence of findings before the person sees them. A finding is a flaw, a strength or an observation, a claim in a sentence or two, and the citations it rests on: a variable, its equation, the variables that read it, a link, a diagnostic id, a loop id and its polarity, a loop leading over a span of a run, a run fact (a value at a time, goes negative, peaks at, ends near, behavior mode), a comparison of two runs, an absence (no diagnostics, no loop through a variable, no readers), or a battery check's outcome. A finding whose every citation holds gets an id (F1, F2, ...) and may be shown; each citation that fails says what is true instead. Cite only what the tools reported.",
+      "effect": "read",
+      "inputSchema": {
+        "$defs": {
+          "Finding": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/FindingKind"
+              },
+              "claim": {
+                "description": "The claim, in a sentence or two, as the person will read it.",
+                "type": "string"
+              },
+              "citations": {
+                "description": "The evidence: at least one, at most 8, each naming something a tool\nreported.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Citation"
+                },
+                "minItems": 1,
+                "maxItems": 8
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "claim",
+              "citations"
+            ]
+          },
+          "FindingKind": {
+            "oneOf": [
+              {
+                "description": "Something wrong with the model.",
+                "type": "string",
+                "const": "flaw"
+              },
+              {
+                "description": "Something the model does well.",
+                "type": "string",
+                "const": "strength"
+              },
+              {
+                "description": "What the model does, neither.",
+                "type": "string",
+                "const": "observation"
+              }
+            ]
+          },
+          "Citation": {
+            "description": "One piece of evidence. `run` is \"current\" (the model as it is) when\nabsent; a variable of a run may be an element (`Population[north]`).",
+            "oneOf": [
+              {
+                "description": "The model has the variable.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "variable"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable"
+                ]
+              },
+              {
+                "description": "The variable's equation (a stock's: its initial value) is `equation`,\nwritten any way that parses the same: spacing, case and the spelling\nof names aside. For an arrayed variable, name an element\n(`Population[north]`) for that element's equation. A variable with a\ntable is its table at its equation's value: `LOOKUP(effect, input)`,\nnot `input`.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "equation": {
+                    "type": "string"
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "equation"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable",
+                  "equation"
+                ]
+              },
+              {
+                "description": "The variable (or one element of it) is within 5% of `value` at `time`\nin the run, or so near zero beside the series that the difference\nreads as none: at the run's start when `time` is absent, which for a\nconstant is its value. A time outside the run is refused.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "time": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  },
+                  "run": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "value"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable",
+                  "value"
+                ]
+              },
+              {
+                "description": "The variables `variable` links to -- those whose equations read it,\nand for a flow the stocks it fills and drains -- are exactly\n`readers`: none, when it is empty, for a variable nothing reads.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "readers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "readers"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable",
+                  "readers"
+                ]
+              },
+              {
+                "description": "`variable` reads `reads`, through a link of `polarity` (its equation's\nsign) when given.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "reads": {
+                    "type": "string"
+                  },
+                  "polarity": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/LinkPolarityName"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "reads"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable",
+                  "reads"
+                ]
+              },
+              {
+                "description": "The model has the diagnostic of this id now.",
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "diagnostic"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "id"
+                ]
+              },
+              {
+                "description": "The model has no diagnostic of `category`, or none at all.",
+                "type": "object",
+                "properties": {
+                  "category": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/DiagnosticCategoryName"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "no_diagnostics"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites"
+                ]
+              },
+              {
+                "description": "The run has the loop of this id, of `polarity` when given (a mostly\nreinforcing loop is reinforcing, a mostly balancing one balancing).",
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "polarity": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/LoopPolarityName"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "run": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "loop"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "id"
+                ]
+              },
+              {
+                "description": "The loop was its partition's strongest for most of the steps between\n`from` and `to` in which a loop was active.",
+                "type": "object",
+                "properties": {
+                  "loop": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "to": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "run": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "leads"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "loop",
+                  "from",
+                  "to"
+                ]
+              },
+              {
+                "description": "No loop of the run goes through the variable.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "run": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "no_loop_through"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable"
+                ]
+              },
+              {
+                "description": "The variable (an element of it, for an arrayed one) goes below zero\nin the run.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "run": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "goes_negative"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable"
+                ]
+              },
+              {
+                "description": "The variable is at its largest at `time`, within 5% of the run.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "time": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "run": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "peaks_at"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable",
+                  "time"
+                ]
+              },
+              {
+                "description": "The variable ends within 5% of `value`.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "run": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "ends_near"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable",
+                  "value"
+                ]
+              },
+              {
+                "description": "The variable's behavior mode in the run is `mode`.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "mode": {
+                    "$ref": "#/$defs/ModeKind"
+                  },
+                  "run": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "behavior_mode"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable",
+                  "mode"
+                ]
+              },
+              {
+                "description": "The variable ends higher (or lower) in `run` than in `than`.",
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "relation": {
+                    "$ref": "#/$defs/Relation"
+                  },
+                  "run": {
+                    "type": "string"
+                  },
+                  "than": {
+                    "type": "string"
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "compares"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "variable",
+                  "relation",
+                  "run",
+                  "than"
+                ]
+              },
+              {
+                "description": "The battery check of this id comes out `outcome`, run again when the\nmodel has changed since.",
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "$ref": "#/$defs/Outcome"
+                  },
+                  "cites": {
+                    "type": "string",
+                    "const": "test"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "cites",
+                  "id",
+                  "outcome"
+                ]
+              }
+            ]
+          },
+          "LinkPolarityName": {
+            "description": "A link's sign as system dynamics writes it: `+` when the target moves with\nthe source, `-` when against it, `?` when the engine cannot tell from the\nequation.",
+            "type": "string",
+            "enum": [
+              "+",
+              "-",
+              "?"
+            ]
+          },
+          "DiagnosticCategoryName": {
+            "description": "Where a diagnostic was raised: the engine's [`DiagnosticCategory`], named\nfor a reader.",
+            "oneOf": [
+              {
+                "description": "An equation that does not parse, names something that does not\nexist, or cannot be compiled.",
+                "type": "string",
+                "const": "equation"
+              },
+              {
+                "description": "A problem with the model as a whole: a cycle, a duplicate name, a bad\ntable.",
+                "type": "string",
+                "const": "model"
+              },
+              {
+                "description": "A units string that does not parse.",
+                "type": "string",
+                "const": "unit_definition"
+              },
+              {
+                "description": "An equation whose computed units disagree with its declared units.",
+                "type": "string",
+                "const": "unit_consistency"
+              },
+              {
+                "description": "A contradiction among the units the model's equations imply.",
+                "type": "string",
+                "const": "unit_inference"
+              },
+              {
+                "description": "A construct the compiler refuses.",
+                "type": "string",
+                "const": "assembly"
+              },
+              {
+                "description": "A value a run produces that is not a number: what an edit's gate\nfinds in the run, where the engine's diagnostics are silent.",
+                "type": "string",
+                "const": "value"
+              }
+            ]
+          },
+          "LoopPolarityName": {
+            "description": "A loop's polarity: reinforcing (it amplifies change) or balancing (it\ncounteracts change). From a run, a loop that showed both is \"mostly\" the\none it showed at least 99% of the time, weighted by its score, and\nundetermined otherwise; from structure, a loop with a link whose sign the\nengine cannot tell is undetermined.",
+            "type": "string",
+            "enum": [
+              "reinforcing",
+              "balancing",
+              "mostly_reinforcing",
+              "mostly_balancing",
+              "undetermined"
+            ]
+          },
+          "ModeKind": {
+            "oneOf": [
+              {
+                "description": "Does not move: an equilibrium.",
+                "type": "string",
+                "const": "at_rest"
+              },
+              {
+                "description": "Moves at a steady speed.",
+                "type": "string",
+                "const": "linear"
+              },
+              {
+                "description": "Moves ever faster: exponential growth, or an accelerating decline.",
+                "type": "string",
+                "const": "exponential"
+              },
+              {
+                "description": "Moves ever slower toward a level: approach to a goal, or decay.",
+                "type": "string",
+                "const": "goal_seeking"
+              },
+              {
+                "description": "Speeds up, then slows toward a level.",
+                "type": "string",
+                "const": "s_shaped"
+              },
+              {
+                "description": "Passes the level it settles at once, and comes back less than half the\nway it went.",
+                "type": "string",
+                "const": "overshoot"
+              },
+              {
+                "description": "Rises, peaks, and falls back more than half the way it rose: overshoot\nand collapse.",
+                "type": "string",
+                "const": "rise_and_fall"
+              },
+              {
+                "description": "Falls, bottoms, and rises back more than half the way it fell.",
+                "type": "string",
+                "const": "fall_and_rise"
+              },
+              {
+                "description": "Swings back and forth.",
+                "type": "string",
+                "const": "oscillation"
+              },
+              {
+                "description": "Takes a non-finite value.",
+                "type": "string",
+                "const": "undefined"
+              },
+              {
+                "description": "None of these.",
+                "type": "string",
+                "const": "other"
+              }
+            ]
+          },
+          "Relation": {
+            "description": "A final value's relation between two runs.",
+            "type": "string",
+            "enum": [
+              "higher",
+              "lower"
+            ]
+          },
+          "Outcome": {
+            "description": "How a check came out.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "passed"
+                ]
+              },
+              {
+                "description": "The model fails the check: fix the model, or say why the check does\nnot apply.",
+                "type": "string",
+                "const": "failed"
+              },
+              {
+                "description": "The check could not run; its reason says why.",
+                "type": "string",
+                "const": "not_run"
+              },
+              {
+                "description": "A result for judgment: it may be right, and a modeler should say.",
+                "type": "string",
+                "const": "flagged"
+              },
+              {
+                "description": "What happened, for an explanation: a knockout's or a disturbance's.",
+                "type": "string",
+                "const": "observed"
+              }
+            ]
+          }
+        },
+        "title": "VerifyFindingsInput",
+        "type": "object",
+        "properties": {
+          "findings": {
+            "description": "At most 12.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Finding"
+            },
+            "minItems": 1,
+            "maxItems": 12
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "findings"
+        ]
+      },
+      "outputSchema": {
+        "$defs": {
+          "FindingVerdict": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The finding's id (`F1`, ...) when every citation holds: what the host\nshows it under.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "holds": {
+                "type": "boolean"
+              },
+              "failures": {
+                "description": "The citations that do not hold, by their place in the finding (from\n1), each with what is true instead.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/CitationFailure"
+                }
+              }
+            },
+            "required": [
+              "holds"
+            ]
+          },
+          "CitationFailure": {
+            "type": "object",
+            "properties": {
+              "citation": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "citation",
+              "reason"
+            ]
+          }
+        },
+        "title": "VerifyFindingsOutput",
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "findings": {
+            "description": "A verdict per finding, in the order given.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/FindingVerdict"
+            }
+          }
+        },
+        "required": [
+          "revision",
+          "findings"
+        ]
+      }
     }
   ]
 }

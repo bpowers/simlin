@@ -195,7 +195,28 @@ The patch JSON's types moved from libsimlin into the engine (`json::ProjectPatch
 
 ### Findings and verification
 
-A finding is a claim with typed citations: a variable (or one of its fields, or that it reads another), a diagnostic, a loop with its polarity, a loop's dominance over a span of a named run, a run fact (goes negative, peaks at a time, ends near a value, shows a behavior mode), a comparison between two runs, an absence (no diagnostics of a kind; no loop through a variable), or a test result. `verify_findings` checks each against the session at the current revision within a tolerance, deterministically, so a host can refuse to show a claim whose evidence does not hold, and an evaluation can check claims without judgment. Whether a claim follows from its citations is a judgment the surface does not make.
+A finding is a flaw, a strength or an observation: a claim a person will read, and one to eight citations, each naming something a tool reported:
+
+| Citation | Holds when |
+|---|---|
+| `variable` | the model has the variable |
+| `equation` | the variable's equation (a stock's initial value; an element's, named by its subscript) parses the same as the cited one: spacing, case and the spelling of names aside. A variable with a table is its table at its equation's value, `LOOKUP(effect, input)`, and the input alone is not its equation |
+| `value` | the variable (or an element) is within 5% of the cited value at the cited time in the run (of the larger of the two), or, for values near zero, within 1e-5 of the series' largest magnitude, the summary's precision, so a value that reads as zero beside the series is zero; the floor decides only when both values are under 0.02% of that magnitude, so on a series that spans orders of magnitude one small value never stands for another; at the run's start when no time is cited, and a time outside the run is refused |
+| `readers` | the variables the variable links to (those whose equations read it, and a flow's stocks) are exactly the cited ones; none, for a variable nothing reads |
+| `reads` | the variable reads the other, through a link of the cited sign by its equation when a sign is cited |
+| `diagnostic` | the model has the diagnostic of that id now |
+| `no_diagnostics` | the model has no diagnostic (of the cited category) |
+| `loop` | the run has the loop of that id, of the cited polarity (a mostly reinforcing loop is reinforcing) |
+| `leads` | the loop was its partition's strongest for at least half the steps of the span in which a loop was active |
+| `no_loop_through` | no loop of the run goes through the variable, or the one element cited; unshowable when the run's loops are a sample |
+| `goes_negative` | the variable, or an element of it, goes below zero in the run |
+| `peaks_at` | the variable is at its largest within 5% of the run of the cited time; a series at rest has no peak, and a time outside the run is refused |
+| `ends_near` | the variable ends at the cited value, as `value` judges one |
+| `behavior_mode` | the classifier gives the variable the cited mode in the run |
+| `compares` | the variable ends higher (or lower) in one run than another, by more than `value` would call the same number: runs that end a hair apart end alike |
+| `test` | the battery check of that id comes out as cited, run again when the model has changed since |
+
+`verify_findings` checks each citation against the session at the current revision, deterministically, so a host can refuse to show a claim whose evidence does not hold, and an evaluation can check claims without judgment. A citation that fails says what is true instead ("population ends at 100 in run 'current'"). A finding every citation of which holds gets an id (`F1`, ...), keyed by its kind and claim, which the host shows it under. A run made before the model changed (its diagrams aside) is not evidence about the model: a citation of one fails and names the repair. The equation, value and readers citations exist because claims kept outrunning the others: "the capacity is now 1500" verified while citing only the variable, and "nothing uses the harvest fraction" while citing only that no loop goes through it. A variable of a run may be an element (`Population[north]`); a fact about one series of an arrayed variable names the element. Whether a claim follows from its citations is a judgment the surface does not make.
 
 ## libsimlin surface
 

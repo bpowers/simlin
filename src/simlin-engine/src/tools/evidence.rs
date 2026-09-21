@@ -15,6 +15,8 @@
 //! the problem the same. Two rows alike in all of that (one variable failing
 //! the same way at two places) are told apart by their order in the report.
 //!
+//! A finding's id (`F1`, ...) is keyed by its kind and its claim.
+//!
 //! A battery check's id (`T1`, ...) is keyed by its test, the variable it
 //! changes and how, so a check run again after an edit keeps its id.
 //!
@@ -25,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
@@ -61,7 +63,7 @@ impl From<DiagnosticSeverity> for Severity {
 /// Where a diagnostic was raised: the engine's [`DiagnosticCategory`], named
 /// for a reader.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticCategoryName {
@@ -139,9 +141,23 @@ pub(crate) struct Evidence {
     next_loop: u32,
     tests: HashMap<super::battery::TestKey, u32>,
     next_test: u32,
+    findings: HashMap<(super::verify::FindingKind, String), u32>,
+    next_finding: u32,
 }
 
 impl Evidence {
+    /// The id of the finding of `kind` that claims `claim`, however it is
+    /// spaced.
+    pub(crate) fn finding_id(&mut self, kind: super::verify::FindingKind, claim: &str) -> String {
+        let claim = claim.split_whitespace().collect::<Vec<_>>().join(" ");
+        let next = &mut self.next_finding;
+        let number = *self.findings.entry((kind, claim)).or_insert_with(|| {
+            *next += 1;
+            *next
+        });
+        format!("F{number}")
+    }
+
     /// The id of the battery check `key` names.
     pub(crate) fn test_id(&mut self, key: &super::battery::TestKey) -> String {
         let next = &mut self.next_test;

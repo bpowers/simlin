@@ -153,7 +153,7 @@ pub enum LoopBasis {
 /// undetermined otherwise; from structure, a loop with a link whose sign the
 /// engine cannot tell is undetermined.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum LoopPolarityName {
@@ -517,7 +517,7 @@ pub(crate) fn analyze_loops(
 
 /// What `through` names: a variable, or one element of an arrayed one, as the
 /// model spells it.
-fn through_of(
+pub(crate) fn through_of(
     project: &datamodel::Project,
     model: &datamodel::Model,
     name: &str,
@@ -723,6 +723,90 @@ pub(crate) fn leaders_after(
         .take(n)
         .map(|(l, _)| evidence.loop_id(&l.key))
         .collect()
+}
+
+/// The polarity the analysis gives the loop whose cycle is `key`, if it has
+/// the loop.
+pub(crate) fn polarity_of(analysis: &LoopAnalysis, key: &[String]) -> Option<LoopPolarityName> {
+    analysis
+        .loops
+        .iter()
+        .find(|l| l.key == key)
+        .map(|l| l.polarity)
+}
+
+/// How often a loop led its partition over a span of a run.
+pub(crate) struct Leadership {
+    /// The steps it was the strongest in.
+    pub led: usize,
+    /// The steps some loop of the partition was active in.
+    pub active: usize,
+    /// The cycle of the loop that was the strongest in the most steps.
+    pub most: Option<Vec<String>>,
+}
+
+/// How often the loop whose cycle is `key` was its partition's strongest
+/// over the saved steps from `from` to `to`, counting the steps in which some
+/// loop of the partition was active; `None` when the analysis does not have
+/// the loop. A run with no active loop (loops from structure) has none
+/// active.
+pub(crate) fn leadership(
+    analysis: &LoopAnalysis,
+    key: &[String],
+    from: f64,
+    to: f64,
+) -> Option<Leadership> {
+    let target = analysis.loops.iter().find(|l| l.key == key)?;
+    let peers: Vec<&AnalyzedLoop> = analysis
+        .loops
+        .iter()
+        .filter(|l| l.partition == target.partition)
+        .collect();
+    let mut counts: Vec<usize> = vec![0; peers.len()];
+    let mut active = 0;
+    for (step, &time) in analysis.times.iter().enumerate() {
+        if time < from || time > to {
+            continue;
+        }
+        let strongest = peers
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (i, l.rel.get(step).map_or(0.0, |s| s.abs())))
+            .fold(
+                (0, 0.0_f64),
+                |best, (i, s)| if s > best.1 { (i, s) } else { best },
+            );
+        if strongest.1 >= ACTIVE_SHARE {
+            active += 1;
+            counts[strongest.0] += 1;
+        }
+    }
+    let target_index = peers.iter().position(|l| l.key == key).expect("a peer");
+    let most = counts
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(&a.0)))
+        .filter(|&(_, &n)| n > 0)
+        .map(|(i, _)| peers[i].key.clone());
+    Some(Leadership {
+        led: counts[target_index],
+        active,
+        most,
+    })
+}
+
+/// The cycles of the analysis's loops through the variable `ident`
+/// (canonical); `None` when the analysis is not of every loop, so that no
+/// absence can be shown.
+pub(crate) fn loops_through(analysis: &LoopAnalysis, ident: &str) -> Option<Vec<Vec<String>>> {
+    analysis.complete.then(|| {
+        analysis
+            .loops
+            .iter()
+            .filter(|l| l.goes_through(ident))
+            .map(|l| l.key.clone())
+            .collect()
+    })
 }
 
 /// The loops of the model as it is, for naming what a replaced equation cuts:

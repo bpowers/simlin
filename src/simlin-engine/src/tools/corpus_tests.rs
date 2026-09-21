@@ -211,8 +211,8 @@ fn first_constant(model: &datamodel::Model) -> Option<String> {
 /// What each model is asked: an outline, every variable read twelve at a
 /// time (up to four calls) and its behavior, a search, an experiment that
 /// doubles a constant, the runs, the loops of the model as it is (each
-/// loop's polarity checked against its chain's signs), the battery, and an
-/// edit that sets the constant.
+/// loop's polarity checked against its chain's signs, and verified as a
+/// citation), the battery, and an edit that sets the constant.
 fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
     let model = project.models.iter().find(|m| m.macro_spec.is_none());
     let names: Vec<String> = model
@@ -278,6 +278,31 @@ fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
         json!({}),
     ) {
         check_parity(sweep, display, &loops);
+        // Each listed loop's own polarity, cited, verifies.
+        let listed = loops["partitions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|partition| partition["loops"].as_array().into_iter().flatten());
+        for report in listed {
+            let citation =
+                json!({"cites": "loop", "id": report["id"], "polarity": report["polarity"]});
+            let verdict = sweep.call(
+                display,
+                &mut host,
+                &mut session,
+                ToolName::VerifyFindings,
+                json!({"findings": [{"kind": "observation", "claim": "a loop", "citations": [citation]}]}),
+            );
+            if let Some(verdict) = verdict
+                && verdict["findings"][0]["holds"] != true
+            {
+                sweep.failures.push(format!(
+                    "{display}: {} does not verify: {}",
+                    report["id"], verdict["findings"][0]["failures"]
+                ));
+            }
+        }
     }
     sweep.call(
         display,

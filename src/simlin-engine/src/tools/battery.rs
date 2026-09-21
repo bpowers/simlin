@@ -216,7 +216,7 @@ impl TestName {
 
 /// How a check came out.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -495,6 +495,117 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
+/// The checks a session has listed, by id: what each checked, and how it last
+/// came out at which revision, so a citation of one is verified without the
+/// battery running again while the model is as it was.
+#[derive(Default)]
+pub(crate) struct CheckLog {
+    checks: HashMap<String, CheckRecord>,
+}
+
+struct CheckRecord {
+    key: TestKey,
+    /// The recorded variables' canonical names; the stocks when empty.
+    record: Vec<String>,
+    revision: u64,
+    outcome: Outcome,
+}
+
+/// The outcome of the check the session listed as `id`: as it came out when
+/// the model was as it is, else run again.
+pub(crate) fn recheck(
+    session: &mut Session,
+    ws: &mut Workspace<'_>,
+    resolved: &ResolvedModel<'_>,
+    id: &str,
+) -> Result<Outcome, String> {
+    let Some(record) = session.checks.checks.get(id) else {
+        return Err(format!(
+            "no battery check has the id '{id}' in this session: check ids come from run_tests"
+        ));
+    };
+    if record.revision == ws.revision {
+        return Ok(record.outcome);
+    }
+    let (key, record_names) = (record.key.clone(), record.record.clone());
+    let model = resolved.model;
+    let target = key
+        .variable
+        .as_deref()
+        .map(|name| {
+            model
+                .get_variable(name)
+                .ok_or_else(|| format!("{id} changed a variable the model no longer has, {name}"))
+        })
+        .transpose()?;
+    let record: Vec<&Variable> = if record_names.is_empty() {
+        model
+            .variables
+            .iter()
+            .filter(|v| matches!(v, Variable::Stock(_)))
+            .collect()
+    } else {
+        record_names
+            .iter()
+            .filter_map(|name| model.get_variable(name))
+            .collect()
+    };
+    let base = session.runs.current(ws, model).map_err(|err| err.error)?;
+    let targets: Vec<&Variable> = target.into_iter().collect();
+    let roles = || {
+        let graph = Graph::of(ws.db, resolved);
+        let units = Units::of(ws, resolved);
+        Roles::of(model, &graph, &units, &Parsed::of(model), &base)
+    };
+    // A check that stopped for other work answers with the stop's words;
+    // the verifier stops at the next citation, while the work still waits.
+    let stopped = |err: ToolError| err.error;
+    let checks = match key.test {
+        TestName::Units => vec![units_check(&mut session.evidence, ws, resolved)],
+        TestName::ExtremeConditions => {
+            let roles = roles();
+            extreme_conditions(ws, model, &base, &roles, &targets)
+                .map_err(stopped)?
+                .checks
+        }
+        TestName::IntegrationError => integration_error(ws, model, &base).map_err(stopped)?,
+        TestName::Sensitivity => {
+            let roles = roles();
+            sensitivity(ws, model, &base, &roles, &targets, &record).map_err(stopped)?
+        }
+        TestName::LoopKnockout => loop_knockout(
+            &mut session.runs,
+            &mut session.evidence,
+            ws,
+            resolved,
+            &base,
+            &targets,
+            &record,
+        )
+        .map_err(stopped)?,
+        TestName::Disturbance => disturbance(
+            &mut session.runs,
+            &mut session.evidence,
+            ws,
+            resolved,
+            &base,
+            &targets,
+            &record,
+        )
+        .map_err(stopped)?,
+    };
+    let outcome = checks
+        .into_iter()
+        .find(|check| check.key == key)
+        .map(|check| check.result.outcome)
+        .ok_or_else(|| format!("{id} no longer applies to the model as it is"))?;
+    if let Some(record) = session.checks.checks.get_mut(id) {
+        record.revision = ws.revision;
+        record.outcome = outcome;
+    }
+    Ok(outcome)
+}
+
 /// What identifies a check across calls and revisions.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TestKey {
@@ -717,7 +828,7 @@ pub(crate) fn run_tests(
     }
 
     let (listed, omitted) = listed(checks);
-    Ok(fitted(
+    let output = fitted(
         &mut session.evidence,
         RunTestsOutput {
             revision: ws.revision,
@@ -726,9 +837,29 @@ pub(crate) fn run_tests(
             omitted,
             not_found,
         },
-        listed,
+        &listed,
         session.outline_budget,
-    ))
+    );
+    let record_names: Vec<String> = if input.record.is_empty() {
+        vec![]
+    } else {
+        record
+            .iter()
+            .map(|v| crate::canonicalize(v.get_ident()).into_owned())
+            .collect()
+    };
+    for (result, check) in output.results.iter().zip(&listed) {
+        session.checks.checks.insert(
+            result.id.clone(),
+            CheckRecord {
+                key: check.key.clone(),
+                record: record_names.clone(),
+                revision: ws.revision,
+                outcome: result.outcome,
+            },
+        );
+    }
+    Ok(output)
 }
 
 /// `targets`, or `default()` and what it says it left out when the call
@@ -779,7 +910,7 @@ fn listed(checks: Vec<Check>) -> (Vec<Check>, usize) {
 fn fitted(
     evidence: &mut Evidence,
     mut output: RunTestsOutput,
-    listed: Vec<Check>,
+    listed: &[Check],
     budget: usize,
 ) -> RunTestsOutput {
     let mut trial = evidence.clone();
@@ -796,7 +927,7 @@ fn fitted(
         output.results.pop();
         output.omitted += 1;
     }
-    for (result, check) in output.results.iter_mut().zip(&listed) {
+    for (result, check) in output.results.iter_mut().zip(listed) {
         result.id = evidence.test_id(&check.key);
     }
     output
@@ -2031,7 +2162,7 @@ impl Watched {
 
 /// The first row at which `values` is below zero by more than rounding: a
 /// billionth of its largest magnitude, or of one.
-fn goes_negative(values: &[f64]) -> Option<usize> {
+pub(crate) fn goes_negative(values: &[f64]) -> Option<usize> {
     let largest = values
         .iter()
         .filter(|v| v.is_finite())

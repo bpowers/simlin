@@ -27,6 +27,11 @@ fn good_input(tool: ToolName) -> Value {
         ToolName::ListRuns => json!({}),
         ToolName::AnalyzeLoops => json!({"through": "Inventory"}),
         ToolName::RunTests => json!({"tests": ["units", "extreme_conditions"]}),
+        ToolName::VerifyFindings => json!({"findings": [{
+            "kind": "observation",
+            "claim": "Inventory is a stock the model integrates.",
+            "citations": [{"cites": "variable", "variable": "Inventory"}]
+        }]}),
         ToolName::EditModel => json!({
             "summary": "Make shipments depend on what is on hand.",
             "operations": [

@@ -140,7 +140,7 @@ impl VariableKind {
 /// the source, `-` when against it, `?` when the engine cannot tell from the
 /// equation.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub enum LinkPolarityName {
     #[serde(rename = "+")]

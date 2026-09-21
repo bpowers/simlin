@@ -37,7 +37,7 @@
 //! structure's: exponential growth at 1% a year over ten years is, over those
 //! ten years, linear.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
@@ -60,7 +60,7 @@ const REST_FLOOR: f64 = 1e-9;
 const STILL_FRACTION: f64 = 1e-6;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ModeKind {

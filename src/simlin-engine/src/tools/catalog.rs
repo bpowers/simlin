@@ -30,6 +30,7 @@ pub enum ToolName {
     AnalyzeLoops,
     RunTests,
     EditModel,
+    VerifyFindings,
 }
 
 /// What calling a tool does to the project.
@@ -44,7 +45,7 @@ pub enum ToolEffect {
 }
 
 impl ToolName {
-    pub const ALL: [ToolName; 9] = [
+    pub const ALL: [ToolName; 10] = [
         ToolName::ReadModel,
         ToolName::ReadVariables,
         ToolName::FindVariables,
@@ -54,6 +55,7 @@ impl ToolName {
         ToolName::AnalyzeLoops,
         ToolName::RunTests,
         ToolName::EditModel,
+        ToolName::VerifyFindings,
     ];
 
     pub fn name(self) -> &'static str {
@@ -67,6 +69,7 @@ impl ToolName {
             ToolName::AnalyzeLoops => "analyze_loops",
             ToolName::RunTests => "run_tests",
             ToolName::EditModel => "edit_model",
+            ToolName::VerifyFindings => "verify_findings",
         }
     }
 
@@ -152,6 +155,17 @@ impl ToolName {
                  its changes and decides whether it lands. Read the model first, and again when \
                  it changed under you."
             }
+            ToolName::VerifyFindings => {
+                "Checks the evidence of findings before the person sees them. A finding is a \
+                 flaw, a strength or an observation, a claim in a sentence or two, and the \
+                 citations it rests on: a variable, its equation, the variables that read it, a \
+                 link, a diagnostic id, a loop id and its polarity, a loop leading over a span of \
+                 a run, a run fact (a value at a time, goes negative, peaks at, ends near, \
+                 behavior mode), a comparison of two runs, an absence (no diagnostics, no loop \
+                 through a variable, no readers), or a battery check's outcome. A finding whose \
+                 every citation holds gets an id (F1, F2, ...) and may be shown; each citation \
+                 that fails says what is true instead. Cite only what the tools reported."
+            }
         }
     }
 
@@ -164,7 +178,8 @@ impl ToolName {
             | ToolName::ReadBehavior
             | ToolName::ListRuns
             | ToolName::AnalyzeLoops
-            | ToolName::RunTests => ToolEffect::Read,
+            | ToolName::RunTests
+            | ToolName::VerifyFindings => ToolEffect::Read,
             ToolName::EditModel => ToolEffect::PlanEdit,
         }
     }
@@ -184,6 +199,7 @@ pub fn generate_catalog_json() -> String {
         FindVariablesOutput, ListRunsInput, ListRunsOutput, ReadBehaviorInput, ReadBehaviorOutput,
         ReadModelInput, ReadModelOutput, ReadVariablesInput, ReadVariablesOutput,
         RunExperimentInput, RunExperimentOutput, RunTestsInput, RunTestsOutput,
+        VerifyFindingsInput, VerifyFindingsOutput,
     };
 
     #[derive(Serialize)]
@@ -249,6 +265,10 @@ pub fn generate_catalog_json() -> String {
                 }
                 ToolName::RunTests => (input::<RunTestsInput>(), output::<RunTestsOutput>()),
                 ToolName::EditModel => (input::<EditModelInput>(), output::<EditModelOutput>()),
+                ToolName::VerifyFindings => (
+                    input::<VerifyFindingsInput>(),
+                    output::<VerifyFindingsOutput>(),
+                ),
             };
             Entry {
                 name: tool.name(),

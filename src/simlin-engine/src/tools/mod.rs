@@ -51,6 +51,7 @@ mod outline;
 mod runs;
 mod series;
 mod variables;
+mod verify;
 
 pub use battery::{
     Condition, Difference, Outcome, Problem, ProblemKind, Response, RunTestsInput, RunTestsOutput,
@@ -90,6 +91,10 @@ pub use variables::{
     ElementEquation, FindVariablesInput, FindVariablesOutput, LinkPolarityName, LinkRef, Lookup,
     LookupKind, ModuleRecord, NotFound, ReadVariablesInput, ReadVariablesOutput, VariableKind,
     VariableMatch, VariableRecord,
+};
+pub use verify::{
+    Citation, CitationFailure, Finding, FindingKind, FindingVerdict, Relation, VerifyFindingsInput,
+    VerifyFindingsOutput,
 };
 
 use serde::Serialize;
@@ -178,6 +183,7 @@ pub struct Session {
     last_read: Option<changes::ReadSnapshot>,
     runs: runs::RunStore,
     plans: edit::PlanStore,
+    checks: battery::CheckLog,
     outline_budget: usize,
 }
 
@@ -191,6 +197,7 @@ impl Session {
             last_read: None,
             runs: runs::RunStore::default(),
             plans: edit::PlanStore::default(),
+            checks: battery::CheckLog::default(),
             outline_budget: OUTLINE_BUDGET,
         }
     }
@@ -241,6 +248,9 @@ impl Session {
             }
             ToolName::RunTests => respond(name, input, |input| battery::run_tests(self, ws, input)),
             ToolName::EditModel => respond(name, input, |input| edit::edit_model(self, ws, input)),
+            ToolName::VerifyFindings => respond(name, input, |input| {
+                verify::verify_findings(self, ws, input)
+            }),
         };
         if output.interrupted {
             self.evidence = evidence;
