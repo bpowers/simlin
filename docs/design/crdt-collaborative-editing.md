@@ -21,14 +21,14 @@ Project
 ├── units: Vec<Unit>
 └── models: Vec<Model>
     ├── name: String
-    ├── variables: Vec<Variable>  (Stock | Flow | Aux | Module)
+    ├── variables: SharedVec<Variable>  (Stock | Flow | Aux | Module)
     │   ├── ident/name: String
     │   ├── equation: String  (the SD equation text)
     │   ├── units: Option<String>
     │   ├── documentation: String
     │   └── ... (graphicalFunction, inflows/outflows, etc.)
     ├── views: Vec<View>
-    │   └── StockFlow { elements: Vec<ViewElement>, viewBox, zoom }
+    │   └── StockFlow { elements: SharedVec<ViewElement>, viewBox, zoom }
     │       └── ViewElement: Aux | Stock | Flow | Link | Module | Alias | Cloud | Group
     │           └── { uid, name, x, y, labelSide, ... }
     ├── loopMetadata: Vec<LoopMetadata>
@@ -335,27 +335,30 @@ implementation not started.
 
 #### 2. Variables-as-Map Refactoring (Medium Priority)
 
-Currently, `Model.variables` is a `Vec<Variable>` — a positional list. For
-CRDT purposes, this should be a map keyed by identifier. The Rust datamodel
-already treats variables as "find by ident" (see `Model::get_variable`), so
-the in-memory representation is already semantically a map even if stored as a
-Vec.
+`Model.variables` is a `SharedVec<Variable>`: a positional list whose
+elements sit behind one `Arc` each, so a copy of the project shares every
+variable until one is edited. For CRDT purposes, this should be a map keyed by
+identifier. The Rust datamodel already treats variables as "find by ident"
+(see `Model::get_variable`), so the in-memory representation is already
+semantically a map even if stored as a list.
 
 Options:
-- **Change nothing in datamodel**: Map the `Vec<Variable>` to a `LoroMap`
-  keyed by ident in the CRDT layer. Keep `Vec` for serialization compatibility.
+- **Change nothing in datamodel**: Map the `SharedVec<Variable>` to a `LoroMap`
+  keyed by ident in the CRDT layer. Keep the list for serialization
+  compatibility.
 - **Refactor to `BTreeMap<String, Variable>`**: Better alignment between
   in-memory representation and CRDT schema. Breaking change for protobuf
   serialization (would need migration).
 
-The first option (keep Vec, map to LoroMap) is lower risk and probably the
-right initial approach.
+The first option (keep the list, map it to a LoroMap) is lower risk and
+probably the right initial approach.
 
 #### 3. View Elements uid-Keyed Map (Medium Priority)
 
-Same issue as variables: `StockFlow.elements` is a `Vec<ViewElement>`. For
-CRDT purposes, it should be keyed by `uid`. The existing `get_variable_name`
-method already searches by uid, confirming the semantic-map nature.
+Same issue as variables: `StockFlow.elements` is a `SharedVec<ViewElement>`, a
+positional list. For CRDT purposes, it should be keyed by `uid`. The existing
+`get_variable_name` method already searches by uid, confirming the
+semantic-map nature.
 
 #### 4. Equation Conflict Semantics (Design Decision Needed)
 
