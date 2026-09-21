@@ -357,3 +357,168 @@ fn a_layout_sync_shares_every_element_it_leaves_in_place() {
         "an equation edit moves nothing"
     );
 }
+
+fn aux(ident: &str, equation: &str, module_input: bool) -> Variable {
+    Variable::Aux(datamodel::Aux {
+        ident: ident.to_string(),
+        equation: Equation::Scalar(equation.to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat {
+            can_be_module_input: module_input,
+            visibility: datamodel::Visibility::Public,
+            ..datamodel::Compat::default()
+        },
+    })
+}
+
+fn module(ident: &str, references: &[(&str, &str)]) -> Variable {
+    Variable::Module(datamodel::Module {
+        ident: ident.to_string(),
+        model_name: "submodel".to_string(),
+        documentation: String::new(),
+        units: None,
+        references: references
+            .iter()
+            .map(|(src, dst)| datamodel::ModuleReference {
+                src: src.to_string(),
+                dst: format!("{ident}\u{00B7}{dst}"),
+            })
+            .collect(),
+        compat: datamodel::Compat::default(),
+        ai_state: None,
+        uid: None,
+    })
+}
+
+/// A main model with three instances of one submodel: `wired` feeds its
+/// first port from `local_input`, `other` feeds its second from
+/// `other_input`, and `bare` is wired to nothing.
+fn modules_project() -> datamodel::Project {
+    let mut project = crate::test_common::TestProject::new("test").build_datamodel();
+    let main = &mut project.models[0];
+    main.variables.extend([
+        aux("local_input", "10", false),
+        aux("other_input", "20", false),
+        module("wired", &[("local_input", "input_a")]),
+        module("other", &[("other_input", "input_b")]),
+        module("bare", &[]),
+    ]);
+    project.models.push(datamodel::Model {
+        name: "submodel".to_string(),
+        sim_specs: None,
+        variables: vec![
+            aux("input_a", "0", true),
+            aux("input_b", "0", true),
+            aux("output", "input_a + input_b", false),
+        ]
+        .into(),
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    project
+}
+
+fn rename_in(model: &str, from: &str, to: &str) -> ProjectPatch {
+    ProjectPatch {
+        project_ops: vec![],
+        models: vec![ModelPatch {
+            name: model.to_string(),
+            ops: vec![ModelOperation::RenameVariable {
+                from: from.to_string(),
+                to: to.to_string(),
+            }],
+        }],
+    }
+}
+
+#[test]
+fn a_rename_copies_only_the_modules_that_name_it() {
+    let original = modules_project();
+    let mut copy = original.clone();
+    apply_patch(&mut copy, rename_in("main", "local_input", "renamed_input")).unwrap();
+
+    let mut variables = changed(
+        &original.models[0].variables,
+        &copy.models[0].variables,
+        ident,
+    );
+    variables.sort();
+    assert_eq!(variables, ["renamed_input", "wired"]);
+}
+
+#[test]
+fn renaming_a_port_copies_only_the_instances_wired_into_it() {
+    let original = modules_project();
+    let mut copy = original.clone();
+    apply_patch(&mut copy, rename_in("submodel", "input_a", "renamed_port")).unwrap();
+
+    assert_eq!(
+        changed(
+            &original.models[0].variables,
+            &copy.models[0].variables,
+            ident
+        ),
+        ["wired"]
+    );
+    let mut submodel = changed(
+        &original.models[1].variables,
+        &copy.models[1].variables,
+        ident,
+    );
+    submodel.sort();
+    assert_eq!(submodel, ["output", "renamed_port"]);
+}
+
+#[test]
+fn renaming_a_flow_copies_only_the_stocks_it_touches() {
+    let original = world3();
+    let mut copy = original.clone();
+    let vars = &original.models[0].variables;
+    let flow = vars
+        .iter()
+        .find_map(|v| match v {
+            Variable::Flow(f) => Some(f.ident.clone()),
+            _ => None,
+        })
+        .expect("world3 has a flow");
+    let canonical_flow = canonicalize(&flow).into_owned();
+    // The stocks that name the flow, and any whose lists the rename's sort
+    // puts in order; no other stock changes.
+    let mut expected: Vec<String> = vars
+        .iter()
+        .filter_map(|v| match v {
+            Variable::Stock(s)
+                if s.inflows
+                    .iter()
+                    .chain(&s.outflows)
+                    .any(|f| canonicalize(f) == canonical_flow)
+                    || !s.inflows.is_sorted()
+                    || !s.outflows.is_sorted() =>
+            {
+                Some(canonicalize(&s.ident).into_owned())
+            }
+            _ => None,
+        })
+        .collect();
+    apply_patch(&mut copy, rename_in("main", &flow, "renamed flow")).unwrap();
+
+    let stocks: Vec<String> = changed(
+        &original.models[0].variables,
+        &copy.models[0].variables,
+        ident,
+    )
+    .into_iter()
+    .filter(|k| matches!(copy.models[0].get_variable(k), Some(Variable::Stock(_))))
+    .collect();
+    let mut stocks = stocks;
+    stocks.sort();
+    expected.sort();
+    assert!(!expected.is_empty());
+    assert_eq!(stocks, expected);
+}

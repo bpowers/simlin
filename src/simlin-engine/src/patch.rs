@@ -716,27 +716,44 @@ fn retarget_parent_module_dst(
     new_ident: &Ident<Canonical>,
 ) {
     let target_canonical = canonicalize(target_model_name);
+    // Only an instance with a reference into the renamed port changes.
+    let retargets = |var: &Variable| {
+        matches!(var, Variable::Module(module)
+        if canonicalize(module.model_name.as_str()) == target_canonical
+            && module.references.iter().any(|reference| {
+                retargeted_dst(&module.ident, &reference.dst, old_ident, new_ident).is_some()
+            }))
+    };
     for model in project.models.iter_mut() {
-        let targets = |var: &Variable| {
-            matches!(var, Variable::Module(module)
-                if canonicalize(module.model_name.as_str()) == target_canonical)
-        };
-        model.variables.edit_where(targets, |var| {
+        model.variables.edit_where(retargets, |var| {
             let Variable::Module(module) = var else {
                 return;
             };
-            let prefix = format!("{}\u{00B7}", canonicalize(module.ident.as_str()));
             for reference in module.references.iter_mut() {
-                let dst_canonical = canonicalize(reference.dst.as_str());
-                let Some(port) = dst_canonical.strip_prefix(prefix.as_str()) else {
-                    continue;
-                };
-                if canonicalize(port).as_ref() == old_ident.as_str() {
-                    reference.dst = format!("{prefix}{}", new_ident.as_str());
+                if let Some(dst) =
+                    retargeted_dst(&module.ident, &reference.dst, old_ident, new_ident)
+                {
+                    reference.dst = dst;
                 }
             }
         });
     }
+}
+
+/// The `dst` a reference of the module instance `module_ident` takes when its
+/// target model's `old_ident` is renamed to `new_ident`, or `None` if the
+/// reference doesn't wire into that port.
+fn retargeted_dst(
+    module_ident: &str,
+    dst: &str,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) -> Option<String> {
+    let prefix = format!("{}\u{00B7}", canonicalize(module_ident));
+    let dst_canonical = canonicalize(dst);
+    let port = dst_canonical.strip_prefix(prefix.as_str())?;
+    (canonicalize(port).as_ref() == old_ident.as_str())
+        .then(|| format!("{prefix}{}", new_ident.as_str()))
 }
 
 /// Rewrite every equation of `model` that references `old_ident`.
@@ -1007,27 +1024,36 @@ fn rename_module_references(
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) {
-    let is_module = |var: &Variable| matches!(var, Variable::Module(_));
-    model.variables.edit_where(is_module, |var| {
+    // Only a module with a reference that names the renamed variable changes.
+    let renames = |var: &Variable| {
+        matches!(var, Variable::Module(module) if module.references.iter().any(|reference| {
+            renamed_module_reference(&reference.src, old_ident, new_ident).is_some()
+                || renamed_module_reference(&reference.dst, old_ident, new_ident).is_some()
+        }))
+    };
+    model.variables.edit_where(renames, |var| {
         if let Variable::Module(module) = var {
             for reference in module.references.iter_mut() {
-                rename_module_reference_string(&mut reference.src, old_ident, new_ident);
-                rename_module_reference_string(&mut reference.dst, old_ident, new_ident);
+                for end in [&mut reference.src, &mut reference.dst] {
+                    if let Some(renamed) = renamed_module_reference(end, old_ident, new_ident) {
+                        *end = renamed;
+                    }
+                }
             }
         }
     });
 }
 
-fn rename_module_reference_string(
-    value: &mut String,
+/// A module reference's `src` or `dst` after `old_ident` is renamed to
+/// `new_ident`, or `None` if the rename leaves it as it is.
+fn renamed_module_reference(
+    value: &str,
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
-) {
-    let canonical = Ident::new(value.as_str());
+) -> Option<String> {
+    let canonical = Ident::new(value);
     let renamed = rename_canonical_ident(&canonical, old_ident, new_ident);
-    if renamed != canonical {
-        *value = renamed.to_source_repr();
-    }
+    (renamed != canonical).then(|| renamed.to_source_repr())
 }
 
 fn rename_group_members(
@@ -1049,24 +1075,25 @@ fn update_stock_flow_references(
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) {
-    model.variables.edit_each(|var| {
-        let Variable::Stock(stock) = var else {
-            return false;
-        };
-        let mut changed = false;
-        for flow in stock.inflows.iter_mut().chain(stock.outflows.iter_mut()) {
-            if canonicalize(flow.as_str()) == old_ident.as_str() {
-                *flow = new_ident.to_source_repr();
-                changed = true;
+    // Only a stock that names the renamed flow changes, or one whose lists
+    // the rename's sort puts in order.
+    let names = |flow: &String| canonicalize(flow.as_str()) == old_ident.as_str();
+    let changes = |var: &Variable| {
+        matches!(var, Variable::Stock(stock)
+            if stock.inflows.iter().chain(&stock.outflows).any(names)
+                || !stock.inflows.is_sorted()
+                || !stock.outflows.is_sorted())
+    };
+    model.variables.edit_where(changes, |var| {
+        if let Variable::Stock(stock) = var {
+            for flow in stock.inflows.iter_mut().chain(stock.outflows.iter_mut()) {
+                if names(flow) {
+                    *flow = new_ident.to_source_repr();
+                }
             }
+            stock.inflows.sort_unstable();
+            stock.outflows.sort_unstable();
         }
-        for flows in [&mut stock.inflows, &mut stock.outflows] {
-            if !flows.is_sorted() {
-                flows.sort_unstable();
-                changed = true;
-            }
-        }
-        changed
     });
 }
 
