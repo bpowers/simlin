@@ -12,7 +12,7 @@ use std::hash::Hash;
 
 use crate::canonicalize;
 use crate::datamodel::{self, Equation, SharedVec, Variable, View, ViewElement};
-use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
+use crate::patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch};
 use crate::shared_vec::Identical;
 
 fn world3() -> datamodel::Project {
@@ -521,4 +521,454 @@ fn renaming_a_flow_copies_only_the_stocks_it_touches() {
     expected.sort();
     assert!(!expected.is_empty());
     assert_eq!(stocks, expected);
+}
+
+/// A patch, the project it applies to, and exactly what it may copy there.
+struct Row {
+    base: datamodel::Project,
+    patch: ProjectPatch,
+    /// The first model's variables the patch changes or adds, by canonical
+    /// ident. Every other variable stays shared.
+    variables: Vec<String>,
+    /// The first model's first view's elements it changes or adds, by uid,
+    /// every other element staying shared; `None` where the model has no view
+    /// after the patch.
+    elements: Option<Vec<i32>>,
+}
+
+impl Row {
+    fn check(&self, what: &str) {
+        let mut copy = self.base.clone();
+        apply_patch(&mut copy, self.patch.clone()).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let mut variables = changed(
+            &self.base.models[0].variables,
+            &copy.models[0].variables,
+            ident,
+        );
+        variables.sort();
+        let mut expected = self.variables.clone();
+        expected.sort();
+        assert_eq!(variables, expected, "{what}: the variables it copied");
+        match &self.elements {
+            Some(expected) => {
+                let mut elements = view_changed(&self.base, &copy);
+                elements.sort();
+                let mut expected = expected.clone();
+                expected.sort();
+                assert_eq!(elements, expected, "{what}: the view elements it copied");
+            }
+            None => assert!(copy.models[0].views.is_empty(), "{what}: no view"),
+        }
+    }
+}
+
+/// One sharing row per `ModelOperation` variant.
+struct ModelRows {
+    upsert_stock: Row,
+    upsert_flow: Row,
+    upsert_aux: Row,
+    upsert_module: Row,
+    delete_variable: Row,
+    rename_variable: Row,
+    upsert_view: Row,
+    delete_view: Row,
+    update_stock_flows: Row,
+    set_loop_name: Row,
+    edit_view: Row,
+}
+
+impl ModelRows {
+    /// Every row, destructured without `..`, so a field added to `ModelRows`
+    /// fails to compile until it is listed here.
+    fn all(&self) -> Vec<(&'static str, &Row)> {
+        let ModelRows {
+            upsert_stock,
+            upsert_flow,
+            upsert_aux,
+            upsert_module,
+            delete_variable,
+            rename_variable,
+            upsert_view,
+            delete_view,
+            update_stock_flows,
+            set_loop_name,
+            edit_view,
+        } = self;
+        vec![
+            ("UpsertStock", upsert_stock),
+            ("UpsertFlow", upsert_flow),
+            ("UpsertAux", upsert_aux),
+            ("UpsertModule", upsert_module),
+            ("DeleteVariable", delete_variable),
+            ("RenameVariable", rename_variable),
+            ("UpsertView", upsert_view),
+            ("DeleteView", delete_view),
+            ("UpdateStockFlows", update_stock_flows),
+            ("SetLoopName", set_loop_name),
+            ("EditView", edit_view),
+        ]
+    }
+
+    /// The row of `op`'s variant. The match has no wildcard, so a variant
+    /// added to `ModelOperation` fails to compile until it has a row.
+    fn of(&self, op: &ModelOperation) -> &Row {
+        match op {
+            ModelOperation::UpsertStock(_) => &self.upsert_stock,
+            ModelOperation::UpsertFlow(_) => &self.upsert_flow,
+            ModelOperation::UpsertAux(_) => &self.upsert_aux,
+            ModelOperation::UpsertModule(_) => &self.upsert_module,
+            ModelOperation::DeleteVariable { .. } => &self.delete_variable,
+            ModelOperation::RenameVariable { .. } => &self.rename_variable,
+            ModelOperation::UpsertView { .. } => &self.upsert_view,
+            ModelOperation::DeleteView { .. } => &self.delete_view,
+            ModelOperation::UpdateStockFlows { .. } => &self.update_stock_flows,
+            ModelOperation::SetLoopName { .. } => &self.set_loop_name,
+            ModelOperation::EditView { .. } => &self.edit_view,
+        }
+    }
+}
+
+/// One sharing row per `ProjectOperation` variant: none of them touches a
+/// model's variables or view.
+struct ProjectRows {
+    set_sim_specs: Row,
+    set_source: Row,
+    add_model: Row,
+}
+
+impl ProjectRows {
+    fn all(&self) -> Vec<(&'static str, &Row)> {
+        let ProjectRows {
+            set_sim_specs,
+            set_source,
+            add_model,
+        } = self;
+        vec![
+            ("SetSimSpecs", set_sim_specs),
+            ("SetSource", set_source),
+            ("AddModel", add_model),
+        ]
+    }
+
+    fn of(&self, op: &ProjectOperation) -> &Row {
+        match op {
+            ProjectOperation::SetSimSpecs(_) => &self.set_sim_specs,
+            ProjectOperation::SetSource(_) => &self.set_source,
+            ProjectOperation::AddModel { .. } => &self.add_model,
+        }
+    }
+}
+
+fn model_row(
+    base: datamodel::Project,
+    op: ModelOperation,
+    variables: &[&str],
+    elements: Option<Vec<i32>>,
+) -> Row {
+    let name = base.models[0].name.clone();
+    Row {
+        base,
+        patch: ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name,
+                ops: vec![op],
+            }],
+        },
+        variables: variables.iter().map(|v| v.to_string()).collect(),
+        elements,
+    }
+}
+
+fn project_row(base: datamodel::Project, op: ProjectOperation) -> Row {
+    Row {
+        base,
+        patch: ProjectPatch {
+            project_ops: vec![op],
+            models: vec![],
+        },
+        variables: vec![],
+        elements: Some(vec![]),
+    }
+}
+
+/// The last variable `pick` accepts whose equation is scalar, with " + 0"
+/// appended to it: an edit a host lands as an upsert.
+fn edited_last<T>(project: &datamodel::Project, pick: impl Fn(&Variable) -> Option<T>) -> T
+where
+    T: Clone,
+{
+    project.models[0]
+        .variables
+        .iter()
+        .rev()
+        .find_map(pick)
+        .expect("world3 has one")
+}
+
+fn plus_zero(equation: &mut Equation) {
+    if let Equation::Scalar(eq) = equation {
+        eq.push_str(" + 0");
+    }
+}
+
+fn model_rows() -> ModelRows {
+    let w = world3();
+    let scalar = |e: &Equation| matches!(e, Equation::Scalar(_));
+    let mut stock = edited_last(&w, |v| match v {
+        Variable::Stock(s) if scalar(&s.equation) => Some(s.clone()),
+        _ => None,
+    });
+    plus_zero(&mut stock.equation);
+    let mut flow = edited_last(&w, |v| match v {
+        Variable::Flow(f) if scalar(&f.equation) => Some(f.clone()),
+        _ => None,
+    });
+    plus_zero(&mut flow.equation);
+    let mut aux = edited_last(&w, |v| match v {
+        Variable::Aux(a) if scalar(&a.equation) => Some(a.clone()),
+        _ => None,
+    });
+    plus_zero(&mut aux.equation);
+
+    // A flow to delete, and the stocks it fills or drains.
+    let deleted = edited_last(&w, |v| match v {
+        Variable::Flow(f) => Some(canonicalize(&f.ident).into_owned()),
+        _ => None,
+    });
+    let drained: Vec<String> = w.models[0]
+        .variables
+        .iter()
+        .filter_map(|v| match v {
+            Variable::Stock(s)
+                if s.inflows
+                    .iter()
+                    .chain(&s.outflows)
+                    .any(|f| canonicalize(f) == deleted) =>
+            {
+                Some(canonicalize(&s.ident).into_owned())
+            }
+            _ => None,
+        })
+        .collect();
+
+    // A stock, and a flow to connect to it.
+    let connected = edited_last(&w, |v| match v {
+        Variable::Stock(s) => Some(s.clone()),
+        _ => None,
+    });
+    let new_outflow = edited_last(&w, |v| match v {
+        Variable::Flow(f)
+            if !connected
+                .inflows
+                .iter()
+                .chain(&connected.outflows)
+                .any(|x| x == &f.ident) =>
+        {
+            Some(f.ident.clone())
+        }
+        _ => None,
+    });
+    let mut outflows = connected.outflows.clone();
+    outflows.push(new_outflow);
+
+    // Two variables to name a loop over; naming mints a uid for each that
+    // lacks one, and changes nothing else.
+    let looped: Vec<Variable> = w.models[0].variables.iter().take(2).cloned().collect();
+    let minted: Vec<String> = looped
+        .iter()
+        .filter(|v| crate::patch::variable_uid(v).is_none())
+        .map(ident)
+        .collect();
+
+    // The view: a stock moved in a freshly allocated whole view, and an aux
+    // moved in place.
+    let View::StockFlow(sf) = &w.models[0].views[0];
+    let mut fresh = sf.elements.to_vec();
+    let moved_stock = fresh
+        .iter_mut()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) => {
+                s.y += 10.0;
+                Some(s.uid)
+            }
+            _ => None,
+        })
+        .expect("world3 draws a stock");
+    let replacement = View::StockFlow(datamodel::StockFlow {
+        elements: fresh.into(),
+        ..sf.clone()
+    });
+    let mut moved_aux = sf
+        .elements
+        .iter()
+        .find(|e| matches!(e, ViewElement::Aux(_)))
+        .cloned()
+        .expect("world3 draws an aux");
+    if let ViewElement::Aux(a) = &mut moved_aux {
+        a.x += 1.0;
+    }
+    let moved_aux_uid = moved_aux.get_uid();
+
+    let mut bare = modules_project().models[0]
+        .get_variable("bare")
+        .cloned()
+        .expect("the fixture has bare");
+    if let Variable::Module(m) = &mut bare {
+        m.references.push(datamodel::ModuleReference {
+            src: "other_input".to_string(),
+            dst: "bare\u{00B7}input_b".to_string(),
+        });
+    }
+    let Variable::Module(bare) = bare else {
+        unreachable!("bare is a module")
+    };
+
+    let stock_key = canonicalize(&stock.ident).into_owned();
+    let flow_key = canonicalize(&flow.ident).into_owned();
+    let aux_key = canonicalize(&aux.ident).into_owned();
+    let connected_key = canonicalize(&connected.ident).into_owned();
+    let minted: Vec<&str> = minted.iter().map(String::as_str).collect();
+    let drained: Vec<&str> = drained.iter().map(String::as_str).collect();
+    ModelRows {
+        upsert_stock: model_row(
+            w.clone(),
+            ModelOperation::UpsertStock(stock),
+            &[&stock_key],
+            Some(vec![]),
+        ),
+        upsert_flow: model_row(
+            w.clone(),
+            ModelOperation::UpsertFlow(flow),
+            &[&flow_key],
+            Some(vec![]),
+        ),
+        upsert_aux: model_row(
+            w.clone(),
+            ModelOperation::UpsertAux(aux),
+            &[&aux_key],
+            Some(vec![]),
+        ),
+        upsert_module: model_row(
+            modules_project(),
+            ModelOperation::UpsertModule(bare),
+            &["bare"],
+            None,
+        ),
+        delete_variable: model_row(
+            w.clone(),
+            ModelOperation::DeleteVariable { ident: deleted },
+            &drained,
+            Some(vec![]),
+        ),
+        rename_variable: model_row(
+            modules_project(),
+            ModelOperation::RenameVariable {
+                from: "local_input".to_string(),
+                to: "renamed_input".to_string(),
+            },
+            &["renamed_input", "wired"],
+            None,
+        ),
+        upsert_view: model_row(
+            w.clone(),
+            ModelOperation::UpsertView {
+                index: 0,
+                view: replacement,
+            },
+            &[],
+            Some(vec![moved_stock]),
+        ),
+        delete_view: model_row(
+            w.clone(),
+            ModelOperation::DeleteView { index: 0 },
+            &[],
+            None,
+        ),
+        update_stock_flows: model_row(
+            w.clone(),
+            ModelOperation::UpdateStockFlows {
+                ident: connected.ident.clone(),
+                inflows: connected.inflows.clone(),
+                outflows,
+            },
+            &[&connected_key],
+            Some(vec![]),
+        ),
+        set_loop_name: model_row(
+            w.clone(),
+            ModelOperation::SetLoopName {
+                variables: looped.iter().map(|v| v.get_ident().to_string()).collect(),
+                name: "a named loop".to_string(),
+                description: None,
+            },
+            &minted,
+            Some(vec![]),
+        ),
+        edit_view: model_row(
+            w,
+            ModelOperation::EditView {
+                index: 0,
+                upsert: vec![moved_aux],
+                remove: vec![],
+            },
+            &[],
+            Some(vec![moved_aux_uid]),
+        ),
+    }
+}
+
+fn project_rows() -> ProjectRows {
+    let w = world3();
+    let mut specs = w.sim_specs.clone();
+    specs.stop += 1.0;
+    ProjectRows {
+        set_sim_specs: project_row(w.clone(), ProjectOperation::SetSimSpecs(specs)),
+        set_source: project_row(
+            w.clone(),
+            ProjectOperation::SetSource(datamodel::Source {
+                extension: datamodel::Extension::Xmile,
+                content: "<xmile/>".to_string(),
+            }),
+        ),
+        add_model: project_row(
+            w,
+            ProjectOperation::AddModel {
+                name: "extra".to_string(),
+            },
+        ),
+    }
+}
+
+#[test]
+fn every_model_operation_copies_only_what_it_changes() {
+    let rows = model_rows();
+    for (what, row) in rows.all() {
+        let op = &row.patch.models[0].ops[0];
+        assert!(
+            std::ptr::eq(rows.of(op), row),
+            "{what}'s row holds a {what}"
+        );
+        row.check(what);
+    }
+}
+
+#[test]
+fn every_project_operation_leaves_the_models_shared() {
+    let rows = project_rows();
+    for (what, row) in rows.all() {
+        assert!(
+            std::ptr::eq(rows.of(&row.patch.project_ops[0]), row),
+            "{what}'s row holds a {what}"
+        );
+        row.check(what);
+    }
+}
+
+#[test]
+fn planning_shares_the_view_it_plans_on() {
+    let project = world3();
+    let View::StockFlow(sf) = &project.models[0].views[0];
+    let base = crate::editing::BaseView::new(&project.models[0], sf);
+    assert_eq!(base.elements().addresses(), sf.elements.addresses());
 }
