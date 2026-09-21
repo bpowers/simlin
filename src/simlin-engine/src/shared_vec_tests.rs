@@ -150,3 +150,43 @@ fn a_spine_holds_exactly_its_elements() {
     let collected: SharedVec<[u64; 64]> = (0..40u64).map(|i| [i; 64]).collect();
     assert_eq!(collected.spine_capacity(), 40);
 }
+
+#[test]
+fn identical_tells_apart_what_eq_does_not() {
+    assert!(0.0 == -0.0 && !0.0f64.identical(&-0.0));
+    assert!(f64::NAN.identical(&f64::NAN), "the same bits are identical");
+    assert!(Some((1, 2.0)).identical(&Some((1, 2.0))));
+    assert!(!vec![1.0, 2.0].identical(&vec![1.0]));
+}
+
+#[test]
+fn share_identical_puts_back_the_allocation_of_each_element_kept_as_it_was() {
+    let before: SharedVec<(i32, f64)> = vec![(1, 1.0), (2, 2.0), (3, 0.0), (4, 4.0)].into();
+    // Built afresh, as a layout or a host's replacement builds a view: one
+    // element kept, one changed, one changed only in the sign of its zero,
+    // one new.
+    let mut after: SharedVec<(i32, f64)> = vec![(1, 1.0), (2, 2.5), (3, -0.0), (5, 5.0)].into();
+    after.share_identical(&before, |e| e.0);
+    let before_addresses = before.addresses();
+    let kept: Vec<bool> = after
+        .addresses()
+        .iter()
+        .map(|a| before_addresses.contains(a))
+        .collect();
+    assert_eq!(kept, [true, false, false, false]);
+    assert!(
+        after[2].1.is_sign_negative(),
+        "a -0.0 is not replaced by 0.0"
+    );
+}
+
+#[test]
+fn share_identical_compares_the_first_of_a_repeated_key() {
+    let before: SharedVec<(i32, f64)> = vec![(7, 1.0), (7, 2.0)].into();
+    let mut after: SharedVec<(i32, f64)> = vec![(7, 1.0), (7, 2.0)].into();
+    after.share_identical(&before, |e| e.0);
+    let b = before.addresses();
+    let a = after.addresses();
+    assert_eq!(a[0], b[0]);
+    assert_ne!(a[1], b[1], "only the key's first element is compared");
+}

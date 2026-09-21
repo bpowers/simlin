@@ -35,7 +35,10 @@
 //!   - `move`: one aux moved by a unit, alternately right and left, through
 //!     `simlin_model_plan_move`, the view-only edit a keyboard nudge lands;
 //!   - `rename`: the last constant renamed and back, which rewrites the
-//!     equations that read it.
+//!     equations that read it;
+//!   - `synced-equation`: the first constant's equation, then the diagram
+//!     synced to the edit (`simlin_project_diagram_sync`), as a host that lays
+//!     its diagram out after each edit lands it.
 //! - `draft`: an equation draft previewed on a scratch copy of the project
 //!   (upsert, diagnostics, a run), the way an equation editor previews one.
 //!
@@ -366,6 +369,7 @@ enum Edit {
     LastEquation,
     Move,
     Rename,
+    SyncedEquation,
 }
 
 fn options() -> Options {
@@ -381,7 +385,10 @@ fn options() -> Options {
                     Some("last-equation") => Edit::LastEquation,
                     Some("move") => Edit::Move,
                     Some("rename") => Edit::Rename,
-                    _ => panic!("--edit takes equation, last-equation, move or rename"),
+                    Some("synced-equation") => Edit::SyncedEquation,
+                    _ => panic!(
+                        "--edit takes equation, last-equation, move, rename or synced-equation"
+                    ),
                 }
             }
             "--edits" => {
@@ -625,6 +632,10 @@ fn edit_target(session: &Session, edit: Edit) -> Option<String> {
             .constants
             .last()
             .map(|c| format!("the equation of '{c}'")),
+        Edit::SyncedEquation => session
+            .constants
+            .first()
+            .map(|c| format!("the equation of '{c}', with the diagram synced")),
         Edit::Move => session
             .drawn_aux
             .map(|uid| format!("the position of aux {uid}")),
@@ -639,10 +650,10 @@ fn edit_target(session: &Session, edit: Edit) -> Option<String> {
 /// found.
 unsafe fn land_edit(session: &Session, edit: Edit, i: usize) {
     let patch = match edit {
-        Edit::Equation | Edit::LastEquation => {
+        Edit::Equation | Edit::LastEquation | Edit::SyncedEquation => {
             let ident = match edit {
-                Edit::Equation => session.constants.first(),
-                _ => session.constants.last(),
+                Edit::LastEquation => session.constants.last(),
+                _ => session.constants.first(),
             };
             let record = variable_json(session.model, ident.unwrap());
             let value: f64 = record["equation"].as_str().unwrap().trim().parse().unwrap();
@@ -684,6 +695,17 @@ unsafe fn land_edit(session: &Session, edit: Edit, i: usize) {
         }
     };
     apply(session.project, &patch);
+    if edit == Edit::SyncedEquation {
+        let patch = CString::new(patch).unwrap();
+        let mut err = ptr::null_mut();
+        simlin_project_diagram_sync(
+            session.project,
+            session.c_name.as_ptr(),
+            patch.as_ptr(),
+            &mut err,
+        );
+        check(err, "syncing the diagram");
+    }
 }
 
 unsafe fn workload_undo(options: &Options) {

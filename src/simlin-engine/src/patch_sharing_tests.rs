@@ -13,6 +13,7 @@ use std::hash::Hash;
 use crate::canonicalize;
 use crate::datamodel::{self, Equation, SharedVec, Variable, View, ViewElement};
 use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
+use crate::shared_vec::Identical;
 
 fn world3() -> datamodel::Project {
     crate::compat::open_vensim(include_str!("../../../test/metasd/WRLD3-03/wrld3-03.mdl"))
@@ -43,6 +44,16 @@ fn changed<T: Clone + PartialEq, K: Eq + Hash + Clone + std::fmt::Debug>(
     after: &SharedVec<T>,
     key: impl Fn(&T) -> K,
 ) -> Vec<K> {
+    changed_by(before, after, key, |a, b| a == b)
+}
+
+/// `changed`, with `same` deciding what counts as left as it was.
+fn changed_by<T: Clone, K: Eq + Hash + Clone + std::fmt::Debug>(
+    before: &SharedVec<T>,
+    after: &SharedVec<T>,
+    key: impl Fn(&T) -> K,
+    same: impl Fn(&T, &T) -> bool,
+) -> Vec<K> {
     let before_at: HashMap<K, (usize, &T)> = before
         .iter()
         .zip(before.addresses())
@@ -52,7 +63,7 @@ fn changed<T: Clone + PartialEq, K: Eq + Hash + Clone + std::fmt::Debug>(
     for (e, address) in after.iter().zip(after.addresses()) {
         let k = key(e);
         match before_at.get(&k) {
-            Some((before_address, before_value)) if *before_value == e => assert_eq!(
+            Some((before_address, before_value)) if same(before_value, e) => assert_eq!(
                 *before_address, address,
                 "{k:?} is unchanged but was copied"
             ),
@@ -266,4 +277,83 @@ fn connecting_a_flow_copies_only_the_stock_it_connects() {
         ident,
     );
     assert_eq!(variables, [canonicalize(&stock.ident).into_owned()]);
+}
+
+/// The keys of the view elements that differ from the original's, after
+/// asserting that every element identical to the original's shares its
+/// allocation.
+fn view_changed(original: &datamodel::Project, edited: &datamodel::Project) -> Vec<i32> {
+    changed_by(
+        elements(original),
+        elements(edited),
+        ViewElement::get_uid,
+        |a, b| a.identical(b),
+    )
+}
+
+#[test]
+fn replacing_a_whole_view_shares_every_element_it_keeps() {
+    let original = world3();
+    let mut copy = original.clone();
+    // A host's replacement view arrives with every element freshly
+    // allocated, one of them moved.
+    let View::StockFlow(sf) = &original.models[0].views[0];
+    let mut fresh = sf.elements.to_vec();
+    let moved = fresh
+        .iter_mut()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) => {
+                s.y += 10.0;
+                Some(s.uid)
+            }
+            _ => None,
+        })
+        .expect("world3 draws a stock");
+    let replacement = datamodel::StockFlow {
+        elements: fresh.into(),
+        ..sf.clone()
+    };
+    apply_patch(
+        &mut copy,
+        model_patch(vec![ModelOperation::UpsertView {
+            index: 0,
+            view: View::StockFlow(replacement),
+        }]),
+    )
+    .unwrap();
+
+    assert_eq!(view_changed(&original, &copy), [moved]);
+}
+
+#[test]
+fn a_layout_sync_shares_every_element_it_leaves_in_place() {
+    let original = world3();
+    let mut copy = original.clone();
+    let aux = original.models[0]
+        .variables
+        .iter()
+        .rev()
+        .find_map(|v| match v {
+            Variable::Aux(a) if matches!(a.equation, Equation::Scalar(_)) => Some(a.clone()),
+            _ => None,
+        })
+        .expect("world3 has a scalar aux");
+    let mut edited = aux;
+    if let Equation::Scalar(eq) = &mut edited.equation {
+        eq.push_str(" + 0");
+    }
+    let patch = model_patch(vec![ModelOperation::UpsertAux(edited)]);
+    apply_patch(&mut copy, patch.clone()).unwrap();
+    let View::StockFlow(old) = &copy.models[0].views[0];
+    let old = old.clone();
+    // The layout lays every element out afresh, as a host's diagram sync
+    // does after each edit.
+    let synced = crate::layout::incremental_layout(&old, &copy, "main", &patch.models[0], None)
+        .expect("the layout syncs");
+    copy.models[0].views[0] = View::StockFlow(synced);
+
+    assert!(
+        view_changed(&original, &copy).is_empty(),
+        "an equation edit moves nothing"
+    );
 }

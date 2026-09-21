@@ -1060,6 +1060,13 @@ fn apply_upsert_view(
     let index = index as usize;
 
     if index < model.views.len() {
+        // A replacement view arrives with every element freshly allocated;
+        // each one it keeps as it was shares the replaced view's allocation.
+        let mut view = view;
+        let (datamodel::View::StockFlow(new), datamodel::View::StockFlow(old)) =
+            (&mut view, &model.views[index]);
+        new.elements
+            .share_identical(&old.elements, datamodel::ViewElement::get_uid);
         model.views[index] = view;
         Ok(())
     } else if index == model.views.len() {

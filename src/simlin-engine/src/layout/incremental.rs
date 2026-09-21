@@ -1179,9 +1179,14 @@ pub(super) fn build_stock_flow_from_state(
     state: LayoutState,
     template: &datamodel::StockFlow,
 ) -> datamodel::StockFlow {
+    // Every element is laid out afresh; each one the layout left as it was
+    // shares the template's allocation again, so an undo copy of the view
+    // costs what the layout changed.
+    let mut elements: datamodel::SharedVec<datamodel::ViewElement> = state.elements.into();
+    elements.share_identical(&template.elements, datamodel::ViewElement::get_uid);
     datamodel::StockFlow {
         name: template.name.clone(),
-        elements: state.elements.into(),
+        elements,
         view_box: template.view_box.clone(),
         zoom: if template.zoom > 0.0 {
             template.zoom

@@ -878,6 +878,110 @@ pub mod view_element {
         /// groups (organizational containers) leave this `false`.
         pub is_mdl_view_marker: bool,
     }
+
+    use crate::shared_vec::{Identical, identical_fields};
+
+    // Bit-for-bit equality, for sharing a view's elements across a
+    // replacement (`SharedVec::share_identical`): `identical_fields!` lists
+    // every field, so a new one fails to compile until it is compared.
+    impl Identical for LabelSide {
+        fn identical(&self, other: &Self) -> bool {
+            self == other
+        }
+    }
+    impl Identical for LinkPolarity {
+        fn identical(&self, other: &Self) -> bool {
+            self == other
+        }
+    }
+    impl Identical for LinkShape {
+        fn identical(&self, other: &Self) -> bool {
+            match self {
+                LinkShape::Straight => matches!(other, LinkShape::Straight),
+                LinkShape::Arc(a) => matches!(other, LinkShape::Arc(b) if a.identical(b)),
+                LinkShape::MultiPoint(p) => {
+                    matches!(other, LinkShape::MultiPoint(q) if p.identical(q))
+                }
+            }
+        }
+    }
+    identical_fields!(ViewElementCompat {
+        width,
+        height,
+        shape,
+        bits,
+        name_field,
+        tail
+    });
+    identical_fields!(Aux {
+        name,
+        uid,
+        x,
+        y,
+        label_side,
+        compat
+    });
+    identical_fields!(Stock {
+        name,
+        uid,
+        x,
+        y,
+        label_side,
+        compat
+    });
+    identical_fields!(FlowPoint {
+        x,
+        y,
+        attached_to_uid
+    });
+    identical_fields!(Flow {
+        name,
+        uid,
+        x,
+        y,
+        label_side,
+        points,
+        compat,
+        label_compat
+    });
+    identical_fields!(Link {
+        uid,
+        from_uid,
+        to_uid,
+        shape,
+        polarity
+    });
+    identical_fields!(Module {
+        name,
+        uid,
+        x,
+        y,
+        label_side
+    });
+    identical_fields!(Alias {
+        uid,
+        alias_of_uid,
+        x,
+        y,
+        label_side,
+        compat
+    });
+    identical_fields!(Cloud {
+        uid,
+        flow_uid,
+        x,
+        y,
+        compat
+    });
+    identical_fields!(Group {
+        uid,
+        name,
+        x,
+        y,
+        width,
+        height,
+        is_mdl_view_marker
+    });
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -891,6 +995,21 @@ pub enum ViewElement {
     Alias(view_element::Alias),
     Cloud(view_element::Cloud),
     Group(view_element::Group),
+}
+
+impl crate::shared_vec::Identical for ViewElement {
+    fn identical(&self, other: &Self) -> bool {
+        match self {
+            ViewElement::Aux(a) => matches!(other, ViewElement::Aux(b) if a.identical(b)),
+            ViewElement::Stock(a) => matches!(other, ViewElement::Stock(b) if a.identical(b)),
+            ViewElement::Flow(a) => matches!(other, ViewElement::Flow(b) if a.identical(b)),
+            ViewElement::Link(a) => matches!(other, ViewElement::Link(b) if a.identical(b)),
+            ViewElement::Module(a) => matches!(other, ViewElement::Module(b) if a.identical(b)),
+            ViewElement::Alias(a) => matches!(other, ViewElement::Alias(b) if a.identical(b)),
+            ViewElement::Cloud(a) => matches!(other, ViewElement::Cloud(b) if a.identical(b)),
+            ViewElement::Group(a) => matches!(other, ViewElement::Group(b) if a.identical(b)),
+        }
+    }
 }
 
 impl ViewElement {

@@ -21,8 +21,80 @@
 //!   copy and keeps it only if it differs.
 //! - A pass that changes every element, on a vector nothing shares yet (an
 //!   import, a generated layout): [`SharedVec::rewrite`], over a plain `Vec`.
+//!
+//! A vector built afresh in place of one it replaces (a view laid out again,
+//! or a host's whole replacement view) shares nothing it kept until
+//! [`SharedVec::share_identical`] puts the old allocation back wherever the
+//! element is [`Identical`] to the one it replaces.
 
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
+
+/// Equality bit for bit: whether one value can stand in for another behind
+/// one allocation.
+///
+/// `PartialEq` compares floats by value, so `0.0 == -0.0` although the two
+/// save differently. A kept element must be indistinguishable from the one it
+/// stands in for, so sharing compares with this, never with `==`.
+pub trait Identical {
+    fn identical(&self, other: &Self) -> bool;
+}
+
+impl Identical for f64 {
+    fn identical(&self, other: &Self) -> bool {
+        self.to_bits() == other.to_bits()
+    }
+}
+
+/// Types whose `==` already compares every bit.
+macro_rules! identical_by_eq {
+    ($($t:ty),* $(,)?) => {
+        $(impl Identical for $t {
+            fn identical(&self, other: &Self) -> bool {
+                self == other
+            }
+        })*
+    };
+}
+identical_by_eq!(bool, i32, u32, String);
+
+impl<T: Identical> Identical for Option<T> {
+    fn identical(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Some(a), Some(b)) => a.identical(b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl<T: Identical> Identical for Vec<T> {
+    fn identical(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().zip(other).all(|(a, b)| a.identical(b))
+    }
+}
+
+impl<A: Identical, B: Identical> Identical for (A, B) {
+    fn identical(&self, other: &Self) -> bool {
+        self.0.identical(&other.0) && self.1.identical(&other.1)
+    }
+}
+
+/// Implements [`Identical`] for a struct field by field. The struct is
+/// destructured without `..`, so a field added to it fails to compile until
+/// it is listed here and compared.
+macro_rules! identical_fields {
+    ($t:ident { $($field:ident),* $(,)? }) => {
+        impl $crate::shared_vec::Identical for $t {
+            fn identical(&self, other: &Self) -> bool {
+                let $t { $($field),* } = self;
+                true $(&& $crate::shared_vec::Identical::identical($field, &other.$field))*
+            }
+        }
+    };
+}
+pub(crate) use identical_fields;
 
 /// A vector whose elements are shared with every clone of it until one of
 /// them is edited.
@@ -116,6 +188,27 @@ impl<T: Clone> SharedVec<T> {
             edit(&mut copy);
             if copy != **element {
                 *element = Arc::new(copy);
+            }
+        }
+    }
+    /// Puts `from`'s allocation in place of each element here that is
+    /// identical to `from`'s element with the same `key`, so a vector built
+    /// afresh shares everything it kept with the one it replaces. Where `from`
+    /// holds a key twice, its first element is the one compared.
+    pub fn share_identical<K: Eq + Hash>(&mut self, from: &SharedVec<T>, key: impl Fn(&T) -> K)
+    where
+        T: Identical,
+    {
+        let mut by_key: HashMap<K, &Arc<T>> = HashMap::with_capacity(from.len());
+        for element in &from.0 {
+            by_key.entry(key(element)).or_insert(element);
+        }
+        for element in &mut self.0 {
+            if let Some(old) = by_key.get(&key(element))
+                && !Arc::ptr_eq(old, element)
+                && old.identical(element)
+            {
+                *element = Arc::clone(old);
             }
         }
     }
