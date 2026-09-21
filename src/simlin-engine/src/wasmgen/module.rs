@@ -290,7 +290,8 @@ pub struct WasmLayout {
     /// consecutive f64 LE pairs). Zero when the model has no graphical
     /// functions.
     pub gf_data_offset: usize,
-    /// Canonical variable name -> slot offset within a chunk.
+    /// Canonical variable name -> slot offset within a chunk, in slot order
+    /// with ties by name.
     pub var_offsets: Vec<(String, usize)>,
 }
 
@@ -304,7 +305,7 @@ impl WasmLayout {
     /// n_chunks:       u64
     /// results_offset: u64
     /// count:          u32              (number of var_offsets entries)
-    /// repeated count times:
+    /// repeated count times, in slot order with ties by name:
     ///     name_len:   u32
     ///     name:       name_len bytes   (UTF-8, the canonical variable name)
     ///     offset:     u64              (slot offset within a chunk)
@@ -1279,11 +1280,16 @@ fn compile_with_passes(
         belt_init_data: &belt_init_data,
     })?;
 
-    let var_offsets = sim
+    // The offsets map is a `HashMap`, whose order differs from one map to the
+    // next, so the name map is ordered here -- by slot, ties by name, the order
+    // `Results` lists its columns in -- and two compiles of one model
+    // serialize the same layout.
+    let mut var_offsets: Vec<(String, usize)> = sim
         .offsets
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), *v))
         .collect();
+    var_offsets.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
     Ok(WasmArtifact {
         wasm,

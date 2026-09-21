@@ -588,6 +588,36 @@ fn compile_simulation_population_matches_vm() {
     );
 }
 
+/// A layout's name map comes from the compiled program's offsets, a
+/// `HashMap` whose order differs between two maps, so without an order of its
+/// own the same model compiled in two databases serializes two layouts.
+#[test]
+fn a_layouts_name_map_is_in_slot_order_whatever_database_compiled_it() {
+    let file = std::fs::File::open(POPULATION_XMILE).expect("open population model");
+    let mut reader = BufReader::new(file);
+    let datamodel = open_xmile(&mut reader).expect("parse population xmile");
+
+    let layouts: Vec<Vec<u8>> = (0..4)
+        .map(|_| {
+            let artifact =
+                compile_simulation(&compile_sim(&datamodel, "main")).expect("wasm codegen");
+            let names = &artifact.layout.var_offsets;
+            assert!(names.len() > 3, "the population model has names to order");
+            assert!(
+                names
+                    .windows(2)
+                    .all(|w| (w[0].1, &w[0].0) < (w[1].1, &w[1].0)),
+                "the name map is in slot order, ties by name: {names:?}"
+            );
+            artifact.layout.serialize()
+        })
+        .collect();
+    assert!(
+        layouts.windows(2).all(|w| w[0] == w[1]),
+        "every database serializes the same layout"
+    );
+}
+
 #[test]
 fn compile_simulation_simple_stock_flow_matches_vm() {
     // A minimal scalar Euler model: a stock filled by a constant inflow.
