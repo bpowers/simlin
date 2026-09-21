@@ -22,10 +22,20 @@
 //! - `diagnostics`: `simlin_project_get_errors` after the first run.
 //! - `loops`: structural loops, a Loops That Matter run with its links, and
 //!   loop discovery.
-//! - `undo`: `--edits N` (default 50) equation edits landed the way a host
-//!   lands them -- read the variable, upsert it, copy the project for undo,
-//!   render the scene, simulate, fetch diagnostics -- keeping every copy, as an
-//!   undo history does; then undo them all.
+//! - `undo`: `--edits N` (default 50) edits landed the way a host lands them
+//!   -- apply the edit's patch, copy the project for undo, render the scene,
+//!   simulate, fetch diagnostics -- keeping every copy, as an undo history
+//!   does; then undo them all. `--edit` picks what each edit changes, since a
+//!   copy that shares what its edit leaves alone costs only what the edit
+//!   reaches:
+//!   - `equation` (the default): the first constant's equation, read and
+//!     upserted as a host edits a variable's field;
+//!   - `last-equation`: the last constant's, which an edit reaches past every
+//!     variable before it if it finds the variable by walking them;
+//!   - `move`: one aux moved by a unit, alternately right and left, through
+//!     `simlin_model_plan_move`, the view-only edit a keyboard nudge lands;
+//!   - `rename`: the last constant renamed and back, which rewrites the
+//!     equations that read it.
 //! - `draft`: an equation draft previewed on a scratch copy of the project
 //!   (upsert, diagnostics, a run), the way an equation editor previews one.
 //!
@@ -346,14 +356,34 @@ struct Options {
     path: String,
     workload: String,
     edits: usize,
+    edit: Edit,
+}
+
+/// What each of the `undo` workload's edits changes.
+#[derive(Clone, Copy, PartialEq)]
+enum Edit {
+    Equation,
+    LastEquation,
+    Move,
+    Rename,
 }
 
 fn options() -> Options {
     let mut args = std::env::args().skip(1);
     let (mut path, mut workload, mut edits) = (None, "all".to_string(), 50);
+    let mut edit = Edit::Equation;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--workload" => workload = args.next().expect("--workload takes a name"),
+            "--edit" => {
+                edit = match args.next().as_deref() {
+                    Some("equation") => Edit::Equation,
+                    Some("last-equation") => Edit::LastEquation,
+                    Some("move") => Edit::Move,
+                    Some("rename") => Edit::Rename,
+                    _ => panic!("--edit takes equation, last-equation, move or rename"),
+                }
+            }
             "--edits" => {
                 edits = args
                     .next()
@@ -365,21 +395,25 @@ fn options() -> Options {
         }
     }
     Options {
-        path: path.expect("usage: memory_census <model file> [--workload W] [--edits N]"),
+        path: path
+            .expect("usage: memory_census <model file> [--workload W] [--edits N] [--edit KIND]"),
         workload,
         edits,
+        edit,
     }
 }
 
 /// An open project with what a host reads from it once: its default model,
-/// the model's name, the idents its sparklines draw and a constant to edit.
+/// the model's name, the idents its sparklines draw, and what the edits
+/// change: its constants in the model's order and an aux its view draws.
 struct Session {
     project: *mut SimlinProject,
     model: *mut SimlinModel,
     model_name: String,
     c_name: CString,
     sparklines: Vec<String>,
-    constant: Option<String>,
+    constants: Vec<String>,
+    drawn_aux: Option<i32>,
 }
 
 unsafe fn open_session(options: &Options) -> Session {
@@ -412,28 +446,34 @@ unsafe fn open_session(options: &Options) -> Session {
     simlin_project_serialize_json(project, 0, false, &mut buf, &mut len, &mut err);
     check(err, "serializing the project");
     let json = take_json(buf, len);
-    let constant = json["models"]
-        .as_array()
+    let model_json = json["models"].as_array().into_iter().flatten().find(|m| {
+        let name = m["name"].as_str().unwrap_or_default();
+        name == model_name || (model_name == "main" && name.is_empty())
+    });
+    let constants = model_json
         .into_iter()
-        .flatten()
-        .filter(|m| {
-            let name = m["name"].as_str().unwrap_or_default();
-            name == model_name || (model_name == "main" && name.is_empty())
-        })
         .flat_map(|m| m["auxiliaries"].as_array().into_iter().flatten())
-        .find(|aux| {
+        .filter(|aux| {
             aux["equation"]
                 .as_str()
                 .is_some_and(|e| e.trim().parse::<f64>().is_ok())
         })
-        .and_then(|aux| aux["name"].as_str().map(str::to_string));
+        .filter_map(|aux| aux["name"].as_str().map(str::to_string))
+        .collect();
+    let drawn_aux = model_json
+        .into_iter()
+        .flat_map(|m| m["views"][0]["elements"].as_array().into_iter().flatten())
+        .find(|e| e["type"] == "aux")
+        .and_then(|e| e["uid"].as_i64())
+        .map(|uid| uid as i32);
     Session {
         project,
         model,
         model_name,
         c_name,
         sparklines,
-        constant,
+        constants,
+        drawn_aux,
     }
 }
 
@@ -573,17 +613,91 @@ unsafe fn workload_loops(options: &Options) {
     );
 }
 
+/// What the `undo` workload's edits change in `session`, as the census prints
+/// it, or `None` when the model has nothing for them to change.
+fn edit_target(session: &Session, edit: Edit) -> Option<String> {
+    match edit {
+        Edit::Equation => session
+            .constants
+            .first()
+            .map(|c| format!("the equation of '{c}'")),
+        Edit::LastEquation => session
+            .constants
+            .last()
+            .map(|c| format!("the equation of '{c}'")),
+        Edit::Move => session
+            .drawn_aux
+            .map(|uid| format!("the position of aux {uid}")),
+        Edit::Rename => session
+            .constants
+            .last()
+            .map(|c| format!("the name of '{c}'")),
+    }
+}
+
+/// Lands the `undo` workload's edit number `i`, on the target `edit_target`
+/// found.
+unsafe fn land_edit(session: &Session, edit: Edit, i: usize) {
+    let patch = match edit {
+        Edit::Equation | Edit::LastEquation => {
+            let ident = match edit {
+                Edit::Equation => session.constants.first(),
+                _ => session.constants.last(),
+            };
+            let record = variable_json(session.model, ident.unwrap());
+            let value: f64 = record["equation"].as_str().unwrap().trim().parse().unwrap();
+            equation_patch(&session.model_name, &record, format!("{}", value + 1.0))
+        }
+        Edit::Move => {
+            let uid = session.drawn_aux.unwrap();
+            let dx = if i.is_multiple_of(2) { 1.0 } else { -1.0 };
+            let (mut buf, mut len, mut err) = (ptr::null_mut(), 0, ptr::null_mut());
+            simlin_model_plan_move(
+                session.model,
+                &uid,
+                1,
+                dx,
+                0.0,
+                &mut buf,
+                &mut len,
+                &mut err,
+            );
+            check(err, "planning a move");
+            let plan = take_json(buf, len);
+            assert!(!plan["patch"].is_null(), "moving aux {uid} lands nothing");
+            serde_json::to_vec(&plan["patch"]).unwrap()
+        }
+        Edit::Rename => {
+            let name = session.constants.last().unwrap();
+            let renamed = format!("{name} renamed");
+            let (from, to) = if i.is_multiple_of(2) {
+                (name, &renamed)
+            } else {
+                (&renamed, name)
+            };
+            serde_json::to_vec(&json!({
+                "models": [{"name": session.model_name, "ops": [
+                    {"type": "renameVariable", "payload": {"from": from, "to": to}}
+                ]}]
+            }))
+            .unwrap()
+        }
+    };
+    apply(session.project, &patch);
+}
+
 unsafe fn workload_undo(options: &Options) {
     let session = open_session(options);
     let mut run = step("simulate", || {
         simulate(session.model, false, &session.sparklines)
     });
     step("get_errors", || diagnostics(session.project));
-    let Some(ident) = session.constant.clone() else {
-        println!("no constant aux to edit: undo skipped");
+    let Some(target) = edit_target(&session, options.edit) else {
+        println!("nothing in the model for these edits to change: undo skipped");
         close(session);
         return;
     };
+    println!("  each edit changes {target}");
     let mut heads = vec![step("first undo copy", || duplicate(session.project))];
     let edits_start = live();
     let mut scene = render_scene(session.project, &session.c_name);
@@ -591,10 +705,7 @@ unsafe fn workload_undo(options: &Options) {
         let label = format!("edit {:>2}", i + 1);
         let quiet = i >= 3 && i + 1 < options.edits;
         let mut land = || {
-            let record = variable_json(session.model, &ident);
-            let value: f64 = record["equation"].as_str().unwrap().trim().parse().unwrap();
-            let patch = equation_patch(&session.model_name, &record, format!("{}", value + 1.0));
-            apply(session.project, &patch);
+            land_edit(&session, options.edit, i);
             sim_specs(session.model);
             heads.push(duplicate(session.project));
             let rendered = render_scene(session.project, &session.c_name);
@@ -665,7 +776,7 @@ unsafe fn workload_draft(options: &Options) {
         simulate(session.model, false, &session.sparklines)
     });
     step("get_errors", || diagnostics(session.project));
-    let Some(ident) = session.constant.clone() else {
+    let Some(ident) = session.constants.first().cloned() else {
         println!("no constant aux to edit: draft skipped");
         close(session);
         return;
