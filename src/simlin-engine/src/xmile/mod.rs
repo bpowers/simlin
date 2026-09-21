@@ -1743,7 +1743,8 @@ fn test_xmile_roundtrips_except_equation() {
                 compat: Compat::default(),
                 ai_state: None,
                 uid: None,
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1811,7 +1812,7 @@ fn test_xmile_roundtrips_indexed_subdimension_parent() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![],
+            variables: vec![].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1866,7 +1867,7 @@ fn test_xmile_roundtrips_element_level_dimension_mapping() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![],
+            variables: vec![].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1926,7 +1927,7 @@ fn test_xmile_roundtrips_multi_target_mappings() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![],
+            variables: vec![].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1986,7 +1987,8 @@ fn test_xmile_roundtrips_data_source() {
                 },
                 ai_state: None,
                 uid: None,
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2034,7 +2036,7 @@ fn test_xmile_roundtrips_loop_metadata() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![],
+            variables: vec![].into(),
             views: vec![],
             loop_metadata: vec![
                 LoopMetadata {
@@ -2416,7 +2418,7 @@ mod macro_tests {
                 datamodel::Model {
                     name: "main".to_string(),
                     sim_specs: None,
-                    variables: vec![aux("result", "mymacro(2, 3)")],
+                    variables: vec![aux("result", "mymacro(2, 3)")].into(),
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
@@ -2598,7 +2600,8 @@ mod macro_tests {
                         aux("the_min", "total_macro.minval"),
                         aux("the_max", "total_macro.maxval"),
                         aux("spread", "the_max - the_min"),
-                    ],
+                    ]
+                    .into(),
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
@@ -2762,13 +2765,15 @@ mod macro_tests {
             .find(|m| m.name == "main")
             .unwrap();
         let doc = "first line\nsecond line";
-        for v in &mut main.variables {
-            if let Variable::Aux(a) = v
-                && a.ident == "total"
-            {
-                a.documentation = doc.to_string();
+        main.variables.rewrite(|variables| {
+            for v in variables.iter_mut() {
+                if let Variable::Aux(a) = v
+                    && a.ident == "total"
+                {
+                    a.documentation = doc.to_string();
+                }
             }
-        }
+        });
 
         let xml = project_to_xmile(&project).expect("must serialize");
         assert!(
@@ -2807,13 +2812,15 @@ mod macro_tests {
             .find(|m| m.name == "main")
             .unwrap();
         let doc = "see C:\\new\\notes; the escape is spelled \\n; trailing \\\nsecond line";
-        for v in &mut main.variables {
-            if let Variable::Aux(a) = v
-                && a.ident == "total"
-            {
-                a.documentation = doc.to_string();
+        main.variables.rewrite(|variables| {
+            for v in variables.iter_mut() {
+                if let Variable::Aux(a) = v
+                    && a.ident == "total"
+                {
+                    a.documentation = doc.to_string();
+                }
             }
-        }
+        });
 
         let xml = project_to_xmile(&project).expect("must serialize");
         assert!(
@@ -3264,7 +3271,8 @@ mod attribute_escape_tests {
                 y: 20.0,
                 label_side: datamodel::view_element::LabelSide::Bottom,
                 compat: None,
-            })],
+            })]
+            .into(),
             view_box: datamodel::Rect::default(),
             zoom: 1.0,
             use_lettered_polarity: false,

@@ -552,8 +552,10 @@ pub fn expand_queues(
     // Clearing the markers is what lets the ordinary compile path REJECT an
     // un-expanded queue (the marker is still set) while accepting this expanded one
     // -- exactly the `QueueNotExpanded` guard contract (§10.3).
+    // Every variable is visited, and each is copied out of what the project
+    // shares with the one it was cloned from only if the pass changes it.
     let model = &mut project.models[model_idx];
-    for v in &mut model.variables {
+    model.variables.edit_each(|v| {
         if let Some(new_eqn) = rewritten_equations.remove(&canon(v.get_ident())) {
             set_variable_equation(v, new_eqn);
         }
@@ -573,7 +575,7 @@ pub fn expand_queues(
             }
             _ => {}
         }
-    }
+    });
     // Append the synthesized container stocks (no-flow INTEGs the pass drives).
     for stock in container_stocks {
         model.variables.push(datamodel::Variable::Stock(stock));

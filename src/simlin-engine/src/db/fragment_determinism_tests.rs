@@ -698,15 +698,13 @@ fn an_active_initial_that_collides_a_helper_name_is_refused() {
 
 /// Give one variable of `dm`'s main model a Vensim `ACTIVE INITIAL` equation.
 fn set_active_initial(dm: &mut datamodel::Project, var: &str, init_eqn: &str) {
-    for v in dm.models[0].variables.iter_mut() {
-        if v.get_ident() == var
-            && let datamodel::Variable::Aux(a) = v
-        {
-            a.compat.active_initial = Some(init_eqn.to_string());
-            return;
-        }
-    }
-    panic!("fixture has no `{var}` to give an ACTIVE INITIAL");
+    let found = dm.models[0]
+        .variables
+        .find_mut(|v| v.get_ident() == var && matches!(v, datamodel::Variable::Aux(_)));
+    let Some(datamodel::Variable::Aux(a)) = found else {
+        panic!("fixture has no `{var}` to give an ACTIVE INITIAL");
+    };
+    a.compat.active_initial = Some(init_eqn.to_string());
 }
 
 /// A variable's synthesized implicit helpers must be reported in an order that
@@ -1053,8 +1051,7 @@ fn a_phantom_module_input_does_not_randomize_implicit_helper_diagnostics() {
         .expect("fixture has a main model");
     let module = main
         .variables
-        .iter_mut()
-        .find(|v| matches!(v, datamodel::Variable::Module(_)))
+        .find_mut(|v| matches!(v, datamodel::Variable::Module(_)))
         .expect("fixture has a module variable");
     if let datamodel::Variable::Module(m) = module {
         m.references.push(datamodel::ModuleReference {

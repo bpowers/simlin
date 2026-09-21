@@ -6966,8 +6966,7 @@ fn identity_gf(slope: f64) -> datamodel::GraphicalFunction {
 fn give_effect_per_element_tables(project: &mut datamodel::Project) {
     let effect = project.models[0]
         .variables
-        .iter_mut()
-        .find(|v| v.get_ident() == "effect")
+        .find_mut(|v| v.get_ident() == "effect")
         .expect("the fixture declares effect");
     let datamodel::Variable::Aux(effect) = effect else {
         panic!("effect is declared as an aux");

@@ -59,7 +59,7 @@ fn cloud(view: &datamodel::StockFlow, uid: i32) -> &view_element::Cloud {
 /// Violations restricted to the named flows, so a corpus file's unrelated
 /// flows do not decide a test about specific ones.
 fn violations_for(view: &datamodel::StockFlow, names: &[&str]) -> Vec<String> {
-    flow_invariant_violations(&view.elements)
+    flow_invariant_violations(&view.elements.to_vec())
         .into_iter()
         .filter(|v| names.iter().any(|n| v.starts_with(&format!("{n}:"))))
         .collect()
@@ -165,7 +165,7 @@ fn sized_stock_endpoints_on_every_face() {
         );
     }
     assert_eq!(
-        flow_invariant_violations(&view.elements),
+        flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new()
     );
 }
@@ -201,7 +201,7 @@ fn valid_geometry_including_off_center_slots_is_not_moved() {
     let ab = flow(view, "ab");
     assert_eq!((ab.x, ab.y), (200.0, 110.0), "valve already on the pipe");
     assert_eq!(
-        flow_invariant_violations(&view.elements),
+        flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new()
     );
 }
@@ -217,7 +217,7 @@ fn land_model_corner_endpoints_are_fixed_without_moving_valid_slots() {
     let project = import(LAND);
     let view = main_view(&project);
     assert_eq!(
-        flow_invariant_violations(&view.elements),
+        flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new()
     );
 
@@ -253,7 +253,7 @@ fn clouds_are_centered_on_straightened_endpoints() {
         assert_eq!((c.x, c.y), (p.x, p.y), "{name}: cloud off its endpoint");
     }
     assert_eq!(
-        flow_invariant_violations(&view.elements),
+        flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new()
     );
 }
@@ -269,7 +269,7 @@ fn xmutil_corpus_clouds_sit_on_their_endpoints() {
     for (label, text) in [("test_abs", ABS), ("chained_initialization", CHAINED)] {
         let project = import(text);
         let view = main_view(&project);
-        let problems: Vec<String> = flow_invariant_violations(&view.elements)
+        let problems: Vec<String> = flow_invariant_violations(&view.elements.to_vec())
             .into_iter()
             .filter(|v| v.contains("cloud"))
             .collect();

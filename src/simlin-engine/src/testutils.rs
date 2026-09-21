@@ -51,7 +51,7 @@ pub(crate) fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datam
     datamodel::Model {
         name: ident.to_string(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -225,7 +225,8 @@ pub(crate) fn feedback_loop_project() -> crate::datamodel::Project {
                     uid: None,
                     compat: crate::datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

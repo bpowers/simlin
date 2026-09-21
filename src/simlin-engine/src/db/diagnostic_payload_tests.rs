@@ -186,16 +186,18 @@ fn xmile_project(xml: &str) -> datamodel::Project {
 /// Pin the loop through `variables` on `model`, the `SetLoopName` shape.
 fn pin_loop(model: &mut datamodel::Model, name: &str, variables: &[&str]) {
     let mut uid_of = std::collections::HashMap::new();
-    for (index, variable) in model.variables.iter_mut().enumerate() {
-        let uid = (index as i32) + 1;
-        uid_of.insert(crate::canonicalize(variable.get_ident()).into_owned(), uid);
-        match variable {
-            datamodel::Variable::Stock(stock) => stock.uid = Some(uid),
-            datamodel::Variable::Flow(flow) => flow.uid = Some(uid),
-            datamodel::Variable::Aux(aux) => aux.uid = Some(uid),
-            datamodel::Variable::Module(module) => module.uid = Some(uid),
+    model.variables.rewrite(|variables| {
+        for (index, variable) in variables.iter_mut().enumerate() {
+            let uid = (index as i32) + 1;
+            uid_of.insert(crate::canonicalize(variable.get_ident()).into_owned(), uid);
+            match variable {
+                datamodel::Variable::Stock(stock) => stock.uid = Some(uid),
+                datamodel::Variable::Flow(flow) => flow.uid = Some(uid),
+                datamodel::Variable::Aux(aux) => aux.uid = Some(uid),
+                datamodel::Variable::Module(module) => module.uid = Some(uid),
+            }
         }
-    }
+    });
     model.loop_metadata.push(datamodel::LoopMetadata {
         uids: variables.iter().map(|v| uid_of[*v]).collect(),
         deleted: false,

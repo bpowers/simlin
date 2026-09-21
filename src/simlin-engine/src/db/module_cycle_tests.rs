@@ -59,7 +59,7 @@ fn model(name: &str, variables: Vec<Variable>) -> datamodel::Model {
     datamodel::Model {
         name: name.to_string(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -406,7 +406,8 @@ fn macro_holding_a_module_project() -> datamodel::Project {
             x_aux("scaled", "p1 * 2", None),
             x_aux("p1", "0", None),
             x_module_named("u_hop", "u", &[("p1", "u_hop.input")], None),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -572,7 +573,7 @@ fn a_macro_without_a_module_still_builds_and_expands() {
     let mac = datamodel::Model {
         name: "mac".to_string(),
         sim_specs: None,
-        variables: vec![x_aux("scaled", "p1 * 2", None), x_aux("p1", "0", None)],
+        variables: vec![x_aux("scaled", "p1 * 2", None), x_aux("p1", "0", None)].into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

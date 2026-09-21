@@ -160,7 +160,7 @@ impl<'input> ConversionContext<'input> {
             Model {
                 name: name.to_string(),
                 sim_specs: None,
-                variables,
+                variables: variables.into(),
                 views,
                 loop_metadata: vec![],
                 groups,

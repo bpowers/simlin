@@ -290,7 +290,8 @@ fn mymacro_registry() -> crate::module_functions::MacroRegistry {
             mk_aux("mymacro", "p1 + p2"),
             mk_aux("p1", "0"),
             mk_aux("p2", "0"),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

@@ -1312,7 +1312,7 @@ pub(super) fn make_model(variables: Vec<Variable>) -> datamodel::Model {
     datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -1351,7 +1351,7 @@ fn make_macro_model(
     datamodel::Model {
         name: name.to_owned(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -2155,7 +2155,7 @@ fn equations_section_full_assembly() {
     let model = datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables: vec![var1, var2],
+        variables: vec![var1, var2].into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -2233,7 +2233,7 @@ fn equations_section_with_groups() {
     let model = datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables: vec![var1, var2, var3],
+        variables: vec![var1, var2, var3].into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![group],
@@ -2584,7 +2584,7 @@ fn sketch_roundtrip_preserves_flow_endpoints_with_nonadjacent_valve_uid() {
     let model = datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables: vec![stock_a, stock_b, flow],
+        variables: vec![stock_a, stock_b, flow].into(),
         views: vec![View::StockFlow(datamodel::StockFlow {
             name: Some("View 1".to_owned()),
             elements: vec![
@@ -2625,7 +2625,8 @@ fn sketch_roundtrip_preserves_flow_endpoints_with_nonadjacent_valve_uid() {
                     compat: None,
                     label_compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -2726,7 +2727,7 @@ fn sketch_roundtrip_preserves_causal_links_to_flows_without_sketch_compat() {
     let model = datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables: vec![stock_a, stock_b, flow, driver],
+        variables: vec![stock_a, stock_b, flow, driver].into(),
         views: vec![View::StockFlow(datamodel::StockFlow {
             name: Some("View 1".to_owned()),
             elements: vec![
@@ -2782,7 +2783,8 @@ fn sketch_roundtrip_preserves_causal_links_to_flows_without_sketch_compat() {
                     shape: LinkShape::Straight,
                     polarity: Some(LinkPolarity::Positive),
                 }),
-            ],
+            ]
+            .into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -2895,7 +2897,7 @@ fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
     let model = datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables: vec![maximum, density],
+        variables: vec![maximum, density].into(),
         views: vec![View::StockFlow(datamodel::StockFlow {
             name: Some("View 1".to_owned()),
             elements: vec![
@@ -2923,7 +2925,8 @@ fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
                     shape: LinkShape::Straight,
                     polarity: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -3185,10 +3188,10 @@ fn full_assembly_has_all_three_sections() {
     let model = datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables: vec![var],
+        variables: vec![var].into(),
         views: vec![View::StockFlow(datamodel::StockFlow {
             name: None,
-            elements,
+            elements: elements.into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -3721,7 +3724,7 @@ fn make_xmile_group(name: &str, uid: i32) -> ViewElement {
 fn make_stock_flow(elements: Vec<ViewElement>) -> StockFlow {
     StockFlow {
         name: None,
-        elements,
+        elements: elements.into(),
         view_box: Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -3814,7 +3817,8 @@ fn write_sketch_section_reapplies_segment_offsets() {
                 label_side: view_element::LabelSide::Bottom,
                 compat: None,
             }),
-        ],
+        ]
+        .into(),
         view_box: Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -3924,7 +3928,8 @@ fn write_sketch_section_reassigns_dense_uids_per_view() {
                 compat: None,
                 label_compat: None,
             }),
-        ],
+        ]
+        .into(),
         view_box: Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -4027,7 +4032,8 @@ fn sketch_records_appear_in_increasing_uid_order() {
                 y: 149.0,
                 compat: None,
             }),
-        ],
+        ]
+        .into(),
         view_box: Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -4660,7 +4666,8 @@ fn build_display_name_map_extracts_view_element_names() {
                 compat: None,
                 label_compat: None,
             }),
-        ],
+        ]
+        .into(),
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -4704,7 +4711,8 @@ fn build_display_name_map_first_occurrence_wins() {
                 label_side: view_element::LabelSide::Bottom,
                 compat: None,
             }),
-        ],
+        ]
+        .into(),
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -4736,7 +4744,8 @@ fn equation_lhs_uses_view_element_casing() {
             y: 0.0,
             label_side: view_element::LabelSide::Bottom,
             compat: None,
-        })],
+        })]
+        .into(),
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -4801,10 +4810,10 @@ fn equation_lhs_casing_in_full_project_roundtrip() {
     let model = datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables: vec![var],
+        variables: vec![var].into(),
         views: vec![View::StockFlow(datamodel::StockFlow {
             name: None,
-            elements,
+            elements: elements.into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -4868,7 +4877,7 @@ fn grouped_variables_retain_group_order() {
     let model = datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables: vec![var_z, var_m, var_a, var_ungrouped],
+        variables: vec![var_z, var_m, var_a, var_ungrouped].into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![group],

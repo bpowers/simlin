@@ -534,7 +534,7 @@ fn sketch_section_structure() {
     ];
     let sf = datamodel::StockFlow {
         name: None,
-        elements,
+        elements: elements.into(),
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -590,10 +590,10 @@ fn sketch_section_in_full_project() {
     let model = datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables: vec![var],
+        variables: vec![var].into(),
         views: vec![View::StockFlow(datamodel::StockFlow {
             name: None,
-            elements,
+            elements: elements.into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -761,7 +761,7 @@ fn sketch_roundtrip_sanitizes_multiline_view_title() {
     let model = datamodel::Model {
         name: "default".to_owned(),
         sim_specs: None,
-        variables: vec![var],
+        variables: vec![var].into(),
         views: vec![View::StockFlow(datamodel::StockFlow {
             name: Some("Overview\r\nMain".to_owned()),
             elements: vec![ViewElement::Aux(view_element::Aux {
@@ -771,7 +771,8 @@ fn sketch_roundtrip_sanitizes_multiline_view_title() {
                 y: 100.0,
                 label_side: view_element::LabelSide::Bottom,
                 compat: None,
-            })],
+            })]
+            .into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,

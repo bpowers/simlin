@@ -431,17 +431,19 @@ y[d] = 7, 8, 9 ~~|
 ";
     let project = parse_mdl(&format!("{source}{CONTROL}")).expect("parses");
     let mut reversed = project.clone();
-    for var in &mut reversed.models[0].variables {
-        let equation = match var {
-            datamodel::Variable::Stock(s) => &mut s.equation,
-            datamodel::Variable::Flow(f) => &mut f.equation,
-            datamodel::Variable::Aux(a) => &mut a.equation,
-            datamodel::Variable::Module(_) => continue,
-        };
-        if let datamodel::Equation::Arrayed(_, elements, _, _) = equation {
-            elements.reverse();
+    reversed.models[0].variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            let equation = match var {
+                datamodel::Variable::Stock(s) => &mut s.equation,
+                datamodel::Variable::Flow(f) => &mut f.equation,
+                datamodel::Variable::Aux(a) => &mut a.equation,
+                datamodel::Variable::Module(_) => continue,
+            };
+            if let datamodel::Equation::Arrayed(_, elements, _, _) = equation {
+                elements.reverse();
+            }
         }
-    }
+    });
     assert_eq!(
         project_to_mdl(&project).unwrap(),
         project_to_mdl(&reversed).unwrap()

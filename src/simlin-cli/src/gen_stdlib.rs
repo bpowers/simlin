@@ -448,7 +448,7 @@ fn gen_stock_flow(sf: &StockFlow) -> String {
     format!(
         "StockFlow {{
             name: {},
-            elements: vec![{}],
+            elements: vec![{}].into(),
             view_box: {},
             zoom: {}_f64,
             use_lettered_polarity: {},
@@ -564,7 +564,8 @@ fn gen_model(model: &Model) -> String {
         sim_specs: {},
         variables: vec![
             {}
-        ],
+        ]
+        .into(),
         views: vec![{}],
         loop_metadata: vec![{}],
         groups: vec![{}],
@@ -685,10 +686,11 @@ fn npv() -> Model {
                 uid: None,
                 compat: Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![View::StockFlow(StockFlow {
             name: None,
-            elements: vec![],
+            elements: vec![].into(),
             view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
             zoom: 1_f64,
             use_lettered_polarity: false,

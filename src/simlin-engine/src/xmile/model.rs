@@ -513,7 +513,9 @@ impl From<Model> for datamodel::Model {
                 v.normalize(&model);
                 let mut view = datamodel::View::from(v);
                 let datamodel::View::StockFlow(sf) = &mut view;
-                crate::diagram::flow_geometry::normalize_flow_geometry(&mut sf.elements);
+                sf.elements.rewrite(|elements| {
+                    crate::diagram::flow_geometry::normalize_flow_geometry(elements)
+                });
                 view
             })
             .collect();
@@ -588,7 +590,7 @@ impl From<Model> for datamodel::Model {
         datamodel::Model {
             name: model.name.as_deref().unwrap_or("main").to_string(),
             sim_specs: model.sim_specs.map(datamodel::SimSpecs::from),
-            variables,
+            variables: variables.into(),
             views,
             loop_metadata,
             groups,
@@ -966,7 +968,8 @@ fn test_semantic_group_roundtrip() {
             ai_state: None,
             uid: None,
             compat: datamodel::Compat::default(),
-        })],
+        })]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![
@@ -1071,7 +1074,8 @@ fn module_target_survives_an_xmile_roundtrip_when_ident_differs() {
                         ai_state: None,
                         uid: None,
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1089,7 +1093,8 @@ fn module_target_survives_an_xmile_roundtrip_when_ident_differs() {
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],

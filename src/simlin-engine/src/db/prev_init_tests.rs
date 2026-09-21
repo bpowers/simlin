@@ -41,7 +41,8 @@ fn test_model_dependency_graph_prunes_lagged_deps_for_implicit_helpers() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1063,8 +1064,7 @@ fn a_positional_capture_shared_by_init_and_previous_unions_its_phases() {
             .build_datamodel();
         let datamodel::Variable::Aux(out) = project.models[0]
             .variables
-            .iter_mut()
-            .find(|variable| variable.get_ident() == "out")
+            .find_mut(|variable| variable.get_ident() == "out")
             .expect("out")
         else {
             unreachable!("the fixture builds out as an aux")
@@ -1739,7 +1739,8 @@ fn module_snapshot_project(probe_equation: &str) -> datamodel::Project {
             scalar("output", "input * 10", false),
             scalar("lagged_input", "PREVIOUS(input, 0)", false),
             scalar("frozen_input", "INIT(input)", false),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

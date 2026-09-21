@@ -114,7 +114,7 @@ fn multi_chain_shared_param_model() -> datamodel::Model {
     datamodel::Model {
         name: TEST_MODEL.to_string(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -263,7 +263,8 @@ fn test_only_pure_inputs_get_ghosted() {
             make_flow("inflow_two", "stock_two * derived"),
             make_stock("stock_three", &["inflow_three"], &[]),
             make_flow("inflow_three", "stock_three * derived"),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),

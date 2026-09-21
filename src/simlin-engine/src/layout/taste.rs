@@ -163,19 +163,25 @@ fn restore_arc_offsets(view: &mut StockFlow, offsets: &HashMap<i32, f64>) {
         .filter(|e| !matches!(e, ViewElement::Link(_) | ViewElement::Group(_)))
         .map(|e| (e.get_uid(), get_visual_center(e, &|_: &str| false)))
         .collect();
-    for e in &mut view.elements {
-        let ViewElement::Link(link) = e else { continue };
-        let Some(offset) = offsets.get(&link.uid) else {
-            continue;
+    let restored = |e: &ViewElement| {
+        let ViewElement::Link(link) = e else {
+            return None;
         };
-        let (Some(&(fx, fy)), Some(&(tx, ty))) =
-            (centers.get(&link.from_uid), centers.get(&link.to_uid))
-        else {
-            continue;
-        };
+        let offset = offsets.get(&link.uid)?;
+        let (&(fx, fy), &(tx, ty)) = (centers.get(&link.from_uid)?, centers.get(&link.to_uid)?);
         let chord = (ty - fy).atan2(tx - fx).to_degrees();
-        link.shape = LinkShape::Arc(chord + offset);
-    }
+        Some(LinkShape::Arc(chord + offset))
+    };
+    view.elements.edit_where(
+        |e| restored(e).is_some(),
+        |e| {
+            if let Some(shape) = restored(e)
+                && let ViewElement::Link(link) = e
+            {
+                link.shape = shape;
+            }
+        },
+    );
 }
 
 /// Mean position of every positioned element.
@@ -194,7 +200,15 @@ fn centroid(view: &StockFlow) -> Option<(f64, f64)> {
 /// Scale every position (flow pipe points included) about `center` by `s`,
 /// then re-snap flow endpoints to the fixed-size stocks.
 fn scale_about(view: &mut StockFlow, center: (f64, f64), s: f64) {
-    for e in &mut view.elements {
+    view.elements.rewrite(|elements| {
+        scale_elements_about(elements, center, s);
+        resnap_flow_endpoints_to_stocks(elements);
+    });
+}
+
+/// Scale every position (flow pipe points included) about `center` by `s`.
+fn scale_elements_about(elements: &mut [ViewElement], center: (f64, f64), s: f64) {
+    for e in elements {
         match e {
             ViewElement::Flow(f) => {
                 f.x = center.0 + (f.x - center.0) * s;
@@ -215,7 +229,6 @@ fn scale_about(view: &mut StockFlow, center: (f64, f64), s: f64) {
             }
         }
     }
-    resnap_flow_endpoints_to_stocks(&mut view.elements);
 }
 
 /// Indices of free-floating nodes, in uid order (deterministic).
@@ -253,7 +266,9 @@ pub fn degrade(view: &StockFlow, degradation: Degradation) -> Option<StockFlow> 
                 let (x, y) = position(&out.elements[i])?;
                 let dx = rng.random_range(-amplitude..=amplitude);
                 let dy = rng.random_range(-amplitude..=amplitude);
-                set_position(&mut out.elements[i], x + dx, y + dy);
+                if let Some(e) = out.elements.get_mut(i) {
+                    set_position(e, x + dx, y + dy);
+                }
             }
         }
         Degradation::Shuffle { seed } => {
@@ -277,7 +292,9 @@ pub fn degrade(view: &StockFlow, degradation: Degradation) -> Option<StockFlow> 
             }
             for (k, &i) in free.iter().enumerate() {
                 let (x, y) = positions[order[k]];
-                set_position(&mut out.elements[i], x, y);
+                if let Some(e) = out.elements.get_mut(i) {
+                    set_position(e, x, y);
+                }
             }
         }
         Degradation::Exile => {
@@ -308,28 +325,29 @@ pub fn degrade(view: &StockFlow, degradation: Degradation) -> Option<StockFlow> 
             let diag = ((maxx - minx).powi(2) + (maxy - miny).powi(2))
                 .sqrt()
                 .max(200.0);
-            set_position(&mut out.elements[target], maxx + diag, maxy + diag);
+            if let Some(e) = out.elements.get_mut(target) {
+                set_position(e, maxx + diag, maxy + diag);
+            }
         }
         Degradation::Stack => {
             if free.len() < 2 {
                 return None;
             }
             let (x, y) = position(&view.elements[free[0]])?;
-            set_position(&mut out.elements[free[1]], x, y);
+            if let Some(e) = out.elements.get_mut(free[1]) {
+                set_position(e, x, y);
+            }
         }
         Degradation::StraightenLinks => {
-            let mut any = false;
-            for e in &mut out.elements {
-                if let ViewElement::Link(link) = e
-                    && matches!(link.shape, LinkShape::Arc(_))
-                {
-                    link.shape = LinkShape::Straight;
-                    any = true;
-                }
-            }
-            if !any {
+            let curved = |e: &ViewElement| matches!(e, ViewElement::Link(link) if matches!(link.shape, LinkShape::Arc(_)));
+            if !out.elements.iter().any(curved) {
                 return None;
             }
+            out.elements.edit_where(curved, |e| {
+                if let ViewElement::Link(link) = e {
+                    link.shape = LinkShape::Straight;
+                }
+            });
             return Some(out);
         }
     }

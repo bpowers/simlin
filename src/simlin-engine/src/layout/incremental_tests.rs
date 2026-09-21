@@ -17,7 +17,7 @@ fn project_with(variables: Vec<datamodel::Variable>) -> datamodel::Project {
         models: vec![datamodel::Model {
             name: TEST_MODEL.to_string(),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views: Vec::new(),
             loop_metadata: Vec::new(),
             groups: Vec::new(),
@@ -210,11 +210,13 @@ fn only_the_links_a_sync_creates_are_curved_for_a_loop() {
         datamodel::Variable::Aux(aux("birth_rate", "0.1")),
     ]);
     let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
-    for e in &mut base.elements {
-        if let ViewElement::Link(l) = e {
-            l.shape = LinkShape::Straight;
+    base.elements.rewrite(|elements| {
+        for e in elements.iter_mut() {
+            if let ViewElement::Link(l) = e {
+                l.shape = LinkShape::Straight;
+            }
         }
-    }
+    });
     let (_, view) = sync(
         &project,
         &base,
@@ -365,7 +367,7 @@ fn overlaps_involving(view: &datamodel::StockFlow, uids: &HashSet<i32>) -> Vec<(
 fn strict_violations(view: &datamodel::StockFlow, uids: &HashSet<i32>) -> String {
     use crate::editing::invariants::{Mode, check_flow_invariants, format_violations};
     format_violations(&check_flow_invariants(
-        &view.elements,
+        &view.elements.to_vec(),
         Mode::Strict { routed: Some(uids) },
     ))
 }
@@ -535,14 +537,16 @@ fn a_created_valve_lands_clear_of_a_parameter() {
     let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
     let config = LayoutConfig::default();
     let (tx, ty) = center_named(&base, "tank").expect("tank drawn");
-    for e in &mut base.elements {
-        if let ViewElement::Aux(a) = e {
-            (a.x, a.y) = (
-                tx + config.stock_width / 2.0 + config.horizontal_spacing / 2.0,
-                ty,
-            );
+    base.elements.rewrite(|elements| {
+        for e in elements.iter_mut() {
+            if let ViewElement::Aux(a) = e {
+                (a.x, a.y) = (
+                    tx + config.stock_width / 2.0 + config.horizontal_spacing / 2.0,
+                    ty,
+                );
+            }
         }
-    }
+    });
     let (_, view) = sync(
         &project,
         &base,
@@ -716,15 +720,17 @@ fn a_stock_added_to_a_drawn_chain_lands_clear_of_side_flows() {
         }
         _ => None,
     });
-    for e in &mut base.elements {
-        match e {
-            ViewElement::Flow(f) if canonicalize(&f.name) == "drain" => {
-                f.points.last_mut().expect("points").x += 40.0;
+    base.elements.rewrite(|elements| {
+        for e in elements.iter_mut() {
+            match e {
+                ViewElement::Flow(f) if canonicalize(&f.name) == "drain" => {
+                    f.points.last_mut().expect("points").x += 40.0;
+                }
+                ViewElement::Cloud(c) if Some(c.uid) == drain_cloud => c.x += 40.0,
+                _ => {}
             }
-            ViewElement::Cloud(c) if Some(c.uid) == drain_cloud => c.x += 40.0,
-            _ => {}
         }
-    }
+    });
     let ops = vec![
         ModelOperation::UpsertStock(stock("tank", &[], &["drain", "transfer"])),
         ModelOperation::UpsertFlow(flow("transfer", "tank * 0.2")),
@@ -1007,14 +1013,13 @@ fn a_created_side_flow_cloud_lands_clear_of_a_stock() {
         .map(|p| (p.x, p.y))
         .expect("drain drawn");
     let mut parked = base.clone();
-    let reservoir = parked
+    let reservoir = match parked
         .elements
-        .iter_mut()
-        .find_map(|e| match e {
-            ViewElement::Stock(s) if canonicalize(&s.name) == "reservoir" => Some(s),
-            _ => None,
-        })
-        .expect("reservoir drawn");
+        .find_mut(|e| matches!(e, ViewElement::Stock(s) if canonicalize(&s.name) == "reservoir"))
+    {
+        Some(ViewElement::Stock(s)) => s,
+        _ => panic!("reservoir drawn"),
+    };
     (reservoir.x, reservoir.y) = sink;
     let reservoir = reservoir.uid;
     assert_eq!(
@@ -1137,32 +1142,34 @@ fn clouds_of_flows_leaving_a_deleted_stock_at_one_point_separate() {
         y,
         attached_to_uid: attached,
     };
-    for e in &mut base.elements {
-        match e {
-            ViewElement::Stock(s) if s.uid == a => (s.x, s.y) = (325.0, 595.0),
-            ViewElement::Stock(s) if s.uid == middle => (s.x, s.y) = (610.0, 595.0),
-            ViewElement::Stock(s) if s.uid == b => (s.x, s.y) = (920.0, 595.0),
-            ViewElement::Flow(f) if canonicalize(&f.name) == "to_a" => {
-                f.points = vec![
-                    point(610.0, 577.5, Some(middle)),
-                    point(610.0, 540.0, None),
-                    point(325.0, 540.0, None),
-                    point(325.0, 577.5, Some(a)),
-                ];
-                (f.x, f.y) = (465.0, 540.0);
+    base.elements.rewrite(|elements| {
+        for e in elements.iter_mut() {
+            match e {
+                ViewElement::Stock(s) if s.uid == a => (s.x, s.y) = (325.0, 595.0),
+                ViewElement::Stock(s) if s.uid == middle => (s.x, s.y) = (610.0, 595.0),
+                ViewElement::Stock(s) if s.uid == b => (s.x, s.y) = (920.0, 595.0),
+                ViewElement::Flow(f) if canonicalize(&f.name) == "to_a" => {
+                    f.points = vec![
+                        point(610.0, 577.5, Some(middle)),
+                        point(610.0, 540.0, None),
+                        point(325.0, 540.0, None),
+                        point(325.0, 577.5, Some(a)),
+                    ];
+                    (f.x, f.y) = (465.0, 540.0);
+                }
+                ViewElement::Flow(f) if canonicalize(&f.name) == "to_b" => {
+                    f.points = vec![
+                        point(610.0, 577.5, Some(middle)),
+                        point(610.0, 539.0, None),
+                        point(920.0, 539.0, None),
+                        point(920.0, 577.5, Some(b)),
+                    ];
+                    (f.x, f.y) = (770.0, 539.0);
+                }
+                _ => {}
             }
-            ViewElement::Flow(f) if canonicalize(&f.name) == "to_b" => {
-                f.points = vec![
-                    point(610.0, 577.5, Some(middle)),
-                    point(610.0, 539.0, None),
-                    point(920.0, 539.0, None),
-                    point(920.0, 577.5, Some(b)),
-                ];
-                (f.x, f.y) = (770.0, 539.0);
-            }
-            _ => {}
         }
-    }
+    });
     let (_, view) = sync(
         &project,
         &base,
@@ -1204,21 +1211,25 @@ fn reattached_valve_fixture(transfer_equation: &str) -> (datamodel::Project, dat
         y,
         attached_to_uid: attached,
     };
-    for e in &mut base.elements {
-        match e {
-            ViewElement::Stock(s) if s.uid == source => (s.x, s.y) = (100.0, 100.0),
-            ViewElement::Stock(s) if s.uid == sink => (s.x, s.y) = (400.0, 100.0),
-            ViewElement::Aux(a) if canonicalize(&a.name) == "note" => (a.x, a.y) = (250.0, 100.0),
-            ViewElement::Flow(f) if canonicalize(&f.name) == "transfer" => {
-                f.points = vec![
-                    point(122.5, 100.0, Some(source)),
-                    point(377.5, 100.0, Some(sink)),
-                ];
-                (f.x, f.y) = (135.0, 100.0);
+    base.elements.rewrite(|elements| {
+        for e in elements.iter_mut() {
+            match e {
+                ViewElement::Stock(s) if s.uid == source => (s.x, s.y) = (100.0, 100.0),
+                ViewElement::Stock(s) if s.uid == sink => (s.x, s.y) = (400.0, 100.0),
+                ViewElement::Aux(a) if canonicalize(&a.name) == "note" => {
+                    (a.x, a.y) = (250.0, 100.0)
+                }
+                ViewElement::Flow(f) if canonicalize(&f.name) == "transfer" => {
+                    f.points = vec![
+                        point(122.5, 100.0, Some(source)),
+                        point(377.5, 100.0, Some(sink)),
+                    ];
+                    (f.x, f.y) = (135.0, 100.0);
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
+    });
     (project, base)
 }
 
@@ -1269,13 +1280,15 @@ fn a_variable_redrawn_as_a_larger_shape_moves_off_its_neighbour() {
         datamodel::Variable::Aux(aux("b", "2")),
     ]);
     let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
-    for e in &mut base.elements {
-        match e {
-            ViewElement::Aux(x) if canonicalize(&x.name) == "a" => (x.x, x.y) = (100.0, 100.0),
-            ViewElement::Aux(x) if canonicalize(&x.name) == "b" => (x.x, x.y) = (130.0, 100.0),
-            _ => {}
+    base.elements.rewrite(|elements| {
+        for e in elements.iter_mut() {
+            match e {
+                ViewElement::Aux(x) if canonicalize(&x.name) == "a" => (x.x, x.y) = (100.0, 100.0),
+                ViewElement::Aux(x) if canonicalize(&x.name) == "b" => (x.x, x.y) = (130.0, 100.0),
+                _ => {}
+            }
         }
-    }
+    });
     let (_, view) = sync(
         &project,
         &base,
@@ -1325,23 +1338,25 @@ fn a_cloud_left_by_a_deleted_stock_steps_off_a_parameter_drawn_on_its_pipe() {
             _ => None,
         })
         .expect("drain's cloud");
-    for e in &mut base.elements {
-        match e {
-            ViewElement::Stock(s) if s.uid == tank => (s.x, s.y) = (500.0, 1262.0),
-            ViewElement::Aux(a) if canonicalize(&a.name) == "marker" => {
-                (a.x, a.y) = (499.0, 1301.0)
+    base.elements.rewrite(|elements| {
+        for e in elements.iter_mut() {
+            match e {
+                ViewElement::Stock(s) if s.uid == tank => (s.x, s.y) = (500.0, 1262.0),
+                ViewElement::Aux(a) if canonicalize(&a.name) == "marker" => {
+                    (a.x, a.y) = (499.0, 1301.0)
+                }
+                ViewElement::Flow(f) if canonicalize(&f.name) == "drain" => {
+                    f.points = vec![
+                        point(499.0, 1279.5, Some(tank)),
+                        point(499.0, 1387.0, Some(cloud)),
+                    ];
+                    (f.x, f.y) = (499.0, 1344.0);
+                }
+                ViewElement::Cloud(c) if c.uid == cloud => (c.x, c.y) = (499.0, 1387.0),
+                _ => {}
             }
-            ViewElement::Flow(f) if canonicalize(&f.name) == "drain" => {
-                f.points = vec![
-                    point(499.0, 1279.5, Some(tank)),
-                    point(499.0, 1387.0, Some(cloud)),
-                ];
-                (f.x, f.y) = (499.0, 1344.0);
-            }
-            ViewElement::Cloud(c) if c.uid == cloud => (c.x, c.y) = (499.0, 1387.0),
-            _ => {}
         }
-    }
+    });
     let (_, view) = sync(
         &project,
         &base,
@@ -1383,14 +1398,16 @@ fn a_sync_draws_nothing_that_references_an_undrawn_variable() {
         datamodel::Variable::Aux(aux("quad", "doubled * 2")),
     ]);
     let model = project.get_model_mut(TEST_MODEL).expect("model");
-    for (uid, var) in (1..).zip(model.variables.iter_mut()) {
-        match var {
-            datamodel::Variable::Stock(s) => s.uid = Some(uid),
-            datamodel::Variable::Flow(f) => f.uid = Some(uid),
-            datamodel::Variable::Aux(a) => a.uid = Some(uid),
-            datamodel::Variable::Module(m) => m.uid = Some(uid),
+    model.variables.rewrite(|variables| {
+        for (uid, var) in (1..).zip(variables.iter_mut()) {
+            match var {
+                datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                datamodel::Variable::Module(m) => m.uid = Some(uid),
+            }
         }
-    }
+    });
     let mut base = generate_layout(&project, TEST_MODEL, None).expect("base layout");
     let (doubled, emigration) = (uid_named(&base, "doubled"), uid_named(&base, "emigration"));
     let undrawn = [doubled, emigration];
@@ -1462,20 +1479,24 @@ fn a_curved_link_turns_with_an_endpoint_the_sync_moved() {
     ]);
     let mut rebuilt_base =
         generate_layout(&rebuilt_project, TEST_MODEL, None).expect("base layout");
-    for e in &mut rebuilt_base.elements {
-        match e {
-            ViewElement::Aux(x) if canonicalize(&x.name) == "a" => (x.x, x.y) = (100.0, 100.0),
-            ViewElement::Aux(x) if canonicalize(&x.name) == "b" => (x.x, x.y) = (130.0, 100.0),
-            ViewElement::Aux(x) if canonicalize(&x.name) == "c" => (x.x, x.y) = (100.0, 300.0),
-            _ => {}
-        }
-    }
-    let curve = |view: &mut datamodel::StockFlow| {
-        for e in &mut view.elements {
-            if let ViewElement::Link(l) = e {
-                l.shape = LinkShape::Arc(40.0);
+    rebuilt_base.elements.rewrite(|elements| {
+        for e in elements.iter_mut() {
+            match e {
+                ViewElement::Aux(x) if canonicalize(&x.name) == "a" => (x.x, x.y) = (100.0, 100.0),
+                ViewElement::Aux(x) if canonicalize(&x.name) == "b" => (x.x, x.y) = (130.0, 100.0),
+                ViewElement::Aux(x) if canonicalize(&x.name) == "c" => (x.x, x.y) = (100.0, 300.0),
+                _ => {}
             }
         }
+    });
+    let curve = |view: &mut datamodel::StockFlow| {
+        view.elements.rewrite(|elements| {
+            for e in elements.iter_mut() {
+                if let ViewElement::Link(l) = e {
+                    l.shape = LinkShape::Arc(40.0);
+                }
+            }
+        });
     };
     curve(&mut valve_project_base.1);
     curve(&mut rebuilt_base);

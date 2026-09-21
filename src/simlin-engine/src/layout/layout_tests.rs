@@ -93,7 +93,8 @@ fn simple_model() -> datamodel::Model {
                 ai_state: None,
                 uid: Some(5),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -106,7 +107,7 @@ fn test_generate_layout_empty() {
     let project = test_project(datamodel::Model {
         name: TEST_MODEL.to_string(),
         sim_specs: None,
-        variables: Vec::new(),
+        variables: Vec::new().into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -360,7 +361,8 @@ fn test_compute_metadata_reads_through_builtin_calls_and_tables() {
                 aux("b", "2"),
                 table.clone(),
                 aux("out", equation),
-            ],
+            ]
+            .into(),
             views: Vec::new(),
             loop_metadata: Vec::new(),
             groups: Vec::new(),
@@ -424,7 +426,8 @@ fn test_generate_layout_links_builtin_call_inputs_and_tables() {
             table,
             aux("effect", "LOOKUP(effect_table, ratio)"),
             aux("perceived_effect", "SMTH1(effect, smoothing_time)"),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -714,7 +717,8 @@ fn test_generate_layout_aux_only() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -749,7 +753,8 @@ fn test_generate_layout_single_aux() {
             },
             ai_state: None,
             uid: Some(1),
-        })],
+        })]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -794,7 +799,8 @@ fn test_generate_layout_disconnected_stocks() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -872,7 +878,8 @@ fn test_generate_layout_disconnected_chains_do_not_explode_apart() {
                 ai_state: None,
                 uid: Some(4),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1019,7 +1026,8 @@ fn test_compute_metadata_includes_isolated_flows_when_stocks_exist() {
                 ai_state: None,
                 uid: Some(3),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1084,7 +1092,8 @@ fn test_generate_layout_includes_isolated_flows_when_stocks_exist() {
                 ai_state: None,
                 uid: Some(3),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1146,7 +1155,8 @@ fn test_generate_layout_includes_module_elements_and_connectors() {
                 ai_state: None,
                 uid: Some(3),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1244,7 +1254,8 @@ fn test_count_view_crossings_shared_endpoint_bidirectional_links() {
                 shape: LinkShape::Straight,
                 polarity: None,
             }),
-        ],
+        ]
+        .into(),
         view_box: Rect {
             x: 0.0,
             y: 0.0,
@@ -1292,7 +1303,8 @@ fn test_compute_metadata_populates_feedback_loops_from_model_metadata() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: vec![datamodel::LoopMetadata {
             uids: vec![1, 2],
@@ -1459,7 +1471,7 @@ fn test_layout_emits_a_flow_listed_by_two_stocks_once() {
         assert_eq!(count, 1, "flow {name} must be laid out once");
     }
     assert_eq!(
-        crate::diagram::flow_geometry::flow_invariant_violations(&view.elements),
+        crate::diagram::flow_geometry::flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new()
     );
 }
@@ -1498,7 +1510,8 @@ fn test_ast_deps_exclude_builtins() {
                     ..Default::default()
                 },
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1562,7 +1575,8 @@ fn test_ast_deps_no_false_positives() {
                     ..Default::default()
                 },
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1629,7 +1643,8 @@ fn test_deps_fallback_on_compile_error() {
                     ..Default::default()
                 },
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1677,7 +1692,8 @@ fn test_ltm_fallback_on_sim_error() {
                     ..Default::default()
                 },
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: vec![datamodel::LoopMetadata {
             uids: vec![1, 2],
@@ -1741,7 +1757,8 @@ fn test_compute_metadata_falls_back_for_invalid_equation() {
                     ..Default::default()
                 },
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1807,7 +1824,8 @@ fn test_compute_metadata_excludes_non_model_deps() {
                     ..Default::default()
                 },
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1848,7 +1866,7 @@ fn test_resolve_model_name_returns_actual_name_for_main_alias() {
     let model = datamodel::Model {
         name: String::new(),
         sim_specs: None,
-        variables: Vec::new(),
+        variables: Vec::new().into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1898,7 +1916,8 @@ fn test_layout_chain() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2060,7 +2079,8 @@ fn test_build_clouds() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2219,7 +2239,8 @@ fn test_build_clouds_no_cloud_for_connected_endpoint() {
                 ai_state: None,
                 uid: Some(3),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2301,7 +2322,8 @@ fn test_build_clouds_sink_cloud() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2415,7 +2437,8 @@ fn test_build_connectors() {
                 ai_state: None,
                 uid: Some(3),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2591,7 +2614,8 @@ fn test_optimize_labels() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2717,7 +2741,8 @@ fn test_place_auxiliaries() {
                 ai_state: None,
                 uid: Some(3),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -4410,7 +4435,8 @@ fn test_identify_new_elements_partial_overlap() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -4488,7 +4514,8 @@ fn test_identify_new_elements_all_present() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -4558,7 +4585,8 @@ fn test_identify_new_elements_empty_state() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -4603,7 +4631,8 @@ fn test_identify_new_elements_uid_exists_but_no_element() {
             compat: datamodel::Compat::default(),
             ai_state: None,
             uid: Some(10),
-        })],
+        })]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -5044,7 +5073,7 @@ fn make_settlement_scenario(
     let model = datamodel::Model {
         name: "test".to_string(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -5572,7 +5601,8 @@ fn test_module_output_dep_preserved_with_db_state() {
             },
             ai_state: None,
             uid: Some(10),
-        })],
+        })]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -5611,7 +5641,8 @@ fn test_module_output_dep_preserved_with_db_state() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),

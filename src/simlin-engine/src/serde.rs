@@ -2284,7 +2284,7 @@ impl From<project_io::View> for View {
 fn test_view_roundtrip_preserves_explicit_empty_title() {
     let view = View::StockFlow(StockFlow {
         name: Some(String::new()),
-        elements: vec![],
+        elements: vec![].into(),
         view_box: Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -2305,7 +2305,7 @@ fn test_view_roundtrip_preserves_explicit_empty_title() {
 fn test_view_roundtrip_preserves_absent_title() {
     let view = View::StockFlow(StockFlow {
         name: None,
-        elements: vec![],
+        elements: vec![].into(),
         view_box: Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -2500,7 +2500,7 @@ impl From<project_io::Model> for Model {
             // the sentinel so re-canonicalization can't mistake it for `·` (#690).
             name: migrate_stored_ident(model.name),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views: model.views.into_iter().map(View::from).collect(),
             loop_metadata: model
                 .loop_metadata
@@ -2528,7 +2528,8 @@ fn test_model_with_loop_metadata_roundtrip() {
             compat: Compat::default(),
             ai_state: None,
             uid: Some(1),
-        })],
+        })]
+        .into(),
         views: vec![],
         loop_metadata: vec![
             LoopMetadata {
@@ -2574,7 +2575,8 @@ fn test_model_with_macro_spec_roundtrip() {
                 ai_state: None,
                 uid: Some(1),
                 compat: Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2597,7 +2599,8 @@ fn test_model_with_macro_spec_roundtrip() {
                 ai_state: None,
                 uid: Some(1),
                 compat: Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2626,7 +2629,8 @@ fn test_model_with_groups_roundtrip() {
             compat: Compat::default(),
             ai_state: None,
             uid: Some(1),
-        })],
+        })]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![
@@ -2908,7 +2912,7 @@ fn make_test_project(variables: Vec<Variable>, dimensions: Vec<Dimension>) -> Pr
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

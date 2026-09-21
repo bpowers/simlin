@@ -541,7 +541,7 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
     let main_model = Model {
         name: "main".to_string(),
         sim_specs: None,
-        variables: all_variables,
+        variables: all_variables.into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

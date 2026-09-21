@@ -251,13 +251,15 @@ fn every_consumer_lowers_each_variable_once() {
 fn an_equation_edit_relowers_only_the_edited_variable() {
     let with_rate = |eqn: &str| {
         let mut project = shared_fixture();
-        for var in &mut project.models[0].variables {
-            if let datamodel::Variable::Aux(aux) = var
-                && aux.ident == "rate"
-            {
-                aux.equation = datamodel::Equation::Scalar(eqn.to_string());
+        project.models[0].variables.rewrite(|variables| {
+            for var in variables.iter_mut() {
+                if let datamodel::Variable::Aux(aux) = var
+                    && aux.ident == "rate"
+                {
+                    aux.equation = datamodel::Equation::Scalar(eqn.to_string());
+                }
             }
-        }
+        });
         project
     };
 

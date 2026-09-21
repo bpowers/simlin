@@ -1565,8 +1565,10 @@ pub fn expand_conveyors(
     // stock-and-flow model. Clearing the markers is what lets the ordinary
     // compile path reject an UN-expanded conveyor (the marker is still set)
     // while accepting this expanded one.
+    // Every variable is visited, and each is copied out of what the project
+    // shares with the one it was cloned from only if the pass changes it.
     let model = &mut project.models[model_idx];
-    for v in &mut model.variables {
+    model.variables.edit_each(|v| {
         // Replace a reader's equation with its container-access-rewritten form
         // (the container subexpressions now reference the synthesized stocks).
         if let Some(new_eqn) = rewritten_equations.remove(&canon(v.get_ident())) {
@@ -1598,7 +1600,7 @@ pub fn expand_conveyors(
             }
             _ => {}
         }
-    }
+    });
     for aux in new_auxes {
         model.variables.push(datamodel::Variable::Aux(aux));
     }

@@ -101,7 +101,7 @@ fn model_sides(
 fn assert_every_flow_resolved(project: &datamodel::Project, label: &str) {
     let view = main_view(project);
     assert_eq!(
-        flow_invariant_violations(&view.elements),
+        flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new(),
         "{label}: flow invariants"
     );

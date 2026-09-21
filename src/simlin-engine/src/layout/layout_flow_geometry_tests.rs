@@ -217,7 +217,7 @@ fn test_fresh_layout_holds_the_flow_invariants() {
     let model_name = project.models[0].name.clone();
     let view = generate_layout(&project, &model_name, None).expect("layout");
     assert_eq!(
-        flow_invariant_violations(&view.elements),
+        flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new()
     );
 }

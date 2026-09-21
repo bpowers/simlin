@@ -32,7 +32,7 @@ fn coords(f: &view_element::Flow) -> Vec<(f64, f64)> {
 }
 
 fn violations_for(view: &datamodel::StockFlow, names: &[&str]) -> Vec<String> {
-    flow_invariant_violations(&view.elements)
+    flow_invariant_violations(&view.elements.to_vec())
         .into_iter()
         .filter(|v| names.iter().any(|n| v.starts_with(&format!("{n}:"))))
         .collect()
@@ -65,7 +65,7 @@ fn a_pipe_just_past_a_big_stocks_face_slides_onto_the_45x35_face() {
         (1087.0, 1478.5)
     );
     assert_eq!(
-        flow_invariant_violations(&view.elements),
+        flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new()
     );
 }
@@ -126,7 +126,7 @@ fn corner_zone_endpoints_slide_into_the_clearance_span() {
     assert_eq!(coords(f), vec![(800.5, 308.5), (800.5, 405.0)]);
     assert_eq!((f.x, f.y), (800.5, 354.0));
     assert_eq!(
-        flow_invariant_violations(&view.elements),
+        flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new()
     );
 
@@ -150,7 +150,7 @@ fn corner_zone_endpoints_slide_into_the_clearance_span() {
         ]
     );
     assert_eq!(
-        flow_invariant_violations(&view.elements),
+        flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new()
     );
 }

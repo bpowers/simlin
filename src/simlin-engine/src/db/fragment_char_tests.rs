@@ -1432,7 +1432,8 @@ fn module_model() -> datamodel::Project {
                     }),
                     aux("usesub", "sub.output * 2", false),
                     aux("smoothed", "SMTH1(src, 2)", false),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1441,7 +1442,7 @@ fn module_model() -> datamodel::Project {
             datamodel::Model {
                 name: "producer".to_string(),
                 sim_specs: None,
-                variables: vec![aux("input", "0", true), aux("output", "input * 10", false)],
+                variables: vec![aux("input", "0", true), aux("output", "input * 10", false)].into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2118,7 +2119,7 @@ fn module_layout_project(with_extra: bool) -> datamodel::Project {
             datamodel::Model {
                 name: "main".to_string(),
                 sim_specs: None,
-                variables: main_vars,
+                variables: main_vars.into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2127,7 +2128,7 @@ fn module_layout_project(with_extra: bool) -> datamodel::Project {
             datamodel::Model {
                 name: "producer".to_string(),
                 sim_specs: None,
-                variables: vec![aux("input", "0", true), aux("output", "input * 10", false)],
+                variables: vec![aux("input", "0", true), aux("output", "input * 10", false)].into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2235,7 +2236,8 @@ fn submodel_layout_project(producer_extra: bool, unrelated_extra: bool) -> datam
                         compat: datamodel::Compat::default(),
                     }),
                     aux("usesub", "sub.output * 2", false),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2244,7 +2246,7 @@ fn submodel_layout_project(producer_extra: bool, unrelated_extra: bool) -> datam
             datamodel::Model {
                 name: "producer".to_string(),
                 sim_specs: None,
-                variables: producer_vars,
+                variables: producer_vars.into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2253,7 +2255,7 @@ fn submodel_layout_project(producer_extra: bool, unrelated_extra: bool) -> datam
             datamodel::Model {
                 name: "unrelated".to_string(),
                 sim_specs: None,
-                variables: unrelated_vars,
+                variables: unrelated_vars.into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2488,16 +2490,19 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
         "this edit rewrites slot 0 in place; it must be `k`, or the test is \
          silently measuring a different variable"
     );
-    k_edited.models[0].variables[0] = datamodel::Variable::Aux(datamodel::Aux {
-        ident: "k".to_string(),
-        equation: datamodel::Equation::Scalar("4".to_string()),
-        documentation: String::new(),
-        units: None,
-        gf: None,
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat::default(),
-    });
+    k_edited.models[0].variables.replace(
+        0,
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: "k".to_string(),
+            equation: datamodel::Equation::Scalar("4".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+    );
     let (_state4, k_execs) = resync_and_assemble(
         &mut db,
         &k_edited,

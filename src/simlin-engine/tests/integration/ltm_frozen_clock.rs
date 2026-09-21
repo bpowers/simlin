@@ -186,21 +186,23 @@ fn time_bearing_min_body() -> Project {
 fn a_time_bearing_reducer_body_keeps_the_frozen_argmin_at_zero() {
     let mut project = time_bearing_min_body();
     // south starts at 20: the same equations, a larger start, never the argmin.
-    for var in &mut project.models[0].variables {
-        if let simlin_engine::datamodel::Variable::Stock(stock) = var
-            && stock.ident == "pop"
-        {
-            stock.equation = simlin_engine::datamodel::Equation::Arrayed(
-                vec!["Region".to_string()],
-                vec![
-                    ("north".to_string(), "10".to_string(), None, None),
-                    ("south".to_string(), "20".to_string(), None, None),
-                ],
-                None,
-                false,
-            );
+    project.models[0].variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let simlin_engine::datamodel::Variable::Stock(stock) = var
+                && stock.ident == "pop"
+            {
+                stock.equation = simlin_engine::datamodel::Equation::Arrayed(
+                    vec!["Region".to_string()],
+                    vec![
+                        ("north".to_string(), "10".to_string(), None, None),
+                        ("south".to_string(), "20".to_string(), None, None),
+                    ],
+                    None,
+                    false,
+                );
+            }
         }
-    }
+    });
     let run = ltm_run(&project, false);
     // The hoisted MIN is `$⁚ltm⁚agg⁚0`, scored per source element.
     let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
@@ -226,22 +228,24 @@ fn frozen_dep_indexed_by_time() -> Project {
         .aux("x", "0.1 * s", None)
         .flow("z", "x + arr[TIME]", None)
         .build_datamodel();
-    for var in &mut project.models[0].variables {
-        if let simlin_engine::datamodel::Variable::Aux(aux) = var
-            && aux.ident == "arr"
-        {
-            aux.equation = simlin_engine::datamodel::Equation::Arrayed(
-                vec!["Slot".to_string()],
-                ["1", "2", "4", "8", "16"]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| (format!("a{}", i + 1), v.to_string(), None, None))
-                    .collect(),
-                None,
-                false,
-            );
+    project.models[0].variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let simlin_engine::datamodel::Variable::Aux(aux) = var
+                && aux.ident == "arr"
+            {
+                aux.equation = simlin_engine::datamodel::Equation::Arrayed(
+                    vec!["Slot".to_string()],
+                    ["1", "2", "4", "8", "16"]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| (format!("a{}", i + 1), v.to_string(), None, None))
+                        .collect(),
+                    None,
+                    false,
+                );
+            }
         }
-    }
+    });
     project
 }
 

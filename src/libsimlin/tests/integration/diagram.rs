@@ -62,7 +62,7 @@ fn test_diagram_sync_keeps_every_view_but_the_first() {
         ..laid_out
     });
     let empty_first = datamodel::View::StockFlow(datamodel::StockFlow {
-        elements: Vec::new(),
+        elements: Vec::new().into(),
         ..match &overview {
             datamodel::View::StockFlow(sf) => sf.clone(),
         }
@@ -431,7 +431,8 @@ fn test_diagram_sync_main_alias_empty_model_name_patch() {
                     ai_state: None,
                     uid: None,
                 }),
-            ],
+            ]
+            .into(),
             views: Vec::new(),
             loop_metadata: Vec::new(),
             groups: Vec::new(),
@@ -460,14 +461,15 @@ fn test_diagram_sync_main_alias_empty_model_name_patch() {
             let mut dm = (*proj).datamodel.lock().unwrap();
             let model = dm.get_model_mut("main").unwrap();
             if let Some(engine::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
-                for elem in &mut sf.elements {
-                    if let engine::datamodel::ViewElement::Stock(s) = elem {
-                        if s.name == "level" {
+                sf.elements.edit_where(
+                    |elem| matches!(elem, engine::datamodel::ViewElement::Stock(s) if s.name == "level"),
+                    |elem| {
+                        if let engine::datamodel::ViewElement::Stock(s) = elem {
                             s.x = MARKER_X;
                             s.y = MARKER_Y;
                         }
-                    }
-                }
+                    },
+                );
             }
         }
 
@@ -569,14 +571,15 @@ fn test_diagram_sync_preserves_layout_when_patch_has_no_ops_for_model() {
             let mut dm = (*proj).datamodel.lock().unwrap();
             let model = dm.get_model_mut("main").unwrap();
             if let Some(engine::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
-                for elem in &mut sf.elements {
-                    if let engine::datamodel::ViewElement::Stock(s) = elem {
-                        if s.name == "level" {
+                sf.elements.edit_where(
+                    |elem| matches!(elem, engine::datamodel::ViewElement::Stock(s) if s.name == "level"),
+                    |elem| {
+                        if let engine::datamodel::ViewElement::Stock(s) = elem {
                             s.x = MARKER_X;
                             s.y = MARKER_Y;
                         }
-                    }
-                }
+                    },
+                );
             }
         }
 

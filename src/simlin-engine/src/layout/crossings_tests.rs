@@ -111,7 +111,7 @@ fn cv_flow_pts(
 fn cv_view(elements: Vec<ViewElement>) -> datamodel::StockFlow {
     datamodel::StockFlow {
         name: None,
-        elements,
+        elements: elements.into(),
         view_box: Rect {
             x: 0.0,
             y: 0.0,

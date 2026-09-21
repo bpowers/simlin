@@ -46,7 +46,7 @@ fn with_view(builder: TestProject, elements: Vec<ViewElement>) -> datamodel::Pro
     let mut project = builder.build_datamodel();
     project.models[0].views = vec![View::StockFlow(StockFlow {
         name: None,
-        elements,
+        elements: elements.into(),
         view_box: datamodel::Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,

@@ -101,7 +101,7 @@ fn model_of(variables: Vec<Variable>) -> Model {
     Model {
         name: "main".to_owned(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

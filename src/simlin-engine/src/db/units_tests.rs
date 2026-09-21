@@ -139,7 +139,8 @@ fn every_shape_project() -> datamodel::Project {
             x_aux("scaled", "p1 * p2", None),
             x_aux("p1", "0", None),
             x_aux("p2", "0", None),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

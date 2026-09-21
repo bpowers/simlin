@@ -827,7 +827,7 @@ mod tests {
         Model {
             name: name.to_string(),
             sim_specs: None,
-            variables: vec![aux("x", "1")],
+            variables: vec![aux("x", "1")].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -848,7 +848,7 @@ mod tests {
         Model {
             name: name.to_string(),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -891,7 +891,7 @@ mod tests {
         Model {
             name: name.to_string(),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

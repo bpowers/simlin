@@ -17,7 +17,7 @@ use smallvec::SmallVec;
 
 use crate::common::canonicalize;
 use crate::datamodel::view_element::{Flow, FlowPoint, LabelSide, Link, LinkShape, Stock};
-use crate::datamodel::{self, Equation, StockFlow, Variable, ViewElement};
+use crate::datamodel::{self, Equation, SharedVec, StockFlow, Variable, ViewElement};
 use crate::diagram::constants::{
     AUX_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
 };
@@ -48,7 +48,8 @@ impl VariableKind {
 const MAX_NAME_SUFFIX: usize = 1024;
 
 pub struct BaseView {
-    elements: Vec<ViewElement>,
+    /// The view's elements, shared with the view they were indexed from.
+    elements: SharedVec<ViewElement>,
     by_uid: HashMap<i32, usize>,
     /// Stock uids and centers in view order: the routing obstacles.
     stock_uids: Vec<i32>,
@@ -143,7 +144,7 @@ impl BaseView {
         }
     }
 
-    pub fn elements(&self) -> &[ViewElement] {
+    pub fn elements(&self) -> &SharedVec<ViewElement> {
         &self.elements
     }
 

@@ -457,7 +457,8 @@ mod tests {
                         visibility: Visibility::Public,
                         ..datamodel::Compat::default()
                     },
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -564,7 +565,8 @@ mod tests {
                         visibility: Visibility::Public,
                         ..datamodel::Compat::default()
                     },
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],

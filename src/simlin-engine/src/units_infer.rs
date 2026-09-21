@@ -1599,7 +1599,8 @@ fn test_macro_body_units_naming_parameters_are_polymorphic() {
         variables: vec![
             x_aux("scaleit", "amount", Some("amount")),
             x_aux("amount", "0", None),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -1659,7 +1660,8 @@ fn test_macro_param_named_units_resolve_to_actual_arg() {
             x_aux("carryunits", "held", None),
             x_aux("held", "5", Some("amount")),
             x_aux("amount", "0", None),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -1715,7 +1717,8 @@ fn test_inconsistent_macro_reports_clear_user_facing_conflict() {
         variables: vec![
             x_aux("squareit", "amount * amount", Some("amount")),
             x_aux("amount", "0", None),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -1790,7 +1793,8 @@ fn test_macro_mixed_param_and_base_units_infer_cleanly() {
             x_aux("flag", "1", Some("dmnl")),
             x_aux("xfrom", "0", None),
             x_aux("tstart", "0", None),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

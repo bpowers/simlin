@@ -114,7 +114,7 @@ pub(crate) fn project_of(elements: Vec<ViewElement>) -> datamodel::Project {
     let mut model = datamodel::Model::from(json_model);
     model.views = vec![datamodel::View::StockFlow(datamodel::StockFlow {
         name: None,
-        elements,
+        elements: elements.into(),
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -130,7 +130,7 @@ pub(crate) fn main_model(project: &datamodel::Project) -> &datamodel::Model {
     project.get_model("main").expect("the model main")
 }
 
-pub(crate) fn view_of(project: &datamodel::Project) -> &[ViewElement] {
+pub(crate) fn view_of(project: &datamodel::Project) -> &datamodel::SharedVec<ViewElement> {
     match main_model(project).views.first() {
         Some(datamodel::View::StockFlow(sf)) => &sf.elements,
         None => panic!("main has no view"),

@@ -86,7 +86,7 @@ fn project_of(variables: Vec<datamodel::Variable>) -> datamodel::Project {
     test_project(datamodel::Model {
         name: TEST_MODEL.to_string(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -144,21 +144,23 @@ fn violations_of(view: &datamodel::StockFlow, ident: &str) -> Vec<String> {
     let (f, clouds) = flow_and_clouds(view, ident);
     let own = format!("{}:", f.name);
     let cloud_prefixes: Vec<String> = clouds.iter().map(|c| format!("cloud {} ", c.uid)).collect();
-    flow_invariant_violations(&view.elements)
+    flow_invariant_violations(&view.elements.to_vec())
         .into_iter()
         .filter(|v| v.starts_with(&own) || cloud_prefixes.iter().any(|p| v.starts_with(p)))
         .collect()
 }
 
 fn set_stock_flows(model: &mut datamodel::Model, ident: &str, inflows: &[&str], outflows: &[&str]) {
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == ident
-        {
-            s.inflows = inflows.iter().map(|f| f.to_string()).collect();
-            s.outflows = outflows.iter().map(|f| f.to_string()).collect();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == ident
+            {
+                s.inflows = inflows.iter().map(|f| f.to_string()).collect();
+                s.outflows = outflows.iter().map(|f| f.to_string()).collect();
+            }
         }
-    }
+    });
 }
 
 /// Apply `ops` to a copy of `base` edited by `edit` (the post-patch model, as
@@ -287,13 +289,16 @@ fn a_flow_the_patch_names_keeps_its_geometry() {
         &base,
         &old,
         |m| {
-            for var in &mut m.variables {
-                if let datamodel::Variable::Flow(f) = var
-                    && f.ident == "waste_a"
-                {
-                    f.equation = datamodel::Equation::Scalar("stock_a * leak_rate * 2".to_string());
+            m.variables.rewrite(|variables| {
+                for var in variables.iter_mut() {
+                    if let datamodel::Variable::Flow(f) = var
+                        && f.ident == "waste_a"
+                    {
+                        f.equation =
+                            datamodel::Equation::Scalar("stock_a * leak_rate * 2".to_string());
+                    }
                 }
-            }
+            });
         },
         vec![ModelOperation::UpsertFlow(flow(
             "waste_a",
@@ -306,13 +311,15 @@ fn a_flow_the_patch_names_keeps_its_geometry() {
         &base,
         &old,
         |m| {
-            for var in &mut m.variables {
-                if let datamodel::Variable::Flow(f) = var
-                    && f.ident == "waste_a"
-                {
-                    f.ident = "spill".to_string();
+            m.variables.rewrite(|variables| {
+                for var in variables.iter_mut() {
+                    if let datamodel::Variable::Flow(f) = var
+                        && f.ident == "waste_a"
+                    {
+                        f.ident = "spill".to_string();
+                    }
                 }
-            }
+            });
             set_stock_flows(m, "stock_a", &[], &["chain_flow", "spill"]);
         },
         vec![ModelOperation::RenameVariable {
@@ -631,14 +638,16 @@ fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
             ops.push(ModelOperation::UpsertFlow(flow(name, "1")));
         }
         for (ident, inflows, outflows) in lists {
-            for var in &mut model.variables {
-                if let datamodel::Variable::Stock(s) = var
-                    && canonicalize(&s.ident) == *ident
-                {
-                    s.inflows = inflows.clone();
-                    s.outflows = outflows.clone();
+            model.variables.rewrite(|variables| {
+                for var in variables.iter_mut() {
+                    if let datamodel::Variable::Stock(s) = var
+                        && canonicalize(&s.ident) == *ident
+                    {
+                        s.inflows = inflows.clone();
+                        s.outflows = outflows.clone();
+                    }
                 }
-            }
+            });
             ops.push(ModelOperation::UpdateStockFlows {
                 ident: ident.to_string(),
                 inflows: inflows.clone(),
@@ -830,17 +839,19 @@ fn a_flow_created_between_offset_stocks_keeps_its_spacing() {
         model
             .variables
             .push(datamodel::Variable::Flow(flow("back", "1")));
-        for var in &mut model.variables {
-            if let datamodel::Variable::Stock(s) = var {
-                let (inflows, outflows): (&[&str], &[&str]) = match canonicalize(&s.ident).as_ref()
-                {
-                    "a" => (&["back"], &["f1"]),
-                    _ => (&["f1"], &["back"]),
-                };
-                s.inflows = inflows.iter().map(|f| f.to_string()).collect();
-                s.outflows = outflows.iter().map(|f| f.to_string()).collect();
+        model.variables.rewrite(|variables| {
+            for var in variables.iter_mut() {
+                if let datamodel::Variable::Stock(s) = var {
+                    let (inflows, outflows): (&[&str], &[&str]) =
+                        match canonicalize(&s.ident).as_ref() {
+                            "a" => (&["back"], &["f1"]),
+                            _ => (&["f1"], &["back"]),
+                        };
+                    s.inflows = inflows.iter().map(|f| f.to_string()).collect();
+                    s.outflows = outflows.iter().map(|f| f.to_string()).collect();
+                }
             }
-        }
+        });
         let patch = ModelPatch {
             name: model_name.clone(),
             ops: vec![
@@ -920,32 +931,34 @@ fn a_flow_the_patch_does_not_touch_is_preserved() {
     ]);
     let mut old = generate_layout(&base, TEST_MODEL, None).expect("initial layout");
     let stock_a_uid = stock_named(&old, "stock_a").uid;
-    for e in &mut old.elements {
-        if let ViewElement::Flow(f) = e
-            && canonicalize(&f.name) == "waste_b"
-        {
-            let (a, b) = (&f.points[0], &f.points[1]);
-            let len = (b.x - a.x).hypot(b.y - a.y);
-            (f.x, f.y) = (a.x + (b.x - a.x) * 4.0 / len, a.y + (b.y - a.y) * 4.0 / len);
-        }
-        if let ViewElement::Flow(f) = e
-            && canonicalize(&f.name) == "waste_a"
-        {
-            f.x += 30.0;
-            for p in &mut f.points {
-                if p.attached_to_uid == Some(stock_a_uid) {
-                    p.x += 4.0;
-                    p.y -= 5.0;
+    old.elements.rewrite(|elements| {
+        for e in elements.iter_mut() {
+            if let ViewElement::Flow(f) = e
+                && canonicalize(&f.name) == "waste_b"
+            {
+                let (a, b) = (&f.points[0], &f.points[1]);
+                let len = (b.x - a.x).hypot(b.y - a.y);
+                (f.x, f.y) = (a.x + (b.x - a.x) * 4.0 / len, a.y + (b.y - a.y) * 4.0 / len);
+            }
+            if let ViewElement::Flow(f) = e
+                && canonicalize(&f.name) == "waste_a"
+            {
+                f.x += 30.0;
+                for p in &mut f.points {
+                    if p.attached_to_uid == Some(stock_a_uid) {
+                        p.x += 4.0;
+                        p.y -= 5.0;
+                    }
                 }
             }
+            if let ViewElement::Flow(f) = e
+                && canonicalize(&f.name) == "chain_flow"
+            {
+                let last = f.points.len() - 1;
+                f.points[last].y += 6.0;
+            }
         }
-        if let ViewElement::Flow(f) = e
-            && canonicalize(&f.name) == "chain_flow"
-        {
-            let last = f.points.len() - 1;
-            f.points[last].y += 6.0;
-        }
-    }
+    });
     let waste_problems = violations_of(&old, "waste_a");
     assert!(
         waste_problems.iter().any(|v| v.contains("off the pipe"))
@@ -991,13 +1004,15 @@ fn a_flow_the_patch_does_not_touch_is_preserved() {
         &base,
         &old,
         |m| {
-            for var in &mut m.variables {
-                if let datamodel::Variable::Aux(a) = var
-                    && a.ident == "leak_rate"
-                {
-                    a.equation = datamodel::Equation::Scalar("0.2".to_string());
+            m.variables.rewrite(|variables| {
+                for var in variables.iter_mut() {
+                    if let datamodel::Variable::Aux(a) = var
+                        && a.ident == "leak_rate"
+                    {
+                        a.equation = datamodel::Equation::Scalar("0.2".to_string());
+                    }
                 }
-            }
+            });
         },
         vec![ModelOperation::UpsertAux(aux("leak_rate", "0.2"))],
     );

@@ -1361,7 +1361,7 @@ mod tests {
         declutter_view(&mut elements);
         let view = crate::datamodel::StockFlow {
             name: None,
-            elements,
+            elements: elements.into(),
             view_box: crate::datamodel::Rect::default(),
             zoom: 1.0,
             use_lettered_polarity: false,

@@ -135,10 +135,10 @@ mod tests {
             models: vec![datamodel::Model {
                 name: "main".to_string(),
                 sim_specs: None,
-                variables,
+                variables: variables.into(),
                 views: vec![View::StockFlow(StockFlow {
                     name: None,
-                    elements,
+                    elements: elements.into(),
                     view_box: datamodel::Rect::default(),
                     zoom: 1.0,
                     use_lettered_polarity: false,

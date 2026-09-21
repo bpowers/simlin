@@ -40,7 +40,7 @@ fn link(uid: i32, from_uid: i32, to_uid: i32) -> ViewElement {
 fn view_of(elements: Vec<ViewElement>) -> datamodel::StockFlow {
     datamodel::StockFlow {
         name: None,
-        elements,
+        elements: elements.into(),
         view_box: datamodel::Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,

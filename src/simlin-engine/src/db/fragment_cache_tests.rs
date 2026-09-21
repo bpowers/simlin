@@ -70,7 +70,8 @@ fn test_compile_var_fragment_caching() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -118,16 +119,19 @@ fn test_compile_var_fragment_caching() {
 
     // Change only alpha.
     let mut project2 = project.clone();
-    project2.models[0].variables[0] = datamodel::Variable::Aux(datamodel::Aux {
-        ident: "alpha".to_string(),
-        equation: datamodel::Equation::Scalar("20".to_string()),
-        documentation: String::new(),
-        units: None,
-        gf: None,
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat::default(),
-    });
+    project2.models[0].variables.replace(
+        0,
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: "alpha".to_string(),
+            equation: datamodel::Equation::Scalar("20".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+    );
 
     let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
     let sync2 = state2.to_sync_result();
@@ -221,7 +225,8 @@ fn test_previous_lagged_feedback_does_not_create_cycle() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -272,7 +277,8 @@ fn test_previous_plus_current_keeps_current_step_dependency() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -352,7 +358,8 @@ fn test_active_initial_previous_is_lagged_in_initial_graph() {
                         ..datamodel::Compat::default()
                     },
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -426,7 +433,8 @@ fn test_previous_module_output_is_pruned_from_dt_dependencies() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -459,7 +467,8 @@ fn test_previous_module_output_is_pruned_from_dt_dependencies() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -528,7 +537,8 @@ fn test_previous_module_output_keeps_non_lagged_same_module_dependency() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -571,7 +581,8 @@ fn test_previous_module_output_keeps_non_lagged_same_module_dependency() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -624,7 +635,8 @@ fn test_init_feedback_does_not_create_dt_cycle() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -694,7 +706,8 @@ fn test_init_plus_current_keeps_current_step_dependency() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -749,7 +762,8 @@ fn test_previous_plus_init_does_not_keep_current_step_dependency() {
                         ..datamodel::Compat::default()
                     },
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -809,7 +823,8 @@ fn test_compile_fragment_init_expression_temp_arg_compiles() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -871,7 +886,8 @@ fn test_compile_fragment_init_dep_kept_for_active_initial_override() {
                         ..datamodel::Compat::default()
                     },
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -932,7 +948,8 @@ fn test_init_feedback_path_is_acyclic() {
                         ..datamodel::Compat::default()
                     },
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -991,7 +1008,8 @@ fn test_module_input_branch_prunes_previous_only_dt_dep() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1036,7 +1054,8 @@ fn test_module_input_branch_prunes_previous_only_dt_dep() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1104,7 +1123,8 @@ fn test_module_input_branch_prunes_init_only_dt_dep() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1149,7 +1169,8 @@ fn test_module_input_branch_prunes_init_only_dt_dep() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1205,7 +1226,7 @@ fn test_assemble_simulation_noop_recompile_is_cache_hit() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![scalar_aux("alpha", "10"), scalar_aux("beta", "alpha + 1")],
+            variables: vec![scalar_aux("alpha", "10"), scalar_aux("beta", "alpha + 1")].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1277,7 +1298,7 @@ fn test_db_sync_noop_recompile_is_cache_hit() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![scalar_aux("alpha", "10"), scalar_aux("beta", "alpha + 1")],
+            variables: vec![scalar_aux("alpha", "10"), scalar_aux("beta", "alpha + 1")].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1365,7 +1386,8 @@ fn test_assemble_module_unchanged_submodule_is_cache_hit() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1389,7 +1411,8 @@ fn test_assemble_module_unchanged_submodule_is_cache_hit() {
                         },
                     }),
                     scalar_aux("output", "input * 2"),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1555,7 +1578,8 @@ fn test_is_root_shift_machineries_in_lockstep() {
                         ai_state: None,
                         uid: None,
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1573,7 +1597,8 @@ fn test_is_root_shift_machineries_in_lockstep() {
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1729,7 +1754,8 @@ fn test_stdlib_inputs_are_one_shot_and_stable_across_syncs() {
                 // SMTH3 instantiates the `stdlib⁚smth3` module, so the synced
                 // project carries the stdlib SourceModel/SourceVariable inputs.
                 scalar_aux("smoothed", "SMTH3(aaa, 5)"),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1789,7 +1815,9 @@ fn test_stdlib_inputs_are_one_shot_and_stable_across_syncs() {
 
     // An unrelated edit: change `aaa` only. The stdlib models are untouched.
     let mut project2 = project.clone();
-    project2.models[0].variables[0] = scalar_aux("aaa", "time * 3");
+    project2.models[0]
+        .variables
+        .replace(0, scalar_aux("aaa", "time * 3"));
 
     let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
     let sync2 = state2.to_sync_result();

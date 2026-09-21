@@ -4418,16 +4418,18 @@ fn gh780_forced_partial_equation_discovery_pinned_loop_dropped() {
     {
         let model = &mut project.models[0];
         let mut uid_of = HashMap::new();
-        for (i, var) in model.variables.iter_mut().enumerate() {
-            let uid = (i as i32) + 1;
-            uid_of.insert(crate::canonicalize(var.get_ident()).into_owned(), uid);
-            match var {
-                datamodel::Variable::Stock(s) => s.uid = Some(uid),
-                datamodel::Variable::Flow(f) => f.uid = Some(uid),
-                datamodel::Variable::Aux(a) => a.uid = Some(uid),
-                datamodel::Variable::Module(m) => m.uid = Some(uid),
+        model.variables.rewrite(|variables| {
+            for (i, var) in variables.iter_mut().enumerate() {
+                let uid = (i as i32) + 1;
+                uid_of.insert(crate::canonicalize(var.get_ident()).into_owned(), uid);
+                match var {
+                    datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                    datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                    datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                    datamodel::Variable::Module(m) => m.uid = Some(uid),
+                }
             }
-        }
+        });
         for (name, members) in [
             ("growth loop", vec!["pop", "growth"]),
             ("drain loop", vec!["pop", "drain"]),
@@ -4668,16 +4670,18 @@ fn gh780_doomed_edge_pinned_revisit_warns_once() {
     {
         let model = &mut project.models[0];
         let mut uid_of = HashMap::new();
-        for (i, var) in model.variables.iter_mut().enumerate() {
-            let uid = (i as i32) + 1;
-            uid_of.insert(crate::canonicalize(var.get_ident()).into_owned(), uid);
-            match var {
-                datamodel::Variable::Stock(s) => s.uid = Some(uid),
-                datamodel::Variable::Flow(f) => f.uid = Some(uid),
-                datamodel::Variable::Aux(a) => a.uid = Some(uid),
-                datamodel::Variable::Module(m) => m.uid = Some(uid),
+        model.variables.rewrite(|variables| {
+            for (i, var) in variables.iter_mut().enumerate() {
+                let uid = (i as i32) + 1;
+                uid_of.insert(crate::canonicalize(var.get_ident()).into_owned(), uid);
+                match var {
+                    datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                    datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                    datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                    datamodel::Variable::Module(m) => m.uid = Some(uid),
+                }
             }
-        }
+        });
         model.loop_metadata.push(datamodel::LoopMetadata {
             uids: ["driver", "grid", "feedback", "bump"]
                 .iter()

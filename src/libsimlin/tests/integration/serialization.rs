@@ -807,7 +807,7 @@ fn test_serialize_mdl_hard_error_for_multi_model_project() {
     datamodel.models.push(engine::datamodel::Model {
         name: "second".to_string(),
         sim_specs: None,
-        variables: vec![],
+        variables: vec![].into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

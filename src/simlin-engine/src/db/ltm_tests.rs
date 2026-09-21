@@ -224,7 +224,8 @@ fn test_ltm_bare_module_snapshot_is_refused_at_lowering() {
                     compat: datamodel::Compat::default(),
                     ai_state: None,
                     uid: None,
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -242,7 +243,8 @@ fn test_ltm_bare_module_snapshot_is_refused_at_lowering() {
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -551,7 +553,7 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![population, births],
+            variables: vec![population, births].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1880,13 +1882,15 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
 
     // Edit ONE variable's equation, in the other loop.
     let mut edited = project.clone();
-    for var in &mut edited.models[0].variables {
-        if let datamodel::Variable::Aux(aux) = var
-            && aux.ident == "edited_rate"
-        {
-            aux.equation = datamodel::Equation::Scalar("0.15".to_string());
+    edited.models[0].variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Aux(aux) = var
+                && aux.ident == "edited_rate"
+            {
+                aux.equation = datamodel::Equation::Scalar("0.15".to_string());
+            }
         }
-    }
+    });
 
     super::compile::reset_shaped_link_score_executions();
     let state2 = sync_from_datamodel_incremental(&mut db, &edited, Some(&state));

@@ -2681,7 +2681,8 @@ fn discover_reducer_feedback(elems: &[&str], candidate_gen: CandidateGen) -> Dis
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2875,7 +2876,8 @@ fn discovery_no_agg_model_unaffected_by_stitching() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -3067,7 +3069,8 @@ fn recompute_strips_element_subscripts_before_port_match() {
                 uid: None,
                 compat: datamodel::Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -3121,7 +3124,8 @@ fn recompute_strips_element_subscripts_before_port_match() {
                 uid: None,
                 compat: datamodel::Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -3447,7 +3451,8 @@ fn multi_output_module_feedback_inputs() -> ModuleFixtureInputs {
             aux("other", "0", true),
             aux("pos", "input_val * 0.02 + other", false),
             aux("neg", "0 - input_val", false),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -3491,7 +3496,8 @@ fn multi_output_module_feedback_inputs() -> ModuleFixtureInputs {
             flow("decay", "s * 0.05"),
             aux("drift", "TIME + 1", false),
             aux("watcher", "m.neg", false),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -4007,7 +4013,8 @@ fn discover_solo_trimmed_duplicate_and_a_competing_loop() -> DiscoveryResult {
                 enum_stock("population", "100", &["births"], &["deaths"]),
                 enum_flow("births", "population * 0.1"),
                 enum_flow("deaths", "population * population * 0.0001"),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -4203,7 +4210,8 @@ fn discover_share_of_total_feedback(elems: &[&str]) -> DiscoveryResult {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -4294,7 +4302,7 @@ fn discover_module_loop_with_a_trimmed_duplicate() -> DiscoveryResult {
     let passthrough = datamodel::Model {
         name: "passthrough".to_string(),
         sim_specs: None,
-        variables: vec![aux("input_val", "0", true), aux("pos", "input_val", false)],
+        variables: vec![aux("input_val", "0", true), aux("pos", "input_val", false)].into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -4356,7 +4364,8 @@ fn discover_module_loop_with_a_trimmed_duplicate() -> DiscoveryResult {
                 uid: None,
                 compat: datamodel::Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

@@ -107,7 +107,8 @@ fn test_model_all_diagnostics_triggers_all_sources() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -217,7 +218,8 @@ fn test_ac2_1_accumulator_parity_with_old_path() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -286,7 +288,8 @@ fn test_ac2_2_bad_table_specific_error() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -340,7 +343,8 @@ fn test_ac2_3_empty_equation() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -467,7 +471,8 @@ fn test_ac2_4_mismatched_dimensions() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -556,7 +561,8 @@ fn test_ac2_5_unit_warnings_severity() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -628,7 +634,8 @@ fn test_ac2_7_vm_validation_errors() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -704,7 +711,8 @@ fn test_ac2_7_assembly_errors_accumulated() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -795,7 +803,8 @@ fn test_compile_var_fragment_malformed_unit_string() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -843,7 +852,8 @@ fn test_compile_var_fragment_unknown_dependency() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -916,7 +926,8 @@ fn test_compile_var_fragment_per_phase_var_new_failure() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1035,7 +1046,8 @@ fn unit_warning_fixture() -> datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1256,7 +1268,8 @@ fn f15_conveyor_project() -> datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1351,7 +1364,8 @@ fn test_conveyor_driven_flow_malformed_equation_still_errors() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1462,7 +1476,8 @@ fn test_queue_driven_outflow_empty_equation_suppressed() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1508,7 +1523,7 @@ fn test_conveyor_marker_removal_reinstates_empty_equation() {
     );
 
     let mut changed = project.clone();
-    if let datamodel::Variable::Stock(s) = &mut changed.models[0].variables[0] {
+    if let Some(datamodel::Variable::Stock(s)) = changed.models[0].variables.get_mut(0) {
         s.compat.conveyor = None;
     } else {
         panic!("fixture's first variable must be the conveyor stock");
@@ -1683,7 +1698,7 @@ fn conveyor_spec_project(
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1866,14 +1881,16 @@ fn test_conveyor_leak_marker_eqn_form_warns() {
         conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &["0.7", "0.5"], None);
     // Re-encode both leaks in the marker+<eqn> form: move each fraction into
     // the flow's own equation and leave the `<leak/>` marker bare.
-    for var in &mut project.models[0].variables {
-        if let datamodel::Variable::Flow(f) = var
-            && let Some(leak) = &mut f.compat.leakage
-        {
-            f.equation =
-                datamodel::Equation::Scalar(leak.fraction.take().expect("fixture fraction"));
+    project.models[0].variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Flow(f) = var
+                && let Some(leak) = &mut f.compat.leakage
+            {
+                f.equation =
+                    datamodel::Equation::Scalar(leak.fraction.take().expect("fixture fraction"));
+            }
         }
-    }
+    });
     let sync = sync_from_datamodel(&db, &project);
     let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
@@ -2354,7 +2371,8 @@ fn arrayed_elements_project(
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2687,7 +2705,8 @@ fn test_unknown_element_subscript_warns_on_conveyor_init_list() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

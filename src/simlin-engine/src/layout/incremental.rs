@@ -1181,7 +1181,7 @@ pub(super) fn build_stock_flow_from_state(
 ) -> datamodel::StockFlow {
     datamodel::StockFlow {
         name: template.name.clone(),
-        elements: state.elements,
+        elements: state.elements.into(),
         view_box: template.view_box.clone(),
         zoom: if template.zoom > 0.0 {
             template.zoom
@@ -2172,7 +2172,7 @@ fn rebow_moved_links(elements: &mut [ViewElement], old_view: &datamodel::StockFl
             .map(|e| (e.get_uid(), get_visual_center(e, &not_arrayed)))
             .collect()
     };
-    let before = centers(&old_view.elements);
+    let before = centers(&old_view.elements.to_vec());
     let after = centers(elements);
     let drawn_before: HashSet<i32> = old_view
         .elements

@@ -331,7 +331,7 @@ fn test_project_apply_patch_upsert_module() {
     let submodel = engine::datamodel::Model {
         name: "SubModel".to_string(),
         sim_specs: None,
-        variables: vec![],
+        variables: vec![].into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -1002,7 +1002,7 @@ fn test_apply_patch_multiple_models() {
     let second_model = engine::datamodel::Model {
         name: "SecondModel".to_string(),
         sim_specs: None,
-        variables: vec![],
+        variables: vec![].into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -2478,15 +2478,17 @@ fn test_apply_patch_set_loop_name() {
         .flow("births", "population * 0.05", None)
         .build_datamodel();
     // SetLoopName resolves variables by UID, so assign UIDs first.
-    for (i, var) in datamodel.models[0].variables.iter_mut().enumerate() {
-        let uid = (i as i32) + 1;
-        match var {
-            engine::datamodel::Variable::Stock(s) => s.uid = Some(uid),
-            engine::datamodel::Variable::Flow(f) => f.uid = Some(uid),
-            engine::datamodel::Variable::Aux(a) => a.uid = Some(uid),
-            engine::datamodel::Variable::Module(m) => m.uid = Some(uid),
+    datamodel.models[0].variables.rewrite(|variables| {
+        for (i, var) in variables.iter_mut().enumerate() {
+            let uid = (i as i32) + 1;
+            match var {
+                engine::datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                engine::datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                engine::datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                engine::datamodel::Variable::Module(m) => m.uid = Some(uid),
+            }
         }
-    }
+    });
     let proj = open_project_from_datamodel(&datamodel);
 
     let patch_json = r#"{

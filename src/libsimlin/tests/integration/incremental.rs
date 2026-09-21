@@ -580,7 +580,8 @@ fn test_incremental_compile_error_preserved_in_sim() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

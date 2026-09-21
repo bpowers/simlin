@@ -233,18 +233,20 @@ fn split_module_dispatchers_preserve_inputs_and_instance_offsets() {
         project.models[0]
             .variables
             .append(&mut additions.models[0].variables);
-        for variable in &mut project.models[0].variables {
-            if let datamodel::Variable::Module(module) = variable {
-                module.references.push(datamodel::ModuleReference {
-                    src: "other_value".to_string(),
-                    dst: format!("{}.other", module.ident),
-                });
-                if module.ident == "sub1" {
-                    module.references[0].src = "other_value".to_string();
-                    module.references[1].src = "in_value".to_string();
+        project.models[0].variables.rewrite(|variables| {
+            for variable in variables.iter_mut() {
+                if let datamodel::Variable::Module(module) = variable {
+                    module.references.push(datamodel::ModuleReference {
+                        src: "other_value".to_string(),
+                        dst: format!("{}.other", module.ident),
+                    });
+                    if module.ident == "sub1" {
+                        module.references[0].src = "other_value".to_string();
+                        module.references[1].src = "in_value".to_string();
+                    }
                 }
             }
-        }
+        });
         let mut child_additions = TestProject::new("child")
             .scalar_aux("other", "-997")
             .stock("extra", "other + 30 * in", &["extra_grow"], &[], None)
@@ -252,19 +254,23 @@ fn split_module_dispatchers_preserve_inputs_and_instance_offsets() {
             .scalar_aux("initial_out", "INIT(out)")
             .scalar_aux("previous_out", "PREVIOUS(out, -101)")
             .build_datamodel();
-        if let datamodel::Variable::Aux(other) = &mut child_additions.models[0].variables[0] {
+        if let Some(datamodel::Variable::Aux(other)) =
+            child_additions.models[0].variables.get_mut(0)
+        {
             other.compat.can_be_module_input = true;
         }
         project.models[1]
             .variables
             .append(&mut child_additions.models[0].variables);
-        for variable in &mut project.models[1].variables {
-            if let datamodel::Variable::Stock(stock) = variable
-                && stock.ident == "out"
-            {
-                stock.equation = datamodel::Equation::Scalar("in + 10 * other".to_string());
+        project.models[1].variables.rewrite(|variables| {
+            for variable in variables.iter_mut() {
+                if let datamodel::Variable::Stock(stock) = variable
+                    && stock.ident == "out"
+                {
+                    stock.equation = datamodel::Equation::Scalar("in + 10 * other".to_string());
+                }
             }
-        }
+        });
         let sim = compile_sim(&project, "main");
         assert!(sim.modules.values().any(|module| {
             module

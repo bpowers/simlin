@@ -61,7 +61,8 @@ fn test_apply_deletion_removes_alias_of_deleted_var() {
             compat: datamodel::Compat::default(),
             ai_state: None,
             uid: Some(1),
-        })],
+        })]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -128,7 +129,8 @@ fn test_existing_bounding_box_negative_positions() {
             compat: datamodel::Compat::default(),
             ai_state: None,
             uid: Some(1),
-        })],
+        })]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -225,7 +227,8 @@ fn test_incremental_flow_endpoints_rebuilt_after_topology_change() {
                 ai_state: None,
                 uid: Some(3),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -266,17 +269,19 @@ fn test_incremental_flow_endpoints_rebuilt_after_topology_change() {
     // Now patch: move flow_f to be an inflow to stock_b instead
     let mut patched_project = initial_project.clone();
     let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
-    for var in &mut model.variables {
-        match var {
-            datamodel::Variable::Stock(s) if s.ident == "stock_a" => {
-                s.inflows.clear();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            match var {
+                datamodel::Variable::Stock(s) if s.ident == "stock_a" => {
+                    s.inflows.clear();
+                }
+                datamodel::Variable::Stock(s) if s.ident == "stock_b" => {
+                    s.inflows = vec!["flow_f".to_string()];
+                }
+                _ => {}
             }
-            datamodel::Variable::Stock(s) if s.ident == "stock_b" => {
-                s.inflows = vec!["flow_f".to_string()];
-            }
-            _ => {}
         }
-    }
+    });
 
     let patch = crate::patch::ModelPatch {
         name: TEST_MODEL.to_string(),
@@ -394,7 +399,8 @@ fn test_incremental_flow_endpoint_stock_to_cloud() {
                 ai_state: None,
                 uid: Some(3),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -432,13 +438,15 @@ fn test_incremental_flow_endpoint_stock_to_cloud() {
     // Patch: stock_b no longer has flow_f as an outflow (flow becomes cloud-sourced)
     let mut patched_project = initial_project.clone();
     let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_b"
-        {
-            s.outflows.clear();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_b"
+            {
+                s.outflows.clear();
+            }
         }
-    }
+    });
     let patch = crate::patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![crate::patch::ModelOperation::UpsertStock(
@@ -533,7 +541,8 @@ fn test_incremental_flow_endpoint_cloud_to_stock() {
                 ai_state: None,
                 uid: Some(3),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -570,13 +579,15 @@ fn test_incremental_flow_endpoint_cloud_to_stock() {
     // Patch: stock_b now has flow_f as outflow (flow becomes stock_b-sourced)
     let mut patched_project = initial_project.clone();
     let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_b"
-        {
-            s.outflows = vec!["flow_f".to_string()];
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_b"
+            {
+                s.outflows = vec!["flow_f".to_string()];
+            }
         }
-    }
+    });
     let patch = crate::patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![crate::patch::ModelOperation::UpsertStock(
@@ -665,7 +676,8 @@ fn test_incremental_kind_change_aux_to_stock_no_delete() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -776,7 +788,8 @@ fn test_incremental_kind_change_stock_to_aux_no_delete() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -981,7 +994,8 @@ fn test_incremental_kind_change_preserves_display_name() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1084,7 +1098,8 @@ fn test_apply_deletion_removes_alias_position_from_state() {
             compat: datamodel::Compat::default(),
             ai_state: None,
             uid: Some(1),
-        })],
+        })]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1157,7 +1172,8 @@ fn test_group_uid_does_not_collide_with_variable_uid() {
             compat: datamodel::Compat::default(),
             ai_state: None,
             uid: Some(10),
-        })],
+        })]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1186,7 +1202,8 @@ fn test_group_uid_does_not_collide_with_variable_uid() {
                 height: 200.0,
                 is_mdl_view_marker: false,
             }),
-        ],
+        ]
+        .into(),
         view_box: datamodel::Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -1236,7 +1253,8 @@ fn test_incremental_new_flow_cloud_positions_recorded() {
             compat: datamodel::Compat::default(),
             ai_state: None,
             uid: Some(1),
-        })],
+        })]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1289,7 +1307,8 @@ fn test_incremental_new_flow_cloud_positions_recorded() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1413,7 +1432,8 @@ fn test_incremental_kind_change_stock_to_aux_resets_attached_flows() {
                 ai_state: None,
                 uid: Some(2),
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1660,14 +1680,16 @@ fn test_incremental_layout_view_only_patch_returns_unchanged() {
 
     // Move an element to a distinctive position
     let mut modified_view = old_view.clone();
-    for elem in &mut modified_view.elements {
-        if let ViewElement::Aux(a) = elem
-            && canonicalize(&a.name).as_ref() == "birth_rate"
-        {
-            a.x = 5555.0;
-            a.y = 4444.0;
+    modified_view.elements.rewrite(|elements| {
+        for elem in elements.iter_mut() {
+            if let ViewElement::Aux(a) = elem
+                && canonicalize(&a.name).as_ref() == "birth_rate"
+            {
+                a.x = 5555.0;
+                a.y = 4444.0;
+            }
         }
-    }
+    });
 
     // Create a view-only patch
     let patch = crate::patch::ModelPatch {
@@ -1833,7 +1855,8 @@ fn test_incremental_new_side_flow_valve_on_pipe() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1845,13 +1868,15 @@ fn test_incremental_new_side_flow_valve_on_pipe() {
     // Add waste_flow as a new outflow from stock_a
     let mut patched_project = initial_project.clone();
     let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_a"
-        {
-            s.outflows.push("waste_flow".to_string());
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("waste_flow".to_string());
+            }
         }
-    }
+    });
     model
         .variables
         .push(datamodel::Variable::Flow(datamodel::Flow {
@@ -1981,7 +2006,8 @@ fn test_incremental_add_second_side_flow_takes_its_own_face() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2019,13 +2045,15 @@ fn test_incremental_add_second_side_flow_takes_its_own_face() {
     // Now add waste_b
     let mut patched_project = initial_project.clone();
     let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_a"
-        {
-            s.outflows.push("waste_b".to_string());
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("waste_b".to_string());
+            }
         }
-    }
+    });
     model
         .variables
         .push(datamodel::Variable::Flow(datamodel::Flow {
@@ -2154,7 +2182,8 @@ fn test_incremental_remove_chain_keeps_cloud_flow_in_place() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2191,13 +2220,15 @@ fn test_incremental_remove_chain_keeps_cloud_flow_in_place() {
     model
         .variables
         .retain(|v| v.get_ident() != "chain_flow" && v.get_ident() != "stock_b");
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_a"
-        {
-            s.outflows = vec!["waste_flow".to_string()];
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows = vec!["waste_flow".to_string()];
+            }
         }
-    }
+    });
 
     let patch = crate::patch::ModelPatch {
         name: TEST_MODEL.to_string(),
@@ -2283,7 +2314,8 @@ fn test_resnap_preserves_vertical_flow_offset() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2403,7 +2435,8 @@ fn test_incremental_chain_flow_seeded_between_stocks() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2432,17 +2465,19 @@ fn test_incremental_chain_flow_seeded_between_stocks() {
     // Add chain_flow: stock_a -> chain_flow -> stock_b
     let mut patched_project = initial_project.clone();
     let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
-    for var in &mut model.variables {
-        match var {
-            datamodel::Variable::Stock(s) if s.ident == "stock_a" => {
-                s.outflows = vec!["chain_flow".to_string()];
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            match var {
+                datamodel::Variable::Stock(s) if s.ident == "stock_a" => {
+                    s.outflows = vec!["chain_flow".to_string()];
+                }
+                datamodel::Variable::Stock(s) if s.ident == "stock_b" => {
+                    s.inflows = vec!["chain_flow".to_string()];
+                }
+                _ => {}
             }
-            datamodel::Variable::Stock(s) if s.ident == "stock_b" => {
-                s.inflows = vec!["chain_flow".to_string()];
-            }
-            _ => {}
         }
-    }
+    });
     model
         .variables
         .push(datamodel::Variable::Flow(datamodel::Flow {
@@ -2590,7 +2625,8 @@ fn test_incremental_add_side_flow_keeps_reordered_siblings_in_place() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2624,23 +2660,25 @@ fn test_incremental_add_side_flow_keeps_reordered_siblings_in_place() {
         .expect("waste_c attach x");
 
     // Swap the x positions of waste_a and waste_b (valve and pipe points)
-    for elem in &mut swapped_view.elements {
-        match elem {
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => {
-                f.x += wc_attach_x - wa_attach_x;
-                for pt in &mut f.points {
-                    pt.x += wc_attach_x - wa_attach_x;
+    swapped_view.elements.rewrite(|elements| {
+        for elem in elements.iter_mut() {
+            match elem {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => {
+                    f.x += wc_attach_x - wa_attach_x;
+                    for pt in &mut f.points {
+                        pt.x += wc_attach_x - wa_attach_x;
+                    }
                 }
-            }
-            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
-                f.x += wa_attach_x - wc_attach_x;
-                for pt in &mut f.points {
-                    pt.x += wa_attach_x - wc_attach_x;
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
+                    f.x += wa_attach_x - wc_attach_x;
+                    for pt in &mut f.points {
+                        pt.x += wa_attach_x - wc_attach_x;
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
-    }
+    });
 
     // Verify: waste_b should now be to the left of waste_a
     let swapped_wa_x = swapped_view
@@ -2673,13 +2711,15 @@ fn test_incremental_add_side_flow_keeps_reordered_siblings_in_place() {
     // Now add waste_d
     let mut patched_project = initial_project.clone();
     let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_a"
-        {
-            s.outflows.push("waste_d".to_string());
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("waste_d".to_string());
+            }
         }
-    }
+    });
     model
         .variables
         .push(datamodel::Variable::Flow(datamodel::Flow {
@@ -2814,7 +2854,8 @@ fn test_incremental_delete_flow_without_update_stock_flows() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2829,13 +2870,15 @@ fn test_incremental_delete_flow_without_update_stock_flows() {
     model
         .variables
         .retain(|v| v.get_ident() != "chain_flow" && v.get_ident() != "stock_b");
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_a"
-        {
-            s.outflows = vec!["waste_flow".to_string()];
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows = vec!["waste_flow".to_string()];
+            }
         }
-    }
+    });
 
     // Patch has ONLY DeleteVariable, no UpdateStockFlows
     let patch = crate::patch::ModelPatch {
@@ -2913,7 +2956,8 @@ fn test_layout_two_horizontal_cloud_outflows_spaced() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2993,7 +3037,8 @@ fn test_incremental_add_second_chain_preserves_first() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -3014,13 +3059,15 @@ fn test_incremental_add_second_chain_preserves_first() {
     // Add stock_c and chain_ac
     let mut patched_project = initial_project.clone();
     let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_a"
-        {
-            s.outflows.push("chain_ac".to_string());
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("chain_ac".to_string());
+            }
         }
-    }
+    });
     model
         .variables
         .push(datamodel::Variable::Stock(datamodel::Stock {

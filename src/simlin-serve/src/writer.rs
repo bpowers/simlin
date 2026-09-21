@@ -418,14 +418,12 @@ mod tests {
         let target_path = dir.path().join("teacup.mdl");
         let target = SaveTarget::InPlaceMdl(target_path.clone());
         let mut project = load_teacup_mdl_project();
-        let flow = project.models[0]
+        let Some(datamodel::Variable::Flow(flow)) = project.models[0]
             .variables
-            .iter_mut()
-            .find_map(|v| match v {
-                datamodel::Variable::Flow(f) => Some(f),
-                _ => None,
-            })
-            .expect("teacup has a flow");
+            .find_mut(|v| matches!(v, datamodel::Variable::Flow(_)))
+        else {
+            panic!("teacup has a flow");
+        };
         flow.compat.non_negative = true;
 
         let outcome = write_through_pipeline(&project, &target).expect("lossy write succeeds");

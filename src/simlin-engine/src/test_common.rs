@@ -667,7 +667,7 @@ impl TestProject {
             models: vec![datamodel::Model {
                 name: "main".to_string(),
                 sim_specs: None,
-                variables: self.variables.clone(),
+                variables: self.variables.clone().into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1099,7 +1099,8 @@ pub fn two_instance_arrayed_submodel_project() -> Project {
                     aux("b_in", "1000 * (1 + TIME)", datamodel::Compat::default()),
                     instance("sub_a", "a_in"),
                     instance("sub_b", "b_in"),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1145,7 +1146,8 @@ pub fn two_instance_arrayed_submodel_project() -> Project {
                         "SUM(INIT(arr[*]))",
                         datamodel::Compat::default(),
                     ),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1219,7 +1221,7 @@ pub fn nested_instance_arrayed_submodel_project() -> Project {
     let model = |name: &str, variables: Vec<Variable>| datamodel::Model {
         name: name.to_string(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

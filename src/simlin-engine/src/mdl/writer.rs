@@ -4590,8 +4590,9 @@ impl MdlWriter {
 
             // Build shared maps from ALL elements so that cross-view
             // references (links, aliases) resolve correctly.
-            let valve_uids = allocate_valve_uids(&sf.elements);
-            let name_map = build_name_map(&sf.elements);
+            let all_elements = sf.elements.to_vec();
+            let valve_uids = allocate_valve_uids(&all_elements);
+            let name_map = build_name_map(&all_elements);
             let mut link_compat_by_uid: HashMap<i32, &view_element::LinkSketchCompat> =
                 HashMap::new();
             let mut stock_uids: HashSet<i32> = HashSet::new();
@@ -4637,7 +4638,7 @@ impl MdlWriter {
                 );
                 self.write_view_segment(
                     view_name,
-                    &sf.elements,
+                    &all_elements,
                     elements,
                     font.as_deref(),
                     sf.use_lettered_polarity,

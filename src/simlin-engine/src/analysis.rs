@@ -2074,7 +2074,8 @@ mod tests {
                             compat: datamodel::Compat::default(),
                         }),
                         x_aux("watcher", "m.neg", None),
-                    ],
+                    ]
+                    .into(),
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],

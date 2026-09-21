@@ -342,7 +342,7 @@ fn an_initial_read_does_not_cancel_a_previous_only_lag() {
         .aux("mixed", "PREVIOUS(y, 0) + INIT(y)", None)
         .aux("instantaneous", "PREVIOUS(y, 0) + y", None)
         .build_datamodel();
-    let datamodel::Variable::Aux(y) = &mut project.models[0].variables[0] else {
+    let Some(datamodel::Variable::Aux(y)) = project.models[0].variables.get_mut(0) else {
         panic!("y is the first aux");
     };
     assert_eq!(y.ident, "y");

@@ -359,13 +359,13 @@ fn next_available_uid(model: &datamodel::Model) -> i32 {
 
 fn upsert_variable(model: &mut datamodel::Model, mut variable: Variable) {
     let ident = canonicalize(variable.get_ident());
-    if let Some(existing) = model.get_variable_mut(&ident) {
+    if let Some(index) = model.variable_index(&ident) {
         // View elements reference variables by UID, so preserve the existing
         // UID when the replacement doesn't specify one.
         if get_uid(&variable).is_none() {
-            set_uid(&mut variable, get_uid(existing));
+            set_uid(&mut variable, get_uid(&model.variables[index]));
         }
-        *existing = variable;
+        model.variables.replace(index, variable);
     } else {
         // New variables created via patch (e.g., from MCP EditModel) may arrive
         // without a UID. Assign one so that SetLoopName can later reference them
@@ -414,7 +414,7 @@ fn apply_add_model(project: &mut datamodel::Project, name: String) -> Result<()>
     project.models.push(datamodel::Model {
         name,
         sim_specs: None,
-        variables: vec![],
+        variables: vec![].into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -431,16 +431,13 @@ fn apply_update_stock_flows(
 ) -> Result<()> {
     let ident = canonicalize(ident_str);
 
-    let stock = model
-        .variables
-        .iter_mut()
-        .find_map(|var| {
-            if let Variable::Stock(stock) = var
-                && canonicalize(stock.ident.as_str()) == ident
-            {
-                return Some(stock);
-            }
-            None
+    let index = model.variables.iter().position(
+        |var| matches!(var, Variable::Stock(stock) if canonicalize(stock.ident.as_str()) == ident),
+    );
+    let stock = index
+        .and_then(|index| match model.variables.get_mut(index) {
+            Some(Variable::Stock(stock)) => Some(stock),
+            _ => None,
         })
         .ok_or_else(|| {
             Error::new(
@@ -544,16 +541,19 @@ fn apply_delete_variable(model: &mut datamodel::Model, ident_str: &str) -> Resul
     let removed = model.variables.remove(pos);
     if let Variable::Flow(flow) = removed {
         let flow_ident = canonicalize(flow.ident.as_str());
-        for var in model.variables.iter_mut() {
-            if let Variable::Stock(stock) = var {
-                stock
-                    .inflows
-                    .retain(|name| canonicalize(name.as_str()) != flow_ident);
-                stock
-                    .outflows
-                    .retain(|name| canonicalize(name.as_str()) != flow_ident);
-            }
-        }
+        let names_flow = |name: &String| canonicalize(name.as_str()) == flow_ident;
+        model.variables.edit_where(
+            |var| {
+                matches!(var, Variable::Stock(stock)
+                    if stock.inflows.iter().chain(&stock.outflows).any(names_flow))
+            },
+            |var| {
+                if let Variable::Stock(stock) = var {
+                    stock.inflows.retain(|name| !names_flow(name));
+                    stock.outflows.retain(|name| !names_flow(name));
+                }
+            },
+        );
     }
 
     // Drop any module input wiring whose `src` named the deleted variable.
@@ -562,13 +562,16 @@ fn apply_delete_variable(model: &mut datamodel::Model, ident_str: &str) -> Resul
     // project fail to compile with a confusing "missing variable" message. The
     // rename path already rewrites module references; the delete path was the
     // asymmetric gap.
-    for var in model.variables.iter_mut() {
-        if let Variable::Module(module) = var {
-            module
-                .references
-                .retain(|reference| canonicalize(reference.src.as_str()) != ident);
-        }
-    }
+    let names_deleted =
+        |reference: &datamodel::ModuleReference| canonicalize(reference.src.as_str()) == ident;
+    model.variables.edit_where(
+        |var| matches!(var, Variable::Module(module) if module.references.iter().any(names_deleted)),
+        |var| {
+            if let Variable::Module(module) = var {
+                module.references.retain(|reference| !names_deleted(reference));
+            }
+        },
+    );
 
     for group in model.groups.iter_mut() {
         group
@@ -714,13 +717,14 @@ fn retarget_parent_module_dst(
 ) {
     let target_canonical = canonicalize(target_model_name);
     for model in project.models.iter_mut() {
-        for var in model.variables.iter_mut() {
+        let targets = |var: &Variable| {
+            matches!(var, Variable::Module(module)
+                if canonicalize(module.model_name.as_str()) == target_canonical)
+        };
+        model.variables.edit_where(targets, |var| {
             let Variable::Module(module) = var else {
-                continue;
+                return;
             };
-            if canonicalize(module.model_name.as_str()) != target_canonical {
-                continue;
-            }
             let prefix = format!("{}\u{00B7}", canonicalize(module.ident.as_str()));
             for reference in module.references.iter_mut() {
                 let dst_canonical = canonicalize(reference.dst.as_str());
@@ -731,7 +735,7 @@ fn retarget_parent_module_dst(
                     reference.dst = format!("{prefix}{}", new_ident.as_str());
                 }
             }
-        }
+        });
     }
 }
 
@@ -753,20 +757,18 @@ fn rename_model_equations(
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) {
-    for var in model.variables.iter_mut() {
-        match var {
-            Variable::Stock(stock) => rename_equation(&mut stock.equation, old_ident, new_ident),
-            Variable::Flow(flow) => {
-                rename_equation(&mut flow.equation, old_ident, new_ident);
-                rename_active_initial(&mut flow.compat, old_ident, new_ident);
-            }
-            Variable::Aux(aux) => {
-                rename_equation(&mut aux.equation, old_ident, new_ident);
-                rename_active_initial(&mut aux.compat, old_ident, new_ident);
-            }
-            Variable::Module(_) => {}
+    model.variables.edit_each(|var| match var {
+        Variable::Stock(stock) => rename_equation(&mut stock.equation, old_ident, new_ident),
+        Variable::Flow(flow) => {
+            rename_equation(&mut flow.equation, old_ident, new_ident);
+            rename_active_initial(&mut flow.compat, old_ident, new_ident);
         }
-    }
+        Variable::Aux(aux) => {
+            rename_equation(&mut aux.equation, old_ident, new_ident);
+            rename_active_initial(&mut aux.compat, old_ident, new_ident);
+        }
+        Variable::Module(_) => {}
+    });
 }
 
 /// Every equation string a `datamodel::Equation` holds: the scalar or
@@ -990,14 +992,15 @@ fn rename_module_references(
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) {
-    for var in model.variables.iter_mut() {
+    let is_module = |var: &Variable| matches!(var, Variable::Module(_));
+    model.variables.edit_where(is_module, |var| {
         if let Variable::Module(module) = var {
             for reference in module.references.iter_mut() {
                 rename_module_reference_string(&mut reference.src, old_ident, new_ident);
                 rename_module_reference_string(&mut reference.dst, old_ident, new_ident);
             }
         }
-    }
+    });
 }
 
 fn rename_module_reference_string(
@@ -1031,7 +1034,7 @@ fn update_stock_flow_references(
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) {
-    for var in model.variables.iter_mut() {
+    model.variables.edit_each(|var| {
         if let Variable::Stock(stock) = var {
             for inflow in stock.inflows.iter_mut() {
                 if canonicalize(inflow.as_str()) == old_ident.as_str() {
@@ -1046,7 +1049,7 @@ fn update_stock_flow_references(
             stock.inflows.sort_unstable();
             stock.outflows.sort_unstable();
         }
-    }
+    });
 }
 
 fn apply_upsert_view(
@@ -1258,7 +1261,7 @@ mod tests {
         let mut project = TestProject::new("test").build_datamodel();
         let view = datamodel::View::StockFlow(datamodel::StockFlow {
             name: None,
-            elements: vec![],
+            elements: vec![].into(),
             view_box: datamodel::Rect::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -1412,7 +1415,8 @@ mod tests {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1550,7 +1554,8 @@ mod tests {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1857,7 +1862,8 @@ mod tests {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1943,7 +1949,8 @@ mod tests {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2021,7 +2028,7 @@ mod tests {
             models: vec![datamodel::Model {
                 name: "".to_string(),
                 sim_specs: None,
-                variables: vec![],
+                variables: vec![].into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2362,7 +2369,8 @@ mod tests {
                     visibility: Visibility::Public,
                     ..datamodel::Compat::default()
                 },
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2422,7 +2430,8 @@ mod tests {
                     visibility: Visibility::Public,
                     ..datamodel::Compat::default()
                 },
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2516,7 +2525,8 @@ mod tests {
                         ..datamodel::Compat::default()
                     },
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2672,7 +2682,8 @@ mod tests {
                     visibility: Visibility::Public,
                     ..datamodel::Compat::default()
                 },
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2749,7 +2760,7 @@ mod tests {
         project.models.push(datamodel::Model {
             name: "submodel".to_string(),
             sim_specs: None,
-            variables: vec![],
+            variables: vec![].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2802,7 +2813,7 @@ mod tests {
         project.models.push(datamodel::Model {
             name: "submodel".to_string(),
             sim_specs: None,
-            variables: vec![],
+            variables: vec![].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2871,7 +2882,7 @@ mod tests {
         project.models.push(datamodel::Model {
             name: "submodel".to_string(),
             sim_specs: None,
-            variables: vec![],
+            variables: vec![].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -3116,7 +3127,8 @@ mod tests {
                             ..datamodel::Compat::default()
                         },
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -3189,7 +3201,8 @@ mod tests {
                             ..datamodel::Compat::default()
                         },
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -3666,7 +3679,7 @@ mod tests {
                     index: 0,
                     view: datamodel::View::StockFlow(datamodel::StockFlow {
                         name: None,
-                        elements: vec![],
+                        elements: vec![].into(),
                         view_box: Default::default(),
                         zoom: 1.0,
                         use_lettered_polarity: false,
@@ -3687,7 +3700,7 @@ mod tests {
                         index: 0,
                         view: datamodel::View::StockFlow(datamodel::StockFlow {
                             name: None,
-                            elements: vec![],
+                            elements: vec![].into(),
                             view_box: Default::default(),
                             zoom: 1.0,
                             use_lettered_polarity: false,

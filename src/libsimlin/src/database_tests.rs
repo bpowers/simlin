@@ -670,8 +670,7 @@ fn a_first_query_waits_for_the_datamodel_and_builds_from_the_contents_it_is_rele
         let project: &mut simlin_engine::datamodel::Project = &mut held;
         let births = project.models[0]
             .variables
-            .iter_mut()
-            .find(|v| v.get_ident() == "births")
+            .find_mut(|v| v.get_ident() == "births")
             .expect("births is a variable");
         if let simlin_engine::datamodel::Variable::Flow(flow) = births {
             flow.equation =

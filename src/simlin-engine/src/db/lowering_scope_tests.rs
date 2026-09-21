@@ -702,7 +702,8 @@ fn a_module_output_read_the_compiler_refuses_is_still_unit_checked() {
                 "person",
                 false,
             ),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

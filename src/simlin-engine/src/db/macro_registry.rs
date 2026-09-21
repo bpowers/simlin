@@ -221,7 +221,7 @@ fn reconstruct_project_models(db: &dyn Db, project: SourceProject) -> Vec<datamo
             datamodel::Model {
                 name: canonical_name.clone(),
                 sim_specs: None,
-                variables,
+                variables: variables.into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -337,7 +337,7 @@ pub(crate) fn project_macro_registry(db: &dyn Db, project: SourceProject) -> Mac
         models.push(datamodel::Model {
             name: source_model.name(db).clone(),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -428,7 +428,7 @@ mod tests {
         Model {
             name: name.to_string(),
             sim_specs: None,
-            variables: vec![aux("x", "1")],
+            variables: vec![aux("x", "1")].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -446,7 +446,7 @@ mod tests {
         Model {
             name: name.to_string(),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -647,7 +647,9 @@ mod tests {
             .iter()
             .position(|m| m.name == "main")
             .expect("main model present");
-        project2.models[main_idx].variables[0] = aux("x", "42");
+        project2.models[main_idx]
+            .variables
+            .replace(0, aux("x", "42"));
 
         let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
         let sync2 = state2.to_sync_result();

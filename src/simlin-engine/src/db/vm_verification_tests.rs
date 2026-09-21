@@ -315,7 +315,8 @@ fn no_loop_project() -> datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -884,7 +885,8 @@ fn compute_link_polarities_stock_flow_model() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -972,7 +974,8 @@ fn compute_link_polarities_negative_dependency() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1828,7 +1831,8 @@ fn test_previous_self_initial_value() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1949,7 +1953,8 @@ fn test_smooth3_stock_input_initialization() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

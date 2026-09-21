@@ -1423,7 +1423,7 @@ pub(super) fn submodel_project(
             datamodel::Model {
                 name: "main".to_string(),
                 sim_specs: None,
-                variables: main_vars,
+                variables: main_vars.into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1432,7 +1432,7 @@ pub(super) fn submodel_project(
             datamodel::Model {
                 name: "submodel".to_string(),
                 sim_specs: None,
-                variables: submodel_vars,
+                variables: submodel_vars.into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1541,7 +1541,7 @@ fn submodel_with_constant_project(
             datamodel::Model {
                 name: "main".to_string(),
                 sim_specs: None,
-                variables: main_vars,
+                variables: main_vars.into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1550,7 +1550,7 @@ fn submodel_with_constant_project(
             datamodel::Model {
                 name: "submodel".to_string(),
                 sim_specs: None,
-                variables: submodel_vars,
+                variables: submodel_vars.into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],

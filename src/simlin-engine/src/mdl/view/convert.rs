@@ -152,9 +152,13 @@ fn convert_views(
     // also runs), and UIDs are reassigned sequentially.
     for view in &mut result {
         let View::StockFlow(sf) = view;
-        route_pending_flows(&mut sf.elements, &pending_routes);
-        crate::diagram::flow_geometry::normalize_flow_geometry(&mut sf.elements);
-        let uid_map = reassign_uids_sequential(&mut sf.elements);
+        sf.elements
+            .rewrite(|elements| route_pending_flows(elements, &pending_routes));
+        sf.elements
+            .rewrite(|elements| crate::diagram::flow_geometry::normalize_flow_geometry(elements));
+        let uid_map = sf
+            .elements
+            .rewrite(|elements| reassign_uids_sequential(elements));
         if let Some(sketch_compat) = sf.sketch_compat.as_mut() {
             remap_sketch_compat_uids(sketch_compat, &uid_map);
         }
@@ -406,7 +410,7 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
 
     let merged = View::StockFlow(datamodel::StockFlow {
         name: None,
-        elements: all_elements,
+        elements: all_elements.into(),
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity,
@@ -544,7 +548,7 @@ fn convert_view(
 
     Some(View::StockFlow(datamodel::StockFlow {
         name: Some(original_title.to_string()),
-        elements,
+        elements: elements.into(),
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity,

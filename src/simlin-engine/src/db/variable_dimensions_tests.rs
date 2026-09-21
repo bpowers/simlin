@@ -129,7 +129,7 @@ fn variable_dimensions_matches_the_parse_on_every_agreeing_arm() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: variables.clone(),
+            variables: variables.clone().into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -226,7 +226,7 @@ fn an_empty_a2a_equation_reports_no_dimensions_on_both_paths() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![lookup_only, datamodel::Variable::Aux(port_aux)],
+            variables: vec![lookup_only, datamodel::Variable::Aux(port_aux)].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -297,7 +297,7 @@ fn an_unparseable_a2a_equation_reports_its_declared_dimensions() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![aux("broken", a2a(&["DimA"], "1 +"))],
+            variables: vec![aux("broken", a2a(&["DimA"], "1 +"))].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -347,7 +347,7 @@ fn an_unparseable_a2a_equation_still_fails_to_compile() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![aux("broken", a2a(&["DimA"], "1 +"))],
+            variables: vec![aux("broken", a2a(&["DimA"], "1 +"))].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -397,7 +397,8 @@ fn a_module_variable_reports_no_dimensions() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -409,7 +410,8 @@ fn a_module_variable_reports_no_dimensions() {
                 variables: vec![
                     aux("input", datamodel::Equation::Scalar("0".to_string())),
                     aux("out", datamodel::Equation::Scalar("input * 2".to_string())),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],

@@ -180,7 +180,8 @@ fn test_dimension_invalidation_scalar_immune() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -257,7 +258,8 @@ fn test_dimension_invalidation_different_dim_immune() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -362,7 +364,8 @@ fn test_dimension_invalidation_same_dim_reparsed() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -436,7 +439,8 @@ fn test_dimension_invalidation_maps_to_chain() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

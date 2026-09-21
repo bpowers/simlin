@@ -37,13 +37,15 @@ fn conveyor_project_with_auxes() -> datamodel::Project {
 
 /// Rewrite `edited`'s scalar equation in place.
 fn set_edited_equation(project: &mut datamodel::Project, eqn: &str) {
-    for v in &mut project.models[0].variables {
-        if let datamodel::Variable::Aux(a) = v
-            && a.ident == "edited"
-        {
-            a.equation = datamodel::Equation::Scalar(eqn.to_string());
+    project.models[0].variables.rewrite(|variables| {
+        for v in variables.iter_mut() {
+            if let datamodel::Variable::Aux(a) = v
+                && a.ident == "edited"
+            {
+                a.equation = datamodel::Equation::Scalar(eqn.to_string());
+            }
         }
-    }
+    });
 }
 
 /// A model with an `<overflow/>` marker on a flow and NO queue stock anywhere.
@@ -406,15 +408,17 @@ fn ordinary_model_has_no_expanded_slot() {
 /// empty equation is legal only on a pass-driven flow.
 fn without_conveyor(project: &datamodel::Project) -> datamodel::Project {
     let mut plain = project.clone();
-    for v in &mut plain.models[0].variables {
-        match v {
-            datamodel::Variable::Stock(s) => s.compat.conveyor = None,
-            datamodel::Variable::Flow(f) if f.ident == "graduating" => {
-                f.equation = datamodel::Equation::Scalar("250".to_string());
+    plain.models[0].variables.rewrite(|variables| {
+        for v in variables.iter_mut() {
+            match v {
+                datamodel::Variable::Stock(s) => s.compat.conveyor = None,
+                datamodel::Variable::Flow(f) if f.ident == "graduating" => {
+                    f.equation = datamodel::Equation::Scalar("250".to_string());
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
+    });
     plain
 }
 
@@ -569,13 +573,15 @@ fn rejected_staged_patch_does_not_poison_the_expanded_slot() {
     // Stage a patch that materially changes the belt's inflow, compile it (this
     // re-syncs the expanded slot to the STAGED project), then roll back.
     let mut staged = project.clone();
-    for v in &mut staged.models[0].variables {
-        if let datamodel::Variable::Flow(f) = v
-            && f.ident == "matriculating"
-        {
-            f.equation = datamodel::Equation::Scalar("500".to_string());
+    staged.models[0].variables.rewrite(|variables| {
+        for v in variables.iter_mut() {
+            if let datamodel::Variable::Flow(f) = v
+                && f.ident == "matriculating"
+            {
+                f.equation = datamodel::Equation::Scalar("500".to_string());
+            }
         }
-    }
+    });
     let (staged_sp, prev) = db.sync_staged(&staged);
     let mut staged_vm = build_sim(
         &mut db,

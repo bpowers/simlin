@@ -1703,7 +1703,7 @@ fn test_incremental_fallback_to_full_layout() {
 
     let empty_view = datamodel::StockFlow {
         name: None,
-        elements: Vec::new(),
+        elements: Vec::new().into(),
         view_box: datamodel::Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
@@ -1909,7 +1909,8 @@ fn test_incremental_add_waste_flow_goes_below() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -1932,13 +1933,15 @@ fn test_incremental_add_waste_flow_goes_below() {
     let model = patched_project.get_model_mut(MAIN_MODEL).unwrap();
 
     // Add waste_flow to stock_a's outflows
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_a"
-        {
-            s.outflows.push("waste_flow".to_string());
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("waste_flow".to_string());
+            }
         }
-    }
+    });
     model
         .variables
         .push(datamodel::Variable::Flow(datamodel::Flow {
@@ -2071,7 +2074,8 @@ fn test_incremental_add_chain_keeps_existing_cloud_flow() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -2127,13 +2131,15 @@ fn test_incremental_add_chain_keeps_existing_cloud_flow() {
     let model = patched_project.get_model_mut(MAIN_MODEL).unwrap();
 
     // Update stock_a outflows to include chain_flow
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_a"
-        {
-            s.outflows.push("chain_flow".to_string());
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("chain_flow".to_string());
+            }
         }
-    }
+    });
     model
         .variables
         .push(datamodel::Variable::Stock(datamodel::Stock {

@@ -49,7 +49,8 @@ fn two_var_project() -> datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -75,16 +76,19 @@ fn releasing_replaced_memos_drops_the_superseded_program() {
             .expect("first compile");
 
     let mut edited = project.clone();
-    edited.models[0].variables[0] = datamodel::Variable::Aux(datamodel::Aux {
-        ident: "alpha".to_string(),
-        equation: datamodel::Equation::Scalar("11".to_string()),
-        documentation: String::new(),
-        units: None,
-        gf: None,
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat::default(),
-    });
+    edited.models[0].variables.replace(
+        0,
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: "alpha".to_string(),
+            equation: datamodel::Equation::Scalar("11".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+    );
     let state2 = sync_from_datamodel_incremental(&mut db, &edited, Some(&state1));
     let second =
         compile_project_incremental(&db, state2.project, "main", crate::db::LtmOverlay::Off)
@@ -289,7 +293,8 @@ fn teacup_project() -> datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
         }],
     }
 }
@@ -549,7 +554,8 @@ fn test_ac1_5_dimension_change_selective_recompile() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -676,7 +682,8 @@ fn test_ac1_6_cross_model_isolation() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -697,7 +704,8 @@ fn test_ac1_6_cross_model_isolation() {
                     compat: datamodel::Compat::default(),
                     ai_state: None,
                     uid: None,
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -719,7 +727,7 @@ fn test_ac1_6_cross_model_isolation() {
 
     // Change model_b's module connections
     let mut project2 = project.clone();
-    if let datamodel::Variable::Module(ref mut m) = project2.models[1].variables[0] {
+    if let Some(datamodel::Variable::Module(m)) = project2.models[1].variables.get_mut(0) {
         m.references = vec![
             datamodel::ModuleReference {
                 src: "input_a".to_string(),
@@ -885,7 +893,8 @@ fn test_model_sim_specs_override() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -945,7 +954,8 @@ fn test_model_sim_specs_defaults_to_project() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1017,7 +1027,8 @@ fn test_circular_dependency_blocks_incremental_compilation() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
         }],
     };
 
@@ -1089,7 +1100,8 @@ fn test_malformed_graphical_function_fails_fragment() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1198,7 +1210,8 @@ fn test_sparse_per_element_gfs_preserve_table_indices() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1305,7 +1318,8 @@ fn test_incremental_compile_smooth_over_module_output() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1323,7 +1337,8 @@ fn test_incremental_compile_smooth_over_module_output() {
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1446,7 +1461,8 @@ fn test_incremental_compile_distinguishes_module_input_sets() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1489,7 +1505,8 @@ fn test_incremental_compile_distinguishes_module_input_sets() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1615,7 +1632,8 @@ fn implicit_lookup_smth1_project() -> datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1675,7 +1693,8 @@ fn pre_lookup_smth1_project() -> datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1887,7 +1906,8 @@ fn test_implicit_module_offsets_in_flattened_map() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1970,7 +1990,8 @@ fn test_incremental_stdlib_restored_after_user_override_removed() {
             ai_state: None,
             uid: None,
             compat: datamodel::Compat::default(),
-        })],
+        })]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

@@ -132,7 +132,7 @@ fn inspect<T>(
     let Some(datamodel::View::StockFlow(view)) = model.views.first() else {
         panic!("main has no view");
     };
-    read(model, &view.elements)
+    read(model, &view.elements.to_vec())
 }
 
 /// The uids an array names: its numbers, or its objects' `uid` fields.

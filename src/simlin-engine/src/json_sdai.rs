@@ -372,7 +372,7 @@ impl From<SdaiModel> for datamodel::Project {
         let model = datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views,
             loop_metadata,
             groups: vec![],
@@ -648,7 +648,7 @@ impl From<datamodel::Project> for SdaiModel {
             .unwrap_or_else(|| datamodel::Model {
                 name: "main".to_string(),
                 sim_specs: None,
-                variables: vec![],
+                variables: vec![].into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -707,7 +707,9 @@ impl From<&datamodel::Project> for SdaiModel {
 
         let mut variables = Vec::new();
 
-        let vars = model.map(|m| m.variables.as_slice()).unwrap_or(&[]);
+        let vars: Vec<&datamodel::Variable> = model
+            .map(|m| m.variables.iter().collect())
+            .unwrap_or_default();
         for var in vars {
             match var {
                 datamodel::Variable::Stock(s) => {

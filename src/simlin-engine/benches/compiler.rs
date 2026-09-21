@@ -302,7 +302,7 @@ fn build_chain_model(n: usize) -> datamodel::Project {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -326,13 +326,15 @@ fn bench_incremental_equation_edit(c: &mut Criterion) {
 
     // Mutated version: change v50's equation
     let mut mutated = original.clone();
-    for var in &mut mutated.models[0].variables {
-        if let Variable::Aux(aux) = var
-            && aux.ident == "v50"
-        {
-            aux.equation = Equation::Scalar("v49 + 2".to_string());
+    mutated.models[0].variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let Variable::Aux(aux) = var
+                && aux.ident == "v50"
+            {
+                aux.equation = Equation::Scalar("v49 + 2".to_string());
+            }
         }
-    }
+    });
 
     // -- Incremental: sync original, then sync mutation and recompile
     group.bench_function(BenchmarkId::new("incremental", n), |b| {

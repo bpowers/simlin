@@ -8,6 +8,7 @@ use std::iter::Iterator;
 
 use crate::canonicalize;
 use crate::common::{DimensionName, ElementName};
+pub use crate::shared_vec::SharedVec;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Default, Eq, Clone)]
@@ -493,12 +494,15 @@ impl Project {
         }
         let mut project = self.clone();
         for model in &mut project.models {
-            for var in &mut model.variables {
-                if let Variable::Stock(s) = var {
-                    s.inflows = distinct_stock_flows(&s.inflows).flows;
-                    s.outflows = distinct_stock_flows(&s.outflows).flows;
-                }
-            }
+            model.variables.edit_where(
+                |v| matches!(v, Variable::Stock(s) if repeats(&s.inflows) || repeats(&s.outflows)),
+                |v| {
+                    if let Variable::Stock(s) = v {
+                        s.inflows = distinct_stock_flows(&s.inflows).flows;
+                        s.outflows = distinct_stock_flows(&s.outflows).flows;
+                    }
+                },
+            );
         }
         std::borrow::Cow::Owned(project)
     }
@@ -931,7 +935,7 @@ pub struct Rect {
 #[derive(Clone, PartialEq)]
 pub struct StockFlow {
     pub name: Option<String>,
-    pub elements: Vec<ViewElement>,
+    pub elements: SharedVec<ViewElement>,
     pub view_box: Rect,
     /// Zoom as a FACTOR: 1.0 = 100%, 2.0 = twice as big. This unit is shared
     /// by the protobuf, JSON, and TypeScript models. XMILE stores zoom as a
@@ -1024,7 +1028,7 @@ pub struct ModelGroup {
 pub struct Model {
     pub name: String,
     pub sim_specs: Option<SimSpecs>,
-    pub variables: Vec<Variable>,
+    pub variables: SharedVec<Variable>,
     pub views: Vec<View>,
     pub loop_metadata: Vec<LoopMetadata>,
     pub groups: Vec<ModelGroup>,
@@ -1133,7 +1137,7 @@ impl Model {
         Model {
             name: macro_name.to_string(),
             sim_specs: None,
-            variables: body_variables,
+            variables: body_variables.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1155,8 +1159,15 @@ impl Model {
     pub fn get_variable_mut(&mut self, ident: &str) -> Option<&mut Variable> {
         let ident = canonicalize(ident);
         self.variables
-            .iter_mut()
-            .find(|var| canonicalize(var.get_ident()) == ident)
+            .find_mut(|var| canonicalize(var.get_ident()) == ident)
+    }
+
+    /// The position of the variable named `ident` in `variables`.
+    pub fn variable_index(&self, ident: &str) -> Option<usize> {
+        let ident = canonicalize(ident);
+        self.variables
+            .iter()
+            .position(|var| canonicalize(var.get_ident()) == ident)
     }
 }
 
@@ -1502,7 +1513,8 @@ mod tests {
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1586,7 +1598,8 @@ mod tests {
                         uid: None,
                         compat: Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1632,7 +1645,8 @@ mod tests {
                         uid: None,
                         compat: Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1681,7 +1695,8 @@ mod tests {
                         ai_state: None,
                         uid: None,
                         compat: Compat::default(),
-                    })],
+                    })]
+                    .into(),
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
@@ -1691,7 +1706,7 @@ mod tests {
                 Model {
                     name: "stdlib\u{205A}systems_rate".to_string(),
                     sim_specs: None,
-                    variables: vec![custom_var],
+                    variables: vec![custom_var].into(),
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
@@ -1732,7 +1747,7 @@ mod tests {
                 Model {
                     name: "main".to_string(),
                     sim_specs: None,
-                    variables: vec![],
+                    variables: vec![].into(),
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
@@ -1774,7 +1789,8 @@ mod tests {
                         ai_state: None,
                         uid: None,
                         compat: Compat::default(),
-                    })],
+                    })]
+                    .into(),
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],

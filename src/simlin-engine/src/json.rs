@@ -1372,7 +1372,7 @@ impl From<Model> for datamodel::Model {
         datamodel::Model {
             name: model.name,
             sim_specs: model.sim_specs.map(|ss| ss.into()),
-            variables,
+            variables: variables.into(),
             views: model.views.into_iter().map(|v| v.into()).collect(),
             loop_metadata: model
                 .loop_metadata

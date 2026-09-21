@@ -126,13 +126,14 @@ fn rewrite_first_aux_equation(
 ) -> simlin_engine::datamodel::Project {
     let mut clone = project.clone();
     let model = clone.models.first_mut().expect("at least one model");
-    for var in &mut model.variables {
-        if let simlin_engine::datamodel::Variable::Aux(aux) = var {
-            aux.equation = simlin_engine::datamodel::Equation::Scalar(new_eq.to_string());
-            return clone;
-        }
-    }
-    panic!("fixture has no auxiliary variable to rewrite");
+    let Some(simlin_engine::datamodel::Variable::Aux(aux)) = model
+        .variables
+        .find_mut(|v| matches!(v, simlin_engine::datamodel::Variable::Aux(_)))
+    else {
+        panic!("fixture has no auxiliary variable to rewrite");
+    };
+    aux.equation = simlin_engine::datamodel::Equation::Scalar(new_eq.to_string());
+    clone
 }
 
 /// Helper: subscribe to the bus, then drain pending notifications until
@@ -776,14 +777,12 @@ async fn mcp_save_for_mdl_reports_export_lossiness_as_warnings() {
     let access = RegistryAccess::new(state.clone());
     let opened = access.open(&mdl_abs).await.expect("open mdl");
     let mut edited = opened.project.clone();
-    let flow = edited.models[0]
+    let Some(simlin_engine::datamodel::Variable::Flow(flow)) = edited.models[0]
         .variables
-        .iter_mut()
-        .find_map(|v| match v {
-            simlin_engine::datamodel::Variable::Flow(f) => Some(f),
-            _ => None,
-        })
-        .expect("teacup has a flow");
+        .find_mut(|v| matches!(v, simlin_engine::datamodel::Variable::Flow(_)))
+    else {
+        panic!("teacup has a flow");
+    };
     flow.compat.non_negative = true;
 
     let outcome = access

@@ -66,7 +66,7 @@ fn model_with(variables: Vec<datamodel::Variable>) -> datamodel::Model {
     datamodel::Model {
         name: TEST_MODEL.to_string(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -99,40 +99,44 @@ fn named_geometry(view: &datamodel::StockFlow) -> HashMap<String, (f64, f64, Lab
 
 fn set_label_side(view: &mut datamodel::StockFlow, ident: &str, side: LabelSide) {
     let mut found = false;
-    for elem in &mut view.elements {
-        match elem {
-            ViewElement::Stock(s) if canonicalize(&s.name) == ident => {
-                s.label_side = side;
-                found = true;
+    view.elements.rewrite(|elements| {
+        for elem in elements.iter_mut() {
+            match elem {
+                ViewElement::Stock(s) if canonicalize(&s.name) == ident => {
+                    s.label_side = side;
+                    found = true;
+                }
+                ViewElement::Flow(f) if canonicalize(&f.name) == ident => {
+                    f.label_side = side;
+                    found = true;
+                }
+                ViewElement::Aux(a) if canonicalize(&a.name) == ident => {
+                    a.label_side = side;
+                    found = true;
+                }
+                ViewElement::Module(m) if canonicalize(&m.name) == ident => {
+                    m.label_side = side;
+                    found = true;
+                }
+                _ => {}
             }
-            ViewElement::Flow(f) if canonicalize(&f.name) == ident => {
-                f.label_side = side;
-                found = true;
-            }
-            ViewElement::Aux(a) if canonicalize(&a.name) == ident => {
-                a.label_side = side;
-                found = true;
-            }
-            ViewElement::Module(m) if canonicalize(&m.name) == ident => {
-                m.label_side = side;
-                found = true;
-            }
-            _ => {}
         }
-    }
+    });
     assert!(found, "no named element '{ident}' in view");
 }
 
 fn set_all_label_sides(view: &mut datamodel::StockFlow, side: LabelSide) {
-    for elem in &mut view.elements {
-        match elem {
-            ViewElement::Stock(s) => s.label_side = side,
-            ViewElement::Flow(f) => f.label_side = side,
-            ViewElement::Aux(a) => a.label_side = side,
-            ViewElement::Module(m) => m.label_side = side,
-            _ => {}
+    view.elements.rewrite(|elements| {
+        for elem in elements.iter_mut() {
+            match elem {
+                ViewElement::Stock(s) => s.label_side = side,
+                ViewElement::Flow(f) => f.label_side = side,
+                ViewElement::Aux(a) => a.label_side = side,
+                ViewElement::Module(m) => m.label_side = side,
+                _ => {}
+            }
         }
-    }
+    });
 }
 
 fn find_flow<'a>(view: &'a datamodel::StockFlow, ident: &str) -> &'a view_element::Flow {
@@ -162,13 +166,15 @@ fn project_with_module() -> datamodel::Project {
             uid: None,
             compat: datamodel::Compat::default(),
         }));
-    for var in &mut model.variables {
-        if let datamodel::Variable::Aux(a) = var
-            && a.ident == "death_rate"
-        {
-            a.equation = datamodel::Equation::Scalar("0.01 * climate.severity".to_string());
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Aux(a) = var
+                && a.ident == "death_rate"
+            {
+                a.equation = datamodel::Equation::Scalar("0.01 * climate.severity".to_string());
+            }
         }
-    }
+    });
     let submodel = datamodel::Model {
         name: "climate_model".to_string(),
         sim_specs: None,
@@ -184,7 +190,8 @@ fn project_with_module() -> datamodel::Project {
             },
             ai_state: None,
             uid: None,
-        })],
+        })]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -236,15 +243,17 @@ fn add_dependent_aux(
     model
         .variables
         .push(datamodel::Variable::Aux(new_aux.clone()));
-    for var in &mut model.variables {
-        if let datamodel::Variable::Flow(f) = var
-            && f.ident == "births"
-        {
-            f.equation = datamodel::Equation::Scalar(
-                "population * birth_rate * (1 - population / carrying_capacity)".to_string(),
-            );
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Flow(f) = var
+                && f.ident == "births"
+            {
+                f.equation = datamodel::Equation::Scalar(
+                    "population * birth_rate * (1 - population / carrying_capacity)".to_string(),
+                );
+            }
         }
-    }
+    });
     let births = model
         .variables
         .iter()
@@ -306,15 +315,17 @@ fn connector_only_patch(
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
     let mut updated = None;
-    for var in &mut model.variables {
-        if let datamodel::Variable::Aux(a) = var
-            && a.ident == "birth_rate"
-        {
-            // birth_rate now reads death_rate: one new connector, no new element.
-            a.equation = datamodel::Equation::Scalar("0.03 + death_rate".to_string());
-            updated = Some(a.clone());
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Aux(a) = var
+                && a.ident == "birth_rate"
+            {
+                // birth_rate now reads death_rate: one new connector, no new element.
+                a.equation = datamodel::Equation::Scalar("0.03 + death_rate".to_string());
+                updated = Some(a.clone());
+            }
         }
-    }
+    });
     let patch = crate::patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![crate::patch::ModelOperation::UpsertAux(
@@ -330,13 +341,15 @@ fn delete_only_patch(
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
     model.variables.retain(|v| v.get_ident() != "birth_rate");
-    for var in &mut model.variables {
-        if let datamodel::Variable::Flow(f) = var
-            && f.ident == "births"
-        {
-            f.equation = datamodel::Equation::Scalar("population * 0.03".to_string());
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Flow(f) = var
+                && f.ident == "births"
+            {
+                f.equation = datamodel::Equation::Scalar("population * 0.03".to_string());
+            }
         }
-    }
+    });
     let patch = crate::patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![crate::patch::ModelOperation::DeleteVariable {
@@ -442,7 +455,8 @@ fn an_untouched_alias_keeps_its_label_side() {
     for (label, (patched, patch)) in &cases {
         for side in ALL_SIDES {
             let mut old_view = base_view.clone();
-            if let Some(ViewElement::Alias(a)) = old_view.elements.last_mut() {
+            let last = old_view.elements.len() - 1;
+            if let Some(ViewElement::Alias(a)) = old_view.elements.get_mut(last) {
                 a.label_side = side;
             }
             let new_view = incremental_layout(&old_view, patched, TEST_MODEL, patch, None)
@@ -463,17 +477,19 @@ fn incremental_layout_preserves_label_side_across_rename() {
 
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
-    for var in &mut model.variables {
-        match var {
-            datamodel::Variable::Aux(a) if a.ident == "birth_rate" => {
-                a.ident = "fertility".to_string();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            match var {
+                datamodel::Variable::Aux(a) if a.ident == "birth_rate" => {
+                    a.ident = "fertility".to_string();
+                }
+                datamodel::Variable::Flow(f) if f.ident == "births" => {
+                    f.equation = datamodel::Equation::Scalar("population * fertility".to_string());
+                }
+                _ => {}
             }
-            datamodel::Variable::Flow(f) if f.ident == "births" => {
-                f.equation = datamodel::Equation::Scalar("population * fertility".to_string());
-            }
-            _ => {}
         }
-    }
+    });
     let patch = crate::patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![crate::patch::ModelOperation::RenameVariable {
@@ -518,13 +534,15 @@ fn side_flow_project() -> datamodel::Project {
 fn add_waste_c(project: &datamodel::Project) -> (datamodel::Project, crate::patch::ModelPatch) {
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_a"
-        {
-            s.outflows.push("waste_c".to_string());
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("waste_c".to_string());
+            }
         }
-    }
+    });
     let waste_c = scalar_flow("waste_c", "1");
     model.variables.push(waste_c.clone());
     let datamodel::Variable::Flow(waste_c) = waste_c else {
@@ -603,13 +621,15 @@ fn remove_chain(project: &datamodel::Project) -> (datamodel::Project, crate::pat
     model
         .variables
         .retain(|v| v.get_ident() != "chain_flow" && v.get_ident() != "stock_b");
-    for var in &mut model.variables {
-        if let datamodel::Variable::Stock(s) = var
-            && s.ident == "stock_a"
-        {
-            s.outflows = vec!["waste_flow".to_string()];
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows = vec!["waste_flow".to_string()];
+            }
         }
-    }
+    });
     let patch = crate::patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![

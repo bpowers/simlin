@@ -85,7 +85,7 @@ fn enum_test_project(vars: Vec<crate::datamodel::Variable>) -> crate::datamodel:
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vars,
+            variables: vars.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

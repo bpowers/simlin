@@ -328,7 +328,8 @@ fn test_get_incoming_links_lists_variables_of_the_model_not_module_reads() {
             ai_state: None,
             uid: None,
             compat: datamodel::Compat::default(),
-        })],
+        })]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -423,7 +424,8 @@ fn test_get_incoming_links_lists_variables_of_the_model_not_module_reads() {
                 uid: None,
                 compat: datamodel::Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -1461,7 +1463,8 @@ fn test_rel_loop_score_unpartitioned_loops_do_not_cross_normalize() {
                 uid: None,
                 compat: datamodel::Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -2950,15 +2953,17 @@ fn build_discovery_with_pin_protobuf() -> Vec<u8> {
     let mut datamodel_project = builder.build_datamodel();
     // Assign UIDs and pin the a<->b loop.
     let model = &mut datamodel_project.models[0];
-    for (i, var) in model.variables.iter_mut().enumerate() {
-        let uid = (i as i32) + 1;
-        match var {
-            datamodel::Variable::Stock(s) => s.uid = Some(uid),
-            datamodel::Variable::Flow(f) => f.uid = Some(uid),
-            datamodel::Variable::Aux(a) => a.uid = Some(uid),
-            datamodel::Variable::Module(m) => m.uid = Some(uid),
+    model.variables.rewrite(|variables| {
+        for (i, var) in variables.iter_mut().enumerate() {
+            let uid = (i as i32) + 1;
+            match var {
+                datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                datamodel::Variable::Module(m) => m.uid = Some(uid),
+            }
         }
-    }
+    });
     let pin_vars = ["a", "to_b", "b", "to_a"];
     let uids: Vec<i32> = pin_vars
         .iter()

@@ -62,7 +62,8 @@ fn create_sum_project(array_size: u32) -> Project {
                     uid: None,
                     compat: Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -125,7 +126,8 @@ fn create_elementwise_add_project(array_size: u32) -> Project {
                     uid: None,
                     compat: Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -182,7 +184,8 @@ fn create_same_array_multi_ref_project(array_size: u32, num_refs: usize) -> Proj
                     uid: None,
                     compat: Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -250,7 +253,8 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
                     uid: None,
                     compat: Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

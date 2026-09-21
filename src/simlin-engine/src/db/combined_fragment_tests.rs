@@ -913,7 +913,8 @@ fn two_stock_init_recurrence_datamodel() -> crate::datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

@@ -293,7 +293,7 @@ fn single_model_project(vars: Vec<datamodel::Variable>) -> datamodel::Project {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vars,
+            variables: vars.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1195,7 +1195,8 @@ fn arrayed_init_recurrence_stock_project(init_eqs: Vec<(&str, &str)>) -> datamod
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1510,7 +1511,8 @@ fn two_stock_init_recurrence_project(
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

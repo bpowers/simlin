@@ -316,7 +316,7 @@ fn commit_report(project: &mut datamodel::Project, edit: &ViewEdit) -> String {
         .map(ViewElement::get_uid)
         .collect();
     [
-        strict_report(view_of(project), &routed),
+        strict_report(&view_of(project).to_vec(), &routed),
         agreement_report(project),
     ]
     .into_iter()
@@ -1072,7 +1072,11 @@ fn nudge_report(project: &datamodel::Project, n: &Nudge) -> Vec<String> {
         if !report.is_empty() {
             failures.push(format!("{}: {report}", n.name));
         }
-        let outside = changed_outside_the_move(view_of(project), view_of(&committed), &n.selection);
+        let outside = changed_outside_the_move(
+            &view_of(project).to_vec(),
+            &view_of(&committed).to_vec(),
+            &n.selection,
+        );
         if !outside.is_empty() {
             failures.push(format!(
                 "{}: changes {outside:?}, which the move does not reach",
@@ -1338,7 +1342,7 @@ fn generated_scenes_nudge_selections_into_edits_that_hold_the_invariants() {
         .map(|seed| {
             let project = project_of(strict_scene(seed).elements);
             let base = base_of(&project);
-            let view = view_of(&project);
+            let view = &view_of(&project).to_vec();
             let movable: Vec<i32> = view
                 .iter()
                 .filter(|e| !matches!(e, ViewElement::Link(_)))
@@ -1365,7 +1369,8 @@ fn generated_scenes_nudge_selections_into_edits_that_hold_the_invariants() {
                 if !report.is_empty() {
                     failures.push(format!("{context}: {report}"));
                 }
-                let outside = changed_outside_the_move(view, view_of(&committed), &selection);
+                let outside =
+                    changed_outside_the_move(view, &view_of(&committed).to_vec(), &selection);
                 if !outside.is_empty() {
                     failures.push(format!(
                         "{context}: changes {outside:?}, which the move does not reach"

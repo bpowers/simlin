@@ -79,14 +79,15 @@ fn ensure_variable_uids(project: &mut simlin_engine::datamodel::Project) {
             .unwrap_or(0);
         let mut next_uid = max_var_uid.max(max_view_uid) + 1;
 
-        for var in &mut model.variables {
-            let has_uid = match var {
-                simlin_engine::datamodel::Variable::Stock(s) => s.uid.is_some(),
-                simlin_engine::datamodel::Variable::Flow(f) => f.uid.is_some(),
-                simlin_engine::datamodel::Variable::Aux(a) => a.uid.is_some(),
-                simlin_engine::datamodel::Variable::Module(m) => m.uid.is_some(),
-            };
-            if !has_uid {
+        let has_uid = |var: &simlin_engine::datamodel::Variable| match var {
+            simlin_engine::datamodel::Variable::Stock(s) => s.uid.is_some(),
+            simlin_engine::datamodel::Variable::Flow(f) => f.uid.is_some(),
+            simlin_engine::datamodel::Variable::Aux(a) => a.uid.is_some(),
+            simlin_engine::datamodel::Variable::Module(m) => m.uid.is_some(),
+        };
+        model.variables.edit_where(
+            |var| !has_uid(var),
+            |var| {
                 match var {
                     simlin_engine::datamodel::Variable::Stock(s) => s.uid = Some(next_uid),
                     simlin_engine::datamodel::Variable::Flow(f) => f.uid = Some(next_uid),
@@ -94,8 +95,8 @@ fn ensure_variable_uids(project: &mut simlin_engine::datamodel::Project) {
                     simlin_engine::datamodel::Variable::Module(m) => m.uid = Some(next_uid),
                 }
                 next_uid += 1;
-            }
-        }
+            },
+        );
     }
 }
 

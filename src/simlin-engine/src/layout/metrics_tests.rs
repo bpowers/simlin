@@ -108,7 +108,7 @@ fn flow_with_points(
 fn make_view(elements: Vec<ViewElement>) -> datamodel::StockFlow {
     datamodel::StockFlow {
         name: None,
-        elements,
+        elements: elements.into(),
         view_box: datamodel::Rect {
             x: 0.0,
             y: 0.0,
@@ -452,7 +452,7 @@ fn test_node_connector_overlap_through_third_node() {
         straight_link(10, 1, 2),
     ]);
     let m = compute_layout_metrics(&view, &cfg());
-    let connectors = collect_connector_geometry(&view.elements);
+    let connectors = collect_connector_geometry(&view.elements.to_vec());
     assert_eq!(connectors.len(), 1);
     let c = &connectors[0];
     let stock_box = node_shape_box(&stock(3, "s", 200.0, 0.0)).unwrap();
@@ -554,7 +554,7 @@ fn test_node_connector_overlap_union_of_overlapping_boxes() {
         straight_link(10, 1, 2),
     ]);
     let m = compute_layout_metrics(&view, &cfg());
-    let connectors = collect_connector_geometry(&view.elements);
+    let connectors = collect_connector_geometry(&view.elements.to_vec());
     let c = &connectors[0];
     let boxes = [node_shape_box(&s3).unwrap(), node_shape_box(&s4).unwrap()];
     let union_len: f64 = c
@@ -765,7 +765,7 @@ fn test_a_link_too_short_to_show_its_arrow_is_crowding() {
         straight_link(10, 1, 2),
     ]);
     let m = compute_layout_metrics(&view, &cfg());
-    let connectors = collect_connector_geometry(&view.elements);
+    let connectors = collect_connector_geometry(&view.elements.to_vec());
     let visible = connectors[0].length;
     assert!(
         visible < MIN_VISIBLE_LINK,
@@ -895,7 +895,7 @@ fn test_aspect_penalty_thin_box_positive() {
     let view = make_view(vec![aux(1, "a", 0.0, 0.0), aux(2, "b", 0.0, 1000.0)]);
     let m = compute_layout_metrics(&view, &cfg());
     assert!(m.aspect_penalty > 0.0);
-    let boxes: Vec<Rect> = build_scene_nodes(&view.elements)
+    let boxes: Vec<Rect> = build_scene_nodes(&view.elements.to_vec())
         .iter()
         .map(SceneNode::footprint_box)
         .collect();
@@ -1479,9 +1479,9 @@ fn test_label_scene_cost_equals_a_full_scan() {
     let weights = MetricWeights::default();
     for dir in ["logistic-growth", "population", "fishbanks", "reliability"] {
         let view = default_project_view(dir);
-        let scene = LabelScene::new(&view.elements);
-        let nodes = build_scene_nodes(&view.elements);
-        let connectors = collect_connector_geometry(&view.elements);
+        let scene = LabelScene::new(&view.elements.to_vec());
+        let nodes = build_scene_nodes(&view.elements.to_vec());
+        let connectors = collect_connector_geometry(&view.elements.to_vec());
         let drawn: HashMap<i32, Rect> = nodes
             .iter()
             .filter_map(|n| n.label.map(|l| (n.uid, l)))

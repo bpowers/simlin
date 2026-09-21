@@ -440,14 +440,13 @@ fn set_stock_initial_per_element(
     dims: &[&str],
     elements: &[(&str, &str)],
 ) {
-    let stock = project.models[0]
+    let stock = match project.models[0]
         .variables
-        .iter_mut()
-        .find_map(|v| match v {
-            Variable::Stock(s) if s.ident == name => Some(s),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("no stock named {name}"));
+        .find_mut(|v| matches!(v, Variable::Stock(s) if s.ident == name))
+    {
+        Some(Variable::Stock(s)) => s,
+        _ => panic!("no stock named {name}"),
+    };
     stock.equation = Equation::Arrayed(
         dims.iter().map(|d| d.to_string()).collect(),
         elements
@@ -499,8 +498,7 @@ fn a_per_element_initial_value_reading_the_flow_does_not_split_the_score() {
         // on D, iterated on E.
         let Some(Variable::Stock(stock)) = project.models[0]
             .variables
-            .iter_mut()
-            .find(|v| matches!(v, Variable::Stock(s) if s.ident == "s"))
+            .find_mut(|v| matches!(v, Variable::Stock(s) if s.ident == "s"))
         else {
             panic!("no stock named s");
         };

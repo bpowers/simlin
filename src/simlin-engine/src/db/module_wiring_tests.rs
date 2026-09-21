@@ -47,7 +47,8 @@ fn project_with_reference(src: &str, dst: &str) -> datamodel::Project {
                 visibility: Visibility::Public,
                 ..datamodel::Compat::default()
             },
-        })],
+        })]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

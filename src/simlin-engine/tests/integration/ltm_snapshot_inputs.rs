@@ -139,21 +139,23 @@ fn lagged_reducer_input_does_not_credit_a_row_that_never_wins() {
         .stock("g", "30", &["growing"], &[], None)
         .flow("growing", "3", None)
         .build_datamodel();
-    for var in &mut project.models[0].variables {
-        if let simlin_engine::datamodel::Variable::Stock(stock) = var
-            && stock.ident == "x"
-        {
-            stock.equation = simlin_engine::datamodel::Equation::Arrayed(
-                vec!["Region".to_owned()],
-                vec![
-                    ("a".to_owned(), "10".to_owned(), None, None),
-                    ("b".to_owned(), "100".to_owned(), None, None),
-                ],
-                None,
-                false,
-            );
+    project.models[0].variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let simlin_engine::datamodel::Variable::Stock(stock) = var
+                && stock.ident == "x"
+            {
+                stock.equation = simlin_engine::datamodel::Equation::Arrayed(
+                    vec!["Region".to_owned()],
+                    vec![
+                        ("a".to_owned(), "10".to_owned(), None, None),
+                        ("b".to_owned(), "100".to_owned(), None, None),
+                    ],
+                    None,
+                    false,
+                );
+            }
         }
-    }
+    });
     let run = ltm_run(&project, true);
     let scores = ltm_series(&run.results, &score_key("x[b]", "total"), 0);
     assert_eq!(scores, vec![0.0; 5], "the other row is always the minimum");
@@ -291,7 +293,8 @@ fn black_box_loop_project(scale: f64) -> simlin_engine::datamodel::Project {
         variables: vec![
             aux("input_val", "0", true),
             aux("out", &format!("{scale} * (1 + TIME)"), false),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

@@ -720,7 +720,7 @@ mod tests {
         let synced =
             simlin_engine::layout::generate_best_layout(&project, "main", None).expect("layout");
         let first = simlin_engine::datamodel::StockFlow {
-            elements: Vec::new(),
+            elements: Vec::new().into(),
             zoom: 2.0,
             ..synced.clone()
         };

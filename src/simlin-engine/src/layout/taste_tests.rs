@@ -213,7 +213,7 @@ fn straighten_turns_every_arc_straight() {
 fn inapplicable_degradations_report_none() {
     let empty = StockFlow {
         name: None,
-        elements: vec![],
+        elements: vec![].into(),
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity: false,

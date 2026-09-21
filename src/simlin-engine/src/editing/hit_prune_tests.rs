@@ -223,7 +223,7 @@ fn sweep(
     context: &str,
 ) -> Tally {
     let index = HitIndex::new(project, "main").expect("main has a view");
-    let elements = view_of(project);
+    let elements = &view_of(project).to_vec();
     let kinds: HashMap<i32, &'static str> =
         elements.iter().map(|e| (e.get_uid(), kind(e))).collect();
     let points = sample(elements, &index, sampling, extra, rng);
@@ -329,18 +329,20 @@ fn crowded(mut elements: Vec<ViewElement>, rng: &mut Rng) -> datamodel::Project 
         .named_dimension("region", &["north", "south"])
         .build_datamodel()
         .dimensions;
-    for variable in &mut project.models[0].variables {
-        if !rng.chance(0.3) {
-            continue;
+    project.models[0].variables.rewrite(|variables| {
+        for variable in variables.iter_mut() {
+            if !rng.chance(0.3) {
+                continue;
+            }
+            let arrayed = Equation::ApplyToAll(vec!["region".to_string()], "1".to_string());
+            match variable {
+                Variable::Stock(v) => v.equation = arrayed,
+                Variable::Flow(v) => v.equation = arrayed,
+                Variable::Aux(v) => v.equation = arrayed,
+                Variable::Module(_) => {}
+            }
         }
-        let arrayed = Equation::ApplyToAll(vec!["region".to_string()], "1".to_string());
-        match variable {
-            Variable::Stock(v) => v.equation = arrayed,
-            Variable::Flow(v) => v.equation = arrayed,
-            Variable::Aux(v) => v.equation = arrayed,
-            Variable::Module(_) => {}
-        }
-    }
+    });
     project
 }
 

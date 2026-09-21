@@ -25,15 +25,17 @@ use simlin_engine::{Vm, canonicalize};
 /// identifies a loop's variables).
 fn assign_uids(project: &mut datamodel::Project) {
     for model in &mut project.models {
-        for (i, var) in model.variables.iter_mut().enumerate() {
-            let uid = (i as i32) + 1;
-            match var {
-                datamodel::Variable::Stock(s) => s.uid = Some(uid),
-                datamodel::Variable::Flow(f) => f.uid = Some(uid),
-                datamodel::Variable::Aux(a) => a.uid = Some(uid),
-                datamodel::Variable::Module(m) => m.uid = Some(uid),
+        model.variables.rewrite(|variables| {
+            for (i, var) in variables.iter_mut().enumerate() {
+                let uid = (i as i32) + 1;
+                match var {
+                    datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                    datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                    datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                    datamodel::Variable::Module(m) => m.uid = Some(uid),
+                }
             }
-        }
+        });
     }
 }
 
@@ -1399,7 +1401,7 @@ fn module_pin_project(sub_vars: Vec<datamodel::Variable>) -> datamodel::Project 
     p.models.push(datamodel::Model {
         name: "sub".to_string(),
         sim_specs: None,
-        variables: sub_vars,
+        variables: sub_vars.into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -1567,7 +1569,7 @@ fn unrelated_module_internal_pins_do_not_cross_normalize() {
     p.models.push(datamodel::Model {
         name: "sub".to_string(),
         sim_specs: None,
-        variables: smooth_sub_vars(),
+        variables: smooth_sub_vars().into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -1699,13 +1701,15 @@ fn previous_lagged_module_output_pin_scored_in_discovery_mode() {
     // Retarget the reader to a PREVIOUS-lagged read of the module output:
     // the lag is the cycle's ONLY state (the passthrough sub is stockless),
     // and it is what lets the otherwise-algebraic cycle compile.
-    for v in &mut project.models[0].variables {
-        if let datamodel::Variable::Aux(a) = v
-            && a.ident == "reader"
-        {
-            a.equation = datamodel::Equation::Scalar("PREVIOUS(sub.output, 0)".to_string());
+    project.models[0].variables.rewrite(|variables| {
+        for v in variables.iter_mut() {
+            if let datamodel::Variable::Aux(a) = v
+                && a.ident == "reader"
+            {
+                a.equation = datamodel::Equation::Scalar("PREVIOUS(sub.output, 0)".to_string());
+            }
         }
-    }
+    });
     pin_loop(
         &mut project,
         "main",
@@ -1959,8 +1963,7 @@ fn stateless_passthrough_module_root_bails_early() {
         module_pin_project(vec![sub_aux("input", "0"), sub_aux("output", "input * 2")]);
     let driver = project.models[0]
         .variables
-        .iter_mut()
-        .find(|v| v.get_ident() == "driver")
+        .find_mut(|v| v.get_ident() == "driver")
         .expect("fixture has driver");
     if let datamodel::Variable::Aux(a) = driver {
         a.equation = datamodel::Equation::Scalar("100 + time".to_string());

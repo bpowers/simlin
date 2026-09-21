@@ -21,6 +21,9 @@
 //! one of the two is edited. The same mutable borrow that drops the indexes
 //! copies a shared datamodel first (`Arc::make_mut`), so an edit of one project
 //! never reaches another, and a datamodel nothing else holds is edited in place.
+//! That copy still shares every variable and view element with the original
+//! (`datamodel::SharedVec`), so an edit costs a pointer per element plus what
+//! it changes.
 
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};

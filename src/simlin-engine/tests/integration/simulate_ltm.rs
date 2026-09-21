@@ -1633,7 +1633,8 @@ fn test_user_defined_module_ltm_vm() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1690,7 +1691,8 @@ fn test_user_defined_module_ltm_vm() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1904,7 +1906,8 @@ fn test_nested_module_ltm_vm() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1947,7 +1950,8 @@ fn test_nested_module_ltm_vm() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2416,7 +2420,8 @@ fn test_scalar_to_arrayed_link_score() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2569,7 +2574,8 @@ fn test_a2a_independent_per_element_computation() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2744,7 +2750,8 @@ fn build_arrayed_to_scalar_model(
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -3095,7 +3102,8 @@ fn build_stddev_feedback_model(c: f64) -> simlin_engine::datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -3181,7 +3189,8 @@ fn build_stddev_invariant_model(k: f64) -> simlin_engine::datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -3519,7 +3528,8 @@ fn build_two_reducer_target_model(c: f64) -> simlin_engine::datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -3815,7 +3825,8 @@ fn test_cross_dim_sum_vs_explicit_cross_validation() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -6514,7 +6525,8 @@ fn build_partial_reduce_model(name: &str) -> simlin_engine::datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -6771,7 +6783,8 @@ fn build_iterated_dim_subscript_model(name: &str) -> simlin_engine::datamodel::P
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -7109,7 +7122,8 @@ fn build_disjoint_dim_arrayed_target_model(name: &str) -> simlin_engine::datamod
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -7211,7 +7225,8 @@ fn build_disjoint_dim_unscoreable_model(name: &str) -> simlin_engine::datamodel:
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -8131,7 +8146,8 @@ fn build_heterogeneous_share_model(c: f64) -> simlin_engine::datamodel::Project 
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -8579,7 +8595,8 @@ fn build_dynamic_index_into_scalar_model() -> simlin_engine::datamodel::Project 
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -8741,7 +8758,8 @@ fn build_mixed_reducer_and_dynamic_index_model() -> simlin_engine::datamodel::Pr
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -8937,7 +8955,8 @@ fn build_var_backed_and_inline_same_reducer_model() -> simlin_engine::datamodel:
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -9101,7 +9120,8 @@ fn test_four_petal_canonical_loop_score_is_link_score_product() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -9310,7 +9330,8 @@ fn build_reducer_feedback_model(name: &str, elems: &[&str]) -> simlin_engine::da
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -9678,7 +9699,8 @@ fn build_lookup_table_feedback_model() -> simlin_engine::datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -9840,7 +9862,8 @@ fn two_module_isolated_loop_project(mod_b_gain: f64) -> simlin_engine::datamodel
                 uid: None,
                 compat: datamodel::Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -9913,7 +9936,8 @@ fn two_module_isolated_loop_project(mod_b_gain: f64) -> simlin_engine::datamodel
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -9984,7 +10008,8 @@ fn multi_output_passthrough_loop_project() -> simlin_engine::datamodel::Project 
                 uid: None,
                 compat: datamodel::Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -10054,7 +10079,8 @@ fn multi_output_passthrough_loop_project() -> simlin_engine::datamodel::Project 
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -10224,7 +10250,8 @@ fn parabola_through_module_loop_project() -> simlin_engine::datamodel::Project {
                 uid: None,
                 compat: datamodel::Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -10304,7 +10331,8 @@ fn parabola_through_module_loop_project() -> simlin_engine::datamodel::Project {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],

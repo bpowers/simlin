@@ -251,7 +251,8 @@ fn test_model_get_latex_equation_module_var_no_ast() {
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -270,7 +271,8 @@ fn test_model_get_latex_equation_module_var_no_ast() {
                     ai_state: None,
                     uid: None,
                     compat: Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],

@@ -280,9 +280,11 @@ fn normalize_model(model: &mut Model) {
     model.loop_metadata.clear();
 
     // Normalize each variable
-    for var in &mut model.variables {
-        normalize_variable(var);
-    }
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            normalize_variable(var);
+        }
+    });
 
     // Normalize synthetic net flows: xmutil and native may differ on whether
     // to synthesize a net flow for a stock or decompose its rate expression
@@ -378,34 +380,38 @@ fn normalize_synthetic_flows(model: &mut Model) {
         .collect();
 
     // Clear inflows/outflows for ALL stocks and drop synthetic variables.
-    for var in &mut model.variables {
-        if let Variable::Stock(stock) = var {
-            stock.inflows.clear();
-            stock.outflows.clear();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let Variable::Stock(stock) = var {
+                stock.inflows.clear();
+                stock.outflows.clear();
+            }
         }
-    }
+    });
     model
         .variables
         .retain(|v| !synthetic_idents.contains(v.get_ident()));
 
     // Demote Flow -> Aux for variables that are only flows because of
     // the synthesis-ambiguous stock.  This ensures both parsers agree.
-    for var in &mut model.variables {
-        if let Variable::Flow(flow) = var
-            && !unambiguous_flow_idents.contains(&flow.ident)
-        {
-            *var = Variable::Aux(Aux {
-                ident: flow.ident.clone(),
-                equation: flow.equation.clone(),
-                documentation: flow.documentation.clone(),
-                units: flow.units.clone(),
-                gf: flow.gf.clone(),
-                ai_state: flow.ai_state,
-                uid: flow.uid,
-                compat: flow.compat.clone(),
-            });
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let Variable::Flow(flow) = var
+                && !unambiguous_flow_idents.contains(&flow.ident)
+            {
+                *var = Variable::Aux(Aux {
+                    ident: flow.ident.clone(),
+                    equation: flow.equation.clone(),
+                    documentation: flow.documentation.clone(),
+                    units: flow.units.clone(),
+                    gf: flow.gf.clone(),
+                    ai_state: flow.ai_state,
+                    uid: flow.uid,
+                    compat: flow.compat.clone(),
+                });
+            }
         }
-    }
+    });
 }
 
 /// Clear view-related and AI-related fields from a variable.

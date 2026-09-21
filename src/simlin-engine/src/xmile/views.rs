@@ -890,7 +890,7 @@ pub mod view_element {
         ];
         let view = StockFlow {
             name: None,
-            elements: vec![],
+            elements: vec![].into(),
             view_box: Default::default(),
             zoom: 0.0,
             use_lettered_polarity: false,
@@ -927,7 +927,8 @@ pub mod view_element {
                     label_side: datamodel::view_element::LabelSide::Top,
                     compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -984,7 +985,8 @@ pub mod view_element {
                     label_side: datamodel::view_element::LabelSide::Top,
                     compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -1035,7 +1037,8 @@ pub mod view_element {
                     label_side: datamodel::view_element::LabelSide::Top,
                     compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -1088,7 +1091,8 @@ pub mod view_element {
                     label_side: datamodel::view_element::LabelSide::Top,
                     compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -1151,7 +1155,8 @@ pub mod view_element {
                     label_side: datamodel::view_element::LabelSide::Top,
                     compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -1355,7 +1360,7 @@ pub mod view_element {
         }];
         let view = StockFlow {
             name: None,
-            elements: vec![],
+            elements: vec![].into(),
             view_box: Default::default(),
             zoom: 0.0,
             use_lettered_polarity: false,
@@ -2103,7 +2108,8 @@ fn test_view_roundtrip() {
                 label_side: datamodel::view_element::LabelSide::Center,
                 compat: None,
             },
-        )],
+        )]
+        .into(),
         view_box: Rect {
             x: 2.4,
             y: 9.5,

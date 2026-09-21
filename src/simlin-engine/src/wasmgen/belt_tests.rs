@@ -428,14 +428,16 @@ fn leaky_belt_xmile(spec: BeltXmile<'_>, leaks: &[Leak]) -> String {
 fn set_ignore_earlier_zone_losses(project: &mut crate::datamodel::Project) {
     let mut flipped = 0usize;
     for model in project.models.iter_mut() {
-        for v in model.variables.iter_mut() {
-            if let crate::datamodel::Variable::Stock(s) = v
-                && let Some(c) = s.compat.conveyor.as_mut()
-            {
-                c.ignore_earlier_zone_losses = true;
-                flipped += 1;
+        model.variables.rewrite(|variables| {
+            for v in variables.iter_mut() {
+                if let crate::datamodel::Variable::Stock(s) = v
+                    && let Some(c) = s.compat.conveyor.as_mut()
+                {
+                    c.ignore_earlier_zone_losses = true;
+                    flipped += 1;
+                }
             }
-        }
+        });
     }
     assert_eq!(flipped, 1, "expected exactly one conveyor stock to flip");
 }

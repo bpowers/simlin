@@ -107,7 +107,8 @@ fn delay1() -> Model {
                 uid: None,
                 compat: Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![View::StockFlow(StockFlow {
             name: None,
             elements: vec![
@@ -205,7 +206,8 @@ fn delay1() -> Model {
                     y: 168_f64,
                     compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Rect {
                 x: 0_f64,
                 y: 0_f64,
@@ -321,7 +323,8 @@ fn delay3() -> Model {
             uid: None,
             compat: Compat::default(),
         })
-        ],
+        ]
+        .into(),
         views: vec![View::StockFlow(StockFlow {
             name: None,
             elements: vec![ViewElement::Stock(view_element::Stock {
@@ -459,7 +462,7 @@ fn delay3() -> Model {
                 x: 620_f64,
                 y: 171_f64,
                 compat: None,
-            })],
+            })].into(),
             view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
             zoom: 1_f64,
             use_lettered_polarity: false,
@@ -530,7 +533,8 @@ fn smth1() -> Model {
                 uid: None,
                 compat: Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![View::StockFlow(StockFlow {
             name: None,
             elements: vec![
@@ -615,7 +619,8 @@ fn smth1() -> Model {
                     y: 165.333_f64,
                     compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Rect {
                 x: 0_f64,
                 y: 0_f64,
@@ -737,7 +742,8 @@ fn smth3() -> Model {
                 uid: None,
                 compat: Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![View::StockFlow(StockFlow {
             name: None,
             elements: vec![
@@ -936,7 +942,8 @@ fn smth3() -> Model {
                     y: 320.333_f64,
                     compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Rect {
                 x: 0_f64,
                 y: 0_f64,
@@ -1029,7 +1036,8 @@ fn systems_conversion() -> Model {
             uid: None,
             compat: Compat::default(),
         })
-        ],
+        ]
+        .into(),
         views: vec![View::StockFlow(StockFlow {
             name: None,
             elements: vec![ViewElement::Aux(view_element::Aux {
@@ -1079,7 +1087,7 @@ fn systems_conversion() -> Model {
                 y: 200_f64,
                 label_side: LabelSide::Bottom,
                 compat: None,
-            })],
+            })].into(),
             view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
             zoom: 1_f64,
             use_lettered_polarity: false,
@@ -1147,7 +1155,8 @@ fn systems_leak() -> Model {
                 uid: None,
                 compat: Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![View::StockFlow(StockFlow {
             name: None,
             elements: vec![
@@ -1191,7 +1200,8 @@ fn systems_leak() -> Model {
                     label_side: LabelSide::Bottom,
                     compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Rect {
                 x: 0_f64,
                 y: 0_f64,
@@ -1266,7 +1276,8 @@ fn systems_rate() -> Model {
                 uid: None,
                 compat: Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![View::StockFlow(StockFlow {
             name: None,
             elements: vec![
@@ -1310,7 +1321,8 @@ fn systems_rate() -> Model {
                     label_side: LabelSide::Bottom,
                     compat: None,
                 }),
-            ],
+            ]
+            .into(),
             view_box: Rect {
                 x: 0_f64,
                 y: 0_f64,
@@ -1394,7 +1406,8 @@ fn trend() -> Model {
             uid: None,
             compat: Compat::default(),
         })
-        ],
+        ]
+        .into(),
         views: vec![View::StockFlow(StockFlow {
             name: None,
             elements: vec![ViewElement::Link(view_element::Link {
@@ -1495,7 +1508,7 @@ fn trend() -> Model {
                 x: 134.333_f64,
                 y: 244.333_f64,
                 compat: None,
-            })],
+            })].into(),
             view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
             zoom: 1_f64,
             use_lettered_polarity: false,
@@ -1591,10 +1604,11 @@ fn npv() -> Model {
                 uid: None,
                 compat: Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![View::StockFlow(StockFlow {
             name: None,
-            elements: vec![],
+            elements: vec![].into(),
             view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
             zoom: 1_f64,
             use_lettered_polarity: false,

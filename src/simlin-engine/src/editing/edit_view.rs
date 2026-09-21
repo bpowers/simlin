@@ -29,27 +29,22 @@ use super::gesture::ViewEdit;
 pub(crate) fn edited_view(base: &StockFlow, upsert: &[ViewElement], remove: &[i32]) -> StockFlow {
     let removed: HashSet<i32> = remove.iter().copied().collect();
     let mut upserts: HashMap<i32, &ViewElement> = upsert.iter().map(|e| (e.get_uid(), e)).collect();
-    let mut elements = Vec::with_capacity(base.elements.len() + upsert.len());
-    for element in &base.elements {
-        let uid = element.get_uid();
-        if removed.contains(&uid) {
-            continue;
-        }
-        match upserts.remove(&uid) {
-            Some(next) => elements.push(next.clone()),
-            None => elements.push(element.clone()),
+    // The edited view shares every element the edit leaves alone with `base`.
+    let mut next = base.clone();
+    next.elements
+        .retain(|element| !removed.contains(&element.get_uid()));
+    for index in 0..next.elements.len() {
+        if let Some(element) = upserts.remove(&next.elements[index].get_uid()) {
+            next.elements.replace(index, element.clone());
         }
     }
     for element in upsert {
         let uid = element.get_uid();
         if !removed.contains(&uid) && upserts.remove(&uid).is_some() {
-            elements.push(element.clone());
+            next.elements.push(element.clone());
         }
     }
-    StockFlow {
-        elements,
-        ..base.clone()
-    }
+    next
 }
 
 fn kind_of(variable: &Variable) -> VariableKind {

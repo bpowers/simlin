@@ -1747,7 +1747,8 @@ fn two_arg_ramp_in_submodule_reads_root_final_time() {
                     compat: datamodel::Compat::default(),
                     ai_state: None,
                     uid: None,
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1775,7 +1776,8 @@ fn two_arg_ramp_in_submodule_reads_root_final_time() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],

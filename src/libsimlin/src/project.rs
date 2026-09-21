@@ -217,10 +217,10 @@ fn new_datamodel(name: String) -> engine::datamodel::Project {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![],
+            variables: vec![].into(),
             views: vec![datamodel::View::StockFlow(datamodel::StockFlow {
                 name: None,
-                elements: vec![],
+                elements: vec![].into(),
                 view_box: datamodel::Rect::default(),
                 zoom: 1.0,
                 use_lettered_polarity: false,
@@ -421,7 +421,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
     let new_model = engine::datamodel::Model {
         name: model_name_str.to_string(),
         sim_specs: None,
-        variables: vec![],
+        variables: vec![].into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

@@ -111,7 +111,8 @@ fn rate_project(available: f64, requested: f64, dest_capacity: f64) -> datamodel
                 ),
                 x_aux("out_actual", "rate_mod.actual"),
                 x_aux("out_remaining", "rate_mod.remaining"),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -219,7 +220,8 @@ fn leak_project(available: f64, rate: f64, dest_capacity: f64) -> datamodel::Pro
                 ),
                 x_aux("out_actual", "leak_mod.actual"),
                 x_aux("out_remaining", "leak_mod.remaining"),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -328,7 +330,8 @@ fn conversion_project(available: f64, rate: f64, dest_capacity: f64) -> datamode
                 x_aux("out_outflow", "conv_mod.outflow"),
                 x_aux("out_waste", "conv_mod.waste"),
                 x_aux("out_remaining", "conv_mod.remaining"),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

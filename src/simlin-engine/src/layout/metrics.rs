@@ -1295,8 +1295,9 @@ pub fn analyze_layout(view: &datamodel::StockFlow) -> LayoutAnalysis {
 }
 
 fn analyze(view: &datamodel::StockFlow, sink: &mut DefectSink) -> LayoutMetrics {
-    let nodes = build_scene_nodes(&view.elements);
-    let connectors = collect_connector_geometry(&view.elements);
+    let elements = view.elements.to_vec();
+    let nodes = build_scene_nodes(&elements);
+    let connectors = collect_connector_geometry(&elements);
 
     let node_overlap = node_overlap_term(&nodes, sink);
     let node_connector_overlap = node_connector_overlap_term(&nodes, &connectors, sink);

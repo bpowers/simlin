@@ -370,7 +370,7 @@ fn every_scenario_writes_equations_that_read_names_needing_quotes() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: Vec::new(),
+            variables: Vec::new().into(),
             views: Vec::new(),
             loop_metadata: Vec::new(),
             groups: Vec::new(),

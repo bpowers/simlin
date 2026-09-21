@@ -298,7 +298,8 @@ fn chain_with_waste_model() -> datamodel::Model {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -436,7 +437,8 @@ fn chain_with_two_waste_model() -> datamodel::Model {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
@@ -504,7 +506,7 @@ fn test_layout_side_flows_take_separate_faces() {
                     let model = datamodel::Model {
                         name: TEST_MODEL.to_string(),
                         sim_specs: None,
-                        variables: vars,
+                        variables: vars.into(),
                         views: Vec::new(),
                         loop_metadata: Vec::new(),
                         groups: Vec::new(),
@@ -628,7 +630,8 @@ fn test_layout_single_outflow_still_horizontal() {
                 ai_state: None,
                 uid: None,
             }),
-        ],
+        ]
+        .into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),

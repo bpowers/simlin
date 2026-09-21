@@ -142,8 +142,7 @@ fn uid_named(view: &StockFlow, ident: &str) -> i32 {
 
 fn element_named<'a>(view: &'a mut StockFlow, ident: &str) -> &'a mut ViewElement {
     view.elements
-        .iter_mut()
-        .find(|e| named_ident(e).as_deref() == Some(ident))
+        .find_mut(|e| named_ident(e).as_deref() == Some(ident))
         .unwrap_or_else(|| panic!("{ident} is drawn"))
 }
 
@@ -230,16 +229,18 @@ fn row_for(kind: FindingKind) {
             let e = edited(POPULATION, ScenarioKind::AddParameter);
             let link = link_between(&e.after_view, "average_lifespan", "deaths");
             e.row(kind, unchanged, |v| {
-                for el in &mut v.elements {
-                    if let ViewElement::Link(l) = el
-                        && l.uid == link
-                    {
-                        l.shape = match l.shape {
-                            LinkShape::Straight => LinkShape::Arc(30.0),
-                            _ => LinkShape::Straight,
-                        };
+                v.elements.rewrite(|elements| {
+                    for el in elements.iter_mut() {
+                        if let ViewElement::Link(l) = el
+                            && l.uid == link
+                        {
+                            l.shape = match l.shape {
+                                LinkShape::Straight => LinkShape::Arc(30.0),
+                                _ => LinkShape::Straight,
+                            };
+                        }
                     }
-                }
+                });
             });
         }
         FindingKind::StaleLinkRemains => {

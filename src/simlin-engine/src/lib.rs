@@ -83,6 +83,8 @@ mod module_functions;
 mod parser;
 mod patch;
 #[cfg(test)]
+mod patch_sharing_tests;
+#[cfg(test)]
 mod per_element_gf_tests;
 // Generated code: silence the lints buffa-codegen's output trips rather than
 // hand-editing a file the freshness test regenerates.
@@ -103,6 +105,7 @@ mod rk_integration_tests;
 #[cfg(test)]
 mod round_builtin_tests;
 pub mod serde;
+mod shared_vec;
 mod snapshot_arg;
 #[path = "stdlib.gen.rs"]
 mod stdlib;

@@ -280,7 +280,7 @@ impl LayoutState {
         Self {
             uid_manager,
             display_names,
-            elements: old_view.elements.clone(),
+            elements: old_view.elements.clone().into(),
             positions,
             flow_templates,
             cloud_ident_to_uid,
@@ -2906,7 +2906,7 @@ pub fn fresh_layout(
     if chains.is_empty() && model.variables.is_empty() {
         return Ok(datamodel::StockFlow {
             name: None,
-            elements: Vec::new(),
+            elements: Vec::new().into(),
             view_box: Rect {
                 x: 0.0,
                 y: 0.0,
@@ -2996,7 +2996,7 @@ pub fn fresh_layout(
 
     Ok(datamodel::StockFlow {
         name: None,
-        elements: state.elements,
+        elements: state.elements.into(),
         view_box,
         zoom: 1.0,
         use_lettered_polarity: false,

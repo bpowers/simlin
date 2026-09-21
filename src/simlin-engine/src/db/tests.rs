@@ -58,7 +58,8 @@ pub(crate) fn simple_project() -> datamodel::Project {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -131,7 +132,8 @@ fn test_sync_multi_model() {
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -149,7 +151,8 @@ fn test_sync_multi_model() {
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -233,7 +236,8 @@ fn test_sync_all_variable_kinds() {
                     ai_state: None,
                     uid: None,
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -295,7 +299,8 @@ fn test_sync_variable_with_gf() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -334,7 +339,7 @@ fn test_sync_dimensions() {
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables: vec![],
+            variables: vec![].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -371,7 +376,11 @@ fn test_sync_resync_updates() {
     );
 
     // Modify the equation and re-sync
-    project.models[0].variables[0].set_scalar_equation("200");
+    project.models[0]
+        .variables
+        .get_mut(0)
+        .unwrap()
+        .set_scalar_equation("200");
     let result2 = sync_from_datamodel(&db, &project);
 
     let pop2 = &result2.models["main"].variables["population"];
@@ -470,7 +479,8 @@ fn test_parse_source_variable_stock() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -532,7 +542,8 @@ fn test_incrementality_unchanged_variable_not_reparsed() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -650,7 +661,8 @@ fn test_variable_direct_dependencies_with_refs() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -695,7 +707,8 @@ fn test_variable_direct_dependencies_stock() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -743,7 +756,8 @@ fn test_variable_direct_dependencies_module() {
                 compat: datamodel::Compat::default(),
                 ai_state: None,
                 uid: None,
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -810,7 +824,8 @@ fn test_incrementality_same_deps_no_recompute() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -926,7 +941,8 @@ fn test_incrementality_different_deps_recompute() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1015,7 +1031,8 @@ fn test_model_dependency_graph_basic() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1088,7 +1105,8 @@ fn test_model_dependency_graph_stock_breaks_chain() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1158,7 +1176,8 @@ fn test_model_dependency_graph_circular_emits_diagnostic() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -1363,7 +1382,8 @@ fn test_model_causal_edges_normalizes_inter_module_output_refs() {
                         ai_state: None,
                         uid: None,
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1396,7 +1416,8 @@ fn test_model_causal_edges_normalizes_inter_module_output_refs() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1429,7 +1450,8 @@ fn test_model_causal_edges_normalizes_inter_module_output_refs() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1512,7 +1534,8 @@ fn test_model_causal_edges_skips_internal_module_refs() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1545,7 +1568,8 @@ fn test_model_causal_edges_skips_internal_module_refs() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1618,7 +1642,8 @@ fn test_model_causal_edges_normalizes_leading_middot_parent_refs() {
                         ai_state: None,
                         uid: None,
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1666,7 +1691,8 @@ fn test_model_causal_edges_normalizes_leading_middot_parent_refs() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
-                ],
+                ]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1687,7 +1713,8 @@ fn test_model_causal_edges_normalizes_leading_middot_parent_refs() {
                         can_be_module_input: true,
                         ..datamodel::Compat::default()
                     },
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -1988,7 +2015,8 @@ fn two_loop_project() -> datamodel::Project {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2164,7 +2192,8 @@ fn test_accumulator_parse_error_bad_equation() {
                 ai_state: None,
                 uid: None,
                 compat: datamodel::Compat::default(),
-            })],
+            })]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2244,7 +2273,8 @@ fn test_accumulator_parity_with_struct_fields() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2307,7 +2337,8 @@ fn test_accumulator_multiple_models() {
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2325,7 +2356,8 @@ fn test_accumulator_multiple_models() {
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2385,7 +2417,8 @@ fn test_accumulator_incrementality() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2499,7 +2532,8 @@ fn test_incremental_sync_preserves_cache_for_unchanged_variable() {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 }),
-            ],
+            ]
+            .into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -2523,7 +2557,11 @@ fn test_incremental_sync_preserves_cache_for_unchanged_variable() {
 
     // Modify only alpha's equation
     let mut project2 = project.clone();
-    project2.models[0].variables[0].set_scalar_equation("42");
+    project2.models[0]
+        .variables
+        .get_mut(0)
+        .unwrap()
+        .set_scalar_equation("42");
 
     // Incremental sync with previous state
     let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
@@ -2717,7 +2755,11 @@ fn test_incremental_sync_successive_patches() {
     );
 
     // Patch 2: change the variable's equation
-    project.models[0].variables[0].set_scalar_equation("999");
+    project.models[0]
+        .variables
+        .get_mut(0)
+        .unwrap()
+        .set_scalar_equation("999");
     let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
 
     let pop_src2 = state2.models["main"].variables["population"].source_var;
@@ -2762,7 +2804,8 @@ fn test_sync_preserves_module_visibility_from_datamodel() {
                     },
                     ai_state: None,
                     uid: None,
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2780,7 +2823,8 @@ fn test_sync_preserves_module_visibility_from_datamodel() {
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2821,7 +2865,8 @@ fn test_incremental_sync_updates_module_visibility() {
                     compat: datamodel::Compat::default(),
                     ai_state: None,
                     uid: None,
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2839,7 +2884,8 @@ fn test_incremental_sync_updates_module_visibility() {
                     ai_state: None,
                     uid: None,
                     compat: datamodel::Compat::default(),
-                })],
+                })]
+                .into(),
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -2851,7 +2897,7 @@ fn test_incremental_sync_updates_module_visibility() {
     };
 
     let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
-    if let datamodel::Variable::Module(m) = &mut project.models[0].variables[0] {
+    if let Some(datamodel::Variable::Module(m)) = project.models[0].variables.get_mut(0) {
         m.compat.visibility = datamodel::Visibility::Public;
     } else {
         panic!("expected module variable in test fixture");

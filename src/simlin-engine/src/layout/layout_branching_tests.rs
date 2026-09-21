@@ -64,7 +64,7 @@ fn make_model(variables: Vec<datamodel::Variable>) -> datamodel::Model {
     datamodel::Model {
         name: TEST_MODEL.to_string(),
         sim_specs: None,
-        variables,
+        variables: variables.into(),
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),

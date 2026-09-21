@@ -68,7 +68,8 @@ pub(super) fn module_and_array_project() -> datamodel::Project {
                 datamodel::Equation::Scalar("SUM(arr)".to_string()),
                 false,
             ),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -127,7 +128,8 @@ fn smooth_of_module_output_project() -> datamodel::Project {
                 uid: None,
                 compat: datamodel::Compat::default(),
             }),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
@@ -630,7 +632,8 @@ fn stock_initialized_through_a_nested_stockless_module_reads_its_t0_value() {
             }),
             module_var("inner", "producer", &[("feed", "inner.input")]),
             plain_aux("out", "inner.output", None),
-        ],
+        ]
+        .into(),
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],

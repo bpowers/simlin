@@ -128,7 +128,7 @@ fn project_with(
         models: vec![datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
-            variables,
+            variables: variables.into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
@@ -526,7 +526,7 @@ fn module_input_wired_from_lookup_only_is_compile_error() {
         project.models.push(datamodel::Model {
             name: "sub".to_string(),
             sim_specs: None,
-            variables: vec![port, aux("y", "g")],
+            variables: vec![port, aux("y", "g")].into(),
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],

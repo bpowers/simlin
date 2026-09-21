@@ -47,7 +47,7 @@ fn sel_link(uid: i32, from_uid: i32, to_uid: i32) -> ViewElement {
 fn sel_view(name: &str, elements: Vec<ViewElement>) -> datamodel::StockFlow {
     datamodel::StockFlow {
         name: Some(name.to_string()),
-        elements,
+        elements: elements.into(),
         view_box: Rect {
             x: 0.0,
             y: 0.0,
@@ -410,31 +410,33 @@ fn test_weighted_cost_guard_rejects_degenerate_layout() {
     // Collapse every positioned node onto the origin so the shapes overlap
     // maximally (links/aliases/groups have no independent position).
     let mut degenerate = view.clone();
-    for elem in &mut degenerate.elements {
-        match elem {
-            ViewElement::Aux(a) => {
-                a.x = 0.0;
-                a.y = 0.0;
+    degenerate.elements.rewrite(|elements| {
+        for elem in elements.iter_mut() {
+            match elem {
+                ViewElement::Aux(a) => {
+                    a.x = 0.0;
+                    a.y = 0.0;
+                }
+                ViewElement::Stock(s) => {
+                    s.x = 0.0;
+                    s.y = 0.0;
+                }
+                ViewElement::Flow(f) => {
+                    f.x = 0.0;
+                    f.y = 0.0;
+                }
+                ViewElement::Module(m) => {
+                    m.x = 0.0;
+                    m.y = 0.0;
+                }
+                ViewElement::Cloud(c) => {
+                    c.x = 0.0;
+                    c.y = 0.0;
+                }
+                ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => {}
             }
-            ViewElement::Stock(s) => {
-                s.x = 0.0;
-                s.y = 0.0;
-            }
-            ViewElement::Flow(f) => {
-                f.x = 0.0;
-                f.y = 0.0;
-            }
-            ViewElement::Module(m) => {
-                m.x = 0.0;
-                m.y = 0.0;
-            }
-            ViewElement::Cloud(c) => {
-                c.x = 0.0;
-                c.y = 0.0;
-            }
-            ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => {}
         }
-    }
+    });
 
     let degenerate_cost =
         compute_layout_metrics(&degenerate, &config).weighted_cost(&MetricWeights::default());

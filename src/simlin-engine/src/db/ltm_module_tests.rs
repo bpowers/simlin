@@ -1561,15 +1561,17 @@ fn test_multi_output_loop_link_uses_per_exit_port_alias() {
 /// `loop_metadata` (the pinned-loop primitive) can reference them.
 fn assign_uids_for_pinning(project: &mut datamodel::Project) {
     for model in &mut project.models {
-        for (i, var) in model.variables.iter_mut().enumerate() {
-            let uid = (i as i32) + 1;
-            match var {
-                datamodel::Variable::Stock(s) => s.uid = Some(uid),
-                datamodel::Variable::Flow(f) => f.uid = Some(uid),
-                datamodel::Variable::Aux(a) => a.uid = Some(uid),
-                datamodel::Variable::Module(m) => m.uid = Some(uid),
+        model.variables.rewrite(|variables| {
+            for (i, var) in variables.iter_mut().enumerate() {
+                let uid = (i as i32) + 1;
+                match var {
+                    datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                    datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                    datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                    datamodel::Variable::Module(m) => m.uid = Some(uid),
+                }
             }
-        }
+        });
     }
 }
 
