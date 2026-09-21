@@ -34,6 +34,7 @@
 //!   of its own work ([`Workspace::waiting`]) and answers that it kept
 //!   nothing, so that work waits at most one unit, and the agent calls again.
 
+mod battery;
 mod behavior;
 mod catalog;
 mod changes;
@@ -46,6 +47,10 @@ mod runs;
 mod series;
 mod variables;
 
+pub use battery::{
+    Condition, Difference, Outcome, Problem, ProblemKind, Response, RunTestsInput, RunTestsOutput,
+    TestName, TestResult, TestSummary, TimeConstantEvidence,
+};
 pub use behavior::{BehaviorMode, Damping, Direction, ModeKind, classify};
 #[cfg(feature = "schema")]
 pub use catalog::generate_catalog_json;
@@ -129,6 +134,10 @@ impl Workspace<'_> {
 pub struct ToolOutput {
     pub json: String,
     pub is_error: bool,
+    /// That the call stopped for other work on the project and kept nothing
+    /// ([`Workspace::waiting`]): a refusal a host that retries by itself
+    /// looks for.
+    pub interrupted: bool,
 }
 
 /// A tool name the catalog does not list: the host's mistake, not the agent's,
@@ -196,7 +205,10 @@ impl Session {
             return Ok(ToolOutput::refusal(&interrupted));
         }
         let ws = &mut ws;
-        Ok(match name {
+        // A call that stops keeps nothing, the ids it gave out on the way
+        // included.
+        let evidence = self.evidence.clone();
+        let output = match name {
             ToolName::ReadModel => {
                 respond(name, input, |input| outline::read_model(self, ws, input))
             }
@@ -216,7 +228,12 @@ impl Session {
             ToolName::AnalyzeLoops => {
                 respond(name, input, |input| loops::analyze_loops(self, ws, input))
             }
-        })
+            ToolName::RunTests => respond(name, input, |input| battery::run_tests(self, ws, input)),
+        };
+        if output.interrupted {
+            self.evidence = evidence;
+        }
+        Ok(output)
     }
 
     /// The results of the run named `name` -- `"current"` for the model as
@@ -372,6 +389,7 @@ fn respond<I: DeserializeOwned, O: Serialize>(
         Ok(output) => ToolOutput {
             json: serde_json::to_string(&output).expect("tool outputs serialize"),
             is_error: false,
+            interrupted: false,
         },
         Err(error) => ToolOutput::refusal(&error),
     }
@@ -382,6 +400,7 @@ impl ToolOutput {
         ToolOutput {
             json: serde_json::to_string(error).expect("refusals serialize"),
             is_error: true,
+            interrupted: error.interrupted,
         }
     }
 }

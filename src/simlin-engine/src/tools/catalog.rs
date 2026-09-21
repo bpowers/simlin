@@ -28,6 +28,7 @@ pub enum ToolName {
     ReadBehavior,
     ListRuns,
     AnalyzeLoops,
+    RunTests,
 }
 
 /// What calling a tool does to the project.
@@ -42,7 +43,7 @@ pub enum ToolEffect {
 }
 
 impl ToolName {
-    pub const ALL: [ToolName; 7] = [
+    pub const ALL: [ToolName; 8] = [
         ToolName::ReadModel,
         ToolName::ReadVariables,
         ToolName::FindVariables,
@@ -50,6 +51,7 @@ impl ToolName {
         ToolName::ReadBehavior,
         ToolName::ListRuns,
         ToolName::AnalyzeLoops,
+        ToolName::RunTests,
     ];
 
     pub fn name(self) -> &'static str {
@@ -61,6 +63,7 @@ impl ToolName {
             ToolName::ReadBehavior => "read_behavior",
             ToolName::ListRuns => "list_runs",
             ToolName::AnalyzeLoops => "analyze_loops",
+            ToolName::RunTests => "run_tests",
         }
     }
 
@@ -125,6 +128,18 @@ impl ToolName {
                  from structure, and an experiment that disturbs it shows which dominates. For \
                  an experiment that replaced equations, names the loops it cut."
             }
+            ToolName::RunTests => {
+                "Runs the validation battery, the model tests of system dynamics practice: the \
+                 engine's unit check; extreme conditions (each constant at zero, or a time \
+                 constant at DT, and at ten times its value, or a share at the whole: values that \
+                 become NaN or infinite, stocks that go negative); integration error (the run at \
+                 half the DT and under RK4); sensitivity (each constant at half and double: a \
+                 change of behavior); loop knockouts (a named variable held at its initial value: \
+                 the loops that cuts); disturbances (a step in a constant: the response, and the \
+                 loops that lead after it). Unit conversions are left out unless named. Each \
+                 check that did not pass comes with an id (T1, T2, ...) that claims can cite. \
+                 Run it before judging a model."
+            }
         }
     }
 
@@ -136,7 +151,8 @@ impl ToolName {
             | ToolName::RunExperiment
             | ToolName::ReadBehavior
             | ToolName::ListRuns
-            | ToolName::AnalyzeLoops => ToolEffect::Read,
+            | ToolName::AnalyzeLoops
+            | ToolName::RunTests => ToolEffect::Read,
         }
     }
 }
@@ -154,7 +170,7 @@ pub fn generate_catalog_json() -> String {
         AnalyzeLoopsInput, AnalyzeLoopsOutput, FindVariablesInput, FindVariablesOutput,
         ListRunsInput, ListRunsOutput, ReadBehaviorInput, ReadBehaviorOutput, ReadModelInput,
         ReadModelOutput, ReadVariablesInput, ReadVariablesOutput, RunExperimentInput,
-        RunExperimentOutput,
+        RunExperimentOutput, RunTestsInput, RunTestsOutput,
     };
 
     #[derive(Serialize)]
@@ -218,6 +234,7 @@ pub fn generate_catalog_json() -> String {
                 ToolName::AnalyzeLoops => {
                     (input::<AnalyzeLoopsInput>(), output::<AnalyzeLoopsOutput>())
                 }
+                ToolName::RunTests => (input::<RunTestsInput>(), output::<RunTestsOutput>()),
             };
             Entry {
                 name: tool.name(),

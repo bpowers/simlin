@@ -34,8 +34,8 @@ use super::outline::{
     AuxKind, IntegrationMethod, SpecsOutline, aux_kind, constant_value, equation_text,
 };
 use super::runs::{
-    CURRENT, ElementValues, EquationChange, Run, RunPlan, SpecsChange, ValueChange, execute,
-    has_table,
+    CURRENT, ElementValues, EquationChange, Replacement, Run, RunPlan, SpecsChange, ValueChange,
+    execute, has_table,
 };
 use super::series::{SeriesCore, element_series, round};
 use super::{Session, ToolError, Workspace, names, resolve_model};
@@ -395,7 +395,7 @@ pub(crate) fn run_experiment(
                 }
                 plan.equations.push(EquationChange {
                     variable: canonical,
-                    equation: equation.clone(),
+                    replacement: Replacement::Equation(equation.clone()),
                 });
                 applied.push(AppliedChange {
                     variable: var.get_ident().to_string(),
@@ -465,7 +465,7 @@ pub(crate) fn run_experiment(
 
 /// Whether a variable holds a value an experiment can set: a constant, or a
 /// flow whose equation is a number. Refused with the repair otherwise.
-fn settable(var: &Variable) -> Result<(), ToolError> {
+pub(crate) fn settable(var: &Variable) -> Result<(), ToolError> {
     let name = var.get_ident();
     match var {
         Variable::Aux(aux) => match aux_kind(aux) {
@@ -499,7 +499,7 @@ fn settable(var: &Variable) -> Result<(), ToolError> {
 
 /// A value change's per-element values, each `to(what it was in the base run
 /// when the change takes effect)`, and the change as applied.
-fn value_change(
+pub(crate) fn value_change(
     base: &Run,
     var: &Variable,
     from_time: Option<f64>,
@@ -607,6 +607,7 @@ fn specs_change(input: Option<&SpecsInput>) -> Result<SpecsChange, ToolError> {
         stop: input.stop,
         dt: input.dt,
         method: input.method,
+        save_step: None,
     })
 }
 

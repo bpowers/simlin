@@ -2651,7 +2651,7 @@
                 "format": "double"
               },
               "elements": {
-                "description": "An arrayed constant's value, element by element.",
+                "description": "An arrayed constant's value element by element, or an equation for\neach element.",
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/ListedElement"
@@ -2682,7 +2682,7 @@
             ]
           },
           "ListedElement": {
-            "description": "One element's value in a listed change.",
+            "description": "One element's value, or its replacement equation, in a listed change.",
             "type": "object",
             "properties": {
               "element": {
@@ -2690,13 +2690,21 @@
                 "type": "string"
               },
               "value": {
-                "type": "number",
+                "type": [
+                  "number",
+                  "null"
+                ],
                 "format": "double"
+              },
+              "equation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
-              "element",
-              "value"
+              "element"
             ]
           },
           "SpecsChange": {
@@ -2733,6 +2741,14 @@
                     "type": "null"
                   }
                 ]
+              },
+              "saveStep": {
+                "description": "How often the run saves. An experiment keeps the model's; a battery\ncheck that refines DT saves at the model's own times, so its rows\ncompare with the model's one for one and it holds no more than the\nmodel's run does.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
               }
             }
           },
@@ -3159,6 +3175,601 @@
           "found",
           "complete",
           "partitions"
+        ]
+      }
+    },
+    {
+      "name": "run_tests",
+      "description": "Runs the validation battery, the model tests of system dynamics practice: the engine's unit check; extreme conditions (each constant at zero, or a time constant at DT, and at ten times its value, or a share at the whole: values that become NaN or infinite, stocks that go negative); integration error (the run at half the DT and under RK4); sensitivity (each constant at half and double: a change of behavior); loop knockouts (a named variable held at its initial value: the loops that cuts); disturbances (a step in a constant: the response, and the loops that lead after it). Unit conversions are left out unless named. Each check that did not pass comes with an id (T1, T2, ...) that claims can cite. Run it before judging a model.",
+      "effect": "read",
+      "inputSchema": {
+        "$defs": {
+          "TestName": {
+            "description": "A test of the battery.",
+            "type": "string",
+            "enum": [
+              "units",
+              "extreme_conditions",
+              "integration_error",
+              "sensitivity",
+              "loop_knockout",
+              "disturbance"
+            ]
+          }
+        },
+        "title": "RunTestsInput",
+        "type": "object",
+        "properties": {
+          "tests": {
+            "description": "The tests to run: all of them when absent.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/TestName"
+            },
+            "default": []
+          },
+          "targets": {
+            "description": "The variables the targeted tests change, in place of their defaults:\nextreme conditions, sensitivity and disturbance take constants (the\nconstants that feed the model's flows by default, less its unit\nconversions); a loop knockout holds variables at their initial\nvalues, and runs only on targets named here. At most 12.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 12,
+            "default": []
+          },
+          "record": {
+            "description": "The variables whose responses sensitivity, knockouts and disturbances\nreport: the model's stocks when absent. At most 12.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 12,
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "$defs": {
+          "TestSummary": {
+            "type": "object",
+            "properties": {
+              "test": {
+                "$ref": "#/$defs/TestName"
+              },
+              "checks": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "passed": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "flagged": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "observed": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "notRun": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "skipped": {
+                "description": "Why the test made no checks.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "note": {
+                "description": "What the test left out and why: the unit conversions its defaults\nleave out, and series that are not a number in the model's own run.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "test",
+              "checks"
+            ]
+          },
+          "TestName": {
+            "description": "A test of the battery.",
+            "type": "string",
+            "enum": [
+              "units",
+              "extreme_conditions",
+              "integration_error",
+              "sensitivity",
+              "loop_knockout",
+              "disturbance"
+            ]
+          },
+          "TestResult": {
+            "description": "One check: what it changed, how it came out, and what it found.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The session's id for this check (`T1`, ...), the same when it is run\nagain.",
+                "type": "string"
+              },
+              "test": {
+                "$ref": "#/$defs/TestName"
+              },
+              "outcome": {
+                "$ref": "#/$defs/Outcome"
+              },
+              "variable": {
+                "description": "The variable it changed, as the model names it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "condition": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Condition"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "timeConstant": {
+                "description": "Why a check at DT took its constant for a time constant: if that is\nwrong, the check tested the wrong extreme.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TimeConstantEvidence"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "value": {
+                "description": "The value it gave the variable (a scalar).",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "fromTime": {
+                "description": "When the change took effect (a disturbance).",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "diagnostics": {
+                "description": "The unit diagnostics, by id (units).",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "problems": {
+                "description": "What went wrong in the run (extreme conditions), first first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Problem"
+                }
+              },
+              "differences": {
+                "description": "The stocks (or elements) that differed most from the model's run\n(integration error).",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Difference"
+                }
+              },
+              "responses": {
+                "description": "How recorded variables responded, the largest changes and every\nmaterial change of behavior (sensitivity, knockout, disturbance).",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Response"
+                }
+              },
+              "cutLinks": {
+                "description": "The links a knockout removed.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/CutLink"
+                }
+              },
+              "loops": {
+                "description": "Loop ids: those a knockout cut, or those that led after a\ndisturbance.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "reason": {
+                "description": "Why a check did not run.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "note": {
+                "description": "What the outcome rests on that the run cannot show: a non-negative\nmarking this engine does not enforce.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "test",
+              "outcome"
+            ]
+          },
+          "Outcome": {
+            "description": "How a check came out.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "passed"
+                ]
+              },
+              {
+                "description": "The model fails the check: fix the model, or say why the check does\nnot apply.",
+                "type": "string",
+                "const": "failed"
+              },
+              {
+                "description": "The check could not run; its reason says why.",
+                "type": "string",
+                "const": "not_run"
+              },
+              {
+                "description": "A result for judgment: it may be right, and a modeler should say.",
+                "type": "string",
+                "const": "flagged"
+              },
+              {
+                "description": "What happened, for an explanation: a knockout's or a disturbance's.",
+                "type": "string",
+                "const": "observed"
+              }
+            ]
+          },
+          "Condition": {
+            "description": "What a check changed.",
+            "oneOf": [
+              {
+                "description": "A constant at zero.",
+                "type": "string",
+                "const": "zero"
+              },
+              {
+                "description": "A time constant at its low extreme: DT, or three DTs for a\nthird-order delay's or smooth's time, whose stages each take a third\nof it.",
+                "type": "string",
+                "const": "dt"
+              },
+              {
+                "description": "A constant at ten times its value.",
+                "type": "string",
+                "const": "ten_times"
+              },
+              {
+                "description": "A share or fraction at its high extreme, the whole: 1, or 100 for one\nin percent.",
+                "type": "string",
+                "const": "whole"
+              },
+              {
+                "description": "A constant at half its value.",
+                "type": "string",
+                "const": "half"
+              },
+              {
+                "description": "A constant at double its value (a share at most the whole).",
+                "type": "string",
+                "const": "double"
+              },
+              {
+                "description": "The run at half its DT.",
+                "type": "string",
+                "const": "half_dt"
+              },
+              {
+                "description": "The run under fourth-order Runge-Kutta.",
+                "type": "string",
+                "const": "rk4"
+              },
+              {
+                "description": "A variable held at its initial value, each element of an arrayed one\nat its own.",
+                "type": "string",
+                "const": "held"
+              },
+              {
+                "description": "A constant stepped up by a tenth, a tenth of the way into the run.",
+                "type": "string",
+                "const": "step"
+              }
+            ]
+          },
+          "TimeConstantEvidence": {
+            "description": "Why the battery took a constant for a time constant, and so tested it at\nDT rather than zero.",
+            "oneOf": [
+              {
+                "description": "Its units are a unit of time.",
+                "type": "string",
+                "const": "time_units"
+              },
+              {
+                "description": "It is the time of a delay, smooth or trend.",
+                "type": "string",
+                "const": "delay_time"
+              },
+              {
+                "description": "It has no units, and divides a quantity a stock moves into a rate:\n`(goal - level) / adjustment_time`.",
+                "type": "string",
+                "const": "divides_a_rate"
+              },
+              {
+                "description": "It has no units, and its reciprocal multiplies a quantity a stock\nmoves into a rate: `population * (1 / lifetime)`, or `population *\ndeath_fraction` with `death_fraction = 1 / lifetime`.",
+                "type": "string",
+                "const": "reciprocal_in_a_rate"
+              }
+            ]
+          },
+          "Problem": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/ProblemKind"
+              },
+              "variable": {
+                "description": "The variable (or element), as the model names it.",
+                "type": "string"
+              },
+              "time": {
+                "description": "When it first happened.",
+                "type": "number",
+                "format": "double"
+              },
+              "value": {
+                "description": "Its least value (goes negative).",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "nonNegative": {
+                "description": "Whether the model marks it non-negative. The engine does not enforce\nthe marking, so it goes negative here where a tool that enforces it\nwould hold it at zero.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "variable",
+              "time"
+            ]
+          },
+          "ProblemKind": {
+            "oneOf": [
+              {
+                "description": "A value became NaN or infinite.",
+                "type": "string",
+                "const": "non_finite"
+              },
+              {
+                "description": "A value went below zero that does not in the model's run.",
+                "type": "string",
+                "const": "goes_negative"
+              }
+            ]
+          },
+          "Difference": {
+            "type": "object",
+            "properties": {
+              "variable": {
+                "type": "string"
+              },
+              "difference": {
+                "description": "Its largest difference from the model's run, as a fraction of its\nscale (the larger of its range and its largest magnitude).",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "variable",
+              "difference"
+            ]
+          },
+          "Response": {
+            "type": "object",
+            "properties": {
+              "variable": {
+                "type": "string"
+              },
+              "change": {
+                "description": "How far its final value moved from the model's run, as a fraction of\nits scale there: positive up, negative down. Left out when either run\nof the series is not a number somewhere, which its mode says.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "largestChange": {
+                "description": "Its largest difference from the model's run at any time, as a\nfraction of its scale there. Left out as `change` is.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "mode": {
+                "description": "Its behavior mode in the check's run.",
+                "$ref": "#/$defs/ModeKind"
+              },
+              "was": {
+                "description": "Its behavior mode in the model's run, when the check changed it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModeKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "variable",
+              "mode"
+            ]
+          },
+          "ModeKind": {
+            "oneOf": [
+              {
+                "description": "Does not move: an equilibrium.",
+                "type": "string",
+                "const": "at_rest"
+              },
+              {
+                "description": "Moves at a steady speed.",
+                "type": "string",
+                "const": "linear"
+              },
+              {
+                "description": "Moves ever faster: exponential growth, or an accelerating decline.",
+                "type": "string",
+                "const": "exponential"
+              },
+              {
+                "description": "Moves ever slower toward a level: approach to a goal, or decay.",
+                "type": "string",
+                "const": "goal_seeking"
+              },
+              {
+                "description": "Speeds up, then slows toward a level.",
+                "type": "string",
+                "const": "s_shaped"
+              },
+              {
+                "description": "Passes the level it settles at once, and comes back less than half the\nway it went.",
+                "type": "string",
+                "const": "overshoot"
+              },
+              {
+                "description": "Rises, peaks, and falls back more than half the way it rose: overshoot\nand collapse.",
+                "type": "string",
+                "const": "rise_and_fall"
+              },
+              {
+                "description": "Falls, bottoms, and rises back more than half the way it fell.",
+                "type": "string",
+                "const": "fall_and_rise"
+              },
+              {
+                "description": "Swings back and forth.",
+                "type": "string",
+                "const": "oscillation"
+              },
+              {
+                "description": "Takes a non-finite value.",
+                "type": "string",
+                "const": "undefined"
+              },
+              {
+                "description": "None of these.",
+                "type": "string",
+                "const": "other"
+              }
+            ]
+          },
+          "CutLink": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ]
+          },
+          "NotFound": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "suggestions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name"
+            ]
+          }
+        },
+        "title": "RunTestsOutput",
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "tests": {
+            "description": "Each test run, with how its checks came out.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/TestSummary"
+            }
+          },
+          "results": {
+            "description": "The checks worth reading, each under its id: every one that did not\npass, and sensitivity's strongest; failures first.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/TestResult"
+            }
+          },
+          "omitted": {
+            "description": "Checks worth reading that the answer leaves out, past its limit or\nits budget.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "notFound": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/NotFound"
+            }
+          }
+        },
+        "required": [
+          "revision",
+          "tests",
+          "results"
         ]
       }
     }

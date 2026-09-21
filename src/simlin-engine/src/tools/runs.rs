@@ -124,13 +124,25 @@ pub(crate) struct ValueChange {
 pub(crate) struct EquationChange {
     /// The variable's canonical name.
     pub variable: String,
-    pub equation: String,
+    pub replacement: Replacement,
+}
+
+/// What a replaced equation becomes.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub(crate) enum Replacement {
+    /// One equation, every element's for an arrayed variable.
+    Equation(String),
+    /// An equation for each element of an arrayed variable, by its subscript
+    /// as a results key spells it (`north`, `a,b`).
+    Elements(Vec<(String, String)>),
 }
 
 /// Run specs a plan changes; `None` keeps the model's.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Default, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct SpecsChange {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<f64>,
@@ -140,6 +152,12 @@ pub struct SpecsChange {
     pub dt: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<IntegrationMethod>,
+    /// How often the run saves. An experiment keeps the model's; a battery
+    /// check that refines DT saves at the model's own times, so its rows
+    /// compare with the model's one for one and it holds no more than the
+    /// model's run does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub save_step: Option<f64>,
 }
 
 impl SpecsChange {
@@ -154,6 +172,7 @@ impl SpecsChange {
             stop: self.stop.or(base.stop),
             dt: self.dt.or(base.dt),
             method: self.method.or(base.method),
+            save_step: self.save_step.or(base.save_step),
         }
     }
 }
@@ -252,20 +271,9 @@ impl Run {
             .collect()
     }
 
-    /// How many rows the run saved: the rows up to the first whose time goes
-    /// back. A save step that is not a multiple of DT leaves the results'
-    /// last rows unwritten, at time zero, and they are no part of the run.
+    /// How many rows the run saved ([`saved_rows`]).
     pub(crate) fn saved_rows(&self) -> usize {
-        let mut previous = f64::NEG_INFINITY;
-        self.results
-            .iter()
-            .position(|row| {
-                let time = row[crate::results::TIME_OFF];
-                let back = time < previous;
-                previous = time;
-                back
-            })
-            .unwrap_or(self.results.step_count)
+        saved_rows(&self.results)
     }
 
     /// The row saved at `time`, or the last one before it: the row before the
@@ -283,6 +291,22 @@ impl Run {
     fn bytes(&self) -> usize {
         self.results.data.len() * std::mem::size_of::<f64>()
     }
+}
+
+/// How many rows `results` saved: the rows up to the first whose time goes
+/// back. A save step that is not a multiple of DT leaves the results' last
+/// rows unwritten, at time zero, and they are no part of the run.
+pub(crate) fn saved_rows(results: &Results) -> usize {
+    let mut previous = f64::NEG_INFINITY;
+    results
+        .iter()
+        .position(|row| {
+            let time = row[crate::results::TIME_OFF];
+            let back = time < previous;
+            previous = time;
+            back
+        })
+        .unwrap_or(results.step_count)
 }
 
 /// A named run as the store keeps it: with its results, or, past the store's
@@ -332,7 +356,8 @@ pub struct ListedChange {
     /// A scalar constant's value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// An arrayed constant's value, element by element.
+    /// An arrayed constant's value element by element, or an equation for
+    /// each element.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub elements: Vec<ListedElement>,
     /// A replacement equation, which holds from the start.
@@ -348,14 +373,17 @@ pub struct ListedChange {
     pub from_time: Option<f64>,
 }
 
-/// One element's value in a listed change.
+/// One element's value, or its replacement equation, in a listed change.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct ListedElement {
     /// The element's subscript, as a results key spells it (`north`, `a,b`).
     pub element: String,
-    pub value: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub equation: Option<String>,
 }
 
 impl RunPlan {
@@ -388,7 +416,8 @@ impl RunPlan {
                                 .and_then(|rest| rest.strip_suffix(']'))
                                 .unwrap_or(key.as_str())
                                 .to_string(),
-                            value: *value,
+                            value: Some(*value),
+                            equation: None,
                         })
                         .collect()
                 },
@@ -397,13 +426,29 @@ impl RunPlan {
                 from_time: change.from_time,
             }
         });
-        let equations = self.equations.iter().map(|change| ListedChange {
-            variable: name(&change.variable),
-            value: None,
-            elements: vec![],
-            equation: Some(change.equation.clone()),
-            table_dropped: variable(&change.variable).is_some_and(has_table),
-            from_time: None,
+        let equations = self.equations.iter().map(|change| {
+            let (equation, elements) = match &change.replacement {
+                Replacement::Equation(text) => (Some(text.clone()), vec![]),
+                Replacement::Elements(elements) => (
+                    None,
+                    elements
+                        .iter()
+                        .map(|(element, text)| ListedElement {
+                            element: element.clone(),
+                            value: None,
+                            equation: Some(text.clone()),
+                        })
+                        .collect(),
+                ),
+            };
+            ListedChange {
+                variable: name(&change.variable),
+                value: None,
+                elements,
+                equation,
+                table_dropped: variable(&change.variable).is_some_and(has_table),
+                from_time: None,
+            }
         });
         values.chain(equations).collect()
     }
@@ -795,16 +840,96 @@ fn simulate(
     waiting: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> Result<Results, RunFailure> {
     let own = crate::results::Specs::from(specs);
-    let mut vm = build_vm(db, source_project, project, &model.name, overlay, &own).map_err(
-        |err| match err {
-            Unbuilt::Compile(err) if plan.stages() => {
-                refusal_reason(db, source_project, &model.name, &err)
-            }
-            Unbuilt::Compile(err) => describe(&err),
-            Unbuilt::Cost(reason) => reason,
-        },
-    )?;
+    let vm =
+        build_vm(db, source_project, project, &model.name, overlay, &own).map_err(
+            |err| match err {
+                Unbuilt::Compile(err) if plan.stages() => {
+                    refusal_reason(db, source_project, &model.name, &err)
+                }
+                Unbuilt::Compile(err) => describe(&err),
+                Unbuilt::Cost(reason) => reason,
+            },
+        )?;
+    run_values(vm, specs, plan, waiting)
+}
 
+/// Run each of `plans`, which change values only, on one compile of `model`,
+/// in parallel where the platform has threads, and give each run's results to
+/// `summarize` as it finishes: what a battery of checks, each a run with one
+/// value changed, costs one compile for. A run's results are dropped once
+/// summarized, so a battery holds a run per thread, not every run at once.
+///
+/// Each run is a unit of the call's work: once other work waits for the
+/// project, no run starts, and the batch answers that it was interrupted
+/// rather than with the runs it did.
+pub(crate) fn execute_values<T: Send>(
+    ws: &mut Workspace<'_>,
+    model: &datamodel::Model,
+    plans: &[RunPlan],
+    summarize: impl Fn(&RunPlan, Results) -> T + Sync,
+) -> Result<Vec<Result<T, String>>, ToolError> {
+    debug_assert!(plans.iter().all(|plan| !plan.stages()));
+    ws.yield_point()?;
+    let Some(source_project) = ws.db.current_source_project() else {
+        return Ok(plans
+            .iter()
+            .map(|_| Err("the project has not been compiled".to_string()))
+            .collect());
+    };
+    let build = match crate::queue_compile::compile_sim(
+        ws.db,
+        source_project,
+        ws.project,
+        &model.name,
+        LtmOverlay::Off,
+    ) {
+        Ok(build) => build,
+        Err(err) => return Ok(plans.iter().map(|_| Err(describe(&err))).collect()),
+    };
+    let specs = super::changes::effective_specs(ws.project, model);
+    let waiting = ws.waiting;
+    let stopped = std::sync::atomic::AtomicBool::new(false);
+    let run = |plan: &RunPlan| {
+        if stopped.load(std::sync::atomic::Ordering::SeqCst) || waiting.is_some_and(|w| w()) {
+            stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(String::new());
+        }
+        let mut vm = crate::vm::Vm::new(build.compiled.clone()).map_err(|err| describe(&err))?;
+        if build.special {
+            vm.set_conveyor_plans(build.conveyor_plans.clone());
+            vm.set_queue_plans(build.queue_plans.clone());
+        }
+        match run_values(vm, specs, plan, waiting) {
+            Ok(results) => Ok(summarize(plan, results)),
+            Err(RunFailure::Failed(reason)) => Err(reason),
+            Err(RunFailure::Stopped) => {
+                stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err(String::new())
+            }
+        }
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let outcomes = {
+        use rayon::prelude::*;
+        plans.par_iter().map(run).collect()
+    };
+    #[cfg(target_arch = "wasm32")]
+    let outcomes = plans.iter().map(run).collect();
+    if stopped.into_inner() {
+        return Err(ToolError::interrupted());
+    }
+    Ok(outcomes)
+}
+
+/// Run `vm` to its end under `plan`'s values, a slice at a time, stopping
+/// between two when `waiting` says other work waits for the project; `specs`
+/// are the model's own, which `plan`'s override.
+fn run_values(
+    mut vm: crate::vm::Vm,
+    specs: &datamodel::SimSpecs,
+    plan: &RunPlan,
+    waiting: Option<&(dyn Fn() -> bool + Sync)>,
+) -> Result<Results, RunFailure> {
     // Values from the start go in before the run, so initial values read
     // them; the others at their times, in order. A value from `t` holds from
     // the first step at or after `t`, the step `IF TIME >= t` turns on at.
@@ -1035,7 +1160,7 @@ fn staged_project(
         let var = model
             .get_variable_mut(&change.variable)
             .ok_or_else(|| format!("the model has no variable '{}'", change.variable))?;
-        replace_equation(var, &change.equation);
+        replace_equation(var, &change.replacement);
     }
     if !plan.specs.is_empty() {
         let specs = match &mut model.sim_specs {
@@ -1057,6 +1182,9 @@ fn staged_project(
                 specs.save_step = None;
             }
         }
+        if let Some(save) = plan.specs.save_step {
+            specs.save_step = Some(datamodel::Dt::Dt(save));
+        }
         if let Some(method) = plan.specs.method {
             specs.sim_method = match method {
                 IntegrationMethod::Euler => datamodel::SimMethod::Euler,
@@ -1068,17 +1196,38 @@ fn staged_project(
     Ok(staged)
 }
 
-/// Replace a variable's value, keeping its dimensions: an arrayed variable's
-/// replacement applies to every element. A stock's equation is its initial
-/// value. A variable whose equation feeds a table (the value is the table at
-/// the equation's value) loses its table: the replacement is the value, as a
-/// knockout that holds an "effect of" at 1 means it.
-pub(crate) fn replace_equation(var: &mut Variable, equation: &str) {
-    let replaced = |old: &Equation| match old {
-        Equation::Scalar(_) => Equation::Scalar(equation.to_string()),
-        Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, ..) => {
-            Equation::ApplyToAll(dims.clone(), equation.to_string())
-        }
+/// Replace a variable's value, keeping its dimensions: one equation applies
+/// to every element of an arrayed variable, and per-element equations to
+/// theirs. A stock's equation is its initial value. A variable whose equation
+/// feeds a table (the value is the table at the equation's value) loses its
+/// table: the replacement is the value, as a knockout that holds an "effect
+/// of" at 1 means it.
+pub(crate) fn replace_equation(var: &mut Variable, replacement: &Replacement) {
+    let replaced = |old: &Equation| match (replacement, old) {
+        (Replacement::Equation(text), Equation::Scalar(_)) => Equation::Scalar(text.clone()),
+        (
+            Replacement::Equation(text),
+            Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, ..),
+        ) => Equation::ApplyToAll(dims.clone(), text.clone()),
+        (
+            Replacement::Elements(elements),
+            Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, ..),
+        ) => Equation::Arrayed(
+            dims.clone(),
+            elements
+                .iter()
+                .map(|(element, text)| (element.clone(), text.clone(), None, None))
+                .collect(),
+            None,
+            false,
+        ),
+        // A scalar is its one element.
+        (Replacement::Elements(elements), Equation::Scalar(_)) => Equation::Scalar(
+            elements
+                .first()
+                .map(|(_, text)| text.clone())
+                .unwrap_or_default(),
+        ),
     };
     match var {
         Variable::Stock(stock) => stock.equation = replaced(&stock.equation),

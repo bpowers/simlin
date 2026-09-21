@@ -16,7 +16,7 @@ fn value(variable: &str, value: f64) -> ValueChange {
 fn equation(variable: &str, text: &str) -> EquationChange {
     EquationChange {
         variable: variable.to_string(),
-        equation: text.to_string(),
+        replacement: Replacement::Equation(text.to_string()),
     }
 }
 
@@ -462,4 +462,35 @@ fn a_run_in_slices_is_the_run_whole_and_stops_between_slices() {
         execute(&mut ws, &model, &RunPlan::default()),
         Err(RunFailure::Stopped)
     ));
+}
+
+/// A batch of runs starts no run once other work waits for the project, and
+/// answers that it stopped rather than with the runs it did.
+#[test]
+fn a_batch_starts_no_run_while_other_work_waits() {
+    let mut host = Host::from_test_project(&inventory());
+    let model = host.project.models[0].clone();
+    let plans: Vec<RunPlan> = [5.0, 6.0, 7.0]
+        .into_iter()
+        .map(|v| RunPlan {
+            values: vec![value("coverage", v)],
+            ..RunPlan::default()
+        })
+        .collect();
+    let summarized = std::sync::atomic::AtomicUsize::new(0);
+    let summarize = |_: &RunPlan, _: Results| {
+        summarized.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    };
+    // Waiting begins once the batch has asked at its start.
+    let waiting = Host::waiting_after(1);
+    let mut ws = Workspace {
+        waiting: Some(&waiting),
+        ..host.workspace()
+    };
+    let stopped = execute_values(&mut ws, &model, &plans, summarize);
+    assert!(stopped.err().is_some_and(|err| err.is_interrupted()));
+    assert_eq!(summarized.into_inner(), 0, "no run started");
+
+    let done = execute_values(&mut host.workspace(), &model, &plans, |_, _| ()).ok();
+    assert_eq!(done.map(|runs| runs.len()), Some(3));
 }

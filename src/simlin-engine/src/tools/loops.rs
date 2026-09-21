@@ -636,7 +636,7 @@ fn report_by_id_of(
 }
 
 /// The loop analysis of `run`: the one kept with it, or a new one.
-fn analysis_of(
+pub(crate) fn analysis_of(
     runs: &mut RunStore,
     ws: &mut Workspace<'_>,
     model: &datamodel::Model,
@@ -653,6 +653,76 @@ fn analysis_of(
     };
     let analysis = analyze(ws, model, &run.plan, base)?;
     Ok(run.loops.get_or_init(|| Arc::new(analysis)).clone())
+}
+
+/// What `analysis`'s plan cut, the loops named by `evidence`: the links its
+/// replaced equations removed, and the ids of the model's loops through them.
+pub(crate) fn cut_of(
+    evidence: &mut Evidence,
+    analysis: &LoopAnalysis,
+    model: &datamodel::Model,
+) -> (Vec<CutLink>, Vec<String>) {
+    let Some(cut) = &analysis.cut else {
+        return (vec![], vec![]);
+    };
+    let names = ModelNames::new(model);
+    let links = cut
+        .links
+        .iter()
+        .map(|(from, to)| CutLink {
+            from: names.display(from),
+            to: names.display(to),
+        })
+        .collect();
+    let loops = cut.loops.iter().map(|l| evidence.loop_id(&l.key)).collect();
+    (links, loops)
+}
+
+/// The ids of the loops that led `analysis`'s run after `time`, strongest
+/// first, at most `n`: the leaders of every partition's spans that end after
+/// it, each by its largest share in them. None from structure.
+pub(crate) fn leaders_after(
+    evidence: &mut Evidence,
+    analysis: &LoopAnalysis,
+    time: f64,
+    n: usize,
+) -> Vec<String> {
+    if analysis.basis != LoopBasis::Run {
+        return vec![];
+    }
+    let mut partitions: Vec<(Option<usize>, Vec<&AnalyzedLoop>)> = Vec::new();
+    for l in &analysis.loops {
+        match partitions.iter_mut().find(|(p, _)| *p == l.partition) {
+            Some((_, members)) => members.push(l),
+            None => partitions.push((l.partition, vec![l])),
+        }
+    }
+    let mut leaders: Vec<(&AnalyzedLoop, f64)> = Vec::new();
+    for (_, members) in &partitions {
+        for span in dominance(members, analysis.times.len()) {
+            let end = analysis
+                .times
+                .get(span.end)
+                .or(analysis.times.last())
+                .copied()
+                .unwrap_or(f64::NEG_INFINITY);
+            if end <= time {
+                continue;
+            }
+            for (i, share) in span.leaders {
+                match leaders.iter_mut().find(|(l, _)| l.key == members[i].key) {
+                    Some((_, best)) => *best = best.max(share),
+                    None => leaders.push((members[i], share)),
+                }
+            }
+        }
+    }
+    leaders.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.key.cmp(&b.0.key)));
+    leaders
+        .into_iter()
+        .take(n)
+        .map(|(l, _)| evidence.loop_id(&l.key))
+        .collect()
 }
 
 /// The loops of the model as it is, for naming what a replaced equation cuts:

@@ -15,6 +15,9 @@
 //! the problem the same. Two rows alike in all of that (one variable failing
 //! the same way at two places) are told apart by their order in the report.
 //!
+//! A battery check's id (`T1`, ...) is keyed by its test, the variable it
+//! changes and how, so a check run again after an edit keeps its id.
+//!
 //! A loop's id (`L1`, `L2`, ...) is keyed by its cycle: its node sequence
 //! rotated to start at its least node, so the same loop read from any run, at
 //! any revision, from a run's scores or from structure, has one id, and the
@@ -131,9 +134,21 @@ pub(crate) struct Evidence {
     next_diagnostic: u32,
     loops: HashMap<Vec<String>, u32>,
     next_loop: u32,
+    tests: HashMap<super::battery::TestKey, u32>,
+    next_test: u32,
 }
 
 impl Evidence {
+    /// The id of the battery check `key` names.
+    pub(crate) fn test_id(&mut self, key: &super::battery::TestKey) -> String {
+        let next = &mut self.next_test;
+        let number = *self.tests.entry(key.clone()).or_insert_with(|| {
+            *next += 1;
+            *next
+        });
+        format!("T{number}")
+    }
+
     /// The cycle, in canonical rotation, of the loop this session calls `id`.
     pub(crate) fn loop_key(&self, id: &str) -> Option<&[String]> {
         let number: u32 = id.strip_prefix('L')?.parse().ok()?;

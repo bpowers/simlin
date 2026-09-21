@@ -210,8 +210,8 @@ fn first_constant(model: &datamodel::Model) -> Option<String> {
 
 /// What each model is asked: an outline, every variable read twelve at a
 /// time (up to four calls) and its behavior, a search, an experiment that
-/// doubles a constant, the runs, and the loops of the model as it is, each
-/// loop's polarity checked against its chain's signs.
+/// doubles a constant, the runs, the loops of the model as it is (each
+/// loop's polarity checked against its chain's signs), and the battery.
 fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
     let model = project.models.iter().find(|m| m.macro_spec.is_none());
     let names: Vec<String> = model
@@ -278,6 +278,13 @@ fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
     ) {
         check_parity(sweep, display, &loops);
     }
+    sweep.call(
+        display,
+        &mut host,
+        &mut session,
+        ToolName::RunTests,
+        json!({}),
+    );
     if let Some(first) = names.first() {
         sweep.call(
             display,
