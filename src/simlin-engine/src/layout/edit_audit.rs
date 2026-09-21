@@ -1226,7 +1226,7 @@ fn consistency_findings(
     }
 
     for v in check_flow_invariants(
-        &side.view.elements.to_vec(),
+        &side.view.elements,
         Mode::Strict {
             routed: Some(routed),
         },

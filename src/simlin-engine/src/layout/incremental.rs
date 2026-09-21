@@ -2171,14 +2171,13 @@ fn element_center(elem: &ViewElement) -> Option<(f64, f64)> {
 fn rebow_moved_links(elements: &mut [ViewElement], old_view: &datamodel::StockFlow) {
     use crate::diagram::connector::get_visual_center;
     let not_arrayed = |_: &str| false;
-    let centers = |els: &[ViewElement]| -> HashMap<i32, (f64, f64)> {
-        els.iter()
-            .filter(|e| !matches!(e, ViewElement::Link(_) | ViewElement::Group(_)))
+    let centers = |els: &mut dyn Iterator<Item = &ViewElement>| -> HashMap<i32, (f64, f64)> {
+        els.filter(|e| !matches!(e, ViewElement::Link(_) | ViewElement::Group(_)))
             .map(|e| (e.get_uid(), get_visual_center(e, &not_arrayed)))
             .collect()
     };
-    let before = centers(&old_view.elements.to_vec());
-    let after = centers(elements);
+    let before = centers(&mut old_view.elements.iter());
+    let after = centers(&mut elements.iter());
     let drawn_before: HashSet<i32> = old_view
         .elements
         .iter()

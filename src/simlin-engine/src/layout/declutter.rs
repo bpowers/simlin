@@ -828,7 +828,7 @@ pub fn declutter_view(elements: &mut [ViewElement]) {
     // once so ghost labels participate in side choice and relaxation like any
     // other label. (Positions change during decluttering but uids and names do
     // not, so resolving once up front is safe.)
-    let alias_names = alias_source_names(elements);
+    let alias_names = alias_source_names(&*elements);
     // Choose-sides -> relax, retrying with a uniform zoom whenever the relax
     // jams (a densely packed force-pass core can't be opened by local pushes
     // alone within the iteration budget). Re-choosing sides each attempt lets a
@@ -880,7 +880,7 @@ pub fn declutter_part(
     if elements.len() < 2 {
         return;
     }
-    let alias_names = alias_source_names(elements);
+    let alias_names = alias_source_names(&*elements);
     optimize_label_sides_for(elements, &alias_names, &resides);
     relax_positions_for(elements, &alias_names, &moves);
     optimize_label_sides_for(elements, &alias_names, &resides);

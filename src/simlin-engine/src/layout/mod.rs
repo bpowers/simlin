@@ -280,7 +280,7 @@ impl LayoutState {
         Self {
             uid_manager,
             display_names,
-            elements: old_view.elements.clone().into(),
+            elements: old_view.elements.to_vec(),
             positions,
             flow_templates,
             cloud_ident_to_uid,

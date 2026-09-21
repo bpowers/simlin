@@ -197,8 +197,12 @@ pub fn format_violations(violations: &[FlowViolation]) -> String {
 }
 
 /// Check every flow of a view's elements.
-pub fn check_flow_invariants(elements: &[ViewElement], mode: Mode<'_>) -> Vec<FlowViolation> {
-    let by_uid: HashMap<i32, &ViewElement> = elements.iter().map(|e| (e.get_uid(), e)).collect();
+pub fn check_flow_invariants<'a>(
+    elements: impl IntoIterator<Item = &'a ViewElement> + Copy,
+    mode: Mode<'_>,
+) -> Vec<FlowViolation> {
+    let by_uid: HashMap<i32, &ViewElement> =
+        elements.into_iter().map(|e| (e.get_uid(), e)).collect();
     let mut out = Vec::new();
     if matches!(mode, Mode::Strict { .. }) {
         check_non_positive_uids(elements, &mut out);
@@ -273,7 +277,10 @@ impl<'a> FlowContext<'a> {
 /// "No uid <= 0 in a committed view": a planner stages sentinel uids for
 /// in-creation elements, so this is a property of committed views only and
 /// applies to every element, routed or not.
-fn check_non_positive_uids(elements: &[ViewElement], out: &mut Vec<FlowViolation>) {
+fn check_non_positive_uids<'a>(
+    elements: impl IntoIterator<Item = &'a ViewElement>,
+    out: &mut Vec<FlowViolation>,
+) {
     for element in elements {
         let uid = element.get_uid();
         if uid <= 0 {
@@ -620,9 +627,9 @@ fn first_distinct_neighbor(pts: &[FlowPoint], index: usize) -> Option<&FlowPoint
 /// as this flow's other terminal the clause could never fire: a cloud inside
 /// that stock makes the inflated terminal bodies overlap, which is exactly the
 /// precondition that exempts G6.
-fn check_no_body_crossing(
+fn check_no_body_crossing<'a>(
     ctx: &FlowContext<'_>,
-    elements: &[ViewElement],
+    elements: impl IntoIterator<Item = &'a ViewElement> + Copy,
     report: &mut Reporter<'_>,
 ) {
     // With one terminal missing (tolerated input) there is no pair to overlap,

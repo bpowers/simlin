@@ -448,13 +448,15 @@ pub(crate) fn alias_label_props_for(
 
 /// Map each alias uid in `elements` to its source element's name. Aliases whose
 /// `alias_of_uid` does not resolve to a named element are omitted (dangling).
-pub(crate) fn alias_source_names(elements: &[ViewElement]) -> HashMap<i32, String> {
+pub(crate) fn alias_source_names<'a>(
+    elements: impl IntoIterator<Item = &'a ViewElement> + Copy,
+) -> HashMap<i32, String> {
     let names: HashMap<i32, &str> = elements
-        .iter()
+        .into_iter()
         .filter_map(|e| e.get_name().map(|n| (e.get_uid(), n)))
         .collect();
     elements
-        .iter()
+        .into_iter()
         .filter_map(|e| match e {
             ViewElement::Alias(a) => names
                 .get(&a.alias_of_uid)
@@ -553,11 +555,13 @@ impl SceneNode {
     }
 }
 
-fn build_scene_nodes(elements: &[ViewElement]) -> Vec<SceneNode> {
+fn build_scene_nodes<'a>(
+    elements: impl IntoIterator<Item = &'a ViewElement> + Copy,
+) -> Vec<SceneNode> {
     let alias_names = alias_source_names(elements);
     let not_arrayed = |_: &str| false;
     elements
-        .iter()
+        .into_iter()
         .filter_map(|e| {
             let shape = node_shape_box(e)?;
             let label = match e {
@@ -643,9 +647,11 @@ fn polyline_length(points: &[Point]) -> f64 {
 /// Collect the drawn geometry of every connector that draws something. Links
 /// use the shared `connector_polyline` (the exact geometry the renderer draws
 /// and `build_view_segments` counts); flows use their point polyline.
-fn collect_connector_geometry(elements: &[ViewElement]) -> Vec<ConnectorGeometry> {
+fn collect_connector_geometry<'a>(
+    elements: impl IntoIterator<Item = &'a ViewElement> + Copy,
+) -> Vec<ConnectorGeometry> {
     let uid_elements: HashMap<i32, &ViewElement> =
-        elements.iter().map(|e| (e.get_uid(), e)).collect();
+        elements.into_iter().map(|e| (e.get_uid(), e)).collect();
     let not_arrayed = |_: &str| false;
 
     let mut out = Vec::new();
@@ -1295,9 +1301,8 @@ pub fn analyze_layout(view: &datamodel::StockFlow) -> LayoutAnalysis {
 }
 
 fn analyze(view: &datamodel::StockFlow, sink: &mut DefectSink) -> LayoutMetrics {
-    let elements = view.elements.to_vec();
-    let nodes = build_scene_nodes(&elements);
-    let connectors = collect_connector_geometry(&elements);
+    let nodes = build_scene_nodes(&view.elements);
+    let connectors = collect_connector_geometry(&view.elements);
 
     let node_overlap = node_overlap_term(&nodes, sink);
     let node_connector_overlap = node_connector_overlap_term(&nodes, &connectors, sink);

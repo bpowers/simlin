@@ -266,9 +266,11 @@ pub fn degrade(view: &StockFlow, degradation: Degradation) -> Option<StockFlow> 
                 let (x, y) = position(&out.elements[i])?;
                 let dx = rng.random_range(-amplitude..=amplitude);
                 let dy = rng.random_range(-amplitude..=amplitude);
-                if let Some(e) = out.elements.get_mut(i) {
-                    set_position(e, x + dx, y + dy);
-                }
+                set_position(
+                    out.elements.get_mut(i).expect("an index into the view"),
+                    x + dx,
+                    y + dy,
+                );
             }
         }
         Degradation::Shuffle { seed } => {
@@ -292,9 +294,11 @@ pub fn degrade(view: &StockFlow, degradation: Degradation) -> Option<StockFlow> 
             }
             for (k, &i) in free.iter().enumerate() {
                 let (x, y) = positions[order[k]];
-                if let Some(e) = out.elements.get_mut(i) {
-                    set_position(e, x, y);
-                }
+                set_position(
+                    out.elements.get_mut(i).expect("an index into the view"),
+                    x,
+                    y,
+                );
             }
         }
         Degradation::Exile => {
@@ -325,18 +329,26 @@ pub fn degrade(view: &StockFlow, degradation: Degradation) -> Option<StockFlow> 
             let diag = ((maxx - minx).powi(2) + (maxy - miny).powi(2))
                 .sqrt()
                 .max(200.0);
-            if let Some(e) = out.elements.get_mut(target) {
-                set_position(e, maxx + diag, maxy + diag);
-            }
+            set_position(
+                out.elements
+                    .get_mut(target)
+                    .expect("an index into the view"),
+                maxx + diag,
+                maxy + diag,
+            );
         }
         Degradation::Stack => {
             if free.len() < 2 {
                 return None;
             }
             let (x, y) = position(&view.elements[free[0]])?;
-            if let Some(e) = out.elements.get_mut(free[1]) {
-                set_position(e, x, y);
-            }
+            set_position(
+                out.elements
+                    .get_mut(free[1])
+                    .expect("an index into the view"),
+                x,
+                y,
+            );
         }
         Degradation::StraightenLinks => {
             let curved = |e: &ViewElement| matches!(e, ViewElement::Link(link) if matches!(link.shape, LinkShape::Arc(_)));
