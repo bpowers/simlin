@@ -3488,8 +3488,12 @@ pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
         }
     }
 
+    // An index at or past the first knot lands at i > 0 unless it hits the
+    // first knot itself. `i == 0` otherwise means an x no comparison could
+    // order (a NaN, which `parse_table` refuses), and the first knot is the
+    // nearest there is: there is no knot before it to interpolate from.
     let i = low;
-    if crate::float::approx_eq(table[i].0, index) {
+    if i == 0 || crate::float::approx_eq(table[i].0, index) {
         table[i].1
     } else {
         // slope = deltaY/deltaX
@@ -3579,8 +3583,11 @@ pub(crate) fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
     }
 
     // low now points to the first element > index
-    // We want the element just before it (the last element <= index)
-    table[low - 1].1
+    // We want the element just before it (the last element <= index). An
+    // index past the first knot lands at low > 0; `low == 0` otherwise means
+    // an x no comparison could order (a NaN, which `parse_table` refuses),
+    // and the first knot is the nearest there is.
+    table[low.saturating_sub(1)].1
 }
 
 #[cfg(test)]
@@ -3681,6 +3688,22 @@ mod lookup_tests {
         assert_eq!(2.0, lookup(&table, 5.0));
         // NaN index: NaN result.
         assert!(lookup(&table, f64::NAN).is_nan());
+    }
+
+    /// A table whose first x is NaN defeats every comparison against it, so
+    /// the search can end before the second knot. No mode reads before the
+    /// table: each answers with the first knot, where interpolating and
+    /// stepping back both used to index `table[-1]`.
+    #[test]
+    fn no_lookup_reads_before_a_table_whose_first_x_is_not_a_number() {
+        let tables: [&[(f64, f64)]; 2] = [&[(f64::NAN, 7.0)], &[(f64::NAN, 7.0), (1.0, 9.0)]];
+        for table in tables {
+            for index in [-1.0, 0.0, 0.5] {
+                assert_eq!(lookup(table, index), 7.0, "{table:?} at {index}");
+                assert_eq!(lookup_forward(table, index), 7.0, "{table:?} at {index}");
+                assert_eq!(lookup_backward(table, index), 7.0, "{table:?} at {index}");
+            }
+        }
     }
 }
 

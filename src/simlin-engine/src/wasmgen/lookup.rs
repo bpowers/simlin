@@ -33,12 +33,16 @@
 //! - **search**: `interp`/`forward` use a *lower-bound* search
 //!   (`x[mid] < index`); `backward` uses an *upper-bound* search
 //!   (`x[mid] <= index`).
-//! - **result**: `interp` either returns `y[low]` exactly (when
+//! - **result**: `interp` either returns `y[low]` exactly (when `low == 0` or
 //!   `approx_eq(x[low], index)`, via the Phase 2 helper) or linearly
 //!   interpolates between knots `low-1` and `low`; `forward` returns `y[low]`;
 //!   `backward` returns `y[low-1]` (the last knot with `x <= index`; for
 //!   duplicate x-values, the LAST such knot, since the upper-bound search lands
-//!   past every equal x).
+//!   past every equal x), or `y[0]` when `low == 0`.
+//!
+//! No helper reads before the table. `low == 0` past the edge clamps means an
+//! x no comparison could order (a NaN, which `parse_table` refuses), and both
+//! the VM and these helpers answer with the first knot.
 //!
 //! Each helper guards `count == 0` and a NaN `index` by returning NaN, matching
 //! the VM's `table.is_empty()` / `index.is_nan()` early returns.
@@ -203,8 +207,8 @@ fn emit_init_search_bounds(f: &mut Function) {
 /// -> f64`, reproducing the VM's `lookup` (`vm.rs:3055-3102`) exactly:
 /// empty/NaN -> NaN; **strict** edge clamps (`index < x[0]` -> `y[0]`,
 /// `index > x[n-1]` -> `y[n-1]`); lower-bound binary search; then at `i = low`,
-/// `approx_eq(x[i], index)` -> `y[i]`, else linear interpolation between knots
-/// `i-1` and `i`.
+/// `i == 0` or `approx_eq(x[i], index)` -> `y[i]`, else linear interpolation
+/// between knots `i-1` and `i`.
 ///
 /// `approx_eq_idx` is the module function index of the Phase 2 `approx_eq`
 /// helper (`lower::HelperFns::approx_eq`); the at-knot exact-hit test `call`s it
@@ -235,7 +239,15 @@ pub(crate) fn emit_lookup_interp(approx_eq_idx: u32) -> Function {
     emit_init_search_bounds(&mut f);
     emit_binary_search(&mut f, true); // lower bound
 
-    // i = low. if approx_eq(x[i], index) { return y[i] }
+    // i = low. if i == 0 { return y[0] }  (no knot before it)
+    f.instruction(&Ins::LocalGet(LOW));
+    f.instruction(&Ins::I32Eqz);
+    f.instruction(&Ins::If(BlockType::Empty));
+    push_y_const0(&mut f);
+    f.instruction(&Ins::Return);
+    f.instruction(&Ins::End);
+
+    // if approx_eq(x[i], index) { return y[i] }
     push_x(&mut f, LOW);
     f.instruction(&Ins::LocalGet(INDEX));
     f.instruction(&Ins::Call(approx_eq_idx));
@@ -316,7 +328,8 @@ pub(crate) fn emit_lookup_forward() -> Function {
 /// reproducing the VM's `lookup_backward` (`vm.rs:3144-3186`): empty/NaN ->
 /// NaN; **inclusive** edge clamps; an **upper-bound** binary search
 /// (`x[mid] <= index`); return `y[low-1]` (the last knot with `x <= index`; for
-/// duplicate x-values, the LAST one). No `approx_eq`, no interpolation.
+/// duplicate x-values, the LAST one), or `y[0]` when `low == 0`. No
+/// `approx_eq`, no interpolation.
 pub(crate) fn emit_lookup_backward() -> Function {
     let mut f = Function::new([(3, ValType::I32)]); // LOW/HIGH/MID
 
@@ -342,6 +355,14 @@ pub(crate) fn emit_lookup_backward() -> Function {
 
     emit_init_search_bounds(&mut f);
     emit_binary_search(&mut f, false); // upper bound
+
+    // if low == 0 { return y[0] }  (no knot before it)
+    f.instruction(&Ins::LocalGet(LOW));
+    f.instruction(&Ins::I32Eqz);
+    f.instruction(&Ins::If(BlockType::Empty));
+    push_y_const0(&mut f);
+    f.instruction(&Ins::Return);
+    f.instruction(&Ins::End);
 
     // return y[low-1]  (reuse MID as low-1)
     f.instruction(&Ins::LocalGet(LOW));
@@ -580,6 +601,22 @@ mod tests {
         for mode in [Mode::Interp, Mode::Forward, Mode::Backward] {
             for &index in &[-1.0, 3.0, 3.0 - 1e-9, 3.0 + 1e-9, 100.0] {
                 assert_matches_vm(mode, single, index);
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_nan_first_x_matches_vm_without_reading_before_the_table() {
+        // A NaN first x defeats every comparison against it, so the search can
+        // end at knot 0. Both backends answer with the first knot rather than
+        // reading the 16 bytes before the table.
+        let tables: [&[(f64, f64)]; 2] = [&[(f64::NAN, 7.0)], &[(f64::NAN, 7.0), (1.0, 9.0)]];
+        for knots in tables {
+            for mode in [Mode::Interp, Mode::Forward, Mode::Backward] {
+                for &index in &[-1.0, 0.0, 0.5] {
+                    assert_matches_vm(mode, knots, index);
+                    assert_eq!(run_lookup(mode, knots, index), 7.0, "{mode:?} at {index}");
+                }
             }
         }
     }

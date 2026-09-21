@@ -325,6 +325,49 @@ fn compile_simulation_gf_lookup_modes_match_vm() {
     }
 }
 
+/// A one-point graphical function that leaves out its x point sits at its
+/// scale's start, so both backends answer every lookup with its one y, in
+/// every mode, below the point, at it and above it.
+#[test]
+fn compile_simulation_one_point_gf_matches_vm() {
+    use crate::datamodel;
+    let gf = datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: None,
+        y_points: vec![7.0],
+        x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 4.0 },
+        y_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 10.0,
+        },
+    };
+    let datamodel = crate::test_common::TestProject::new("one_point_gf")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .aux("input", "TIME - 1", None)
+        .aux_with_gf("curve", "0", gf)
+        .aux("interp_val", "LOOKUP(curve, input)", None)
+        .aux("fwd_val", "LOOKUP_FORWARD(curve, input)", None)
+        .aux("bwd_val", "LOOKUP_BACKWARD(curve, input)", None)
+        .build_datamodel();
+
+    let sim = compile_sim(&datamodel, "main");
+    let artifact = compile_simulation(&sim).expect("wasm codegen");
+    let wasm_data = run_artifact_results(&artifact);
+    let n_slots = artifact.layout.n_slots;
+    for name in ["interp_val", "fwd_val", "bwd_val"] {
+        let (_, off) = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("{name} should be in the layout"));
+        for c in 0..artifact.layout.n_chunks {
+            assert_eq!(wasm_data[c * n_slots + off], 7.0, "{name} at chunk {c}");
+        }
+    }
+    assert!(assert_matches_vm(sim, &artifact) >= 4);
+}
+
 /// GH #924, the inverse of the GH #884 reject this test used to pin: a CONVEYOR
 /// model lowers through the PUBLIC wasm datamodel entry points, with no up-front
 /// marker scan and no silent VM fallback. Both LTM flag settings take the same

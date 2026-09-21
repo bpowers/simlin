@@ -275,7 +275,16 @@ impl<MI, E> Variable<MI, E> {
     }
 }
 
-#[allow(clippy::unnecessary_wraps)]
+/// The table the compiler looks a graphical function up in.
+///
+/// A graphical function that leaves out its x points has them spread evenly
+/// over its x scale. A lone point sits at the scale's start, as the MDL writer
+/// writes it: a one-point table answers every lookup with its one y, wherever
+/// its x is.
+///
+/// An x that is not a number is a `BadTable` error. The lookups binary-search
+/// the x values, and a NaN compares false against every index, so a search
+/// over one lands on no knot.
 pub(crate) fn parse_table(
     gf: Option<&datamodel::GraphicalFunction>,
 ) -> EquationResult<Option<Table>> {
@@ -285,6 +294,7 @@ pub(crate) fn parse_table(
 
     let x: Vec<f64> = match &gf.x_points {
         Some(x_points) => x_points.clone(),
+        None if gf.y_points.len() == 1 => vec![gf.x_scale.min],
         None => {
             let x_min = gf.x_scale.min;
             let x_max = gf.x_scale.max;
@@ -296,6 +306,14 @@ pub(crate) fn parse_table(
                 .collect()
         }
     };
+    if x.iter().any(|x| x.is_nan()) {
+        return eqn_err!(
+            BadTable,
+            0,
+            0,
+            "the graphical function has an x value that is not a number"
+        );
+    }
 
     Ok(Some(Table {
         x,
@@ -711,6 +729,103 @@ pub(crate) fn may_have_unfilled_arms(
             elements.iter().any(|(_, eqn, _, _)| is_nan_literal(eqn))
                 || default.as_deref().is_some_and(is_nan_literal)
         }
+    }
+}
+
+#[cfg(test)]
+mod parse_table_tests {
+    use super::*;
+    use crate::test_common::TestProject;
+
+    /// A graphical function over x in [0, 4] whose y points are `y` and whose
+    /// x points are spread over the scale.
+    fn implied(y: &[f64]) -> datamodel::GraphicalFunction {
+        datamodel::GraphicalFunction {
+            kind: datamodel::GraphicalFunctionKind::Continuous,
+            x_points: None,
+            y_points: y.to_vec(),
+            x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 4.0 },
+            y_scale: datamodel::GraphicalFunctionScale {
+                min: 0.0,
+                max: 10.0,
+            },
+        }
+    }
+
+    #[test]
+    fn spread_x_points_run_from_the_scales_start_to_its_end() {
+        let table = parse_table(Some(&implied(&[1.0, 2.0, 3.0])))
+            .unwrap()
+            .unwrap();
+        assert_eq!(table.x, [0.0, 2.0, 4.0]);
+    }
+
+    /// Spreading one point over the scale divides by zero; the lone point
+    /// sits at the scale's start instead.
+    #[test]
+    fn a_lone_point_sits_at_the_scales_start() {
+        let table = parse_table(Some(&implied(&[7.0]))).unwrap().unwrap();
+        assert_eq!(table.x, [0.0]);
+        assert_eq!(table.y, [7.0]);
+    }
+
+    #[test]
+    fn an_x_that_is_not_a_number_is_a_bad_table() {
+        let explicit = datamodel::GraphicalFunction {
+            x_points: Some(vec![0.0, f64::NAN, 2.0]),
+            ..implied(&[1.0, 2.0, 3.0])
+        };
+        let unscaled = datamodel::GraphicalFunction {
+            x_scale: datamodel::GraphicalFunctionScale {
+                min: f64::NAN,
+                max: 4.0,
+            },
+            ..implied(&[1.0, 2.0])
+        };
+        for gf in [explicit, unscaled] {
+            let Err(err) = parse_table(Some(&gf)) else {
+                panic!("a NaN x is refused");
+            };
+            assert_eq!(err.code, ErrorCode::BadTable);
+        }
+    }
+
+    /// A one-point table answers every lookup with its one y, in every mode,
+    /// below its x, at it and above it.
+    #[test]
+    fn a_one_point_table_answers_every_lookup_with_its_y() {
+        let project = TestProject::new("one_point")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("input", "TIME - 1", None)
+            .aux_with_gf("curve", "0", implied(&[7.0]))
+            .aux("interp_val", "LOOKUP(curve, input)", None)
+            .aux("fwd_val", "LOOKUP_FORWARD(curve, input)", None)
+            .aux("bwd_val", "LOOKUP_BACKWARD(curve, input)", None)
+            .aux_with_gf("with_lookup", "input", implied(&[7.0]));
+        for name in ["interp_val", "fwd_val", "bwd_val", "with_lookup"] {
+            project.assert_vm_result(name, &[7.0, 7.0, 7.0]);
+        }
+    }
+
+    #[test]
+    fn a_model_with_a_nan_x_reports_a_bad_table_on_its_variable() {
+        let project = TestProject::new("nan_x")
+            .aux("input", "TIME", None)
+            .aux_with_gf(
+                "curve",
+                "input",
+                datamodel::GraphicalFunction {
+                    x_points: Some(vec![f64::NAN]),
+                    ..implied(&[7.0])
+                },
+            );
+        assert!(
+            project
+                .error_diagnostics()
+                .contains(&("main.curve".to_string(), ErrorCode::BadTable)),
+            "{:?}",
+            project.error_diagnostics()
+        );
     }
 }
 
