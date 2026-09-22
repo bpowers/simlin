@@ -13,8 +13,9 @@
 //! `simlin_model_compile_to_wasm`, `simlin_analyze_discover_loops`,
 //! `simlin_project_diagram_sync`, the renderings of a model with no view, and
 //! the tool entry points (`simlin_tool_session_call`,
-//! `simlin_tool_session_get_run`, `simlin_tool_session_list_runs`), which take
-//! the contents they answer from under the datamodel lock.
+//! `simlin_tool_session_get_run`, `simlin_tool_session_list_runs`,
+//! `simlin_tool_session_land_plan`), which take the contents they answer from,
+//! or land on, under the datamodel lock.
 //! Those that do not take the database alone (`lock_db`), which locks the
 //! datamodel only to build it: `simlin_analyze_get_loops`,
 //! `simlin_model_get_incoming_links`, `simlin_model_get_links` and
@@ -170,6 +171,8 @@ enum Query {
     ToolRun,
     #[cfg(feature = "agent_tools")]
     ToolListRuns,
+    #[cfg(feature = "agent_tools")]
+    ToolLandPlan,
 }
 
 impl Query {
@@ -192,6 +195,8 @@ impl Query {
         Query::ToolRun,
         #[cfg(feature = "agent_tools")]
         Query::ToolListRuns,
+        #[cfg(feature = "agent_tools")]
+        Query::ToolLandPlan,
     ];
 
     /// Whether the row runs on the project with no stock-and-flow view.
@@ -429,6 +434,24 @@ impl Query {
                 expect_no_error(err, "making a tool session");
                 let (mut buf, mut len) = (ptr::null_mut(), 0);
                 crate::tools::simlin_tool_session_list_runs(session, &mut buf, &mut len, &mut err);
+                crate::tools::simlin_tool_session_unref(session);
+                String::from_utf8_lossy(&take_bytes(buf, len)).into_owned()
+            }
+            #[cfg(feature = "agent_tools")]
+            Query::ToolLandPlan => {
+                // An id the session never gave: the entry point takes its
+                // locks, and answers that there is no such plan.
+                let session = crate::tools::simlin_tool_session_new(model, &mut err);
+                expect_no_error(err, "making a tool session");
+                let id = CString::new("P1").unwrap();
+                let (mut buf, mut len) = (ptr::null_mut(), 0);
+                crate::tools::simlin_tool_session_land_plan(
+                    session,
+                    id.as_ptr(),
+                    &mut buf,
+                    &mut len,
+                    &mut err,
+                );
                 crate::tools::simlin_tool_session_unref(session);
                 String::from_utf8_lossy(&take_bytes(buf, len)).into_owned()
             }

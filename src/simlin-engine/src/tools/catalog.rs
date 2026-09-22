@@ -29,6 +29,7 @@ pub enum ToolName {
     ListRuns,
     AnalyzeLoops,
     RunTests,
+    EditModel,
 }
 
 /// What calling a tool does to the project.
@@ -43,7 +44,7 @@ pub enum ToolEffect {
 }
 
 impl ToolName {
-    pub const ALL: [ToolName; 8] = [
+    pub const ALL: [ToolName; 9] = [
         ToolName::ReadModel,
         ToolName::ReadVariables,
         ToolName::FindVariables,
@@ -52,6 +53,7 @@ impl ToolName {
         ToolName::ListRuns,
         ToolName::AnalyzeLoops,
         ToolName::RunTests,
+        ToolName::EditModel,
     ];
 
     pub fn name(self) -> &'static str {
@@ -64,6 +66,7 @@ impl ToolName {
             ToolName::ListRuns => "list_runs",
             ToolName::AnalyzeLoops => "analyze_loops",
             ToolName::RunTests => "run_tests",
+            ToolName::EditModel => "edit_model",
         }
     }
 
@@ -140,6 +143,15 @@ impl ToolName {
                  check that did not pass comes with an id (T1, T2, ...) that claims can cite. \
                  Run it before judging a model."
             }
+            ToolName::EditModel => {
+                "Plans an edit to the model -- add stocks, flows and variables, set equations, \
+                 units, notes and lookups, connect flows, rename, delete, name loops, change the \
+                 sim specs -- without applying it. The gate refuses an edit that adds an error, \
+                 stops the model simulating, makes a value not a number, or gives a model its \
+                 first unit warning. A plan that passes gets an id (P1, P2, ...); the person sees \
+                 its changes and decides whether it lands. Read the model first, and again when \
+                 it changed under you."
+            }
         }
     }
 
@@ -153,6 +165,7 @@ impl ToolName {
             | ToolName::ListRuns
             | ToolName::AnalyzeLoops
             | ToolName::RunTests => ToolEffect::Read,
+            ToolName::EditModel => ToolEffect::PlanEdit,
         }
     }
 }
@@ -167,10 +180,10 @@ pub fn catalog_json() -> &'static str {
 #[cfg(feature = "schema")]
 pub fn generate_catalog_json() -> String {
     use super::{
-        AnalyzeLoopsInput, AnalyzeLoopsOutput, FindVariablesInput, FindVariablesOutput,
-        ListRunsInput, ListRunsOutput, ReadBehaviorInput, ReadBehaviorOutput, ReadModelInput,
-        ReadModelOutput, ReadVariablesInput, ReadVariablesOutput, RunExperimentInput,
-        RunExperimentOutput, RunTestsInput, RunTestsOutput,
+        AnalyzeLoopsInput, AnalyzeLoopsOutput, EditModelInput, EditModelOutput, FindVariablesInput,
+        FindVariablesOutput, ListRunsInput, ListRunsOutput, ReadBehaviorInput, ReadBehaviorOutput,
+        ReadModelInput, ReadModelOutput, ReadVariablesInput, ReadVariablesOutput,
+        RunExperimentInput, RunExperimentOutput, RunTestsInput, RunTestsOutput,
     };
 
     #[derive(Serialize)]
@@ -235,6 +248,7 @@ pub fn generate_catalog_json() -> String {
                     (input::<AnalyzeLoopsInput>(), output::<AnalyzeLoopsOutput>())
                 }
                 ToolName::RunTests => (input::<RunTestsInput>(), output::<RunTestsOutput>()),
+                ToolName::EditModel => (input::<EditModelInput>(), output::<EditModelOutput>()),
             };
             Entry {
                 name: tool.name(),

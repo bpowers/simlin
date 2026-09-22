@@ -27,6 +27,20 @@ fn good_input(tool: ToolName) -> Value {
         ToolName::ListRuns => json!({}),
         ToolName::AnalyzeLoops => json!({"through": "Inventory"}),
         ToolName::RunTests => json!({"tests": ["units", "extreme_conditions"]}),
+        ToolName::EditModel => json!({
+            "summary": "Make shipments depend on what is on hand.",
+            "operations": [
+                {"op": "set_equation", "variable": "shipments", "equation": "MIN(orders, Inventory)"}
+            ]
+        }),
+    }
+}
+
+/// What a call of `tool` needs the session to have done first: an edit is
+/// planned against what the session read.
+fn prepare(host: &mut Host, session: &mut Session, tool: ToolName) {
+    if tool == ToolName::EditModel {
+        host.call(session, "read_model", json!({}));
     }
 }
 
@@ -56,6 +70,7 @@ fn every_tools_input_and_output_agree_with_the_schemas_the_catalog_publishes() {
     for tool in ToolName::ALL {
         let mut host = Host::from_test_project(&inventory());
         let mut session = Session::new("main");
+        prepare(&mut host, &mut session, tool);
         let input = good_input(tool);
         let input_schema = jsonschema::validator_for(&catalog_schema(tool, "inputSchema")).unwrap();
         assert!(
@@ -149,6 +164,7 @@ fn every_output_names_the_revision_it_read() {
                 .set_scalar_equation("5")
         });
         host.edit(|_| {});
+        prepare(&mut host, &mut session, tool);
         let output = host.call(&mut session, tool.name(), good_input(tool));
         assert_eq!(output["revision"], 2, "{}", tool.name());
     }
@@ -181,6 +197,10 @@ fn a_call_other_work_waits_for_stops_and_keeps_nothing() {
             "{}: an interrupted read is no read",
             tool.name()
         );
+        // An edit is planned against a read; the interrupted call left none.
+        if tool == ToolName::EditModel {
+            host.call(&mut session, "read_model", json!({}));
+        }
         host.call(&mut session, tool.name(), good_input(tool));
     }
 }

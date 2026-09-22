@@ -11,7 +11,7 @@ use crate::datamodel::{self, Project};
 use crate::db::SimlinDb;
 use crate::test_common::TestProject;
 
-use super::{Session, ToolOutput, Workspace};
+use super::{Landing, Session, ToolOutput, Workspace};
 
 /// A project as a host holds one for tool calls: the datamodel, a db synced to
 /// it with `SimlinDb::sync` (what libsimlin's open functions do), and the
@@ -104,6 +104,20 @@ impl Host {
         let output = self.call_raw(session, tool, &input.to_string());
         assert!(output.is_error, "{tool} answered {input}: {}", output.json);
         serde_json::from_str(&output.json).expect("refusals are JSON")
+    }
+
+    /// Land the plan `id` as a host does: `Session::land_plan` on the
+    /// project as it is, its result made the project's contents in one
+    /// edit. The reason, when it does not land.
+    pub fn land(&mut self, session: &mut Session, id: &str) -> Result<(), String> {
+        match session.land_plan(self.workspace(), id) {
+            None => Err(format!("the session has no plan '{id}'")),
+            Some(Landing::Refused(reason)) => Err(reason),
+            Some(Landing::Landed(project)) => {
+                self.edit(|p| *p = *project);
+                Ok(())
+            }
+        }
     }
 
     pub fn workspace(&mut self) -> Workspace<'_> {

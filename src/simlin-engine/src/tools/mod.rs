@@ -21,6 +21,10 @@
 //!   that is stable for the life of the session (`evidence`), so an agent can
 //!   refer to "D3" or "L2" across calls and a verifier can check what it
 //!   names.
+//! - **Edits are plans.** No tool changes the project: `edit_model` returns a
+//!   plan the gate passed, which the host lands, once the person approves,
+//!   with `Session::land_plan`: a plan lands by construction, on the project
+//!   as it is then.
 //! - **Refusals are output.** A domain failure -- an unknown variable, input
 //!   that does not match the schema -- is a [`ToolOutput`] with `is_error` set,
 //!   naming the rule and the repair, for the agent to read and answer. Only a
@@ -38,6 +42,7 @@ mod battery;
 mod behavior;
 mod catalog;
 mod changes;
+mod edit;
 mod evidence;
 mod experiment;
 mod loops;
@@ -56,6 +61,10 @@ pub use behavior::{BehaviorMode, Damping, Direction, ModeKind, classify};
 pub use catalog::generate_catalog_json;
 pub use catalog::{ToolEffect, ToolName, catalog_json};
 pub use changes::{ChangedField, ChangedVariable, Changes};
+pub use edit::{
+    ChangeAction, EditModelInput, EditModelOutput, EditOperation, Landing, LookupShape,
+    PlannedChange, PlannedDiagnostic, Verdict,
+};
 pub use evidence::{DiagnosticCategoryName, DiagnosticReport, Severity};
 pub use experiment::{
     AppliedChange, ChangeInput, Comparison, ElementValue, RunExperimentInput, RunExperimentOutput,
@@ -168,6 +177,7 @@ pub struct Session {
     evidence: evidence::Evidence,
     last_read: Option<changes::ReadSnapshot>,
     runs: runs::RunStore,
+    plans: edit::PlanStore,
     outline_budget: usize,
 }
 
@@ -180,6 +190,7 @@ impl Session {
             evidence: evidence::Evidence::default(),
             last_read: None,
             runs: runs::RunStore::default(),
+            plans: edit::PlanStore::default(),
             outline_budget: OUTLINE_BUDGET,
         }
     }
@@ -229,6 +240,7 @@ impl Session {
                 respond(name, input, |input| loops::analyze_loops(self, ws, input))
             }
             ToolName::RunTests => respond(name, input, |input| battery::run_tests(self, ws, input)),
+            ToolName::EditModel => respond(name, input, |input| edit::edit_model(self, ws, input)),
         };
         if output.interrupted {
             self.evidence = evidence;
@@ -266,11 +278,32 @@ impl Session {
         self.runs.listing(ws, model)
     }
 
+    /// Land the plan `edit_model` gave the id `id` on the project as `ws`
+    /// has it: the project as the plan leaves it, for the host to make its
+    /// contents in one edit, or why it cannot land there, for the agent to
+    /// plan again. `None` for an id the session never gave, or a plan it
+    /// has forgotten (it keeps the last 16).
+    ///
+    /// A plan lands by construction: at the revision it was planned at, its
+    /// patch, gated against those very contents; at another, planned again
+    /// on the contents as they are, and landed only when what it writes is
+    /// as it was, the gate passes again and its lines are the ones the
+    /// person approved. The host holds the project's contents for the call,
+    /// so nothing lands between the check and the edit.
+    pub fn land_plan(&mut self, mut ws: Workspace<'_>, id: &str) -> Option<Landing> {
+        edit::land_plan(self, &mut ws, id)
+    }
+
     /// What changed in the model's variables and sim specs since this
     /// session's last `read_model`, or `None` before the first read and when
     /// nothing did: what a host tells an agent about the person's work before
     /// its next turn. The revision alone cannot say, since a layout-only
     /// change advances it and changes no variable.
+    ///
+    /// What the session's own plans left, once a host landed them, is the
+    /// agent's work and not news to it, so a variable or the sim specs as one
+    /// of its plans would leave them is left out; a change the person made
+    /// after the plan landed is reported.
     ///
     /// `project` at `revision` is the project as it is now, as a
     /// [`Workspace`] carries it.
@@ -284,7 +317,7 @@ impl Session {
             return None;
         }
         let model = resolve_datamodel_model(project, &self.model_name)?;
-        let changes = changes::diff(snapshot, project, model);
+        let changes = changes::diff(snapshot, project, model, &self.plans);
         (!changes.is_empty()).then_some(changes)
     }
 }
@@ -365,6 +398,13 @@ impl ToolError {
 
     pub(crate) fn with_suggestions(mut self, suggestions: Vec<String>) -> ToolError {
         self.suggestions = suggestions;
+        self
+    }
+
+    /// The refusal with `prefix` before what it says: which of several
+    /// parts of a call it is about.
+    pub(crate) fn prefixed(mut self, prefix: &str) -> ToolError {
+        self.error = format!("{prefix}{}", self.error);
         self
     }
 }

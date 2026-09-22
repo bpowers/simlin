@@ -621,8 +621,8 @@ fn convert_arrayed_equation(a: ArrayedEquationInput) -> ejson::ArrayedEquation {
 
 /// Convert a curated `EditOperation` to an engine `ModelOperation`.
 ///
-/// Excluded fields (`uid`, `compat`) are filled with engine defaults
-/// (0 / None).
+/// Excluded fields (`uid`, `ai_state`, `compat`) are filled with engine
+/// defaults (0 / None).
 fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
     match op {
         EditOperation::UpsertStock(s) => {
@@ -635,6 +635,7 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
                 outflows: s.outflows.unwrap_or_default(),
                 documentation: s.documentation.unwrap_or_default(),
                 arrayed_equation: s.arrayed_equation.map(convert_arrayed_equation),
+                ai_state: None,
                 compat: None,
                 non_negative: false,
                 can_be_module_input: false,
@@ -651,6 +652,7 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
                 graphical_function: f.graphical_function,
                 documentation: f.documentation.unwrap_or_default(),
                 arrayed_equation: f.arrayed_equation.map(convert_arrayed_equation),
+                ai_state: None,
                 compat: None,
                 non_negative: false,
                 can_be_module_input: false,
@@ -667,6 +669,7 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
                 graphical_function: a.graphical_function,
                 documentation: a.documentation.unwrap_or_default(),
                 arrayed_equation: a.arrayed_equation.map(convert_arrayed_equation),
+                ai_state: None,
                 compat: None,
                 can_be_module_input: false,
                 is_public: false,

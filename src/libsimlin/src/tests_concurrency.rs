@@ -1122,6 +1122,124 @@ fn an_interrupted_read_of_a_run_is_told_from_a_missing_one() {
     }
 }
 
+/// A landing the person approved, made while a call on the same session runs,
+/// counts itself as waiting from before it waits for the session, which the
+/// call holds for its whole length: the call stops at its next checkpoint and
+/// keeps nothing, and the landing lands, rather than waiting the call out.
+/// With one session per document, this is a host's own setup.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn a_landing_stops_a_call_on_its_own_session() {
+    use crate::tools::install_tool_test_hook;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+
+    let datamodel = TestProject::new("tool_land_own_session")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    let proj_addr = proj as usize;
+    // Call `tool` on the session at `session_addr`: whether it refused, and
+    // its output.
+    let call = |session_addr: usize, tool: &str, input: &str| unsafe {
+        let name = CString::new(tool).unwrap();
+        let (mut buf, mut len, mut is_error) = (ptr::null_mut(), 0usize, false);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        crate::tools::simlin_tool_session_call(
+            session_addr as *mut crate::tools::SimlinToolSession,
+            name.as_ptr(),
+            input.as_ptr(),
+            input.len(),
+            &mut buf,
+            &mut len,
+            &mut is_error,
+            &mut err,
+        );
+        assert!(err.is_null());
+        let output: serde_json::Value =
+            serde_json::from_slice(std::slice::from_raw_parts(buf, len)).unwrap();
+        simlin_free(buf);
+        (is_error, output)
+    };
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let session = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let session_addr = session as usize;
+        call(session_addr, "read_model", "");
+        let (is_error, plan) = call(
+            session_addr,
+            "edit_model",
+            r#"{"summary": "a faster rate", "operations": [
+                {"op": "set_equation", "variable": "rate", "equation": "0.03"}]}"#,
+        );
+        assert!(!is_error, "{plan}");
+        let id = plan["plan"].as_str().unwrap().to_string();
+
+        // The next call waits inside its database section until work waits
+        // for the project, or the positive wait runs out.
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let hold = Arc::new(AtomicBool::new(true));
+        let hold_in_hook = Arc::clone(&hold);
+        let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+            if project as *const SimlinProject as usize == proj_addr
+                && hold_in_hook.swap(false, Ordering::SeqCst)
+            {
+                let _ = entered_tx.send(());
+                let deadline = std::time::Instant::now() + POSITIVE_WAIT;
+                while !project.is_waited_on() && std::time::Instant::now() < deadline {
+                    thread::yield_now();
+                }
+            }
+        }));
+        let caller = thread::spawn(move || call(session_addr, "read_model", ""));
+        entered_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("the call holds the session in its database section");
+        let lander = thread::spawn(move || {
+            let id = CString::new(id).unwrap();
+            let (mut buf, mut len, mut err) = (ptr::null_mut(), 0usize, ptr::null_mut());
+            let started = std::time::Instant::now();
+            crate::tools::simlin_tool_session_land_plan(
+                session_addr as *mut crate::tools::SimlinToolSession,
+                id.as_ptr(),
+                &mut buf,
+                &mut len,
+                &mut err,
+            );
+            assert!(err.is_null());
+            let answer: serde_json::Value =
+                serde_json::from_slice(std::slice::from_raw_parts(buf, len)).unwrap();
+            simlin_free(buf);
+            (answer, started.elapsed())
+        });
+        let (is_error, output) = caller.join().expect("the call finished");
+        assert!(is_error, "{output}");
+        assert_eq!(output["interrupted"], true, "the call stopped: {output}");
+        let (answer, waited) = lander.join().expect("the landing finished");
+        assert_eq!(answer, serde_json::json!({"landed": true}));
+        assert!(
+            waited < POSITIVE_WAIT / 2,
+            "the landing waited {waited:?}, not the call's whole length"
+        );
+        let mut revision = 0;
+        simlin_project_get_revision(proj, &mut revision, &mut err);
+        assert!(err.is_null());
+        assert_eq!(revision, 1, "the plan landed");
+        assert!(!(*proj).is_waited_on(), "nothing waits once the landing is in");
+
+        crate::tools::simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// A tool call stops for an edit that waits for the database: the edit holds
 /// the datamodel while it waits, so every hit test waits with it, and a call
 /// that ran on would keep them waiting for the rest of its work. The call

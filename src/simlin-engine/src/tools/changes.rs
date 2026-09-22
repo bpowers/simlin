@@ -12,7 +12,7 @@
 //! reshaped pipe) changes nothing an agent read, so it is no change here,
 //! though it advances the project's revision.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -132,6 +132,8 @@ pub(crate) struct ReadSnapshot {
     /// Each variable's record by canonical name.
     variables: BTreeMap<String, Variable>,
     specs: datamodel::SimSpecs,
+    /// The model's loop names.
+    loops: Vec<datamodel::LoopMetadata>,
     dimensions: Vec<datamodel::Dimension>,
     units: Vec<datamodel::Unit>,
     /// The project's other models by name: what of each a simulation reads.
@@ -150,10 +152,58 @@ struct ModelContents {
 impl ModelContents {
     fn of(model: &datamodel::Model) -> ModelContents {
         ModelContents {
-            variables: model.variables.clone(),
+            variables: model.variables.iter().map(without_provenance).collect(),
             sim_specs: model.sim_specs.clone(),
         }
     }
+}
+
+/// `var` with no record of who made it: what is compared when the question is
+/// whether a variable changed, since provenance changes with every edit and
+/// describes the edit, not the model.
+pub(crate) fn without_provenance(var: &Variable) -> Variable {
+    let mut var = var.clone();
+    match &mut var {
+        Variable::Stock(v) => v.ai_state = None,
+        Variable::Flow(v) => v.ai_state = None,
+        Variable::Aux(v) => v.ai_state = None,
+        Variable::Module(v) => v.ai_state = None,
+    }
+    var
+}
+
+/// Whether two records (none: absent) are the same variable, provenance
+/// aside.
+pub(crate) fn same_record(a: Option<&Variable>, b: Option<&Variable>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => without_provenance(a) == without_provenance(b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// The loop name of `loops` for the loop through the variables `names`
+/// (canonical), whose uids `variables` give.
+pub(crate) fn loop_entry<'a>(
+    variables: impl IntoIterator<Item = &'a Variable>,
+    loops: &'a [datamodel::LoopMetadata],
+    names: &BTreeSet<String>,
+) -> Option<&'a datamodel::LoopMetadata> {
+    let by_uid: BTreeMap<i32, String> = variables
+        .into_iter()
+        .filter_map(|v| {
+            crate::patch::variable_uid(v)
+                .map(|uid| (uid, crate::canonicalize(v.get_ident()).into_owned()))
+        })
+        .collect();
+    loops.iter().find(|entry| {
+        let through: Option<BTreeSet<String>> = entry
+            .uids
+            .iter()
+            .map(|uid| by_uid.get(uid).cloned())
+            .collect();
+        through.as_ref() == Some(names)
+    })
 }
 
 /// The project's models other than `model`, by name.
@@ -183,10 +233,30 @@ impl ReadSnapshot {
                 .map(|v| (crate::canonicalize(v.get_ident()).into_owned(), v.clone()))
                 .collect(),
             specs: effective_specs(project, model).clone(),
+            loops: model.loop_metadata.clone(),
             dimensions: project.dimensions.clone(),
             units: project.units.clone(),
             other_models: other_models(project, model),
         }
+    }
+}
+
+impl ReadSnapshot {
+    /// The record the read gave the variable named `name` (canonically), if
+    /// the model had it then.
+    pub(crate) fn record(&self, name: &str) -> Option<&Variable> {
+        self.variables.get(name)
+    }
+
+    /// The sim specs the read gave.
+    pub(crate) fn specs(&self) -> &datamodel::SimSpecs {
+        &self.specs
+    }
+
+    /// The name the read gave the loop through the variables `names`
+    /// (canonical), if it had one.
+    pub(crate) fn loop_name(&self, names: &BTreeSet<String>) -> Option<&datamodel::LoopMetadata> {
+        loop_entry(self.variables.values(), &self.loops, names)
     }
 }
 
@@ -198,11 +268,14 @@ pub(crate) fn effective_specs<'a>(
     model.sim_specs.as_ref().unwrap_or(&project.sim_specs)
 }
 
-/// What changed between `snapshot` and `model` as it is in `project`.
+/// What changed between `snapshot` and `model` as it is in `project`,
+/// leaving out what `explained` accounts for: a variable whose record (none:
+/// removed) it says someone else's work left, and the sim specs likewise.
 pub(crate) fn diff(
     snapshot: &ReadSnapshot,
     project: &datamodel::Project,
     model: &datamodel::Model,
+    explained: &dyn Explains,
 ) -> Changes {
     let now: BTreeMap<String, &Variable> = model
         .variables
@@ -212,6 +285,9 @@ pub(crate) fn diff(
     let mut added = Vec::new();
     let mut changed = Vec::new();
     for (canonical, var) in &now {
+        if explained.variable(canonical, Some(var)) {
+            continue;
+        }
         match snapshot.variables.get(canonical) {
             None => added.push(var.get_ident().to_string()),
             Some(before) => {
@@ -228,9 +304,12 @@ pub(crate) fn diff(
     let removed: Vec<String> = snapshot
         .variables
         .iter()
-        .filter(|(canonical, _)| !now.contains_key(*canonical))
+        .filter(|(canonical, _)| {
+            !now.contains_key(*canonical) && !explained.variable(canonical, None)
+        })
         .map(|(_, var)| var.get_ident().to_string())
         .collect();
+    let specs = effective_specs(project, model);
     let (added, added_count) = cap(added);
     let (removed, removed_count) = cap(removed);
     let (changed, changed_count) = cap(changed);
@@ -257,11 +336,20 @@ pub(crate) fn diff(
         removed_count,
         changed,
         changed_count,
-        specs_changed: &snapshot.specs != effective_specs(project, model),
+        specs_changed: &snapshot.specs != specs && !explained.specs(specs),
         dimensions_changed: snapshot.dimensions != project.dimensions,
         unit_definitions_changed: snapshot.units != project.units,
         models_changed,
     }
+}
+
+/// Changes a diff leaves out, because the reader knows of them already.
+pub(crate) trait Explains {
+    /// Whether the variable named `name` (canonically) being as `record` is
+    /// (none: removed) is accounted for.
+    fn variable(&self, name: &str, record: Option<&Variable>) -> bool;
+    /// Whether the sim specs being `specs` is accounted for.
+    fn specs(&self, specs: &datamodel::SimSpecs) -> bool;
 }
 
 /// A list capped at [`MAX_CHANGED_NAMES`], and its length when the cap bound.

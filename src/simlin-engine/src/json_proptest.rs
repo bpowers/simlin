@@ -350,6 +350,7 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
                     non_negative: false,
                     can_be_module_input: false,
                     is_public: false,
+                    ai_state: None,
                 }
             ),
         // Arrayed stock: has arrayed_equation, empty initial_equation
@@ -377,6 +378,7 @@ fn stock_strategy() -> BoxedStrategy<Stock> {
                     non_negative: false,
                     can_be_module_input: false,
                     is_public: false,
+                    ai_state: None,
                 }
             ),
     ]
@@ -407,6 +409,7 @@ fn flow_strategy() -> BoxedStrategy<Flow> {
                 non_negative: false,
                 can_be_module_input: false,
                 is_public: false,
+                ai_state: None,
             }),
         // Arrayed flow: has arrayed_equation, empty equation
         (
@@ -430,6 +433,7 @@ fn flow_strategy() -> BoxedStrategy<Flow> {
                 non_negative: false,
                 can_be_module_input: false,
                 is_public: false,
+                ai_state: None,
             }),
     ]
     .boxed()
@@ -475,6 +479,7 @@ fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
                         compat,
                         can_be_module_input: false,
                         is_public: false,
+                        ai_state: None,
                     }
                 }
             ),
@@ -510,6 +515,7 @@ fn auxiliary_strategy() -> BoxedStrategy<Auxiliary> {
                     compat,
                     can_be_module_input: false,
                     is_public: false,
+                    ai_state: None,
                 }
             }),
     ]
@@ -552,6 +558,7 @@ fn module_strategy() -> impl Strategy<Value = Module> {
                     compat,
                     can_be_module_input: false,
                     is_public: false,
+                    ai_state: None,
                 }
             },
         )
@@ -1274,6 +1281,7 @@ mod protobuf_roundtrip_tests {
                     outflows: vec!["deaths".to_string()],
                     documentation: "Total population".to_string(),
                     arrayed_equation: None,
+                    ai_state: None,
                     compat: Some(Compat {
                         non_negative: true,
                         is_public: true,
@@ -1292,6 +1300,7 @@ mod protobuf_roundtrip_tests {
                         graphical_function: None,
                         documentation: String::new(),
                         arrayed_equation: None,
+                        ai_state: None,
                         compat: Some(Compat {
                             non_negative: true,
                             ..Default::default()
@@ -1308,6 +1317,7 @@ mod protobuf_roundtrip_tests {
                         graphical_function: None,
                         documentation: String::new(),
                         arrayed_equation: None,
+                        ai_state: None,
                         compat: Some(Compat {
                             non_negative: true,
                             ..Default::default()
@@ -1326,6 +1336,7 @@ mod protobuf_roundtrip_tests {
                         graphical_function: None,
                         documentation: String::new(),
                         arrayed_equation: None,
+                        ai_state: None,
                         compat: Some(Compat {
                             can_be_module_input: true,
                             ..Default::default()
@@ -1341,6 +1352,7 @@ mod protobuf_roundtrip_tests {
                         graphical_function: None,
                         documentation: String::new(),
                         arrayed_equation: None,
+                        ai_state: None,
                         compat: Some(Compat {
                             can_be_module_input: true,
                             ..Default::default()
@@ -1459,6 +1471,7 @@ mod protobuf_roundtrip_tests {
                         elements: None,
                         has_except_default: None,
                     }),
+                    ai_state: None,
                     compat: None,
                     non_negative: false,
                     can_be_module_input: false,
@@ -1495,6 +1508,7 @@ mod protobuf_roundtrip_tests {
                         ]),
                         has_except_default: None,
                     }),
+                    ai_state: None,
                     compat: None,
                     can_be_module_input: false,
                     is_public: false,
@@ -1583,6 +1597,7 @@ mod protobuf_roundtrip_tests {
                     }),
                     documentation: String::new(),
                     arrayed_equation: None,
+                    ai_state: None,
                     compat: None,
                     can_be_module_input: false,
                     is_public: false,
@@ -1826,6 +1841,7 @@ mod protobuf_roundtrip_tests {
             outflows: vec![],
             documentation: String::new(),
             arrayed_equation: None,
+            ai_state: None,
             compat: Some(Compat {
                 non_negative: true,
                 can_be_module_input: true,

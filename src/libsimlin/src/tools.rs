@@ -343,8 +343,10 @@ fn snapshot(
 /// `read_model` -- variables added, removed and changed (with which fields),
 /// and whether the sim specs changed -- as UTF-8 JSON to a buffer the caller
 /// frees with `simlin_free`, or `null` before the first read and when nothing
-/// did. A view edit changes nothing an agent read, so it is no change here.
-/// What a host tells an agent about the person's work before its next turn.
+/// did. A view edit changes nothing an agent read, so it is no change here,
+/// and what the session's own plans left once landed is the agent's work, not
+/// news to it. What a host tells an agent about the person's work before its
+/// next turn.
 ///
 /// # Safety
 /// - `session` must be a valid pointer to a SimlinToolSession
@@ -380,6 +382,117 @@ pub unsafe extern "C" fn simlin_tool_session_get_changes(
     drop(tool_session);
     let json = serde_json::to_vec(&changes).expect("a change report serializes");
     write_bytes_to_ffi_output(&json, out_buf, out_len, out_error, "a change report");
+}
+
+/// Land the plan `edit_model` gave the id `id` on the project as it is, once
+/// the person approves it: the one way an agent's edit reaches a project.
+/// Writes `{"landed": true}`, or `{"landed": false, "reason": ...}` when it
+/// cannot land there, as UTF-8 JSON to a buffer the caller frees with
+/// `simlin_free`; a refusal is for the agent to read, which plans the edit
+/// again. `DoesNotExist` for an id the session never gave, or a plan it has
+/// forgotten (it keeps the last 16).
+///
+/// The plan lands by construction, under the datamodel lock held for the
+/// whole call, so nothing lands between the check and the edit: at the
+/// revision it was planned at, its patch, which the session's gate passed
+/// against those very contents; at another, the plan's operations planned
+/// again on the contents as they are, landed only when everything the plan
+/// writes is as it was when the plan was made, the gate passes again, and
+/// the plan comes out with the lines the person approved. A person's diagram
+/// edits meanwhile are kept. The gate is the session's own (errors the model
+/// had are tolerated, a new error or value that is not a number refused), so
+/// no host passes `allow_errors`. Landing advances the revision as any edit
+/// does. Locks the session, then the datamodel, then the database, and counts
+/// itself among the waiters a call stops for from before it waits for the
+/// session: a call on the same session holds the session for the whole call,
+/// and one on another the database, so either stops at its next checkpoint
+/// rather than keep the person's approved edit waiting for the rest of it.
+///
+/// # Safety
+/// - `session` must be a valid pointer to a SimlinToolSession
+/// - `id` must be a valid C string
+/// - `out_buf` and `out_len` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn simlin_tool_session_land_plan(
+    session: *mut SimlinToolSession,
+    id: *const c_char,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buf.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+    let session_ref = match require_session(session) {
+        Ok(s) => s,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
+    };
+    if id.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("plan id pointer must not be NULL"),
+        );
+        return;
+    }
+    let Ok(id) = CStr::from_ptr(id).to_str() else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic).with_message("plan id is not valid UTF-8"),
+        );
+        return;
+    };
+    let project = &*(*session_ref.model).project;
+    // Counted until it holds the database, which no call then does.
+    let waiting = project.count_waiting();
+    let mut tool_session = session_ref.session.lock().unwrap();
+    let mut datamodel = project.datamodel.lock().unwrap();
+    let mut db = project.lock_db_with(&datamodel);
+    drop(waiting);
+    let revision = datamodel.revision();
+    // The person's own approval: nothing it waits for is theirs, so it does
+    // not stop.
+    let workspace = tools::Workspace {
+        project: &datamodel,
+        db: &mut db,
+        revision,
+        waiting: None,
+    };
+    let landing = tool_session.land_plan(workspace, id);
+    let answer = match landing {
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::DoesNotExist)
+                    .with_message(format!("the session has no plan '{id}'")),
+            );
+            return;
+        }
+        Some(tools::Landing::Landed(contents)) => {
+            // The edit: the database synced to the plan's contents, then the
+            // contents replaced by them, which advances the revision.
+            db.sync(&contents);
+            datamodel.replace(std::sync::Arc::from(contents));
+            serde_json::json!({"landed": true})
+        }
+        Some(tools::Landing::Refused(reason)) => {
+            serde_json::json!({"landed": false, "reason": reason})
+        }
+    };
+    drop(db);
+    drop(datamodel);
+    drop(tool_session);
+    let json = serde_json::to_vec(&answer).expect("a landing serializes");
+    write_bytes_to_ffi_output(&json, out_buf, out_len, out_error, "a landing");
 }
 
 /// The results of the session's run named `name` -- `"current"` for the model

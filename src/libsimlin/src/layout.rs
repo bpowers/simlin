@@ -12,7 +12,6 @@ use std::os::raw::c_char;
 
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
-use crate::patch::{convert_json_project_patch, JsonProjectPatch};
 use crate::{clear_out_error, require_project, store_error, SimlinErrorCode, SimlinProject};
 
 /// Generate the best automatic layout for the named model and replace its
@@ -86,7 +85,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
                 return;
             }
         };
-        let json_patch: JsonProjectPatch = match serde_json::from_str(json_str) {
+        let json_patch: engine::json::ProjectPatch = match serde_json::from_str(json_str) {
             Ok(p) => p,
             Err(e) => {
                 store_error(
@@ -97,17 +96,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
                 return;
             }
         };
-        let engine_patch = match convert_json_project_patch(json_patch) {
-            Ok(p) => p,
-            Err(e) => {
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic)
-                        .with_message(format!("failed to convert patch: {e}")),
-                );
-                return;
-            }
-        };
+        let engine_patch = engine::ProjectPatch::from(json_patch);
         // Collect all patches for this model and merge their ops, because a
         // ProjectPatch may legally contain multiple ModelPatch entries for the
         // same model (e.g. two separate UpsertFlow ops on the same model).

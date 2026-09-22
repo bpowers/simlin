@@ -4,11 +4,11 @@
 
 //! Patch types, conversion, validation, and FFI.
 //!
-//! JSON-based project patching: deserialize a JSON patch, convert to the
-//! engine's `ProjectPatch`, apply it (with optional dry-run), and collect
-//! both compile-time and static-analysis errors.
+//! JSON-based project patching: deserialize a JSON patch (the engine's
+//! `json::ProjectPatch`), convert to the engine's `ProjectPatch`, apply it
+//! (with optional dry-run), and collect both compile-time and static-analysis
+//! errors.
 
-use serde::Deserialize;
 use simlin_engine::common::ErrorCode;
 use simlin_engine::{self as engine};
 use std::ptr;
@@ -16,10 +16,10 @@ use std::ptr;
 use simlin_engine::errors;
 
 pub use crate::ffi_error::ErrorDetail as ErrorDetailData;
-use crate::ffi_error::{FfiError, SimlinError};
+use crate::ffi_error::SimlinError;
 use crate::{
     build_simlin_error, clear_out_error, require_project, store_anyhow_error, store_error,
-    store_ffi_error, SimlinErrorCode, SimlinErrorKind, SimlinProject, SimlinUnitErrorKind,
+    SimlinErrorCode, SimlinErrorKind, SimlinProject, SimlinUnitErrorKind,
 };
 
 #[cfg(test)]
@@ -77,185 +77,6 @@ fn invoke_patch_test_hook(point: PatchHookPoint, project_ref: &SimlinProject) {
     if let Some(hook) = hook {
         hook(point, project_ref);
     }
-}
-
-// ── JSON serde types ───────────────────────────────────────────────────
-
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
-enum JsonProjectOperation {
-    SetSimSpecs {
-        #[serde(rename = "simSpecs")]
-        sim_specs: engine::json::SimSpecs,
-    },
-    AddModel {
-        name: String,
-    },
-}
-
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct JsonProjectPatch {
-    #[serde(default)]
-    project_ops: Vec<JsonProjectOperation>,
-    #[serde(default)]
-    models: Vec<JsonModelPatch>,
-}
-
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Deserialize)]
-struct JsonModelPatch {
-    name: String,
-    #[serde(default)]
-    ops: Vec<JsonModelOperation>,
-}
-
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
-enum JsonModelOperation {
-    UpsertAux {
-        aux: engine::json::Auxiliary,
-    },
-    UpsertStock {
-        stock: engine::json::Stock,
-    },
-    UpsertFlow {
-        flow: engine::json::Flow,
-    },
-    UpsertModule {
-        module: engine::json::Module,
-    },
-    DeleteVariable {
-        ident: String,
-    },
-    RenameVariable {
-        from: String,
-        to: String,
-    },
-    UpsertView {
-        index: u32,
-        view: engine::json::View,
-    },
-    DeleteView {
-        index: u32,
-    },
-    UpdateStockFlows {
-        ident: String,
-        inflows: Vec<String>,
-        outflows: Vec<String>,
-    },
-    SetLoopName {
-        variables: Vec<String>,
-        name: String,
-        #[serde(default)]
-        description: Option<String>,
-    },
-    /// Upsert and remove view elements; the engine derives the model operations
-    /// the edit implies when it applies (`ModelOperation::EditView`).
-    EditView {
-        index: u32,
-        #[serde(default)]
-        upsert: Vec<engine::json::ViewElement>,
-        #[serde(default)]
-        remove: Vec<i32>,
-    },
-}
-
-// ── conversion helpers ─────────────────────────────────────────────────
-
-pub(crate) fn convert_json_project_patch(
-    patch: JsonProjectPatch,
-) -> std::result::Result<engine::ProjectPatch, FfiError> {
-    let mut project_ops = Vec::with_capacity(patch.project_ops.len());
-    for op in patch.project_ops {
-        project_ops.push(convert_json_project_operation(op)?);
-    }
-
-    let mut models = Vec::with_capacity(patch.models.len());
-    for model in patch.models {
-        let mut ops = Vec::with_capacity(model.ops.len());
-        for op in model.ops {
-            ops.push(convert_json_model_operation(op)?);
-        }
-        models.push(engine::ModelPatch {
-            name: model.name,
-            ops,
-        });
-    }
-
-    Ok(engine::ProjectPatch {
-        project_ops,
-        models,
-    })
-}
-
-fn convert_json_project_operation(
-    op: JsonProjectOperation,
-) -> std::result::Result<engine::ProjectOperation, FfiError> {
-    let result = match op {
-        JsonProjectOperation::SetSimSpecs { sim_specs } => {
-            engine::ProjectOperation::SetSimSpecs(sim_specs.into())
-        }
-        JsonProjectOperation::AddModel { name } => engine::ProjectOperation::AddModel { name },
-    };
-    Ok(result)
-}
-
-fn convert_json_model_operation(
-    op: JsonModelOperation,
-) -> std::result::Result<engine::ModelOperation, FfiError> {
-    let result = match op {
-        JsonModelOperation::UpsertAux { aux } => engine::ModelOperation::UpsertAux(aux.into()),
-        JsonModelOperation::UpsertStock { stock } => {
-            engine::ModelOperation::UpsertStock(stock.into())
-        }
-        JsonModelOperation::UpsertFlow { flow } => engine::ModelOperation::UpsertFlow(flow.into()),
-        JsonModelOperation::UpsertModule { module } => {
-            engine::ModelOperation::UpsertModule(module.into())
-        }
-        JsonModelOperation::DeleteVariable { ident } => {
-            engine::ModelOperation::DeleteVariable { ident }
-        }
-        JsonModelOperation::RenameVariable { from, to } => {
-            engine::ModelOperation::RenameVariable { from, to }
-        }
-        JsonModelOperation::UpsertView { index, view } => engine::ModelOperation::UpsertView {
-            index,
-            view: view.into(),
-        },
-        JsonModelOperation::DeleteView { index } => engine::ModelOperation::DeleteView { index },
-        JsonModelOperation::UpdateStockFlows {
-            ident,
-            inflows,
-            outflows,
-        } => engine::ModelOperation::UpdateStockFlows {
-            ident,
-            inflows,
-            outflows,
-        },
-        JsonModelOperation::SetLoopName {
-            variables,
-            name,
-            description,
-        } => engine::ModelOperation::SetLoopName {
-            variables,
-            name,
-            description,
-        },
-        JsonModelOperation::EditView {
-            index,
-            upsert,
-            remove,
-        } => engine::ModelOperation::EditView {
-            index,
-            upsert: upsert.into_iter().map(Into::into).collect(),
-            remove,
-        },
-    };
-    Ok(result)
 }
 
 // ── ErrorDetailBuilder ─────────────────────────────────────────────────
@@ -745,7 +566,7 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
         json_str
     };
 
-    let json_patch: JsonProjectPatch = match serde_json::from_str(json_str) {
+    let json_patch: engine::json::ProjectPatch = match serde_json::from_str(json_str) {
         Ok(patch) => patch,
         Err(err) => {
             store_error(
@@ -757,13 +578,7 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
         }
     };
 
-    let patch = match convert_json_project_patch(json_patch) {
-        Ok(patch) => patch,
-        Err(err) => {
-            store_ffi_error(out_error, err);
-            return;
-        }
-    };
+    let patch = engine::ProjectPatch::from(json_patch);
 
     let project_ref = match require_project(project) {
         Ok(p) => p,

@@ -74,7 +74,7 @@ pub(crate) const MAX_RUN_STEPS: usize = 200_000_000;
 /// How many slices a run is taken in. Between two, it asks whether other work
 /// waits for the project, and stops if so: that work waits at most a slice
 /// of a run, not the whole of a long one.
-const RUN_SLICES: f64 = 16.0;
+pub(crate) const RUN_SLICES: f64 = 16.0;
 
 /// Why a run did not finish: the reason, in words, or other work that waits
 /// for the project, which a run stops for between its slices.
@@ -997,7 +997,7 @@ impl Slices<'_> {
 }
 
 /// Why a VM was not built.
-enum Unbuilt {
+pub(crate) enum Unbuilt {
     /// The model does not compile.
     Compile(crate::common::Error),
     /// The run would cost more than a run may ([`over_budget`]).
@@ -1007,7 +1007,7 @@ enum Unbuilt {
 /// A VM of `model_name` in `project`, compiled on `db` (synced to it) under
 /// `overlay` -- unless the run would cost more than a run may, measured
 /// against `own`, the model's own specs, before the VM allocates its results.
-fn build_vm(
+pub(crate) fn build_vm(
     db: &mut SimlinDb,
     source_project: SourceProject,
     project: &datamodel::Project,

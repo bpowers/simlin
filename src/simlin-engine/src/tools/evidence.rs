@@ -79,6 +79,9 @@ pub enum DiagnosticCategoryName {
     UnitInference,
     /// A construct the compiler refuses.
     Assembly,
+    /// A value a run produces that is not a number: what an edit's gate
+    /// finds in the run, where the engine's diagnostics are silent.
+    Value,
 }
 
 impl From<DiagnosticCategory> for DiagnosticCategoryName {
@@ -197,35 +200,24 @@ impl Evidence {
         diagnostics
             .iter()
             .map(|diagnostic| {
-                let formatted = format_diagnostic_with_datamodel(diagnostic, ws.project);
-                let variable = formatted.variable_name.clone();
-                // The key reads the engine's reason, never the quote a parse
-                // error is shown with: the quote holds the equation's text, so
-                // keying on it would give the same problem a new id at every
-                // edit of its equation.
-                let engine_reason = formatted.details.clone();
-                let severity = Severity::from(diagnostic.severity);
-                let code = diagnostic.code();
+                let described = describe(diagnostic, ws.project, resolved.model);
                 let occurrence = seen
-                    .entry((variable.clone(), severity, code, engine_reason.clone()))
+                    .entry((
+                        described.variable.clone(),
+                        described.severity,
+                        described.code,
+                        described.engine_reason.clone(),
+                    ))
                     .and_modify(|n| *n += 1)
                     .or_insert(0);
                 let id = self.diagnostic_id(DiagnosticKey {
-                    variable: variable.clone(),
-                    severity,
-                    code,
-                    reason: engine_reason.clone(),
+                    variable: described.variable.clone(),
+                    severity: described.severity,
+                    code: described.code,
+                    reason: described.engine_reason.clone(),
                     occurrence: *occurrence,
                 });
-                let reason = reason_given(diagnostic, &formatted, resolved.model);
-                DiagnosticReport {
-                    id,
-                    severity,
-                    category: diagnostic.category().into(),
-                    code: code.to_string(),
-                    variable: variable.map(|name| display_name(resolved.model, &name)),
-                    reason,
-                }
+                described.report(id, resolved.model)
             })
             .collect()
     }
@@ -250,6 +242,58 @@ fn reason_given(
         (Some(own), None) => Some(own),
         (None, Some(quote)) => Some(quote),
         (None, None) => formatted.details.clone(),
+    }
+}
+
+/// A diagnostic as a tool describes it, before any id: what a report of it
+/// says, and what identifies the problem.
+pub(crate) struct Described {
+    pub severity: Severity,
+    pub category: DiagnosticCategoryName,
+    pub code: ErrorCode,
+    /// The variable to fix, canonically.
+    pub variable: Option<String>,
+    /// The engine's reason, which identifies the problem.
+    pub engine_reason: Option<String>,
+    /// The reason a report gives ([`reason_given`]).
+    pub reason: Option<String>,
+}
+
+impl Described {
+    /// The report of this diagnostic under `id`, its variable named as
+    /// `model` spells it.
+    pub(crate) fn report(self, id: String, model: &datamodel::Model) -> DiagnosticReport {
+        DiagnosticReport {
+            id,
+            severity: self.severity,
+            category: self.category,
+            code: self.code.to_string(),
+            variable: self.variable.map(|name| display_name(model, &name)),
+            reason: self.reason,
+        }
+    }
+}
+
+/// Describe `diagnostic` of `model` in `project`, which may be a staged copy
+/// of the project a session reads (the model as an edit would leave it).
+pub(crate) fn describe(
+    diagnostic: &Diagnostic,
+    project: &datamodel::Project,
+    model: &datamodel::Model,
+) -> Described {
+    let formatted = format_diagnostic_with_datamodel(diagnostic, project);
+    // The key reads the engine's reason, never the quote a parse error is
+    // shown with: the quote holds the equation's text, so keying on it would
+    // give the same problem a new id at every edit of its equation.
+    let engine_reason = formatted.details.clone();
+    let reason = reason_given(diagnostic, &formatted, model);
+    Described {
+        severity: Severity::from(diagnostic.severity),
+        category: diagnostic.category().into(),
+        code: diagnostic.code(),
+        variable: formatted.variable_name,
+        engine_reason,
+        reason,
     }
 }
 

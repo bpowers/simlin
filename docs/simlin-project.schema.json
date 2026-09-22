@@ -188,6 +188,17 @@
             }
           ]
         },
+        "aiState": {
+          "description": "Who made the variable, as ISEE's AI information records it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "compat": {
           "anyOf": [
             {
@@ -618,6 +629,20 @@
         "max"
       ]
     },
+    "AiState": {
+      "description": "Who made a variable and who edited it, as ISEE's AI information records\nit: the letters of [`datamodel::AiState`].",
+      "type": "string",
+      "enum": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F",
+        "G",
+        "H"
+      ]
+    },
     "Flow": {
       "type": "object",
       "properties": {
@@ -651,6 +676,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/ArrayedEquation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "aiState": {
+          "description": "Who made the variable, as ISEE's AI information records it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiState"
             },
             {
               "type": "null"
@@ -723,6 +759,17 @@
             }
           ]
         },
+        "aiState": {
+          "description": "Who made the variable, as ISEE's AI information records it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "compat": {
           "anyOf": [
             {
@@ -770,6 +817,17 @@
           "items": {
             "$ref": "#/$defs/ModuleReference"
           }
+        },
+        "aiState": {
+          "description": "Who made the variable, as ISEE's AI information records it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiState"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "compat": {
           "anyOf": [

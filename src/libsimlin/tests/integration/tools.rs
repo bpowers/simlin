@@ -114,6 +114,25 @@ unsafe fn apply(proj: *mut SimlinProject, patch: &Value) {
     expect_no_error(err, "the patch");
 }
 
+/// Land the plan `id` as a host does once the person approves it, and
+/// return the answer: whether it landed, and why not.
+unsafe fn land(session: *mut SimlinToolSession, id: &str) -> Value {
+    let id = CString::new(id).unwrap();
+    let (mut buf, mut len, mut err) = (ptr::null_mut(), 0, ptr::null_mut());
+    simlin_tool_session_land_plan(session, id.as_ptr(), &mut buf, &mut len, &mut err);
+    expect_no_error(err, "landing the plan");
+    let answer = serde_json::from_slice(std::slice::from_raw_parts(buf, len)).expect("JSON");
+    simlin_free(buf);
+    answer
+}
+
+unsafe fn revision_of(proj: *mut SimlinProject) -> u64 {
+    let (mut revision, mut err) = (0, ptr::null_mut());
+    simlin_project_get_revision(proj, &mut revision, &mut err);
+    expect_no_error(err, "reading the revision");
+    revision
+}
+
 fn set_rate(equation: &str) -> Value {
     json!({"models": [{"name": "main", "ops": [
         {"type": "upsertAux", "payload": {"aux": {"name": "rate", "equation": equation, "units": "1/month"}}}
@@ -430,6 +449,278 @@ unsafe fn run_series(session: *mut SimlinToolSession, run: &str, variable: &str)
     assert_eq!(written, steps);
     simlin_results_unref(results);
     series
+}
+
+#[test]
+fn a_host_lands_a_plan_the_session_made() {
+    unsafe {
+        let proj = project();
+        let model = main_model(proj);
+        let session = new_session(model);
+        call(session, "read_model", "{}");
+        let (plan, is_error) = call(
+            session,
+            "edit_model",
+            &json!({"summary": "a faster growth rate", "operations": [
+                {"op": "set_equation", "variable": "rate", "equation": "0.2"}
+            ]})
+            .to_string(),
+        );
+        assert!(!is_error, "{plan}");
+        assert_eq!(plan["verdict"], "ready");
+        let id = plan["plan"].as_str().unwrap();
+
+        let revision = revision_of(proj);
+        assert_eq!(land(session, id), json!({"landed": true}));
+        assert!(revision_of(proj) > revision, "landing is an edit");
+        let (record, _) = call(session, "read_variables", r#"{"names": ["rate"]}"#);
+        assert_eq!(record["variables"][0]["equation"], "0.2");
+        let again = land(session, id);
+        assert_eq!(again["landed"], false, "{again}");
+        assert!(again["reason"].as_str().unwrap().contains("landed already"));
+
+        let unknown = CString::new("P9").unwrap();
+        let (mut buf, mut len, mut err) = (ptr::null_mut(), 0, ptr::null_mut());
+        simlin_tool_session_land_plan(session, unknown.as_ptr(), &mut buf, &mut len, &mut err);
+        expect_error_code(
+            err,
+            SimlinErrorCode::DoesNotExist,
+            "a plan the session lacks",
+        );
+        let mut err = ptr::null_mut();
+        simlin_tool_session_land_plan(session, ptr::null(), &mut buf, &mut len, &mut err);
+        expect_error_code(err, SimlinErrorCode::Generic, "a NULL id");
+        let id = CString::new(id).unwrap();
+        let mut err = ptr::null_mut();
+        simlin_tool_session_land_plan(session, id.as_ptr(), ptr::null_mut(), &mut len, &mut err);
+        expect_error_code(err, SimlinErrorCode::Generic, "a NULL buffer");
+
+        simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A plan the person's edits since have made wrong does not land: one that
+/// now reads a variable the person deleted, and one of a variable the person
+/// changed. The agent is told why, and plans again.
+#[test]
+fn a_plan_the_model_changed_under_does_not_land() {
+    unsafe {
+        let proj = project();
+        let model = main_model(proj);
+        let session = new_session(model);
+        call(session, "read_model", "{}");
+        let plan = |ops: Value| {
+            let (plan, _) = call(
+                session,
+                "edit_model",
+                &json!({"summary": "an edit", "operations": ops}).to_string(),
+            );
+            assert_eq!(plan["verdict"], "ready", "{plan}");
+            plan["plan"].as_str().unwrap().to_string()
+        };
+        apply(proj, &set_bonus("0.05"));
+        call(session, "read_model", "{}");
+        let reads_bonus = plan(json!([
+            {"op": "set_equation", "variable": "rate", "equation": "0.1 + bonus"}
+        ]));
+        // The person deletes what the plan reads.
+        apply(
+            proj,
+            &json!({"models": [{"name": "main", "ops": [
+                {"type": "deleteVariable", "payload": {"ident": "bonus"}}
+            ]}]}),
+        );
+        let answer = land(session, &reads_bonus);
+        assert_eq!(answer["landed"], false, "{answer}");
+        assert!(
+            answer["reason"]
+                .as_str()
+                .unwrap()
+                .contains("no longer passes the gate"),
+            "{answer}"
+        );
+
+        call(session, "read_model", "{}");
+        let sets_rate =
+            plan(json!([{"op": "set_equation", "variable": "rate", "equation": "0.3"}]));
+        apply(proj, &set_rate("0.15"));
+        assert_ne!(changes(session), Value::Null, "the person's edit is news");
+        let answer = land(session, &sets_rate);
+        assert_eq!(answer["landed"], false, "{answer}");
+        assert!(
+            answer["reason"]
+                .as_str()
+                .unwrap()
+                .contains("rate changed since the plan"),
+            "{answer}"
+        );
+        let (record, _) = call(session, "read_variables", r#"{"names": ["rate"]}"#);
+        assert_eq!(
+            record["variables"][0]["equation"], "0.15",
+            "the person's edit stands"
+        );
+
+        simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A copy of `proj`, made as a host copies a project for an undo step.
+unsafe fn copy_of(proj: *mut SimlinProject) -> *mut SimlinProject {
+    let mut err = ptr::null_mut();
+    let copy = simlin_project_new(ptr::null(), &mut err);
+    expect_no_error(err, "a new project");
+    simlin_project_replace_contents(copy, proj, &mut err);
+    expect_no_error(err, "copying the project");
+    copy
+}
+
+/// `variable`'s equation in `proj`'s main model.
+unsafe fn equation_of(proj: *mut SimlinProject, variable: &str) -> String {
+    let contents = (*proj).datamodel.lock().unwrap();
+    let var = contents
+        .get_model("main")
+        .unwrap()
+        .get_variable(variable)
+        .unwrap()
+        .clone();
+    match var.get_equation() {
+        Some(simlin_engine::datamodel::Equation::Scalar(text)) => text.clone(),
+        other => panic!("{variable} has no scalar equation: {:?}", other.is_some()),
+    }
+}
+
+/// Whether `a` and `b` share one datamodel, as a copy does until either is
+/// edited.
+unsafe fn share_contents(a: *mut SimlinProject, b: *mut SimlinProject) -> bool {
+    let (a, b) = (
+        (*a).datamodel.lock().unwrap(),
+        (*b).datamodel.lock().unwrap(),
+    );
+    std::ptr::eq::<simlin_engine::datamodel::Project>(&**a, &**b)
+}
+
+/// A plan made before the project's contents were replaced -- an undo
+/// restoring a copy, a reload -- is planned again on what the replacement
+/// left, never landed as it was made: it lands keeping what the replacement
+/// changed elsewhere, and is refused when the replacement changed what it
+/// writes.
+#[test]
+fn a_plan_made_before_a_replacement_is_planned_again_on_what_it_left() {
+    unsafe {
+        let proj = project();
+        let model = main_model(proj);
+        let session = new_session(model);
+        call(session, "read_model", "{}");
+        let plan = |equation: &str| {
+            let (plan, _) = call(
+                session,
+                "edit_model",
+                &json!({"summary": "a growth rate", "operations": [
+                    {"op": "set_equation", "variable": "rate", "equation": equation}
+                ]})
+                .to_string(),
+            );
+            assert_eq!(plan["verdict"], "ready", "{plan}");
+            plan["plan"].as_str().unwrap().to_string()
+        };
+        let faster = plan("0.3");
+        let elsewhere = copy_of(proj);
+        apply(
+            elsewhere,
+            &json!({"models": [{"name": "main", "ops": [
+                {"type": "upsertFlow", "payload": {"flow": {
+                    "name": "births", "equation": "population * rate * 1", "units": "person/month"
+                }}}
+            ]}]}),
+        );
+        let before = revision_of(proj);
+        let mut err = ptr::null_mut();
+        simlin_project_replace_contents(proj, elsewhere, &mut err);
+        expect_no_error(err, "replacing the contents");
+        assert!(revision_of(proj) > before, "a replacement is a change");
+        assert_eq!(land(session, &faster), json!({"landed": true}));
+        assert_eq!(equation_of(proj, "rate"), "0.3");
+        assert_eq!(
+            equation_of(proj, "births"),
+            "population * rate * 1",
+            "what the replacement changed stays"
+        );
+
+        call(session, "read_model", "{}");
+        let slower = plan("0.05");
+        let changed = copy_of(proj);
+        apply(changed, &set_rate("0.15"));
+        simlin_project_replace_contents(proj, changed, &mut err);
+        expect_no_error(err, "replacing the contents");
+        let answer = land(session, &slower);
+        assert_eq!(answer["landed"], false, "{answer}");
+        assert_eq!(equation_of(proj, "rate"), "0.15", "the replacement stands");
+
+        simlin_project_unref(changed);
+        simlin_project_unref(elsewhere);
+        simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A plan landed on a project an undo copy shares its contents with leaves
+/// the copy as it was: the landing replaces the project's contents, and tool
+/// calls, which read them, leave the two sharing until then.
+#[test]
+fn a_plan_landed_beside_a_copy_leaves_the_copy_as_it_was() {
+    unsafe {
+        let proj = project();
+        let model = main_model(proj);
+        let session = new_session(model);
+        call(session, "read_model", "{}");
+        let (plan, _) = call(
+            session,
+            "edit_model",
+            &json!({"summary": "faster", "operations": [
+                {"op": "set_equation", "variable": "rate", "equation": "0.3"}
+            ]})
+            .to_string(),
+        );
+        let id = plan["plan"].as_str().unwrap().to_string();
+        let copy = copy_of(proj);
+        call(session, "read_model", "{}");
+        let (out, is_error) = call(
+            session,
+            "run_experiment",
+            r#"{"name": "a", "set": [{"variable": "rate", "multiply": 2}]}"#,
+        );
+        assert!(!is_error, "{out}");
+        assert!(
+            share_contents(proj, copy),
+            "tool calls read, and copy nothing"
+        );
+        let before = revision_of(proj);
+        assert_eq!(land(session, &id), json!({"landed": true}));
+        assert!(revision_of(proj) > before, "landing is an edit");
+        assert_eq!(equation_of(proj, "rate"), "0.3");
+        assert_eq!(
+            equation_of(copy, "rate"),
+            "0.1",
+            "the copy keeps its contents"
+        );
+        assert!(!share_contents(proj, copy));
+
+        simlin_project_unref(copy);
+        simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+fn set_bonus(equation: &str) -> Value {
+    json!({"models": [{"name": "main", "ops": [
+        {"type": "upsertAux", "payload": {"aux": {"name": "bonus", "equation": equation, "units": "1/month"}}}
+    ]}]})
 }
 
 /// How many loops the host's own structural loop surface reports.

@@ -207,15 +207,20 @@ enum Mutation {
     ReplaceContents,
     AddModel,
     DiagramSync,
+    /// `simlin_tool_session_land_plan`: an agent's approved edit.
+    #[cfg(feature = "agent_tools")]
+    LandPlan,
 }
 
 impl Mutation {
-    const ALL: [Mutation; 5] = [
+    const ALL: &[Mutation] = &[
         Mutation::ViewOnlyPatch,
         Mutation::StagedPatch,
         Mutation::ReplaceContents,
         Mutation::AddModel,
         Mutation::DiagramSync,
+        #[cfg(feature = "agent_tools")]
+        Mutation::LandPlan,
     ];
 
     unsafe fn run(self, proj: *mut SimlinProject) {
@@ -242,6 +247,20 @@ impl Mutation {
                 let name = CString::new("main").unwrap();
                 simlin_project_diagram_sync(proj, name.as_ptr(), ptr::null(), &mut err);
             }
+            #[cfg(feature = "agent_tools")]
+            Mutation::LandPlan => {
+                let model = main_model(proj);
+                let session = planned_session(model);
+                let id = CString::new("P1").unwrap();
+                let (mut buf, mut len) = (ptr::null_mut(), 0);
+                simlin_tool_session_land_plan(session, id.as_ptr(), &mut buf, &mut len, &mut err);
+                let answer: Value = serde_json::from_slice(std::slice::from_raw_parts(buf, len))
+                    .expect("a landing is JSON");
+                assert_eq!(answer["landed"], true, "{answer}");
+                simlin_free(buf);
+                simlin_tool_session_unref(session);
+                simlin_model_unref(model);
+            }
         }
         expect_no_error(err, &format!("{self:?}"));
     }
@@ -253,6 +272,8 @@ impl Mutation {
             | Mutation::StagedPatch
             | Mutation::ReplaceContents
             | Mutation::DiagramSync => true,
+            #[cfg(feature = "agent_tools")]
+            Mutation::LandPlan => true,
             Mutation::AddModel => false,
         }
     }
@@ -261,7 +282,7 @@ impl Mutation {
 #[test]
 fn every_mutating_entry_point_drops_the_hit_index_and_advances_the_revision() {
     let mut failures = Vec::new();
-    for mutation in Mutation::ALL {
+    for &mutation in Mutation::ALL {
         unsafe {
             let proj = open(100.0, 100.0);
             let model = main_model(proj);
@@ -318,6 +339,62 @@ enum Read {
     ToolChanges,
     #[cfg(feature = "agent_tools")]
     ToolRun,
+    /// Planning an edit stages it on the db and restores; the plan is the
+    /// host's to land.
+    #[cfg(feature = "agent_tools")]
+    ToolPlan,
+}
+
+/// A tool session over `model` that has read it and planned an edit, `P1`.
+/// The calls run on a thread of its own, so one that waits on a lock it can
+/// never take fails the test instead of hanging it.
+#[cfg(feature = "agent_tools")]
+unsafe fn planned_session(model: *mut SimlinModel) -> *mut crate::tools::SimlinToolSession {
+    let model_addr = model as usize;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let session = plan_in(model_addr as *mut SimlinModel);
+        let _ = tx.send(session as usize);
+    });
+    rx.recv_timeout(POSITIVE_WAIT)
+        .expect("the session plans rather than waiting on a lock it can never take")
+        as *mut crate::tools::SimlinToolSession
+}
+
+/// [`planned_session`]'s calls.
+#[cfg(feature = "agent_tools")]
+unsafe fn plan_in(model: *mut SimlinModel) -> *mut crate::tools::SimlinToolSession {
+    let mut err = ptr::null_mut();
+    let session = simlin_tool_session_new(model, &mut err);
+    expect_no_error(err, "making a tool session");
+    for (tool, input) in [
+        ("read_model", "{}".to_string()),
+        (
+            "edit_model",
+            json!({"summary": "a named growth rate", "operations": [
+                {"op": "add_variable", "name": "base_rate", "equation": "0.1"},
+                {"op": "set_equation", "variable": "rate", "equation": "base_rate"}
+            ]})
+            .to_string(),
+        ),
+    ] {
+        let tool = CString::new(tool).unwrap();
+        let (mut out, mut out_len, mut is_error) = (ptr::null_mut(), 0, false);
+        simlin_tool_session_call(
+            session,
+            tool.as_ptr(),
+            input.as_ptr(),
+            input.len(),
+            &mut out,
+            &mut out_len,
+            &mut is_error,
+            &mut err,
+        );
+        expect_no_error(err, "a tool call");
+        assert!(!is_error, "the call answers");
+        simlin_free(out);
+    }
+    session
 }
 
 impl Read {
@@ -339,6 +416,8 @@ impl Read {
         Read::ToolChanges,
         #[cfg(feature = "agent_tools")]
         Read::ToolRun,
+        #[cfg(feature = "agent_tools")]
+        Read::ToolPlan,
     ];
 
     unsafe fn run(self, proj: *mut SimlinProject, model: *mut SimlinModel) {
@@ -443,6 +522,8 @@ impl Read {
                 simlin_results_unref(results);
                 simlin_tool_session_unref(session);
             }
+            #[cfg(feature = "agent_tools")]
+            Read::ToolPlan => simlin_tool_session_unref(planned_session(model)),
             #[cfg(feature = "agent_tools")]
             Read::ToolCall | Read::ToolChanges => {
                 let session = simlin_tool_session_new(model, &mut err);

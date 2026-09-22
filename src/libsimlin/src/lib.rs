@@ -477,10 +477,11 @@ pub struct SimlinProject {
     /// the value is set-once-and-monotone.
     pub(crate) ltm_requested: AtomicBool,
     /// How many entry points hold the datamodel lock while they wait for the
-    /// database, each through `lock_db_with` or `built_db`: an edit
-    /// (`simlin_project_apply_patch`, `simlin_project_add_model`,
+    /// database, each through `lock_db_with`, `built_db` or `count_waiting`:
+    /// an edit (`simlin_project_apply_patch`, `simlin_project_add_model`,
     /// `simlin_project_diagram_sync`, an undo's
-    /// `simlin_project_replace_contents`), a simulation (`simlin_sim_new`), a
+    /// `simlin_project_replace_contents`, and a tool session's landing, from
+    /// before it waits for its session), a simulation (`simlin_sim_new`), a
     /// read of the diagnostics (`simlin_project_get_errors`,
     /// `simlin_project_is_simulatable`), loop discovery, a wasm compile, and a
     /// render that lays out a model with no view. Each one keeps
@@ -490,6 +491,17 @@ pub struct SimlinProject {
     /// (`simlin_engine::tools::Workspace::waiting`).
     waiting_for_db: AtomicUsize,
     pub ref_count: AtomicUsize,
+}
+
+/// A waiter counted in `SimlinProject::waiting_for_db`
+/// (`SimlinProject::count_waiting`), uncounted when it drops however the wait
+/// ends, a poisoned lock's panic included.
+pub(crate) struct Waiting<'a>(&'a AtomicUsize);
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// The project's salsa database, locked.
@@ -654,18 +666,19 @@ impl SimlinProject {
         if let Ok(guard) = db.try_lock() {
             return guard;
         }
-        /// Uncounts the waiter however the wait ends, a poisoned lock's panic
-        /// included.
-        struct Waiting<'c>(&'c AtomicUsize);
-        impl Drop for Waiting<'_> {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
+        let _waiting = self.count_waiting();
+        db.lock().unwrap()
+    }
+
+    /// Count the caller among the waiters a tool call stops for
+    /// (`waiting_for_db`) until the guard drops: what `lock_db_with` and
+    /// `built_db` do while they wait for the database, and what a landing of
+    /// a tool session's plan does from before it waits for its session, which
+    /// a call on that session holds for the whole call.
+    pub(crate) fn count_waiting(&self) -> Waiting<'_> {
         self.waiting_for_db
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let _waiting = Waiting(&self.waiting_for_db);
-        db.lock().unwrap()
+        Waiting(&self.waiting_for_db)
     }
 
     /// Whether the database has been built.

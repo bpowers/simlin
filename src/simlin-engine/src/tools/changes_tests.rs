@@ -10,6 +10,19 @@ use crate::test_common::TestProject;
 use crate::tools::Session;
 use crate::tools::test_support::{Host, inventory};
 
+/// Accounts for nothing: every change is reported.
+struct Nothing;
+
+impl Explains for Nothing {
+    fn variable(&self, _name: &str, _record: Option<&Variable>) -> bool {
+        false
+    }
+
+    fn specs(&self, _specs: &datamodel::SimSpecs) -> bool {
+        false
+    }
+}
+
 fn aux(name: &str, equation: &str) -> Variable {
     TestProject::new("p")
         .aux(name, equation, Some("widget"))
@@ -175,7 +188,7 @@ fn the_diff_names_added_removed_and_changed_variables_as_the_model_spells_them()
         .set_scalar_equation("6");
     model.variables.push(aux("Backlog Level", "0"));
 
-    let changes = diff(&snapshot, &edited, &edited.models[0]);
+    let changes = diff(&snapshot, &edited, &edited.models[0], &Nothing);
     assert_eq!(changes.since_revision, 3);
     assert_eq!(changes.added, ["Backlog Level"]);
     assert_eq!(changes.removed, ["shipments"]);
@@ -211,11 +224,11 @@ fn a_view_edit_changes_nothing_an_agent_read_and_a_specs_edit_does() {
             font: None,
             sketch_compat: None,
         }));
-    assert!(diff(&snapshot, &moved, &moved.models[0]).is_empty());
+    assert!(diff(&snapshot, &moved, &moved.models[0], &Nothing).is_empty());
 
     let mut respecified = project.clone();
     respecified.sim_specs.stop = 40.0;
-    let changes = diff(&snapshot, &respecified, &respecified.models[0]);
+    let changes = diff(&snapshot, &respecified, &respecified.models[0], &Nothing);
     assert!(changes.specs_changed && changes.added.is_empty() && changes.changed.is_empty());
 
     // A model's own specs override the project's, so they are what count.
@@ -223,7 +236,7 @@ fn a_view_edit_changes_nothing_an_agent_read_and_a_specs_edit_does() {
     let mut specs = own.sim_specs.clone();
     specs.dt = datamodel::Dt::Reciprocal(8.0);
     own.models[0].sim_specs = Some(specs);
-    assert!(diff(&snapshot, &own, &own.models[0]).specs_changed);
+    assert!(diff(&snapshot, &own, &own.models[0], &Nothing).specs_changed);
 }
 
 #[test]
@@ -236,7 +249,7 @@ fn a_change_list_is_capped_and_counted() {
             .variables
             .push(aux(&format!("added_{i:02}"), "1"));
     }
-    let changes = diff(&snapshot, &grown, &grown.models[0]);
+    let changes = diff(&snapshot, &grown, &grown.models[0], &Nothing);
     assert_eq!(changes.added.len(), MAX_CHANGED_NAMES);
     assert_eq!(changes.added_count, Some(MAX_CHANGED_NAMES + 5));
     assert_eq!(changes.removed_count, None);
@@ -310,14 +323,14 @@ fn the_diff_names_what_the_models_variables_rest_on() {
     sub.variables.retain(|v| v.get_ident() == "x");
     project.models.push(sub);
     let snapshot = ReadSnapshot::new(0, &project, &project.models[0]);
-    assert!(diff(&snapshot, &project, &project.models[0]).is_empty());
+    assert!(diff(&snapshot, &project, &project.models[0], &Nothing).is_empty());
 
     let mut dims = project.clone();
     dims.dimensions[0] = datamodel::Dimension::named(
         "region".to_string(),
         vec!["north".to_string(), "south".to_string(), "east".to_string()],
     );
-    let changes = diff(&snapshot, &dims, &dims.models[0]);
+    let changes = diff(&snapshot, &dims, &dims.models[0], &Nothing);
     assert!(changes.dimensions_changed, "an element added");
     assert!(!changes.is_empty());
 
@@ -328,25 +341,25 @@ fn the_diff_names_what_the_models_variables_rest_on() {
         disabled: false,
         aliases: vec![],
     });
-    assert!(diff(&snapshot, &units, &units.models[0]).unit_definitions_changed);
+    assert!(diff(&snapshot, &units, &units.models[0], &Nothing).unit_definitions_changed);
 
     let mut other = project.clone();
     other.models[1]
         .get_variable_mut("x")
         .unwrap()
         .set_scalar_equation("2");
-    let changes = diff(&snapshot, &other, &other.models[0]);
+    let changes = diff(&snapshot, &other, &other.models[0], &Nothing);
     assert_eq!(changes.models_changed, ["sub"]);
 
     // The other model's diagram is no change.
     let mut moved = project.clone();
     moved.models[1].views.clear();
-    assert!(diff(&snapshot, &moved, &moved.models[0]).is_empty());
+    assert!(diff(&snapshot, &moved, &moved.models[0], &Nothing).is_empty());
 
     let mut gone = project.clone();
     gone.models.pop();
     assert_eq!(
-        diff(&snapshot, &gone, &gone.models[0]).models_changed,
+        diff(&snapshot, &gone, &gone.models[0], &Nothing).models_changed,
         ["sub"]
     );
 }
@@ -359,7 +372,7 @@ fn a_change_of_case_is_a_change_of_name() {
     if let Variable::Aux(aux) = edited.models[0].get_variable_mut("coverage").unwrap() {
         aux.ident = "Coverage".to_string();
     }
-    let changes = diff(&snapshot, &edited, &edited.models[0]);
+    let changes = diff(&snapshot, &edited, &edited.models[0], &Nothing);
     assert!(
         changes.added.is_empty() && changes.removed.is_empty(),
         "{changes:?}"

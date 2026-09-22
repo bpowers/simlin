@@ -246,6 +246,52 @@ pub struct GraphicalFunction {
     pub y_scale: Option<GraphicalFunctionScale>,
 }
 
+/// Who made a variable and who edited it, as ISEE's AI information records
+/// it: the letters of [`datamodel::AiState`].
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub enum AiState {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+}
+
+impl From<AiState> for datamodel::AiState {
+    fn from(state: AiState) -> datamodel::AiState {
+        match state {
+            AiState::A => datamodel::AiState::A,
+            AiState::B => datamodel::AiState::B,
+            AiState::C => datamodel::AiState::C,
+            AiState::D => datamodel::AiState::D,
+            AiState::E => datamodel::AiState::E,
+            AiState::F => datamodel::AiState::F,
+            AiState::G => datamodel::AiState::G,
+            AiState::H => datamodel::AiState::H,
+        }
+    }
+}
+
+impl From<datamodel::AiState> for AiState {
+    fn from(state: datamodel::AiState) -> AiState {
+        match state {
+            datamodel::AiState::A => AiState::A,
+            datamodel::AiState::B => AiState::B,
+            datamodel::AiState::C => AiState::C,
+            datamodel::AiState::D => AiState::D,
+            datamodel::AiState::E => AiState::E,
+            datamodel::AiState::F => AiState::F,
+            datamodel::AiState::G => AiState::G,
+            datamodel::AiState::H => AiState::H,
+        }
+    }
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
@@ -264,6 +310,9 @@ pub struct Stock {
     pub documentation: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub arrayed_equation: Option<ArrayedEquation>,
+    /// Who made the variable, as ISEE's AI information records it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ai_state: Option<AiState>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub compat: Option<Compat>,
     // Legacy fields: read from old JSON but never written
@@ -293,6 +342,9 @@ pub struct Flow {
     pub documentation: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub arrayed_equation: Option<ArrayedEquation>,
+    /// Who made the variable, as ISEE's AI information records it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ai_state: Option<AiState>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub compat: Option<Compat>,
     // Legacy fields: read from old JSON but never written
@@ -322,6 +374,9 @@ pub struct Auxiliary {
     pub documentation: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub arrayed_equation: Option<ArrayedEquation>,
+    /// Who made the variable, as ISEE's AI information records it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ai_state: Option<AiState>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub compat: Option<Compat>,
     // Legacy fields: read from old JSON but never written
@@ -355,6 +410,9 @@ pub struct Module {
     pub documentation: String,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub references: Vec<ModuleReference>,
+    /// Who made the variable, as ISEE's AI information records it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ai_state: Option<AiState>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub compat: Option<Compat>,
     // Legacy fields: read from old JSON but never written
@@ -918,7 +976,7 @@ impl From<Stock> for datamodel::Stock {
             },
             inflows: stock.inflows,
             outflows: stock.outflows,
-            ai_state: None,
+            ai_state: stock.ai_state.map(Into::into),
             uid: if stock.uid == 0 {
                 None
             } else {
@@ -1012,7 +1070,7 @@ impl From<Flow> for datamodel::Flow {
                 Some(flow.units)
             },
             gf: flow.graphical_function.map(|gf| gf.into()),
-            ai_state: None,
+            ai_state: flow.ai_state.map(Into::into),
             uid: if flow.uid == 0 { None } else { Some(flow.uid) },
             compat,
         }
@@ -1102,7 +1160,7 @@ impl From<Auxiliary> for datamodel::Aux {
                 Some(aux.units)
             },
             gf: aux.graphical_function.map(|gf| gf.into()),
-            ai_state: None,
+            ai_state: aux.ai_state.map(Into::into),
             uid: if aux.uid == 0 { None } else { Some(aux.uid) },
             compat,
         }
@@ -1131,7 +1189,7 @@ impl From<Module> for datamodel::Module {
                 Some(module.units)
             },
             references: module.references.into_iter().map(|r| r.into()).collect(),
-            ai_state: None,
+            ai_state: module.ai_state.map(Into::into),
             uid: if module.uid == 0 {
                 None
             } else {
@@ -1744,6 +1802,7 @@ impl From<datamodel::Stock> for Stock {
             outflows: stock.outflows,
             documentation: stock.documentation,
             arrayed_equation,
+            ai_state: stock.ai_state.map(Into::into),
             compat: if compat.is_empty() {
                 None
             } else {
@@ -1813,6 +1872,7 @@ impl From<datamodel::Flow> for Flow {
             graphical_function: flow.gf.map(|gf| gf.into()),
             documentation: flow.documentation,
             arrayed_equation,
+            ai_state: flow.ai_state.map(Into::into),
             compat: if compat.is_empty() {
                 None
             } else {
@@ -1882,6 +1942,7 @@ impl From<datamodel::Aux> for Auxiliary {
             graphical_function: aux.gf.map(|gf| gf.into()),
             documentation: aux.documentation,
             arrayed_equation,
+            ai_state: aux.ai_state.map(Into::into),
             compat: if compat.is_empty() {
                 None
             } else {
@@ -1912,6 +1973,7 @@ impl From<datamodel::Module> for Module {
             units: module.units.unwrap_or_default(),
             documentation: module.documentation,
             references: module.references.into_iter().map(|r| r.into()).collect(),
+            ai_state: module.ai_state.map(Into::into),
             compat: if compat.is_empty() {
                 None
             } else {
@@ -2259,9 +2321,372 @@ impl From<&datamodel::Project> for Project {
     }
 }
 
+// ── Project patches ──────────────────────────────────────────────────────
+
+/// A patch to a project as JSON: what `simlin_project_apply_patch` takes, and
+/// the form an edit plan's patch travels in to the host that lands it. The
+/// engine's own [`crate::ProjectPatch`] converts to and from it.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPatch {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_ops: Vec<ProjectOperation>,
+    #[serde(default)]
+    pub models: Vec<ModelPatch>,
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
+pub enum ProjectOperation {
+    SetSimSpecs {
+        #[serde(rename = "simSpecs")]
+        sim_specs: SimSpecs,
+    },
+    AddModel {
+        name: String,
+    },
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelPatch {
+    pub name: String,
+    #[serde(default)]
+    pub ops: Vec<ModelOperation>,
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
+pub enum ModelOperation {
+    UpsertAux {
+        aux: Auxiliary,
+    },
+    UpsertStock {
+        stock: Stock,
+    },
+    UpsertFlow {
+        flow: Flow,
+    },
+    UpsertModule {
+        module: Module,
+    },
+    DeleteVariable {
+        ident: String,
+    },
+    RenameVariable {
+        from: String,
+        to: String,
+    },
+    UpsertView {
+        index: u32,
+        view: View,
+    },
+    DeleteView {
+        index: u32,
+    },
+    UpdateStockFlows {
+        ident: String,
+        inflows: Vec<String>,
+        outflows: Vec<String>,
+    },
+    SetLoopName {
+        variables: Vec<String>,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    /// Upsert and remove view elements; the engine derives the model operations
+    /// the edit implies when it applies (`ModelOperation::EditView`).
+    EditView {
+        index: u32,
+        #[serde(default)]
+        upsert: Vec<ViewElement>,
+        #[serde(default)]
+        remove: Vec<i32>,
+    },
+}
+
+impl From<ProjectPatch> for crate::patch::ProjectPatch {
+    fn from(patch: ProjectPatch) -> Self {
+        crate::patch::ProjectPatch {
+            project_ops: patch
+                .project_ops
+                .into_iter()
+                .map(|op| match op {
+                    ProjectOperation::SetSimSpecs { sim_specs } => {
+                        crate::patch::ProjectOperation::SetSimSpecs(sim_specs.into())
+                    }
+                    ProjectOperation::AddModel { name } => {
+                        crate::patch::ProjectOperation::AddModel { name }
+                    }
+                })
+                .collect(),
+            models: patch
+                .models
+                .into_iter()
+                .map(|model| crate::patch::ModelPatch {
+                    name: model.name,
+                    ops: model.ops.into_iter().map(Into::into).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<ModelOperation> for crate::patch::ModelOperation {
+    fn from(op: ModelOperation) -> Self {
+        use crate::patch::ModelOperation as Op;
+        match op {
+            ModelOperation::UpsertAux { aux } => Op::UpsertAux(aux.into()),
+            ModelOperation::UpsertStock { stock } => Op::UpsertStock(stock.into()),
+            ModelOperation::UpsertFlow { flow } => Op::UpsertFlow(flow.into()),
+            ModelOperation::UpsertModule { module } => Op::UpsertModule(module.into()),
+            ModelOperation::DeleteVariable { ident } => Op::DeleteVariable { ident },
+            ModelOperation::RenameVariable { from, to } => Op::RenameVariable { from, to },
+            ModelOperation::UpsertView { index, view } => Op::UpsertView {
+                index,
+                view: view.into(),
+            },
+            ModelOperation::DeleteView { index } => Op::DeleteView { index },
+            ModelOperation::UpdateStockFlows {
+                ident,
+                inflows,
+                outflows,
+            } => Op::UpdateStockFlows {
+                ident,
+                inflows,
+                outflows,
+            },
+            ModelOperation::SetLoopName {
+                variables,
+                name,
+                description,
+            } => Op::SetLoopName {
+                variables,
+                name,
+                description,
+            },
+            ModelOperation::EditView {
+                index,
+                upsert,
+                remove,
+            } => Op::EditView {
+                index,
+                upsert: upsert.into_iter().map(Into::into).collect(),
+                remove,
+            },
+        }
+    }
+}
+
+/// The JSON form of an engine patch. A source change, which a host never
+/// sends and a plan never makes, has none.
+impl TryFrom<crate::patch::ProjectPatch> for ProjectPatch {
+    type Error = String;
+
+    fn try_from(patch: crate::patch::ProjectPatch) -> Result<Self, String> {
+        let project_ops = patch
+            .project_ops
+            .into_iter()
+            .map(|op| match op {
+                crate::patch::ProjectOperation::SetSimSpecs(sim_specs) => {
+                    Ok(ProjectOperation::SetSimSpecs {
+                        sim_specs: sim_specs.into(),
+                    })
+                }
+                crate::patch::ProjectOperation::AddModel { name } => {
+                    Ok(ProjectOperation::AddModel { name })
+                }
+                crate::patch::ProjectOperation::SetSource(_) => {
+                    Err("a change of the project's source has no JSON form".to_string())
+                }
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let models = patch
+            .models
+            .into_iter()
+            .map(|model| ModelPatch {
+                name: model.name,
+                ops: model.ops.into_iter().map(Into::into).collect(),
+            })
+            .collect();
+        Ok(ProjectPatch {
+            project_ops,
+            models,
+        })
+    }
+}
+
+impl From<crate::patch::ModelOperation> for ModelOperation {
+    fn from(op: crate::patch::ModelOperation) -> Self {
+        use crate::patch::ModelOperation as Op;
+        match op {
+            Op::UpsertAux(aux) => ModelOperation::UpsertAux { aux: aux.into() },
+            Op::UpsertStock(stock) => ModelOperation::UpsertStock {
+                stock: stock.into(),
+            },
+            Op::UpsertFlow(flow) => ModelOperation::UpsertFlow { flow: flow.into() },
+            Op::UpsertModule(module) => ModelOperation::UpsertModule {
+                module: module.into(),
+            },
+            Op::DeleteVariable { ident } => ModelOperation::DeleteVariable { ident },
+            Op::RenameVariable { from, to } => ModelOperation::RenameVariable { from, to },
+            Op::UpsertView { index, view } => ModelOperation::UpsertView {
+                index,
+                view: view.into(),
+            },
+            Op::DeleteView { index } => ModelOperation::DeleteView { index },
+            Op::UpdateStockFlows {
+                ident,
+                inflows,
+                outflows,
+            } => ModelOperation::UpdateStockFlows {
+                ident,
+                inflows,
+                outflows,
+            },
+            Op::SetLoopName {
+                variables,
+                name,
+                description,
+            } => ModelOperation::SetLoopName {
+                variables,
+                name,
+                description,
+            },
+            Op::EditView {
+                index,
+                upsert,
+                remove,
+            } => ModelOperation::EditView {
+                index,
+                upsert: upsert.into_iter().map(Into::into).collect(),
+                remove,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An engine patch with every model operation reaches a host as JSON and
+    /// back as the same patch: landing either leaves the same project, and
+    /// the JSON is the shape `simlin_project_apply_patch` has always taken.
+    #[test]
+    fn a_patch_round_trips_through_json_with_every_operation() {
+        use crate::patch::{ModelOperation as Op, ModelPatch as MP, ProjectOperation as PO};
+        let base = crate::test_common::TestProject::new("roundtrip")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("level", "10", &["inflow"], &[], None)
+            .flow("inflow", "rate", None)
+            .aux("rate", "1", None)
+            .aux("spare", "2", None)
+            .build_datamodel();
+        let aux = |name: &str, eqn: &str| datamodel::Aux {
+            ident: name.to_string(),
+            equation: datamodel::Equation::Scalar(eqn.to_string()),
+            documentation: "notes".to_string(),
+            units: Some("widget".to_string()),
+            gf: None,
+            ai_state: None,
+            uid: Some(40),
+            compat: datamodel::Compat::default(),
+        };
+        let mut specs = base.sim_specs.clone();
+        specs.stop = 20.0;
+        let patch = crate::patch::ProjectPatch {
+            project_ops: vec![PO::SetSimSpecs(specs)],
+            models: vec![MP {
+                name: "main".to_string(),
+                ops: vec![
+                    Op::UpsertAux(aux("extra", "3")),
+                    Op::UpsertFlow(datamodel::Flow {
+                        ident: "outflow".to_string(),
+                        equation: datamodel::Equation::Scalar("level / 4".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: Some(41),
+                        compat: datamodel::Compat::default(),
+                    }),
+                    Op::UpdateStockFlows {
+                        ident: "level".to_string(),
+                        inflows: vec!["inflow".to_string()],
+                        outflows: vec!["outflow".to_string()],
+                    },
+                    Op::UpsertStock(datamodel::Stock {
+                        ident: "reservoir".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["outflow".to_string()],
+                        outflows: vec![],
+                        ai_state: None,
+                        uid: Some(42),
+                        compat: datamodel::Compat::default(),
+                    }),
+                    Op::RenameVariable {
+                        from: "extra".to_string(),
+                        to: "bonus".to_string(),
+                    },
+                    Op::DeleteVariable {
+                        ident: "spare".to_string(),
+                    },
+                    Op::SetLoopName {
+                        variables: vec!["level".to_string(), "outflow".to_string()],
+                        name: "draining".to_string(),
+                        description: Some("the level empties".to_string()),
+                    },
+                    Op::UpsertView {
+                        index: 0,
+                        view: datamodel::View::StockFlow(datamodel::StockFlow {
+                            name: None,
+                            elements: vec![].into(),
+                            view_box: datamodel::Rect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 100.0,
+                                height: 100.0,
+                            },
+                            zoom: 1.0,
+                            use_lettered_polarity: false,
+                            font: None,
+                            sketch_compat: None,
+                        }),
+                    },
+                    Op::EditView {
+                        index: 0,
+                        upsert: vec![],
+                        remove: vec![],
+                    },
+                    Op::DeleteView { index: 0 },
+                ],
+            }],
+        };
+        let json = ProjectPatch::try_from(patch.clone()).unwrap();
+        let text = serde_json::to_string(&json).unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(wire["projectOps"][0]["type"], "setSimSpecs");
+        assert_eq!(wire["models"][0]["ops"][0]["type"], "upsertAux");
+        assert_eq!(
+            wire["models"][0]["ops"][0]["payload"]["aux"]["name"],
+            "extra"
+        );
+        let back: ProjectPatch = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, json);
+
+        let (mut direct, mut through_json) = (base.clone(), base.clone());
+        crate::apply_patch(&mut direct, patch).unwrap();
+        crate::apply_patch(&mut through_json, back.into()).unwrap();
+        assert!(direct == through_json, "the same project either way");
+        assert!(direct.models[0].get_variable("bonus").is_some());
+    }
 
     #[test]
     fn test_graphical_function_roundtrip() {
@@ -2413,6 +2838,7 @@ mod tests {
                     uid: 200,
                     name: "birth_rate".to_string(),
                     equation: "0.02".to_string(),
+                    ai_state: None,
                     compat: Some(Compat {
                         active_initial: Some("0.015".to_string()),
                         can_be_module_input: true,
@@ -2442,6 +2868,7 @@ mod tests {
                         elements: None,
                         has_except_default: None,
                     }),
+                    ai_state: None,
                     compat: Some(Compat {
                         active_initial: Some("initial_capacity".to_string()),
                         is_public: true,
@@ -2483,6 +2910,7 @@ mod tests {
                         ]),
                         has_except_default: None,
                     }),
+                    ai_state: None,
                     compat: Some(Compat {
                         is_public: true,
                         ..Default::default()
@@ -2707,6 +3135,7 @@ mod tests {
                 outflows: vec![],
                 documentation: String::new(),
                 arrayed_equation: None,
+                ai_state: None,
                 compat: None,
                 non_negative: false,
                 can_be_module_input: false,
@@ -2720,6 +3149,7 @@ mod tests {
                 graphical_function: None,
                 documentation: String::new(),
                 arrayed_equation: None,
+                ai_state: None,
                 compat: None,
                 non_negative: false,
                 can_be_module_input: false,
@@ -2733,6 +3163,7 @@ mod tests {
                 graphical_function: None,
                 documentation: String::new(),
                 arrayed_equation: None,
+                ai_state: None,
                 compat: None,
                 can_be_module_input: false,
                 is_public: false,
@@ -2807,6 +3238,7 @@ mod tests {
                 graphical_function: None,
                 documentation: String::new(),
                 arrayed_equation: None,
+                ai_state: None,
                 compat: None,
                 can_be_module_input: false,
                 is_public: false,
@@ -3173,6 +3605,7 @@ mod tests {
             outflows: vec!["deaths".to_string()],
             documentation: String::new(),
             arrayed_equation: None,
+            ai_state: None,
             compat: None,
             non_negative: false,
             can_be_module_input: false,
@@ -3208,6 +3641,7 @@ mod tests {
             graphical_function: None,
             documentation: String::new(),
             arrayed_equation: None,
+            ai_state: None,
             compat: None,
             non_negative: false,
             can_be_module_input: false,
@@ -3234,6 +3668,7 @@ mod tests {
             uid: 3,
             name: "birth_rate".to_string(),
             equation: "0.02".to_string(),
+            ai_state: None,
             compat: None,
             units: "1/year".to_string(),
             graphical_function: None,
@@ -3267,6 +3702,7 @@ mod tests {
             units: String::new(),
             documentation: String::new(),
             references: vec![],
+            ai_state: None,
             compat: None,
             can_be_module_input: false,
             is_public: false,
@@ -3327,6 +3763,7 @@ mod tests {
                 outflows: vec![],
                 documentation: String::new(),
                 arrayed_equation: None,
+                ai_state: None,
                 compat: None,
                 non_negative: false,
                 can_be_module_input: false,
@@ -3340,6 +3777,7 @@ mod tests {
                 graphical_function: None,
                 documentation: String::new(),
                 arrayed_equation: None,
+                ai_state: None,
                 compat: None,
                 non_negative: false,
                 can_be_module_input: false,
@@ -3349,6 +3787,7 @@ mod tests {
                 uid: 3,
                 name: "constant".to_string(),
                 equation: "5".to_string(),
+                ai_state: None,
                 compat: None,
                 units: String::new(),
                 graphical_function: None,
@@ -3387,6 +3826,7 @@ mod tests {
                 elements: None,
                 has_except_default: None,
             }),
+            ai_state: None,
             compat: Some(Compat {
                 active_initial: None,
                 ..Default::default()
@@ -3419,6 +3859,7 @@ mod tests {
                 elements: None,
                 has_except_default: None,
             }),
+            ai_state: None,
             compat: Some(Compat {
                 active_initial: None,
                 ..Default::default()
@@ -3450,6 +3891,7 @@ mod tests {
                 elements: None,
                 has_except_default: None,
             }),
+            ai_state: None,
             compat: Some(Compat {
                 active_initial: Some("correct".to_string()),
                 ..Default::default()
@@ -3475,6 +3917,7 @@ mod tests {
             outflows: vec![],
             documentation: String::new(),
             arrayed_equation: None,
+            ai_state: None,
             compat: Some(Compat {
                 active_initial: Some(String::new()),
                 ..Default::default()
@@ -3509,6 +3952,7 @@ mod tests {
                 }]),
                 has_except_default: None,
             }),
+            ai_state: None,
             compat: None,
             non_negative: false,
             can_be_module_input: false,
@@ -3537,6 +3981,7 @@ mod tests {
             outflows: vec![],
             documentation: String::new(),
             arrayed_equation: None,
+            ai_state: None,
             compat: Some(Compat {
                 active_initial: Some("50".to_string()),
                 ..Default::default()
@@ -3569,6 +4014,7 @@ mod tests {
             graphical_function: None,
             documentation: String::new(),
             arrayed_equation: None,
+            ai_state: None,
             compat: Some(Compat {
                 active_initial: Some("5".to_string()),
                 ..Default::default()
@@ -3592,6 +4038,7 @@ mod tests {
             graphical_function: None,
             documentation: String::new(),
             arrayed_equation: None,
+            ai_state: None,
             compat: Some(Compat {
                 active_initial: Some("0".to_string()),
                 ..Default::default()
@@ -3627,6 +4074,7 @@ mod tests {
                 }]),
                 has_except_default: None,
             }),
+            ai_state: None,
             compat: None,
             can_be_module_input: false,
             is_public: false,
@@ -3730,6 +4178,7 @@ mod tests {
             graphical_function: None,
             documentation: String::new(),
             arrayed_equation: None,
+            ai_state: None,
             compat: Some(Compat {
                 data_source: Some(JsonDataSource {
                     kind: "data".to_string(),
@@ -3900,6 +4349,7 @@ mod tests {
                     outflows: vec![],
                     documentation: String::new(),
                     arrayed_equation: None,
+                    ai_state: None,
                     compat: None,
                     non_negative: false,
                     can_be_module_input: false,
@@ -3935,5 +4385,48 @@ mod tests {
         );
         assert_eq!(from_owned.dimensions.len(), from_ref.dimensions.len());
         assert_eq!(from_owned.units.len(), from_ref.units.len());
+    }
+
+    /// Who made each variable -- ISEE's AI information, one letter a
+    /// variable -- survives the JSON forms, so an edit through them keeps it.
+    #[test]
+    fn a_variables_provenance_round_trips_through_json() {
+        let mut project = crate::test_common::TestProject::new("provenance")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("level", "10", &["inflow"], &[], None)
+            .flow("inflow", "rate", None)
+            .aux("rate", "1", None)
+            .aux("unmarked", "2", None)
+            .build_datamodel();
+        let states = [
+            ("level", datamodel::AiState::C),
+            ("inflow", datamodel::AiState::G),
+            ("rate", datamodel::AiState::F),
+        ];
+        for (name, state) in states {
+            match project.models[0].get_variable_mut(name).unwrap() {
+                datamodel::Variable::Stock(v) => v.ai_state = Some(state),
+                datamodel::Variable::Flow(v) => v.ai_state = Some(state),
+                datamodel::Variable::Aux(v) => v.ai_state = Some(state),
+                datamodel::Variable::Module(v) => v.ai_state = Some(state),
+            }
+        }
+        let text = serde_json::to_string(&Project::from(project.clone())).unwrap();
+        assert!(text.contains(r#""aiState":"G""#), "{text}");
+        let back: datamodel::Project = serde_json::from_str::<Project>(&text).unwrap().into();
+        for (name, state) in states {
+            assert_eq!(
+                back.models[0].get_variable(name).unwrap().get_ai_state(),
+                Some(state),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            back.models[0]
+                .get_variable("unmarked")
+                .unwrap()
+                .get_ai_state(),
+            None
+        );
     }
 }
