@@ -148,13 +148,7 @@ fn values_apply_at_their_times_in_order() {
         ..RunPlan::default()
     };
     let results = execute(&mut host.workspace(), &model, &plan).unwrap();
-    let run = Run {
-        name: "steps".to_string(),
-        revision: 0,
-        key: 0,
-        plan,
-        results,
-    };
+    let run = Run::new("steps".to_string(), 0, 0, plan, results);
     let offset = run.results.offsets[&Ident::<Canonical>::new("s")];
     let s = run.series(offset);
     // 1 a step to t = 2, 2 a step to t = 6, 3 a step after.
@@ -301,13 +295,7 @@ fn rows_past_the_last_saved_one_are_no_part_of_a_run() {
     let mut host = Host::new(datamodel);
     let model = host.project.models[0].clone();
     let results = execute(&mut host.workspace(), &model, &RunPlan::default()).unwrap();
-    let run = Run {
-        name: "uneven".to_string(),
-        revision: 0,
-        key: 0,
-        plan: RunPlan::default(),
-        results,
-    };
+    let run = Run::new("uneven".to_string(), 0, 0, RunPlan::default(), results);
     let times = run.times();
     assert!(times.windows(2).all(|w| w[1] >= w[0]), "{times:?}");
     let last = *times.last().unwrap();

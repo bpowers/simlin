@@ -27,6 +27,7 @@ pub enum ToolName {
     RunExperiment,
     ReadBehavior,
     ListRuns,
+    AnalyzeLoops,
 }
 
 /// What calling a tool does to the project.
@@ -41,13 +42,14 @@ pub enum ToolEffect {
 }
 
 impl ToolName {
-    pub const ALL: [ToolName; 6] = [
+    pub const ALL: [ToolName; 7] = [
         ToolName::ReadModel,
         ToolName::ReadVariables,
         ToolName::FindVariables,
         ToolName::RunExperiment,
         ToolName::ReadBehavior,
         ToolName::ListRuns,
+        ToolName::AnalyzeLoops,
     ];
 
     pub fn name(self) -> &'static str {
@@ -58,6 +60,7 @@ impl ToolName {
             ToolName::RunExperiment => "run_experiment",
             ToolName::ReadBehavior => "read_behavior",
             ToolName::ListRuns => "list_runs",
+            ToolName::AnalyzeLoops => "analyze_loops",
         }
     }
 
@@ -112,6 +115,16 @@ impl ToolName {
                  equation, the run specs, and the run it started from. Use it to learn what a \
                  run the person made, or one of yours from earlier, tried."
             }
+            ToolName::AnalyzeLoops => {
+                "Finds the feedback loops that drove a run, and when: for each group of stocks \
+                 feedback connects, which loops led over the run and with what share, and the \
+                 loops themselves, each with an id (L1, L2, ...) that later calls and claims can \
+                 cite, its polarity (reinforcing or balancing) and its chain of links with their \
+                 signs. Loops, their polarity and their dominance come from here. A run that \
+                 holds still, as a model at equilibrium does, has no active loop: its loops come \
+                 from structure, and an experiment that disturbs it shows which dominates. For \
+                 an experiment that replaced equations, names the loops it cut."
+            }
         }
     }
 
@@ -122,7 +135,8 @@ impl ToolName {
             | ToolName::FindVariables
             | ToolName::RunExperiment
             | ToolName::ReadBehavior
-            | ToolName::ListRuns => ToolEffect::Read,
+            | ToolName::ListRuns
+            | ToolName::AnalyzeLoops => ToolEffect::Read,
         }
     }
 }
@@ -137,9 +151,10 @@ pub fn catalog_json() -> &'static str {
 #[cfg(feature = "schema")]
 pub fn generate_catalog_json() -> String {
     use super::{
-        FindVariablesInput, FindVariablesOutput, ListRunsInput, ListRunsOutput, ReadBehaviorInput,
-        ReadBehaviorOutput, ReadModelInput, ReadModelOutput, ReadVariablesInput,
-        ReadVariablesOutput, RunExperimentInput, RunExperimentOutput,
+        AnalyzeLoopsInput, AnalyzeLoopsOutput, FindVariablesInput, FindVariablesOutput,
+        ListRunsInput, ListRunsOutput, ReadBehaviorInput, ReadBehaviorOutput, ReadModelInput,
+        ReadModelOutput, ReadVariablesInput, ReadVariablesOutput, RunExperimentInput,
+        RunExperimentOutput,
     };
 
     #[derive(Serialize)]
@@ -200,6 +215,9 @@ pub fn generate_catalog_json() -> String {
                     (input::<ReadBehaviorInput>(), output::<ReadBehaviorOutput>())
                 }
                 ToolName::ListRuns => (input::<ListRunsInput>(), output::<ListRunsOutput>()),
+                ToolName::AnalyzeLoops => {
+                    (input::<AnalyzeLoopsInput>(), output::<AnalyzeLoopsOutput>())
+                }
             };
             Entry {
                 name: tool.name(),

@@ -29,9 +29,13 @@
 //!
 //! A host lists the named runs with what each changed ([`RunListing`]), as
 //! the agent's `list_runs` does.
+//!
+//! A run is made without the LTM overlay. Its loops are analyzed on demand by
+//! replaying its plan under the overlay ([`execute_then`], `loops`), and the
+//! analysis is kept with the run.
 
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use buffa::Message;
 use indexmap::IndexMap;
@@ -45,6 +49,7 @@ use crate::db::{DiagnosticSeverity, LtmOverlay, SimlinDb, SourceProject, collect
 use crate::results::Results;
 
 use super::evidence::{QUOTE_CHARS, window};
+use super::loops::LoopAnalysis;
 use super::outline::IntegrationMethod;
 use super::{Session, ToolError, Workspace, resolve_model};
 
@@ -166,6 +171,12 @@ pub(crate) struct RunPlan {
 }
 
 impl RunPlan {
+    /// Whether the plan compiles a staged copy of the model: it replaces an
+    /// equation or changes the run specs.
+    pub(crate) fn stages(&self) -> bool {
+        !self.equations.is_empty() || !self.specs.is_empty()
+    }
+
     /// `base`'s plan with `self`'s changes after it: a change of a variable
     /// `self` also changes is replaced, not compounded, and `self`'s specs
     /// override `base`'s.
@@ -205,9 +216,28 @@ pub(crate) struct Run {
     pub key: u64,
     pub plan: RunPlan,
     pub results: Results,
+    /// The run's loop analysis, once asked for.
+    pub loops: OnceLock<Arc<LoopAnalysis>>,
 }
 
 impl Run {
+    pub(crate) fn new(
+        name: String,
+        revision: u64,
+        key: u64,
+        plan: RunPlan,
+        results: Results,
+    ) -> Run {
+        Run {
+            name,
+            revision,
+            key,
+            plan,
+            results,
+            loops: OnceLock::new(),
+        }
+    }
+
     /// The saved times.
     pub(crate) fn times(&self) -> Vec<f64> {
         self.series(crate::results::TIME_OFF)
@@ -557,13 +587,13 @@ impl RunStore {
                 ))
             })
         })?;
-        let run = Arc::new(Run {
-            name: CURRENT.to_string(),
-            revision: ws.revision,
+        let run = Arc::new(Run::new(
+            CURRENT.to_string(),
+            ws.revision,
             key,
-            plan: RunPlan::default(),
+            RunPlan::default(),
             results,
-        });
+        ));
         self.current = Some(run.clone());
         Ok(run)
     }
@@ -605,13 +635,7 @@ impl RunStore {
                 ToolError::new(format!("run '{name}' does not run again: {reason}"))
             })
         })?;
-        let run = Arc::new(Run {
-            name: name.to_string(),
-            revision,
-            key,
-            plan,
-            results,
-        });
+        let run = Arc::new(Run::new(name.to_string(), revision, key, plan, results));
         self.named.insert(name.to_string(), Kept::Run(run.clone()));
         self.within_budget(name);
         Ok(run)
@@ -693,52 +717,93 @@ impl RunStore {
 /// return the results; the reason, in words, when it does not simulate, and
 /// [`RunFailure::Stopped`] when other work waits for the project between two
 /// of its slices.
-///
-/// A plan with equation or spec changes stages a copy of the datamodel,
-/// compiles it, and restores the database to the project before returning,
-/// whatever the outcome.
 pub(crate) fn execute(
     ws: &mut Workspace<'_>,
     model: &datamodel::Model,
     plan: &RunPlan,
 ) -> Result<Results, RunFailure> {
+    execute_then(ws, model, plan, LtmOverlay::Off, |_, _, _| ()).map(|(results, ())| results)
+}
+
+/// [`execute`] compiled under `overlay`, calling `after` with the database,
+/// the project the run compiled and its results while the database still
+/// holds that project: for a plan that stages, the staged copy, which an
+/// analysis of the run reads the structure of.
+///
+/// A plan with equation or spec changes stages a copy of the datamodel,
+/// compiles it, and restores the database to the project before returning,
+/// whatever the outcome (a panic included, from [`Staging`]'s drop); `after`
+/// may change the database's inputs other than the project's contents (a
+/// mode flag), and must set them back itself.
+pub(crate) fn execute_then<T>(
+    ws: &mut Workspace<'_>,
+    model: &datamodel::Model,
+    plan: &RunPlan,
+    overlay: LtmOverlay,
+    after: impl FnOnce(&mut SimlinDb, SourceProject, &Results) -> T,
+) -> Result<(Results, T), RunFailure> {
+    let specs = super::changes::effective_specs(ws.project, model).clone();
     let waiting = ws.waiting;
-    let staged_needed = !plan.equations.is_empty() || !plan.specs.is_empty();
-    let own = crate::results::Specs::from(super::changes::effective_specs(ws.project, model));
-    let mut vm = if staged_needed {
+    if plan.stages() {
         let staged = staged_project(ws.project, &model.name, plan)?;
         let staging = Staging::new(ws.db, ws.project, &staged);
         let source_project = staging.source_project;
-        let built = build_vm(
+        let results = simulate(
             &mut *staging.db,
             source_project,
             &staged,
-            &model.name,
-            LtmOverlay::Off,
-            &own,
-        );
-        built.map_err(|err| match err {
-            Unbuilt::Compile(err) => refusal_reason(staging.db, source_project, &model.name, &err),
-            Unbuilt::Cost(reason) => reason,
-        })?
-    } else {
-        let source_project = ws
-            .db
-            .current_source_project()
-            .ok_or_else(|| "the project has not been compiled".to_string())?;
-        build_vm(
-            ws.db,
-            source_project,
-            ws.project,
-            &model.name,
-            LtmOverlay::Off,
-            &own,
-        )
-        .map_err(|err| match err {
+            model,
+            &specs,
+            plan,
+            overlay,
+            waiting,
+        )?;
+        let analysis = after(&mut *staging.db, source_project, &results);
+        return Ok((results, analysis));
+    }
+    let source_project = ws
+        .db
+        .current_source_project()
+        .ok_or_else(|| "the project has not been compiled".to_string())?;
+    let results = simulate(
+        ws.db,
+        source_project,
+        ws.project,
+        model,
+        &specs,
+        plan,
+        overlay,
+        waiting,
+    )?;
+    let analysis = after(ws.db, source_project, &results);
+    Ok((results, analysis))
+}
+
+/// Compile `model` in `project` (the one `source_project` holds) under
+/// `overlay`, and run it under `plan`'s values, a slice at a time. `specs`
+/// are the model's own, which `plan`'s override, and what a run's cost is
+/// held against.
+#[allow(clippy::too_many_arguments)]
+fn simulate(
+    db: &mut SimlinDb,
+    source_project: SourceProject,
+    project: &datamodel::Project,
+    model: &datamodel::Model,
+    specs: &datamodel::SimSpecs,
+    plan: &RunPlan,
+    overlay: LtmOverlay,
+    waiting: Option<&(dyn Fn() -> bool + Sync)>,
+) -> Result<Results, RunFailure> {
+    let own = crate::results::Specs::from(specs);
+    let mut vm = build_vm(db, source_project, project, &model.name, overlay, &own).map_err(
+        |err| match err {
+            Unbuilt::Compile(err) if plan.stages() => {
+                refusal_reason(db, source_project, &model.name, &err)
+            }
             Unbuilt::Compile(err) => describe(&err),
             Unbuilt::Cost(reason) => reason,
-        })?
-    };
+        },
+    )?;
 
     // Values from the start go in before the run, so initial values read
     // them; the others at their times, in order. A value from `t` holds from
@@ -746,7 +811,6 @@ pub(crate) fn execute(
     // `run_to(t)` evaluates the step at `t` before it stops, so the value is
     // set after running to half a step before that step: the clock then
     // stands at it, and its flows read the new value.
-    let specs = super::changes::effective_specs(ws.project, model);
     let start = plan.specs.start.unwrap_or(specs.start);
     let stop = plan.specs.stop.unwrap_or(specs.stop);
     let dt = plan

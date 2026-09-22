@@ -2773,6 +2773,394 @@
           "runs"
         ]
       }
+    },
+    {
+      "name": "analyze_loops",
+      "description": "Finds the feedback loops that drove a run, and when: for each group of stocks feedback connects, which loops led over the run and with what share, and the loops themselves, each with an id (L1, L2, ...) that later calls and claims can cite, its polarity (reinforcing or balancing) and its chain of links with their signs. Loops, their polarity and their dominance come from here. A run that holds still, as a model at equilibrium does, has no active loop: its loops come from structure, and an experiment that disturbs it shows which dominates. For an experiment that replaced equations, names the loops it cut.",
+      "effect": "read",
+      "inputSchema": {
+        "additionalProperties": false,
+        "title": "AnalyzeLoopsInput",
+        "type": "object",
+        "properties": {
+          "run": {
+            "description": "The run to analyze: \"current\" for the model as it is (when absent), or\na run an experiment made.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "through": {
+            "description": "Only the loops through this variable (any of its elements, or the one\nnamed, as in `population[north]`), and the partitions they are in.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "loops": {
+            "description": "Loops to report whole, by the ids earlier answers gave them: each with\nits full chain, in its partition, and no dominance timeline. At most\n4, and not with `through`.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4,
+            "default": []
+          }
+        }
+      },
+      "outputSchema": {
+        "$defs": {
+          "LoopBasis": {
+            "description": "Where an answer's loops come from.",
+            "oneOf": [
+              {
+                "description": "The run's loop scores: loops active in the run, with their dominance\nand the polarity the run shows.",
+                "type": "string",
+                "const": "run"
+              },
+              {
+                "description": "The model's structure, because no loop was active in the run: loops\nwith their equations' polarity, and no dominance.",
+                "type": "string",
+                "const": "structure"
+              }
+            ]
+          },
+          "PartitionReport": {
+            "description": "A cycle partition: stocks connected by feedback, and the loops among them,\nwhich compete for dominance with each other and no others.",
+            "type": "object",
+            "properties": {
+              "stocks": {
+                "description": "Its stocks, as the model names them (an arrayed stock by element); at\nmost 12. Empty for loops inside a module, which belong to no\npartition of this model.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "otherStocks": {
+                "description": "How many more stocks it has than it names.",
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "loopCount": {
+                "description": "How many of its loops the analysis found (through `through`, when\ngiven).",
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "dominance": {
+                "description": "Which loops led, span by span: from the run's start to its end in at\nmost 12 spans. Absent for loops from structure.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/DominanceSpan"
+                }
+              },
+              "loops": {
+                "description": "Every loop `dominance` names, then the most important others (the\nshortest, from structure); at most 8 besides the leaders.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LoopReport"
+                }
+              }
+            },
+            "required": [
+              "stocks",
+              "loopCount",
+              "loops"
+            ]
+          },
+          "DominanceSpan": {
+            "description": "A span of a run and the loops that led in it: the strongest on average\nover the span, and those holding at least half its share, at most 3. None\nled a span in which no loop was active.",
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "number",
+                "format": "double"
+              },
+              "to": {
+                "type": "number",
+                "format": "double"
+              },
+              "leaders": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LoopShare"
+                }
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "leaders"
+            ]
+          },
+          "LoopShare": {
+            "type": "object",
+            "properties": {
+              "loop": {
+                "description": "The loop's id.",
+                "type": "string"
+              },
+              "share": {
+                "description": "Its share of the partition's loop activity, from 0 to 1: at each time\nthe shares of all the partition's loops sum to 1, so where many loops\nare active each holds little.",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "loop",
+              "share"
+            ]
+          },
+          "LoopReport": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The session's id for this loop (`L1`, ...), the same in every run and\nrevision while the loop exists.",
+                "type": "string"
+              },
+              "name": {
+                "description": "The name the model gives the loop, if it has one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "polarity": {
+                "$ref": "#/$defs/LoopPolarityName"
+              },
+              "length": {
+                "description": "How many variables the loop passes through.",
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "chain": {
+                "description": "The loop from a stock (when it has one) around to where it started:\neach step is a variable and the sign of the link from it to the next\nstep's variable, the last step's link returning to the first. Absent\nfor a loop of more than 12 variables, unless it was asked for by id.",
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ChainLink"
+                }
+              },
+              "stocks": {
+                "description": "The stocks the loop passes through, in its order: given for a loop\nwhose chain is not.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "share": {
+                "description": "Its share of the partition's loop activity, averaged over the run,\nfrom 0 to 1. Absent for loops from structure.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              }
+            },
+            "required": [
+              "id",
+              "polarity",
+              "length"
+            ]
+          },
+          "LoopPolarityName": {
+            "description": "A loop's polarity: reinforcing (it amplifies change) or balancing (it\ncounteracts change). From a run, a loop that showed both is \"mostly\" the\none it showed at least 99% of the time, weighted by its score, and\nundetermined otherwise; from structure, a loop with a link whose sign the\nengine cannot tell is undetermined.",
+            "type": "string",
+            "enum": [
+              "reinforcing",
+              "balancing",
+              "mostly_reinforcing",
+              "mostly_balancing",
+              "undetermined"
+            ]
+          },
+          "ChainLink": {
+            "type": "object",
+            "properties": {
+              "variable": {
+                "description": "The variable, as the model names it; an element of an arrayed one is\nsubscripted.",
+                "type": "string"
+              },
+              "polarity": {
+                "description": "The sign of the link from this variable to the next: the run's, when\nthe run scored the link, so `?` there means its sign changed over the\nrun; otherwise its equation's.",
+                "$ref": "#/$defs/LinkPolarityName"
+              }
+            },
+            "required": [
+              "variable",
+              "polarity"
+            ]
+          },
+          "LinkPolarityName": {
+            "description": "A link's sign as system dynamics writes it: `+` when the target moves with\nthe source, `-` when against it, `?` when the engine cannot tell from the\nequation.",
+            "type": "string",
+            "enum": [
+              "+",
+              "-",
+              "?"
+            ]
+          },
+          "OmittedLoops": {
+            "description": "Loops the analysis found and the answer does not list.",
+            "type": "object",
+            "properties": {
+              "partitions": {
+                "description": "Partitions past the 6 listed.",
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "loops": {
+                "description": "Loops not listed, in listed partitions and the others. `through` finds\nthe loops through a variable.",
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "partitions",
+              "loops"
+            ]
+          },
+          "CutReport": {
+            "type": "object",
+            "properties": {
+              "links": {
+                "description": "The links the replaced equations removed: what each replaced variable\nread before and no longer reads.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/CutLink"
+                }
+              },
+              "loops": {
+                "description": "The model's loops through them, which this run does not have; at most\n8.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LoopReport"
+                }
+              },
+              "otherLoops": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "links",
+              "loops"
+            ]
+          },
+          "CutLink": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ]
+          }
+        },
+        "title": "AnalyzeLoopsOutput",
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "run": {
+            "type": "string"
+          },
+          "basis": {
+            "$ref": "#/$defs/LoopBasis"
+          },
+          "through": {
+            "description": "The variable `through` named, as the model names it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "found": {
+            "description": "The loops the analysis found (those through `through`, when given).",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "complete": {
+            "description": "Whether the loops were drawn from every loop there is: false when the\nmodel has too many to enumerate, so the run's were found by searching\nfor the strongest (a sample), or too many for its structure alone to\nlist.",
+            "type": "boolean"
+          },
+          "partitions": {
+            "description": "The partitions the loops are in, largest first.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/PartitionReport"
+            }
+          },
+          "omitted": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OmittedLoops"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "absent": {
+            "description": "Loops asked for by id that this run does not have: inactive in it, or\ncut from it.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "leftOut": {
+            "description": "Loops asked for by id left out to keep the answer within its budget:\nask for them in another call.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cut": {
+            "description": "What the run's replaced equations cut.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CutReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "revision",
+          "run",
+          "basis",
+          "found",
+          "complete",
+          "partitions"
+        ]
+      }
     }
   ]
 }

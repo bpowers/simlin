@@ -17,9 +17,10 @@
 //! - **Bounded, quiet results.** No tool returns a whole model or a raw
 //!   series, and an outline that would exceed its budget is outlined by
 //!   sector instead. Success says little.
-//! - **Ids a claim can cite.** A diagnostic is reported under an id that is
-//!   stable for the life of the session (`evidence`), so an agent can refer to
-//!   "D3" across calls and a verifier can check what it names.
+//! - **Ids a claim can cite.** A diagnostic or a loop is reported under an id
+//!   that is stable for the life of the session (`evidence`), so an agent can
+//!   refer to "D3" or "L2" across calls and a verifier can check what it
+//!   names.
 //! - **Refusals are output.** A domain failure -- an unknown variable, input
 //!   that does not match the schema -- is a [`ToolOutput`] with `is_error` set,
 //!   naming the rule and the repair, for the agent to read and answer. Only a
@@ -38,6 +39,7 @@ mod catalog;
 mod changes;
 mod evidence;
 mod experiment;
+mod loops;
 mod names;
 mod outline;
 mod runs;
@@ -53,6 +55,10 @@ pub use evidence::{DiagnosticCategoryName, DiagnosticReport, Severity};
 pub use experiment::{
     AppliedChange, ChangeInput, Comparison, ElementValue, RunExperimentInput, RunExperimentOutput,
     SpecsInput,
+};
+pub use loops::{
+    AnalyzeLoopsInput, AnalyzeLoopsOutput, ChainLink, CutLink, CutReport, DominanceSpan, LoopBasis,
+    LoopPolarityName, LoopReport, LoopShare, OmittedLoops, PartitionReport,
 };
 pub use outline::{
     ConstantOutline, Counts, IntegrationMethod, LookupOutline, LookupSummary, ModuleInputOutline,
@@ -207,6 +213,9 @@ impl Session {
                 respond(name, input, |input| series::read_behavior(self, ws, input))
             }
             ToolName::ListRuns => respond(name, input, |input| runs::list_runs(self, ws, input)),
+            ToolName::AnalyzeLoops => {
+                respond(name, input, |input| loops::analyze_loops(self, ws, input))
+            }
         })
     }
 

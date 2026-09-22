@@ -9,7 +9,8 @@
 //! reads is the engine's, a call carries JSON in and out at the project's
 //! current revision, a refusal is output the agent reads rather than an error,
 //! a host's misuse is an error with a code, a session keeps its model alive,
-//! and calls interleave with edits from other threads without deadlock.
+//! calls interleave with edits from other threads without deadlock, and a loop
+//! analysis leaves the host's other analyses of the project as they were.
 
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -429,6 +430,50 @@ unsafe fn run_series(session: *mut SimlinToolSession, run: &str, variable: &str)
     assert_eq!(written, steps);
     simlin_results_unref(results);
     series
+}
+
+/// How many loops the host's own structural loop surface reports.
+unsafe fn structural_loop_count(model: *mut SimlinModel) -> usize {
+    let mut err = ptr::null_mut();
+    let loops = simlin_analyze_get_loops(model, &mut err);
+    expect_no_error(err, "the structural loops");
+    let count = (*loops).count;
+    simlin_free_loops(loops);
+    count
+}
+
+#[test]
+fn a_loop_analysis_follows_the_project_and_leaves_its_other_analyses_as_they_were() {
+    unsafe {
+        let proj = project();
+        let model = main_model(proj);
+        let session = new_session(model);
+        assert_eq!(structural_loop_count(model), 1);
+
+        let (loops, is_error) = call(session, "analyze_loops", "{}");
+        assert!(!is_error, "{loops}");
+        assert_eq!(loops["basis"], "run");
+        let growth = &loops["partitions"][0]["loops"][0];
+        assert_eq!(growth["id"], "L1");
+        assert_eq!(growth["polarity"], "reinforcing");
+        // The analysis runs in discovery mode and sets the project back, so
+        // the structural surface still enumerates the model's loops.
+        assert_eq!(structural_loop_count(model), 1);
+
+        // A rate of zero holds the population still: the same loop, from
+        // structure, under its id.
+        apply(proj, &set_rate("0"));
+        let (still, is_error) = call(session, "analyze_loops", "{}");
+        assert!(!is_error, "{still}");
+        assert!(still["revision"].as_u64().unwrap() > 0);
+        assert_eq!(still["basis"], "structure");
+        assert_eq!(still["partitions"][0]["loops"][0]["id"], "L1");
+        assert_eq!(structural_loop_count(model), 1);
+
+        simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
 }
 
 #[test]

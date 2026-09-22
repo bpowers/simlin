@@ -14,6 +14,11 @@
 //! where in the equation it points, since an edit that moves the span leaves
 //! the problem the same. Two rows alike in all of that (one variable failing
 //! the same way at two places) are told apart by their order in the report.
+//!
+//! A loop's id (`L1`, `L2`, ...) is keyed by its cycle: its node sequence
+//! rotated to start at its least node, so the same loop read from any run, at
+//! any revision, from a run's scores or from structure, has one id, and the
+//! same nodes in the other direction are another loop.
 
 use std::collections::HashMap;
 
@@ -120,13 +125,34 @@ struct DiagnosticKey {
 }
 
 /// The ids a session has given out.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Evidence {
     diagnostics: HashMap<DiagnosticKey, u32>,
     next_diagnostic: u32,
+    loops: HashMap<Vec<String>, u32>,
+    next_loop: u32,
 }
 
 impl Evidence {
+    /// The cycle, in canonical rotation, of the loop this session calls `id`.
+    pub(crate) fn loop_key(&self, id: &str) -> Option<&[String]> {
+        let number: u32 = id.strip_prefix('L')?.parse().ok()?;
+        self.loops
+            .iter()
+            .find(|&(_, &n)| n == number)
+            .map(|(key, _)| key.as_slice())
+    }
+
+    /// The id of the loop whose cycle, in canonical rotation, is `key`.
+    pub(crate) fn loop_id(&mut self, key: &[String]) -> String {
+        let next = &mut self.next_loop;
+        let number = *self.loops.entry(key.to_vec()).or_insert_with(|| {
+            *next += 1;
+            *next
+        });
+        format!("L{number}")
+    }
+
     fn diagnostic_id(&mut self, key: DiagnosticKey) -> String {
         let next = &mut self.next_diagnostic;
         let number = *self.diagnostics.entry(key).or_insert_with(|| {

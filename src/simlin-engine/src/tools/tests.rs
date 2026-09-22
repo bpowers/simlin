@@ -25,6 +25,7 @@ fn good_input(tool: ToolName) -> Value {
         }),
         ToolName::ReadBehavior => json!({"variables": ["Inventory", "orders"]}),
         ToolName::ListRuns => json!({}),
+        ToolName::AnalyzeLoops => json!({"through": "Inventory"}),
     }
 }
 

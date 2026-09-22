@@ -443,13 +443,8 @@ pub(crate) fn run_experiment(
     let results = execute(ws, model, &plan).map_err(|failure| {
         failure.refusal(|reason| ToolError::new(format!("the experiment does not run: {reason}")))
     })?;
-    let run = Run {
-        name: name.clone(),
-        revision: ws.revision,
-        key: session.runs.key(ws),
-        plan,
-        results,
-    };
+    let key = session.runs.key(ws);
+    let run = Run::new(name.clone(), ws.revision, key, plan, results);
 
     let (behavior, omitted) = compare(&run, base.as_deref(), model, &record);
     let specs = run_specs(&run, model, ws.project);

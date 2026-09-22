@@ -414,62 +414,11 @@ fn run_ltm_pipeline(
         .map_err(|e| e.details.unwrap_or_else(|| e.code.to_string()))?;
     let results = vm.into_results();
 
-    // Build an element-level CausalGraph for loop discovery. This ensures
-    // that arrayed models get element-specific loops (e.g., population[NYC]
-    // -> births[NYC] -> population[NYC]) rather than variable-level loops.
-    // The model compiled (above), but if it is somehow absent from the salsa
-    // model map there is no causal graph to analyse -- a structural edge case,
-    // not a compile error, so degrade gracefully to empty loops.
-    let Some(source_model) = source_project.models(db).get(&canonical_name).copied() else {
-        return Ok(None);
-    };
-    let element_edges = crate::db::model_element_causal_edges(db, source_model, source_project);
-    // Enrich the element-level graph with module sub-graphs + variable map so
-    // the discovery-mode per-exit-port pathway recompute (GH #698) can fire on
-    // this production path; the bare `causal_graph_from_element_edges`
-    // constructor leaves both empty.
-    let causal_graph = crate::db::causal_graph_from_element_edges_with_modules(
-        db,
-        source_model,
-        source_project,
-        element_edges,
-    );
-
-    let stocks: Vec<crate::common::Ident<crate::common::Canonical>> = element_edges
-        .stocks
-        .iter()
-        .map(|s| crate::common::Ident::new(s))
-        .collect();
-
-    // Get LTM variable metadata and project dimensions for A2A link
-    // score expansion. This allows parse_link_offsets to expand A2A
-    // link scores into per-element edges.
-    let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
-    let dm_dims = crate::db::project_datamodel_dims(db, source_project);
-
-    // Per-variable declared dims + the dimension-mapping context let the A2A
-    // expansion project each Bare score's from-node onto the source's OWN
-    // dims (bare for a scalar feeder, the diagonal/broadcast/mapped form for
-    // an arrayed one) so the discovery search graph's node names match the
-    // element graph the discovery runs on (GH #754).
-    let expansion = build_link_expansion_context(db, source_model, source_project);
-
-    let sub_model_output_ports = build_sub_model_output_ports(db, source_project);
-
-    let discovery = crate::ltm_finding::discover_loops_with_graph(
-        &results,
-        &causal_graph,
-        &stocks,
-        &ltm_vars.vars,
-        dm_dims,
-        &expansion,
-        &sub_model_output_ports,
-        budget,
-    );
     // The model compiled and simulated; a discovery failure here is a
     // post-simulation structural bail, not an actionable compile error, so
     // degrade gracefully to empty loops (no `analysis_error`).
-    let Ok(discovery) = discovery else {
+    let Some(discovery) = discover_run_loops(db, source_project, &canonical_name, &results, budget)
+    else {
         return Ok(None);
     };
     let found_loops = discovery.loops;
@@ -511,10 +460,83 @@ fn run_ltm_pipeline(
     }))
 }
 
+/// Loop discovery over a run's results: the loops of the model named
+/// `model_name` (canonically) that the run's recorded link scores say were
+/// ever active, ranked, filtered and given ids, with their cycle partitions.
+///
+/// `results` must come from `source_project`'s model compiled under
+/// `LtmOverlay::On` with the project in discovery mode, so every causal edge
+/// carries a link score: the run [`analyze_model`] makes, or one a host makes
+/// with changes of its own (a value set during the run, a replaced equation on
+/// a staged project). `budget` bounds discovery's candidate generation as in
+/// [`analyze_model`].
+///
+/// `None` when the model is absent from the project's model map or discovery
+/// bails on the run's structure: a degradation rather than a compile error,
+/// which a caller reports as no loops.
+pub fn discover_run_loops(
+    db: &dyn crate::db::Db,
+    source_project: SourceProject,
+    model_name: &str,
+    results: &crate::results::Results,
+    budget: Option<std::time::Duration>,
+) -> Option<crate::ltm_finding::DiscoveryResult> {
+    // Build an element-level CausalGraph for loop discovery. This ensures
+    // that arrayed models get element-specific loops (e.g., population[NYC]
+    // -> births[NYC] -> population[NYC]) rather than variable-level loops.
+    // A model absent from the salsa model map has no causal graph to
+    // analyse: a structural edge case, not a compile error.
+    let source_model = source_project.models(db).get(model_name).copied()?;
+    let element_edges = crate::db::model_element_causal_edges(db, source_model, source_project);
+    // Enrich the element-level graph with module sub-graphs + variable map so
+    // the discovery-mode per-exit-port pathway recompute (GH #698) can fire on
+    // this production path; the bare `causal_graph_from_element_edges`
+    // constructor leaves both empty.
+    let causal_graph = crate::db::causal_graph_from_element_edges_with_modules(
+        db,
+        source_model,
+        source_project,
+        element_edges,
+    );
+
+    let stocks: Vec<crate::common::Ident<crate::common::Canonical>> = element_edges
+        .stocks
+        .iter()
+        .map(|s| crate::common::Ident::new(s))
+        .collect();
+
+    // Get LTM variable metadata and project dimensions for A2A link
+    // score expansion. This allows parse_link_offsets to expand A2A
+    // link scores into per-element edges.
+    let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
+    let dm_dims = crate::db::project_datamodel_dims(db, source_project);
+
+    // Per-variable declared dims + the dimension-mapping context let the A2A
+    // expansion project each Bare score's from-node onto the source's OWN
+    // dims (bare for a scalar feeder, the diagonal/broadcast/mapped form for
+    // an arrayed one) so the discovery search graph's node names match the
+    // element graph the discovery runs on (GH #754).
+    let expansion = build_link_expansion_context(db, source_model, source_project);
+
+    let sub_model_output_ports = build_sub_model_output_ports(db, source_project);
+
+    crate::ltm_finding::discover_loops_with_graph(
+        results,
+        &causal_graph,
+        &stocks,
+        &ltm_vars.vars,
+        dm_dims,
+        &expansion,
+        &sub_model_output_ports,
+        budget,
+    )
+    .ok()
+}
+
 /// Build a mapping from variable-UID sets to loop names using the model's
 /// persisted `loop_metadata`.  Entries are stored as a sorted Vec of UIDs
 /// because UIDs must be matched as a set.
-fn build_uid_to_loop_name(
+pub(crate) fn build_uid_to_loop_name(
     project: &datamodel::Project,
     model_name: &str,
 ) -> Vec<(Vec<i32>, String)> {
@@ -646,11 +668,29 @@ fn to_loop_summary(
 }
 
 /// Try to match loop variables to a persisted loop name via UID sets.
+fn resolve_loop_name(
+    fl: &crate::ltm_finding::FoundLoop,
+    uid_to_loop_name: &[(Vec<i32>, String)],
+    model_name: &str,
+    project: &datamodel::Project,
+) -> Option<String> {
+    let loop_var_idents: std::collections::HashSet<String> = fl
+        .loop_info
+        .links
+        .iter()
+        .map(|l| l.from.to_string())
+        .collect();
+    persisted_loop_name(&loop_var_idents, uid_to_loop_name, model_name, project)
+}
+
+/// The persisted name (from [`build_uid_to_loop_name`]'s map) of the loop
+/// through `loop_var_idents`, the canonical idents of its variables: the name
+/// whose UID set is exactly theirs.
 ///
 /// UID lookup is scoped to `model_name` so that variables with the same
 /// identifier in different models don't produce false matches.
-fn resolve_loop_name(
-    fl: &crate::ltm_finding::FoundLoop,
+pub(crate) fn persisted_loop_name(
+    loop_var_idents: &std::collections::HashSet<String>,
     uid_to_loop_name: &[(Vec<i32>, String)],
     model_name: &str,
     project: &datamodel::Project,
@@ -661,13 +701,6 @@ fn resolve_loop_name(
 
     // Collect UIDs for variables in the loop from the datamodel,
     // restricted to the model being analyzed.
-    let loop_var_idents: std::collections::HashSet<String> = fl
-        .loop_info
-        .links
-        .iter()
-        .map(|l| l.from.to_string())
-        .collect();
-
     let mut loop_uids: Vec<i32> = project
         .models
         .iter()

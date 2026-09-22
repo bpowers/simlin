@@ -155,6 +155,45 @@ impl Sweep {
     }
 }
 
+/// A loop whose chain is signed link by link has the polarity its negative
+/// links make, an even number reinforcing and an odd one balancing; a chain
+/// with a link its run never signed says nothing.
+fn check_parity(sweep: &mut Sweep, model: &str, answer: &Value) {
+    let loops = answer["partitions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|partition| partition["loops"].as_array().into_iter().flatten());
+    for report in loops {
+        let (Some(chain), Some(polarity)) =
+            (report["chain"].as_array(), report["polarity"].as_str())
+        else {
+            continue;
+        };
+        let signs: Option<Vec<bool>> = chain
+            .iter()
+            .map(|link| match link["polarity"].as_str() {
+                Some("-") => Some(true),
+                Some("+") => Some(false),
+                _ => None,
+            })
+            .collect();
+        let Some(signs) = signs else { continue };
+        let negatives = signs.iter().filter(|&&negative| negative).count();
+        let expected = if negatives % 2 == 0 {
+            "reinforcing"
+        } else {
+            "balancing"
+        };
+        if polarity != "undetermined" && !polarity.ends_with(expected) {
+            sweep.failures.push(format!(
+                "{model}: {} is {polarity} with {negatives} negative links",
+                report["id"]
+            ));
+        }
+    }
+}
+
 /// The first constant of `model` an experiment can double: a scalar
 /// auxiliary whose equation is a number.
 fn first_constant(model: &datamodel::Model) -> Option<String> {
@@ -171,7 +210,8 @@ fn first_constant(model: &datamodel::Model) -> Option<String> {
 
 /// What each model is asked: an outline, every variable read twelve at a
 /// time (up to four calls) and its behavior, a search, an experiment that
-/// doubles a constant, and the runs.
+/// doubles a constant, the runs, and the loops of the model as it is, each
+/// loop's polarity checked against its chain's signs.
 fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
     let model = project.models.iter().find(|m| m.macro_spec.is_none());
     let names: Vec<String> = model
@@ -229,6 +269,15 @@ fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
         ToolName::ListRuns,
         json!({}),
     );
+    if let Some(loops) = sweep.call(
+        display,
+        &mut host,
+        &mut session,
+        ToolName::AnalyzeLoops,
+        json!({}),
+    ) {
+        check_parity(sweep, display, &loops);
+    }
     if let Some(first) = names.first() {
         sweep.call(
             display,
