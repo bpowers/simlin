@@ -2317,7 +2317,9 @@ void simlin_tool_session_unref(SimlinToolSession *session);
 // simulation, a stage of an analysis) and answers a refusal with `"interrupted": true` that
 // kept nothing: the entry point waits at most one unit. A host that retries
 // by itself does so once that work is done -- after an edit, at the next
-// revision -- and never in a loop against a project that stays busy.
+// revision -- and never in a loop against a project that stays busy. A call
+// its host cancels (`simlin_tool_session_cancel`) stops at the same points
+// and answers a refusal with `"cancelled": true`, which no host retries.
 //
 // # Safety
 // - `session` must be a valid pointer to a SimlinToolSession
@@ -2332,6 +2334,22 @@ void simlin_tool_session_call(SimlinToolSession *session,
                               uintptr_t *out_len,
                               bool *out_is_error,
                               SimlinError **out_error);
+
+// Cancel the session's tool calls under way -- the one answering and any
+// waiting for the session -- as a host does when what they were for is gone,
+// such as the window whose analysis a call runs: each stops at its next
+// checkpoint, between units of its work, or, still waiting for the session,
+// as it gets it, before it waits for the database, and answers a refusal
+// with `"cancelled": true` that kept nothing, which a host does not retry. A
+// call made after this returns runs as usual. It returns at once, without
+// waiting for the calls to stop, and takes no lock, so any thread may make
+// it, one inside a call included. It cancels only `simlin_tool_session_call`:
+// a host's own reads of the session's runs and a landing, the person's own
+// act, go on. A NULL `session` is a no-op.
+//
+// # Safety
+// - `session` must be a valid pointer to a SimlinToolSession, or NULL
+void simlin_tool_session_cancel(SimlinToolSession *session);
 
 // Forget the session's run named `name` -- its series and its plan -- as a
 // host does when the person discards it: no tool reads it again, the listing

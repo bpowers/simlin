@@ -37,6 +37,8 @@
 //!   stops between units
 //!   of its own work ([`Workspace::waiting`]) and answers that it kept
 //!   nothing, so that work waits at most one unit, and the agent calls again.
+//!   A call its host cancels stops at the same points
+//!   ([`Workspace::cancelled`]), and is not called again.
 
 mod battery;
 mod behavior;
@@ -122,6 +124,12 @@ pub struct Workspace<'a> {
     /// -- and stops there, keeping nothing, so that work waits at most one
     /// unit. `None` for a host whose calls never share the project.
     pub waiting: Option<&'a (dyn Fn() -> bool + Sync)>,
+    /// Whether the host has cancelled the call: what it was for is gone, as
+    /// when the person closes the window it answers. A call stops for it
+    /// where it stops for `waiting`, keeping nothing, and answers that it was
+    /// cancelled, which no host calls again. `None` for a host that never
+    /// cancels a call.
+    pub cancelled: Option<&'a (dyn Fn() -> bool + Sync)>,
 }
 
 impl Workspace<'_> {
@@ -152,6 +160,9 @@ pub struct ToolOutput {
     /// ([`Workspace::waiting`]): a refusal a host that retries by itself
     /// looks for.
     pub interrupted: bool,
+    /// That the host cancelled the call, which stopped and kept nothing
+    /// ([`Workspace::cancelled`]): a refusal no host retries.
+    pub cancelled: bool,
 }
 
 /// A tool name the catalog does not list: the host's mistake, not the agent's,
@@ -212,21 +223,33 @@ impl Session {
     /// the catalog has no such tool.
     pub fn call(
         &mut self,
-        mut ws: Workspace<'_>,
+        ws: Workspace<'_>,
         tool: &str,
         input: &str,
     ) -> Result<ToolOutput, UnknownTool> {
         let Some(name) = ToolName::from_name(tool) else {
             return Err(UnknownTool(tool.to_string()));
         };
-        if let Err(interrupted) = ws.yield_point() {
-            return Ok(ToolOutput::refusal(&interrupted));
-        }
-        let ws = &mut ws;
         // A call that stops keeps nothing, the ids it gave out on the way
         // included.
         let evidence = self.evidence.clone();
-        let output = match name {
+        let (output, cancelled) = checkpointed(ws, |ws| self.answer(ws, name, input));
+        if output.interrupted || cancelled {
+            self.evidence = evidence;
+        }
+        Ok(if cancelled {
+            ToolOutput::refusal(&ToolError::cancelled())
+        } else {
+            output
+        })
+    }
+
+    /// Answer a call of the tool `name`.
+    fn answer(&mut self, ws: &mut Workspace<'_>, name: ToolName, input: &str) -> ToolOutput {
+        if let Err(interrupted) = ws.yield_point() {
+            return ToolOutput::refusal(&interrupted);
+        }
+        match name {
             ToolName::ReadModel => {
                 respond(name, input, |input| outline::read_model(self, ws, input))
             }
@@ -251,30 +274,36 @@ impl Session {
             ToolName::VerifyFindings => respond(name, input, |input| {
                 verify::verify_findings(self, ws, input)
             }),
-        };
-        if output.interrupted {
-            self.evidence = evidence;
         }
-        Ok(output)
     }
 
     /// The results of the run named `name` -- `"current"` for the model as
     /// it is -- for a host to chart: every saved series, not a summary, with
     /// the revision the run was made at and whether the model has changed
     /// since (its diagrams aside). A read that stops for other work on the
-    /// project says so ([`RunUnavailable::interrupted`]).
+    /// project says so ([`RunUnavailable::interrupted`]), as does one its host
+    /// cancelled ([`RunUnavailable::cancelled`]).
     pub fn run_results(
         &mut self,
-        mut ws: Workspace<'_>,
+        ws: Workspace<'_>,
         name: &str,
     ) -> Result<RunResults, RunUnavailable> {
-        let resolved = resolve_model(ws.project, ws.db, &self.model_name)?;
-        let run = self.runs.get(&mut ws, resolved.model, name)?;
-        let stale = !self.runs.is_fresh(&ws, &run);
-        Ok(RunResults {
-            results: run.results.clone(),
-            revision: run.revision,
-            stale,
+        let (results, cancelled) = checkpointed(ws, |ws| {
+            let resolved = resolve_model(ws.project, ws.db, &self.model_name)?;
+            let run = self.runs.get(ws, resolved.model, name)?;
+            let stale = !self.runs.is_fresh(ws, &run);
+            Ok(RunResults {
+                results: run.results.clone(),
+                revision: run.revision,
+                stale,
+            })
+        });
+        results.map_err(|err: ToolError| {
+            if cancelled {
+                ToolError::cancelled().into()
+            } else {
+                err.into()
+            }
         })
     }
 
@@ -314,8 +343,14 @@ impl Session {
     /// as it was, the gate passes again and its lines are the ones the
     /// person approved. The host holds the project's contents for the call,
     /// so nothing lands between the check and the edit.
-    pub fn land_plan(&mut self, mut ws: Workspace<'_>, id: &str) -> Option<Landing> {
-        edit::land_plan(self, &mut ws, id)
+    pub fn land_plan(&mut self, ws: Workspace<'_>, id: &str) -> Option<Landing> {
+        let (landing, cancelled) = checkpointed(ws, |ws| edit::land_plan(self, ws, id));
+        match landing {
+            Some(Landing::Refused(_)) if cancelled => {
+                Some(Landing::Refused(ToolError::cancelled().error))
+            }
+            landing => landing,
+        }
     }
 
     /// What changed in the model's variables and sim specs since this
@@ -346,6 +381,37 @@ impl Session {
     }
 }
 
+/// Run `answer` on `ws` with its checkpoints stopping for the host's cancel
+/// as for other work waiting, and say whether one stopped the call for the
+/// cancel: a checkpoint asks only whether to stop, so the entry point says
+/// why.
+fn checkpointed<T>(ws: Workspace<'_>, answer: impl FnOnce(&mut Workspace<'_>) -> T) -> (T, bool) {
+    let Workspace {
+        project,
+        db,
+        revision,
+        waiting,
+        cancelled,
+    } = ws;
+    let stopped_for_cancel = std::sync::atomic::AtomicBool::new(false);
+    let stop = || {
+        if cancelled.is_some_and(|cancelled| cancelled()) {
+            stopped_for_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            return true;
+        }
+        waiting.is_some_and(|waiting| waiting())
+    };
+    let mut ws = Workspace {
+        project,
+        db,
+        revision,
+        waiting: Some(&stop),
+        cancelled,
+    };
+    let answer = answer(&mut ws);
+    (answer, stopped_for_cancel.into_inner())
+}
+
 /// A run's series for a host to chart, and what the host needs to say of
 /// them.
 pub struct RunResults {
@@ -366,12 +432,16 @@ pub struct RunUnavailable {
     /// ([`Workspace::waiting`]), not that there is no such run: a host reads
     /// it again once that work is done.
     pub interrupted: bool,
+    /// That the host cancelled the read ([`Workspace::cancelled`]), which it
+    /// does not make again.
+    pub cancelled: bool,
 }
 
 impl From<ToolError> for RunUnavailable {
     fn from(err: ToolError) -> RunUnavailable {
         RunUnavailable {
             interrupted: err.is_interrupted(),
+            cancelled: err.cancelled,
             reason: err.error,
         }
     }
@@ -390,6 +460,10 @@ pub(crate) struct ToolError {
     /// loop against a project that stays busy.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     interrupted: bool,
+    /// That the host cancelled the call, which stopped and kept nothing: no
+    /// host calls it again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    cancelled: bool,
 }
 
 impl ToolError {
@@ -398,6 +472,7 @@ impl ToolError {
             error: error.into(),
             suggestions: vec![],
             interrupted: false,
+            cancelled: false,
         }
     }
 
@@ -416,6 +491,16 @@ impl ToolError {
                 "the call stopped for the person's work on the project, which was waiting for \
                  it, and kept nothing; the model may have changed, so read what this call \
                  needs again, then make it once more",
+            )
+        }
+    }
+
+    /// The answer of a call its host cancelled ([`Workspace::cancelled`]).
+    pub(crate) fn cancelled() -> ToolError {
+        ToolError {
+            cancelled: true,
+            ..ToolError::new(
+                "the host cancelled the call, which stopped before it finished and kept nothing",
             )
         }
     }
@@ -454,17 +539,27 @@ fn respond<I: DeserializeOwned, O: Serialize>(
             json: serde_json::to_string(&output).expect("tool outputs serialize"),
             is_error: false,
             interrupted: false,
+            cancelled: false,
         },
         Err(error) => ToolOutput::refusal(&error),
     }
 }
 
 impl ToolOutput {
+    /// The answer of a call its host cancelled before it began its work
+    /// ([`Workspace::cancelled`]): what a host that notices the cancel first,
+    /// as a call does that waited for its session, answers without making the
+    /// call.
+    pub fn cancelled() -> ToolOutput {
+        ToolOutput::refusal(&ToolError::cancelled())
+    }
+
     fn refusal(error: &ToolError) -> ToolOutput {
         ToolOutput {
             json: serde_json::to_string(error).expect("refusals serialize"),
             is_error: true,
             interrupted: error.interrupted,
+            cancelled: error.cancelled,
         }
     }
 }

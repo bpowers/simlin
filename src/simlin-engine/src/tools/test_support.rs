@@ -51,6 +51,7 @@ impl Host {
             db: &mut self.db,
             revision: self.revision,
             waiting: None,
+            cancelled: None,
         };
         session
             .call(ws, tool, input)
@@ -86,6 +87,28 @@ impl Host {
             db: &mut self.db,
             revision: self.revision,
             waiting: Some(waiting),
+            cancelled: None,
+        };
+        session
+            .call(ws, tool, &input.to_string())
+            .expect("the catalog lists the tool")
+    }
+
+    /// Call a tool with `cancelled` as the host's report that it cancelled
+    /// the call, and `waiting` as its report of other work waiting for the
+    /// project.
+    pub fn call_cancelled(
+        &mut self,
+        session: &mut Session,
+        tool: &str,
+        input: Value,
+        cancelled: &(dyn Fn() -> bool + Sync),
+        waiting: &(dyn Fn() -> bool + Sync),
+    ) -> ToolOutput {
+        let ws = Workspace {
+            cancelled: Some(cancelled),
+            waiting: Some(waiting),
+            ..self.workspace()
         };
         session
             .call(ws, tool, &input.to_string())
@@ -126,6 +149,7 @@ impl Host {
             db: &mut self.db,
             revision: self.revision,
             waiting: None,
+            cancelled: None,
         }
     }
 }

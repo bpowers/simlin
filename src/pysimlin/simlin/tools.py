@@ -17,7 +17,8 @@ the gate), and the project commits the edit as it commits any other.
 
 Thread-safety: a session serializes its calls with a per-instance lock, and
 the engine locks the session, the project's contents, and its database for
-each call.
+each call. :meth:`ToolSession.cancel` takes no lock, so another thread can
+stop a call under way.
 """
 
 from __future__ import annotations
@@ -53,6 +54,14 @@ class ToolOutput:
         (after an edit, at the next revision), never in a loop."""
         refusal = self.data if isinstance(self.data, dict) else {}
         return self.is_error and refusal.get("interrupted") is True
+
+    @property
+    def cancelled(self) -> bool:
+        """Whether the call stopped because its host cancelled it
+        (:meth:`ToolSession.cancel`), and kept nothing. Not to be called
+        again."""
+        refusal = self.data if isinstance(self.data, dict) else {}
+        return self.is_error and refusal.get("cancelled") is True
 
 
 @dataclass(frozen=True)
@@ -210,6 +219,15 @@ class ToolSession:
             )
             for run in listed
         ]
+
+    def cancel(self) -> None:
+        """Cancel the session's calls under way, the one answering and any
+        waiting for the session, as a host does when what they were for is
+        gone: each stops at its next checkpoint and answers a refusal whose
+        :attr:`ToolOutput.cancelled` is set. A call made after this runs as
+        usual. Returns at once, and takes no lock, so any thread may call it.
+        """
+        lib.simlin_tool_session_cancel(self._ptr)
 
     def forget(self, name: str) -> bool:
         """Forget the run ``name``, its series and its plan, as a host does

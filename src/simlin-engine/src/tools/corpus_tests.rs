@@ -98,6 +98,7 @@ impl Sweep {
                 "error": {"type": "string"},
                 "suggestions": {"type": "array", "items": {"type": "string"}},
                 "interrupted": {"type": "boolean"},
+                "cancelled": {"type": "boolean"},
             },
             "required": ["error"],
             "additionalProperties": false,

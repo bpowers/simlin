@@ -1338,3 +1338,168 @@ fn a_tool_call_stops_for_an_edit_that_waits_for_it() {
         simlin_project_unref(proj);
     }
 }
+
+/// Call `read_model` on the session at `session_addr`, as a host's thread
+/// does: whether it refused, and its output.
+#[cfg(feature = "agent_tools")]
+unsafe fn read_model_on(session_addr: usize) -> (bool, serde_json::Value) {
+    let name = CString::new("read_model").unwrap();
+    let (mut buf, mut len, mut is_error) = (ptr::null_mut(), 0usize, false);
+    let mut err: *mut SimlinError = ptr::null_mut();
+    crate::tools::simlin_tool_session_call(
+        session_addr as *mut crate::tools::SimlinToolSession,
+        name.as_ptr(),
+        ptr::null(),
+        0,
+        &mut buf,
+        &mut len,
+        &mut is_error,
+        &mut err,
+    );
+    assert!(err.is_null());
+    let output: serde_json::Value =
+        serde_json::from_slice(std::slice::from_raw_parts(buf, len)).unwrap();
+    simlin_free(buf);
+    (is_error, output)
+}
+
+/// A call its host cancels while it runs -- here from inside the call, as any
+/// thread may -- stops and answers that it was cancelled, not interrupted,
+/// and a call made after the cancel answers as usual.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn a_cancelled_tool_call_stops_and_a_later_call_answers() {
+    use crate::tools::install_tool_test_hook;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let datamodel = TestProject::new("tool_cancel")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let session = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let session_addr = session as usize;
+        let proj_addr = proj as usize;
+        let cancel_once = Arc::new(AtomicBool::new(true));
+        let cancel_in_hook = Arc::clone(&cancel_once);
+        let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+            if project as *const SimlinProject as usize == proj_addr
+                && cancel_in_hook.swap(false, Ordering::SeqCst)
+            {
+                crate::tools::simlin_tool_session_cancel(
+                    session_addr as *mut crate::tools::SimlinToolSession,
+                );
+            }
+        }));
+
+        let (is_error, output) = read_model_on(session_addr);
+        assert!(is_error, "{output}");
+        assert_eq!(output["cancelled"], true, "{output}");
+        assert!(output.get("interrupted").is_none(), "{output}");
+        assert!(!cancel_once.load(Ordering::SeqCst), "the hook cancelled");
+
+        let (is_error, output) = read_model_on(session_addr);
+        assert!(!is_error, "a call after the cancel answers: {output}");
+
+        // NULL is no session to cancel.
+        crate::tools::simlin_tool_session_cancel(ptr::null_mut());
+        crate::tools::simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A cancel covers a call waiting for the session as well as the one
+/// answering: a host that closes a window stops all the work it began. The
+/// waiting call answers as soon as it has the session, without waiting for
+/// the database, which another session's call may hold.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn a_cancel_covers_a_call_waiting_for_the_session() {
+    use crate::tools::install_tool_test_hook;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+
+    let datamodel = TestProject::new("tool_cancel_waiting")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    let proj_addr = proj as usize;
+
+    // The first call holds the session inside the hook until released. The
+    // hook runs once a call holds the database: how many do is counted.
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let hold = Arc::new(AtomicBool::new(true));
+    let release = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (hold_in_hook, release_in_hook) = (Arc::clone(&hold), Arc::clone(&release));
+    let entered_in_hook = Arc::clone(&entered);
+    let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+        if project as *const SimlinProject as usize != proj_addr {
+            return;
+        }
+        entered_in_hook.fetch_add(1, Ordering::SeqCst);
+        if hold_in_hook.swap(false, Ordering::SeqCst) {
+            let _ = entered_tx.send(());
+            while !release_in_hook.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        }
+    }));
+    struct Release(Arc<AtomicBool>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let release_guard = Release(Arc::clone(&release));
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let session = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let session_addr = session as usize;
+
+        let answering = thread::spawn(move || read_model_on(session_addr));
+        entered_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("the first call holds the session");
+        let waiting = thread::spawn(move || read_model_on(session_addr));
+        let deadline = std::time::Instant::now() + POSITIVE_WAIT;
+        while (*session).calls_begun() < 2 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!((*session).calls_begun(), 2, "the second call has begun");
+
+        crate::tools::simlin_tool_session_cancel(session);
+        drop(release_guard);
+        for (which, call) in [("answering", answering), ("waiting", waiting)] {
+            let (is_error, output) = call.join().expect("the call finished");
+            assert!(is_error, "{which}: {output}");
+            assert_eq!(output["cancelled"], true, "{which}: {output}");
+        }
+        assert_eq!(
+            entered.load(Ordering::SeqCst),
+            1,
+            "the waiting call answered before it took the database"
+        );
+
+        let (is_error, output) = read_model_on(session_addr);
+        assert!(!is_error, "a call after the cancel answers: {output}");
+
+        crate::tools::simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

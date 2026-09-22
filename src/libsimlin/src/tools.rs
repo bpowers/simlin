@@ -15,7 +15,7 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use simlin_engine::tools;
@@ -84,6 +84,21 @@ pub struct SimlinToolSession {
     model: *const SimlinModel,
     session: Mutex<tools::Session>,
     ref_count: AtomicUsize,
+    /// How many calls have begun: each takes the count as its ticket as it
+    /// begins, before it waits for the session.
+    calls_begun: AtomicU64,
+    /// A call whose ticket is below this was cancelled
+    /// (`simlin_tool_session_cancel`).
+    cancelled_below: AtomicU64,
+}
+
+#[cfg(test)]
+impl SimlinToolSession {
+    /// How many calls have begun on the session, the one waiting for it
+    /// included.
+    pub(crate) fn calls_begun(&self) -> u64 {
+        self.calls_begun.load(Ordering::SeqCst)
+    }
 }
 
 /// Write the tool catalog -- every tool's name, description, effect, and the
@@ -140,6 +155,8 @@ pub unsafe extern "C" fn simlin_tool_session_new(
         model: model_ref as *const SimlinModel,
         session: Mutex::new(tools::Session::new(&model_ref.model_name)),
         ref_count: AtomicUsize::new(1),
+        calls_begun: AtomicU64::new(0),
+        cancelled_below: AtomicU64::new(0),
     }))
 }
 
@@ -203,7 +220,9 @@ unsafe fn require_session<'a>(
 /// simulation, a stage of an analysis) and answers a refusal with `"interrupted": true` that
 /// kept nothing: the entry point waits at most one unit. A host that retries
 /// by itself does so once that work is done -- after an edit, at the next
-/// revision -- and never in a loop against a project that stays busy.
+/// revision -- and never in a loop against a project that stays busy. A call
+/// its host cancels (`simlin_tool_session_cancel`) stops at the same points
+/// and answers a refusal with `"cancelled": true`, which no host retries.
 ///
 /// # Safety
 /// - `session` must be a valid pointer to a SimlinToolSession
@@ -274,29 +293,42 @@ pub unsafe extern "C" fn simlin_tool_session_call(
         return;
     };
 
+    // Taken before the call waits for the session, so a cancel made while it
+    // waits covers it.
+    let ticket = session_ref.calls_begun.fetch_add(1, Ordering::SeqCst);
     let project = &*(*session_ref.model).project;
     let mut tool_session = session_ref.session.lock().unwrap();
-    let (contents, revision, mut db) = snapshot(project);
-    #[cfg(test)]
-    invoke_tool_test_hook(project);
-    let waiting = || project.is_waited_on();
-    let workspace = tools::Workspace {
-        project: &contents,
-        db: &mut db,
-        revision,
-        waiting: Some(&waiting),
-    };
-    let output = match tool_session.call(workspace, name, input) {
-        Ok(output) => output,
-        Err(unknown) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(unknown.to_string()),
-            );
-            return;
+    let cancelled_below = &session_ref.cancelled_below;
+    let cancelled = || ticket < cancelled_below.load(Ordering::SeqCst);
+    // A call cancelled while it waited for the session answers now, before it
+    // waits for the database, which another session's call may hold. A tool
+    // the catalog lacks is still the host's mistake.
+    let output = if cancelled() && tools::ToolName::from_name(name).is_some() {
+        tools::ToolOutput::cancelled()
+    } else {
+        let (contents, revision, mut db) = snapshot(project);
+        #[cfg(test)]
+        invoke_tool_test_hook(project);
+        let waiting = || project.is_waited_on();
+        let workspace = tools::Workspace {
+            project: &contents,
+            db: &mut db,
+            revision,
+            waiting: Some(&waiting),
+            cancelled: Some(&cancelled),
+        };
+        match tool_session.call(workspace, name, input) {
+            Ok(output) => output,
+            Err(unknown) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::DoesNotExist)
+                        .with_message(unknown.to_string()),
+                );
+                return;
+            }
         }
     };
-    drop(db);
     drop(tool_session);
     if write_bytes_to_ffi_output(
         output.json.as_bytes(),
@@ -306,6 +338,28 @@ pub unsafe extern "C" fn simlin_tool_session_call(
         "a tool's output",
     ) {
         *out_is_error = output.is_error;
+    }
+}
+
+/// Cancel the session's tool calls under way -- the one answering and any
+/// waiting for the session -- as a host does when what they were for is gone,
+/// such as the window whose analysis a call runs: each stops at its next
+/// checkpoint, between units of its work, or, still waiting for the session,
+/// as it gets it, before it waits for the database, and answers a refusal
+/// with `"cancelled": true` that kept nothing, which a host does not retry. A
+/// call made after this returns runs as usual. It returns at once, without
+/// waiting for the calls to stop, and takes no lock, so any thread may make
+/// it, one inside a call included. It cancels only `simlin_tool_session_call`:
+/// a host's own reads of the session's runs and a landing, the person's own
+/// act, go on. A NULL `session` is a no-op.
+///
+/// # Safety
+/// - `session` must be a valid pointer to a SimlinToolSession, or NULL
+#[no_mangle]
+pub unsafe extern "C" fn simlin_tool_session_cancel(session: *mut SimlinToolSession) {
+    if let Some(session) = session.as_ref() {
+        let begun = session.calls_begun.load(Ordering::SeqCst);
+        session.cancelled_below.fetch_max(begun, Ordering::SeqCst);
     }
 }
 
@@ -521,6 +575,7 @@ pub unsafe extern "C" fn simlin_tool_session_land_plan(
         db: &mut db,
         revision,
         waiting: None,
+        cancelled: None,
     };
     let landing = tool_session.land_plan(workspace, id);
     let answer = match landing {
@@ -608,6 +663,7 @@ pub unsafe extern "C" fn simlin_tool_session_get_run(
         db: &mut db,
         revision,
         waiting: Some(&waiting),
+        cancelled: None,
     };
     let results = tool_session.run_results(workspace, name);
     drop(db);
@@ -685,6 +741,7 @@ pub unsafe extern "C" fn simlin_tool_session_list_runs(
         db: &mut db,
         revision,
         waiting: None,
+        cancelled: None,
     };
     let runs = tool_session.runs(&workspace);
     drop(db);

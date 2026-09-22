@@ -955,3 +955,22 @@ fn a_host_forgets_a_run_the_person_deletes() {
         simlin_project_unref(proj);
     }
 }
+
+/// A cancel stops the calls under way when it is made, and no other: with
+/// none under way, the next call answers. A NULL session is no misuse.
+#[test]
+fn a_cancel_stops_only_the_calls_under_way() {
+    unsafe {
+        let proj = project();
+        let model = main_model(proj);
+        let session = new_session(model);
+        simlin_tool_session_cancel(session);
+        let (output, is_error) = call(session, "read_model", "{}");
+        assert!(!is_error, "{output}");
+        simlin_tool_session_cancel(ptr::null_mut());
+
+        simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

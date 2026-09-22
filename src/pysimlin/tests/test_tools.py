@@ -5,6 +5,7 @@ What each tool answers is pinned by the engine's own tests
 (``simlin_engine::tools``); these pin the binding.
 """
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,21 @@ def test_a_sessions_runs_are_listed_with_their_revision_and_staleness(
     assert not session.forget("doubled")
     with pytest.raises(SimlinRuntimeError):
         session.forget("current")
+
+
+def test_a_cancel_stops_only_the_calls_under_way(model: simlin.Model) -> None:
+    session = ToolSession(model)
+    session.cancel()
+    outline = session.call("read_model")
+    assert not outline.is_error, outline.data
+    assert not outline.cancelled
+
+    # A cancel takes no lock: it returns while a call holds the session.
+    cancelling = threading.Thread(target=session.cancel)
+    with session._lock:
+        cancelling.start()
+        cancelling.join(timeout=10)
+        assert not cancelling.is_alive()
 
 
 def test_a_plan_lands_and_the_project_commits_it(model: simlin.Model) -> None:
@@ -168,3 +184,11 @@ def test_an_interrupted_call_is_told_from_a_refusal() -> None:
     assert stopped.interrupted
     assert not refused.interrupted
     assert not answered.interrupted
+
+
+def test_a_cancelled_call_is_told_from_an_interrupted_one() -> None:
+    cancelled = ToolOutput(data={"error": "the host cancelled", "cancelled": True}, is_error=True)
+    interrupted = ToolOutput(data={"error": "the call stopped", "interrupted": True}, is_error=True)
+    assert cancelled.cancelled
+    assert not cancelled.interrupted
+    assert not interrupted.cancelled

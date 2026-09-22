@@ -209,3 +209,169 @@ fn a_call_other_work_waits_for_stops_and_keeps_nothing() {
         host.call(&mut session, tool.name(), good_input(tool));
     }
 }
+
+/// A call its host cancels stops at its first checkpoint and answers that it
+/// was cancelled and kept nothing -- not that it was interrupted, which a
+/// host calls again -- and a later call, not cancelled, answers.
+#[test]
+fn a_call_its_host_cancels_stops_keeps_nothing_and_is_not_to_be_retried() {
+    for tool in ToolName::ALL {
+        let mut host = Host::from_test_project(&inventory());
+        let mut session = Session::new("main");
+        let output = host.call_cancelled(
+            &mut session,
+            tool.name(),
+            good_input(tool),
+            &|| true,
+            &|| false,
+        );
+        assert!(
+            output.is_error && output.cancelled && !output.interrupted,
+            "{}: {}",
+            tool.name(),
+            output.json
+        );
+        let refusal: Value = serde_json::from_str(&output.json).unwrap();
+        assert_eq!(refusal["cancelled"], true, "{}: {refusal}", tool.name());
+        assert!(
+            refusal.get("interrupted").is_none(),
+            "{}: {refusal}",
+            tool.name()
+        );
+        let message = refusal["error"].as_str().unwrap();
+        assert!(
+            message.contains("cancelled") && message.contains("kept nothing"),
+            "{}: {message}",
+            tool.name()
+        );
+        host.edit(|p| {
+            p.models[0]
+                .get_variable_mut("coverage")
+                .unwrap()
+                .set_scalar_equation("5")
+        });
+        assert_eq!(
+            session.changes_since_read(&host.project, host.revision),
+            None,
+            "{}: a cancelled read is no read",
+            tool.name()
+        );
+        prepare(&mut host, &mut session, tool);
+        host.call(&mut session, tool.name(), good_input(tool));
+    }
+}
+
+/// A cancel that comes during a call's work stops it at the next checkpoint,
+/// a slice of a run included, and the call keeps nothing of what it had done:
+/// a run it was making is not the session's. A call both cancelled and waited
+/// on answers that it was cancelled, since no host is to call it again.
+#[test]
+fn a_call_cancelled_during_its_work_keeps_nothing_of_it() {
+    let input = good_input(ToolName::RunExperiment);
+    let mut stopped = 0;
+    for after in 1.. {
+        let mut host = Host::from_test_project(&inventory());
+        let mut session = Session::new("main");
+        let cancelled = Host::waiting_after(after);
+        let output = host.call_cancelled(
+            &mut session,
+            "run_experiment",
+            input.clone(),
+            &cancelled,
+            &|| false,
+        );
+        if !output.is_error {
+            break;
+        }
+        assert!(output.cancelled && !output.interrupted, "{}", output.json);
+        stopped += 1;
+        assert!(
+            session.runs(&host.workspace()).is_empty(),
+            "the run the call was making is not the session's"
+        );
+    }
+    assert!(
+        stopped > 2,
+        "the call stops between the slices of its runs, not only before them ({stopped})"
+    );
+
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    let output = host.call_cancelled(&mut session, "run_experiment", input, &|| true, &|| true);
+    assert!(output.cancelled && !output.interrupted, "{}", output.json);
+}
+
+/// A run's results and a landing the host cancels stop at a checkpoint too,
+/// and say that they were cancelled; the same asks, not cancelled, answer.
+#[test]
+fn a_hosts_read_of_a_run_and_a_landing_stop_when_cancelled() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    let cancelled = || true;
+    let ws = Workspace {
+        cancelled: Some(&cancelled),
+        ..host.workspace()
+    };
+    let refused = session.run_results(ws, "current").err().expect("it stops");
+    assert!(refused.cancelled && !refused.interrupted, "{refused:?}");
+    assert!(refused.reason.contains("cancelled"), "{refused:?}");
+    assert!(session.run_results(host.workspace(), "current").is_ok());
+
+    host.call(&mut session, "read_model", json!({}));
+    let planned = host.call(
+        &mut session,
+        "edit_model",
+        json!({"summary": "Hold more cover.", "operations": [
+            {"op": "set_equation", "variable": "coverage", "equation": "5"}
+        ]}),
+    );
+    let id = planned["plan"].as_str().expect("a plan").to_string();
+    // At another revision the plan is planned again, which runs the model.
+    host.edit(|p| {
+        p.models[0]
+            .get_variable_mut("orders")
+            .unwrap()
+            .set_scalar_equation("10 + STEP(3, 5)")
+    });
+    let ws = Workspace {
+        cancelled: Some(&cancelled),
+        ..host.workspace()
+    };
+    match session.land_plan(ws, &id) {
+        Some(Landing::Refused(reason)) => assert!(reason.contains("cancelled"), "{reason}"),
+        _ => panic!("a cancelled landing lands nothing"),
+    }
+    host.land(&mut session, &id).expect("the plan lands");
+}
+
+/// The ids a cancelled call gave out on the way are not the session's: a
+/// finding verified after a call a cancel stopped between two findings takes
+/// the id the first would have had.
+#[test]
+fn a_cancelled_call_gives_out_no_ids() {
+    let finding = |claim: &str, variable: &str| {
+        json!({"kind": "observation", "claim": claim,
+               "citations": [{"cites": "variable", "variable": variable}]})
+    };
+    let first = finding("Inventory is a stock the model integrates.", "Inventory");
+    let second = finding("Orders drive production.", "orders");
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    // The call asks at its start and after each citation; the cancel comes
+    // after the first finding has its id.
+    let cancelled = Host::waiting_after(2);
+    let output = host.call_cancelled(
+        &mut session,
+        "verify_findings",
+        json!({"findings": [first, second.clone()]}),
+        &cancelled,
+        &|| false,
+    );
+    assert!(output.cancelled, "{}", output.json);
+    let verified = host.call(
+        &mut session,
+        "verify_findings",
+        json!({"findings": [second]}),
+    );
+    assert_eq!(verified["findings"][0]["id"], "F1", "{verified}");
+}

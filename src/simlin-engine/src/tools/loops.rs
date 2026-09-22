@@ -868,7 +868,7 @@ fn analyze(
         .collect();
     let read_before = inputs(ws.db, source_model, source_project, &replaced);
     let project = ws.project;
-    let waiting = ws.waiting;
+    let (waiting, cancelled) = (ws.waiting, ws.cancelled);
     ws.yield_point()?;
     // The mode is an input on the project's handle, which a staged sync
     // keeps, so the staged copy compiles in it too. It is set back when the
@@ -879,6 +879,7 @@ fn analyze(
         db: &mut mode,
         revision: ws.revision,
         waiting,
+        cancelled,
     };
     let outcome = runs::execute_then(
         &mut inner,
