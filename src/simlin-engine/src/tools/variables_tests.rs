@@ -483,3 +483,43 @@ fn long_per_element_equations_are_cut_and_the_list_bounded() {
         "read whole"
     );
 }
+
+#[test]
+fn a_scalar_record_says_what_it_did_in_the_current_run() {
+    let project = TestProject::new("goal")
+        .with_sim_time(0.0, 40.0, 0.25)
+        .stock("s", "0", &["f"], &[], None)
+        .flow("f", "(100 - s) / 5", None)
+        .named_dimension("d", &["a", "b"])
+        .array_const("wide[d]", 1.0);
+    let output = read(project.build_datamodel(), &["s", "wide"]);
+    let s = &output["variables"][0];
+    assert_eq!(s["behavior"]["mode"]["kind"], "goal_seeking");
+    assert_eq!(s["behavior"]["start"], 0.0);
+    assert!(
+        s["behavior"].get("samples").is_none(),
+        "a record carries the core; read_behavior has the rest"
+    );
+    assert!(
+        output["variables"][1].get("behavior").is_none(),
+        "an arrayed variable's behavior is read_behavior's"
+    );
+    assert!(output.get("behaviorUnavailable").is_none());
+}
+
+#[test]
+fn records_of_a_model_that_does_not_simulate_say_why_they_carry_no_behavior() {
+    let mut project = inventory().build_datamodel();
+    project.models[0]
+        .get_variable_mut("shipments")
+        .unwrap()
+        .set_scalar_equation("ordrs");
+    let output = read(project, &["Inventory"]);
+    assert!(output["variables"][0].get("behavior").is_none());
+    assert!(
+        output["behaviorUnavailable"]
+            .as_str()
+            .unwrap()
+            .contains("does not simulate")
+    );
+}

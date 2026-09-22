@@ -53,6 +53,7 @@ class ErrorCode(IntEnum):
     DUPLICATE_UNIT = 43
     EXPECTED_MODULE = 44
     EXPECTED_IDENT = 45
+    INTERRUPTED = 46
 
 
 class ErrorKind(IntEnum):

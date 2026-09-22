@@ -396,3 +396,166 @@ fn calls_and_edits_from_two_threads_interleave_without_deadlock() {
         simlin_project_unref(proj);
     }
 }
+
+/// A run's series, through the results handle a host charts from.
+unsafe fn run_series(session: *mut SimlinToolSession, run: &str, variable: &str) -> Vec<f64> {
+    let name = CString::new(run).unwrap();
+    let mut err = ptr::null_mut();
+    let results = simlin_tool_session_get_run(
+        session,
+        name.as_ptr(),
+        ptr::null_mut(),
+        ptr::null_mut(),
+        &mut err,
+    );
+    expect_no_error(err, "getting the run");
+    assert!(!results.is_null());
+    let mut steps = 0;
+    let mut err = ptr::null_mut();
+    simlin_results_get_stepcount(results, &mut steps, &mut err);
+    expect_no_error(err, "counting the run's steps");
+    let variable = CString::new(variable).unwrap();
+    let mut series = vec![0.0; steps];
+    let (mut written, mut err) = (0, ptr::null_mut());
+    simlin_results_get_series(
+        results,
+        variable.as_ptr(),
+        series.as_mut_ptr(),
+        series.len(),
+        &mut written,
+        &mut err,
+    );
+    expect_no_error(err, "reading the series");
+    assert_eq!(written, steps);
+    simlin_results_unref(results);
+    series
+}
+
+#[test]
+fn a_host_charts_a_runs_series_from_its_results_handle() {
+    unsafe {
+        let proj = project();
+        let model = main_model(proj);
+        let session = new_session(model);
+        let current = run_series(session, "current", "population");
+        assert_eq!(current.len(), 11);
+        assert_eq!(current[0], 10.0);
+
+        let (output, is_error) = call(
+            session,
+            "run_experiment",
+            r#"{"name": "faster", "set": [{"variable": "rate", "multiply": 2}]}"#,
+        );
+        assert!(!is_error, "{output}");
+        let faster = run_series(session, "faster", "population");
+        assert_eq!(faster[0], 10.0);
+        assert!(faster[10] > current[10], "{faster:?} {current:?}");
+
+        let unknown = CString::new("nowhere").unwrap();
+        let mut err = ptr::null_mut();
+        let (none, no) = (ptr::null_mut(), ptr::null_mut());
+        assert!(
+            simlin_tool_session_get_run(session, unknown.as_ptr(), none, no, &mut err).is_null()
+        );
+        expect_error_code(
+            err,
+            SimlinErrorCode::DoesNotExist,
+            "a run the session lacks",
+        );
+        let mut err = ptr::null_mut();
+        assert!(simlin_tool_session_get_run(session, ptr::null(), none, no, &mut err).is_null());
+        expect_error_code(err, SimlinErrorCode::Generic, "a NULL run name");
+        let mut err = ptr::null_mut();
+        assert!(
+            simlin_tool_session_get_run(ptr::null_mut(), unknown.as_ptr(), none, no, &mut err)
+                .is_null()
+        );
+        expect_error_code(err, SimlinErrorCode::Generic, "a NULL session");
+
+        simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The session's run list, as a host's run picker reads it.
+unsafe fn list_runs(session: *mut SimlinToolSession) -> serde_json::Value {
+    let (mut buf, mut len, mut err) = (ptr::null_mut(), 0, ptr::null_mut());
+    simlin_tool_session_list_runs(session, &mut buf, &mut len, &mut err);
+    expect_no_error(err, "listing the runs");
+    let json = std::slice::from_raw_parts(buf, len).to_vec();
+    simlin_free(buf);
+    serde_json::from_slice(&json).unwrap()
+}
+
+/// A host lists the session's runs and learns, for each and for the series it
+/// charts, the revision it was made at and whether the model has changed
+/// since: not when only the diagram moved, and yes after an equation edit.
+#[test]
+fn a_host_lists_runs_and_learns_when_one_is_stale() {
+    unsafe {
+        let proj = project();
+        let model = main_model(proj);
+        let session = new_session(model);
+        assert_eq!(list_runs(session), serde_json::json!([]));
+        let (output, is_error) = call(
+            session,
+            "run_experiment",
+            r#"{"name": "faster", "set": [{"variable": "rate", "multiply": 2}]}"#,
+        );
+        assert!(!is_error, "{output}");
+        assert_eq!(
+            list_runs(session),
+            serde_json::json!([{
+                "name": "faster", "revision": 0, "stale": false, "gone": false,
+                "from": "current", "changes": [{"variable": "rate", "value": 0.2}], "specs": {}
+            }])
+        );
+
+        let fetch = |session| {
+            let name = CString::new("faster").unwrap();
+            let (mut revision, mut stale, mut err) = (u64::MAX, true, ptr::null_mut());
+            let results = simlin_tool_session_get_run(
+                session,
+                name.as_ptr(),
+                &mut revision,
+                &mut stale,
+                &mut err,
+            );
+            expect_no_error(err, "getting the run");
+            simlin_results_unref(results);
+            (revision, stale)
+        };
+        assert_eq!(fetch(session), (0, false));
+
+        // A diagram edit advances the revision and changes nothing the run
+        // simulated.
+        apply(
+            proj,
+            &json!({"models": [{"name": "main", "ops": [
+                {"type": "upsertView", "payload": {"index": 0, "view": {"kind": "stock_flow", "elements": []}}}
+            ]}]}),
+        );
+        let mut revision = 0;
+        let mut err = ptr::null_mut();
+        simlin_project_get_revision(proj, &mut revision, &mut err);
+        expect_no_error(err, "reading the revision");
+        assert!(revision > 0, "the diagram edit landed");
+        assert_eq!(
+            fetch(session),
+            (0, false),
+            "a diagram edit leaves the run fresh"
+        );
+        apply(proj, &set_rate("0.3"));
+        assert_eq!(fetch(session), (0, true), "an equation edit makes it stale");
+        assert_eq!(list_runs(session)[0]["stale"], true);
+
+        let (mut buf, mut len, mut err) = (ptr::null_mut(), 0, ptr::null_mut());
+        simlin_tool_session_list_runs(ptr::null_mut(), &mut buf, &mut len, &mut err);
+        expect_error_code(err, SimlinErrorCode::Generic, "a NULL session");
+
+        simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

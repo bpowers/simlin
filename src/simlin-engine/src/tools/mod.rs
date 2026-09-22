@@ -33,22 +33,38 @@
 //!   of its own work ([`Workspace::waiting`]) and answers that it kept
 //!   nothing, so that work waits at most one unit, and the agent calls again.
 
+mod behavior;
 mod catalog;
 mod changes;
 mod evidence;
+mod experiment;
 mod names;
 mod outline;
+mod runs;
+mod series;
 mod variables;
 
+pub use behavior::{BehaviorMode, Damping, Direction, ModeKind, classify};
 #[cfg(feature = "schema")]
 pub use catalog::generate_catalog_json;
 pub use catalog::{ToolEffect, ToolName, catalog_json};
 pub use changes::{ChangedField, ChangedVariable, Changes};
 pub use evidence::{DiagnosticCategoryName, DiagnosticReport, Severity};
+pub use experiment::{
+    AppliedChange, ChangeInput, Comparison, ElementValue, RunExperimentInput, RunExperimentOutput,
+    SpecsInput,
+};
 pub use outline::{
     ConstantOutline, Counts, IntegrationMethod, LookupOutline, LookupSummary, ModuleInputOutline,
     ModuleOutline, Omitted, ReadModelInput, ReadModelOutput, SectorOutline, SpecsOutline,
     StockOutline, VariableOutline,
+};
+pub use runs::{
+    ListRunsInput, ListRunsOutput, ListedChange, ListedElement, RunListing, SpecsChange,
+};
+pub use series::{
+    LeftOut, OmittedElements, Point, ReadBehaviorInput, ReadBehaviorOutput, SeriesCore,
+    SeriesSummary, StaleRun,
 };
 pub use variables::{
     ElementEquation, FindVariablesInput, FindVariablesOutput, LinkPolarityName, LinkRef, Lookup,
@@ -77,7 +93,7 @@ pub struct Workspace<'a> {
     /// Whether other work on the project waits for the call to release the
     /// database: a person's edit or undo, a run of the model as it is, a
     /// host's read of its diagnostics or its loops. A call
-    /// asks between units of its work -- a simulation, a stage of an analysis
+    /// asks between units of its work -- a slice of a simulation, a stage of an analysis
     /// -- and stops there, keeping nothing, so that work waits at most one
     /// unit. `None` for a host whose calls never share the project.
     pub waiting: Option<&'a (dyn Fn() -> bool + Sync)>,
@@ -136,6 +152,7 @@ pub struct Session {
     model_name: String,
     evidence: evidence::Evidence,
     last_read: Option<changes::ReadSnapshot>,
+    runs: runs::RunStore,
     outline_budget: usize,
 }
 
@@ -147,6 +164,7 @@ impl Session {
             model_name: model_name.to_string(),
             evidence: evidence::Evidence::default(),
             last_read: None,
+            runs: runs::RunStore::default(),
             outline_budget: OUTLINE_BUDGET,
         }
     }
@@ -161,7 +179,7 @@ impl Session {
     /// the catalog has no such tool.
     pub fn call(
         &mut self,
-        ws: Workspace<'_>,
+        mut ws: Workspace<'_>,
         tool: &str,
         input: &str,
     ) -> Result<ToolOutput, UnknownTool> {
@@ -171,17 +189,55 @@ impl Session {
         if let Err(interrupted) = ws.yield_point() {
             return Ok(ToolOutput::refusal(&interrupted));
         }
+        let ws = &mut ws;
         Ok(match name {
             ToolName::ReadModel => {
-                respond(name, input, |input| outline::read_model(self, &ws, input))
+                respond(name, input, |input| outline::read_model(self, ws, input))
             }
             ToolName::ReadVariables => respond(name, input, |input| {
-                variables::read_variables(self, &ws, input)
+                variables::read_variables(self, ws, input)
             }),
             ToolName::FindVariables => respond(name, input, |input| {
-                variables::find_variables(&ws, &self.model_name, input)
+                variables::find_variables(ws, &self.model_name, input)
             }),
+            ToolName::RunExperiment => respond(name, input, |input| {
+                experiment::run_experiment(self, ws, input)
+            }),
+            ToolName::ReadBehavior => {
+                respond(name, input, |input| series::read_behavior(self, ws, input))
+            }
+            ToolName::ListRuns => respond(name, input, |input| runs::list_runs(self, ws, input)),
         })
+    }
+
+    /// The results of the run named `name` -- `"current"` for the model as
+    /// it is -- for a host to chart: every saved series, not a summary, with
+    /// the revision the run was made at and whether the model has changed
+    /// since (its diagrams aside). A read that stops for other work on the
+    /// project says so ([`RunUnavailable::interrupted`]).
+    pub fn run_results(
+        &mut self,
+        mut ws: Workspace<'_>,
+        name: &str,
+    ) -> Result<RunResults, RunUnavailable> {
+        let resolved = resolve_model(ws.project, ws.db, &self.model_name)?;
+        let run = self.runs.get(&mut ws, resolved.model, name)?;
+        let stale = !self.runs.is_fresh(&ws, &run);
+        Ok(RunResults {
+            results: run.results.clone(),
+            revision: run.revision,
+            stale,
+        })
+    }
+
+    /// The session's named runs, oldest first, for a host to list: each with
+    /// the revision it was made at, whether it is stale, whether it is gone
+    /// (stale, with its results no longer kept), the run it started from, and
+    /// everything it changed from the model. "current", the model as it is,
+    /// is always there and is not listed.
+    pub fn runs(&mut self, ws: &Workspace<'_>) -> Vec<RunListing> {
+        let model = resolve_datamodel_model(ws.project, &self.model_name);
+        self.runs.listing(ws, model)
     }
 
     /// What changed in the model's variables and sim specs since this
@@ -207,6 +263,37 @@ impl Session {
     }
 }
 
+/// A run's series for a host to chart, and what the host needs to say of
+/// them.
+pub struct RunResults {
+    pub results: crate::Results,
+    /// The revision the run was made at.
+    pub revision: u64,
+    /// Whether the model has changed since, beyond its diagrams.
+    pub stale: bool,
+}
+
+/// Why a host's read of a run has no results.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunUnavailable {
+    /// What went wrong, in words: no such run, or a model that does not
+    /// simulate.
+    pub reason: String,
+    /// That the read stopped for other work on the project and kept nothing
+    /// ([`Workspace::waiting`]), not that there is no such run: a host reads
+    /// it again once that work is done.
+    pub interrupted: bool,
+}
+
+impl From<ToolError> for RunUnavailable {
+    fn from(err: ToolError) -> RunUnavailable {
+        RunUnavailable {
+            interrupted: err.is_interrupted(),
+            reason: err.error,
+        }
+    }
+}
+
 /// A refusal: what rule the call broke and how to repair it.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize)]
@@ -229,6 +316,12 @@ impl ToolError {
             suggestions: vec![],
             interrupted: false,
         }
+    }
+
+    /// Whether this is the answer of a call that stopped for other work,
+    /// which a caller passes on rather than reads as a refusal of its own.
+    pub(crate) fn is_interrupted(&self) -> bool {
+        self.interrupted
     }
 
     /// The answer of a call that stopped for other work on the project
@@ -306,14 +399,16 @@ pub(crate) struct ResolvedModel<'a> {
     pub source_model: SourceModel,
 }
 
-/// Resolve the session's model, or refuse naming the models the project has.
-pub(crate) fn resolve_model<'a>(
-    ws: &'a Workspace<'_>,
+/// Resolve the session's model in `project`, whose database is `db`, or refuse
+/// naming the models the project has. The model borrows the project, not the
+/// workspace, so a tool can hold it while it runs the workspace's database.
+pub(crate) fn resolve_model<'p>(
+    project: &'p datamodel::Project,
+    db: &SimlinDb,
     name: &str,
-) -> Result<ResolvedModel<'a>, ToolError> {
+) -> Result<ResolvedModel<'p>, ToolError> {
     let not_found = || {
-        let names: Vec<String> = ws
-            .project
+        let names: Vec<String> = project
             .models
             .iter()
             .filter(|m| m.macro_spec.is_none() && !m.name.starts_with("stdlib\u{205A}"))
@@ -321,15 +416,15 @@ pub(crate) fn resolve_model<'a>(
             .collect();
         ToolError::new(format!("the project has no model named '{name}'")).with_suggestions(names)
     };
-    let model = resolve_datamodel_model(ws.project, name).ok_or_else(not_found)?;
-    let source_project = ws.db.current_source_project().ok_or_else(|| {
+    let model = resolve_datamodel_model(project, name).ok_or_else(not_found)?;
+    let source_project = db.current_source_project().ok_or_else(|| {
         ToolError::new(
             "the project has not been compiled; the host must sync it before calling a tool",
         )
     })?;
     let canonical = crate::canonicalize(&model.name);
     let source_model = source_project
-        .models(&*ws.db)
+        .models(db)
         .get(canonical.as_ref())
         .copied()
         .ok_or_else(not_found)?;

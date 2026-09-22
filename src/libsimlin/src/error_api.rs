@@ -74,6 +74,7 @@ pub extern "C" fn simlin_error_str(err: u32) -> *const c_char {
         Ok(SimlinErrorCode::DuplicateUnit) => "duplicate_unit\0",
         Ok(SimlinErrorCode::ExpectedModule) => "expected_module\0",
         Ok(SimlinErrorCode::ExpectedIdent) => "expected_ident\0",
+        Ok(SimlinErrorCode::Interrupted) => "interrupted\0",
         Err(()) => "unknown_error\0",
     };
     s.as_ptr() as *const c_char

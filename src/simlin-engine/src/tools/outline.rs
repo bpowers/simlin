@@ -104,7 +104,7 @@ pub struct SpecsOutline {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum IntegrationMethod {
@@ -269,7 +269,7 @@ pub(crate) fn read_model(
     ws: &Workspace<'_>,
     _input: ReadModelInput,
 ) -> Result<ReadModelOutput, ToolError> {
-    let resolved = resolve_model(ws, &session.model_name)?;
+    let resolved = resolve_model(ws.project, ws.db, &session.model_name)?;
     let diagnostics = session.evidence.report_diagnostics(ws, &resolved);
     let changes = session.changes_since_read(ws.project, ws.revision);
     session.last_read = Some(ReadSnapshot::new(ws.revision, ws.project, resolved.model));
@@ -642,7 +642,7 @@ fn is_lookup_only_equation(equation: &Equation) -> bool {
 /// when every element's is. `NaN`, which an importer writes for an equation
 /// the model never filled in, is no constant: it is an equation that has yet
 /// to be written, and its diagnostics say so.
-fn constant_value(equation: &Equation) -> Option<String> {
+pub(crate) fn constant_value(equation: &Equation) -> Option<String> {
     let number = |text: &str| text.trim().parse::<f64>().is_ok_and(f64::is_finite);
     match equation {
         Equation::Scalar(text) | Equation::ApplyToAll(_, text) => {

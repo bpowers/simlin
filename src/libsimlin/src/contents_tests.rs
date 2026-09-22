@@ -21,8 +21,8 @@
 //!
 //! The reads keep the index and the revision, pinned for a row per kind of
 //! read: a dry-run and a rejected patch, a simulation, diagnostics, a scene,
-//! serialization, the editing planners, and a tool session's call and change
-//! report. A read that
+//! serialization, the editing planners, and a tool session's call, change
+//! report and run. A read that
 //! dropped the index would only cost a rebuild, but a read that advanced the
 //! revision would tell every host caching against it that the project had
 //! changed when it had not.
@@ -316,6 +316,8 @@ enum Read {
     ToolCall,
     #[cfg(feature = "agent_tools")]
     ToolChanges,
+    #[cfg(feature = "agent_tools")]
+    ToolRun,
 }
 
 impl Read {
@@ -335,6 +337,8 @@ impl Read {
         Read::ToolCall,
         #[cfg(feature = "agent_tools")]
         Read::ToolChanges,
+        #[cfg(feature = "agent_tools")]
+        Read::ToolRun,
     ];
 
     unsafe fn run(self, proj: *mut SimlinProject, model: *mut SimlinModel) {
@@ -422,6 +426,22 @@ impl Read {
                     &mut len,
                     &mut err,
                 );
+            }
+            #[cfg(feature = "agent_tools")]
+            Read::ToolRun => {
+                let session = simlin_tool_session_new(model, &mut err);
+                expect_no_error(err, "making a tool session");
+                err = ptr::null_mut();
+                let current = CString::new("current").unwrap();
+                let results = simlin_tool_session_get_run(
+                    session,
+                    current.as_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut err,
+                );
+                simlin_results_unref(results);
+                simlin_tool_session_unref(session);
             }
             #[cfg(feature = "agent_tools")]
             Read::ToolCall | Read::ToolChanges => {

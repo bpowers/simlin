@@ -155,13 +155,26 @@ impl Sweep {
     }
 }
 
+/// The first constant of `model` an experiment can double: a scalar
+/// auxiliary whose equation is a number.
+fn first_constant(model: &datamodel::Model) -> Option<String> {
+    model.variables.iter().find_map(|v| match v {
+        datamodel::Variable::Aux(aux) if aux.gf.is_none() => match &aux.equation {
+            datamodel::Equation::Scalar(text) if text.trim().parse::<f64>().is_ok() => {
+                Some(aux.ident.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
 /// What each model is asked: an outline, every variable read twelve at a
-/// time (up to four calls), and a search.
+/// time (up to four calls) and its behavior, a search, an experiment that
+/// doubles a constant, and the runs.
 fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
-    let names: Vec<String> = project
-        .models
-        .iter()
-        .find(|m| m.macro_spec.is_none())
+    let model = project.models.iter().find(|m| m.macro_spec.is_none());
+    let names: Vec<String> = model
         .map(|m| {
             m.variables
                 .iter()
@@ -169,6 +182,7 @@ fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
                 .collect()
         })
         .unwrap_or_default();
+    let constant = model.and_then(first_constant);
     let mut host = Host::new(project);
     let mut session = Session::new("main");
     if sweep
@@ -191,7 +205,30 @@ fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
             ToolName::ReadVariables,
             json!({ "names": chunk }),
         );
+        sweep.call(
+            display,
+            &mut host,
+            &mut session,
+            ToolName::ReadBehavior,
+            json!({ "variables": chunk }),
+        );
     }
+    if let Some(constant) = constant {
+        sweep.call(
+            display,
+            &mut host,
+            &mut session,
+            ToolName::RunExperiment,
+            json!({"name": "doubled", "set": [{"variable": constant, "multiply": 2}]}),
+        );
+    }
+    sweep.call(
+        display,
+        &mut host,
+        &mut session,
+        ToolName::ListRuns,
+        json!({}),
+    );
     if let Some(first) = names.first() {
         sweep.call(
             display,

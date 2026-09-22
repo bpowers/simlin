@@ -23,7 +23,7 @@ use simlin_engine::tools;
 use crate::ffi_error::SimlinError;
 use crate::{
     clear_out_error, require_model, store_anyhow_error, store_error, write_bytes_to_ffi_output,
-    SimlinErrorCode, SimlinModel,
+    SimlinErrorCode, SimlinModel, SimlinResults,
 };
 
 #[cfg(test)]
@@ -76,9 +76,9 @@ fn invoke_tool_test_hook(project: &crate::SimlinProject) {
     }
 }
 
-/// One agent's work on one model: the evidence ids it has been given and what
-/// it last read (`simlin_engine::tools::Session`), over the model it was made
-/// for.
+/// One agent's work on one model: the evidence ids it has been given, what it
+/// last read, and the runs it made (`simlin_engine::tools::Session`), over the
+/// model it was made for.
 pub struct SimlinToolSession {
     /// Counted: the session keeps its model, and through it the project, alive.
     model: *const SimlinModel,
@@ -199,8 +199,8 @@ unsafe fn require_session<'a>(
 /// or an undo's `simlin_project_replace_contents`), a simulation
 /// (`simlin_sim_new`), a read of the diagnostics, the others
 /// `SimlinProject::waiting_for_db` lists -- keeps those readers waiting with
-/// it, so the call stops for it between units of its work (a simulation, a
-/// stage of an analysis) and answers a refusal with `"interrupted": true` that
+/// it, so the call stops for it between units of its work (a slice of a
+/// simulation, a stage of an analysis) and answers a refusal with `"interrupted": true` that
 /// kept nothing: the entry point waits at most one unit. A host that retries
 /// by itself does so once that work is done -- after an edit, at the next
 /// revision -- and never in a loop against a project that stays busy.
@@ -380,4 +380,147 @@ pub unsafe extern "C" fn simlin_tool_session_get_changes(
     drop(tool_session);
     let json = serde_json::to_vec(&changes).expect("a change report serializes");
     write_bytes_to_ffi_output(&json, out_buf, out_len, out_error, "a change report");
+}
+
+/// The results of the session's run named `name` -- `"current"` for the model
+/// as it is at the project's current revision, or a run an experiment made --
+/// as a standalone results handle the caller releases with
+/// `simlin_results_unref`: every saved series, for a host to chart, where the
+/// tools answer an agent with summaries. The revision the run was made at goes
+/// to `out_revision`, and whether the model has changed since (its diagrams
+/// aside) to `out_stale`; either may be NULL. NULL with `DoesNotExist` when
+/// the session has no such run, and with the reason when the model does not
+/// simulate. A read that must simulate stops, as a tool call does, for an
+/// edit or a simulation that waits for the project, and keeps nothing: NULL
+/// with `Interrupted`, for a host that reads it again once that work is done.
+/// The handle holds a copy of the run's series.
+///
+/// # Safety
+/// - `session` must be a valid pointer to a SimlinToolSession
+/// - `name` must be a valid C string
+/// - `out_revision` and `out_stale` must be valid pointers or NULL
+#[no_mangle]
+pub unsafe extern "C" fn simlin_tool_session_get_run(
+    session: *mut SimlinToolSession,
+    name: *const c_char,
+    out_revision: *mut u64,
+    out_stale: *mut bool,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinResults {
+    clear_out_error(out_error);
+    let session_ref = match require_session(session) {
+        Ok(s) => s,
+        Err(err) => {
+            store_error(out_error, err);
+            return ptr::null_mut();
+        }
+    };
+    if name.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("run name pointer must not be NULL"),
+        );
+        return ptr::null_mut();
+    }
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic).with_message("run name is not valid UTF-8"),
+        );
+        return ptr::null_mut();
+    };
+
+    let project = &*(*session_ref.model).project;
+    let mut tool_session = session_ref.session.lock().unwrap();
+    let (contents, revision, mut db) = snapshot(project);
+    let waiting = || project.is_waited_on();
+    let workspace = tools::Workspace {
+        project: &contents,
+        db: &mut db,
+        revision,
+        waiting: Some(&waiting),
+    };
+    let results = tool_session.run_results(workspace, name);
+    drop(db);
+    drop(tool_session);
+    match results {
+        Ok(run) => {
+            if !out_revision.is_null() {
+                *out_revision = run.revision;
+            }
+            if !out_stale.is_null() {
+                *out_stale = run.stale;
+            }
+            Box::into_raw(Box::new(SimlinResults {
+                results: run.results,
+                ref_count: AtomicUsize::new(1),
+            }))
+        }
+        Err(unavailable) => {
+            let code = if unavailable.interrupted {
+                SimlinErrorCode::Interrupted
+            } else {
+                SimlinErrorCode::DoesNotExist
+            };
+            store_error(
+                out_error,
+                SimlinError::new(code).with_message(unavailable.reason),
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Write the session's named runs, oldest first, as UTF-8 JSON to a buffer the
+/// caller frees with `simlin_free`: `[{"name", "revision", "stale", "gone",
+/// "from", "changes", "specs"}]`, where `stale` says the model has changed
+/// since the run (its diagrams aside), `gone` that a stale run's series are
+/// no longer kept, `from` names the run it started from, and `changes` and
+/// `specs` are everything it changed from the model, exactly as it ran: each
+/// `{"variable", "value" | "elements" | "equation", "tableDropped"?,
+/// "fromTime"?}`, and the specs it set (`start`, `stop`, `dt`, `method`).
+/// The run `"current"`, the model as it is, is always there and is not
+/// listed. What a host's run list, chart picker and "run again" read.
+///
+/// # Safety
+/// - `session` must be a valid pointer to a SimlinToolSession
+/// - `out_buf` and `out_len` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn simlin_tool_session_list_runs(
+    session: *mut SimlinToolSession,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buf.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+    let session_ref = match require_session(session) {
+        Ok(s) => s,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
+    };
+    let project = &*(*session_ref.model).project;
+    let mut tool_session = session_ref.session.lock().unwrap();
+    let (contents, revision, mut db) = snapshot(project);
+    let workspace = tools::Workspace {
+        project: &contents,
+        db: &mut db,
+        revision,
+        waiting: None,
+    };
+    let runs = tool_session.runs(&workspace);
+    drop(db);
+    drop(tool_session);
+    let json = serde_json::to_vec(&runs).expect("a run listing serializes");
+    write_bytes_to_ffi_output(&json, out_buf, out_len, out_error, "a run listing");
 }

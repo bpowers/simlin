@@ -67,18 +67,36 @@ impl Host {
     /// Call a tool while other work waits for the project, as a host whose
     /// person edits during the call reports, and parse the answer.
     pub fn call_waited_on(&mut self, session: &mut Session, tool: &str, input: Value) -> Value {
-        let waiting = || true;
+        let output = self.call_waiting(session, tool, input.clone(), &|| true);
+        assert!(output.is_error, "{tool} answered {input}: {}", output.json);
+        serde_json::from_str(&output.json).expect("refusals are JSON")
+    }
+
+    /// Call a tool with `waiting` as the host's report of other work waiting
+    /// for the project.
+    pub fn call_waiting(
+        &mut self,
+        session: &mut Session,
+        tool: &str,
+        input: Value,
+        waiting: &(dyn Fn() -> bool + Sync),
+    ) -> ToolOutput {
         let ws = Workspace {
             project: &self.project,
             db: &mut self.db,
             revision: self.revision,
-            waiting: Some(&waiting),
+            waiting: Some(waiting),
         };
-        let output = session
+        session
             .call(ws, tool, &input.to_string())
-            .expect("the catalog lists the tool");
-        assert!(output.is_error, "{tool} answered {input}: {}", output.json);
-        serde_json::from_str(&output.json).expect("refusals are JSON")
+            .expect("the catalog lists the tool")
+    }
+
+    /// A report of other work that begins to wait once the call has asked
+    /// `after` times: what a person's edit that arrives mid-call looks like.
+    pub fn waiting_after(after: usize) -> impl Fn() -> bool + Sync {
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        move || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= after
     }
 
     /// Call a tool that must refuse, and parse its refusal.
@@ -96,6 +114,21 @@ impl Host {
             waiting: None,
         }
     }
+}
+
+/// `project` with a diagram of its first model, laid out by the engine, so a
+/// test can make an edit that changes only the diagram.
+pub(crate) fn with_diagram(mut project: Project) -> Project {
+    let name = project.models[0].name.clone();
+    let view = crate::layout::generate_layout(&project, &name, None).expect("the model lays out");
+    project.models[0].views = vec![datamodel::View::StockFlow(view)];
+    project
+}
+
+/// An edit of `project`'s first diagram alone: its zoom, as a pinch leaves it.
+pub(crate) fn zoom_the_diagram(project: &mut Project) {
+    let datamodel::View::StockFlow(view) = &mut project.models[0].views[0];
+    view.zoom = if view.zoom == 2.0 { 1.0 } else { 2.0 };
 }
 
 /// An inventory model with a bit of everything an outline lists: stocks with

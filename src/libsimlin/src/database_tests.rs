@@ -12,8 +12,9 @@
 //! `simlin_project_apply_patch` (every patch that validates),
 //! `simlin_model_compile_to_wasm`, `simlin_analyze_discover_loops`,
 //! `simlin_project_diagram_sync`, the renderings of a model with no view, and
-//! the tool entry points (`simlin_tool_session_call`), which take the contents
-//! they answer from under the datamodel lock.
+//! the tool entry points (`simlin_tool_session_call`,
+//! `simlin_tool_session_get_run`, `simlin_tool_session_list_runs`), which take
+//! the contents they answer from under the datamodel lock.
 //! Those that do not take the database alone (`lock_db`), which locks the
 //! datamodel only to build it: `simlin_analyze_get_loops`,
 //! `simlin_model_get_incoming_links`, `simlin_model_get_links` and
@@ -165,6 +166,10 @@ enum Query {
     LatexEquation,
     #[cfg(feature = "agent_tools")]
     ToolCall,
+    #[cfg(feature = "agent_tools")]
+    ToolRun,
+    #[cfg(feature = "agent_tools")]
+    ToolListRuns,
 }
 
 impl Query {
@@ -183,6 +188,10 @@ impl Query {
         Query::LatexEquation,
         #[cfg(feature = "agent_tools")]
         Query::ToolCall,
+        #[cfg(feature = "agent_tools")]
+        Query::ToolRun,
+        #[cfg(feature = "agent_tools")]
+        Query::ToolListRuns,
     ];
 
     /// Whether the row runs on the project with no stock-and-flow view.
@@ -383,6 +392,45 @@ impl Query {
                     "{is_error} {}",
                     String::from_utf8_lossy(&take_bytes(buf, len))
                 )
+            }
+            #[cfg(feature = "agent_tools")]
+            Query::ToolRun => {
+                let session = crate::tools::simlin_tool_session_new(model, &mut err);
+                expect_no_error(err, "making a tool session");
+                let current = CString::new("current").unwrap();
+                let results = crate::tools::simlin_tool_session_get_run(
+                    session,
+                    current.as_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut err,
+                );
+                crate::tools::simlin_tool_session_unref(session);
+                let population = CString::new("population").unwrap();
+                let mut values = vec![0.0; 11];
+                let mut written = 0;
+                let mut series_err = ptr::null_mut();
+                if !results.is_null() {
+                    simlin_results_get_series(
+                        results,
+                        population.as_ptr(),
+                        values.as_mut_ptr(),
+                        values.len(),
+                        &mut written,
+                        &mut series_err,
+                    );
+                    simlin_results_unref(results);
+                }
+                format!("{:?} {:?}", &values[..written], take_error(series_err))
+            }
+            #[cfg(feature = "agent_tools")]
+            Query::ToolListRuns => {
+                let session = crate::tools::simlin_tool_session_new(model, &mut err);
+                expect_no_error(err, "making a tool session");
+                let (mut buf, mut len) = (ptr::null_mut(), 0);
+                crate::tools::simlin_tool_session_list_runs(session, &mut buf, &mut len, &mut err);
+                crate::tools::simlin_tool_session_unref(session);
+                String::from_utf8_lossy(&take_bytes(buf, len)).into_owned()
             }
         };
         let error = take_error(err);

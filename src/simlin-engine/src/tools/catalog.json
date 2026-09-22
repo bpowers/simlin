@@ -931,6 +931,17 @@
                 "items": {
                   "$ref": "#/$defs/DiagnosticReport"
                 }
+              },
+              "behavior": {
+                "description": "What it did in the current run: a scalar variable's start and end,\nextremes and behavior mode (`read_behavior` has an arrayed one's, and\nmore).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SeriesCore"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -1184,6 +1195,219 @@
               }
             ]
           },
+          "SeriesCore": {
+            "description": "What a series did, in brief. A value that is not a number (a division by\nzero, an overflow) is left out, as are a start, an end, a sample or a\nturning point that is not one; the mode says when the series went\nundefined.",
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "end": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "min": {
+                "description": "Its least and greatest values that are numbers, with their times.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Point"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Point"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "negativeFrom": {
+                "description": "When it first went below zero, if it ever did.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "mode": {
+                "$ref": "#/$defs/BehaviorMode"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "Point": {
+            "description": "A value at a time.",
+            "type": "object",
+            "properties": {
+              "time": {
+                "type": "number",
+                "format": "double"
+              },
+              "value": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "time",
+              "value"
+            ]
+          },
+          "BehaviorMode": {
+            "description": "A series' behavior mode.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/ModeKind"
+              },
+              "direction": {
+                "description": "Which way it moves: for an overshoot or a single turn, the way it\nfirst went; absent at rest and for an oscillation.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Direction"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "damping": {
+                "description": "An oscillation's damping.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Damping"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "startsAt": {
+                "description": "When a series that sat still at first began to move.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "settlesAt": {
+                "description": "When a series stopped moving, if that was before the run ended.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "ModeKind": {
+            "oneOf": [
+              {
+                "description": "Does not move: an equilibrium.",
+                "type": "string",
+                "const": "at_rest"
+              },
+              {
+                "description": "Moves at a steady speed.",
+                "type": "string",
+                "const": "linear"
+              },
+              {
+                "description": "Moves ever faster: exponential growth, or an accelerating decline.",
+                "type": "string",
+                "const": "exponential"
+              },
+              {
+                "description": "Moves ever slower toward a level: approach to a goal, or decay.",
+                "type": "string",
+                "const": "goal_seeking"
+              },
+              {
+                "description": "Speeds up, then slows toward a level.",
+                "type": "string",
+                "const": "s_shaped"
+              },
+              {
+                "description": "Passes the level it settles at once, and comes back less than half the\nway it went.",
+                "type": "string",
+                "const": "overshoot"
+              },
+              {
+                "description": "Rises, peaks, and falls back more than half the way it rose: overshoot\nand collapse.",
+                "type": "string",
+                "const": "rise_and_fall"
+              },
+              {
+                "description": "Falls, bottoms, and rises back more than half the way it fell.",
+                "type": "string",
+                "const": "fall_and_rise"
+              },
+              {
+                "description": "Swings back and forth.",
+                "type": "string",
+                "const": "oscillation"
+              },
+              {
+                "description": "Takes a non-finite value.",
+                "type": "string",
+                "const": "undefined"
+              },
+              {
+                "description": "None of these.",
+                "type": "string",
+                "const": "other"
+              }
+            ]
+          },
+          "Direction": {
+            "type": "string",
+            "enum": [
+              "rising",
+              "falling"
+            ]
+          },
+          "Damping": {
+            "oneOf": [
+              {
+                "description": "Each swing smaller than the last.",
+                "type": "string",
+                "const": "damped"
+              },
+              {
+                "description": "Swings of about the same size.",
+                "type": "string",
+                "const": "sustained"
+              },
+              {
+                "description": "Each swing larger than the last.",
+                "type": "string",
+                "const": "growing"
+              },
+              {
+                "description": "Too few swings in the run to tell.",
+                "type": "string",
+                "const": "undetermined"
+              }
+            ]
+          },
           "NotFound": {
             "type": "object",
             "properties": {
@@ -1229,6 +1453,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "behaviorUnavailable": {
+            "description": "Why the records carry no behavior, when the model does not simulate.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1336,6 +1567,1210 @@
         "required": [
           "revision",
           "matches"
+        ]
+      }
+    },
+    {
+      "name": "run_experiment",
+      "description": "Runs a what-if experiment on a copy of the model and keeps it under a name for later calls and claims to cite: set constants to values or multiply them, replace equations (which cuts the links from what they read: how to test an explanation), from a time on or from the start, and change DT, the integration method or the stop time. Returns each change as applied and each recorded variable's behavior beside the run it started from. The model itself is not changed.",
+      "effect": "read",
+      "inputSchema": {
+        "$defs": {
+          "ChangeInput": {
+            "description": "One change to one variable: its new value, a multiplier for its value, or a replacement equation.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "description": "A constant's new value (for an arrayed constant, every element's).",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "variable",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "multiply": {
+                    "description": "A factor for a constant's value in the run the experiment starts from.",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "variable",
+                  "multiply"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "variable": {
+                    "type": "string"
+                  },
+                  "equation": {
+                    "description": "A replacement equation, in this run only; for a stock, its initial value. It replaces the variable's value, a table it fed included. Replacing a computed variable's equation cuts the links from what it read: that is how a link is taken out to test an explanation.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "variable",
+                  "equation"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "SpecsInput": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "default": null
+              },
+              "stop": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "default": null
+              },
+              "dt": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "default": null
+              },
+              "method": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/IntegrationMethod"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "additionalProperties": false
+          },
+          "IntegrationMethod": {
+            "type": "string",
+            "enum": [
+              "euler",
+              "rk2",
+              "rk4"
+            ]
+          }
+        },
+        "title": "RunExperimentInput",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "A short name the run is kept and cited under; a name already used\nreplaces that run. \"current\" is the model as it is, and is not a name\nan experiment can take.",
+            "type": "string"
+          },
+          "from": {
+            "description": "The run to start from and compare with: \"current\" (the default) or a\nrun an experiment made. Its changes are kept unless this experiment\nchanges the same variables.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "set": {
+            "description": "The changes, each to one variable.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ChangeInput"
+            }
+          },
+          "fromTime": {
+            "description": "When the value and multiplier changes take effect: from the first step\nat or after this time; from the start (initial values included) when\nabsent. Equation changes always hold from the start.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "default": null
+          },
+          "specs": {
+            "description": "Run specs to change.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SpecsInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "record": {
+            "description": "The variables to summarize, by name; the model's stocks when absent.\nAt most 12.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 12,
+            "default": []
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ]
+      },
+      "outputSchema": {
+        "$defs": {
+          "AppliedChange": {
+            "description": "One change as applied.",
+            "type": "object",
+            "properties": {
+              "variable": {
+                "type": "string"
+              },
+              "value": {
+                "description": "The value it took, and what it was in the starting run (a scalar\nconstant).",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "was": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "elements": {
+                "description": "Each element's value and what it was (an arrayed constant).",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ElementValue"
+                }
+              },
+              "equation": {
+                "description": "The replacement equation, and the equation it replaced.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "wasEquation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tableDropped": {
+                "description": "That the variable's table no longer applies: its value was the table\nat its equation's value, and is now the replacement itself.",
+                "type": "boolean"
+              },
+              "fromTime": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              }
+            },
+            "required": [
+              "variable"
+            ]
+          },
+          "ElementValue": {
+            "type": "object",
+            "properties": {
+              "element": {
+                "type": "string"
+              },
+              "value": {
+                "type": "number",
+                "format": "double"
+              },
+              "was": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "element",
+              "value",
+              "was"
+            ]
+          },
+          "SpecsOutline": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "number",
+                "format": "double"
+              },
+              "stop": {
+                "type": "number",
+                "format": "double"
+              },
+              "dt": {
+                "type": "number",
+                "format": "double"
+              },
+              "saveStep": {
+                "description": "How often results are saved, when it differs from DT.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "method": {
+                "$ref": "#/$defs/IntegrationMethod"
+              },
+              "timeUnits": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "start",
+              "stop",
+              "dt",
+              "method"
+            ]
+          },
+          "IntegrationMethod": {
+            "type": "string",
+            "enum": [
+              "euler",
+              "rk2",
+              "rk4"
+            ]
+          },
+          "Comparison": {
+            "description": "A variable's behavior in the new run and in the run it started from.",
+            "type": "object",
+            "properties": {
+              "variable": {
+                "type": "string"
+              },
+              "this": {
+                "$ref": "#/$defs/SeriesCore"
+              },
+              "base": {
+                "description": "Absent when there is no run to compare with: the model as it is does\nnot simulate.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SeriesCore"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "variable",
+              "this"
+            ]
+          },
+          "SeriesCore": {
+            "description": "What a series did, in brief. A value that is not a number (a division by\nzero, an overflow) is left out, as are a start, an end, a sample or a\nturning point that is not one; the mode says when the series went\nundefined.",
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "end": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "min": {
+                "description": "Its least and greatest values that are numbers, with their times.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Point"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Point"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "negativeFrom": {
+                "description": "When it first went below zero, if it ever did.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "mode": {
+                "$ref": "#/$defs/BehaviorMode"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "Point": {
+            "description": "A value at a time.",
+            "type": "object",
+            "properties": {
+              "time": {
+                "type": "number",
+                "format": "double"
+              },
+              "value": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "time",
+              "value"
+            ]
+          },
+          "BehaviorMode": {
+            "description": "A series' behavior mode.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/ModeKind"
+              },
+              "direction": {
+                "description": "Which way it moves: for an overshoot or a single turn, the way it\nfirst went; absent at rest and for an oscillation.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Direction"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "damping": {
+                "description": "An oscillation's damping.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Damping"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "startsAt": {
+                "description": "When a series that sat still at first began to move.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "settlesAt": {
+                "description": "When a series stopped moving, if that was before the run ended.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "ModeKind": {
+            "oneOf": [
+              {
+                "description": "Does not move: an equilibrium.",
+                "type": "string",
+                "const": "at_rest"
+              },
+              {
+                "description": "Moves at a steady speed.",
+                "type": "string",
+                "const": "linear"
+              },
+              {
+                "description": "Moves ever faster: exponential growth, or an accelerating decline.",
+                "type": "string",
+                "const": "exponential"
+              },
+              {
+                "description": "Moves ever slower toward a level: approach to a goal, or decay.",
+                "type": "string",
+                "const": "goal_seeking"
+              },
+              {
+                "description": "Speeds up, then slows toward a level.",
+                "type": "string",
+                "const": "s_shaped"
+              },
+              {
+                "description": "Passes the level it settles at once, and comes back less than half the\nway it went.",
+                "type": "string",
+                "const": "overshoot"
+              },
+              {
+                "description": "Rises, peaks, and falls back more than half the way it rose: overshoot\nand collapse.",
+                "type": "string",
+                "const": "rise_and_fall"
+              },
+              {
+                "description": "Falls, bottoms, and rises back more than half the way it fell.",
+                "type": "string",
+                "const": "fall_and_rise"
+              },
+              {
+                "description": "Swings back and forth.",
+                "type": "string",
+                "const": "oscillation"
+              },
+              {
+                "description": "Takes a non-finite value.",
+                "type": "string",
+                "const": "undefined"
+              },
+              {
+                "description": "None of these.",
+                "type": "string",
+                "const": "other"
+              }
+            ]
+          },
+          "Direction": {
+            "type": "string",
+            "enum": [
+              "rising",
+              "falling"
+            ]
+          },
+          "Damping": {
+            "oneOf": [
+              {
+                "description": "Each swing smaller than the last.",
+                "type": "string",
+                "const": "damped"
+              },
+              {
+                "description": "Swings of about the same size.",
+                "type": "string",
+                "const": "sustained"
+              },
+              {
+                "description": "Each swing larger than the last.",
+                "type": "string",
+                "const": "growing"
+              },
+              {
+                "description": "Too few swings in the run to tell.",
+                "type": "string",
+                "const": "undetermined"
+              }
+            ]
+          }
+        },
+        "title": "RunExperimentOutput",
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "run": {
+            "description": "The run's name.",
+            "type": "string"
+          },
+          "from": {
+            "description": "The run it started from and is compared with.",
+            "type": "string"
+          },
+          "applied": {
+            "description": "This experiment's changes as applied.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/AppliedChange"
+            }
+          },
+          "specs": {
+            "description": "The specs the run ran under.",
+            "$ref": "#/$defs/SpecsOutline"
+          },
+          "behavior": {
+            "description": "Each recorded variable (or element) in this run and in the one it\nstarted from.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Comparison"
+            }
+          },
+          "omitted": {
+            "description": "Recorded variables and elements left out, when there were more than a\nsummary lists.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
+          },
+          "replaced": {
+            "description": "Whether the run replaced an earlier run of the same name.",
+            "type": "boolean"
+          },
+          "forgotten": {
+            "description": "A run forgotten to keep the session within its runs.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "description": "Why the run is compared with nothing: the model as it is does not\nsimulate.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "revision",
+          "run",
+          "from",
+          "specs",
+          "behavior"
+        ]
+      }
+    },
+    {
+      "name": "read_behavior",
+      "description": "Summarizes what variables did in runs: start and end, minimum and maximum with their times, turning points, when it first went negative, its behavior mode (at rest, linear, exponential, goal seeking, S-shaped, overshoot, rise and fall, fall and rise, oscillation, undefined for a non-finite value, or other), and a dozen samples. Name an element to read one (population[north]). \"current\" is the model as it is; other runs are experiments'.",
+      "effect": "read",
+      "inputSchema": {
+        "required": [
+          "variables"
+        ],
+        "title": "ReadBehaviorInput",
+        "type": "object",
+        "properties": {
+          "variables": {
+            "description": "The variables to summarize, by name, or one element of an arrayed\nvariable (`population[north]`); at most 12.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 12
+          },
+          "runs": {
+            "description": "The runs to summarize them in, by name: \"current\" for the model as it\nis, or runs an experiment made. \"current\" alone when absent; at most 4.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4,
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "$defs": {
+          "SeriesSummary": {
+            "description": "A variable's (or one element's) behavior in a run.",
+            "type": "object",
+            "properties": {
+              "variable": {
+                "description": "The variable, with its element for an arrayed one (`population[north]`).",
+                "type": "string"
+              },
+              "run": {
+                "type": "string"
+              },
+              "start": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "end": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "min": {
+                "description": "Its least and greatest values that are numbers, with their times.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Point"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Point"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "negativeFrom": {
+                "description": "When it first went below zero, if it ever did.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "mode": {
+                "$ref": "#/$defs/BehaviorMode"
+              },
+              "turns": {
+                "description": "Its turning points, the peaks and troughs it reversed from, in order;\nat most six.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Point"
+                }
+              },
+              "samples": {
+                "description": "About a dozen evenly spaced values, first and last included; left out\nwhen the answer is over its budget.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Point"
+                }
+              }
+            },
+            "required": [
+              "variable",
+              "run",
+              "mode"
+            ]
+          },
+          "Point": {
+            "description": "A value at a time.",
+            "type": "object",
+            "properties": {
+              "time": {
+                "type": "number",
+                "format": "double"
+              },
+              "value": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "time",
+              "value"
+            ]
+          },
+          "BehaviorMode": {
+            "description": "A series' behavior mode.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/ModeKind"
+              },
+              "direction": {
+                "description": "Which way it moves: for an overshoot or a single turn, the way it\nfirst went; absent at rest and for an oscillation.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Direction"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "damping": {
+                "description": "An oscillation's damping.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Damping"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "startsAt": {
+                "description": "When a series that sat still at first began to move.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "settlesAt": {
+                "description": "When a series stopped moving, if that was before the run ended.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "ModeKind": {
+            "oneOf": [
+              {
+                "description": "Does not move: an equilibrium.",
+                "type": "string",
+                "const": "at_rest"
+              },
+              {
+                "description": "Moves at a steady speed.",
+                "type": "string",
+                "const": "linear"
+              },
+              {
+                "description": "Moves ever faster: exponential growth, or an accelerating decline.",
+                "type": "string",
+                "const": "exponential"
+              },
+              {
+                "description": "Moves ever slower toward a level: approach to a goal, or decay.",
+                "type": "string",
+                "const": "goal_seeking"
+              },
+              {
+                "description": "Speeds up, then slows toward a level.",
+                "type": "string",
+                "const": "s_shaped"
+              },
+              {
+                "description": "Passes the level it settles at once, and comes back less than half the\nway it went.",
+                "type": "string",
+                "const": "overshoot"
+              },
+              {
+                "description": "Rises, peaks, and falls back more than half the way it rose: overshoot\nand collapse.",
+                "type": "string",
+                "const": "rise_and_fall"
+              },
+              {
+                "description": "Falls, bottoms, and rises back more than half the way it fell.",
+                "type": "string",
+                "const": "fall_and_rise"
+              },
+              {
+                "description": "Swings back and forth.",
+                "type": "string",
+                "const": "oscillation"
+              },
+              {
+                "description": "Takes a non-finite value.",
+                "type": "string",
+                "const": "undefined"
+              },
+              {
+                "description": "None of these.",
+                "type": "string",
+                "const": "other"
+              }
+            ]
+          },
+          "Direction": {
+            "type": "string",
+            "enum": [
+              "rising",
+              "falling"
+            ]
+          },
+          "Damping": {
+            "oneOf": [
+              {
+                "description": "Each swing smaller than the last.",
+                "type": "string",
+                "const": "damped"
+              },
+              {
+                "description": "Swings of about the same size.",
+                "type": "string",
+                "const": "sustained"
+              },
+              {
+                "description": "Each swing larger than the last.",
+                "type": "string",
+                "const": "growing"
+              },
+              {
+                "description": "Too few swings in the run to tell.",
+                "type": "string",
+                "const": "undetermined"
+              }
+            ]
+          },
+          "NotFound": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "suggestions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "OmittedElements": {
+            "type": "object",
+            "properties": {
+              "variable": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "variable",
+              "count"
+            ]
+          },
+          "StaleRun": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "run",
+              "revision"
+            ]
+          },
+          "LeftOut": {
+            "description": "What a `read_behavior` answer left out to fit its budget, in the order it\nleaves things out.",
+            "type": "object",
+            "properties": {
+              "samples": {
+                "description": "Every summary's samples.",
+                "type": "boolean"
+              },
+              "turns": {
+                "description": "Every summary's turning points.",
+                "type": "boolean"
+              },
+              "variables": {
+                "description": "Variables left out whole, to read in another call.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "title": "ReadBehaviorOutput",
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "series": {
+            "description": "One summary per variable (or element) and run, variable by variable.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/SeriesSummary"
+            }
+          },
+          "notFound": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/NotFound"
+            }
+          },
+          "omittedElements": {
+            "description": "Arrayed variables with more elements than a summary lists, and how\nmany were left out.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/OmittedElements"
+            }
+          },
+          "staleRuns": {
+            "description": "Runs made before the model last changed (its diagrams aside): what\nthey show is what the model did then.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/StaleRun"
+            }
+          },
+          "leftOut": {
+            "description": "What was left out to keep the answer within its budget.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LeftOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "revision",
+          "series"
+        ]
+      }
+    },
+    {
+      "name": "list_runs",
+      "description": "Lists the runs experiments made, oldest first, and says for each whether the model has changed since it was made and what it changed from the model: each constant's value (from a time on, or from the start), each replacement equation, the run specs, and the run it started from. Use it to learn what a run the person made, or one of yours from earlier, tried.",
+      "effect": "read",
+      "inputSchema": {
+        "additionalProperties": false,
+        "title": "ListRunsInput",
+        "type": "object"
+      },
+      "outputSchema": {
+        "$defs": {
+          "RunListing": {
+            "description": "What a session tells a host, or an agent, of one of its runs.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "revision": {
+                "description": "The revision the run was made at.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "stale": {
+                "description": "Whether the model has changed, beyond its diagrams, since.",
+                "type": "boolean"
+              },
+              "gone": {
+                "description": "Whether the run is gone: stale, with its results no longer kept.",
+                "type": "boolean"
+              },
+              "from": {
+                "description": "The run it started from, as it was named then: \"current\", the model\nas it was, or a run an experiment made.",
+                "type": "string"
+              },
+              "changes": {
+                "description": "Everything the run changed from the model, with the changes it kept\nfrom the run it started from: values first, then equations.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ListedChange"
+                }
+              },
+              "specs": {
+                "description": "The run specs it changed; a spec left out is the model's.",
+                "$ref": "#/$defs/SpecsChange"
+              }
+            },
+            "required": [
+              "name",
+              "revision",
+              "stale",
+              "gone",
+              "from",
+              "changes",
+              "specs"
+            ]
+          },
+          "ListedChange": {
+            "description": "One change a run makes to one variable, as it was made: exactly the value\nthe run set, where the experiment's answer rounds it.",
+            "type": "object",
+            "properties": {
+              "variable": {
+                "description": "The variable as the model spells it, or its canonical name when the\nmodel no longer has it.",
+                "type": "string"
+              },
+              "value": {
+                "description": "A scalar constant's value.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "elements": {
+                "description": "An arrayed constant's value, element by element.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ListedElement"
+                }
+              },
+              "equation": {
+                "description": "A replacement equation, which holds from the start.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tableDropped": {
+                "description": "That the replacement is the variable's value, where the model's\nvariable is a table read at its equation's value.",
+                "type": "boolean"
+              },
+              "fromTime": {
+                "description": "When a value takes effect: from the first step at or after this\ntime, or from the start (initial values included) when absent.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              }
+            },
+            "required": [
+              "variable"
+            ]
+          },
+          "ListedElement": {
+            "description": "One element's value in a listed change.",
+            "type": "object",
+            "properties": {
+              "element": {
+                "description": "The element's subscript, as a results key spells it (`north`, `a,b`).",
+                "type": "string"
+              },
+              "value": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "element",
+              "value"
+            ]
+          },
+          "SpecsChange": {
+            "description": "Run specs a plan changes; `None` keeps the model's.",
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "stop": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "dt": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "method": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/IntegrationMethod"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "IntegrationMethod": {
+            "type": "string",
+            "enum": [
+              "euler",
+              "rk2",
+              "rk4"
+            ]
+          }
+        },
+        "title": "ListRunsOutput",
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "runs": {
+            "description": "The session's named runs, oldest first. \"current\", the model as it\nis, is always there and is not listed.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/RunListing"
+            }
+          },
+          "omitted": {
+            "description": "Runs left out to keep the answer within its budget, oldest first.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "revision",
+          "runs"
         ]
       }
     }

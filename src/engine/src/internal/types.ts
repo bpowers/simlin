@@ -62,6 +62,7 @@ export enum SimlinErrorCode {
   DuplicateUnit = 43,
   ExpectedModule = 44,
   ExpectedIdent = 45,
+  Interrupted = 46,
 }
 
 // Error kind categorizing where in the project the error originates

@@ -24,6 +24,9 @@ pub enum ToolName {
     ReadModel,
     ReadVariables,
     FindVariables,
+    RunExperiment,
+    ReadBehavior,
+    ListRuns,
 }
 
 /// What calling a tool does to the project.
@@ -38,10 +41,13 @@ pub enum ToolEffect {
 }
 
 impl ToolName {
-    pub const ALL: [ToolName; 3] = [
+    pub const ALL: [ToolName; 6] = [
         ToolName::ReadModel,
         ToolName::ReadVariables,
         ToolName::FindVariables,
+        ToolName::RunExperiment,
+        ToolName::ReadBehavior,
+        ToolName::ListRuns,
     ];
 
     pub fn name(self) -> &'static str {
@@ -49,6 +55,9 @@ impl ToolName {
             ToolName::ReadModel => "read_model",
             ToolName::ReadVariables => "read_variables",
             ToolName::FindVariables => "find_variables",
+            ToolName::RunExperiment => "run_experiment",
+            ToolName::ReadBehavior => "read_behavior",
+            ToolName::ListRuns => "list_runs",
         }
     }
 
@@ -79,14 +88,41 @@ impl ToolName {
                  description, closest first. Use it when a name the person said or wrote does \
                  not match the model's."
             }
+            ToolName::RunExperiment => {
+                "Runs a what-if experiment on a copy of the model and keeps it under a name for \
+                 later calls and claims to cite: set constants to values or multiply them, \
+                 replace equations (which cuts the links from what they read: how to test an \
+                 explanation), from a time on or from the start, and change DT, the integration \
+                 method or the stop time. Returns each change as applied and each recorded \
+                 variable's behavior beside the run it started from. The model itself is not \
+                 changed."
+            }
+            ToolName::ReadBehavior => {
+                "Summarizes what variables did in runs: start and end, minimum and maximum with \
+                 their times, turning points, when it first went negative, its behavior mode \
+                 (at rest, linear, exponential, goal seeking, S-shaped, overshoot, rise and \
+                 fall, fall and rise, oscillation, undefined for a non-finite value, or other), \
+                 and a dozen samples. Name an element to read one (population[north]). \
+                 \"current\" is the model as it is; other runs are experiments'."
+            }
+            ToolName::ListRuns => {
+                "Lists the runs experiments made, oldest first, and says for each whether the \
+                 model has changed since it was made and what it changed from the model: each \
+                 constant's value (from a time on, or from the start), each replacement \
+                 equation, the run specs, and the run it started from. Use it to learn what a \
+                 run the person made, or one of yours from earlier, tried."
+            }
         }
     }
 
     pub fn effect(self) -> ToolEffect {
         match self {
-            ToolName::ReadModel | ToolName::ReadVariables | ToolName::FindVariables => {
-                ToolEffect::Read
-            }
+            ToolName::ReadModel
+            | ToolName::ReadVariables
+            | ToolName::FindVariables
+            | ToolName::RunExperiment
+            | ToolName::ReadBehavior
+            | ToolName::ListRuns => ToolEffect::Read,
         }
     }
 }
@@ -101,8 +137,9 @@ pub fn catalog_json() -> &'static str {
 #[cfg(feature = "schema")]
 pub fn generate_catalog_json() -> String {
     use super::{
-        FindVariablesInput, FindVariablesOutput, ReadModelInput, ReadModelOutput,
-        ReadVariablesInput, ReadVariablesOutput,
+        FindVariablesInput, FindVariablesOutput, ListRunsInput, ListRunsOutput, ReadBehaviorInput,
+        ReadBehaviorOutput, ReadModelInput, ReadModelOutput, ReadVariablesInput,
+        ReadVariablesOutput, RunExperimentInput, RunExperimentOutput,
     };
 
     #[derive(Serialize)]
@@ -155,6 +192,14 @@ pub fn generate_catalog_json() -> String {
                     input::<FindVariablesInput>(),
                     output::<FindVariablesOutput>(),
                 ),
+                ToolName::RunExperiment => (
+                    input::<RunExperimentInput>(),
+                    output::<RunExperimentOutput>(),
+                ),
+                ToolName::ReadBehavior => {
+                    (input::<ReadBehaviorInput>(), output::<ReadBehaviorOutput>())
+                }
+                ToolName::ListRuns => (input::<ListRunsInput>(), output::<ListRunsOutput>()),
             };
             Entry {
                 name: tool.name(),

@@ -140,6 +140,12 @@ typedef enum {
   SIMLIN_ERROR_CODE_DUPLICATE_UNIT = 43,
   SIMLIN_ERROR_CODE_EXPECTED_MODULE = 44,
   SIMLIN_ERROR_CODE_EXPECTED_IDENT = 45,
+  // The entry point stopped for other work on the project that was
+  // waiting for it (a person's edit, a simulation) and kept nothing: made
+  // again once that work is done, it answers. A host's read of a tool
+  // session's run (`simlin_tool_session_get_run`) reports it, where no such
+  // run is `DoesNotExist`.
+  SIMLIN_ERROR_CODE_INTERRUPTED = 46,
 } SimlinErrorCode;
 
 // Error kind categorizing where in the project the error originates.
@@ -193,9 +199,9 @@ typedef enum {
 // A live drag over the view as it was when the drag began.
 typedef struct SimlinGesture SimlinGesture;
 
-// One agent's work on one model: the evidence ids it has been given and what
-// it last read (`simlin_engine::tools::Session`), over the model it was made
-// for.
+// One agent's work on one model: the evidence ids it has been given, what it
+// last read, and the runs it made (`simlin_engine::tools::Session`), over the
+// model it was made for.
 typedef struct SimlinToolSession SimlinToolSession;
 
 // A single feedback loop
@@ -2307,8 +2313,8 @@ void simlin_tool_session_unref(SimlinToolSession *session);
 // or an undo's `simlin_project_replace_contents`), a simulation
 // (`simlin_sim_new`), a read of the diagnostics, the others
 // `SimlinProject::waiting_for_db` lists -- keeps those readers waiting with
-// it, so the call stops for it between units of its work (a simulation, a
-// stage of an analysis) and answers a refusal with `"interrupted": true` that
+// it, so the call stops for it between units of its work (a slice of a
+// simulation, a stage of an analysis) and answers a refusal with `"interrupted": true` that
 // kept nothing: the entry point waits at most one unit. A host that retries
 // by itself does so once that work is done -- after an edit, at the next
 // revision -- and never in a loop against a project that stays busy.
@@ -2341,6 +2347,48 @@ void simlin_tool_session_get_changes(SimlinToolSession *session,
                                      uint8_t **out_buf,
                                      uintptr_t *out_len,
                                      SimlinError **out_error);
+
+// The results of the session's run named `name` -- `"current"` for the model
+// as it is at the project's current revision, or a run an experiment made --
+// as a standalone results handle the caller releases with
+// `simlin_results_unref`: every saved series, for a host to chart, where the
+// tools answer an agent with summaries. The revision the run was made at goes
+// to `out_revision`, and whether the model has changed since (its diagrams
+// aside) to `out_stale`; either may be NULL. NULL with `DoesNotExist` when
+// the session has no such run, and with the reason when the model does not
+// simulate. A read that must simulate stops, as a tool call does, for an
+// edit or a simulation that waits for the project, and keeps nothing: NULL
+// with `Interrupted`, for a host that reads it again once that work is done.
+// The handle holds a copy of the run's series.
+//
+// # Safety
+// - `session` must be a valid pointer to a SimlinToolSession
+// - `name` must be a valid C string
+// - `out_revision` and `out_stale` must be valid pointers or NULL
+SimlinResults *simlin_tool_session_get_run(SimlinToolSession *session,
+                                           const char *name,
+                                           uint64_t *out_revision,
+                                           bool *out_stale,
+                                           SimlinError **out_error);
+
+// Write the session's named runs, oldest first, as UTF-8 JSON to a buffer the
+// caller frees with `simlin_free`: `[{"name", "revision", "stale", "gone",
+// "from", "changes", "specs"}]`, where `stale` says the model has changed
+// since the run (its diagrams aside), `gone` that a stale run's series are
+// no longer kept, `from` names the run it started from, and `changes` and
+// `specs` are everything it changed from the model, exactly as it ran: each
+// `{"variable", "value" | "elements" | "equation", "tableDropped"?,
+// "fromTime"?}`, and the specs it set (`start`, `stop`, `dt`, `method`).
+// The run `"current"`, the model as it is, is always there and is not
+// listed. What a host's run list, chart picker and "run again" read.
+//
+// # Safety
+// - `session` must be a valid pointer to a SimlinToolSession
+// - `out_buf` and `out_len` must be valid pointers
+void simlin_tool_session_list_runs(SimlinToolSession *session,
+                                   uint8_t **out_buf,
+                                   uintptr_t *out_len,
+                                   SimlinError **out_error);
 
 #ifdef __cplusplus
 }  // extern "C"

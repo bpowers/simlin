@@ -184,6 +184,12 @@ pub enum SimlinErrorCode {
     DuplicateUnit = 43,
     ExpectedModule = 44,
     ExpectedIdent = 45,
+    /// The entry point stopped for other work on the project that was
+    /// waiting for it (a person's edit, a simulation) and kept nothing: made
+    /// again once that work is done, it answers. A host's read of a tool
+    /// session's run (`simlin_tool_session_get_run`) reports it, where no such
+    /// run is `DoesNotExist`.
+    Interrupted = 46,
 }
 
 impl TryFrom<u32> for SimlinErrorCode {
@@ -237,6 +243,7 @@ impl TryFrom<u32> for SimlinErrorCode {
             43 => Ok(SimlinErrorCode::DuplicateUnit),
             44 => Ok(SimlinErrorCode::ExpectedModule),
             45 => Ok(SimlinErrorCode::ExpectedIdent),
+            46 => Ok(SimlinErrorCode::Interrupted),
             _ => Err(()),
         }
     }

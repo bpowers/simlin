@@ -18,6 +18,13 @@ fn good_input(tool: ToolName) -> Value {
         ToolName::ReadModel => json!({}),
         ToolName::ReadVariables => json!({"names": ["Inventory", "production"]}),
         ToolName::FindVariables => json!({"phrase": "inventory"}),
+        ToolName::RunExperiment => json!({
+            "name": "doubled coverage",
+            "set": [{"variable": "coverage", "multiply": 2}],
+            "record": ["Inventory", "desired_inventory"]
+        }),
+        ToolName::ReadBehavior => json!({"variables": ["Inventory", "orders"]}),
+        ToolName::ListRuns => json!({}),
     }
 }
 

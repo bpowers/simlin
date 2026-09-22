@@ -1068,6 +1068,60 @@ fn a_tool_call_on_a_poisoned_database_panics_rather_than_waits() {
     unsafe { simlin_project_unref(proj) };
 }
 
+/// A host's read of a run that has to simulate stops, as a call does, for
+/// work that waits for the project, and says so with a code of its own: the
+/// host tells a read that stopped from a run the session lacks, and reads it
+/// again once that work is done.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn an_interrupted_read_of_a_run_is_told_from_a_missing_one() {
+    use std::sync::atomic::Ordering;
+
+    let datamodel = TestProject::new("tool_read_stops")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let session = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let read = |name: &str| -> Result<(), SimlinErrorCode> {
+            let name = CString::new(name).unwrap();
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let results = crate::tools::simlin_tool_session_get_run(
+                session,
+                name.as_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut err,
+            );
+            if err.is_null() {
+                simlin_results_unref(results);
+                Ok(())
+            } else {
+                let code = simlin_error_get_code(err);
+                simlin_error_free(err);
+                Err(code)
+            }
+        };
+        assert_eq!(read("missing"), Err(SimlinErrorCode::DoesNotExist));
+        // Work waiting for the project, counted as an edit that holds the
+        // datamodel while it waits for the database counts itself.
+        (*proj).waiting_for_db.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(read("current"), Err(SimlinErrorCode::Interrupted));
+        (*proj).waiting_for_db.fetch_sub(1, Ordering::SeqCst);
+        assert_eq!(read("current"), Ok(()), "the read again, once the work is done");
+
+        crate::tools::simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// A tool call stops for an edit that waits for the database: the edit holds
 /// the datamodel while it waits, so every hit test waits with it, and a call
 /// that ran on would keep them waiting for the rest of its work. The call

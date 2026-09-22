@@ -31,6 +31,7 @@ use crate::ltm::LinkPolarity;
 
 use super::evidence::{DiagnosticReport, display_name, window};
 use super::outline::{AuxKind, aux_kind, dimensions};
+use super::series::{SeriesCore, element_series_upto};
 use super::{Session, ToolError, Workspace, names, resolve_model};
 
 /// The most variables one `read_variables` call reads.
@@ -78,6 +79,9 @@ pub struct ReadVariablesOutput {
     /// another call.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub omitted: Vec<String>,
+    /// Why the records carry no behavior, when the model does not simulate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior_unavailable: Option<String>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -284,6 +288,11 @@ pub struct VariableRecord {
     /// This variable's diagnostics, each under the id `read_model` gives it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<DiagnosticReport>,
+    /// What it did in the current run: a scalar variable's start and end,
+    /// extremes and behavior mode (`read_behavior` has an arrayed one's, and
+    /// more).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<SeriesCore>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -321,7 +330,7 @@ pub struct VariableMatch {
 /// Answer `read_variables`.
 pub(crate) fn read_variables(
     session: &mut Session,
-    ws: &Workspace<'_>,
+    ws: &mut Workspace<'_>,
     input: ReadVariablesInput,
 ) -> Result<ReadVariablesOutput, ToolError> {
     if input.names.is_empty() {
@@ -333,7 +342,7 @@ pub(crate) fn read_variables(
             input.names.len()
         )));
     }
-    let resolved = resolve_model(ws, &session.model_name)?;
+    let resolved = resolve_model(ws.project, ws.db, &session.model_name)?;
     let model = resolved.model;
 
     let mut records: Vec<(&Variable, Option<String>)> = Vec::new();
@@ -358,6 +367,13 @@ pub(crate) fn read_variables(
     }
 
     let diagnostics = session.evidence.report_diagnostics(ws, &resolved);
+    // A model that does not simulate still has definitions to read; its
+    // records say why they carry no behavior.
+    let (current, behavior_unavailable) = match session.runs.current(ws, model) {
+        Ok(run) => (Some(run), None),
+        Err(refusal) if refusal.is_interrupted() => return Err(refusal),
+        Err(refusal) => (None, Some(refusal.error)),
+    };
     let links = crate::analysis::model_links(
         &*ws.db,
         resolved.source_model,
@@ -375,8 +391,8 @@ pub(crate) fn read_variables(
                 polarity: polarity.into(),
             };
             let mut record = definition(model, var);
-            if let Some(element) = element {
-                narrow_to_element(&mut record, var, &element);
+            if let Some(element) = &element {
+                narrow_to_element(&mut record, var, element);
             }
             let mut inputs: Vec<LinkRef> = links
                 .iter()
@@ -404,6 +420,18 @@ pub(crate) fn read_variables(
                     ..d.clone()
                 })
                 .collect();
+            // A scalar's behavior, or a named element's.
+            record.behavior = current.as_ref().and_then(|run| {
+                let (series, omitted) =
+                    element_series_upto(run, model, var.get_ident(), element.as_deref(), 1);
+                let scalar_or_element = record.dimensions.is_empty() || element.is_some();
+                match series.as_slice() {
+                    [(_, values)] if omitted == 0 && scalar_or_element => {
+                        Some(SeriesCore::of(&run.times(), values))
+                    }
+                    _ => None,
+                }
+            });
             record
         })
         .collect();
@@ -413,6 +441,7 @@ pub(crate) fn read_variables(
         variables,
         not_found,
         omitted: vec![],
+        behavior_unavailable,
     };
     fit(&mut output, session.outline_budget);
     Ok(output)
@@ -537,6 +566,7 @@ fn definition(model: &datamodel::Model, var: &Variable) -> VariableRecord {
         readers: vec![],
         more_readers: None,
         diagnostics: vec![],
+        behavior: None,
     };
     let documentation = |text: &str| {
         Some(window(text.trim(), 0, 0, MAX_DOCUMENTATION_CHARS)).filter(|t| !t.is_empty())
@@ -676,7 +706,7 @@ pub(crate) fn find_variables(
             "give a phrase to search for: a name, part of one, or a few words of description",
         ));
     }
-    let resolved = resolve_model(ws, model_name)?;
+    let resolved = resolve_model(ws.project, ws.db, model_name)?;
     let matches = names::rank(resolved.model, &input.phrase)
         .into_iter()
         .filter(|(score, _)| *score >= MATCH_THRESHOLD)

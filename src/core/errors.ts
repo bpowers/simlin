@@ -56,6 +56,7 @@ export enum ErrorCode {
   DuplicateUnit = 43,
   ExpectedModule = 44,
   ExpectedIdent = 45,
+  Interrupted = 46,
 }
 
 export function errorCodeDescription(code: ErrorCode): string {
@@ -152,6 +153,8 @@ export function errorCodeDescription(code: ErrorCode): string {
       return 'Expected a module, found a non-module';
     case ErrorCode.ExpectedIdent:
       return 'Expected an identifier';
+    case ErrorCode.Interrupted:
+      return 'Stopped for other work on the project; try again';
   }
   return 'Unknown error from core engine';
 }

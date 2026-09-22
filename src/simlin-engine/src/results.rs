@@ -79,6 +79,7 @@ impl Specs {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
 pub struct Results {
     pub offsets: HashMap<Ident<Canonical>, usize>,
     // one large allocation
