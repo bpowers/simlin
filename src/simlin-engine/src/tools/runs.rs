@@ -28,7 +28,8 @@
 //! gone, since running its plan now would simulate a different model.
 //!
 //! A host lists the named runs with what each changed ([`RunListing`]), as
-//! the agent's `list_runs` does.
+//! the agent's `list_runs` does, and forgets one when the person discards it,
+//! after which no tool reads it.
 //!
 //! A run is made without the LTM overlay. Its loops are analyzed on demand by
 //! replaying its plan under the overlay ([`execute_then`], `loops`), and the
@@ -698,6 +699,12 @@ impl RunStore {
             .flatten();
         self.within_budget(&name);
         (replaced, forgotten)
+    }
+
+    /// Forget the named run `name`, its results and its plan, so no tool
+    /// reads it again; whether the session had it.
+    pub(crate) fn forget(&mut self, name: &str) -> bool {
+        self.named.shift_remove(name).is_some()
     }
 
     /// Every named run, oldest first, as a host lists them, with the

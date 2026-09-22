@@ -309,6 +309,61 @@ pub unsafe extern "C" fn simlin_tool_session_call(
     }
 }
 
+/// Forget the session's run named `name` -- its series and its plan -- as a
+/// host does when the person discards it: no tool reads it again, the listing
+/// leaves it out, and a run made from it keeps what it changed. Whether the
+/// session had it goes to `out_forgotten`, which may be NULL; a run it never
+/// had is no error. `"current"`, the model as it is, is refused with
+/// `Generic`. Locks the session only.
+///
+/// # Safety
+/// - `session` must be a valid pointer to a SimlinToolSession
+/// - `name` must be a valid C string
+/// - `out_forgotten` must be a valid pointer or NULL
+#[no_mangle]
+pub unsafe extern "C" fn simlin_tool_session_forget_run(
+    session: *mut SimlinToolSession,
+    name: *const c_char,
+    out_forgotten: *mut bool,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    let session_ref = match require_session(session) {
+        Ok(s) => s,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
+    };
+    if name.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("run name pointer must not be NULL"),
+        );
+        return;
+    }
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic).with_message("run name is not valid UTF-8"),
+        );
+        return;
+    };
+    let forgotten = session_ref.session.lock().unwrap().forget_run(name);
+    match forgotten {
+        Ok(forgotten) => {
+            if !out_forgotten.is_null() {
+                *out_forgotten = forgotten;
+            }
+        }
+        Err(reason) => store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic).with_message(reason),
+        ),
+    }
+}
+
 /// The project's contents and revision, taken under the datamodel lock, and
 /// its database, locked, with the datamodel released: what a tool entry point
 /// answers from. The contents are the project's own, shared, so taking them

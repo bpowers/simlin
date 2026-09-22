@@ -2333,6 +2333,22 @@ void simlin_tool_session_call(SimlinToolSession *session,
                               bool *out_is_error,
                               SimlinError **out_error);
 
+// Forget the session's run named `name` -- its series and its plan -- as a
+// host does when the person discards it: no tool reads it again, the listing
+// leaves it out, and a run made from it keeps what it changed. Whether the
+// session had it goes to `out_forgotten`, which may be NULL; a run it never
+// had is no error. `"current"`, the model as it is, is refused with
+// `Generic`. Locks the session only.
+//
+// # Safety
+// - `session` must be a valid pointer to a SimlinToolSession
+// - `name` must be a valid C string
+// - `out_forgotten` must be a valid pointer or NULL
+void simlin_tool_session_forget_run(SimlinToolSession *session,
+                                    const char *name,
+                                    bool *out_forgotten,
+                                    SimlinError **out_error);
+
 // Write what changed in the session's model since the session's last
 // `read_model` -- variables added, removed and changed (with which fields),
 // and whether the sim specs changed -- as UTF-8 JSON to a buffer the caller

@@ -80,6 +80,11 @@ def test_a_sessions_runs_are_listed_with_their_revision_and_staleness(
     assert change["value"] == pytest.approx(made.data["applied"][0]["value"], rel=1e-4)
     assert listed.specs == {}
     assert not session.run("doubled").empty
+    assert session.forget("doubled")
+    assert session.runs() == []
+    assert not session.forget("doubled")
+    with pytest.raises(SimlinRuntimeError):
+        session.forget("current")
 
 
 def test_a_plan_lands_and_the_project_commits_it(model: simlin.Model) -> None:

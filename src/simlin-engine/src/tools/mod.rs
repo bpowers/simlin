@@ -288,6 +288,20 @@ impl Session {
         self.runs.listing(ws, model)
     }
 
+    /// Forget the named run `name`, its results and its plan, as when the
+    /// person discards it: no tool reads it again, and a run made from it
+    /// keeps what it changed. Whether the session had it; "current", the
+    /// model as it is, is refused.
+    pub fn forget_run(&mut self, name: &str) -> Result<bool, String> {
+        if name.trim() == runs::CURRENT {
+            return Err(format!(
+                "\"{}\" is the model as it is, which a session does not forget",
+                runs::CURRENT
+            ));
+        }
+        Ok(self.runs.forget(name.trim()))
+    }
+
     /// Land the plan `edit_model` gave the id `id` on the project as `ws`
     /// has it: the project as the plan leaves it, for the host to make its
     /// contents in one edit, or why it cannot land there, for the agent to

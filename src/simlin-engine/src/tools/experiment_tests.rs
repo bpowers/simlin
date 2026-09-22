@@ -982,3 +982,44 @@ fn a_call_stops_before_its_next_simulation_when_other_work_waits() {
     // With nothing waiting, the same call runs it again.
     samples(&mut host, &mut session, "Inventory", "a");
 }
+
+/// A run the person discards is forgotten: no tool reads it, the listing
+/// leaves it out, and a run made from it keeps what it changed. Forgetting
+/// it again, or one the session never had, is no error; the model as it is
+/// is not the session's to forget.
+#[test]
+fn a_forgotten_run_is_gone_for_every_tool_and_what_was_made_from_it_stays() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "base", "set": [{"variable": "coverage", "value": 6}]}),
+    );
+    experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "on top", "from": "base",
+               "set": [{"variable": "adjustment time", "value": 3}]}),
+    );
+    assert_eq!(session.forget_run("base"), Ok(true));
+    let listing = listing(&mut host, &mut session);
+    assert_eq!(listing.as_array().unwrap().len(), 1, "{listing}");
+    assert_eq!(listing[0]["from"], "base");
+    assert_eq!(listing[0]["changes"].as_array().unwrap().len(), 2);
+    let refusal = host.refuse(
+        &mut session,
+        "read_behavior",
+        json!({"variables": ["Inventory"], "runs": ["base"]}),
+    );
+    assert_eq!(
+        refusal["suggestions"],
+        json!(["current", "on top"]),
+        "{refusal}"
+    );
+    samples(&mut host, &mut session, "Inventory", "on top");
+
+    assert_eq!(session.forget_run("base"), Ok(false));
+    assert_eq!(session.forget_run("never made"), Ok(false));
+    assert!(session.forget_run("current").is_err());
+}

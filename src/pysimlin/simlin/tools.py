@@ -211,6 +211,21 @@ class ToolSession:
             for run in listed
         ]
 
+    def forget(self, name: str) -> bool:
+        """Forget the run ``name``, its series and its plan, as a host does
+        when the person discards it: no tool reads it again, and a run made
+        from it keeps what it changed. Whether the session had it.
+
+        Raises:
+            SimlinRuntimeError: For "current", the model as it is.
+        """
+        forgotten = ffi.new("bool *")
+        err_ptr = ffi.new("SimlinError **")
+        with self._lock:
+            lib.simlin_tool_session_forget_run(self._ptr, string_to_c(name), forgotten, err_ptr)
+        check_out_error(err_ptr, f"Forget run '{name}'")
+        return bool(forgotten[0])
+
     def land(self, id: str) -> Landing:
         """Land the plan ``id`` in the model's project, as a host does once
         the person approves it. The engine lands it on the project as it is:

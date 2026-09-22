@@ -895,3 +895,63 @@ fn a_host_lists_runs_and_learns_when_one_is_stale() {
         simlin_project_unref(proj);
     }
 }
+
+/// Forget the run `name`, and say whether the session had it.
+unsafe fn forget(session: *mut SimlinToolSession, name: &str) -> bool {
+    let name = CString::new(name).unwrap();
+    let (mut forgotten, mut err) = (false, ptr::null_mut());
+    simlin_tool_session_forget_run(session, name.as_ptr(), &mut forgotten, &mut err);
+    expect_no_error(err, "forgetting the run");
+    forgotten
+}
+
+/// A host discards a run the person deletes: it leaves the listing and no
+/// tool reads it. Forgetting one the session lacks is no error, and the
+/// model as it is, or a host's misuse, is refused with a code.
+#[test]
+fn a_host_forgets_a_run_the_person_deletes() {
+    unsafe {
+        let proj = project();
+        let model = main_model(proj);
+        let session = new_session(model);
+        for name in ["faster", "slower"] {
+            let (output, is_error) = call(
+                session,
+                "run_experiment",
+                &json!({"name": name, "set": [{"variable": "rate", "multiply": 2}]}).to_string(),
+            );
+            assert!(!is_error, "{output}");
+        }
+        assert!(forget(session, "faster"));
+        let listed = list_runs(session);
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed[0]["name"], "slower");
+        let (refusal, is_error) = call(
+            session,
+            "read_behavior",
+            r#"{"variables": ["population"], "runs": ["faster"]}"#,
+        );
+        assert!(is_error, "{refusal}");
+        assert!(!forget(session, "faster"), "forgotten already");
+
+        let current = CString::new("current").unwrap();
+        let mut err = ptr::null_mut();
+        simlin_tool_session_forget_run(session, current.as_ptr(), ptr::null_mut(), &mut err);
+        expect_error_code(err, SimlinErrorCode::Generic, "the model as it is");
+        let mut err = ptr::null_mut();
+        simlin_tool_session_forget_run(session, ptr::null(), ptr::null_mut(), &mut err);
+        expect_error_code(err, SimlinErrorCode::Generic, "a NULL name");
+        let mut err = ptr::null_mut();
+        simlin_tool_session_forget_run(
+            ptr::null_mut(),
+            current.as_ptr(),
+            ptr::null_mut(),
+            &mut err,
+        );
+        expect_error_code(err, SimlinErrorCode::Generic, "a NULL session");
+
+        simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
