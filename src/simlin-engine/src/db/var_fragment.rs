@@ -72,12 +72,6 @@ pub(crate) struct ExplicitFragment<'db> {
     pub input: Option<Box<FragmentInput<'db>>>,
 }
 
-/// The four implicit globals lower to `LoadGlobalVar` at fixed absolute slots
-/// and never go through a fragment's dependency shapes.
-pub(crate) fn is_implicit_global(name: &str) -> bool {
-    matches!(name, "time" | "dt" | "initial_time" | "final_time")
-}
-
 /// Resolve datamodel dimension names to the project's `Dimension`s. A name the
 /// project does not declare is dropped: the declaring variable's own fragment
 /// reports it, and a shape with fewer axes fails loudly at lowering rather than
@@ -490,9 +484,25 @@ fn source_self_shape(
 }
 
 /// Every name in `names` that `model` declares, resolved once (the variable
-/// itself and the implicit globals skipped), and the first name the model
-/// declares nowhere -- an unknown dependency, reported by the fragment
-/// constructor. The instance a qualified read relocates through is proven by
+/// itself skipped), and the first name the model declares nowhere -- an
+/// unknown dependency, reported by the fragment constructor.
+///
+/// A name here is always a variable's: an equation's reference, a stock's
+/// flow, a module input's source. The clock and the run's specs are read by
+/// the builtin calls `Expr0::new` makes of the bare words (`time`, `dt`,
+/// `initial_time`, ...), which never reach a dependency shape, so a name
+/// spelled like one -- an equation's quoted `"dt"`, a flow list's `dt` -- is
+/// the variable the model declares under it, and where it declares none, a
+/// name like any other it does not declare. Vensim models declare such
+/// variables (`dt = TIME STEP` in `test/metasd/theil-statistics/Theil_2011.mdl`,
+/// `PI = 3.14159` in `test/metasd/industrial-dynamics/IDch15/IDch15d.mdl`).
+/// The rule is the engine's own: XMILE 1.0 has no such variable to read, since
+/// its quotation marks "are not part of the identifier itself" (section
+/// 3.2.2.1), and of a function's name "It is not, for example, possible to have
+/// a variable named MIN as this is a reserved function name" (section 2.1). `ast::needs_quoting`
+/// states the rule from the printer's side.
+///
+/// The instance a qualified read relocates through is proven by
 /// the dependency query, so it resolves; a qualified spelling the query could
 /// not prove (`module.output` after the module was deleted) is one local name
 /// the model declares nowhere and is reported as such.
@@ -506,7 +516,7 @@ fn resolve_referenced_heads(
     let mut heads: ResolvedHeads = Vec::new();
     let mut unknown: Option<Ident<Canonical>> = None;
     for head in names {
-        if head.as_str() == self_ident || is_implicit_global(head.as_str()) {
+        if head.as_str() == self_ident {
             continue;
         }
         match DeclaredName::resolve(db, model, project, head.as_str()) {

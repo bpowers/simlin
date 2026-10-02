@@ -64,29 +64,26 @@ impl UnitEvaluator<'_> {
         use UnitError::ConsistencyError;
         match expr {
             Expr2::Const(_, _, _) => Ok(Units::Constant),
+            // A name is always a variable: the clock and the run's specs are
+            // the builtin calls below, which `Expr0::new` makes of the bare
+            // words, so a `Var` named `time` is the quoted reference to a
+            // variable the model declares under that name.
             Expr2::Var(ident, _, loc) => {
-                let units: &UnitMap = if ident.as_str() == "time"
-                    || ident.as_str() == "initial_time"
-                    || ident.as_str() == "final_time"
-                {
-                    // we created this time variable just for unit checking, it is definitely Some
-                    self.time.units().unwrap()
-                } else {
-                    // use the variable's explicitly defined units unless they don't exist.
-                    // if they don't exist, try to use any inferred units (this handles modules)
-                    self.model
-                        .variables
-                        .get(ident)
-                        .and_then(|var| var.units())
-                        .or_else(|| self.inferred_units.get(ident))
-                        .ok_or_else(|| {
-                            ConsistencyError(
-                                ErrorCode::DoesNotExist,
-                                *loc,
-                                Some(format!("can't find or no units for dependency '{ident}'")),
-                            )
-                        })?
-                };
+                // use the variable's explicitly defined units unless they don't exist.
+                // if they don't exist, try to use any inferred units (this handles modules)
+                let units: &UnitMap = self
+                    .model
+                    .variables
+                    .get(ident)
+                    .and_then(|var| var.units())
+                    .or_else(|| self.inferred_units.get(ident))
+                    .ok_or_else(|| {
+                        ConsistencyError(
+                            ErrorCode::DoesNotExist,
+                            *loc,
+                            Some(format!("can't find or no units for dependency '{ident}'")),
+                        )
+                    })?;
 
                 Ok(Units::Explicit(units.clone()))
             }

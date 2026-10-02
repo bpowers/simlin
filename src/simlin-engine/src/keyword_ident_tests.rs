@@ -20,13 +20,20 @@
 //! save, the worst outcome in this codebase. The tests below pin the whole
 //! chain: both readers admit the name, the printer quotes it, a rename keeps the
 //! model compiling, and the corrupting spelling never appears in stored text.
+//!
+//! A zero-argument builtin's name (`pi`, `time`, `dt`, ...) is the same
+//! contract with a quieter failure: the bare word parses, as the builtin's
+//! call, so a reference to a VARIABLE of that name that loses its quotes
+//! still compiles and computes something else. The last tests pin it over the
+//! builtin table.
 
-use crate::common::Ident;
+use crate::common::{ErrorCode, Ident};
 use crate::datamodel;
 use crate::db::{
     SimlinDb, collect_all_diagnostics, compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
+use crate::test_common::TestProject;
 
 /// The equation-language keywords in their `name=` spelling.
 ///
@@ -452,4 +459,298 @@ fn renaming_to_an_unspellable_name_is_refused() {
             .and_then(|v| v.get_equation().cloned()),
     );
     assert_compiles_clean(&project, "the model renamed to `x$y`");
+}
+
+/// Every zero-argument builtin's name and alias, from the signature table, so
+/// a builtin added there has a row in the two tests below.
+fn nullary_builtin_names() -> Vec<&'static str> {
+    crate::builtins::BuiltinSig::ALL
+        .iter()
+        .filter(|sig| sig.max_args == Some(0))
+        .flat_map(|sig| std::iter::once(sig.name).chain(sig.aliases.iter().copied()))
+        .collect()
+}
+
+/// The second family of names with two readings: a zero-argument builtin's
+/// (`pi`, `time`, `dt`, ...). Bare, the name is the builtin; quoted, it is the
+/// model's variable of that name -- the implicit globals' names included,
+/// which a model may declare as variables (`dt = TIME STEP` is ordinary
+/// Vensim).
+#[test]
+fn a_quoted_builtin_name_reads_the_variable_and_a_bare_one_the_builtin() {
+    let names = nullary_builtin_names();
+    assert!(names.contains(&"pi") && names.contains(&"dt"), "{names:?}");
+    for name in names {
+        let project = read_xmile(&format!(
+            r#"
+        <aux name="{name}"><eqn>42</eqn></aux>
+        <aux name="quoted"><eqn>&quot;{name}&quot;</eqn></aux>
+        <aux name="bare"><eqn>{name}</eqn></aux>"#
+        ));
+        let builtin_only = read_xmile(&format!(r#"<aux name="bare"><eqn>{name}</eqn></aux>"#));
+        assert_eq!(final_value(&project, "quoted"), 42.0, "\"{name}\"");
+        assert_eq!(
+            final_value(&project, "bare").to_bits(),
+            final_value(&builtin_only, "bare").to_bits(),
+            "{name}"
+        );
+    }
+}
+
+/// A rename reprints every equation that references the renamed variable. A
+/// reference to a variable named like a builtin keeps its quotes through
+/// that, so the equation still reads the variable: bare, `"pi" * r` would
+/// come back as the constant times `radius`, a different number with no
+/// error.
+#[test]
+fn renaming_an_unrelated_variable_preserves_a_builtin_named_reference() {
+    for name in nullary_builtin_names() {
+        let mut project = read_xmile(&format!(
+            r#"
+        <aux name="{name}"><eqn>3</eqn></aux>
+        <aux name="r"><eqn>2</eqn></aux>
+        <aux name="area"><eqn>&quot;{name}&quot; * r</eqn></aux>"#
+        ));
+        assert_eq!(final_value(&project, "area"), 6.0, "{name}");
+
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![ModelOperation::RenameVariable {
+                        from: "r".to_string(),
+                        to: "radius".to_string(),
+                    }],
+                }],
+            },
+        )
+        .expect("rename must apply");
+
+        assert_eq!(
+            Some(datamodel::Equation::Scalar(format!("\"{name}\" * radius"))),
+            project.models[0]
+                .variables
+                .iter()
+                .find(|v| v.get_ident() == "area")
+                .and_then(|v| v.get_equation().cloned()),
+            "the reprinted equation keeps the quotes that make `{name}` the variable"
+        );
+        assert_eq!(final_value(&project, "area"), 6.0, "{name}");
+    }
+}
+
+/// An MDL model whose control section is `TIME STEP = 0.125` over 0 to 2,
+/// with `variables` before it.
+fn mdl_with_control(variables: &str) -> datamodel::Project {
+    let mdl = format!(
+        "{variables}\
+         INITIAL TIME = 0\n\t~\t\n\t~\t|\n\n\
+         FINAL TIME = 2\n\t~\t\n\t~\t|\n\n\
+         TIME STEP = 0.125\n\t~\t\n\t~\t|\n\n\
+         SAVEPER = TIME STEP\n\t~\t\n\t~\t|\n\n\
+         \\\\\\---/// Sketch information - do not modify anything except names\n"
+    );
+    crate::compat::open_vensim(&mdl).expect("MDL must parse")
+}
+
+// The three tests below pin a KNOWN GAP of the MDL importer and writer, so
+// that it can neither be forgotten nor change silently. A Vensim model may
+// declare a variable named like one of this engine's zero-argument builtins
+// (`dt = TIME STEP` in `test/metasd/theil-statistics/Theil_2011.mdl`,
+// `PI = 3.14159` in `test/metasd/industrial-dynamics/IDch15/IDch15d.mdl`);
+// what Vensim itself does with such a name is unverified against its
+// documentation, but a model that declares one can only mean the variable.
+// The engine reads a bare `dt` or `pi` as its builtin and a quoted one as the
+// variable, and the importer (`mdl::xmile_compat::quote_reference`) leaves
+// such a reference bare. The fix is the importer quoting a reference to a
+// variable the model declares, and the MDL writer telling `TIME STEP` from a
+// variable named `dt`; each test is named for what the engine does today, and
+// that fix deletes it.
+
+/// Known gap: in an MDL file a bare reference to a variable named like a
+/// builtin reads the builtin. `x = dt * 2` beside `dt = 0.25` and
+/// `TIME STEP = 0.125` computes 0.25, where the variable gives 0.5; `pi * 2`
+/// beside `pi = 3` computes 2π, where the variable gives 6.
+#[test]
+fn a_bare_mdl_reference_to_a_variable_named_like_a_builtin_reads_the_builtin() {
+    for (name, value, builtin) in [("dt", "0.25", 0.125), ("pi", "3", std::f64::consts::PI)] {
+        let project = mdl_with_control(&format!(
+            "{name} = {value}\n\t~\t\n\t~\t|\n\n\
+             x = {name} * 2\n\t~\t\n\t~\t|\n\n"
+        ));
+        assert_compiles_clean(&project, name);
+        assert_eq!(final_value(&project, "x"), builtin * 2.0, "{name}");
+    }
+}
+
+/// Known gap: one name means two things in one MDL model. A stock whose
+/// inflow list names `dt` (`S = INTEG(dt, 0)`) reads the variable, since a
+/// flow list holds names; one whose net flow is an expression
+/// (`T = INTEG(dt * 1, 0)`) reads the builtin, through the net flow
+/// auxiliary's bare `dt`.
+#[test]
+fn an_mdl_flow_list_name_reads_the_variable_and_a_net_flow_expression_the_builtin() {
+    let project = mdl_with_control(
+        "dt = 0.25\n\t~\t\n\t~\t|\n\n\
+         S = INTEG(dt, 0)\n\t~\t\n\t~\t|\n\n\
+         T = INTEG(dt * 1, 0)\n\t~\t\n\t~\t|\n\n",
+    );
+    assert_compiles_clean(&project, "the two stocks");
+    assert_eq!(
+        final_value(&project, "s"),
+        0.25 * 2.0,
+        "the variable, over 2 months"
+    );
+    assert_eq!(
+        final_value(&project, "t"),
+        0.125 * 2.0,
+        "the builtin, over 2 months"
+    );
+}
+
+/// Known gap: an MDL save of `dt = TIME STEP` writes `dt = dt`, which reads
+/// back as the time step only because a bare `dt` is the builtin.
+#[test]
+fn an_mdl_save_writes_a_variable_defined_as_the_time_step_as_dt_equals_dt() {
+    let project = mdl_with_control("dt = TIME STEP\n\t~\t\n\t~\t|\n\n");
+    let written = crate::compat::to_mdl(&project).expect("MDL must write");
+    assert!(
+        written.lines().any(|line| line.trim() == "dt = dt"),
+        "{written}"
+    );
+    let read_back = crate::compat::open_vensim(&written).expect("the save reads");
+    assert_eq!(final_value(&read_back, "dt"), 0.125);
+}
+
+/// A quoted builtin name the model declares no variable of is a name the
+/// model does not declare, refused as any other is: the implicit globals'
+/// names (`time`, `dt`, ...), whose values live in slots of their own, are no
+/// exception, since only the bare word reads those slots.
+#[test]
+fn an_undeclared_quoted_builtin_name_is_an_unknown_dependency() {
+    let refusal = |reference: &str| {
+        TestProject::new("p")
+            .aux("x", &format!("{reference} * 2"), None)
+            .error_diagnostics()
+    };
+    let unknown = refusal("\"nowhere\"");
+    assert_eq!(
+        unknown,
+        vec![("main.x".to_string(), ErrorCode::UnknownDependency)]
+    );
+    for name in nullary_builtin_names() {
+        assert_eq!(refusal(&format!("\"{name}\"")), unknown, "\"{name}\"");
+    }
+}
+
+/// A module-function call's helpers read a variable named like a builtin
+/// through its quoted name, as the equation itself does: the argument as the
+/// instance's input (`SMTH1("dt", 2)`) and as a hoisted expression
+/// (`SMTH1("dt" * 2, 2)`).
+#[test]
+fn a_helper_reads_a_variable_named_like_a_builtin() {
+    for name in nullary_builtin_names() {
+        for (argument, value) in [
+            (format!("\"{name}\""), 3.0),
+            (format!("\"{name}\" * 2"), 6.0),
+        ] {
+            let project = TestProject::new("p").aux(name, "3", None).aux(
+                "smoothed",
+                &format!("SMTH1({argument}, 2)"),
+                None,
+            );
+            assert_eq!(project.error_diagnostics(), vec![], "{argument}");
+            let series = project.vm_result("smoothed");
+            assert!(series.iter().all(|v| *v == value), "{argument}: {series:?}");
+        }
+    }
+}
+
+/// A quoted builtin name has the units of the variable it reads, whatever
+/// units the builtin would have (`time` and its kin carry the model's time
+/// unit): checked against the declared units, and inferred where the
+/// variable declares none.
+#[test]
+fn a_quoted_builtin_name_has_the_units_of_the_variable() {
+    let model = |declared: Option<&'static str>| {
+        move |name: &str| {
+            TestProject::new("u")
+                .with_time_units("month")
+                .unit("widgets", None)
+                .unit("month", None)
+                .aux_with_units(name, "3", declared)
+                .aux_with_units("same", &format!("\"{name}\" * 2"), Some("widgets"))
+        }
+    };
+    for name in nullary_builtin_names() {
+        for (how, model) in [
+            ("declared", model(Some("widgets"))),
+            ("inferred", model(None)),
+        ] {
+            model(name).assert_no_unit_diagnostics();
+            let wrong =
+                model(name).aux_with_units("wrong", &format!("\"{name}\" * 2"), Some("month"));
+            let mismatches: Vec<Option<String>> = wrong
+                .unit_diagnostic_details()
+                .into_iter()
+                .map(|(variable, _)| variable)
+                .collect();
+            // A declared unit is checked at the equation that breaks it; an
+            // inferred one conflicts between the two equations that bind it.
+            let reported = match how {
+                "declared" => mismatches.contains(&Some("wrong".to_string())),
+                _ => !mismatches.is_empty(),
+            };
+            assert!(reported, "{how} \"{name}\": {mismatches:?}");
+        }
+    }
+}
+
+/// A variable declared under a builtin's name is a variable to the LTM
+/// overlay too: the scores of a loop through a flow that reads it compile,
+/// where a name the overlay left unresolved would be a fragment warning.
+#[test]
+fn a_variable_named_like_a_builtin_is_scored_under_ltm() {
+    for name in nullary_builtin_names() {
+        let project = read_xmile(&format!(
+            r#"
+        <aux name="{name}"><eqn>0.5</eqn></aux>
+        <stock name="s"><eqn>1</eqn><inflow>f</inflow></stock>
+        <flow name="f"><eqn>s * &quot;{name}&quot;</eqn></flow>"#
+        ));
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::On);
+        assert!(diags.is_empty(), "{name}: {diags:?}");
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::On)
+            .unwrap_or_else(|e| panic!("{name}: the model must compile under LTM: {e:?}"));
+        assert_eq!(final_value(&project, "s"), 1.5, "{name}");
+    }
+}
+
+/// A variable named for one of the slots the VM keeps for the clock and the
+/// run's specs (`vm::TIME_OFF`, `DT_OFF`, `INITIAL_TIME_OFF`,
+/// `FINAL_TIME_OFF`) takes that slot's key in the results: the column of
+/// the name is the variable's series, and the clock is read from its slot.
+#[test]
+fn a_variable_named_for_a_clock_slot_takes_its_results_key() {
+    for name in ["time", "dt", "initial_time", "final_time"] {
+        let project = TestProject::new("p")
+            .with_sim_time(1.0, 3.0, 1.0)
+            .aux(name, "42", None)
+            .build_datamodel();
+        let mut vm = crate::queue_compile::build_vm(&project, "main").expect("model must build");
+        vm.run_to_end().expect("simulation must run");
+        let results = vm.into_results();
+        let at = results.offsets[&Ident::new(name)];
+        let column: Vec<f64> = results.iter().map(|row| row[at]).collect();
+        assert_eq!(column, [42.0, 42.0, 42.0], "{name}");
+        let clock: Vec<f64> = results
+            .iter()
+            .map(|row| row[crate::results::TIME_OFF])
+            .collect();
+        assert_eq!(clock, [1.0, 2.0, 3.0], "{name}");
+    }
 }

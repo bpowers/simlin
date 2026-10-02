@@ -1046,6 +1046,32 @@ fn the_gate_refuses_a_value_that_is_not_a_number_and_lists_every_warning() {
     );
 }
 
+/// The gate reads a variable's series whatever its name holds: a `$`, a
+/// `[`, or the word `time`, whose series has the results' `time` key.
+#[test]
+fn the_gate_refuses_a_value_that_is_not_a_number_whatever_the_name() {
+    for name in ["$x", "cost [usd]", "time", "plain"] {
+        let project = inventory().aux(name, "1", None);
+        let mut host = Host::from_test_project(&project);
+        let mut session = Session::new("main");
+        read(&mut host, &mut session);
+        let output = edit(
+            &mut host,
+            &mut session,
+            operations(json!([{"op": "set_equation", "variable": name, "equation": "0 / 0"}])),
+        );
+        assert_eq!(output["verdict"], "refused", "{name}: {output}");
+        assert!(
+            output["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["code"] == "non_finite" && d["variable"] == name),
+            "{name}: {output}"
+        );
+    }
+}
+
 /// A model that did not simulate has no run to compare with, so a value
 /// that is not a number there is not the edit's doing: a repair of a
 /// learner's broken model is not refused for one.

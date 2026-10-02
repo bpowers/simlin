@@ -81,7 +81,7 @@ impl BinaryOp {
 /// [`Literal`], compared by bit pattern. The same argument applies to `Expr1`,
 /// `Expr2` and `Expr3`; see [`Literal`] for the full statement.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone)]
 pub enum Expr0 {
     Const(String, Literal, Loc),
     Var(RawIdent, Loc),
@@ -95,7 +95,7 @@ pub enum Expr0 {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone)]
 pub enum IndexExpr0 {
     Wildcard(Loc),
     StarRange(RawIdent, Loc),
@@ -122,7 +122,7 @@ impl IndexExpr0 {
     pub(crate) fn eq_ignoring_loc(&self, other: &IndexExpr0) -> bool {
         match (self, other) {
             (IndexExpr0::Wildcard(_), IndexExpr0::Wildcard(_)) => true,
-            (IndexExpr0::StarRange(l, _), IndexExpr0::StarRange(r, _)) => l == r,
+            (IndexExpr0::StarRange(l, _), IndexExpr0::StarRange(r, _)) => same_name(l, r),
             (IndexExpr0::Range(ll, lr, _), IndexExpr0::Range(rl, rr, _)) => {
                 ll.eq_ignoring_loc(rl) && lr.eq_ignoring_loc(rr)
             }
@@ -296,8 +296,13 @@ impl Expr0 {
         }
     }
 
-    /// Do these two expressions say the same thing, ignoring where they were
-    /// written?
+    /// Do these two expressions say the same thing, however each was
+    /// spelled and wherever it was written? Exactly
+    /// `self.canonical(Aliases::Spelling) == other.canonical(Aliases::Spelling)`
+    /// ([`crate::ast::CanonicalEqn`], the one owner of that question), walked
+    /// without building either canonical tree
+    /// (`canonical_tests::eq_ignoring_loc_is_canonical_equality` holds the two
+    /// together).
     ///
     /// `PartialEq` compares source positions, and it must: salsa uses it to
     /// decide whether a re-parse changed anything, and an expression that moved
@@ -307,7 +312,8 @@ impl Expr0 {
     /// two copies came from. The apply-to-all expansion walks one cloned body
     /// per element, and the dt and initial passes walk one equation twice, so
     /// that question is asked on every model with a capture in an arrayed
-    /// equation. See [`crate::capture::Capture::same_definition`].
+    /// equation, which is why it allocates nothing. See
+    /// [`crate::capture::Capture::same_definition`].
     ///
     /// A constant is the VALUE it denotes: `2` and `2.0` compute the same thing,
     /// so a helper minted from each is one helper. Its spelling matters only to
@@ -315,17 +321,17 @@ impl Expr0 {
     pub(crate) fn eq_ignoring_loc(&self, other: &Expr0) -> bool {
         match (self, other) {
             (Expr0::Const(_, ln, _), Expr0::Const(_, rn, _)) => ln == rn,
-            (Expr0::Var(l, _), Expr0::Var(r, _)) => l == r,
+            (Expr0::Var(l, _), Expr0::Var(r, _)) => same_name(l, r),
             (
                 Expr0::App(UntypedBuiltinFn(lf, largs), _),
                 Expr0::App(UntypedBuiltinFn(rf, rargs), _),
             ) => {
-                lf == rf
+                crate::common::canonicalize(lf) == crate::common::canonicalize(rf)
                     && largs.len() == rargs.len()
                     && largs.iter().zip(rargs).all(|(l, r)| l.eq_ignoring_loc(r))
             }
             (Expr0::Subscript(lid, lidx, _), Expr0::Subscript(rid, ridx, _)) => {
-                lid == rid
+                same_name(lid, rid)
                     && lidx.len() == ridx.len()
                     && lidx.iter().zip(ridx).all(|(l, r)| l.eq_ignoring_loc(r))
             }
@@ -351,6 +357,13 @@ impl Expr0 {
             Expr0::If(_, _, _, loc) => *loc,
         }
     }
+}
+
+/// Whether two names are one name to the engine, which resolves a name by its
+/// canonical ident. `canonicalize` borrows a name that is already canonical,
+/// so the common case allocates nothing.
+fn same_name(l: &RawIdent, r: &RawIdent) -> bool {
+    l == r || crate::common::canonicalize(l.as_str()) == crate::common::canonicalize(r.as_str())
 }
 
 impl Default for Expr0 {

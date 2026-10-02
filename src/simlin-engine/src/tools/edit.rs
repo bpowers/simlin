@@ -1960,16 +1960,27 @@ fn newly_non_finite(
         .iter()
         .take(super::runs::saved_rows(results))
         .collect();
+    let declared: BTreeSet<String> = model
+        .variables
+        .iter()
+        .map(|var| crate::canonicalize(var.get_ident()).into_owned())
+        .collect();
     let mut found: Vec<(String, f64)> = Vec::new();
     for (key, &offset) in &results.offsets {
         let key = key.as_str();
-        if key.starts_with('$') || key == "time" {
+        // The clock and the compiler's helpers are no variable's series; a
+        // variable's name may hold `$`, `[` or the word `time`.
+        let Some(owner) = crate::save_check::column_variable(key, &declared) else {
             continue;
-        }
+        };
         let Some(row) = rows.iter().position(|r| !r[offset].is_finite()) else {
             continue;
         };
-        let variable = crate::ltm::strip_subscript(key);
+        let variable = if owner == key {
+            key
+        } else {
+            crate::ltm::strip_subscript(key)
+        };
         let subscript = &key[variable.len()..];
         let base_key = format!(
             "{}{subscript}",

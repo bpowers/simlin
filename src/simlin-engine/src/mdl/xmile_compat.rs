@@ -296,6 +296,19 @@ impl XmileFormatter {
         if result.eq_ignore_ascii_case("nan") {
             return result;
         }
+        // A second disclosed residual: a name the equation language reads as
+        // a zero-argument builtin's call (`dt`, `pi`: names Vensim models
+        // declare as variables, as `test/metasd/theil-statistics` and
+        // `test/metasd/thyroid-dynamics` do) stays bare, so a reference to a
+        // Vensim variable of that name reads
+        // the builtin, not the variable. Quoting it reads the variable, and
+        // the writer (`mdl::writer`'s zero-argument call arm) then has to
+        // tell the two apart by the tree rather than by the variable set: it
+        // writes `dt = TIME STEP` back as `dt = dt`, which only this bare
+        // spelling reads back as the builtin it stands for.
+        if crate::builtins::is_0_arity_builtin_fn_ci(&result) {
+            return result;
+        }
         if crate::ast::needs_quoting(&result) {
             format!("\"{}\"", result)
         } else {

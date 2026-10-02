@@ -163,11 +163,11 @@ impl Eq for Literal {}
 /// Consistent with [`PartialEq`]: equal literals hash equal because both are
 /// defined on the same bit pattern.
 ///
-/// Nothing hashes a `Literal` today -- none of the AST enums derives `Hash`.
-/// It exists so that the obvious future change does not silently break the
-/// `Hash`/`Eq` contract: `ltm_agg`'s synthetic-agg dedup map is keyed by printed
-/// equation text precisely *because* `Expr2` is not `Hash`, and a `Hash` derived
-/// over a bare `f64` would disagree with bit equality on NaN.
+/// `Expr0` derives `Hash` over it (an equation's canonical form,
+/// `ast::CanonicalEqn`, is hashable), and a `Hash` derived over a bare `f64`
+/// would disagree with bit equality on NaN. The later tiers do not derive it:
+/// `ltm_agg`'s synthetic-agg dedup map is keyed by printed equation text
+/// because `Expr2` is not `Hash`.
 impl Hash for Literal {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.to_bits().hash(state);

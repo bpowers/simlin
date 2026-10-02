@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use indexmap::IndexMap;
 
-use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, Literal};
+use crate::ast::{Ast, Expr0, IndexExpr0, Literal};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::capture::{
     Capture, CaptureKind, CaptureShape, HoistedArg, ImplicitModule, ImplicitVar, element_suffix,
@@ -835,13 +835,14 @@ impl<'a> BuiltinVisitor<'a> {
                 }
 
                 let (func, args) = rewrite_alias_module_call(func, args, loc)?;
-                // MODULO(x, y) is the function-call form of the MOD binary operator
-                if func == "modulo" && args.len() == 2 {
-                    let mut it = args.into_iter();
-                    let lhs = it.next().unwrap();
-                    let rhs = it.next().unwrap();
-                    return Ok(Op2(BinaryOp::Mod, Box::new(lhs), Box::new(rhs), loc));
-                }
+                // A call that is the function-call spelling of a binary
+                // operator (`MODULO(x, y)` is `x mod y`) is that operator:
+                // `ast::operator_for_call` is the one list, which an
+                // equation's canonical form reads too.
+                let args = match crate::ast::operator_for_call(&func, args) {
+                    Ok((op, lhs, rhs)) => return Ok(Op2(op, Box::new(lhs), Box::new(rhs), loc)),
+                    Err(args) => args,
+                };
                 let args = if func == "previous" && args.len() == 1 {
                     let mut args = args;
                     args.push(Const("0".to_string(), Literal::new(0.0), loc));

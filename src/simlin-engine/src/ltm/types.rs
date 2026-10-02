@@ -372,9 +372,12 @@ pub(crate) fn normalize_module_ref(ident: &Ident<Canonical>) -> Ident<Canonical>
 /// The reserved synthetic-name prefix: `$` followed by U+205A (TWO DOT
 /// PUNCTUATION). Every macro-instantiation internal (`$⁚{var}⁚{n}⁚{func}`)
 /// and every LTM-internal node (`$⁚ltm⁚agg⁚{n}`, `$⁚ltm⁚link_score⁚…`, etc.)
-/// begins with it. Real model variables never start with `$`, so this is an
-/// exact membership test for "is this node a synthetic/macro/module internal
-/// rather than a user variable".
+/// begins with it, and `capture::synthetic_ident` spells the helper names
+/// with it. Neither character is an identifier character, so a model
+/// variable carries it only under a quoted name that spells it out (a `$`
+/// alone, as in `"$x"`, is not the prefix): this is the membership test for
+/// "is this node a synthetic/macro/module internal rather than a user
+/// variable".
 pub(crate) const SYNTHETIC_NODE_PREFIX: &str = "$\u{205A}";
 
 /// `true` when `name` is a synthetic/internal node -- a macro-instantiation
