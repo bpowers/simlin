@@ -4,4 +4,6 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
+cc d9e14de4a6d38a8f36edc84689bde8d36c857096b031593b47a28a49478adeed # shrinks to name = "pi"
+cc 3f86b0a658ec54ec4073fe41acbe464d5dd3dc7ae8902b8d71f509ab456ac586 # shrinks to expr = Op1(Negative, Op1(Negative, Var(RawIdent("pi"), Loc { start: 0, end: 0 }), Loc { start: 0, end: 0 }), Loc { start: 0, end: 0 })
 cc 8caa1a7b2287c982fb2ee0ff605aec31b76241f6ac7c2f70cf3dfc45b04ae9d8 # shrinks to expr = If(Var(RawIdent("a"), Loc { start: 0, end: 0 }), Op1(Transpose, App(UntypedBuiltinFn("abs", [Var(RawIdent("a"), Loc { start: 0, end: 0 })]), Loc { start: 0, end: 0 }), Loc { start: 0, end: 0 }), Var(RawIdent("a"), Loc { start: 0, end: 0 }), Loc { start: 0, end: 0 })

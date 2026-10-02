@@ -70,7 +70,7 @@ fn test_loc_basics() {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone)]
 /// An unresolved builtin call: the function's lowercased name and its
 /// arguments. The arguments are a `Box<[Expr]>` rather than a `Vec` so a
 /// node holds exactly the arguments it has: an argument list is fixed once

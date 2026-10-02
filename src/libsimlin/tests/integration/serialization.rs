@@ -1050,6 +1050,57 @@ fn test_check_save_names_a_change_the_run_does_not_show_as_a_warning() {
     }
 }
 
+/// A stock and its outflow marked non-negative, the stock far above zero for
+/// the whole run. MDL has no such marking.
+const A_NON_NEGATIVE_STOCK: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+<header><name>t</name><vendor>v</vendor><product version="1">p</product></header>
+<sim_specs><start>0</start><stop>5</stop><dt>1</dt></sim_specs>
+<model><variables>
+<stock name="s"><eqn>100</eqn><outflow>drain</outflow><non_negative/></stock>
+<flow name="drain"><eqn>1</eqn><non_negative/></flow>
+</variables></model></xmile>"#;
+
+/// The engine does not enforce a non-negative marking, so its runs of the
+/// model and of the save are the same, and the marking's loss is an error all
+/// the same: no run of the engine shows whether the marking binds.
+#[test]
+fn test_check_save_grades_a_lost_non_negative_marking_as_an_error() {
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_xmile(
+            A_NON_NEGATIVE_STOCK.as_ptr(),
+            A_NON_NEGATIVE_STOCK.len(),
+            &mut err,
+        );
+        expect_no_error(err, "open_xmile");
+        let mut changes: *mut SimlinError = ptr::null_mut();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_project_check_save(
+            proj,
+            SimlinSaveFormat::Mdl as u32,
+            ptr::null(),
+            0,
+            &mut changes,
+            &mut err,
+        );
+        expect_no_error(err, "check_save");
+        assert!(!changes.is_null(), "MDL drops the marking");
+        assert_eq!(simlin_error_get_detail_count(changes), 2);
+        for (i, variable) in ["drain", "s"].into_iter().enumerate() {
+            let detail = &*simlin_error_get_detail(changes, i);
+            assert_eq!(detail.severity, SimlinErrorSeverity::Error);
+            assert_eq!(CStr::from_ptr(detail.variable_name).to_str(), Ok(variable));
+            assert_eq!(
+                CStr::from_ptr(detail.details).to_str().unwrap(),
+                format!("'{variable}' is no longer non-negative")
+            );
+        }
+        simlin_error_free(changes);
+        simlin_project_unref(proj);
+    }
+}
+
 /// With `file_io` (on for this crate's tests), the check reads an MDL save
 /// back with the data dir the project was opened with.
 #[cfg(feature = "file_io")]

@@ -10,8 +10,6 @@
 
 use std::fmt;
 
-use crate::canonicalize;
-
 /// A formula expression in the systems format.
 /// Formulas are evaluated strictly left-to-right with no operator precedence.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,7 +77,9 @@ impl Expr {
                 // Ensure decimal point is present for clarity
                 if s.contains('.') { s } else { format!("{f}.0") }
             }
-            Expr::Ref(name) => canonicalize(name).into_owned(),
+            // Spelled as an equation spells a name: a stock named `pi` is
+            // read as the stock only quoted.
+            Expr::Ref(name) => crate::ast::print_ident(name),
             Expr::Inf => "inf()".to_string(),
             Expr::Paren(inner) => format!("({})", inner.to_equation_string()),
             Expr::BinOp(left, op, right) => {

@@ -21,9 +21,7 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident, IdentMap};
 
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
-use crate::db::var_fragment::{
-    dimensions_named, is_implicit_global, model_dep_shape, source_dep_shape,
-};
+use crate::db::var_fragment::{dimensions_named, model_dep_shape, source_dep_shape};
 use crate::db::{
     Db, Diagnostic, DiagnosticError, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel,
     SourceProject, VarFragmentResult, canonical_module_input_set,
@@ -649,7 +647,7 @@ fn lower_ltm_variable(
         ),
     );
     for head in ltm_read_heads(db, model, project, own_helpers, &classified) {
-        if head == var_ident || is_implicit_global(head.as_str()) {
+        if head == var_ident {
             continue;
         }
         let shape = own_helpers

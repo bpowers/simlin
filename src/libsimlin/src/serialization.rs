@@ -403,14 +403,14 @@ pub unsafe extern "C" fn simlin_project_serialize_mdl(
 ///
 /// - its definition: the simulation specs, each dimension's elements, parent
 ///   and mappings, and each variable's kind, dimensions, elements, equations
-///   (in the spelling the engine resolves them by), `:EXCEPT:` default,
-///   initial values, graphical functions, flows and the flags that change a
-///   simulation, whether or not the project simulates;
+///   (in their canonical form), `:EXCEPT:` default, initial values, graphical
+///   functions, flows and the markings that change a simulation, whether or
+///   not the project simulates;
 /// - when the project simulates, every variable's series, value for value.
 ///
 /// When the check cannot be sure a save keeps the meaning, it reports a
-/// change. Units, documentation and views are not meaning; a save that
-/// loses them reports them through the writers' own warnings.
+/// change. Units, documentation and views are not meaning, and the check
+/// says nothing of them.
 ///
 /// Each change is a wire-`Generic` detail on the aggregate `SimlinError`
 /// stored in `out_changes`: kind `Variable` with `variable_name` set when one
@@ -423,10 +423,14 @@ pub unsafe extern "C" fn simlin_project_serialize_mdl(
 /// The verdict is `out_changes` itself: NULL when the save keeps the model's
 /// meaning, and otherwise the save must not be made in place. A detail's
 /// severity only grades its change: `Error` when the save's results differ
-/// from the project's now, `Warning` when only its definition does (an
-/// equation the run never reaches, a flag it never exercises). When neither
-/// the project nor its save simulates, every detail is a `Warning`, since
-/// there are no results to compare.
+/// from the project's, `Warning` when only its definition does (an equation
+/// the run never reaches, an `:EXCEPT:` default that fills no element). A
+/// non-negative marking a stock or flow loses or gains is an `Error` (an
+/// auxiliary's means nothing to the engine and is not compared): the engine
+/// does not enforce the marking, so no run of it shows whether the marking
+/// binds, and a simulator that enforces it computes other results wherever
+/// it does. When neither the project nor its save simulates, every detail is
+/// a `Warning`, since there are no results to compare.
 ///
 /// `data_dir` is the directory the project's external data files are found
 /// in, as `simlin_project_open_vensim_with_data` takes it, so an MDL save's

@@ -48,7 +48,7 @@ pub(crate) use graph::{
     ModulePathways, ModulePathwaysWithTruncation, assign_loop_ids, module_pathway_budget,
 };
 pub(crate) use partitions::loop_dimension_element_tuples;
-pub(crate) use types::{is_synthetic_node_name, normalize_module_ref};
+pub(crate) use types::{SYNTHETIC_NODE_PREFIX, is_synthetic_node_name, normalize_module_ref};
 
 // Shared SCC primitive over an `Ident`-keyed adjacency list. Used in
 // production by the `db/dep_graph.rs` element-cycle refinement

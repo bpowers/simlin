@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::ast::print_ident;
 use crate::canonicalize;
 use crate::common::Result;
 use crate::datamodel::{
@@ -349,10 +350,10 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
             let drain_ident = format!("{source_canon}_drained_{}", acc.len());
             let outflow_terms = acc
                 .iter()
-                .map(|s| s.as_str())
+                .map(|s| print_ident(s))
                 .collect::<Vec<_>>()
                 .join(" - ");
-            let drain_eq = format!("{source_canon} - {outflow_terms}");
+            let drain_eq = format!("{} - {outflow_terms}", print_ident(&source_canon));
             variables.push(Variable::Aux(Aux {
                 ident: drain_ident.clone(),
                 equation: Equation::Scalar(drain_eq),
@@ -463,11 +464,16 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
                     })
                     .unwrap_or_default();
 
+                let dest = print_ident(&dc.dest_canon);
                 if outflows.is_empty() {
-                    format!("{rewritten_max} - {}", dc.dest_canon)
+                    format!("{rewritten_max} - {dest}")
                 } else {
-                    let outflow_sum = outflows.join(" + ");
-                    format!("{rewritten_max} - {} + {outflow_sum}", dc.dest_canon)
+                    let outflow_sum = outflows
+                        .iter()
+                        .map(|f| print_ident(f))
+                        .collect::<Vec<_>>()
+                        .join(" + ");
+                    format!("{rewritten_max} - {dest} + {outflow_sum}")
                 }
             }
         };
@@ -579,10 +585,8 @@ fn canon(name: &str) -> String {
 }
 
 /// Rewrite an Expr to an equation string, substituting Ref nodes whose
-/// canonical name appears in `rewrites` with the raw target string.
-/// Unlike `Expr::to_equation_string`, this avoids re-canonicalizing the
-/// substituted targets, preserving `.` separators in module references
-/// like `module.remaining`.
+/// canonical name appears in `rewrites` with the target's name, every name
+/// spelled through `print_ident`.
 ///
 /// Applies the same left-to-right parenthesization logic as
 /// `Expr::to_equation_string`: when the left child of a BinOp has lower
@@ -600,13 +604,11 @@ fn rewrite_expr_to_equation(expr: &Expr, rewrites: &HashMap<String, String>) -> 
     }
 
     match expr {
+        // A name is spelled as an equation spells it (`print_ident`): a stock
+        // named `pi` is read as the stock only quoted.
         Expr::Ref(name) => {
             let canon_name = canonicalize(name).into_owned();
-            if let Some(target) = rewrites.get(&canon_name) {
-                target.clone()
-            } else {
-                canon_name
-            }
+            print_ident(rewrites.get(&canon_name).unwrap_or(&canon_name))
         }
         Expr::Int(n) => format!("{n}"),
         Expr::Float(f) => {
@@ -689,6 +691,79 @@ mod tests {
         match find_var(project, ident)?.get_equation()? {
             Equation::Scalar(s) => Some(s.clone()),
             _ => None,
+        }
+    }
+
+    /// The final value of every column of `source`'s run, by name.
+    fn final_values(source: &str) -> std::collections::BTreeMap<String, f64> {
+        let project = crate::compat::open_systems(source).expect("the model reads");
+        let mut vm = crate::queue_compile::build_vm(&project, "main").expect("the model compiles");
+        vm.run_to_end().expect("the model runs");
+        let results = vm.into_results();
+        let last = results.iter().next_back().expect("a last step").to_vec();
+        results
+            .offsets
+            .iter()
+            .map(|(name, &at)| (name.as_str().to_string(), last[at]))
+            .collect()
+    }
+
+    /// A stock named like a zero-argument builtin is read as the stock in
+    /// every equation the translation writes: a rate that names it, drained
+    /// or not, the drain of its outflows, the capacity left in it as a
+    /// destination, and another stock's initial value and maximum. Each model
+    /// runs as the same model under the plain name `a`.
+    #[test]
+    fn a_stock_named_like_a_builtin_is_read_as_the_stock() {
+        let models = [
+            "A(10) > B @ 1\nC(2) > D @ A\nA > E @ 8\n",
+            "A(4, 5) > c @ 5\nz(10) > A @ 10\n",
+            "A(100)\nB(A)\nC(1, A)\nX(1) > Y @ A\n",
+        ];
+        // `inf` is left out: the systems format's own lexer reads it as
+        // infinity (`Token::Inf`), so no systems model can name a stock `inf`
+        // in an expression.
+        let names: Vec<&str> = crate::builtins::BuiltinSig::ALL
+            .iter()
+            .filter(|sig| sig.max_args == Some(0))
+            .flat_map(|sig| std::iter::once(sig.name).chain(sig.aliases.iter().copied()))
+            .filter(|name| *name != "inf")
+            .collect();
+        for model in models {
+            let plain = final_values(model);
+            for name in &names {
+                let renamed = final_values(&model.replace('A', name));
+                // The columns of `a` and of what the translation names after
+                // it; a stock named for a clock column (`time`, `dt`) takes
+                // that column's key, so the plain run's clock is left out.
+                let expected: std::collections::BTreeMap<String, f64> = plain
+                    .iter()
+                    .filter(|(column, _)| column.starts_with('a'))
+                    .map(|(column, value)| (column.replacen('a', name, 1), *value))
+                    .collect();
+                let compared =
+                    |values: &std::collections::BTreeMap<String, f64>| -> Vec<(String, f64)> {
+                        values
+                            .iter()
+                            .filter(|(column, _)| {
+                                column.starts_with(*name) && !column.contains('\u{b7}')
+                            })
+                            .map(|(column, value)| (column.clone(), *value))
+                            .collect()
+                    };
+                assert_eq!(
+                    compared(&renamed),
+                    compared(&expected),
+                    "{name} in {model:?}"
+                );
+                for stock in ["b", "c", "d", "e", "x", "y", "z"] {
+                    assert_eq!(
+                        renamed.get(stock),
+                        plain.get(stock),
+                        "{stock}, {name} in {model:?}"
+                    );
+                }
+            }
         }
     }
 

@@ -24,7 +24,7 @@ use crate::ast::LoweringScope;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
-    DeclaredName, ExplicitFragment, ResolvedHeads, explicit_fragment_input, is_implicit_global,
+    DeclaredName, ExplicitFragment, ResolvedHeads, explicit_fragment_input,
 };
 
 // Test-only per-thread record of which fragment-compiler bodies ran.
@@ -372,8 +372,10 @@ fn implicit_referenced_names<MI, E>(
     names
 }
 
-/// Every name in `names` that `model` declares (the helper itself and the
-/// implicit globals skipped), each resolved once through `DeclaredName`. A
+/// Every name in `names` that `model` declares (the helper itself skipped),
+/// each resolved once through `DeclaredName`; a name spelled like a builtin's
+/// (`dt`) is the variable the model declares under it, as for an explicit
+/// variable (`var_fragment::resolve_referenced_heads`). A
 /// helper's dependencies are explicit variables of the same model or other
 /// helpers; a name that is neither fails to resolve at lowering.
 fn implicit_referenced_heads(
@@ -385,7 +387,7 @@ fn implicit_referenced_heads(
 ) -> ResolvedHeads {
     let mut heads: ResolvedHeads = Vec::new();
     for head in names {
-        if head.as_str() == self_name || is_implicit_global(head.as_str()) {
+        if head.as_str() == self_name {
             continue;
         }
         if let Some(declared) = DeclaredName::resolve(db, model, project, head.as_str()) {

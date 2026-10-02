@@ -59,9 +59,11 @@ use crate::variable::{ElementScope, VarKind, Variable, get_dimensions};
 
 /// The name a synthesized helper of `parent` is filed under.
 ///
-/// The separator is U+205A (TWO DOT PUNCTUATION) and the prefix is `$`; neither
-/// is an identifier character, so a helper name can never collide with a
-/// user-authored one, and every one of them prints quoted.
+/// The separator is U+205A (TWO DOT PUNCTUATION) and the prefix is
+/// [`crate::ltm::SYNTHETIC_NODE_PREFIX`], `$` and the separator, which is how
+/// every reader tells a helper from a variable; neither character is an
+/// identifier character, so only a quoted name could collide with a helper's,
+/// and every helper name prints quoted.
 ///
 /// `part` says what the helper holds -- `arg0` for a `PREVIOUS`/`INIT`
 /// capture, `arg{i}` for a hoisted module-call argument, the function name for
@@ -80,9 +82,10 @@ use crate::variable::{ElementScope, VarKind, Variable, get_dimensions};
 /// One function means the parse, the dependency stage and the layout cannot
 /// disagree about where a helper sorts.
 pub(crate) fn synthetic_ident(parent: &str, n: usize, part: &str, suffix: Option<&str>) -> String {
+    use crate::ltm::SYNTHETIC_NODE_PREFIX as PREFIX;
     match suffix {
-        Some(suffix) if !suffix.is_empty() => format!("$⁚{parent}⁚{n}⁚{part}⁚{suffix}"),
-        _ => format!("$⁚{parent}⁚{n}⁚{part}"),
+        Some(suffix) if !suffix.is_empty() => format!("{PREFIX}{parent}⁚{n}⁚{part}⁚{suffix}"),
+        _ => format!("{PREFIX}{parent}⁚{n}⁚{part}"),
     }
 }
 

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5fa43e654ab45ff49c8cc1c090ee102b6eb39c543802d28152adf386c0c5bdc9 # shrinks to a = App(UntypedBuiltinFn("abs", [App(UntypedBuiltinFn("abs", [Var(RawIdent("pi"), Loc { start: 0, end: 0 })]), Loc { start: 0, end: 0 })]), Loc { start: 0, end: 0 }), b = Var(RawIdent("a"), Loc { start: 0, end: 0 })
+cc df83571c55b4357c7e2bfd873cb060aaca006623d6297fe8f773c4b17a94805e # shrinks to a = If(App(UntypedBuiltinFn("MAX", [Var(RawIdent("a"), Loc { start: 0, end: 0 })]), Loc { start: 0, end: 0 }), Var(RawIdent("a"), Loc { start: 0, end: 0 }), Var(RawIdent("a"), Loc { start: 0, end: 0 }), Loc { start: 0, end: 0 }), b = Var(RawIdent("a"), Loc { start: 0, end: 0 })
