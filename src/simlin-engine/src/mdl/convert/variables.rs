@@ -1644,9 +1644,10 @@ impl<'input> ConversionContext<'input> {
 /// sorted before use." Neither speaks of a lookup written out of order in a
 /// model file; the output above is what settles that.
 ///
-/// The sort is stable, so points that share an x (a vertical step) keep the
-/// order they are listed in. Which of them Vensim answers with at that x, and
-/// how it orders them when the list is also out of order, is unverified.
+/// The sort is stable and compares x as numbers, so points that share an x (a
+/// vertical step, `-0` and `0` included, which the lookups read as one x) keep
+/// the order they are listed in. Which of them Vensim answers with at that x,
+/// and how it orders them when the list is also out of order, is unverified.
 ///
 /// Lists of different lengths pair no points and are left as they are for the
 /// compiler to refuse.
@@ -1655,7 +1656,9 @@ pub(super) fn points_in_x_order(x_vals: Vec<f64>, y_vals: Vec<f64>) -> (Vec<f64>
         return (x_vals, y_vals);
     }
     let mut points: Vec<(f64, f64)> = x_vals.into_iter().zip(y_vals).collect();
-    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // A NaN has no numeric order; `total_cmp` places it so the sort is total,
+    // and the compiler refuses the table for it.
+    points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or_else(|| a.0.total_cmp(&b.0)));
     points.into_iter().unzip()
 }
 

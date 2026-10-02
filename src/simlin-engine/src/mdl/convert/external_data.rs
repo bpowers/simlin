@@ -14,8 +14,6 @@ use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::data_provider::DataProvider;
 use crate::datamodel::{GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale};
 
-use super::variables::points_in_x_order;
-
 /// Parsed GET DIRECT function call.
 #[derive(Clone)]
 pub(super) enum GetDirectCall {
@@ -411,13 +409,18 @@ pub(super) fn resolve_get_direct(
     }
 }
 
-/// Convert (x, y) pairs to a GraphicalFunction lookup table, its points put in
-/// ascending x order by the importer's one ordering rule
-/// (`variables::points_in_x_order`), since the compiler refuses a table whose
-/// x decreases (`variable::parse_table`). How Vensim reads a data file's
-/// series listed out of x order is undocumented, so reading it as the curve
-/// through its points, as Vensim reads a lookup in the model file, is the
-/// engine's rule, unverified.
+/// Convert (x, y) pairs to a GraphicalFunction lookup table, its points in
+/// the order the provider returns them.
+///
+/// A series listed out of x order is not reordered. How Vensim reads one is
+/// unverified: its `GET DIRECT DATA` and `GET DIRECT LOOKUPS` pages
+/// (vensim.com/documentation, `fn_get_direct_data.html`,
+/// `fn_get_direct_lookups.html`) say nothing of row order, and no run in
+/// `test/` settles it as one settles a lookup written in the model file
+/// (`variables::points_in_x_order`). So the importer does not choose a
+/// reading: the table keeps the file's order and the compiler refuses it
+/// (`variable::parse_table`, `BadTable`), which names the problem instead of
+/// computing from an order nobody checked.
 fn pairs_to_graphical_function(pairs: &[(f64, f64)]) -> GraphicalFunction {
     if pairs.is_empty() {
         return GraphicalFunction {
@@ -429,10 +432,8 @@ fn pairs_to_graphical_function(pairs: &[(f64, f64)]) -> GraphicalFunction {
         };
     }
 
-    let (x_points, y_points) = points_in_x_order(
-        pairs.iter().map(|(x, _)| *x).collect(),
-        pairs.iter().map(|(_, y)| *y).collect(),
-    );
+    let x_points: Vec<f64> = pairs.iter().map(|(x, _)| *x).collect();
+    let y_points: Vec<f64> = pairs.iter().map(|(_, y)| *y).collect();
 
     let x_min = x_points.iter().cloned().fold(f64::INFINITY, f64::min);
     let x_max = x_points.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -786,8 +787,10 @@ mod tests {
         }
     }
 
+    /// The importer keeps the file's order rather than choose how Vensim
+    /// would read it, and the compiler refuses the table.
     #[test]
-    fn an_external_series_listed_out_of_x_order_is_read_in_x_order() {
+    fn an_external_series_listed_out_of_x_order_is_kept_as_listed_and_refused() {
         // One row per GET DIRECT call; the match says which of them build a
         // table, so a new call kind needs a row and an answer.
         let calls = [
@@ -809,12 +812,11 @@ mod tests {
                 ResolvedData::Lookup(_, gf) => {
                     assert!(builds_a_table, "{expr}");
                     tables += 1;
-                    assert_eq!(gf.x_points, Some(vec![0.0, 1.0, 2.0, 3.0]), "{expr}");
-                    assert_eq!(gf.y_points, vec![10.0, 20.0, 30.0, 40.0], "{expr}");
-                    let table = crate::variable::parse_table(Some(&gf))
-                        .expect("the compiler accepts the table")
-                        .expect("a table");
-                    assert_eq!(table.x, vec![0.0, 1.0, 2.0, 3.0], "{expr}");
+                    assert_eq!(gf.x_points, Some(vec![2.0, 0.0, 3.0, 1.0]), "{expr}");
+                    assert_eq!(gf.y_points, vec![30.0, 10.0, 40.0, 20.0], "{expr}");
+                    let refusal = crate::variable::parse_table(Some(&gf))
+                        .expect_err("the compiler refuses the table");
+                    assert_eq!(refusal.code, crate::common::ErrorCode::BadTable, "{expr}");
                 }
                 _ => assert!(!builds_a_table, "{expr}"),
             }

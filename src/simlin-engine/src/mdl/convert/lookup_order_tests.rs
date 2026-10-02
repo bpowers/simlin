@@ -188,3 +188,36 @@ fn a_lookup_listed_out_of_x_order_is_imported_in_x_order_whatever_its_syntax() {
         assert!(carriers.contains(&carrier), "{carrier:?} has rows");
     }
 }
+
+/// Points that share an x keep their listed order through the sort, a step
+/// written with both signs of zero included: the lookups read `-0` and `0` as
+/// one x, so ordering them by sign would change which y the step answers.
+#[test]
+fn points_that_share_an_x_keep_their_listed_order() {
+    struct Row {
+        listed: &'static [(f64, f64)],
+        in_order: &'static [(f64, f64)],
+    }
+    let rows = [
+        Row {
+            listed: &[(2.0, 9.0), (0.0, 5.0), (-0.0, 7.0), (1.0, 8.0)],
+            in_order: &[(0.0, 5.0), (-0.0, 7.0), (1.0, 8.0), (2.0, 9.0)],
+        },
+        Row {
+            listed: &[(2.0, 9.0), (-0.0, 5.0), (0.0, 7.0), (1.0, 8.0)],
+            in_order: &[(-0.0, 5.0), (0.0, 7.0), (1.0, 8.0), (2.0, 9.0)],
+        },
+        Row {
+            listed: &[(3.0, 4.0), (1.0, 6.0), (1.0, 2.0), (0.0, 1.0)],
+            in_order: &[(0.0, 1.0), (1.0, 6.0), (1.0, 2.0), (3.0, 4.0)],
+        },
+    ];
+    let bits = |values: Vec<f64>| values.into_iter().map(f64::to_bits).collect::<Vec<u64>>();
+    for row in rows {
+        let (x, y): (Vec<f64>, Vec<f64>) = row.listed.iter().copied().unzip();
+        let (want_x, want_y): (Vec<f64>, Vec<f64>) = row.in_order.iter().copied().unzip();
+        let (got_x, got_y) = super::points_in_x_order(x, y);
+        assert_eq!(bits(got_x), bits(want_x), "{:?}", row.listed);
+        assert_eq!(got_y, want_y, "{:?}", row.listed);
+    }
+}
