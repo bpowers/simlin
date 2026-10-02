@@ -31,7 +31,7 @@ use crate::ltm::LinkPolarity;
 
 use super::evidence::{DiagnosticReport, display_name, window};
 use super::outline::{AuxKind, aux_kind, dimensions};
-use super::series::{SeriesCore, element_series_upto};
+use super::series::{SeriesCore, keyed_series_upto, scale_in_run};
 use super::{Session, ToolError, Workspace, names, resolve_model};
 
 /// The most variables one `read_variables` call reads.
@@ -423,11 +423,12 @@ pub(crate) fn read_variables(
             // A scalar's behavior, or a named element's.
             record.behavior = current.as_ref().and_then(|run| {
                 let (series, omitted) =
-                    element_series_upto(run, model, var.get_ident(), element.as_deref(), 1);
+                    keyed_series_upto(run, model, var.get_ident(), element.as_deref(), 1);
                 let scalar_or_element = record.dimensions.is_empty() || element.is_some();
                 match series.as_slice() {
-                    [(_, values)] if omitted == 0 && scalar_or_element => {
-                        Some(SeriesCore::of(&run.times(), values))
+                    [series] if omitted == 0 && scalar_or_element => {
+                        let scale = scale_in_run(&run.results, model, &series.key);
+                        Some(SeriesCore::at(&run.times(), &series.values, scale))
                     }
                     _ => None,
                 }

@@ -459,11 +459,15 @@ specific time -- use `model.simulate()`:
 
 ```python
 with model.simulate() as sim:
-    sim.run_to(50.0)
-    sim.set_value("max_growth_rate", 0.12)  # intervene at t=50
+    sim.run_to(50.0)                        # every step through t=50
+    sim.set_value("max_growth_rate", 0.12)  # holds from the next step on
     sim.run_to_end()
     run = sim.get_run()
 ```
+
+`run_to(t)` evaluates every step at or before `t`, so a value set after it
+takes effect at the following step. To have it hold from `t` itself, run to
+the step before (`sim.run_to(t - dt)`) and set it then.
 
 ### Accessing Results
 

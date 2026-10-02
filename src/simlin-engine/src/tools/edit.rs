@@ -1956,10 +1956,7 @@ fn newly_non_finite(
         .iter()
         .map(|(from, to)| (to.as_str(), from.as_str()))
         .collect();
-    let rows: Vec<&[f64]> = results
-        .iter()
-        .take(super::runs::saved_rows(results))
-        .collect();
+    let rows: Vec<&[f64]> = results.iter().collect();
     let declared: BTreeSet<String> = model
         .variables
         .iter()

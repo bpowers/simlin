@@ -736,10 +736,13 @@ pub(crate) fn persisted_loop_name(
         .map(|(_, name)| name.clone())
 }
 
-/// Build the time array from simulation results specs.
+/// The time of each saved row, read from the rows: a save step that is not a
+/// whole number of DTs saves rows that are not evenly spaced
+/// (`results::Specs`).
 fn build_time_array(results: &crate::results::Results) -> Vec<f64> {
-    (0..results.step_count)
-        .map(|i| results.specs.start + (i as f64) * results.specs.save_step)
+    results
+        .iter()
+        .map(|row| row[crate::results::TIME_OFF])
         .collect()
 }
 
@@ -927,6 +930,44 @@ mod tests {
         let sync = crate::db::sync_from_datamodel(&db, project);
         let sp = sync.project;
         (db, sp)
+    }
+
+    /// The time axis of an analysis, and of each discovered loop's scores, is
+    /// the rows' own. With a save step that is not a whole number of DTs the
+    /// rows are not evenly spaced (each is the first step at or after its
+    /// save time), and an axis counted in save steps from the start would be
+    /// up to a DT off them.
+    #[test]
+    fn an_analysis_reads_its_times_from_the_rows() {
+        let mut project = crate::test_common::TestProject::new("growth")
+            .with_sim_time(0.0, 6.0, 0.25)
+            .stock("s", "10", &["f"], &[], None)
+            .flow("f", "s * 0.1", None)
+            .build_datamodel();
+        project.sim_specs.save_step = Some(datamodel::Dt::Dt(0.3));
+        // The rows a save step of 0.3 saves at a DT of 0.25.
+        let specs = crate::results::Specs::from(&project.sim_specs);
+        let rows: Vec<f64> = (0..specs.n_chunks as u64)
+            .map(|row| specs.time_at(specs.saved_row_step(row) as u64))
+            .collect();
+        assert_eq!(rows[..5], [0.0, 0.5, 0.75, 1.0, 1.25]);
+
+        let (mut db, sp) = synced_db(&project);
+        let analysis = analyze_model(&project, &mut db, sp, "main", None).expect("analysis");
+        assert_eq!(analysis.time, rows);
+
+        crate::db::set_project_ltm_discovery_mode(&mut db, sp, true);
+        let mut vm = crate::build_sim(&mut db, sp, &project, "main", crate::db::LtmOverlay::On)
+            .expect("the model compiles under the overlay");
+        vm.run_to_end().expect("the model runs");
+        let results = vm.into_results();
+        let discovery =
+            discover_run_loops(&db, sp, "main", &results, None).expect("the run has a loop");
+        assert!(!discovery.loops.is_empty());
+        for found in &discovery.loops {
+            let times: Vec<f64> = found.scores.iter().map(|(time, _)| *time).collect();
+            assert_eq!(times, rows);
+        }
     }
 
     /// F2: `analyze_model` on a conveyor model must NOT report a spurious

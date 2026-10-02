@@ -312,8 +312,12 @@ pub struct Vm {
     next_chunk: usize,
     // have we completed initials and emitted the first state
     did_initials: bool,
-    // step counter for save_every cadence
-    step_accum: usize,
+    // The index of the step the clock stands at: the next step `run_to`
+    // evaluates, at `specs.time_at(step)`. The clock is counted, never
+    // accumulated, so step `k`'s time is the nearest number to `start + k*dt`
+    // however many steps came before it; past `specs.final_step()` the run is
+    // over.
+    step: u64,
     // Temp array storage (allocated once, reused across evals)
     // Indexed by temp_offsets from ByteCodeContext
     temp_storage: Vec<f64>,
@@ -773,19 +777,23 @@ pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
 pub const POISON_SENTINEL: f64 = -1.234567e123;
 
 impl Vm {
+    /// A VM that runs `sim` under the specs it was compiled with.
     pub fn new(sim: impl Into<Arc<CompiledSimulation>>) -> Result<Vm> {
         let sim: Arc<CompiledSimulation> = sim.into();
-        if sim.specs.stop < sim.specs.start {
-            return sim_err!(
-                BadSimSpecs,
-                "end time has to be after start time".to_string()
-            );
-        }
-        // Strict positivity: reject dt <= 0 (and NaN), but accept any positive
-        // value including very small ones (e.g. 1e-8 in f32).  Using approx_eq
-        // here would incorrectly reject small-but-valid timesteps.
-        if sim.specs.dt <= 0.0 || sim.specs.dt.is_nan() {
-            return sim_err!(BadSimSpecs, "dt must be greater than 0".to_string());
+        let specs = sim.specs.clone();
+        Vm::with_specs(sim, specs)
+    }
+
+    /// A VM that runs `sim`'s program under `specs` in place of the specs it
+    /// was compiled with. The program does not depend on them (start, stop, DT
+    /// and the integration method are read as the run goes), so a run under
+    /// other specs needs no other compile. A model with a conveyor or a queue
+    /// is the exception: its expansion reads the specs, so it runs under the
+    /// specs it was compiled with.
+    pub fn with_specs(sim: impl Into<Arc<CompiledSimulation>>, specs: Specs) -> Result<Vm> {
+        let sim: Arc<CompiledSimulation> = sim.into();
+        if let Some(reason) = specs.refusal() {
+            return sim_err!(BadSimSpecs, reason.to_string());
         }
 
         let root_module = sim.modules.get(&sim.root).ok_or_else(|| {
@@ -796,15 +804,49 @@ impl Vm {
             )
         })?;
         let n_slots = root_module.n_slots;
-        let n_chunks = sim.specs.n_chunks;
-        let data: Box<[f64]> = vec![0.0; n_slots * (n_chunks + 2)].into_boxed_slice();
+        let n_chunks = specs.n_chunks;
+        // The saved rows and the two working rows (the step under way and the
+        // one it integrates into). A run whose rows cannot be counted, or
+        // that the allocator will not give, is refused: specs a person can
+        // type (a DT of 1e-12) ask for more memory than there is, and the
+        // zeroed allocation below aborts the process when it fails.
+        let too_many_rows = || -> Result<Vm> {
+            sim_err!(
+                BadSimSpecs,
+                format!(
+                    "a run from {} to {} in steps of {}, saving every {}, saves {}, each of \
+                     {n_slots} values: more than can be held in memory",
+                    crate::results::written(specs.start),
+                    crate::results::written(specs.stop),
+                    crate::results::written(specs.dt),
+                    crate::results::written(specs.save_step),
+                    crate::results::written_rows(n_chunks),
+                )
+            )
+        };
+        let Some(len) = n_chunks
+            .checked_add(2)
+            .and_then(|chunks| chunks.checked_mul(n_slots))
+        else {
+            return too_many_rows();
+        };
+        // Asked of the allocator first, as a reservation that touches no
+        // memory and is given back: a refusal there is the refusal. The rows
+        // themselves are the zeroed allocation, whose pages are untouched
+        // until a row is written, so a long run that is stopped early costs
+        // what it saved. (Memory that runs out between the two is not caught;
+        // nothing in safe Rust allocates zeroed memory fallibly.)
+        if Vec::<f64>::new().try_reserve_exact(len).is_err() {
+            return too_many_rows();
+        }
+        let data: Box<[f64]> = vec![0.0; len].into_boxed_slice();
 
         // Allocate temp storage based on context temp info
         let temp_total_size = root_module.context.temp_total_size;
         let temp_storage = vec![0.0; temp_total_size];
 
         // Collect stock offsets for RK integration (empty for Euler)
-        let stock_offsets = match sim.specs.method {
+        let stock_offsets = match specs.method {
             Method::Euler => Vec::new(),
             Method::RungeKutta2 | Method::RungeKutta4 => {
                 collect_stock_offsets(&sim.modules, &sim.root, 0)
@@ -815,7 +857,7 @@ impl Vm {
         let sliced_sim = CompiledSlicedSimulation::build(&sim.modules, &sim.root);
 
         Ok(Vm {
-            specs: sim.specs.clone(),
+            specs,
             sliced_sim,
             n_slots,
             n_chunks,
@@ -823,7 +865,7 @@ impl Vm {
             curr_chunk: 0,
             next_chunk: 1,
             did_initials: false,
-            step_accum: 0,
+            step: 0,
             temp_storage,
             stack: Stack::new(),
             view_stack: Vec::with_capacity(4),
@@ -896,13 +938,66 @@ impl Vm {
         self.poison_next = true;
     }
 
-    pub fn run_to_end(&mut self) -> Result<()> {
-        let end = self.specs.stop;
-        self.run_to(end)
+    /// The specs the run is made under.
+    pub fn specs(&self) -> &Specs {
+        &self.specs
     }
 
-    #[inline(never)]
+    /// Run to the end of the run: every step up to the one at the stop time.
+    pub fn run_to_end(&mut self) -> Result<()> {
+        self.run_steps(f64::INFINITY)
+    }
+
+    /// Evaluate every step at or before `end`, and leave the clock at the
+    /// first step after it.
+    ///
+    /// The step AT `end` is evaluated: a value set after `run_to(t)` takes
+    /// effect from the step after `t`. [`Vm::run_until`] is the call that
+    /// stops before a time. A time within [`crate::results::STEP_TOLERANCE`]
+    /// of a step is that step. Steps past the stop time are never run: once
+    /// the run is over a further call evaluates nothing.
+    ///
+    /// The clock rests at a step that has not been evaluated -- after the
+    /// final step, one step past the stop time -- so time never goes back
+    /// from one call to the next. What a read sees there
+    /// ([`Vm::get_value_now`]) is that step's stocks, which the last step
+    /// integrated, and its flows and auxiliaries as a preview, computed from
+    /// the values as they are so a read between two calls sees one
+    /// consistent step.
+    ///
+    /// The wasm blob rests in the same state while the target is before its
+    /// last saved row. From there on it rests at that row, evaluated, because
+    /// it takes no step past it; making it rest where the VM does is a
+    /// question of the blob's ABI that this does not settle
+    /// (`wasmgen::module_tests::where_a_run_rests_on_each_backend`).
     pub fn run_to(&mut self, end: f64) -> Result<()> {
+        // One past the last step to evaluate. NaN compares false with every
+        // step, which runs to the end.
+        self.run_steps(self.specs.step_at_or_before(end) + 1.0)
+    }
+
+    /// Evaluate every step before `time`, and leave the clock at the first
+    /// step at or after it, not yet evaluated: a value set now takes effect
+    /// at that step, the step an equation's `TIME >= time` first holds at
+    /// under Euler integration. (Under Runge-Kutta an equation's test of TIME
+    /// is also read by the stages of the step before, which look ahead of it;
+    /// a value set here is not.)
+    pub fn run_until(&mut self, time: f64) -> Result<()> {
+        self.run_steps(self.specs.step_at_or_after(time))
+    }
+
+    /// Evaluate every step before step `step` (a step count), and rest at
+    /// it: [`Vm::run_until`] for a caller that counts in steps. Where the
+    /// clock's last place is coarser than a DT, two steps can have one time,
+    /// and only a count tells them apart.
+    pub(crate) fn run_until_step(&mut self, step: f64) -> Result<()> {
+        self.run_steps(step)
+    }
+
+    /// Evaluate steps while the clock's step is below `limit` (a step count,
+    /// possibly fractional or infinite) and the run is not over.
+    #[inline(never)]
+    fn run_steps(&mut self, limit: f64) -> Result<()> {
         // Conveyors integrate under Euler only: the slat model is defined per-DT
         // and has no meaning under Runge-Kutta substeps (§9.4). The build path
         // rejects this at compile time; this guards a Vm assembled directly.
@@ -924,11 +1019,15 @@ impl Vm {
 
         let spec_start = self.specs.start;
         let dt = self.specs.dt;
-        let save_step = self.specs.save_step;
         let n_slots = self.n_slots;
-        let n_chunks = self.n_chunks;
-
-        let save_every = std::cmp::max(1, (save_step / dt).round() as usize);
+        let final_step = self.specs.final_step();
+        // A finished run takes no more steps and keeps its resting row as it
+        // is, a value set on it since included.
+        if self.step > final_step {
+            return Ok(());
+        }
+        let save_step_in_steps = self.specs.save_step_in_steps();
+        let specs = self.specs.clone();
 
         self.stack.clear();
         let mut data = self.data.take().unwrap();
@@ -957,28 +1056,37 @@ impl Vm {
             use_prev_fallback: !self.prev_values_valid,
         };
 
-        // Macro for the save/advance logic shared by all integration methods.
-        // Placed here because it captures local variables from run_to.
-        // NOTE: contains `break` that exits the enclosing `loop` in each
-        // integration method arm -- the caller must be inside a loop.
+        // Whether the run stops before evaluating the step the clock stands
+        // at: the run is over, or the caller's limit is reached.
+        macro_rules! stops_here {
+            () => {
+                self.step > final_step || self.step as f64 >= limit
+            };
+        }
+
+        // The save/advance logic shared by all integration methods, run once
+        // the step at the clock is evaluated: `curr` holds the step, and
+        // `next` the stocks of the step after it. A step that is the next
+        // row's (`Specs::saved_row_step`; the rows saved so far are the chunks
+        // before the cursor's) keeps its row, and the cursor moves on to the
+        // next chunk; any other step's row is the working row, which the next
+        // step overwrites. The buffer has a chunk for every saved row and two
+        // more, so the cursor cannot leave it: the last saved row is row
+        // `n_chunks - 1`, which leaves `curr` at `n_chunks` and `next` at
+        // `n_chunks + 1`.
         macro_rules! save_advance {
             ($data:expr) => {{
-                self.step_accum += 1;
-                let (curr_sa, _) =
+                let saved = self.step as f64
+                    == Specs::saved_row_step_at(save_step_in_steps, self.curr_chunk as u64);
+                self.step += 1;
+                let (curr2, next2) =
                     borrow_two(&mut $data, n_slots, self.curr_chunk, self.next_chunk);
-                let is_initial_timestep =
-                    (self.curr_chunk == 0) && (curr_sa[TIME_OFF] == spec_start);
-                if self.step_accum != save_every && !is_initial_timestep {
-                    let (curr2, next2) =
-                        borrow_two(&mut $data, n_slots, self.curr_chunk, self.next_chunk);
-                    curr2.copy_from_slice(next2);
-                } else {
+                next2[TIME_OFF] = specs.time_at(self.step);
+                if saved {
                     self.curr_chunk = self.next_chunk;
-                    if self.next_chunk + 1 >= n_chunks + 2 {
-                        break;
-                    }
                     self.next_chunk += 1;
-                    self.step_accum = 0;
+                } else {
+                    curr2.copy_from_slice(next2);
                 }
             }};
         }
@@ -988,10 +1096,10 @@ impl Vm {
 
         match self.specs.method {
             Method::Euler => loop {
-                let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
-                if curr[TIME_OFF] > end {
+                if stops_here!() {
                     break;
                 }
+                let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
                 #[cfg(any(test, feature = "test-support"))]
                 if poison_next {
                     next[IMPLICIT_VAR_COUNT..].fill(POISON_SENTINEL);
@@ -1080,17 +1188,16 @@ impl Vm {
                 state.prev_values.copy_from_slice(curr);
                 state.use_prev_fallback = false;
                 self.prev_values_valid = true;
-                next[TIME_OFF] = curr[TIME_OFF] + dt;
 
                 save_advance!(data);
             },
             Method::RungeKutta4 => {
                 loop {
-                    let (curr, next) =
-                        borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
-                    if curr[TIME_OFF] > end {
+                    if stops_here!() {
                         break;
                     }
+                    let (curr, next) =
+                        borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
 
                     let saved_time = curr[TIME_OFF];
 
@@ -1132,7 +1239,6 @@ impl Vm {
                     }
 
                     curr[TIME_OFF] = saved_time;
-                    next[TIME_OFF] = saved_time + dt;
 
                     // Re-evaluate flows (not stocks) with the restored state
                     // so that curr has correct aux/flow output values.
@@ -1162,11 +1268,11 @@ impl Vm {
             }
             Method::RungeKutta2 => {
                 loop {
-                    let (curr, next) =
-                        borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
-                    if curr[TIME_OFF] > end {
+                    if stops_here!() {
                         break;
                     }
+                    let (curr, next) =
+                        borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
 
                     let saved_time = curr[TIME_OFF];
 
@@ -1191,7 +1297,6 @@ impl Vm {
                     }
 
                     curr[TIME_OFF] = saved_time;
-                    next[TIME_OFF] = saved_time + dt;
 
                     // Re-evaluate flows with restored state (see RK4 comment)
                     Self::eval(
@@ -1213,32 +1318,30 @@ impl Vm {
             }
         }
 
-        // The integration loop breaks on `curr[TIME] > end` *after* an advance, so
-        // the live curr chunk holds the resting-point stocks + reserved time vars
-        // but its flow/aux/constant slots were never recomputed for the advanced
-        // time -- Euler's `curr.copy_from_slice(next)` leaves a stale `next` row,
-        // and the chunk-ring advance lands on a chunk whose non-stock slots are
-        // stale (e.g. 0 for a constant). A mid-run `get_value_now` of a non-stock
-        // would otherwise read that garbage. Re-evaluate root flows once at the
-        // resting curr so the chunk is fully self-consistent ("the value at the
-        // current time") and identical to the wasm backend's resting curr (#625).
+        // What a caller reads between calls (`get_value_now`) is the resting
+        // row, the live curr chunk: the step the run evaluates next, or, once
+        // the run is over, the step after its last (one past the stop time),
+        // so the clock never goes back from one call to the next. The
+        // integration loop stops *after* an advance, so the live curr chunk
+        // holds that step's stocks and reserved time vars, but its
+        // flow/aux/constant slots were never computed for it -- Euler's
+        // `curr.copy_from_slice(next)` leaves a stale `next` row, and the
+        // cursor's advance lands on a chunk whose non-stock slots are stale
+        // (e.g. 0 for a constant). Root flows are evaluated once there so the
+        // chunk is self-consistent ("the value at the current time"); the
+        // wasm blob's resting `curr` is the same row bit for bit while the
+        // blob has not reached its last saved row (#625; `Vm::run_to` says
+        // where they differ).
         //
         // This touches only the live curr chunk: every results row was already
-        // saved (and `get_series` reads chunks `[0, curr_chunk)`, excluding this
-        // one), a resumed `run_to` re-evaluates from scratch, and `run_to_end`
-        // reads the last *results* row -- so it is invisible to the saved series,
-        // to resume, and to a full run. It does NOT re-snapshot `prev_values`, so a
-        // resume's `PREVIOUS` still sees the last completed step.
-        //
-        // Guarded on `curr_chunk != next_chunk`: when `run_to(target)` is called
-        // with `target` past FINAL_TIME the loop exits via the chunk-ring
-        // exhaustion break in `save_advance!`, which sets `curr_chunk = next_chunk`
-        // before breaking. Calling `borrow_two` with two equal chunk indices would
-        // slice out of bounds and panic. That exhausted-slab case is exactly the
-        // one a mid-run read never reaches (a full slab means time has reached
-        // FINAL_TIME, not mid-interval), so skipping the re-eval there is correct
-        // and matches the pre-#625 graceful clamp.
-        if self.curr_chunk != self.next_chunk {
+        // saved (the saved rows are chunks `[0, curr_chunk)`, excluding this
+        // one), and a resumed `run_to` evaluates the step afresh -- so it is
+        // invisible to the saved series and to resume. The preview does NOT
+        // re-snapshot `prev_values`, so a resume's `PREVIOUS` still sees the
+        // last completed step. `curr` and `next` are always two chunks of the
+        // buffer (see `save_advance!`). A finished run returns before this, so
+        // its resting row, a value set on it since included, stays as it is.
+        {
             let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
             // For a conveyor/queue model the Flows re-eval alone would UNDO the
             // self-consistency it exists to provide: each pass-driven flow
@@ -1316,15 +1419,25 @@ impl Vm {
         Ok(())
     }
 
+    /// The rows the run has saved so far: `specs.n_chunks` of them once the
+    /// run is over, fewer for a run stopped part-way.
     pub fn into_results(self) -> Results {
+        let step_count = self.saved_rows();
         Results {
             offsets: self.sim.offsets.clone(),
             data: self.data.unwrap(),
             step_size: self.n_slots,
-            step_count: self.n_chunks,
+            step_count,
             specs: self.specs,
             is_vensim: false,
         }
+    }
+
+    /// How many rows the run has saved: the chunks before the cursor's. The
+    /// cursor's own chunk is the step under way, which is saved only once it
+    /// has been evaluated.
+    fn saved_rows(&self) -> usize {
+        self.curr_chunk
     }
 
     pub fn set_value_now(&mut self, off: usize, val: f64) {
@@ -1453,7 +1566,7 @@ impl Vm {
         self.curr_chunk = 0;
         self.next_chunk = 1;
         self.did_initials = false;
-        self.step_accum = 0;
+        self.step = 0;
         self.prev_values.fill(0.0);
         self.temp_storage.fill(0.0);
         self.stack.clear();
@@ -1749,7 +1862,7 @@ impl Vm {
         }
 
         self.did_initials = true;
-        self.step_accum = 0;
+        self.step = 0;
 
         self.data = Some(data);
         Ok(())
@@ -1764,14 +1877,9 @@ impl Vm {
         if !self.did_initials {
             return Some(vec![]);
         }
-        // After the main loop, curr_chunk equals the number of valid
-        // saved steps (e.g. 101 for a 0..100 run).  After run_initials()
-        // alone, curr_chunk is still 0 but chunk 0 is valid (1 step).
-        let n_steps = if self.curr_chunk == 0 {
-            1
-        } else {
-            std::cmp::min(self.curr_chunk, self.n_chunks)
-        };
+        // After run_initials() alone nothing is saved yet, but chunk 0 holds
+        // the initial values, which a caller reads as the one step so far.
+        let n_steps = self.saved_rows().max(1);
         let mut series = Vec::with_capacity(n_steps);
         for chunk_idx in 0..n_steps {
             let base = chunk_idx * self.n_slots;
@@ -3427,8 +3535,24 @@ pub(crate) fn step(time: f64, dt: f64, height: f64, step_time: f64) -> f64 {
     }
 }
 
+/// XMILE's PULSE (1.0 section 3.5.4): "a one-DT wide pulse at the given
+/// time", `volume / dt` for one step, again every `interval` when there is
+/// one ("PULSE(20, 12, 5) generates a pulse value of 20/DT at time 12, 17, 22,
+/// etc.").
+///
+/// The step that carries a pulse is the first step at or after the pulse's
+/// time, read on the step grid as `results::Specs` reads every time: a step
+/// within `STEP_TOLERANCE` of a DT before the pulse's time is at it, so a
+/// pulse time written as a step's (`0.9` at a DT of `0.3`, whose third step
+/// is `0.8999999999999999`) fires at that step. The spec says nothing of a
+/// pulse time between two steps, and every PULSE in the corpus's Stella
+/// models is at a step's time, so "the first step at or after it" is the
+/// engine's rule, unverified against Stella. (Vensim's PULSE takes a start
+/// and a width and is another function; the MDL reader lowers it to its own
+/// expression.)
 #[inline(never)]
 pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval: f64) -> f64 {
+    let time = time + dt * crate::results::STEP_TOLERANCE;
     if time < first_pulse {
         return 0.0;
     }
@@ -4754,6 +4878,10 @@ mod superinstruction_tests {
 #[cfg(test)]
 #[path = "vm_reset_run_to_and_constants_tests.rs"]
 mod vm_reset_run_to_and_constants_tests;
+
+#[cfg(test)]
+#[path = "vm_step_grid_tests.rs"]
+mod vm_step_grid_tests;
 
 /// `ChunkRegions::backing` is where a view's storage region is resolved, and it
 /// is the ONE place the VM reproduces the two snapshot semantics the scalar

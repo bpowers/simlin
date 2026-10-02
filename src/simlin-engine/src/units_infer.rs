@@ -950,8 +950,7 @@ impl UnitInferer<'_> {
         constraints: &mut Vec<LocatedConstraint>,
         active: &InstantiationPath<'_>,
     ) {
-        let time_units_name =
-            canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
+        let time_units_name = self.ctx.time_units_name();
         // Resolve the time unit exactly the way a variable's `<units>` string
         // is resolved (`Context::resolve_name`: aliases, the dimensionless
         // spellings, unknown-name fallback) so inference uses the same
@@ -1837,8 +1836,7 @@ pub(crate) fn infer(
     units_ctx: &Context,
     model: &UnitModel,
 ) -> InferenceResult {
-    let time_units_name =
-        canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
+    let time_units_name = units_ctx.time_units_name();
     // Resolve through `Context::resolve_name` so the synthetic `time`
     // variable's units match what `units_check::check` uses (see the same
     // resolution in `gen_all_constraints`).

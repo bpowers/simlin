@@ -773,9 +773,10 @@ const PU_INTERVAL: u32 = 4;
 const PU_NEXT: u32 = 5;
 
 /// Build the body of `pulse(time, dt, volume, first_pulse, interval) -> f64`,
-/// reproducing the VM's `pulse` (`vm.rs:3036`) including its `while` loop.
+/// reproducing the VM's `vm::pulse` including its `while` loop.
 ///
 /// ```text
+/// time = time + dt * STEP_TOLERANCE
 /// if time < first_pulse { return 0.0 }
 /// next_pulse = first_pulse
 /// loop {                              // while time >= next_pulse
@@ -793,6 +794,16 @@ fn emit_pulse() -> Function {
     use Instruction as Ins;
     use wasm_encoder::BlockType;
     let mut f = Function::new([(1, ValType::F64)]);
+
+    // time = time + dt * STEP_TOLERANCE: a step within the step tolerance
+    // before the pulse's time is at it, as `vm::pulse` reads it (the
+    // parameter's local is reused).
+    f.instruction(&Ins::LocalGet(PU_TIME));
+    f.instruction(&Ins::LocalGet(PU_DT));
+    f.instruction(&f64_const(crate::results::STEP_TOLERANCE));
+    f.instruction(&Ins::F64Mul);
+    f.instruction(&Ins::F64Add);
+    f.instruction(&Ins::LocalSet(PU_TIME));
 
     // if time < first_pulse { return 0.0 }
     f.instruction(&Ins::LocalGet(PU_TIME));

@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc afeab83947324f23372c64db56b65008bc67bff10e3fd8adc5e943f06cd1e19b # shrinks to (family, times, values) = (Logistic, 60 rows): saved unevenly it read exponential
+cc 1bbc1215f5df62a6b2b0b006dbdd68c63cbdaf2d1c05d927f3b4372d9b0e03dc # shrinks to (family, times, values) = (Logistic, 60 rows): saved unevenly it read exponential
+cc f45a63c08a2b79309c236db96bf7208f9608a5135ac542e6f4fba9c86ddafca3 # shrinks to (_, times, values) = (DampedOscillation, 141 rows), stretch = 10000.0, start = 0.0: settled a twentieth before the end on one clock and not the other
+cc ad633eb0a6a441bbaf084616b3b6870713258522161704ce925b27de5cc512b5 # shrinks to (family, times, values) = (DampedOscillation, 93 rows), phase = 0: one swing over a tenth of the range, smaller ones after it, unsettled: read undetermined
+cc 8936648b88088769abae6c8d068463d29b03bd12ec2f28604703865621c26859 # shrinks to (family, times, values) = (GrowingOscillation, 93 rows), phase = 0: the movement after its one swing measured from the wrong turn

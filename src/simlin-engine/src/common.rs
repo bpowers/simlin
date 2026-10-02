@@ -643,6 +643,13 @@ pub enum ErrorCode {
     /// subrange its arms cover, so that no fabricated element exists to warn
     /// about (GH #1059).
     MissingElementEquation,
+    /// The declared save step is not a whole number of time steps, so the
+    /// saved rows are not at their save times: each is the first step at or
+    /// after its save time (`results::Specs`), or every step when the save
+    /// step is shorter than a time step. Warning-level: the run is what the
+    /// specs ask for as nearly as steps allow, and a reader of the rows
+    /// should know they are not evenly spaced.
+    SaveStepOffTheStepGrid,
 }
 
 impl fmt::Display for ErrorCode {
@@ -733,6 +740,7 @@ impl fmt::Display for ErrorCode {
             MacroContainsModule => "macro_contains_module",
             UnfilledEquation => "unfilled_equation",
             MissingElementEquation => "missing_element_equation",
+            SaveStepOffTheStepGrid => "save_step_off_the_step_grid",
         };
 
         write!(f, "{name}")
@@ -846,6 +854,7 @@ impl ErrorCode {
             MacroContainsModule => "a macro cannot contain a module",
             UnfilledEquation => "the equation has not been written yet",
             MissingElementEquation => "some of the variable's elements have no equation",
+            SaveStepOffTheStepGrid => "the save step is not a whole number of time steps",
         }
     }
 }

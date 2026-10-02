@@ -2140,6 +2140,11 @@ void simlin_sim_unref(SimlinSim *sim);
 
 // Runs the simulation to a specified time
 //
+// Every step at or before `time` is evaluated, and the simulation rests at
+// the next step, not yet evaluated, which is what `simlin_sim_get_value`
+// then reads; after the final step that is one step past the stop time, and
+// a further call takes no step.
+//
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
 void simlin_sim_run_to(SimlinSim *sim, double time, SimlinError **out_error);
@@ -2172,6 +2177,11 @@ void simlin_sim_reset(SimlinSim *sim, SimlinError **out_error);
 void simlin_sim_run_initials(SimlinSim *sim, SimlinError **out_error);
 
 // Gets a single value from the simulation
+//
+// After `simlin_sim_run_to`, the value in the state the simulation rests in:
+// the next step, not yet evaluated (its stocks integrated, its flows and
+// auxiliaries computed from them); after the final step, one step past the
+// stop time. After `simlin_sim_run_to_end`, the last saved row.
 //
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim

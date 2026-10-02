@@ -735,6 +735,44 @@ fn test_libsimlin_get_series_after_partial_run() {
     }
 }
 
+/// A read after `simlin_sim_run_to` is of the state the simulation rests
+/// in: the next step, not yet evaluated, its stock integrated and its flow
+/// computed from it; after the final step, one step past the stop, where a
+/// further `run_to` takes no step. The clock a host reads never goes back.
+#[test]
+fn test_libsimlin_get_value_after_run_to_reads_the_next_step() {
+    let dm = TestProject::new("resting")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("rate", "2", None)
+        .stock("level", "0", &["inflow"], &[], None)
+        .flow("inflow", "rate + level / 100", None)
+        .build_datamodel();
+    unsafe {
+        let (proj, model, sim) = create_test_sim(&dm);
+        let run_to = |time: f64| {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_sim_run_to(sim, time, &mut err as *mut *mut SimlinError);
+            expect_no_error(err, &format!("run_to({time})"));
+        };
+        let mut level = 0.0;
+        for step in 0..=10 {
+            level += 2.0 + level / 100.0;
+            run_to(f64::from(step));
+            assert_sim_value(sim, "time", f64::from(step + 1), 0.0);
+            assert_sim_value(sim, "level", level, 1e-12);
+            assert_sim_value(sim, "inflow", 2.0 + level / 100.0, 1e-12);
+        }
+        // Past the end the run is over: one step past the stop, as it was.
+        run_to(25.0);
+        assert_sim_value(sim, "time", 11.0, 0.0);
+        assert_sim_value(sim, "level", level, 1e-12);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 #[test]
 fn test_libsimlin_set_value_flows_through_dependents() {
     let dm = TestProject::new("override_flow")

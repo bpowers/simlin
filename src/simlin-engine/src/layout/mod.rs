@@ -3616,9 +3616,8 @@ fn compute_metadata_parts(
         };
         let dt = dt_to_f64(&specs.dt);
         let raw_save_step = specs.save_step.as_ref().map(dt_to_f64).unwrap_or(dt);
-        // The VM saves at most once per dt step
-        // (save_every = max(1, round(save_step/dt))), so the effective
-        // cadence is never faster than dt.
+        // A run saves a step at most once (`results::Specs::save_step`), so
+        // the effective cadence is never faster than dt.
         let effective_save_step = raw_save_step.max(dt);
         crate::ltm_dominance::calculate_dominant_periods(
             &feedback_loops,

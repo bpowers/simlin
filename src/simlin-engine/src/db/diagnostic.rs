@@ -287,6 +287,22 @@ pub fn model_all_diagnostics(
     // `simlin_project_get_errors` (GH #873).
     emit_conveyor_spec_warnings(db, model, project);
 
+    // A model's own sim specs whose save step is off the step grid. The
+    // project's specs are the project's fact, reported once by
+    // `collect_all_diagnostics`.
+    if let Some(specs) = model.model_sim_specs(db)
+        && let Some(warning) = save_step_warning(specs)
+    {
+        Diagnostic {
+            model: model.name(db).clone(),
+            variable: None,
+            owner: None,
+            severity: DiagnosticSeverity::Warning,
+            error: warning,
+        }
+        .accumulate(db);
+    }
+
     // Unknown element subscripts on non-apply-to-all arrays (GH #905):
     // an `<element>` entry naming no declared element is silently dropped
     // by every downstream consumer; surface it as a Warning here so the
@@ -1148,6 +1164,38 @@ fn fmt_diag_value(v: f64) -> String {
     }
 }
 
+/// The warning for sim specs whose declared save step is not a whole number
+/// of time steps, saying what the saved rows are instead (the rule is
+/// `results::Specs`'s); `None` for specs with no save step, one on the step
+/// grid, or a time step no run can be made with (another diagnostic's
+/// concern).
+fn save_step_warning(specs: &crate::datamodel::SimSpecs) -> Option<DiagnosticError> {
+    let value = |dt: &crate::datamodel::Dt| match dt {
+        crate::datamodel::Dt::Dt(v) => *v,
+        crate::datamodel::Dt::Reciprocal(v) => 1.0 / *v,
+    };
+    let dt = value(&specs.dt);
+    let declared = value(specs.save_step.as_ref()?);
+    if !(dt > 0.0 && dt.is_finite() && declared.is_finite())
+        || crate::results::save_step_is_on_the_step_grid(dt, declared)
+    {
+        return None;
+    }
+    let rows = if declared < dt {
+        "every step is saved".to_string()
+    } else {
+        "each saved row is the first step at or after its save time, up to one time step late"
+            .to_string()
+    };
+    Some(DiagnosticError::Model(Error::new(
+        crate::common::ErrorKind::Model,
+        crate::common::ErrorCode::SaveStepOffTheStepGrid,
+        Some(format!(
+            "the save step {declared} is not a whole number of time steps of {dt}: {rows}"
+        )),
+    )))
+}
+
 /// Validate each explicit module variable in `model`: the model it names and
 /// the wiring of its inputs.
 ///
@@ -1398,6 +1446,17 @@ pub fn collect_all_diagnostics(
                 *code,
                 Some(message.clone()),
             )),
+        });
+    }
+
+    // The project's sim specs belong to no model, like the two facts above.
+    if let Some(warning) = save_step_warning(project.sim_specs(db)) {
+        all.push(Diagnostic {
+            model: String::new(),
+            variable: None,
+            owner: None,
+            severity: DiagnosticSeverity::Warning,
+            error: warning,
         });
     }
 

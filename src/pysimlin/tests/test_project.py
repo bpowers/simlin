@@ -301,7 +301,9 @@ class TestPatchWarningSemantics:
         n_before = len(project.get_errors())
         assert n_before > 0
 
-        project.set_sim_specs(save_step=0.5)
+        # A save step of a whole number of time steps: one that is not is
+        # itself reported, and this patch has to add nothing of its own.
+        project.set_sim_specs(save_step=2.0)
         assert len(project.get_errors()) == n_before
 
     def test_rejected_patch_raises_with_details(self) -> None:

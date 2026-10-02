@@ -191,6 +191,235 @@ fn a_run_that_starts_from_another_keeps_its_changes_unless_it_changes_the_same_v
     assert!(a_adjust.iter().all(|&v| v == 4.0), "{a_adjust:?}");
 }
 
+/// A change from a time on, over a run that changed the same constant
+/// earlier, keeps the earlier change until that time: the run is the one it
+/// started from up to there, and the answer's `was` is the value the constant
+/// has in this run just before the change. A multiplier is of that value, the
+/// constant's in the starting run at the time the change takes effect.
+#[test]
+fn a_timed_change_over_a_run_keeps_what_that_run_set_before_it() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "base", "set": [{"variable": "coverage", "value": 8}]}),
+    );
+    // The model's coverage is 4; base's is 8 from the start.
+    let late = experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "late", "from": "base", "fromTime": 10,
+               "set": [{"variable": "coverage", "multiply": 2}]}),
+    );
+    assert_eq!(
+        late["applied"][0],
+        json!({"variable": "coverage", "value": 16.0, "was": 8.0, "fromTime": 10.0})
+    );
+    let coverage = samples(&mut host, &mut session, "coverage", "late");
+    // Twelve samples over 0..20: the first five fall before t = 10.
+    assert!(coverage[..5].iter().all(|&v| v == 8.0), "{coverage:?}");
+    assert_eq!(coverage[11], 16.0, "{coverage:?}");
+
+    // Over `late`, whose coverage is 8 until 10 and 16 after: a multiplier
+    // from 15 is of 16, and one from 5 of 8.
+    for (from_time, was) in [(15.0, 16.0), (5.0, 8.0)] {
+        let again = experiment(
+            &mut host,
+            &mut session,
+            json!({"name": "again", "from": "late", "fromTime": from_time,
+                   "set": [{"variable": "coverage", "multiply": 0.5}]}),
+        );
+        assert_eq!(again["applied"][0]["was"], was, "from {from_time}");
+        assert_eq!(again["applied"][0]["value"], was / 2.0, "from {from_time}");
+    }
+    // The change from 5 replaced late's change at 10, which came after it,
+    // and kept base's from the start.
+    let coverage = samples(&mut host, &mut session, "coverage", "again");
+    assert_eq!(coverage[0], 8.0, "{coverage:?}");
+    assert!(coverage[3..].iter().all(|&v| v == 4.0), "{coverage:?}");
+}
+
+/// A value from a time is set on the variable as the starting run has it. A
+/// run that replaced the variable's equation with one that is not a number
+/// left nothing to set, and the experiment is refused with the repair; one
+/// that replaced it with a number left a constant, which takes the value.
+#[test]
+fn a_timed_value_over_a_runs_replaced_equation_is_refused_unless_it_is_a_number() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "base", "set": [{"variable": "coverage", "equation": "4 + TIME / 10"}]}),
+    );
+    for change in [json!({"value": 8}), json!({"multiply": 2})] {
+        let mut set = change.clone();
+        set["variable"] = json!("coverage");
+        let refusal = host.refuse(
+            &mut session,
+            "run_experiment",
+            json!({"name": "late", "from": "base", "fromTime": 10, "set": [set]}),
+        );
+        assert_eq!(
+            refusal["error"],
+            "run 'base' gave 'coverage' the equation '4 + TIME / 10', so it is computed there \
+             and has no value to set from time 10; give it an equation with the time in it \
+             instead (IF TIME >= 10 THEN new ELSE 4 + TIME / 10)",
+            "{change}"
+        );
+    }
+    // From the start, the value replaces the run's equation whole.
+    let whole = experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "whole", "from": "base",
+               "set": [{"variable": "coverage", "value": 8}]}),
+    );
+    assert_eq!(whole["applied"][0]["value"], 8.0, "{whole}");
+    let coverage = samples(&mut host, &mut session, "coverage", "whole");
+    assert!(coverage.iter().all(|&v| v == 8.0), "{coverage:?}");
+
+    experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "six", "set": [{"variable": "coverage", "equation": "6"}]}),
+    );
+    let late = experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "late", "from": "six", "fromTime": 10,
+               "set": [{"variable": "coverage", "value": 8}]}),
+    );
+    assert_eq!(late["applied"][0]["was"], 6.0, "{late}");
+    let coverage = samples(&mut host, &mut session, "coverage", "late");
+    assert!(coverage[..5].iter().all(|&v| v == 6.0), "{coverage:?}");
+    assert_eq!(coverage[11], 8.0, "{coverage:?}");
+}
+
+/// A save step longer than the run saves the first step alone, and every
+/// tool that runs the model answers for that one row.
+#[test]
+fn a_run_of_one_row_is_read_by_every_tool() {
+    let mut project = inventory().build_datamodel();
+    project.sim_specs.save_step = Some(crate::datamodel::Dt::Dt(1e308));
+    let mut host = Host::new(project);
+    let mut session = Session::new("main");
+    let behavior = host.call(
+        &mut session,
+        "read_behavior",
+        json!({"variables": ["Inventory"]}),
+    );
+    let samples = behavior["series"][0]["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 1, "{behavior}");
+    assert_eq!(samples[0]["time"], 0.0);
+    let changed = experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "x", "set": [{"variable": "coverage", "value": 8}]}),
+    );
+    assert_eq!(changed["applied"][0]["value"], 8.0, "{changed}");
+    host.call(&mut session, "analyze_loops", json!({}));
+    host.call(&mut session, "run_tests", json!({}));
+}
+
+/// A run whose clock's last place is coarser than its DT is the whole run:
+/// it is taken in slices counted in steps, as the VM counts them, so it
+/// ends however many of its steps share one time. Each call answers within
+/// a deadline on its own thread, so a run that never ends fails here rather
+/// than hanging the suite.
+#[test]
+fn a_run_whose_clock_is_coarser_than_its_dt_ends() {
+    for method in ["euler", "rk4"] {
+        for (start, stop, dt) in [
+            (1e16, 1e16 + 4.0, 1.0),
+            (9007199254740992.0, 9007199254740996.0, 1.0),
+            (-1e16, -1e16 + 10.0, 1.0),
+            (1e18, 1e18 + 128.0, 0.5),
+            (1e22, 1e22 + 1e7, 1e6),
+        ] {
+            let specs = json!({"start": start, "stop": stop, "dt": dt, "method": method});
+            let (tx, rx) = std::sync::mpsc::channel();
+            let input = json!({"name": "x", "specs": specs});
+            std::thread::spawn(move || {
+                let mut host = Host::from_test_project(&inventory());
+                let mut session = Session::new("main");
+                let output = host.call(&mut session, "run_experiment", input);
+                let rows = session
+                    .run_results(host.workspace(), "x")
+                    .map(|run| (run.results.step_count, run.results.specs.final_step()));
+                let _ = tx.send((output, rows.ok()));
+            });
+            let Ok((output, rows)) = rx.recv_timeout(std::time::Duration::from_secs(30)) else {
+                panic!("{specs}: the run did not end");
+            };
+            let Some((saved, final_step)) = rows else {
+                panic!("{specs}: the run is kept: {output}");
+            };
+            assert_eq!(saved as u64, final_step + 1, "{specs}: every step saved");
+        }
+    }
+}
+
+/// An experiment's two runs are read at one scale. A stock that holds
+/// arithmetic residue in the model's run and opens to 6 in the experiment
+/// was at rest and is rising: the residue is not a behavior of its own that
+/// the experiment merely scaled.
+#[test]
+fn a_run_of_residue_beside_a_run_that_moves_is_at_rest() {
+    let project = TestProject::new("eq")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .aux("demand", "3", None)
+        .aux("fraction", "0.1", None)
+        .aux("margin", "demand * fraction - demand / 10", None)
+        .aux("shown", "margin * 4", None);
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    let output = experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "doubled", "set": [{"variable": "fraction", "multiply": 2}],
+               "record": ["shown"]}),
+    );
+    let shown = comparison(&output, "shown");
+    // A product of residue: nothing in the model says what scale it is at,
+    // and the experiment's own run does.
+    assert_eq!(shown["this"]["end"], 1.2, "{shown}");
+    assert_eq!(shown["base"]["mode"]["kind"], "at_rest", "{shown}");
+    // At rest, with the residue it holds: four times 5.5511e-17.
+    assert_eq!(shown["base"]["end"], 2.2204e-16, "{shown}");
+    assert_eq!(shown["base"]["max"]["value"], 2.2204e-16, "{shown}");
+}
+
+/// And the other way: residue in the experiment's run beside a movement in
+/// the model's is at rest. The experiment closes a gap the model opens, so
+/// what is left of it creeps to 1e-15, read at the scale of the movement it
+/// is compared with; read alone it would be a line.
+#[test]
+fn residue_in_the_experiments_run_beside_a_movement_in_the_models_is_at_rest() {
+    let project = TestProject::new("gap")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .aux("demand", "3", None)
+        .aux("fraction", "0.2", None)
+        .flow("orders", "demand * fraction", None)
+        .flow("fulfilled", "demand / 10", None)
+        .stock("gap", "0", &["orders"], &["fulfilled"], None)
+        .aux("shown", "gap * 4", None);
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    let output = experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "closed", "set": [{"variable": "fraction", "value": 0.1}],
+               "record": ["shown"]}),
+    );
+    let shown = comparison(&output, "shown");
+    assert_eq!(shown["base"]["mode"]["kind"], "linear", "{shown}");
+    assert_eq!(shown["this"]["mode"]["kind"], "at_rest", "{shown}");
+    let end = shown["this"]["end"].as_f64().unwrap_or(0.0);
+    assert!(end != 0.0 && end.abs() < 1e-12, "it holds residue: {shown}");
+}
+
 #[test]
 fn specs_change_the_run_and_the_output_says_what_it_ran_under() {
     let mut host = Host::from_test_project(&inventory());

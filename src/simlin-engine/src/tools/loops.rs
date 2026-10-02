@@ -393,6 +393,22 @@ pub(crate) struct LoopAnalysis {
     cut: Option<Cut>,
 }
 
+impl LoopAnalysis {
+    /// About how many bytes the analysis holds: its times, and each loop's
+    /// score series and names. What a run store counts a kept analysis as.
+    pub(crate) fn bytes(&self) -> usize {
+        let text = |names: &[String]| names.iter().map(String::len).sum::<usize>();
+        let numbers = self.times.len() + self.loops.iter().map(|l| l.rel.len()).sum::<usize>();
+        numbers * std::mem::size_of::<f64>()
+            + self
+                .loops
+                .iter()
+                .map(|l| text(&l.key) + text(&l.chain))
+                .sum::<usize>()
+            + self.partitions.iter().map(|p| text(p)).sum::<usize>()
+    }
+}
+
 /// One loop of an analysis.
 #[derive(Clone)]
 pub(crate) struct AnalyzedLoop {
@@ -1115,7 +1131,9 @@ fn stocks_at_rest(model: &datamodel::Model, results: &Results) -> bool {
             }
             any = true;
             let series: Vec<f64> = results.iter().map(|row| row[offset]).collect();
-            if super::behavior::classify(&times, &series).kind != super::behavior::ModeKind::AtRest
+            let scale = super::series::scale_in_run(results, model, key.as_str());
+            if super::behavior::classify_at(&times, &series, scale).kind
+                != super::behavior::ModeKind::AtRest
             {
                 return false;
             }

@@ -1792,20 +1792,7 @@ fn vm_ramp(time: f64, slope: f64, start: f64, end: f64) -> f64 {
     }
 }
 fn vm_pulse(time: f64, dt: f64, volume: f64, first: f64, interval: f64) -> f64 {
-    if time < first {
-        return 0.0;
-    }
-    let mut next = first;
-    while time >= next {
-        if time < next + dt {
-            return volume / dt;
-        } else if interval <= 0.0 {
-            break;
-        } else {
-            next += interval;
-        }
-    }
-    0.0
+    crate::vm::pulse(time, dt, volume, first, interval)
 }
 
 /// Assert a wasm `Apply` result equals an exact f64 value (for the
@@ -1991,6 +1978,25 @@ fn apply_pulse_across_intervals() {
             t,
             dt,
             vm_pulse(t, dt, 4.0, 2.0, 0.0),
+        );
+    }
+    // A pulse time written as a step's, where the step's own time is a unit
+    // in the last place below it: both backends fire there, and at no step
+    // beside it.
+    let dt = 0.3;
+    let third = 3.0 * dt;
+    assert!(third < 0.9);
+    assert_eq!(vm_pulse(third, dt, 4.0, 0.9, 0.0), 4.0 / dt);
+    for step in [2.0, 3.0, 4.0] {
+        let t = step * dt;
+        assert_apply_exact(
+            BuiltinId::Pulse,
+            4.0,
+            0.9,
+            0.0,
+            t,
+            dt,
+            vm_pulse(t, dt, 4.0, 0.9, 0.0),
         );
     }
 }

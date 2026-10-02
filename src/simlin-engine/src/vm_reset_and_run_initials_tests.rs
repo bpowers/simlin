@@ -90,14 +90,10 @@ fn test_fused_binops_preserve_operand_order() {
 }
 
 /// Regression (#632 review): `run_to(target)` with `target` past FINAL_TIME
-/// exits the integration loop via the chunk-ring exhaustion break in
-/// `save_advance!`, which sets `self.curr_chunk = self.next_chunk` *before*
-/// breaking. The post-loop flow re-eval (added for #625) must not then call
-/// `borrow_two` with two equal chunk indices -- that slices
-/// `left[a*n_slots..(a+1)*n_slots]` out of a `left` of length `a*n_slots` and
-/// panics. Such a target is a supported clamp case (the FFI `simlin_sim_run_to`
-/// forwards `time` unclamped), so it must return `Ok` gracefully, not abort
-/// across the C boundary.
+/// runs to the end of the run and no further. Such a target is a supported
+/// case (the FFI `simlin_sim_run_to` forwards `time` unclamped), so it must
+/// return `Ok`, not abort across the C boundary, and leave the resting row
+/// readable: a finished run rests one step past the stop.
 #[test]
 fn run_to_past_final_time_does_not_panic() {
     let tp = TestProject::new("past_end")
@@ -108,20 +104,20 @@ fn run_to_past_final_time_does_not_panic() {
     let compiled = build_compiled(&tp);
     let mut vm = Vm::new(compiled).unwrap();
 
-    // 10x past FINAL_TIME: the loop fills the chunk ring and exits via the
-    // exhaustion break (curr_chunk == next_chunk), the aliasing case.
+    // 10x past FINAL_TIME.
     vm.run_to(30.0)
         .expect("run_to past the end must clamp gracefully, not panic");
 
-    // The live curr chunk is still well-formed and readable (the integrated
-    // stock, finite -- no out-of-bounds slice).
+    // The resting row is the step after the last: the stock integrated
+    // through the step at the stop time.
     let level_off = vm
         .get_offset(&Ident::<Canonical>::from_str_unchecked("level"))
         .expect("level offset must exist");
-    assert!(
-        vm.get_value_now(level_off).is_finite(),
-        "level must be finite after clamping past the end"
-    );
+    assert_eq!(vm.get_value_now(level_off), 8.0);
+    assert_eq!(vm.get_value_now(TIME_OFF), 4.0);
+    // A further call takes no step.
+    vm.run_to(30.0).expect("a finished run takes no step");
+    assert_eq!(vm.get_value_now(TIME_OFF), 4.0);
 }
 
 /// End-to-end guard for the global-operand and two-constant fused binops
