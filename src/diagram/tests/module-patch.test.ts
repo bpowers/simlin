@@ -12,6 +12,8 @@ import * as path from 'path';
 import { Project, configureWasm, ready, resetWasm, SIMLIN_VARTYPE_MODULE } from '@simlin/engine';
 import type { JsonProjectPatch } from '@simlin/engine';
 
+import { isModelNameTaken, unusedCopyName } from '../module-wiring';
+
 async function loadWasm(): Promise<void> {
   const wasmPath = path.join(__dirname, '..', '..', 'engine', 'core', 'libsimlin.wasm');
   const wasmBuffer = fs.readFileSync(wasmPath);
@@ -356,6 +358,36 @@ describe('upsertModule patch operation', () => {
     expect(ecoModule!.references).toEqual([{ src: 'prey', dst: 'hares' }]);
     expect(ecoModule!.units).toBe('animals');
     expect(ecoModule!.documentation).toBe('Ecosystem module');
+
+    await project.dispose();
+  });
+});
+
+// The engine refuses a new model a name another model is known by
+// (canonically, the unnamed model being `main`); the editor's name helpers
+// read names as it does, so a name they pick is one the engine adds.
+describe('a new model name', () => {
+  beforeEach(async () => {
+    await loadWasm();
+  });
+
+  it('is taken, and replaced, exactly where the engine refuses it', async () => {
+    const project = await Project.open(loadTestXmile());
+    const addModel = (name: string): Promise<unknown> =>
+      project.applyPatch({ projectOps: [{ type: 'addModel', payload: { name } }] }, { allowErrors: true });
+    const modelNames = async (): Promise<string[]> =>
+      JSON.parse(await project.serializeJson()).models.map((m: { name: string }) => m.name);
+
+    await addModel('Hares Model');
+    for (const respelled of ['hares_model', 'HARES  MODEL', 'Main']) {
+      expect(isModelNameTaken(await modelNames(), respelled)).toBe(true);
+      await expect(addModel(respelled)).rejects.toThrow();
+    }
+
+    const fresh = unusedCopyName(await modelNames(), 'hares_model');
+    expect(isModelNameTaken(await modelNames(), fresh)).toBe(false);
+    await addModel(fresh);
+    expect(await modelNames()).toContain(fresh);
 
     await project.dispose();
   });

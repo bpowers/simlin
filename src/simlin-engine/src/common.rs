@@ -1024,7 +1024,7 @@ pub type EquationResult<T> = result::Result<T, EquationError>;
 /// preserving the literal-vs-separator distinction. `to_source_repr` (via
 /// `canonical_to_source`) maps it back to `.` so all user-facing/serialized
 /// output is byte-identical to before.
-const LITERAL_PERIOD_SENTINEL: char = '\u{2024}';
+pub(crate) const LITERAL_PERIOD_SENTINEL: char = '\u{2024}';
 const LITERAL_PERIOD_SENTINEL_STR: &str = "\u{2024}";
 
 /// Inverse of the period handling in [`canonicalize`]: map both the module
@@ -1375,10 +1375,21 @@ pub(crate) fn duplicate_variable_groups<'a, I>(idents: I) -> Vec<(String, Vec<St
 where
     I: IntoIterator<Item = &'a str>,
 {
+    duplicate_groups_by(idents, canonicalize)
+}
+
+/// [`duplicate_variable_groups`] under the name `key` gives each spelling.
+pub(crate) fn duplicate_groups_by<'a, I>(
+    idents: I,
+    key: impl Fn(&'a str) -> Cow<'a, str>,
+) -> Vec<(String, Vec<String>)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
     let mut order: Vec<String> = Vec::new();
     let mut groups: HashMap<String, Vec<String>> = HashMap::new();
     for ident in idents {
-        let canonical = canonicalize(ident).into_owned();
+        let canonical = key(ident).into_owned();
         let entry = groups.entry(canonical.clone()).or_default();
         if entry.is_empty() {
             order.push(canonical);
@@ -1412,6 +1423,26 @@ pub(crate) fn duplicate_variable_message(
         "variables {list} in model '{model_name}' all canonicalize to the same identifier \
          '{canonical}' (variable names are case-, whitespace-, and underscore-insensitive); \
          simulating would silently keep only one of them, so rename them to be distinct"
+    )
+}
+
+/// The user-facing message for one group of models known by one name
+/// (`datamodel::canonical_model_name`), shared by the hard compile error
+/// (`compile_project_incremental`) and the project-level diagnostic
+/// (`collect_all_diagnostics`) so every surface reports identical text. No
+/// patch operation renames or removes a model, so the remedy it names is the
+/// file's.
+pub(crate) fn duplicate_model_message(canonical: &str, spellings: &[String]) -> String {
+    let list = spellings
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "models {list} are all the model '{canonical}' (model names are case-, whitespace-, \
+         and underscore-insensitive, and an unnamed model is 'main'); simulating would \
+         silently keep only one of them, so the project cannot run until all but one are \
+         renamed or removed in the file it was opened from"
     )
 }
 

@@ -407,6 +407,35 @@ pub(crate) fn model_duplicate_variables(
     )
 }
 
+/// The project's models known by one name (`datamodel::canonical_model_name`):
+/// for each such name more than one of the project's models has, that name
+/// plus every as-written spelling in declaration order.
+///
+/// Every model is filed under its canonical name (the `models` map, module
+/// `model_name` lookups, the sync's handles), so of two such models the db
+/// holds one -- the later -- and the other is a model no query reaches while
+/// patches still address it by its stored name. An unnamed model and one
+/// named `main` are the same hazard from the other side: a patch addressed to
+/// `main` edits the unnamed one (`Project::model_index`) while a run of
+/// `main` runs the other. Like two variables of one canonical name in a
+/// model, either is a project to refuse rather than to run: the compile gate
+/// and `collect_all_diagnostics` both read this.
+///
+/// Read from `model_names`, the as-written list in declaration order. A
+/// stdlib model's name is on that list only where no project model stands in
+/// its place (`db::sync`), so a project model named for a stdlib model is not
+/// a duplicate.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn project_duplicate_models(
+    db: &dyn Db,
+    project: SourceProject,
+) -> Vec<(String, Vec<String>)> {
+    crate::common::duplicate_groups_by(
+        project.model_names(db).iter().map(|s| s.as_str()),
+        crate::datamodel::canonical_model_name,
+    )
+}
+
 /// Emit one Error-severity `DuplicateVariable` diagnostic per colliding
 /// canonical-ident group in `model`, naming every original spelling and the
 /// model (GH #885). The message text is shared with the hard compile error
@@ -1457,6 +1486,23 @@ pub fn collect_all_diagnostics(
             owner: None,
             severity: DiagnosticSeverity::Warning,
             error: warning,
+        });
+    }
+
+    // Models whose names canonicalize alike are a project-level fact too: one
+    // row per group, under no model, since the models it names are not all
+    // reachable through `models`.
+    for (canonical, spellings) in project_duplicate_models(db, project) {
+        all.push(Diagnostic {
+            model: String::new(),
+            variable: None,
+            owner: None,
+            severity: DiagnosticSeverity::Error,
+            error: DiagnosticError::Model(Error::new(
+                crate::common::ErrorKind::Model,
+                crate::common::ErrorCode::DuplicateVariable,
+                Some(crate::common::duplicate_model_message(canonical, spellings)),
+            )),
         });
     }
 

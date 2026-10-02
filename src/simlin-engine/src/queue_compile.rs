@@ -544,7 +544,7 @@ pub fn expand_queues(
             }
         });
 
-    // Pass 2 (mutable): apply the container-rewritten equations, give every driven
+    // Pass 2: apply the container-rewritten equations, give every driven
     // outflow a `0` placeholder equation so it compiles to a writable slot
     // (preserving its array shape so an arrayed queue keeps its per-element
     // slots), clear the queue/overflow markers so the expanded model compiles as a
@@ -552,34 +552,42 @@ pub fn expand_queues(
     // Clearing the markers is what lets the ordinary compile path REJECT an
     // un-expanded queue (the marker is still set) while accepting this expanded one
     // -- exactly the `QueueNotExpanded` guard contract (§10.3).
-    // Every variable is visited, and each is copied out of what the project
-    // shares with the one it was cloned from only if the pass changes it.
+    // Every variable is read, and only one the pass changes is replaced: the
+    // rest stay shared with the project this one was cloned from. A variable
+    // the pass has no business with is not copied at all, and one it rewrites
+    // to what it already was (a driven outflow a Stella export gave the `0`
+    // placeholder) is not replaced.
     let model = &mut project.models[model_idx];
-    model.variables.edit_each(|v| {
-        let mut changed = false;
-        if let Some(new_eqn) = rewritten_equations.remove(&canon(v.get_ident())) {
-            set_variable_equation(v, new_eqn);
-            changed = true;
+    model.variables.update(|original| {
+        let ident = canon(original.get_ident());
+        let rewritten = rewritten_equations.remove(&ident);
+        let driven_flow =
+            matches!(original, datamodel::Variable::Flow(_)) && driven.contains(&ident);
+        let queue = matches!(original, datamodel::Variable::Stock(s) if s.compat.queue.is_some());
+        if rewritten.is_none() && !driven_flow && !queue {
+            return None;
         }
-        changed
-            | match v {
-                datamodel::Variable::Flow(f) if driven.contains(&canon(&f.ident)) => {
-                    // The queue stock now drives this outflow via the pass; give it a
-                    // writable placeholder slot and drop the overflow marker (it is an
-                    // ordinary flow after expansion).
-                    f.equation = placeholder_zero_equation(&f.equation);
-                    f.compat.overflow = false;
-                    true
-                }
-                datamodel::Variable::Stock(s) if s.compat.queue.is_some() => {
-                    // The FIFO is now driven by the pass; the expanded stock is an
-                    // ordinary INTEG whose Δ = Σ inflow − Σ outflow (§4.1), so drop
-                    // the queue marker.
-                    s.compat.queue = None;
-                    true
-                }
-                _ => false,
+        let mut v = original.clone();
+        if let Some(new_eqn) = rewritten {
+            set_variable_equation(&mut v, new_eqn);
+        }
+        match &mut v {
+            datamodel::Variable::Flow(f) if driven_flow => {
+                // The queue stock drives this outflow via the pass; give it a
+                // writable placeholder slot and drop the overflow marker (it is an
+                // ordinary flow after expansion).
+                f.equation = placeholder_zero_equation(&f.equation);
+                f.compat.overflow = false;
             }
+            datamodel::Variable::Stock(s) if queue => {
+                // The FIFO is driven by the pass; the expanded stock is an
+                // ordinary INTEG whose Δ = Σ inflow − Σ outflow (§4.1), so drop
+                // the queue marker.
+                s.compat.queue = None;
+            }
+            _ => {}
+        }
+        (v != *original).then_some(v)
     });
     // Append the synthesized container stocks (no-flow INTEGs the pass drives).
     for stock in container_stocks {

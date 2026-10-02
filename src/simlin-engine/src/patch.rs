@@ -5,10 +5,11 @@
 use std::collections::HashMap;
 
 use crate::ast::{Expr0, Expr2, IndexExpr0, IndexExpr2, print_eqn};
-use crate::builtins::{BuiltinFn, UntypedBuiltinFn};
+use crate::builtins::{BuiltinFn, Loc, UntypedBuiltinFn};
 use crate::canonicalize;
 use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, RawIdent, Result};
-use crate::datamodel::{self, Variable};
+use crate::datamodel::{self, NameRole, Variable};
+use crate::dimensions::DimensionsContext;
 use crate::lexer::LexerType;
 
 /// A patch to apply to a project. Contains project-level operations
@@ -23,9 +24,22 @@ pub struct ProjectPatch {
 /// A project-level operation.
 #[derive(Clone)]
 pub enum ProjectOperation {
+    /// Sets the sim specs the project runs under.
+    ///
+    /// A run takes its specs from the model it runs when that model has specs
+    /// of its own, and from the project otherwise (XMILE 1.0 section 2.3: a
+    /// model's `<sim_specs>` override the file's). So the edit sets the
+    /// project's specs and takes the root model's own away: afterwards the
+    /// project's are the one statement of what the root model runs under, and
+    /// every reader of either agrees with the run. The root model is the one a
+    /// host runs when it names none (`Project::default_model`). Another
+    /// model's own specs are that model's and stay, so a run of another model
+    /// that has its own still runs under them.
     SetSimSpecs(datamodel::SimSpecs),
     SetSource(datamodel::Source),
-    AddModel { name: String },
+    AddModel {
+        name: String,
+    },
 }
 
 /// A patch targeting a specific model within the project.
@@ -45,6 +59,26 @@ pub enum ModelOperation {
     DeleteVariable {
         ident: String,
     },
+    /// Renames a variable and respells every reference to it, in every model
+    /// that can name it (its own and every model instantiating that one), and
+    /// every other place a model holds its name, but for a diagram's labels:
+    /// every view's label keeps naming the old name until a view edit
+    /// (`EditView`, as `editing::plan_rename` plans one, or an upserted view)
+    /// or a diagram sync that carries the patch relabels it. A host that
+    /// draws the model sends the rename that way, or syncs its diagrams after
+    /// it.
+    ///
+    /// Refused, changing nothing, where carrying it out would decide what an
+    /// identifier inside a subscript's brackets names, which the compiler
+    /// does not answer one way (`patch::Reader`): when the old or the new name
+    /// is a dimension's, and when the variable is written alone in a
+    /// subscript (or at an end of a range there) and its old or new name is an
+    /// element of a dimension. Refused too when the new name is one of the
+    /// run's clock slots (`db::is_implicit_global`: the time, the time step,
+    /// the initial and the final time): a variable of that name takes the
+    /// slot's results key, so a rename does not give a variable one, though
+    /// the compiler resolves the quoted name; a model that already declares
+    /// one keeps it.
     RenameVariable {
         from: String,
         to: String,
@@ -143,18 +177,32 @@ pub fn is_view_only_patch(project: &datamodel::Project, patch: &ProjectPatch) ->
 
 pub fn apply_patch(project: &mut datamodel::Project, patch: ProjectPatch) -> Result<()> {
     let mut staged = project.clone();
+    apply_patch_in_place(&mut staged, patch)?;
+    *project = staged;
+    Ok(())
+}
 
+/// Applies `patch` to `project` itself. A patch that fails leaves `project`
+/// holding the operations before the one that failed, so a caller that must
+/// keep the project as it was stages a copy, as [`apply_patch`] does.
+pub(crate) fn apply_patch_in_place(
+    project: &mut datamodel::Project,
+    patch: ProjectPatch,
+) -> Result<()> {
     // Apply project-level operations first
     for project_op in patch.project_ops {
         match project_op {
             ProjectOperation::SetSimSpecs(sim_specs) => {
-                staged.sim_specs = sim_specs;
+                project.sim_specs = sim_specs;
+                if let Some(root) = project.default_model_mut() {
+                    root.sim_specs = None;
+                }
             }
             ProjectOperation::SetSource(source) => {
-                staged.source = Some(source);
+                project.source = Some(source);
             }
             ProjectOperation::AddModel { name } => {
-                apply_add_model(&mut staged, name)?;
+                apply_add_model(project, name)?;
             }
         }
     }
@@ -162,11 +210,10 @@ pub fn apply_patch(project: &mut datamodel::Project, patch: ProjectPatch) -> Res
     // Then apply model-level operations
     for model_patch in patch.models {
         for op in model_patch.ops {
-            apply_model_operation(&mut staged, &model_patch.name, op)?;
+            apply_model_operation(project, &model_patch.name, op)?;
         }
     }
 
-    *project = staged;
     Ok(())
 }
 
@@ -282,17 +329,24 @@ fn canonicalize_stock_references(stock: &mut datamodel::Stock) {
 
 /// The stored form of a stock's inflow or outflow list, for every op that sets
 /// one: the set the engine integrates (`datamodel::distinct_stock_flows`, so
-/// `"Flow A"` and `"flow_a"` are one member), as canonical idents, sorted.
-/// Storing the set keeps a patch from writing a repeat the sync would then
-/// have to warn about.
+/// `"Flow A"` and `"flow_a"` are one member), as canonical idents, in the
+/// order given. Storing the set keeps a patch from writing a repeat the sync
+/// would then have to warn about.
+///
+/// The order is the modeler's and is kept: XMILE 1.0 section 4.2
+/// (`docs/reference/xmile-v1.0.html`, "Stocks") says inflows "appear with
+/// multiple tags in inflow-priority order (if the order of inflow to the stock
+/// is important)", and that a queue's "outflows have a priority order and MAY
+/// have the `<overflow/>` option set on all but the first outflow". The engine
+/// reads both: a queue serves its outflows in list order
+/// (`docs/design/queues.md` section 3.3), and a conveyor admits its coupled
+/// inflows in list order.
 fn canonical_flow_list(flows: &[String]) -> Vec<String> {
-    let mut list: Vec<String> = datamodel::distinct_stock_flows(flows)
+    datamodel::distinct_stock_flows(flows)
         .flows
         .iter()
         .map(|flow| canonicalize(flow).into_owned())
-        .collect();
-    list.sort_unstable();
-    list
+        .collect()
 }
 
 fn canonicalize_module_references(module: &mut datamodel::Module) {
@@ -365,7 +419,12 @@ fn upsert_variable(model: &mut datamodel::Model, mut variable: Variable) {
         if get_uid(&variable).is_none() {
             set_uid(&mut variable, get_uid(&model.variables[index]));
         }
-        model.variables.replace(index, variable);
+        // An upsert of the variable as it is changes nothing, so the model
+        // keeps the allocation it has and a copy of the project keeps sharing
+        // it.
+        if model.variables[index] != variable {
+            model.variables.replace(index, variable);
+        }
     } else {
         // New variables created via patch (e.g., from MCP EditModel) may arrive
         // without a UID. Assign one so that SetLoopName can later reference them
@@ -401,14 +460,45 @@ fn get_model_mut<'a>(
 }
 
 fn apply_add_model(project: &mut datamodel::Project, name: String) -> Result<()> {
-    // Check if a model with this name already exists.
-    // Model names are stored and looked up as-is (no canonicalization),
-    // consistent with XMILE/JSON import and the C FFI simlin_project_add_model.
-    if project.get_model(&name).is_some() {
+    // A model's name is stored as written, and a patch addresses it so, but
+    // the engine knows every model by its canonical name, the empty name
+    // being `main`: a project with two models of one such name is one it
+    // refuses to compile (`db::diagnostic::project_duplicate_models`). So a
+    // name is taken when the name it is known by is.
+    let known_as = datamodel::canonical_model_name(&name);
+    if let Some(taken) = project
+        .models
+        .iter()
+        .find(|model| datamodel::canonical_model_name(&model.name) == known_as)
+    {
         return Err(Error::new(
             ErrorKind::Model,
             ErrorCode::DuplicateVariable,
-            Some(format!("model '{}' already exists", name)),
+            Some(if taken.name == name {
+                format!("model '{name}' already exists")
+            } else {
+                format!(
+                    "model '{name}' already exists as '{}' (model names are case-, \
+                     whitespace-, and underscore-insensitive, and an unnamed model is \
+                     'main')",
+                    taken.name
+                )
+            }),
+        ));
+    }
+    // The stdlib's models are named under a prefix of their own, and a
+    // project model of such a name stands in the stdlib model's place
+    // (`db::sync`): an empty one would answer every call of that builtin. The
+    // one way a project holds a stdlib model is the stdlib's own definition,
+    // which `Project::ensure_referenced_stdlib_models` adds.
+    if known_as.starts_with(datamodel::STDLIB_PREFIX) {
+        return Err(Error::new(
+            ErrorKind::Model,
+            ErrorCode::BadModelName,
+            Some(format!(
+                "cannot add model '{name}': names beginning '{}' are the stdlib's",
+                datamodel::STDLIB_PREFIX
+            )),
         ));
     }
     project.models.push(datamodel::Model {
@@ -431,14 +521,12 @@ fn apply_update_stock_flows(
 ) -> Result<()> {
     let ident = canonicalize(ident_str);
 
-    let index = model.variables.iter().position(
-        |var| matches!(var, Variable::Stock(stock) if canonicalize(stock.ident.as_str()) == ident),
-    );
-    let stock = index
-        .and_then(|index| match model.variables.get_mut(index) {
-            Some(Variable::Stock(stock)) => Some(stock),
-            _ => None,
-        })
+    let index = model
+        .variables
+        .iter()
+        .position(
+            |var| matches!(var, Variable::Stock(stock) if canonicalize(stock.ident.as_str()) == ident),
+        )
         .ok_or_else(|| {
             Error::new(
                 ErrorKind::Model,
@@ -447,8 +535,16 @@ fn apply_update_stock_flows(
             )
         })?;
 
-    stock.inflows = canonical_flow_list(inflows);
-    stock.outflows = canonical_flow_list(outflows);
+    let inflows = canonical_flow_list(inflows);
+    let outflows = canonical_flow_list(outflows);
+    // Lists the stock already holds leave it as it is, in the allocation a
+    // copy of the project shares.
+    let holds_them = matches!(&model.variables[index], Variable::Stock(stock)
+        if stock.inflows == inflows && stock.outflows == outflows);
+    if !holds_them && let Some(Variable::Stock(stock)) = model.variables.get_mut(index) {
+        stock.inflows = inflows;
+        stock.outflows = outflows;
+    }
 
     Ok(())
 }
@@ -485,18 +581,22 @@ fn apply_set_loop_name(
     let mut next_uid = next_available_uid(model);
     let mut uids: Vec<i32> = Vec::with_capacity(unique_vars.len());
     for var_name in &unique_vars {
-        let var = model.get_variable_mut(var_name).ok_or_else(|| {
+        let index = model.variable_index(var_name).ok_or_else(|| {
             Error::new(
                 ErrorKind::Model,
                 ErrorCode::DoesNotExist,
                 Some(format!("variable '{}' not found", var_name)),
             )
         })?;
-        let uid = match get_uid(var) {
+        // Only a variable that takes a new uid is written: one that has a uid
+        // stays in the allocation a copy of the project shares.
+        let uid = match get_uid(&model.variables[index]) {
             Some(uid) => uid,
             None => {
                 let minted = next_uid;
-                set_uid(var, Some(minted));
+                if let Some(var) = model.variables.get_mut(index) {
+                    set_uid(var, Some(minted));
+                }
                 next_uid += 1;
                 minted
             }
@@ -530,11 +630,7 @@ fn apply_set_loop_name(
 
 fn apply_delete_variable(model: &mut datamodel::Model, ident_str: &str) -> Result<()> {
     let ident = canonicalize(ident_str);
-    let Some(pos) = model
-        .variables
-        .iter()
-        .position(|var| canonicalize(var.get_ident()) == ident)
-    else {
+    let Some(pos) = model.variable_index(ident_str) else {
         return Err(no_such_variable(ident_str));
     };
 
@@ -556,19 +652,29 @@ fn apply_delete_variable(model: &mut datamodel::Model, ident_str: &str) -> Resul
         );
     }
 
-    // Drop any module input wiring whose `src` named the deleted variable.
-    // Mirrors the stock-flow and group-member cleanup above: a left-behind
-    // `src` becomes a dependency on a non-existent variable, making the whole
-    // project fail to compile with a confusing "missing variable" message. The
-    // rename path already rewrites module references; the delete path was the
-    // asymmetric gap.
-    let names_deleted =
-        |reference: &datamodel::ModuleReference| canonicalize(reference.src.as_str()) == ident;
+    // Drop the module wiring that runs through the deleted variable: a
+    // left-behind `src` is a dependency on a variable the model no longer has,
+    // and the whole project stops compiling with a "missing variable" message;
+    // a left-behind `dst` is an input written into an instance that is gone.
+    // An end runs through the variable in any spelling whose path starts at
+    // it: the bare name, XMILE's parent-scope `·name` (the form the XMILE
+    // reader stores), `self·name`, and a port of a deleted module instance
+    // (`name·output`, `name·input`).
+    let starts_at_deleted = |end: &str| {
+        let end = canonicalize(end);
+        let (_, path) = split_scope_prefix(&end);
+        path.split(MODULE_SEPARATOR).next() == Some(ident.as_ref())
+    };
+    let runs_through_deleted = |reference: &datamodel::ModuleReference| {
+        starts_at_deleted(&reference.src) || starts_at_deleted(&reference.dst)
+    };
     model.variables.edit_where(
-        |var| matches!(var, Variable::Module(module) if module.references.iter().any(names_deleted)),
+        |var| matches!(var, Variable::Module(module) if module.references.iter().any(runs_through_deleted)),
         |var| {
             if let Variable::Module(module) = var {
-                module.references.retain(|reference| !names_deleted(reference));
+                module
+                    .references
+                    .retain(|reference| !runs_through_deleted(reference));
             }
         },
     );
@@ -580,6 +686,30 @@ fn apply_delete_variable(model: &mut datamodel::Model, ident_str: &str) -> Resul
     }
 
     Ok(())
+}
+
+/// The separator between a module instance and what is read through it in a
+/// canonical identifier (`hares·births`).
+const MODULE_SEPARATOR: char = '\u{00B7}';
+
+/// A canonical reference as it is written in a model, split into its scope
+/// prefix and the path it walks.
+///
+/// The prefix names no variable: `self·` is the model itself (a module's port
+/// is spelled `self·port`), and a bare `·` is XMILE's parent-scope spelling
+/// `.x`, which the reader stores canonicalized and every consumer reads as the
+/// bare name (`db::DepScope::resolve`). The path's first segment is a variable
+/// of the model, and each later one a variable of the model the segment before
+/// it instantiates.
+fn split_scope_prefix(reference: &str) -> (&str, &str) {
+    const SELF_PREFIX: &str = "self\u{00B7}";
+    if reference.starts_with(SELF_PREFIX) {
+        return reference.split_at(SELF_PREFIX.len());
+    }
+    if reference.starts_with(MODULE_SEPARATOR) {
+        return reference.split_at(MODULE_SEPARATOR.len_utf8());
+    }
+    ("", reference)
 }
 
 fn apply_rename_variable(
@@ -596,10 +726,10 @@ fn apply_rename_variable(
     // `Lexer::quoted_identifier` terminates on the first `"` and the grammar has
     // no escape of any kind, so a canonical name containing `"` can be written
     // neither bare nor quoted. Renaming TO one is not merely useless: this
-    // function reprints every dependent equation, so it would persist
-    // `c = "x"y" + 1` into the datamodel and the previously-valid model would
-    // stop compiling with `UnclosedQuotedIdent` -- the same silent, saved
-    // corruption GH #976 fixed for keyword names, through this same entry point.
+    // function respells every reference, so it would persist `c = "x"y" + 1`
+    // into the datamodel and the previously-valid model would stop compiling
+    // with `UnclosedQuotedIdent` -- the same silent, saved corruption GH #976
+    // fixed for keyword names, through this same entry point.
     //
     // Rejecting at the front door rather than teaching the lexer an escape is
     // deliberate: nothing is lost by refusing a name that nothing could ever
@@ -618,23 +748,51 @@ fn apply_rename_variable(
         ));
     }
 
+    let model_index = project.model_index(model_name).ok_or_else(|| {
+        Error::new(
+            ErrorKind::Model,
+            ErrorCode::BadModelName,
+            Some(format!("there is no model named '{model_name}'")),
+        )
+    })?;
+
     if old_ident == new_ident {
         // Canonically-identical rename: only the display spelling changes
         // (e.g. "students" -> "Students"). Every reference resolves through
         // canonicalization, so no equation or reference rewrites are needed --
         // just restamp the stored display name.
-        let model = get_model_mut(project, model_name)?;
-        let var = model
-            .get_variable_mut(from)
+        let model = &mut project.models[model_index];
+        let index = model
+            .variable_index(from)
             .ok_or_else(|| no_such_variable(from))?;
-        if var.get_ident() != to {
+        if model.variables[index].get_ident() != to
+            && let Some(var) = model.variables.get_mut(index)
+        {
             var.set_ident(to.to_string());
         }
         return Ok(());
     }
 
-    let model = get_model_mut(project, model_name)?;
+    // A rename does not give a variable the name of one of the run's clock
+    // slots -- the time, the time step, the initial and the final time
+    // (`db::is_implicit_global`); a model that already declares one keeps it.
+    // The compiler resolves such a name written quoted, so the rule is
+    // stricter than it: a variable of that name takes the slot's key in the
+    // results, where every host reads the clock. Another builtin's name
+    // (`pi`, `if`) is not refused; the printer quotes it.
+    if crate::db::is_implicit_global(new_ident.as_str()) {
+        return Err(Error::new(
+            ErrorKind::Model,
+            ErrorCode::DuplicateVariable,
+            Some(format!(
+                "cannot rename '{from}' to '{to}': '{to}' is one of the simulation's own \
+                 clock names (time, the time step, the initial and the final time), which a \
+                 rename does not give a variable"
+            )),
+        ));
+    }
 
+    let model = &project.models[model_index];
     if model.get_variable(new_ident.as_str()).is_some() {
         return Err(Error::new(
             ErrorKind::Model,
@@ -644,287 +802,695 @@ fn apply_rename_variable(
             )),
         ));
     }
-
-    let (target_index, is_flow) = model
-        .variables
-        .iter()
-        .enumerate()
-        .find_map(|(idx, var)| {
-            if canonicalize(var.get_ident()) == old_ident.as_str() {
-                Some((idx, matches!(var, Variable::Flow(_))))
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| no_such_variable(from))?;
-
-    rename_model_equations(model, &old_ident, &new_ident);
-
-    if is_flow {
-        update_stock_flow_references(model, &old_ident, &new_ident);
+    if model.get_variable(old_ident.as_str()).is_none() {
+        return Err(no_such_variable(from));
     }
 
-    rename_module_references(model, &old_ident, &new_ident);
-    rename_group_members(model, &old_ident, &new_ident);
+    let rename = Rename::new(project, model_index, &old_ident, &new_ident);
+    // A name a dimension has, before the rename or after it, can be the
+    // dimension or the variable wherever an equation writes it, and the
+    // compiler reads it both ways (`Reader`). XMILE 1.0 section 3.7.1 says
+    // dimension names "must be distinct from model variables names".
+    let shared_with_dimension = |name: &str| {
+        Error::new(
+            ErrorKind::Model,
+            ErrorCode::DuplicateVariable,
+            Some(format!(
+                "cannot rename '{from}' to '{to}': '{name}' is also the name of a dimension, \
+                 so an equation that writes it may mean the dimension or the variable, and the \
+                 rename cannot tell which (XMILE requires a variable's name to differ from \
+                 every dimension's)"
+            )),
+        )
+    };
+    if rename.dimensions.is_dimension_name(old_ident.as_str()) {
+        return Err(shared_with_dimension(from));
+    }
+    if rename.dimensions.is_dimension_name(new_ident.as_str()) {
+        return Err(shared_with_dimension(to));
+    }
 
-    if let Some(var) = model.variables.get_mut(target_index) {
-        // Store the caller's display spelling verbatim (ident fields hold
-        // display names; see the comment above `canonicalize_stock_references`).
-        // References below are rewritten with the canonical `new_ident`.
-        var.set_ident(to.to_string());
-
-        // If the renamed variable is itself a module instance, its OWN input
-        // references carry the module-qualified `{old}·{port}` dst prefix. The
-        // engine rebuilds inputs under the new `{new}·` prefix and would drop a
-        // stale `{old}·port` reference, silently unwiring every input. Reprefix
-        // them so the wiring survives renaming the module variable.
-        if let Variable::Module(module) = var {
-            let old_prefix = format!("{}\u{00B7}", old_ident.as_str());
-            let new_prefix = format!("{}\u{00B7}", new_ident.as_str());
-            for reference in module.references.iter_mut() {
-                let dst_canonical = canonicalize(reference.dst.as_str());
-                if let Some(port) = dst_canonical.strip_prefix(old_prefix.as_str()) {
-                    reference.dst = format!("{new_prefix}{port}");
+    // A reference reaches the renamed variable from its own model and from
+    // every model that instantiates that model, however deep; no other model
+    // can name it. Every text is respelled before any is written, so a
+    // rename refused for an ambiguous reference in one model leaves every
+    // model as it was.
+    let reaches = rename.models_reaching();
+    let mut respelled: Vec<(usize, Vec<(usize, Variable)>)> = Vec::new();
+    for (index, model) in project.models.iter().enumerate() {
+        if !reaches[index] {
+            continue;
+        }
+        let mut variables = Vec::new();
+        for (position, var) in model.variables.iter().enumerate() {
+            match rename.renamed_texts(index, var) {
+                Ok(Some(renamed)) => variables.push((position, renamed)),
+                Ok(None) => {}
+                Err(Ambiguity(why)) => {
+                    return Err(Error::new(
+                        ErrorKind::Model,
+                        ErrorCode::DuplicateVariable,
+                        Some(format!(
+                            "cannot rename '{from}' to '{to}': the equation of '{}' in model \
+                             '{}' {why}",
+                            var.get_ident(),
+                            model.name
+                        )),
+                    ));
                 }
             }
         }
+        respelled.push((index, variables));
     }
-
-    // Cross-model fix-up: the variable just renamed may be a module INPUT PORT.
-    // Every PARENT module that instantiates this model wires into the OLD port
-    // name via its `dst` (the module-qualified `module·port` form), and those
-    // references live in OTHER models that the single-model rename above never
-    // visits. Without retargeting them the parent silently feeds the renamed
-    // port its default value -- wrong numbers, no error.
-    retarget_parent_module_dst(project, model_name, &old_ident, &new_ident);
+    for (index, variables) in respelled {
+        let model = &mut project.models[index];
+        for (position, renamed) in variables {
+            model.variables.replace(position, renamed);
+        }
+        model.map_variable_names(|role, name| rename.renamed_name(index, role, name, to));
+    }
 
     Ok(())
 }
 
-/// Retarget the `dst` of every parent module reference that wires into the
-/// just-renamed input port of `target_model_name`.
+/// What a module instance instantiates.
+enum Instantiates {
+    /// A model of the project, by its index in `project.models`.
+    Model(usize),
+    /// A stdlib model, which the db holds for every project and no patch
+    /// reaches.
+    Stdlib,
+    /// A model nothing holds: a read through the instance resolves to nothing.
+    Nothing,
+}
+
+/// Where a reference leads from the model it is written in.
+enum Target<'r> {
+    /// One name of the model the reference is written in.
+    Local(&'r str),
+    /// A variable read through module instances.
+    Through {
+        /// Each instance on the way, with the model it is a variable of.
+        instances: Vec<(usize, &'r str)>,
+        /// The model the last instance instantiates; `None` for a stdlib
+        /// model.
+        model: Option<usize>,
+        variable: &'r str,
+    },
+}
+
+/// How a spelling is read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadAs {
+    /// As a variable: a reference in an equation, a module reference's `src`,
+    /// a stock's flow. It is resolved as `db::DepScope::resolve` resolves it,
+    /// so a hop through an instance of a model nothing holds fails, and the
+    /// spelling is one local name.
+    Variable,
+    /// As a module reference's `dst`: a port, through the instance the
+    /// spelling starts at (`db::assemble::port_of`), whatever model that
+    /// instance instantiates, so the wiring follows a renamed instance even
+    /// before its model is in the project.
+    Port,
+}
+
+/// Where in an expression a reference is written, which decides what the
+/// compiler can read it as.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Site {
+    /// An identifier anywhere but alone in a subscript's brackets: an
+    /// operand, a call's argument, a part of an index expression.
+    Value,
+    /// The variable a subscript indexes.
+    Subscripted,
+    /// Alone in a subscript's brackets, or an end of a range there.
+    Index,
+}
+
+/// A reference a rename would have to respell without knowing what the
+/// compiler reads it as, and why: a phrase completing "the equation of
+/// `reader` ...".
+struct Ambiguity(String);
+
+/// What a rename makes of a reference in an expression, by where it is
+/// written: the name it reads after the rename, `None` for one the rename
+/// leaves, or the ambiguity that refuses the rename.
+type Respelled = std::result::Result<Option<Ident<Canonical>>, Ambiguity>;
+
+/// What a rename makes of each reference in an expression ([`Respelled`]).
+type Respelling<'f> = dyn Fn(Site, &Ident<Canonical>) -> Respelled + 'f;
+
+/// One rename, and what each name of the renamed variable reads after it.
 ///
-/// A module reference `dst` is the canonical `{module_ident}·{port}` form (see
-/// `build_module_inputs`). For each module instance pointing at
-/// `target_model_name`, rewrite a reference whose port suffix names `old_ident`
-/// to name `new_ident`. Gated on the module's target model so an unrelated model
-/// with a like-named variable is untouched.
-fn retarget_parent_module_dst(
-    project: &mut datamodel::Project,
-    target_model_name: &str,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) {
-    let target_canonical = canonicalize(target_model_name);
-    // Only an instance with a reference into the renamed port changes.
-    let retargets = |var: &Variable| {
-        matches!(var, Variable::Module(module)
-        if canonicalize(module.model_name.as_str()) == target_canonical
-            && module.references.iter().any(|reference| {
-                retargeted_dst(&module.ident, &reference.dst, old_ident, new_ident).is_some()
-            }))
-    };
-    for model in project.models.iter_mut() {
-        model.variables.edit_where(retargets, |var| {
-            let Variable::Module(module) = var else {
-                return;
-            };
-            for reference in module.references.iter_mut() {
-                if let Some(dst) =
-                    retargeted_dst(&module.ident, &reference.dst, old_ident, new_ident)
+/// A reference names the variable from the model it is written in: bare in
+/// the variable's own model (or under a scope prefix, `split_scope_prefix`),
+/// and through a chain of module instances from a model that instantiates it
+/// (`hares·births` in the model holding the instance `hares`). The chain is
+/// resolved the way the compiler resolves it (`Rename::target`). One rule
+/// therefore respells an equation's references, a module's `src` and `dst`,
+/// and a stock's flow lists, in every model that reaches the renamed variable
+/// -- a renamed input port in its parents' `dst`, a renamed output in its
+/// parents' equations and `src`, and a renamed module instance in everything
+/// read or wired through it.
+///
+/// Inside an equation a name spelled like the variable is not always a
+/// reference to it, and where the rename cannot tell, it refuses
+/// (`Reader`).
+struct Rename<'a> {
+    /// The renamed variable's model, by its index in `project.models`.
+    model: usize,
+    old: &'a Ident<Canonical>,
+    new: &'a Ident<Canonical>,
+    /// For each model, by its index in `project.models`, the module
+    /// instances a reference can hop through, by canonical ident, with what
+    /// each instantiates, as the project declares them before the rename.
+    instances: Vec<HashMap<String, Instantiates>>,
+    dimensions: DimensionsContext,
+    /// The project's dimensions by name, in declaration order, so the
+    /// dimension a refusal names is the same on every run.
+    dimension_names: Vec<String>,
+}
+
+impl<'a> Rename<'a> {
+    fn new(
+        project: &datamodel::Project,
+        model: usize,
+        old: &'a Ident<Canonical>,
+        new: &'a Ident<Canonical>,
+    ) -> Self {
+        let dimensions = DimensionsContext::from(&project.dimensions);
+        // Of two models whose names canonicalize alike (a project the engine
+        // refuses to compile) a name is the later's, the one the db files
+        // under it.
+        let models: HashMap<String, usize> = project
+            .models
+            .iter()
+            .enumerate()
+            .map(|(index, model)| (canonicalize(&model.name).into_owned(), index))
+            .collect();
+        let instantiates = |model_name: &str| {
+            let name = canonicalize(model_name);
+            match models.get(name.as_ref()) {
+                Some(&index) => Instantiates::Model(index),
+                None if crate::stdlib::MODEL_NAMES
+                    .iter()
+                    .any(|stdlib| name.strip_prefix(datamodel::STDLIB_PREFIX) == Some(*stdlib)) =>
                 {
-                    reference.dst = dst;
+                    Instantiates::Stdlib
+                }
+                None => Instantiates::Nothing,
+            }
+        };
+        let instances = project
+            .models
+            .iter()
+            .map(|model| {
+                model
+                    .variables
+                    .iter()
+                    .filter_map(|var| match var {
+                        Variable::Module(module) => Some((
+                            canonicalize(&module.ident).into_owned(),
+                            instantiates(&module.model_name),
+                        )),
+                        Variable::Stock(_) | Variable::Flow(_) | Variable::Aux(_) => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        Rename {
+            model,
+            old,
+            new,
+            instances,
+            dimensions,
+            dimension_names: project
+                .dimensions
+                .iter()
+                .map(|dimension| dimension.name().to_string())
+                .collect(),
+        }
+    }
+
+    /// The first dimension of the project, in declaration order, that has an
+    /// element named `name`: the membership test the compiler resolves a
+    /// subscript's index against (`Dimension::canonical_element`).
+    fn dimension_with_element(&self, name: &str) -> Option<&str> {
+        self.dimension_names
+            .iter()
+            .find(|dimension| {
+                self.dimensions
+                    .get_by_raw_name(dimension)
+                    .is_some_and(|dimension| dimension.canonical_element(name).is_some())
+            })
+            .map(String::as_str)
+    }
+
+    /// Which models, by index, can name the renamed variable: its own, and
+    /// every model with an instance of a model that can.
+    fn models_reaching(&self) -> Vec<bool> {
+        let mut reaches = vec![false; self.instances.len()];
+        reaches[self.model] = true;
+        loop {
+            let mut grew = false;
+            for (from, instances) in self.instances.iter().enumerate() {
+                let instantiates_one = || {
+                    instances
+                        .values()
+                        .any(|instance| matches!(instance, Instantiates::Model(to) if reaches[*to]))
+                };
+                if !reaches[from] && instantiates_one() {
+                    reaches[from] = true;
+                    grew = true;
+                }
+            }
+            if !grew {
+                return reaches;
+            }
+        }
+    }
+
+    /// Where `path`, a canonical spelling written in the model at index
+    /// `model` with its scope prefix taken off, leads when read as `read_as`
+    /// says. Read as a variable it is `db::DepScope::resolve` on the
+    /// datamodel: each segment but the last must be a module instance of the
+    /// model the segment before it instantiates, and the last is a variable
+    /// of the model the last instance instantiates. A spelling that fails a
+    /// hop is one local name, the whole of it: `x·foo` beside an auxiliary
+    /// `x` reads the variable named `x.foo`, never `x`. Read as a port, an
+    /// instance of a model nothing holds is a hop too, to a model no rename
+    /// reaches.
+    fn target<'r>(&self, model: usize, path: &'r str, read_as: ReadAs) -> Target<'r> {
+        let mut instances = Vec::new();
+        let (mut at, mut rest) = (model, path);
+        while let Some((segment, tail)) = rest.split_once(MODULE_SEPARATOR) {
+            match self.instances[at].get(segment) {
+                Some(Instantiates::Model(next)) => {
+                    instances.push((at, segment));
+                    (at, rest) = (*next, tail);
+                }
+                Some(Instantiates::Stdlib) => {
+                    instances.push((at, segment));
+                    return Target::Through {
+                        instances,
+                        model: None,
+                        variable: tail,
+                    };
+                }
+                Some(Instantiates::Nothing) if read_as == ReadAs::Port => {
+                    instances.push((at, segment));
+                    return Target::Through {
+                        instances,
+                        model: None,
+                        variable: tail,
+                    };
+                }
+                Some(Instantiates::Nothing) | None => {
+                    return Target::Local(path);
+                }
+            }
+        }
+        if instances.is_empty() {
+            Target::Local(path)
+        } else {
+            Target::Through {
+                instances,
+                model: Some(at),
+                variable: rest,
+            }
+        }
+    }
+
+    /// What `reference`, written in the model at index `model` and read as
+    /// `read_as` says, reads after the rename, or `None` when it does not
+    /// name the renamed variable.
+    fn renamed(
+        &self,
+        model: usize,
+        reference: &Ident<Canonical>,
+        read_as: ReadAs,
+    ) -> Option<Ident<Canonical>> {
+        let (prefix, path) = split_scope_prefix(reference.as_str());
+        let is_renamed = |at: usize, name: &str| at == self.model && name == self.old.as_str();
+        let mut renamed = String::from(prefix);
+        match self.target(model, path, read_as) {
+            Target::Local(name) => {
+                if !is_renamed(model, name) {
+                    return None;
+                }
+                renamed.push_str(self.new.as_str());
+            }
+            Target::Through {
+                instances,
+                model: holder,
+                variable,
+            } => {
+                let renames_variable = holder.is_some_and(|holder| is_renamed(holder, variable));
+                if !renames_variable && !instances.iter().any(|(at, name)| is_renamed(*at, name)) {
+                    return None;
+                }
+                for (at, name) in instances {
+                    renamed.push_str(if is_renamed(at, name) {
+                        self.new.as_str()
+                    } else {
+                        name
+                    });
+                    renamed.push(MODULE_SEPARATOR);
+                }
+                renamed.push_str(if renames_variable {
+                    self.new.as_str()
+                } else {
+                    variable
+                });
+            }
+        }
+        Some(Ident::from_unchecked(renamed))
+    }
+
+    /// `var`, a variable of the model at index `model`, with every reference
+    /// to the renamed variable in its expression texts respelled
+    /// (`Variable::expression_texts`), or `None` when there is none; or the
+    /// first ambiguity that refuses the rename.
+    fn renamed_texts(
+        &self,
+        model: usize,
+        var: &Variable,
+    ) -> std::result::Result<Option<Variable>, Ambiguity> {
+        let reader = Reader {
+            rename: self,
+            model,
+        };
+        let mut ambiguity = None;
+        let renamed = var.map_expression_texts(|_, text| {
+            match renamed_text(text, &|site, reference| reader.renamed(site, reference)) {
+                Ok(renamed) => renamed,
+                Err(found) => {
+                    ambiguity.get_or_insert(found);
+                    None
                 }
             }
         });
+        match ambiguity {
+            Some(ambiguity) => Err(ambiguity),
+            None => Ok(renamed),
+        }
+    }
+
+    /// What a name the model at index `model` holds outside an expression
+    /// (`Model::map_variable_names`) becomes, or `None` when the rename
+    /// leaves it. `to` is the new name as the caller spelled it.
+    fn renamed_name(&self, model: usize, role: NameRole, name: &str, to: &str) -> Option<String> {
+        // A name of the renamed variable's own model, compared canonically.
+        let is_renamed = || model == self.model && canonicalize(name) == self.old.as_str();
+        match role {
+            // The variable's own name takes the caller's display spelling
+            // verbatim (ident fields hold display names; see the comment
+            // above `canonicalize_stock_references`).
+            NameRole::Ident => is_renamed().then(|| to.to_string()),
+            // A flow keeps its place in its list (the order is the flows'
+            // priority, `canonical_flow_list`), and a reference's end is a
+            // path. Both are stored canonical, the form the upserts store
+            // them in (`canonicalize_stock_references`,
+            // `canonicalize_module_references`).
+            NameRole::Inflow | NameRole::Outflow | NameRole::ModuleSource => self
+                .renamed(model, &Ident::new(name), ReadAs::Variable)
+                .map(|renamed| renamed.as_str().to_string()),
+            NameRole::ModuleDestination => self
+                .renamed(model, &Ident::new(name), ReadAs::Port)
+                .map(|renamed| renamed.as_str().to_string()),
+            // Names of the model's own variables, which their readers
+            // canonicalize: the distribution's by `conveyor_compile`, a
+            // macro's by the registry, a group's by the patch operations.
+            NameRole::Distribution
+            | NameRole::MacroParameter
+            | NameRole::MacroOutput
+            | NameRole::GroupMember => is_renamed().then(|| self.new.as_str().to_string()),
+            // A diagram's label is the view's own, and a rename leaves it:
+            // every view's label names the old name until a view edit
+            // (`ModelOperation::EditView`, an upserted view) or a diagram
+            // sync that carries the patch (the incremental layout) relabels
+            // it, wrapping the label as it does.
+            NameRole::ViewLabel => None,
+        }
     }
 }
 
-/// The `dst` a reference of the module instance `module_ident` takes when its
-/// target model's `old_ident` is renamed to `new_ident`, or `None` if the
-/// reference doesn't wire into that port.
-fn retargeted_dst(
-    module_ident: &str,
-    dst: &str,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> Option<String> {
-    let prefix = format!("{}\u{00B7}", canonicalize(module_ident));
-    let dst_canonical = canonicalize(dst);
-    let port = dst_canonical.strip_prefix(prefix.as_str())?;
-    (canonicalize(port).as_ref() == old_ident.as_str())
-        .then(|| format!("{prefix}{}", new_ident.as_str()))
-}
-
-/// Rewrite every equation of `model` that references `old_ident`.
+/// The expression texts of one model as a rename reads them: which names
+/// written in them are references to the renamed variable, and where the
+/// rename cannot tell.
 ///
-/// A rename is SYNTACTIC: each equation string is parsed as written
-/// (`Expr0::new`, the parser alone), renamed, and printed back, so what the
-/// user wrote is what comes back with one name changed. Neither compiler tier
-/// can do that: the parse memo's tree is the EXPANDED one -- a `SMTH1(x, 3)`
-/// is already an instance read and a `PREVIOUS(x + 1)` a capture, so printing
-/// it back would replace the call with the helper's name -- and the lowered
-/// tree is absent for an equation the compiler refuses, which would leave the
-/// old name in place and turn the refusal into an unknown dependency. A string
-/// that does not parse, or names nothing renamed, is left exactly as written
-/// (`patch::tests::rename_rewrites_an_equation_the_lowering_refuses`,
-/// `rename_keeps_a_module_function_call_as_written`).
-fn rename_model_equations(
-    model: &mut datamodel::Model,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) {
-    model.variables.edit_each(|var| match var {
-        Variable::Stock(stock) => rename_equation(&mut stock.equation, old_ident, new_ident),
-        Variable::Flow(flow) => {
-            let equation = rename_equation(&mut flow.equation, old_ident, new_ident);
-            let initial = rename_active_initial(&mut flow.compat, old_ident, new_ident);
-            equation || initial
-        }
-        Variable::Aux(aux) => {
-            let equation = rename_equation(&mut aux.equation, old_ident, new_ident);
-            let initial = rename_active_initial(&mut aux.compat, old_ident, new_ident);
-            equation || initial
-        }
-        Variable::Module(_) => false,
-    });
+/// The compiler has no single statement of what an identifier inside a
+/// subscript's brackets names. The dependency walk skips one that is a
+/// dimension or an element of any dimension
+/// (`variable::ClassifyVisitor::is_dimension_or_element`). A static subscript
+/// reads an element of the axis it indexes (`compiler::subscript`, through
+/// `dimensions::resolve_axis_index_name`), and a range reads its ends as
+/// elements only when both are elements of the axis, as variables otherwise.
+/// A dimension's name is the active axis's element where an axis supplies it,
+/// and the like-named variable where none does
+/// (`compiler::Context::lower_from_expr3`). A rename that chose among those
+/// readings would be a resolver of its own replaying a rule that is not one,
+/// so it chooses none: wherever the reading decides what a respelled
+/// reference means, the rename is refused.
+///
+/// - A variable whose name is a dimension's, before or after the rename
+///   (`apply_rename_variable`, before any text is read). XMILE 1.0 section
+///   3.7.1 says dimension names "must be distinct from model variables
+///   names", and in an equation such a name can be either.
+/// - A reference alone in a subscript's brackets, or at an end of a range
+///   there, whose name before or after the rename is an element of some
+///   dimension (`Dimension::canonical_element`, the membership test a
+///   subscript is resolved by). XMILE 1.0 section 2.1 lets element names be
+///   the same as variable names.
+/// - A reference whose new spelling is a `dimension·element`, which the
+///   compiler reads as that element's position.
+///
+/// What is left has one reading. A name that is no dimension and no element
+/// is the variable wherever it is written, in brackets too (a dynamic index),
+/// and is respelled. A `dimension·element` written as an identifier is that
+/// element's position (`Expr1::constify_dimensions` over
+/// `DimensionsContext::lookup`, which this asks rather than restates), so a
+/// rename leaves it.
+///
+/// `patch::rename_tests` holds the rule to the run: every rename there is
+/// refused, or leaves the model computing what it computed.
+struct Reader<'a> {
+    rename: &'a Rename<'a>,
+    /// The model the texts are in, by its index in `project.models`.
+    model: usize,
 }
 
-/// Every equation string a `datamodel::Equation` holds: the scalar or
-/// apply-to-all text, and an arrayed equation's per-element texts, per-element
-/// initial texts and default.
-/// Renames every reference in `equation`, returning whether any changed.
-fn rename_equation(
-    equation: &mut datamodel::Equation,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> bool {
-    match equation {
-        datamodel::Equation::Scalar(text) | datamodel::Equation::ApplyToAll(_, text) => {
-            rename_text(text, old_ident, new_ident)
+impl Reader<'_> {
+    /// What `reference`, written at `site`, reads after the rename: `None`
+    /// when it does not name the renamed variable, an [`Ambiguity`] when the
+    /// compiler could read it, or its new spelling, as something else.
+    fn renamed(&self, site: Site, reference: &Ident<Canonical>) -> Respelled {
+        let dimensions = &self.rename.dimensions;
+        let is_identifier = site != Site::Subscripted;
+        if is_identifier && dimensions.lookup(reference.as_str()).is_some() {
+            return Ok(None);
         }
-        datamodel::Equation::Arrayed(_, elements, default_eq, _) => {
-            let mut changed = false;
-            for (_, text, initial, _) in elements.iter_mut() {
-                changed |= rename_text(text, old_ident, new_ident);
-                if let Some(initial) = initial.as_mut() {
-                    changed |= rename_text(initial, old_ident, new_ident);
-                }
-            }
-            if let Some(default_eq) = default_eq.as_mut() {
-                changed |= rename_text(default_eq, old_ident, new_ident);
-            }
-            changed
+        let Some(renamed) = self.rename.renamed(self.model, reference, ReadAs::Variable) else {
+            return Ok(None);
+        };
+        let written = crate::ast::print_ident(reference.as_str());
+        let spelled = crate::ast::print_ident(renamed.as_str());
+        if is_identifier && dimensions.lookup(renamed.as_str()).is_some() {
+            return Err(Ambiguity(format!(
+                "reads `{written}`, which the rename would spell `{spelled}`, the \
+                 position of a dimension's element"
+            )));
         }
+        if site == Site::Index {
+            let element = |name: &Ident<Canonical>| {
+                let (_, path) = split_scope_prefix(name.as_str());
+                self.rename.dimension_with_element(path)
+            };
+            if let Some(dimension) = element(reference) {
+                return Err(Ambiguity(format!(
+                    "writes `{written}` alone in a subscript, and `{written}` is also an \
+                     element of the dimension '{dimension}': the rename cannot tell whether \
+                     it names the element or the variable there"
+                )));
+            }
+            if let Some(dimension) = element(&renamed) {
+                return Err(Ambiguity(format!(
+                    "writes `{written}` alone in a subscript, and `{spelled}` is an element \
+                     of the dimension '{dimension}': renamed, it would name the element \
+                     there rather than the variable"
+                )));
+            }
+        }
+        Ok(Some(renamed))
     }
 }
 
-/// Renames every reference in an `ACTIVE INITIAL`, returning whether any
-/// changed.
-fn rename_active_initial(
-    compat: &mut datamodel::Compat,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> bool {
-    compat
-        .active_initial
-        .as_mut()
-        .is_some_and(|text| rename_text(text, old_ident, new_ident))
-}
+/// The longest text a span addresses: a span is a pair of `u16`s
+/// (`builtins::Loc`), and a position past it wraps.
+const SPAN_REACH: usize = u16::MAX as usize;
 
-/// One equation string: parsed as written, renamed, and printed back only if
-/// a reference changed, which it returns. An empty or unparseable string is
-/// left as it is; the parse errors are the variable's own diagnostics,
-/// reported by the compile.
-fn rename_text(
-    text: &mut String,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> bool {
+/// One expression text with every reference `renamed` gives a new name
+/// respelled, or `None` when it gives none: the text stays as it is. An empty
+/// or unparseable text is one of those; its parse errors are the variable's
+/// own diagnostics, reported by the compile. A reference `renamed` finds
+/// ambiguous refuses the whole text with the first such one.
+///
+/// The text is parsed as written (`Expr0::new`, the parser alone) only to
+/// find its references. Neither compiler tier can find them: the parse memo's
+/// tree is the EXPANDED one -- a `SMTH1(x, 3)` is already an instance read and
+/// a `PREVIOUS(x + 1)` a capture -- and the lowered tree is absent for an
+/// equation the compiler refuses, which must still be renamed or the refusal
+/// turns into an unknown dependency. Each renamed reference is then spliced
+/// into the text at its own span, so everything else the modeler wrote -- the
+/// spacing, a builtin's case, every other name's spelling -- comes back byte
+/// for byte (`patch::rename_tests`).
+///
+/// A text longer than `SPAN_REACH` has no spans to splice at: one past the
+/// reach has wrapped onto another place in the text, where the same letters
+/// may well stand. It goes through the printer instead, which spells the same
+/// expression without the modeler's layout, and that is decided on the text's
+/// length, before any span is read.
+fn renamed_text(
+    text: &str,
+    renamed: &Respelling<'_>,
+) -> std::result::Result<Option<String>, Ambiguity> {
     let Ok(Some(expr)) = Expr0::new(text, LexerType::Equation) else {
-        return false;
+        return Ok(None);
     };
-    let renamed = rename_expr(&expr, old_ident, new_ident);
-    if renamed == expr {
-        return false;
+    let mut walk = Walk {
+        renamed,
+        splices: Vec::new(),
+        ambiguity: None,
+    };
+    let respelled = walk.expr(&expr);
+    let Walk {
+        mut splices,
+        ambiguity,
+        ..
+    } = walk;
+    if let Some(ambiguity) = ambiguity {
+        return Err(ambiguity);
     }
-    *text = print_eqn(&renamed);
-    true
+    if splices.is_empty() {
+        return Ok(None);
+    }
+    if text.len() > SPAN_REACH {
+        return Ok(Some(print_eqn(&respelled)));
+    }
+    splices.sort_by_key(|splice| std::cmp::Reverse(splice.start));
+    let mut text = text.to_string();
+    for splice in splices {
+        text.replace_range(splice.start..splice.start + splice.old_len, &splice.new);
+    }
+    Ok(Some(text))
 }
 
-fn rename_expr(expr: &Expr0, old_ident: &Ident<Canonical>, new_ident: &Ident<Canonical>) -> Expr0 {
-    match expr {
-        Expr0::Const(..) => expr.clone(),
-        Expr0::Var(ident, loc) => Expr0::Var(rename_raw_ident(ident, old_ident, new_ident), *loc),
-        // Every argument is an expression, a bare variable reference included
-        // (`isModuleInput(x)`), so one walk covers every builtin.
-        Expr0::App(UntypedBuiltinFn(name, args), loc) => Expr0::App(
-            UntypedBuiltinFn(
-                name.clone(),
-                args.iter()
-                    .map(|arg| rename_expr(arg, old_ident, new_ident))
-                    .collect(),
+/// One reference a rename respells: where it starts in the text, how long it
+/// is written there, and how it reads after.
+struct Splice {
+    start: usize,
+    old_len: usize,
+    new: String,
+}
+
+/// The one walk of an expression's references a rename makes: each reference
+/// is put to `renamed` with the [`Site`] it is written at, and the walk
+/// returns the expression with every new name in place -- the tree the
+/// printer spells when the text is past a span's reach -- while recording
+/// each new name in `splices` with its place in the text, which is what the
+/// text takes otherwise, and the first ambiguity met.
+struct Walk<'r, 'f> {
+    renamed: &'r Respelling<'f>,
+    splices: Vec<Splice>,
+    ambiguity: Option<Ambiguity>,
+}
+
+impl Walk<'_, '_> {
+    fn expr(&mut self, expr: &Expr0) -> Expr0 {
+        match expr {
+            Expr0::Const(..) => expr.clone(),
+            Expr0::Var(ident, loc) => Expr0::Var(self.ident(ident, *loc, Site::Value), *loc),
+            // Every argument is an expression, a bare variable reference
+            // included (`isModuleInput(x)`), so one walk covers every builtin.
+            Expr0::App(UntypedBuiltinFn(name, args), loc) => Expr0::App(
+                UntypedBuiltinFn(
+                    name.clone(),
+                    args.iter().map(|arg| self.expr(arg)).collect(),
+                ),
+                *loc,
             ),
-            *loc,
-        ),
-        Expr0::Subscript(ident, indexes, loc) => Expr0::Subscript(
-            rename_raw_ident(ident, old_ident, new_ident),
-            indexes
-                .iter()
-                .map(|idx| rename_index_expr(idx, old_ident, new_ident))
-                .collect(),
-            *loc,
-        ),
-        Expr0::Op1(op, rhs, loc) => {
-            Expr0::Op1(*op, Box::new(rename_expr(rhs, old_ident, new_ident)), *loc)
+            // A subscripted reference's span covers its brackets; the name is
+            // at its start.
+            Expr0::Subscript(ident, indexes, loc) => Expr0::Subscript(
+                self.ident(ident, *loc, Site::Subscripted),
+                indexes.iter().map(|index| self.index(index)).collect(),
+                *loc,
+            ),
+            Expr0::Op1(op, rhs, loc) => Expr0::Op1(*op, Box::new(self.expr(rhs)), *loc),
+            Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
+                *op,
+                Box::new(self.expr(lhs)),
+                Box::new(self.expr(rhs)),
+                *loc,
+            ),
+            Expr0::If(cond, then_branch, else_branch, loc) => Expr0::If(
+                Box::new(self.expr(cond)),
+                Box::new(self.expr(then_branch)),
+                Box::new(self.expr(else_branch)),
+                *loc,
+            ),
         }
-        Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
-            *op,
-            Box::new(rename_expr(lhs, old_ident, new_ident)),
-            Box::new(rename_expr(rhs, old_ident, new_ident)),
-            *loc,
-        ),
-        Expr0::If(cond, then_branch, else_branch, loc) => Expr0::If(
-            Box::new(rename_expr(cond, old_ident, new_ident)),
-            Box::new(rename_expr(then_branch, old_ident, new_ident)),
-            Box::new(rename_expr(else_branch, old_ident, new_ident)),
-            *loc,
-        ),
     }
-}
 
-fn rename_index_expr(
-    index: &IndexExpr0,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> IndexExpr0 {
-    match index {
-        IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(_, _) | IndexExpr0::DimPosition(_, _) => {
-            index.clone()
+    /// One index of a subscript. An identifier alone in an index, or at an
+    /// end of a range, is at `Site::Index`; any other index is an expression
+    /// like another.
+    fn index(&mut self, index: &IndexExpr0) -> IndexExpr0 {
+        let mut alone = |expr: &Expr0| match expr {
+            Expr0::Var(ident, loc) => Expr0::Var(self.ident(ident, *loc, Site::Index), *loc),
+            Expr0::Const(..)
+            | Expr0::App(..)
+            | Expr0::Subscript(..)
+            | Expr0::Op1(..)
+            | Expr0::Op2(..)
+            | Expr0::If(..) => self.expr(expr),
+        };
+        match index {
+            // A star range names a dimension, never a variable.
+            IndexExpr0::Wildcard(_)
+            | IndexExpr0::StarRange(_, _)
+            | IndexExpr0::DimPosition(_, _) => index.clone(),
+            IndexExpr0::Range(lhs, rhs, loc) => {
+                IndexExpr0::Range(Box::new(alone(lhs)), Box::new(alone(rhs)), *loc)
+            }
+            IndexExpr0::Expr(expr) => IndexExpr0::Expr(alone(expr)),
         }
-        IndexExpr0::Range(lhs, rhs, loc) => IndexExpr0::Range(
-            Box::new(rename_expr(lhs, old_ident, new_ident)),
-            Box::new(rename_expr(rhs, old_ident, new_ident)),
-            *loc,
-        ),
-        IndexExpr0::Expr(expr) => IndexExpr0::Expr(rename_expr(expr, old_ident, new_ident)),
     }
-}
 
-/// A reference as written, renamed through the canonical rule
-/// (`rename_canonical_ident`); a reference the rule leaves alone keeps the
-/// user's spelling.
-fn rename_raw_ident(
-    ident: &RawIdent,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> RawIdent {
-    let canonical = ident.canonicalize();
-    let renamed = rename_canonical_ident(&canonical, old_ident, new_ident);
-    if renamed == canonical {
-        ident.clone()
-    } else {
-        RawIdent::new(renamed.to_source_repr())
+    /// A reference as written at `site`, respelled when `renamed` gives it a
+    /// new name (and then recorded in `splices`); a reference the rename
+    /// leaves alone, or finds ambiguous, keeps the modeler's spelling. The
+    /// new spelling is `ast::print_ident`'s of the canonical name, the one
+    /// spelling of a name inside equation text, which quotes a name the lexer
+    /// cannot read bare: a name holding a literal period is written `"a.b"`,
+    /// never as the path `a.b`.
+    fn ident(&mut self, ident: &RawIdent, loc: Loc, site: Site) -> RawIdent {
+        match (self.renamed)(site, &ident.canonicalize()) {
+            Ok(Some(renamed)) => {
+                let spelled = crate::ast::print_ident(renamed.as_str());
+                self.splices.push(Splice {
+                    start: loc.start as usize,
+                    old_len: ident.as_str().len(),
+                    new: spelled.clone(),
+                });
+                RawIdent::new(spelled)
+            }
+            Ok(None) => ident.clone(),
+            Err(ambiguity) => {
+                self.ambiguity.get_or_insert(ambiguity);
+                ident.clone()
+            }
+        }
     }
 }
 
@@ -933,16 +1499,24 @@ pub(crate) fn expr2_to_string(expr: &Expr2) -> String {
     crate::ast::print_eqn(&expr0)
 }
 
+/// A canonical name as the identifier a parsed expression holds for it. The
+/// canonical form is carried over as it is: it reads back as itself, where
+/// the source form (`Ident::to_source_repr`) would read a literal period back
+/// as a module separator and name another variable.
+fn raw_ident(ident: &Ident<Canonical>) -> RawIdent {
+    RawIdent::new(ident.as_str().to_string())
+}
+
 pub(crate) fn expr2_to_expr0(expr: &Expr2) -> Expr0 {
     match expr {
         Expr2::Const(text, value, loc) => Expr0::Const(text.clone(), *value, *loc),
-        Expr2::Var(ident, _, loc) => Expr0::Var(RawIdent::new(ident.to_source_repr()), *loc),
+        Expr2::Var(ident, _, loc) => Expr0::Var(raw_ident(ident), *loc),
         Expr2::App(builtin, _, loc) => {
             let untyped = builtin_to_untyped(builtin);
             Expr0::App(untyped, *loc)
         }
         Expr2::Subscript(ident, indexes, _, loc) => Expr0::Subscript(
-            RawIdent::new(ident.to_source_repr()),
+            raw_ident(ident),
             indexes.iter().map(index_expr2_to_index_expr0).collect(),
             *loc,
         ),
@@ -992,111 +1566,6 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
     UntypedBuiltinFn(builtin.name().to_string(), args)
 }
 
-fn rename_canonical_ident(
-    ident: &Ident<Canonical>,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> Ident<Canonical> {
-    if ident == old_ident {
-        return new_ident.clone();
-    }
-
-    let ident_str = ident.as_str();
-    if let Some(pos) = ident_str.rfind('·') {
-        let prefix = &ident_str[..pos];
-        let suffix = &ident_str[pos + '·'.len_utf8()..];
-
-        // Only rename references to this model's own variable: self-qualified
-        // (`self·x`), or XMILE's parent-scope spelling (`.x`, canonicalized to
-        // `·x`), which every consumer reads as the bare name
-        // (`db::DepScope::resolve`). Any other qualifier names another
-        // module's variable.
-        if suffix == old_ident.as_str() && (prefix == "self" || prefix.is_empty()) {
-            return Ident::from_unchecked(format!("{prefix}·{}", new_ident.as_str()));
-        }
-    }
-
-    ident.clone()
-}
-
-fn rename_module_references(
-    model: &mut datamodel::Model,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) {
-    // Only a module with a reference that names the renamed variable changes.
-    let renames = |var: &Variable| {
-        matches!(var, Variable::Module(module) if module.references.iter().any(|reference| {
-            renamed_module_reference(&reference.src, old_ident, new_ident).is_some()
-                || renamed_module_reference(&reference.dst, old_ident, new_ident).is_some()
-        }))
-    };
-    model.variables.edit_where(renames, |var| {
-        if let Variable::Module(module) = var {
-            for reference in module.references.iter_mut() {
-                for end in [&mut reference.src, &mut reference.dst] {
-                    if let Some(renamed) = renamed_module_reference(end, old_ident, new_ident) {
-                        *end = renamed;
-                    }
-                }
-            }
-        }
-    });
-}
-
-/// A module reference's `src` or `dst` after `old_ident` is renamed to
-/// `new_ident`, or `None` if the rename leaves it as it is.
-fn renamed_module_reference(
-    value: &str,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> Option<String> {
-    let canonical = Ident::new(value);
-    let renamed = rename_canonical_ident(&canonical, old_ident, new_ident);
-    (renamed != canonical).then(|| renamed.to_source_repr())
-}
-
-fn rename_group_members(
-    model: &mut datamodel::Model,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) {
-    for group in model.groups.iter_mut() {
-        for member in group.members.iter_mut() {
-            if canonicalize(member.as_str()) == old_ident.as_str() {
-                *member = new_ident.to_source_repr();
-            }
-        }
-    }
-}
-
-fn update_stock_flow_references(
-    model: &mut datamodel::Model,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) {
-    // Only a stock that names the renamed flow changes, or one whose lists
-    // the rename's sort puts in order.
-    let names = |flow: &String| canonicalize(flow.as_str()) == old_ident.as_str();
-    let changes = |var: &Variable| {
-        matches!(var, Variable::Stock(stock)
-            if stock.inflows.iter().chain(&stock.outflows).any(names)
-                || !stock.inflows.is_sorted()
-                || !stock.outflows.is_sorted())
-    };
-    model.variables.edit_where(changes, |var| {
-        if let Variable::Stock(stock) = var {
-            for flow in stock.inflows.iter_mut().chain(stock.outflows.iter_mut()) {
-                if names(flow) {
-                    *flow = new_ident.to_source_repr();
-                }
-            }
-            stock.inflows.sort_unstable();
-            stock.outflows.sort_unstable();
-        }
-    });
-}
-
 fn apply_upsert_view(
     model: &mut datamodel::Model,
     index: u32,
@@ -1140,6 +1609,14 @@ fn apply_delete_view(model: &mut datamodel::Model, index: u32) -> Result<()> {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "patch_flow_order_tests.rs"]
+mod flow_order_tests;
+
+#[cfg(test)]
+#[path = "patch_rename_tests.rs"]
+mod rename_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1306,6 +1783,139 @@ mod tests {
             datamodel::SimMethod::RungeKutta4
         );
         assert_eq!(project.sim_specs.time_units, Some("days".to_string()));
+    }
+
+    /// A lowered expression turned back into a parsed one names each variable
+    /// as itself, a name with a literal period in it included: the link scores
+    /// LTM generates from one are the scores of the same model under a plain
+    /// name, with nothing declined.
+    #[test]
+    fn a_lowered_expression_names_a_variable_with_a_period_as_itself() {
+        use crate::db::{LtmOverlay, SimlinDb, collect_all_diagnostics};
+
+        let link_score = |rate: &str| {
+            let project = TestProject::new("period")
+                .aux(rate, "0.1", None)
+                .aux("cap", "100", None)
+                .flow(
+                    "inflow",
+                    &format!("level * {rate} * (1 - level / cap)"),
+                    None,
+                )
+                .stock("level", "10", &["inflow"], &[], None)
+                .build_datamodel();
+            let mut db = SimlinDb::default();
+            let source = db.sync(&project);
+            let rows: Vec<String> = collect_all_diagnostics(&db, source, LtmOverlay::On)
+                .iter()
+                .map(|d| format!("{:?}: {:?}", d.variable, d.reason()))
+                .collect();
+            assert!(rows.is_empty(), "{rate}: {rows:#?}");
+            let compiled =
+                crate::db::compile_project_incremental(&db, source, "main", LtmOverlay::On)
+                    .expect("the model compiles under LTM");
+            let mut vm = crate::vm::Vm::new((*compiled).clone()).expect("a vm");
+            vm.run_to_end().expect("it runs");
+            let results = crate::test_common::collect_results(&vm.into_results());
+            results["$\u{205A}ltm\u{205A}link_score\u{205A}level\u{2192}inflow"].clone()
+        };
+        let plain = link_score("rate_x");
+        assert!(plain.iter().any(|score| *score != 0.0), "{plain:?}");
+        assert_eq!(link_score("\"rate.x\""), plain);
+    }
+
+    /// The specs an edit sets are the specs the root model runs under, whether
+    /// or not the model carried specs of its own, which override the
+    /// project's, and whatever the root is called. Another model's own specs
+    /// are not the edit's to change.
+    #[test]
+    fn set_sim_specs_is_what_the_root_model_runs_under() {
+        let specs = |stop: f64| datamodel::SimSpecs {
+            start: 0.0,
+            stop,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        };
+        let last_time = |project: &datamodel::Project, model: &str| {
+            let mut vm = crate::queue_compile::build_vm(project, model).expect("it builds");
+            vm.run_to_end().expect("it runs");
+            let results = crate::test_common::collect_results(&vm.into_results());
+            results["time"].last().copied()
+        };
+        let set = ProjectPatch {
+            project_ops: vec![ProjectOperation::SetSimSpecs(specs(20.0))],
+            models: vec![],
+        };
+        // A model of its own specs, `stop` at 5 plus its place, so each
+        // model's run says whose specs it ran under.
+        let model = |name: &str, place: usize, is_macro: bool| datamodel::Model {
+            name: name.to_string(),
+            sim_specs: Some(specs(5.0 + place as f64)),
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: name.to_string(),
+                equation: Equation::Scalar("TIME".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })]
+            .into(),
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: is_macro.then(|| datamodel::MacroSpec {
+                parameters: vec![],
+                primary_output: name.to_string(),
+                additional_outputs: vec![],
+            }),
+        };
+
+        // The models, each a name and whether it is a macro, and which is
+        // the root.
+        let rows: &[(&[(&str, bool)], usize)] = &[
+            (&[("main", false), ("other", false)], 0),
+            (&[("Main", false), ("other", false)], 0),
+            (&[("", false), ("other", false)], 0),
+            (&[("other", false), ("main", false)], 1),
+            (&[("root model", false), ("other", false)], 0),
+            (&[("helper", true), ("simulation", false)], 1),
+        ];
+        for (models, root) in rows {
+            let mut project = TestProject::new("specs").build_datamodel();
+            project.sim_specs = specs(10.0);
+            project.models = models
+                .iter()
+                .enumerate()
+                .map(|(place, (name, is_macro))| model(name, place, *is_macro))
+                .collect();
+            assert_eq!(project.default_model_index(), Some(*root), "{models:?}");
+
+            apply_patch(&mut project, set.clone()).unwrap();
+            assert!(project.sim_specs == specs(20.0));
+            for (place, (name, is_macro)) in models.iter().enumerate() {
+                let own = project.models[place].sim_specs.clone();
+                if place == *root {
+                    assert!(own.is_none(), "{models:?}: the root's own specs go");
+                    assert_eq!(last_time(&project, name), Some(20.0), "{models:?}");
+                } else {
+                    assert!(
+                        own == Some(specs(5.0 + place as f64)),
+                        "{models:?}: {name} keeps its own"
+                    );
+                    if !is_macro {
+                        assert_eq!(
+                            last_time(&project, name),
+                            Some(5.0 + place as f64),
+                            "{models:?}: {name}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1690,11 +2300,9 @@ mod tests {
             _ => panic!("{name}: expected an aux"),
         };
         assert_eq!(scalar("bad"), "aa + b", "a mismatched equation is renamed");
-        // A builtin's name is lowercased by the parser (`parser/mod.rs`), so the
-        // printer has only that form on either tier.
         assert_eq!(
             scalar("good"),
-            "sum(aa) * 2",
+            "SUM(aa) * 2",
             "a compiling equation is renamed"
         );
         assert_eq!(
@@ -1788,8 +2396,8 @@ mod tests {
 
     /// A module-function call and a snapshot argument are the user's text, not
     /// the instance read and the capture the parse rewrites them into: a
-    /// rename rewrites the argument and keeps the call (in the parser's
-    /// lowercase spelling of the builtin's name).
+    /// rename rewrites the argument and keeps the call, in the case it was
+    /// written in.
     #[test]
     fn rename_keeps_a_module_function_call_as_written() {
         let mut project = TestProject::new("test")
@@ -1821,8 +2429,8 @@ mod tests {
             },
             _ => panic!("{name}: expected an aux"),
         };
-        assert_eq!(scalar("y"), "smth1(w, 3)");
-        assert_eq!(scalar("z"), "previous(w + 1) + init(w * 2)");
+        assert_eq!(scalar("y"), "SMTH1(w, 3)");
+        assert_eq!(scalar("z"), "PREVIOUS(w + 1) + INIT(w * 2)");
         assert_eq!(
             scalar("untouched"),
             "SMTH1(y, 2)",
@@ -2386,19 +2994,90 @@ mod tests {
         assert!(submodel.views.is_empty());
     }
 
+    /// A model's name is taken when its canonical form is: the engine files
+    /// models under their canonical names, and two of one name are a project
+    /// it refuses to compile. The project is left as it was.
     #[test]
-    fn add_model_duplicate_returns_error() {
-        let mut project = TestProject::new("test").build_datamodel();
+    fn add_model_refuses_a_name_whose_canonical_form_is_taken() {
+        let mut base = TestProject::new("test").build_datamodel();
+        apply_patch(
+            &mut base,
+            ProjectPatch {
+                project_ops: vec![ProjectOperation::AddModel {
+                    name: "Customer Growth".to_string(),
+                }],
+                models: vec![],
+            },
+        )
+        .unwrap();
 
-        let patch = ProjectPatch {
+        for taken in [
+            "main",
+            "Main",
+            "MAIN",
+            "Customer Growth",
+            "customer_growth",
+            "customer growth",
+            "Customer_Growth",
+        ] {
+            let mut project = base.clone();
+            let err = apply_patch(
+                &mut project,
+                ProjectPatch {
+                    project_ops: vec![ProjectOperation::AddModel {
+                        name: taken.to_string(),
+                    }],
+                    models: vec![],
+                },
+            )
+            .expect_err(taken);
+            assert_eq!(err.code, ErrorCode::DuplicateVariable, "{taken}");
+            assert!(project == base, "{taken}: the project is as it was");
+        }
+
+        // An unnamed model is `main`, from either side.
+        let add = |name: &str| ProjectPatch {
             project_ops: vec![ProjectOperation::AddModel {
-                name: "main".to_string(),
+                name: name.to_string(),
             }],
             models: vec![],
         };
-
-        let err = apply_patch(&mut project, patch).unwrap_err();
+        let mut project = base.clone();
+        let err = apply_patch(&mut project, add("")).expect_err("the empty name is main");
         assert_eq!(err.code, ErrorCode::DuplicateVariable);
+        let mut unnamed = base.clone();
+        unnamed.models[0].name = String::new();
+        let mut project = unnamed.clone();
+        let err = apply_patch(&mut project, add("Main")).expect_err("main is the unnamed model");
+        assert_eq!(err.code, ErrorCode::DuplicateVariable);
+        assert!(project == unnamed);
+
+        // A name under the stdlib's prefix is the stdlib's, whether or not a
+        // stdlib model has it.
+        for reserved in [
+            "stdlib\u{205A}smth1",
+            "Stdlib\u{205A}SMTH1",
+            "stdlib\u{205A}mine",
+        ] {
+            let mut project = base.clone();
+            let err = apply_patch(&mut project, add(reserved)).expect_err(reserved);
+            assert_eq!(err.code, ErrorCode::BadModelName, "{reserved}");
+            assert!(project == base, "{reserved}: the project is as it was");
+        }
+
+        // A name whose canonical form is free is added, as written.
+        let mut project = base.clone();
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![ProjectOperation::AddModel {
+                    name: "Customer Growth 2".to_string(),
+                }],
+                models: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(project.models[2].name, "Customer Growth 2");
     }
 
     #[test]

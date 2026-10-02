@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
+use crate::datamodel::{ViewElement, view_element};
 
 fn numbers() -> SharedVec<String> {
     ["zero", "one", "two", "three", "four"]
@@ -67,33 +68,33 @@ fn edit_where_copies_only_the_elements_it_picks() {
     assert_eq!(shared(&original, &copy), 3);
 }
 
+/// The pass the `update` rows run: an `o` after the first letter becomes `0`.
+fn zeroed(s: &str) -> Option<String> {
+    s[1..].contains('o').then(|| s.replace('o', "0"))
+}
+
 #[test]
-fn edit_each_keeps_what_it_leaves_unchanged_shared() {
+fn update_replaces_what_the_pass_returns_and_keeps_the_rest_shared() {
     let original = numbers();
     let mut copy = original.clone();
-    // The edit visits every element but changes only those holding an `o`
-    // after their first letter; the others come out equal and stay shared.
-    copy.edit_each(|s| {
-        if !s[1..].contains('o') {
-            return false;
-        }
-        *s = s.replace('o', "0");
-        true
-    });
+    copy.update(|s| zeroed(s));
     assert_eq!(copy.to_vec(), ["zer0", "one", "tw0", "three", "f0ur"]);
+    assert_eq!(original.to_vec(), ["zero", "one", "two", "three", "four"]);
     assert_eq!(shared(&original, &copy), 2);
 }
 
 #[test]
-fn edit_each_edits_an_element_nothing_else_holds_in_place() {
+fn update_gives_one_result_whether_or_not_anything_shares_the_elements() {
     let mut alone = numbers();
-    let before = alone.addresses();
-    alone.edit_each(|s| {
-        s.push('!');
-        true
-    });
-    assert_eq!(alone[4], "four!");
-    assert_eq!(alone.addresses(), before, "no element was copied");
+    let untouched = alone.addresses();
+    alone.update(|s| zeroed(s));
+    let original = numbers();
+    let mut shared_copy = original.clone();
+    shared_copy.update(|s| zeroed(s));
+    assert_eq!(alone.to_vec(), shared_copy.to_vec());
+    // An element the pass returns nothing for stays where it was, in either.
+    assert_eq!(alone.addresses()[1], untouched[1]);
+    assert_eq!(shared_copy.addresses()[1], original.addresses()[1]);
 }
 
 #[test]
@@ -156,40 +157,56 @@ fn a_spine_holds_exactly_its_elements() {
     assert_eq!(collected.spine_capacity(), 40);
 }
 
-#[test]
-fn identical_tells_apart_what_eq_does_not() {
-    assert!(0.0 == -0.0 && !0.0f64.identical(&-0.0));
-    assert!(f64::NAN.identical(&f64::NAN), "the same bits are identical");
-    assert!(Some((1, 2.0)).identical(&Some((1, 2.0))));
-    assert!(!vec![1.0, 2.0].identical(&vec![1.0]));
+fn cloud(uid: i32, x: f64) -> ViewElement {
+    ViewElement::Cloud(view_element::Cloud {
+        uid,
+        flow_uid: 0,
+        x,
+        y: 0.0,
+        compat: None,
+    })
 }
 
 #[test]
 fn share_identical_puts_back_the_allocation_of_each_element_kept_as_it_was() {
-    let before: SharedVec<(i32, f64)> = vec![(1, 1.0), (2, 2.0), (3, 0.0), (4, 4.0)].into();
+    let before: SharedVec<ViewElement> = vec![
+        cloud(1, 1.0),
+        cloud(2, 2.0),
+        cloud(3, 0.0),
+        cloud(4, f64::NAN),
+        cloud(5, 5.0),
+    ]
+    .into();
     // Built afresh, as a layout or a host's replacement builds a view: one
     // element kept, one changed, one changed only in the sign of its zero,
-    // one new.
-    let mut after: SharedVec<(i32, f64)> = vec![(1, 1.0), (2, 2.5), (3, -0.0), (5, 5.0)].into();
-    after.share_identical(&before, |e| e.0);
+    // one kept that holds a NaN, one new.
+    let mut after: SharedVec<ViewElement> = vec![
+        cloud(1, 1.0),
+        cloud(2, 2.5),
+        cloud(3, -0.0),
+        cloud(4, f64::NAN),
+        cloud(6, 5.0),
+    ]
+    .into();
+    after.share_identical(&before, ViewElement::get_uid);
     let before_addresses = before.addresses();
     let kept: Vec<bool> = after
         .addresses()
         .iter()
         .map(|a| before_addresses.contains(a))
         .collect();
-    assert_eq!(kept, [true, false, false, false]);
+    assert_eq!(kept, [true, false, false, true, false]);
     assert!(
-        after[2].1.is_sign_negative(),
+        matches!(&after[2], ViewElement::Cloud(c) if c.x.is_sign_negative()),
         "a -0.0 is not replaced by 0.0"
     );
 }
 
 #[test]
 fn share_identical_compares_the_first_of_a_repeated_key() {
-    let before: SharedVec<(i32, f64)> = vec![(7, 1.0), (7, 2.0)].into();
-    let mut after: SharedVec<(i32, f64)> = vec![(7, 1.0), (7, 2.0)].into();
-    after.share_identical(&before, |e| e.0);
+    let before: SharedVec<ViewElement> = vec![cloud(7, 1.0), cloud(7, 2.0)].into();
+    let mut after: SharedVec<ViewElement> = vec![cloud(7, 1.0), cloud(7, 2.0)].into();
+    after.share_identical(&before, ViewElement::get_uid);
     let b = before.addresses();
     let a = after.addresses();
     assert_eq!(a[0], b[0]);
@@ -197,23 +214,17 @@ fn share_identical_compares_the_first_of_a_repeated_key() {
 }
 
 #[test]
-fn edit_each_keeps_a_change_eq_cannot_see() {
-    // `0.0 == -0.0`, so a copy kept only when it compared unequal would lose
-    // this edit on a shared element, the one an undo history holds.
+fn update_keeps_a_replacement_that_compares_equal() {
+    // `0.0 == -0.0`, so a pass that returns one for the other has still
+    // changed its element: what it returns is kept, never compared.
     let original: SharedVec<f64> = vec![0.0, 1.0].into();
     let mut copy = original.clone();
-    copy.edit_each(|x| {
-        if *x != 0.0 {
-            return false;
-        }
-        *x = -0.0;
-        true
-    });
-    assert!(copy[0].is_sign_negative(), "the edit was kept");
+    copy.update(|x| (*x == 0.0).then_some(-0.0));
+    assert!(copy[0].is_sign_negative(), "the replacement was kept");
     assert!(original[0].is_sign_positive(), "the original is untouched");
     assert_eq!(
         copy.addresses()[1],
         original.addresses()[1],
-        "an element the edit left alone is still shared"
+        "an element the pass left alone is still shared"
     );
 }

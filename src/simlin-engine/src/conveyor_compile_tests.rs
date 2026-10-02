@@ -908,6 +908,98 @@ fn transit_dt_mismatch_out_of_domain_inputs_are_other_diagnostics_jobs() {
     assert_eq!(transit_dt_mismatch(4.0, f64::NAN), None);
 }
 
+/// The scan for a read of a pass-driven flow covers what a variable computes
+/// each step: every text of its equation that is the equation itself
+/// (`ExpressionRole::Equation`). One row per role an equation's text can have.
+#[test]
+fn the_driven_flow_scan_reads_an_equations_own_texts() {
+    use datamodel::{Equation, ExpressionRole};
+
+    let driven_set: std::collections::HashSet<String> = ["out_f".to_string()].into();
+    let driven_sorted = ["out_f".to_string()];
+    let reads = |equation: Equation| {
+        let model = datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "reader".to_string(),
+                equation,
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })]
+            .into(),
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        };
+        find_driven_flow_read(&model, &driven_set, &driven_sorted)
+            .map(|(reader, flow)| (reader.to_string(), flow))
+    };
+    let found = Some(("reader".to_string(), "out_f".to_string()));
+    let dims = || vec!["d".to_string()];
+    let element = |text: &str, initial: Option<&str>| {
+        vec![(
+            "a".to_string(),
+            text.to_string(),
+            initial.map(str::to_string),
+            None,
+        )]
+    };
+
+    for role in [
+        ExpressionRole::Equation,
+        ExpressionRole::Initial,
+        ExpressionRole::Option,
+    ] {
+        match role {
+            ExpressionRole::Equation => {
+                assert_eq!(reads(Equation::Scalar("out_f * 2".to_string())), found);
+                assert_eq!(
+                    reads(Equation::ApplyToAll(dims(), "out_f".to_string())),
+                    found
+                );
+                assert_eq!(
+                    reads(Equation::Arrayed(
+                        dims(),
+                        element("out_f", None),
+                        None,
+                        false
+                    )),
+                    found
+                );
+                assert_eq!(
+                    reads(Equation::Arrayed(
+                        dims(),
+                        element("1", None),
+                        Some("out_f".to_string()),
+                        true
+                    )),
+                    found
+                );
+            }
+            // An element's own initial is not what the variable computes each
+            // step, and is not scanned.
+            ExpressionRole::Initial => assert_eq!(
+                reads(Equation::Arrayed(
+                    dims(),
+                    element("1", Some("out_f")),
+                    None,
+                    false
+                )),
+                None
+            ),
+            // An equation holds no option text: those are a stock's and a
+            // flow's, scanned by the conveyor-parameter check.
+            ExpressionRole::Option => {}
+        }
+    }
+}
+
 // ----- end-to-end dist / source placement -----
 
 #[test]
