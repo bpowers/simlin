@@ -2275,12 +2275,15 @@ impl Project {
 /// The name a model is known by, which two models of a project must not
 /// share: its canonical name (model names are case-, whitespace- and
 /// underscore-insensitive), with the empty name read as `main`, as
-/// [`Project::model_index`] reads a patch addressed to `main`.
+/// [`Project::model_index`] reads a patch addressed to `main`. Empty is
+/// decided on the canonical form, so a blank name is the unnamed model's too:
+/// the db files both under the one empty key.
 pub fn canonical_model_name(name: &str) -> std::borrow::Cow<'_, str> {
-    if name.is_empty() {
+    let canonical = crate::common::canonicalize(name);
+    if canonical.is_empty() {
         return std::borrow::Cow::Borrowed("main");
     }
-    crate::common::canonicalize(name)
+    canonical
 }
 
 #[cfg(test)]

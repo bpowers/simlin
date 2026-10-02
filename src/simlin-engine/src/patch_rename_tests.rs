@@ -1000,6 +1000,67 @@ fn a_rename_and_a_delete_decide_every_place_a_model_holds_a_name() {
     }
 }
 
+/// A delete unwires the module references that start at the deleted variable
+/// as the compiler reads them (`db::DepScope::resolve`): a spelling's first
+/// segment is where it starts only when that segment is a module instance,
+/// and otherwise the whole spelling is one local name. So deleting `x.foo`
+/// unwires a read of `x.foo` and leaves a read of `x`, and deleting `x`
+/// leaves a read of `x.foo`.
+#[test]
+fn a_delete_unwires_what_starts_at_the_deleted_variable_as_the_compiler_reads_it() {
+    let base = || {
+        project(vec![
+            model(
+                "main",
+                vec![
+                    aux("x", "1"),
+                    aux("x.foo", "5"),
+                    module("inst", "sub", &[]),
+                    module(
+                        "reader",
+                        "sub",
+                        &[
+                            ("x", "reader.a"),
+                            ("x.foo", "reader.b"),
+                            (".x.foo", "reader.c"),
+                            ("inst.out", "reader.d"),
+                        ],
+                    ),
+                ],
+            ),
+            model(
+                "sub",
+                vec![
+                    aux("a", "0"),
+                    aux("b", "0"),
+                    aux("c", "0"),
+                    aux("d", "0"),
+                    aux("out", "a + b + c + d"),
+                ],
+            ),
+        ])
+    };
+    let sources_after = |deleted: &str| {
+        let mut project = base();
+        apply_patch(&mut project, delete_in("main", deleted)).unwrap();
+        references(&project, "main", "reader")
+            .into_iter()
+            .map(|(src, _)| src)
+            .collect::<Vec<String>>()
+    };
+    let rows: [(&str, &[&str]); 3] = [
+        (
+            "x",
+            &["x\u{00B7}foo", "\u{00B7}x\u{00B7}foo", "inst\u{00B7}out"],
+        ),
+        ("x.foo", &["x", "inst\u{00B7}out"]),
+        ("inst", &["x", "x\u{00B7}foo", "\u{00B7}x\u{00B7}foo"]),
+    ];
+    for (deleted, want) in rows {
+        assert_eq!(sources_after(deleted), want, "after deleting `{deleted}`");
+    }
+}
+
 /// A macro's parameters and output are variables of its body, named by its
 /// spec: renamed with the spec, a macro computes what it computed.
 #[test]

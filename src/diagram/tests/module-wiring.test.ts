@@ -347,6 +347,9 @@ describe('model names', () => {
     expect(canonicalModelName('Customer Growth')).toBe('customer_growth');
     expect(canonicalModelName('')).toBe('main');
     expect(canonicalModelName('MAIN')).toBe('main');
+    // A name whose canonical form is empty is the unnamed model's.
+    expect(canonicalModelName('   ')).toBe('main');
+    expect(canonicalModelName('""')).toBe('main');
   });
 
   it('takes a name another model is known by, however it is spelled', () => {
@@ -356,6 +359,7 @@ describe('model names', () => {
     }
     expect(isModelNameTaken(names, 'Customer Growth 2')).toBe(false);
     expect(isModelNameTaken([''], 'main')).toBe(true);
+    expect(isModelNameTaken([''], '  ')).toBe(true);
   });
 
   it('finds the first copy name no model is known by', () => {

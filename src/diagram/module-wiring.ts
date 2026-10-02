@@ -14,10 +14,12 @@ import type { JsonModule } from '@simlin/engine';
  * engine's `datamodel::canonical_model_name`, which its `AddModel` refuses a
  * taken one of. Comparing the names as written would let a new model's name
  * collide with an existing one that differs only in case, spacing or
- * underscores, and the engine would refuse the edit.
+ * underscores, and the engine would refuse the edit. Empty is decided on the
+ * canonical form, so a blank name is the unnamed model's too.
  */
 export function canonicalModelName(name: string): string {
-  return name === '' ? 'main' : canonicalize(name);
+  const canonical = canonicalize(name);
+  return canonical === '' ? 'main' : canonical;
 }
 
 /** Whether a model of `modelNames` is already known by `name`'s name. */

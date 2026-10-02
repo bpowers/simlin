@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr0, Expr2, IndexExpr0, IndexExpr2, print_eqn};
 use crate::builtins::{BuiltinFn, Loc, UntypedBuiltinFn};
@@ -567,7 +567,7 @@ fn apply_set_loop_name(
     // close the cycle (e.g., ["a", "b", "a"]). Deduplicate before resolving
     // UIDs so that a client passing the ReadModel output directly doesn't
     // produce duplicate entries in the sorted UID list.
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     let unique_vars: Vec<&String> = variables
         .iter()
         .filter(|v| seen.insert(v.as_str()))
@@ -634,6 +634,17 @@ fn apply_delete_variable(model: &mut datamodel::Model, ident_str: &str) -> Resul
         return Err(no_such_variable(ident_str));
     };
 
+    // The instances a reference can hop through, the deleted variable among
+    // them when it is one.
+    let instances: HashSet<String> = model
+        .variables
+        .iter()
+        .filter_map(|var| match var {
+            Variable::Module(module) => Some(canonicalize(&module.ident).into_owned()),
+            Variable::Stock(_) | Variable::Flow(_) | Variable::Aux(_) => None,
+        })
+        .collect();
+
     let removed = model.variables.remove(pos);
     if let Variable::Flow(flow) = removed {
         let flow_ident = canonicalize(flow.ident.as_str());
@@ -659,11 +670,18 @@ fn apply_delete_variable(model: &mut datamodel::Model, ident_str: &str) -> Resul
     // An end runs through the variable in any spelling whose path starts at
     // it: the bare name, XMILE's parent-scope `·name` (the form the XMILE
     // reader stores), `self·name`, and a port of a deleted module instance
-    // (`name·output`, `name·input`).
+    // (`name·output`, `name·input`). A path starts at its first segment only
+    // when that segment is a module instance; otherwise the whole spelling is
+    // one local name, as `db::DepScope::resolve` reads it, so `x·foo` beside
+    // an auxiliary `x` starts at the variable named `x.foo`, never at `x`.
     let starts_at_deleted = |end: &str| {
         let end = canonicalize(end);
         let (_, path) = split_scope_prefix(&end);
-        path.split(MODULE_SEPARATOR).next() == Some(ident.as_ref())
+        let start = match path.split_once(MODULE_SEPARATOR) {
+            Some((head, _)) if instances.contains(head) => head,
+            Some(_) | None => path,
+        };
+        start == ident.as_ref()
     };
     let runs_through_deleted = |reference: &datamodel::ModuleReference| {
         starts_at_deleted(&reference.src) || starts_at_deleted(&reference.dst)
@@ -3019,6 +3037,10 @@ mod tests {
             "customer_growth",
             "customer growth",
             "Customer_Growth",
+            // A name whose canonical form is empty is the unnamed model's.
+            "   ",
+            "\t",
+            "\"\"",
         ] {
             let mut project = base.clone();
             let err = apply_patch(
@@ -3049,6 +3071,9 @@ mod tests {
         unnamed.models[0].name = String::new();
         let mut project = unnamed.clone();
         let err = apply_patch(&mut project, add("Main")).expect_err("main is the unnamed model");
+        assert_eq!(err.code, ErrorCode::DuplicateVariable);
+        assert!(project == unnamed);
+        let err = apply_patch(&mut project, add("  ")).expect_err("a blank name is unnamed too");
         assert_eq!(err.code, ErrorCode::DuplicateVariable);
         assert!(project == unnamed);
 
