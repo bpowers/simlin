@@ -30,7 +30,15 @@ import * as path from 'node:path';
 
 import { test, expect, type Locator, type Page } from '@playwright/test';
 
-import { ENV, pysimlinDir, pythonExecutable } from './jupyter-server';
+import {
+  ENV,
+  canRunCells,
+  kernelState,
+  pysimlinDir,
+  pythonExecutable,
+  startNotebookSession,
+  type SessionFacts,
+} from './jupyter-server';
 
 const NOTEBOOK = 'journey.ipynb';
 const MODEL = 'teacup.xmile';
@@ -99,39 +107,149 @@ function required(name: string): string {
 }
 
 /**
- * The cells of the ACTIVE notebook.  JupyterLab restores the workspace, so
- * a second test finds the first test's notebook still open in a hidden tab
- * (Lumino marks inactive dock tabs `lm-mod-hidden`); an unscoped `.jp-Cell`
- * would count both notebooks' cells.
+ * The cells of the visible notebook. Each test opens its notebook in a
+ * workspace of its own (`openNotebook`), so that is the notebook under test;
+ * the scope to the visible panel (Lumino marks inactive dock tabs
+ * `lm-mod-hidden`) keeps a second notebook a test might open from being
+ * counted with it.
  */
 function activeCells(page: Page): Locator {
   return page.locator('.jp-NotebookPanel:not(.lm-mod-hidden) .jp-Notebook .jp-Cell');
 }
 
+/** The JupyterLab workspace a notebook's test runs in: its own. */
+function workspaceOf(notebook: string): string {
+  return notebook.replace(/[^A-Za-z0-9]+/g, '-');
+}
+
 /**
- * Wait until the visible notebook has a live kernel. On a cold server (the
- * first notebook opened after Lab's caches were rebuilt) Lab can still be
- * starting the session when the page shows its cells; a Shift+Enter then
- * opens the "Select Kernel" dialog instead of running the cell. The toolbar's
- * kernel-name button is no signal (it shows the preferred name before a
- * session exists); the execution indicator reports `data-status="idle"` only
- * once a kernel is connected. A "Select Kernel" dialog left open is accepted
- * so the default kernel starts.
+ * Open `notebook` in JupyterLab with its kernel session already running, and
+ * wait until it is the notebook Lab shows, with its `cellCount` cells.
+ *
+ * The session is started on the server first (`startNotebookSession`, which
+ * says why): Lab finds a session for the notebook's path and connects to it,
+ * so whether the notebook gets a kernel does not ride on the one start
+ * request the page would otherwise make.
+ *
+ * The notebook opens in a workspace named for it. Lab saves a workspace's
+ * layout on the server and restores it on the next load, before it opens the
+ * notebook the URL names: in a shared workspace the notebook an earlier test
+ * left open is the visible one for a while, with a kernel that is ready and
+ * cells that render a few at a time, so a helper that means "the visible
+ * notebook" clicks and runs a cell of the wrong one. The path check says
+ * which notebook the helpers are about to act on instead of inferring it from
+ * a cell count.
+ */
+async function openNotebook(page: Page, notebook: string, cellCount: number): Promise<void> {
+  const url = required(ENV.url);
+  const token = required(ENV.token);
+  await startNotebookSession({ url, token }, notebook);
+  await page.goto(`${url}lab/workspaces/${workspaceOf(notebook)}/tree/${notebook}?token=${token}`);
+  await expect
+    .poll(() => visibleNotebookPath(page), { timeout: 90_000, message: `waiting for JupyterLab to show ${notebook}` })
+    .toBe(notebook);
+  await expect(activeCells(page)).toHaveCount(cellCount, { timeout: 90_000 });
+}
+
+/** The parts of JupyterLab's application object the journey reads. */
+interface LabApp {
+  shell: { widgets(area: 'main'): Iterable<LabWidget> };
+}
+interface LabWidget {
+  node: Element;
+  context?: { path: string };
+  sessionContext?: {
+    isReady: boolean;
+    session: { kernel: { connectionStatus: string; status: string } | null } | null;
+  };
+}
+
+/**
+ * The path of the notebook JupyterLab is showing, or `null` when it shows
+ * none (or the application object does not exist yet).
+ */
+async function visibleNotebookPath(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const app = (window as unknown as { jupyterapp?: LabApp }).jupyterapp;
+    const node = document.querySelector('.jp-NotebookPanel:not(.lm-mod-hidden)');
+    if (app === undefined || node === null) {
+      return null;
+    }
+    for (const widget of app.shell.widgets('main')) {
+      if (widget.node === node) {
+        return widget.context?.path ?? null;
+      }
+    }
+    return null;
+  });
+}
+
+/**
+ * What JupyterLab says about the visible notebook's kernel session, read from
+ * the application object (`window.jupyterapp`, there because the server is
+ * launched with `expose_app_in_browser`). `null` until the page has a visible
+ * notebook.
+ *
+ * The notebook toolbar's execution indicator is no substitute: it shows
+ * `data-status="idle"` from the moment the notebook renders, before its
+ * session has connected to anything.
+ */
+async function sessionFacts(page: Page): Promise<SessionFacts | null> {
+  return page.evaluate(() => {
+    const app = (window as unknown as { jupyterapp?: LabApp }).jupyterapp;
+    const node = document.querySelector('.jp-NotebookPanel:not(.lm-mod-hidden)');
+    if (app === undefined || node === null) {
+      return null;
+    }
+    for (const widget of app.shell.widgets('main')) {
+      const context = widget.sessionContext;
+      if (widget.node === node && context !== undefined) {
+        const kernel = context.session?.kernel ?? null;
+        return {
+          ready: context.isReady,
+          connection: kernel === null ? null : kernel.connectionStatus,
+          status: kernel === null ? null : kernel.status,
+        };
+      }
+    }
+    return null;
+  });
+}
+
+/**
+ * Wait until a cell run in the visible notebook would execute: its session
+ * has finished starting and its kernel is connected (`kernelState`).
+ *
+ * Lab is still connecting the notebook to its session when the page shows the
+ * notebook's cells. A Shift+Enter in that window makes Lab ask for a session
+ * of its own for the run while its session start is still under way; it then
+ * settles the two by shutting one down, kernel connection and all, which
+ * surfaces as "Canceled future for ... message" page errors.
+ *
+ * A dialog over the notebook ("Error Starting Kernel", "Select Kernel") means
+ * Lab gave up on the kernel and is waiting for a person, so it fails the wait
+ * at once with the dialog's text instead of running out the clock.
  */
 async function waitForKernel(page: Page): Promise<void> {
-  const dialogSelect = page.locator('.jp-Dialog button.jp-mod-accept', { hasText: /^select$/i });
-  const indicator = page.locator('.jp-NotebookPanel:not(.lm-mod-hidden) .jp-Notebook-ExecutionIndicator');
+  const dialog = page.locator('.jp-Dialog').first();
+  const dialogText = async (): Promise<string> => (await dialog.innerText()).replace(/\s+/g, ' ').trim();
+  let raised: string | undefined;
   await expect
     .poll(
       async () => {
-        if (await dialogSelect.isVisible()) {
-          await dialogSelect.click();
+        if (await dialog.isVisible()) {
+          raised = await dialogText();
+          return 'dialog';
         }
-        return indicator.first().getAttribute('data-status');
+        const state = kernelState(await sessionFacts(page));
+        return canRunCells(state) ? 'ready' : state;
       },
       { timeout: 90_000, message: 'waiting for the notebook kernel to connect' },
     )
-    .toMatch(/^(idle|busy)$/);
+    .toMatch(/^(ready|dialog)$/);
+  if (raised !== undefined) {
+    throw new Error(`JupyterLab raised a dialog instead of connecting the notebook's kernel: ${raised}`);
+  }
 }
 
 /** Click into cell `index`'s editor and run it with Shift+Enter. */
@@ -235,8 +353,6 @@ async function shiftPan(
 test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the Editor and follows changes to it', async ({
   page,
 }) => {
-  const baseUrl = required(ENV.url);
-  const token = required(ENV.token);
   const rootDir = required(ENV.rootDir);
   const modelPath = path.join(rootDir, MODEL);
   fs.copyFileSync(FIXTURE, modelPath);
@@ -251,8 +367,7 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
     }
   });
 
-  await page.goto(`${baseUrl}lab/tree/${NOTEBOOK}?token=${token}`);
-  await expect(activeCells(page)).toHaveCount(CELLS.length, { timeout: 90_000 });
+  await openNotebook(page, NOTEBOOK, CELLS.length);
 
   // --- display: the Editor renders in the cell output -------------------
   const displayCell = await runCell(page, 0);
@@ -385,8 +500,6 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
 test('a model built from scratch in memory displays with a laid-out diagram and follows Python edits', async ({
   page,
 }) => {
-  const baseUrl = required(ENV.url);
-  const token = required(ENV.token);
   const rootDir = required(ENV.rootDir);
   fs.writeFileSync(path.join(rootDir, SCRATCH_NOTEBOOK), notebookJson(SCRATCH_CELLS));
 
@@ -398,8 +511,7 @@ test('a model built from scratch in memory displays with a laid-out diagram and 
     }
   });
 
-  await page.goto(`${baseUrl}lab/tree/${SCRATCH_NOTEBOOK}?token=${token}`);
-  await expect(activeCells(page)).toHaveCount(SCRATCH_CELLS.length, { timeout: 90_000 });
+  await openNotebook(page, SCRATCH_NOTEBOOK, SCRATCH_CELLS.length);
 
   // The display lays the viewless model out (one committed change, so the
   // revision printed BEFORE the display is one behind what the next cell
@@ -454,8 +566,6 @@ test('a model built from scratch in memory displays with a laid-out diagram and 
 // `data-lm-suppress-shortcuts`, so the attribute has to be on the focused
 // element itself, not only on the wrapper.
 test('pysimlin-widget.AC2.6: keys with the Editor focused act on the Editor, not the notebook', async ({ page }) => {
-  const baseUrl = required(ENV.url);
-  const token = required(ENV.token);
   const rootDir = required(ENV.rootDir);
   const model = 'keys.xmile';
   const modelPath = path.join(rootDir, model);
@@ -464,12 +574,8 @@ test('pysimlin-widget.AC2.6: keys with the Editor focused act on the Editor, not
   const cellSources = [['import simlin', `m = simlin.open("${model}")`, 'm'], ['print(1)'], ['print(2)']];
   fs.writeFileSync(path.join(rootDir, notebook), notebookJson(cellSources));
 
-  await page.goto(`${baseUrl}lab/tree/${notebook}?token=${token}`);
-  // Lab restores the workspace, so notebooks from earlier tests are open in
-  // other (hidden) tabs: scope to the visible notebook panel.
-  const panel = page.locator('.jp-NotebookPanel:not(.lm-mod-hidden)');
-  const cells = panel.locator('.jp-Notebook .jp-Cell');
-  await expect(cells).toHaveCount(cellSources.length, { timeout: 90_000 });
+  await openNotebook(page, notebook, cellSources.length);
+  const cells = activeCells(page);
   const displayCell = await runCell(page, 0);
   const widget = displayCell.locator('.simlin-notebook-widget');
   const canvas = widget.locator('svg.simlin-canvas');

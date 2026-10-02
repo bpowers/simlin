@@ -67,6 +67,9 @@ export function serverArgs(rootDir: string, token: string): string[] {
     '--LabApp.check_for_updates_class=jupyterlab.handlers.announcements.NeverCheckForUpdate',
     '--LabApp.news_url=None',
     '--LabApp.extension_manager=readonly',
+    // `window.jupyterapp`: the journey asks the application for a notebook's
+    // kernel state (`SessionFacts`), which nothing it renders reports.
+    '--LabApp.expose_app_in_browser=True',
   ];
 }
 
@@ -160,6 +163,107 @@ export function preflight(python: string): void {
   if (result.status !== 0) {
     throw new Error(`${python} cannot run the notebook journey:\n${result.stderr}${result.stdout}`);
   }
+}
+
+/** The kernel every journey notebook runs on: the venv's own ipykernel. */
+export const KERNEL_NAME = 'python3';
+
+/**
+ * The body of the request that starts a notebook's kernel session: what
+ * JupyterLab itself posts when it opens a notebook that has none.
+ */
+export function sessionRequestBody(notebook: string): {
+  path: string;
+  name: string;
+  type: 'notebook';
+  kernel: { name: string };
+} {
+  return { path: notebook, name: notebook, type: 'notebook', kernel: { name: KERNEL_NAME } };
+}
+
+/** How many times a kernel session start is tried before the journey gives up. */
+export const SESSION_START_ATTEMPTS = 3;
+
+/**
+ * Start `notebook`'s kernel session on the server, before the browser opens
+ * the notebook.
+ *
+ * JupyterLab starts a notebook's session itself when it opens one, and when
+ * that one request fails it shows an "Error Starting Kernel" dialog and leaves
+ * the notebook with no kernel: nothing in the page starts one afterwards, so a
+ * journey that leaves the start to the page waits out its whole timeout on a
+ * notebook that will never run a cell, with nothing to say why. A session
+ * that already exists for the notebook's path is one Lab connects to instead
+ * of starting its own, so the journey starts it here, where a refusal carries
+ * the server's own words. Starting a kernel is the server's business rather
+ * than the widget's, which is what the journey is about, so a refused start
+ * is tried again (and said so, on stderr) before it fails the run.
+ */
+export async function startNotebookSession(
+  server: Pick<ServerInfo, 'url' | 'token'>,
+  notebook: string,
+  post: (url: string, init: RequestInit) => Promise<Response> = fetch,
+): Promise<void> {
+  const refusals: string[] = [];
+  for (let attempt = 1; attempt <= SESSION_START_ATTEMPTS; attempt++) {
+    let refusal: string;
+    try {
+      const res = await post(`${server.url}api/sessions`, {
+        method: 'POST',
+        headers: { Authorization: `token ${server.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(sessionRequestBody(notebook)),
+      });
+      if (res.ok) {
+        return;
+      }
+      refusal = `HTTP ${res.status}: ${await res.text()}`;
+    } catch (err) {
+      refusal = err instanceof Error ? err.message : String(err);
+    }
+    refusals.push(`attempt ${attempt}: ${refusal}`);
+    console.error(`starting the kernel session for ${notebook} failed (${refusals[refusals.length - 1]})`);
+  }
+  throw new Error(`the jupyter server did not start a kernel session for ${notebook}:\n${refusals.join('\n')}`);
+}
+
+/**
+ * What JupyterLab's application object says about a notebook's kernel
+ * session (`ISessionContext` and its kernel connection).
+ */
+export interface SessionFacts {
+  /** The session context has finished starting (`isReady`). */
+  ready: boolean;
+  /** The kernel connection's socket state, or `null` with no kernel. */
+  connection: string | null;
+  /** The kernel's execution state, or `null` with no kernel. */
+  status: string | null;
+}
+
+/**
+ * One phrase for a notebook's kernel: `idle` or `busy` when a cell run now
+ * would execute, and otherwise what stands in the way. `facts` is `null` when
+ * the page has no visible notebook yet.
+ *
+ * The kernel's own status is not enough: a kernel connection reports the last
+ * status it heard, so one whose socket is not `connected` is whatever its
+ * socket is, and a session still starting has no kernel to speak for it.
+ */
+export function kernelState(facts: SessionFacts | null): string {
+  if (facts === null) {
+    return 'no notebook';
+  }
+  if (!facts.ready) {
+    return 'session starting';
+  }
+  if (facts.connection === null || facts.status === null) {
+    return 'no kernel';
+  }
+  return facts.connection === 'connected' ? facts.status : facts.connection;
+}
+
+/** Whether a cell run would execute in a kernel in `state` (`kernelState`). */
+export function canRunCells(state: string): boolean {
+  return state === 'idle' || state === 'busy';
 }
 
 /** Launch JupyterLab and resolve once its REST API answers with our token. */
