@@ -1555,24 +1555,16 @@ impl<'input> ConversionContext<'input> {
     }
 
     /// Build a GraphicalFunction from a LookupTable.
-    /// The var_name is used to check if LOOKUP EXTRAPOLATE was used with this lookup.
+    /// The var_name is used to check whether `TABXL` is called on this lookup.
     fn build_graphical_function(
         &self,
         var_name: &str,
         table: &crate::mdl::ast::LookupTable,
     ) -> GraphicalFunction {
-        // Handle legacy XY format by transforming if needed
-        let (x_vals, y_vals) = if table.format == crate::mdl::ast::TableFormat::LegacyXY {
-            // Legacy format: values are stored flat in x_vals, need to split
-            let n = table.x_vals.len() / 2;
-            if n > 0 && table.x_vals.len().is_multiple_of(2) {
-                (table.x_vals[..n].to_vec(), table.x_vals[n..].to_vec())
-            } else {
-                (table.x_vals.clone(), table.y_vals.clone())
-            }
-        } else {
-            (table.x_vals.clone(), table.y_vals.clone())
-        };
+        // Every syntax reaches here as pairs: the parser splits a legacy
+        // x-then-y list as it reads it (`LookupTable::transform_legacy`).
+        debug_assert!(table.format == crate::mdl::ast::TableFormat::Pairs);
+        let (x_vals, y_vals) = points_in_x_order(table.x_vals.clone(), table.y_vals.clone());
         // x-scale: use file-specified range if available, otherwise compute from data
         let x_scale = if let Some(x_range) = table.x_range {
             GraphicalFunctionScale {
@@ -1609,9 +1601,11 @@ impl<'input> ConversionContext<'input> {
             }
         };
 
-        // Check if extrapolation should be enabled:
+        // The table extrapolates when:
         // 1. table.extrapolate is set in the lookup definition itself
-        // 2. OR the lookup is used with LOOKUP EXTRAPOLATE / TABXL somewhere
+        // 2. OR `TABXL` is called on the lookup somewhere (`stocks.rs`'s scan).
+        //    `LOOKUP EXTRAPOLATE` is a call's own reading -- it imports as the
+        //    `LOOKUP_EXTRAPOLATE` builtin -- and leaves the table's kind alone.
         let should_extrapolate =
             table.extrapolate || self.extrapolate_lookups.contains(&canonical_name(var_name));
 
@@ -1632,6 +1626,42 @@ impl<'input> ConversionContext<'input> {
         }
     }
 }
+
+/// A lookup's points in ascending x order, as Vensim reads them whatever order
+/// the file lists them in: Vensim DSS's own run of
+/// `lookup2dim[B,E]((2,-3),(1,-7),(0,-1))` in
+/// `test/test-models/tests/subscripted_lookups/output.tab` answers -1 at 0 and
+/// -4 at 0.5, the curve through `(0,-1),(1,-7),(2,-3)`. The project holds the
+/// points in that order, since the engine's lookups search x and XMILE requires
+/// ascending `<xpts>` (1.0 section 4.1.3).
+///
+/// Vensim's documentation says the same of its own storage: "The Input/Output
+/// pairs are always stored in ascending x order" (vensim.com/documentation,
+/// `ref_editing_lookups.html`, on the lookup editor), and the Vensim 5.10b
+/// release notes (`version_5_10b___-_.html`) say "Out of order XY pairs in
+/// Changes files or loaded into the Lookup Editor via Import Vals could cause
+/// unexpected simulation results without issuing any messages. X vals are now
+/// sorted before use." Neither speaks of a lookup written out of order in a
+/// model file; the output above is what settles that.
+///
+/// The sort is stable, so points that share an x (a vertical step) keep the
+/// order they are listed in. Which of them Vensim answers with at that x, and
+/// how it orders them when the list is also out of order, is unverified.
+///
+/// Lists of different lengths pair no points and are left as they are for the
+/// compiler to refuse.
+pub(super) fn points_in_x_order(x_vals: Vec<f64>, y_vals: Vec<f64>) -> (Vec<f64>, Vec<f64>) {
+    if x_vals.len() != y_vals.len() || x_vals.windows(2).all(|pair| pair[0] <= pair[1]) {
+        return (x_vals, y_vals);
+    }
+    let mut points: Vec<(f64, f64)> = x_vals.into_iter().zip(y_vals).collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    points.into_iter().unzip()
+}
+
+#[cfg(test)]
+#[path = "lookup_order_tests.rs"]
+mod lookup_order_tests;
 
 #[cfg(test)]
 mod tests {

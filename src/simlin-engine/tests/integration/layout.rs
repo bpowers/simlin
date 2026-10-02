@@ -2539,7 +2539,8 @@ fn test_incremental_two_word_label_round_trips_every_format() {
     let pb: project_io::Project = project_serde::serialize(&patched).unwrap();
     let bytes = pb.encode_to_vec();
     let from_pb =
-        project_serde::deserialize(project_io::Project::decode_from_slice(&bytes).unwrap());
+        project_serde::deserialize(project_io::Project::decode_from_slice(&bytes).unwrap())
+            .unwrap();
     assert_eq!(
         label_of(&first_view(&from_pb)),
         laid_out,

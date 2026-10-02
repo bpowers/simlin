@@ -27,7 +27,7 @@ fn roundtrip_to_json(dm: &datamodel::Project) -> (Vec<u8>, String) {
 
     // bytes -> protobuf -> datamodel -> JSON
     let pb_decoded = project_io::Project::decode_from_slice(&pb_bytes).unwrap();
-    let dm_decoded: datamodel::Project = project_serde::deserialize(pb_decoded);
+    let dm_decoded: datamodel::Project = project_serde::deserialize(pb_decoded).unwrap();
     let json_project: json::Project = dm_decoded.into();
     let json_str = serde_json::to_string(&json_project).unwrap();
 

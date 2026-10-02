@@ -85,6 +85,7 @@ pub enum BuiltinFn<Expr> {
     Lookup(Box<Expr>, Box<Expr>, Loc),
     LookupForward(Box<Expr>, Box<Expr>, Loc),
     LookupBackward(Box<Expr>, Box<Expr>, Loc),
+    LookupExtrapolate(Box<Expr>, Box<Expr>, Loc),
     Abs(Box<Expr>),
     Arccos(Box<Expr>),
     Arcsin(Box<Expr>),
@@ -372,6 +373,14 @@ static LOOKUP_BACKWARD: BuiltinSig = sig(
     ResultKind::Scalar,
     Invariance::Pure,
 );
+static LOOKUP_EXTRAPOLATE: BuiltinSig = sig(
+    "lookup_extrapolate",
+    2,
+    Some(2),
+    &[ArgKind::Table, SCALAR],
+    ResultKind::Scalar,
+    Invariance::Pure,
+);
 static ABS: BuiltinSig = unary_math("abs");
 static ARCCOS: BuiltinSig = unary_math("arccos");
 static ARCSIN: BuiltinSig = unary_math("arcsin");
@@ -575,10 +584,11 @@ static INIT: BuiltinSig = sig(
 
 impl BuiltinSig {
     /// Every signature, one per [`BuiltinFn`] variant, in declaration order.
-    pub const ALL: [&'static BuiltinSig; 44] = [
+    pub const ALL: [&'static BuiltinSig; 45] = [
         &LOOKUP,
         &LOOKUP_FORWARD,
         &LOOKUP_BACKWARD,
+        &LOOKUP_EXTRAPOLATE,
         &ABS,
         &ARCCOS,
         &ARCSIN,
@@ -644,6 +654,31 @@ impl BuiltinSig {
         BY_NAME.get(name).copied()
     }
 
+    /// Whether the builtin is one of the `LOOKUP` family: its first argument
+    /// is the table it reads ([`ArgKind::Table`]), its second the index. The
+    /// one statement of which builtins those are, so a pass that treats a
+    /// lookup's table apart from its value arguments asks this (or
+    /// [`BuiltinFn::lookup_args`]) and a lookup builtin added to the table is
+    /// one everywhere.
+    pub(crate) fn reads_a_table(&self) -> bool {
+        self.arg_kinds.first() == Some(&ArgKind::Table)
+    }
+
+    /// Whether a (lowercased) source name denotes a `LOOKUP` family builtin.
+    pub(crate) fn name_reads_a_table(name: &str) -> bool {
+        Self::by_name(name).is_some_and(BuiltinSig::reads_a_table)
+    }
+
+    /// The name of every `LOOKUP` family builtin, for tests whose rows are
+    /// the family.
+    #[cfg(test)]
+    pub(crate) fn table_readers() -> impl Iterator<Item = &'static str> {
+        Self::ALL
+            .iter()
+            .filter(|sig| sig.reads_a_table())
+            .map(|sig| sig.name)
+    }
+
     /// Whether a call spelled with `n` arguments is well-formed.
     pub fn accepts_arity(&self, n: usize) -> bool {
         n >= self.min_args as usize && self.max_args.is_none_or(|max| n <= max as usize)
@@ -676,7 +711,10 @@ macro_rules! builtin_args {
         use BuiltinFn::*;
         let mut out = SmallVec::new();
         match $builtin {
-            Lookup(a, b, _) | LookupForward(a, b, _) | LookupBackward(a, b, _) => {
+            Lookup(a, b, _)
+            | LookupForward(a, b, _)
+            | LookupBackward(a, b, _)
+            | LookupExtrapolate(a, b, _) => {
                 out.push(&$($m)? **a);
                 out.push(&$($m)? **b);
             }
@@ -736,6 +774,9 @@ macro_rules! builtin_rebuild {
             Lookup(a, b, loc) => Lookup($arg!($f, a), $arg!($f, b), $copy!(loc)),
             LookupForward(a, b, loc) => LookupForward($arg!($f, a), $arg!($f, b), $copy!(loc)),
             LookupBackward(a, b, loc) => LookupBackward($arg!($f, a), $arg!($f, b), $copy!(loc)),
+            LookupExtrapolate(a, b, loc) => {
+                LookupExtrapolate($arg!($f, a), $arg!($f, b), $copy!(loc))
+            }
             Abs(a) => Abs($arg!($f, a)),
             Arccos(a) => Arccos($arg!($f, a)),
             Arcsin(a) => Arcsin($arg!($f, a)),
@@ -865,6 +906,7 @@ impl<Expr> BuiltinFn<Expr> {
             Lookup(_, _, _) => &LOOKUP,
             LookupForward(_, _, _) => &LOOKUP_FORWARD,
             LookupBackward(_, _, _) => &LOOKUP_BACKWARD,
+            LookupExtrapolate(_, _, _) => &LOOKUP_EXTRAPOLATE,
             Abs(_) => &ABS,
             Arccos(_) => &ARCCOS,
             Arcsin(_) => &ARCSIN,
@@ -912,6 +954,18 @@ impl<Expr> BuiltinFn<Expr> {
     /// The canonical lowercase name of this builtin.
     pub fn name(&self) -> &'static str {
         self.signature().name
+    }
+
+    /// The table and the index of a `LOOKUP` family call
+    /// ([`BuiltinSig::reads_a_table`]), and `None` for any other builtin.
+    pub fn lookup_args(&self) -> Option<(&Expr, &Expr)> {
+        if !self.signature().reads_a_table() {
+            return None;
+        }
+        match self.args().as_slice() {
+            [table, index] => Some((*table, *index)),
+            _ => unreachable!("a lookup builtin takes a table and an index"),
+        }
     }
 
     /// The argument expressions, in call order. An `IsModuleInput`'s
@@ -1072,6 +1126,7 @@ impl<Expr> BuiltinFn<Expr> {
             Lookup(a, b, _) => Lookup(a, b, Loc::default()),
             LookupForward(a, b, _) => LookupForward(a, b, Loc::default()),
             LookupBackward(a, b, _) => LookupBackward(a, b, Loc::default()),
+            LookupExtrapolate(a, b, _) => LookupExtrapolate(a, b, Loc::default()),
             IsModuleInput(id, _) => IsModuleInput(id, Loc::default()),
             locless @ (Abs(_)
             | Arccos(_)
@@ -1231,6 +1286,7 @@ mod tests {
             Builtin::Lookup(b(1), b(2), Loc::new(1, 2)),
             Builtin::LookupForward(b(1), b(2), Loc::new(1, 2)),
             Builtin::LookupBackward(b(1), b(2), Loc::new(1, 2)),
+            Builtin::LookupExtrapolate(b(1), b(2), Loc::new(1, 2)),
             Builtin::Abs(b(1)),
             Builtin::Arccos(b(1)),
             Builtin::Arcsin(b(1)),
@@ -1278,6 +1334,7 @@ mod tests {
                 Builtin::Lookup(..)
                 | Builtin::LookupForward(..)
                 | Builtin::LookupBackward(..)
+                | Builtin::LookupExtrapolate(..)
                 | Builtin::Abs(..)
                 | Builtin::Arccos(..)
                 | Builtin::Arcsin(..)

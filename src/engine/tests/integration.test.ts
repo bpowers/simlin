@@ -11,6 +11,7 @@ import { init, reset, getMemory, isUrl } from '@simlin/engine/internal/wasm';
 import { malloc, free } from '../src/internal/memory';
 import { SimlinError, readErrorDetail } from '../src/internal/error';
 import { SimlinErrorCode } from '../src/internal/types';
+import { ErrorCode, errorCodeDescription } from '../src/errors';
 import { validateStructSizes, getRustStructSizes } from '../src/internal/analysis';
 import {
   simlin_project_unref,
@@ -110,6 +111,49 @@ describe('WASM Integration Tests', () => {
 
       // The actual error string returned by libsimlin
       expect(str).toBe('generic');
+    });
+
+    // `SimlinErrorCode` (internal/types.ts) and `ErrorCode` (errors.ts) are
+    // hand-written copies of libsimlin's enum. The engine names each of its
+    // codes and answers 'unknown_error' past the last, so walking the codes
+    // from zero gives the engine's own list to hold both copies to.
+    it('mirrors every code the engine names, number for number, in both TypeScript tables', () => {
+      const error_str_fn = instance.exports.simlin_error_str as (code: number) => number;
+      const memory = instance.exports.memory as WebAssembly.Memory;
+      const decoder = new TextDecoder();
+      const nameOf = (code: number): string => {
+        const ptr = error_str_fn(code);
+        const view = new Uint8Array(memory.buffer);
+        let end = ptr;
+        while (view[end] !== 0) end++;
+        return decoder.decode(view.slice(ptr, end));
+      };
+
+      const engineNames: string[] = [];
+      for (let name = nameOf(0); name !== 'unknown_error'; name = nameOf(engineNames.length)) {
+        engineNames.push(name);
+        expect(engineNames.length).toBeLessThan(1000);
+      }
+      expect(engineNames.length).toBeGreaterThan(0);
+
+      const pascalCase = (snake: string): string =>
+        snake
+          .split('_')
+          .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+          .join('');
+      const expected = engineNames.map((name, code) => [pascalCase(name), code]);
+      // A numeric enum also maps each number back to its name; the members
+      // are the entries whose value is the number.
+      const members = (table: object): [string, number][] =>
+        Object.entries(table).filter((entry): entry is [string, number] => typeof entry[1] === 'number');
+      expect(members(SimlinErrorCode)).toEqual(expected);
+      expect(members(ErrorCode)).toEqual(expected);
+
+      // Each code has a description of its own, not the one an unknown code gets.
+      const unknown = errorCodeDescription(engineNames.length as ErrorCode);
+      for (let code = 0; code < engineNames.length; code++) {
+        expect(errorCodeDescription(code as ErrorCode)).not.toBe(unknown);
+      }
     });
   });
 

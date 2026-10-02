@@ -1113,7 +1113,7 @@ fn roundtrip_pb_json(json_project: &Project) -> (Vec<u8>, String) {
     let pb_decoded = project_io::Project::decode_from_slice(&pb_bytes).unwrap();
 
     // protobuf -> datamodel -> json -> string
-    let dm_decoded: datamodel::Project = project_serde::deserialize(pb_decoded);
+    let dm_decoded: datamodel::Project = project_serde::deserialize(pb_decoded).unwrap();
     let json_decoded: Project = dm_decoded.into();
     let json_str = serde_json::to_string(&json_decoded).unwrap();
 
@@ -1169,13 +1169,13 @@ proptest! {
 
         // Decode and do second roundtrip
         let pb1_decoded = project_io::Project::decode_from_slice(&pb_bytes1).unwrap();
-        let dm2: datamodel::Project = project_serde::deserialize(pb1_decoded);
+        let dm2: datamodel::Project = project_serde::deserialize(pb1_decoded).unwrap();
         let pb2: project_io::Project = project_serde::serialize(&dm2).unwrap();
         let pb_bytes2 = pb2.encode_to_vec();
 
         // Third roundtrip
         let pb2_decoded = project_io::Project::decode_from_slice(&pb_bytes2).unwrap();
-        let dm3: datamodel::Project = project_serde::deserialize(pb2_decoded);
+        let dm3: datamodel::Project = project_serde::deserialize(pb2_decoded).unwrap();
         let pb3: project_io::Project = project_serde::serialize(&dm3).unwrap();
         let pb_bytes3 = pb3.encode_to_vec();
 
@@ -1217,7 +1217,8 @@ mod protobuf_roundtrip_tests {
             .unwrap_or_else(|_| panic!("Failed to decode {}", filename));
 
         // Convert to datamodel
-        let dm_original: datamodel::Project = project_serde::deserialize(pb_original.clone());
+        let dm_original: datamodel::Project =
+            project_serde::deserialize(pb_original.clone()).unwrap();
 
         // First roundtrip: pb -> json string
         let json_project1: Project = dm_original.into();

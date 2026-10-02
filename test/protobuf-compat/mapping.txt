@@ -1,0 +1,272 @@
+Project {
+    name: "",
+    sim_specs: SimSpecs {
+        start: 0.0,
+        stop: 1.0,
+        dt: Dt(
+            1.0,
+        ),
+        save_step: None,
+        sim_method: Euler,
+        time_units: Some(
+            "Months",
+        ),
+    },
+    dimensions: [
+        Dimension {
+            name: "DimA",
+            elements: Named(
+                [
+                    "A1",
+                    "A2",
+                    "A3",
+                ],
+            ),
+            mappings: [],
+            parent: None,
+        },
+        Dimension {
+            name: "DimB",
+            elements: Named(
+                [
+                    "B1",
+                    "B2",
+                ],
+            ),
+            mappings: [
+                DimensionMapping {
+                    target: "dima",
+                    element_map: [
+                        (
+                            "b1",
+                            "a1",
+                        ),
+                        (
+                            "b1",
+                            "a2",
+                        ),
+                        (
+                            "b2",
+                            "a3",
+                        ),
+                    ],
+                },
+            ],
+            parent: None,
+        },
+        Dimension {
+            name: "DimC",
+            elements: Named(
+                [
+                    "C1",
+                    "C2",
+                    "C3",
+                ],
+            ),
+            mappings: [
+                DimensionMapping {
+                    target: "dimd",
+                    element_map: [],
+                },
+            ],
+            parent: None,
+        },
+        Dimension {
+            name: "DimD",
+            elements: Named(
+                [
+                    "D1",
+                    "D2",
+                    "D3",
+                ],
+            ),
+            mappings: [],
+            parent: None,
+        },
+        Dimension {
+            name: "SubA",
+            elements: Named(
+                [
+                    "A1",
+                    "A2",
+                ],
+            ),
+            mappings: [],
+            parent: None,
+        },
+        Dimension {
+            name: "SubC",
+            elements: Named(
+                [
+                    "C1",
+                    "C2",
+                ],
+            ),
+            mappings: [],
+            parent: None,
+        },
+    ],
+    units: [],
+    models: [
+        Model {
+            name: "main",
+            sim_specs: None,
+            variables: [
+                Aux(
+                    Aux {
+                        ident: "a",
+                        equation: ApplyToAll(
+                            [
+                                "DimA",
+                            ],
+                            "b[DimB] * 10",
+                        ),
+                        documentation: "mapping an index to a subdimension",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "b",
+                        equation: Arrayed(
+                            [
+                                "DimB",
+                            ],
+                            [
+                                (
+                                    "b1",
+                                    "1",
+                                    None,
+                                    None,
+                                ),
+                                (
+                                    "b2",
+                                    "2",
+                                    None,
+                                    None,
+                                ),
+                            ],
+                            None,
+                            false,
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "c",
+                        equation: Arrayed(
+                            [
+                                "DimC",
+                            ],
+                            [
+                                (
+                                    "c1",
+                                    "1",
+                                    None,
+                                    None,
+                                ),
+                                (
+                                    "c2",
+                                    "2",
+                                    None,
+                                    None,
+                                ),
+                                (
+                                    "c3",
+                                    "3",
+                                    None,
+                                    None,
+                                ),
+                            ],
+                            None,
+                            false,
+                        ),
+                        documentation: "defining a dimension with a subdimension",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "d",
+                        equation: ApplyToAll(
+                            [
+                                "DimD",
+                            ],
+                            "c[DimC] * 10",
+                        ),
+                        documentation: "mapping a subdimension to an index",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+    ],
+    source: None,
+    ai_information: None,
+}

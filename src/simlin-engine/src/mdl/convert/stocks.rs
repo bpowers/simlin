@@ -90,7 +90,8 @@ impl<'input> ConversionContext<'input> {
         }
     }
 
-    /// Pass 4: Scan for LOOKUP EXTRAPOLATE / TABXL calls and flag referenced lookups.
+    /// Pass 4: Scan for `TABXL` calls and flag the lookups they name as
+    /// extrapolating. `LOOKUP EXTRAPOLATE` is a call's own reading and flags none.
     pub(super) fn scan_for_extrapolate_lookups(&mut self) {
         // Collect all expressions first to avoid borrow conflict
         let equations: Vec<_> = self

@@ -35,7 +35,7 @@ export function ErrorDetails({
   ) {
     errors.push(
       <div key="sim" className={styles.list}>
-        simulation error: {errorCodeDescription(simError.code)}
+        simulation error: {simError.details ?? errorCodeDescription(simError.code)}
       </div>,
     );
   }
@@ -57,7 +57,7 @@ export function ErrorDetails({
     for (const err of errs) {
       errors.push(
         <div key={`var-${ident}-${err.code}-${err.start}`} className={styles.list}>
-          variable "{ident}" error: {errorCodeDescription(err.code)}
+          variable "{ident}" error: {err.details ?? errorCodeDescription(err.code)}
         </div>,
       );
     }

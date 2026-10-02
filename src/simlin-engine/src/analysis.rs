@@ -792,6 +792,11 @@ pub struct ModelLink {
 /// Owned strings and series, so the value outlives the db borrow: the edges
 /// are materialized before `results` is read, and a caller can drop its locks
 /// the moment this returns.
+///
+/// The list is the same for the same model every time, in `(from, to)` name
+/// order: the edges are walked in that order (`CausalEdgesResult::edges` is
+/// an ordered map), which is also the order the collapse folds paths and
+/// returns its links in.
 pub fn model_links(
     db: &dyn crate::db::Db,
     model: crate::db::SourceModel,

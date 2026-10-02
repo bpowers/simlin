@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::common::Result;
+use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::{
     Aux, Compat, Conveyor, DataSource, DataSourceKind, Dimension, DimensionElements,
     DimensionMapping, Dt, Equation, Extension, Flow, GraphicalFunction, GraphicalFunctionKind,
@@ -49,6 +49,52 @@ fn migrate_stored_ident(s: String) -> String {
     } else {
         s
     }
+}
+
+/// The error for a stored project that lacks something every writer writes: a
+/// `ProtobufDecode` whose reason says what is missing. The reader refuses
+/// such a project rather than invent the missing piece, and never panics on
+/// one: bytes that decode are not thereby a project.
+fn unreadable(reason: &str) -> Error {
+    Error::new(
+        ErrorKind::Import,
+        ErrorCode::ProtobufDecode,
+        Some(reason.to_string()),
+    )
+}
+
+/// Puts where in the project a flaw was found ahead of its reason:
+/// `model 'main': variable 'births': there is no equation`.
+fn within(place: String) -> impl FnOnce(Error) -> Error {
+    move |mut err| {
+        err.details = Some(match err.details.take() {
+            Some(reason) => format!("{place}: {reason}"),
+            None => place,
+        });
+        err
+    }
+}
+
+/// A variable's equation as stored, refused when the variable was stored
+/// without one.
+fn variable_equation(
+    equation: Option<project_io::variable::Equation>,
+    ident: &str,
+) -> Result<Equation> {
+    equation
+        .ok_or_else(|| unreadable("there is no equation"))
+        .and_then(Equation::try_from)
+        .map_err(within(format!("variable '{ident}'")))
+}
+
+/// A variable's own graphical function as stored, when it has one.
+fn variable_gf(
+    gf: Option<project_io::GraphicalFunction>,
+    ident: &str,
+) -> Result<Option<GraphicalFunction>> {
+    gf.map(GraphicalFunction::try_from)
+        .transpose()
+        .map_err(within(format!("variable '{ident}'")))
 }
 
 impl From<Dt> for project_io::Dt {
@@ -272,9 +318,22 @@ impl From<GraphicalFunction> for project_io::GraphicalFunction {
     }
 }
 
-impl From<project_io::GraphicalFunction> for GraphicalFunction {
-    fn from(gf: project_io::GraphicalFunction) -> Self {
-        GraphicalFunction {
+/// A graphical function stored without one of its scales is refused. Every
+/// writer writes both, and the reader does not derive one: the x scale is what
+/// places the points when no x points are stored.
+impl TryFrom<project_io::GraphicalFunction> for GraphicalFunction {
+    type Error = Error;
+
+    fn try_from(gf: project_io::GraphicalFunction) -> Result<Self> {
+        let x_scale = gf
+            .x_scale
+            .into_option()
+            .ok_or_else(|| unreadable("the graphical function has no x scale"))?;
+        let y_scale = gf
+            .y_scale
+            .into_option()
+            .ok_or_else(|| unreadable("the graphical function has no y scale"))?;
+        Ok(GraphicalFunction {
             kind: GraphicalFunctionKind::from(gf.kind.as_known().unwrap_or_default()),
             x_points: if gf.x_points.is_empty() {
                 None
@@ -282,9 +341,9 @@ impl From<project_io::GraphicalFunction> for GraphicalFunction {
                 Some(gf.x_points)
             },
             y_points: gf.y_points,
-            x_scale: GraphicalFunctionScale::from(gf.x_scale.unwrap()),
-            y_scale: GraphicalFunctionScale::from(gf.y_scale.unwrap()),
-        }
+            x_scale: GraphicalFunctionScale::from(x_scale),
+            y_scale: GraphicalFunctionScale::from(y_scale),
+        })
     }
 }
 
@@ -308,7 +367,9 @@ fn test_graphical_function_roundtrip() {
     ];
     for expected in cases {
         let expected = expected.clone();
-        let actual = GraphicalFunction::from(project_io::GraphicalFunction::from(expected.clone()));
+        let actual =
+            GraphicalFunction::try_from(project_io::GraphicalFunction::from(expected.clone()))
+                .unwrap();
         assert_eq!(expected, actual);
     }
 }
@@ -547,8 +608,13 @@ fn extract_legacy_initial_equation(eqn: &project_io::variable::Equation) -> Opti
     }
 }
 
-impl From<project_io::variable::Equation> for Equation {
-    fn from(eqn: project_io::variable::Equation) -> Self {
+/// An equation message whose kind is unset is refused: it is either no
+/// equation at all or a kind a later schema added, and reading it as an empty
+/// scalar would lose it on the next save.
+impl TryFrom<project_io::variable::Equation> for Equation {
+    type Error = Error;
+
+    fn try_from(eqn: project_io::variable::Equation) -> Result<Self> {
         // `dimension_names` and each element's `subscript` are STRUCTURED ident
         // references (dimension/element names), not free equation text, and are
         // matched symmetrically through `canonicalize` against the dimension
@@ -561,7 +627,10 @@ impl From<project_io::variable::Equation> for Equation {
         // reader stores; every `.` in it is a literal period within a leaf name
         // (commas separate names), so migrating the whole string is correct and
         // preserves the commas.
-        match eqn.equation.unwrap() {
+        let Some(equation) = eqn.equation else {
+            return Err(unreadable("the equation is of no kind this reader knows"));
+        };
+        Ok(match equation {
             project_io::variable::equation::Equation::Scalar(scalar) => {
                 Equation::Scalar(scalar.equation)
             }
@@ -588,7 +657,7 @@ impl From<project_io::variable::Equation> for Equation {
                         .elements
                         .into_iter()
                         .map(|e| {
-                            (
+                            Ok((
                                 // Migrated like the declaration (#690), then
                                 // stored as the element key's canonical
                                 // spelling (`from_subscript`, the one owner).
@@ -599,15 +668,17 @@ impl From<project_io::variable::Equation> for Equation {
                                 .to_string(),
                                 e.equation,
                                 e.initial_equation,
-                                e.gf.map(GraphicalFunction::from),
-                            )
+                                e.gf.into_option()
+                                    .map(GraphicalFunction::try_from)
+                                    .transpose()?,
+                            ))
                         })
-                        .collect(),
+                        .collect::<Result<Vec<_>>>()?,
                     arrayed.default_equation,
                     has_except,
                 )
             }
-        }
+        })
     }
 }
 
@@ -633,7 +704,8 @@ fn test_equation_roundtrip() {
     ];
     for expected in cases {
         let expected = expected.clone();
-        let actual = Equation::from(project_io::variable::Equation::from(expected.clone()));
+        let actual =
+            Equation::try_from(project_io::variable::Equation::from(expected.clone())).unwrap();
         assert_eq!(expected, actual);
     }
 }
@@ -659,7 +731,7 @@ fn a_default_that_does_not_apply_still_does_not_after_a_round_trip() {
         panic!("expected Arrayed proto");
     };
     assert_eq!(arrayed.has_except_default, Some(false));
-    assert_eq!(Equation::from(proto), eq);
+    assert_eq!(Equation::try_from(proto).unwrap(), eq);
 }
 
 #[test]
@@ -677,7 +749,7 @@ fn test_has_except_default_proto_roundtrip() {
     };
     assert_eq!(arrayed.has_except_default, Some(true));
 
-    let roundtripped = Equation::from(proto);
+    let roundtripped = Equation::try_from(proto).unwrap();
     assert_eq!(roundtripped, eq);
 }
 
@@ -709,7 +781,7 @@ fn arrayed_element_subscripts_deserialize_to_the_canonical_key() {
             },
         )),
     };
-    let Equation::Arrayed(_, elements, _, _) = Equation::from(proto) else {
+    let Equation::Arrayed(_, elements, _, _) = Equation::try_from(proto).unwrap() else {
         panic!("expected Arrayed");
     };
     let keys: Vec<&str> = elements.iter().map(|(k, _, _, _)| k.as_str()).collect();
@@ -733,7 +805,7 @@ fn test_has_except_default_absent_defaults_to_false() {
             },
         )),
     };
-    let eq = Equation::from(proto);
+    let eq = Equation::try_from(proto).unwrap();
     match eq {
         Equation::Arrayed(_, _, _, has_except_default) => {
             assert!(!has_except_default, "absent field should default to false");
@@ -761,7 +833,7 @@ fn test_legacy_proto_with_default_equation_infers_has_except() {
             },
         )),
     };
-    let eq = Equation::from(proto);
+    let eq = Equation::try_from(proto).unwrap();
     match eq {
         Equation::Arrayed(_, _, default_eq, has_except_default) => {
             assert_eq!(default_eq.as_deref(), Some("10"));
@@ -789,7 +861,7 @@ fn test_legacy_initial_equation_deserialization() {
     assert_eq!(legacy, Some("392".to_string()));
 
     // Equation conversion ignores the legacy field
-    let eqn = Equation::from(proto_eqn);
+    let eqn = Equation::try_from(proto_eqn).unwrap();
     assert_eq!(eqn, Equation::Scalar("a+1".to_string()));
 }
 
@@ -847,8 +919,10 @@ impl From<Stock> for project_io::variable::Stock {
     }
 }
 
-impl From<project_io::variable::Stock> for Stock {
-    fn from(stock: project_io::variable::Stock) -> Self {
+impl TryFrom<project_io::variable::Stock> for Stock {
+    type Error = Error;
+
+    fn try_from(stock: project_io::variable::Stock) -> Result<Self> {
         let legacy_ai = stock
             .equation
             .as_option()
@@ -860,12 +934,13 @@ impl From<project_io::variable::Stock> for Stock {
             stock.can_be_module_input,
             stock.visibility,
         );
-        Stock {
+        let equation = variable_equation(stock.equation.into_option(), &stock.ident)?;
+        Ok(Stock {
             // ident-typed fields: migrate a pre-#559 raw-`.` literal period to
             // the sentinel so re-canonicalization can't mistake it for `·`
             // (#690). inflows/outflows are flow variable names (idents).
             ident: migrate_stored_ident(stock.ident),
-            equation: stock.equation.unwrap().into(),
+            equation,
             documentation: stock.documentation,
             units: if stock.units.is_empty() {
                 None
@@ -889,7 +964,7 @@ impl From<project_io::variable::Stock> for Stock {
             } else {
                 Some(stock.uid)
             },
-        }
+        })
     }
 }
 
@@ -925,7 +1000,7 @@ fn test_stock_roundtrip() {
     ];
     for expected in cases {
         let expected = expected.clone();
-        let actual = Stock::from(project_io::variable::Stock::from(expected.clone()));
+        let actual = Stock::try_from(project_io::variable::Stock::from(expected.clone())).unwrap();
         assert_eq!(expected, actual);
     }
 }
@@ -976,7 +1051,7 @@ fn test_stock_proto_legacy_only_deserialization() {
         uid: 0,
         compat: MessageField::none(),
     };
-    let stock = Stock::from(proto);
+    let stock = Stock::try_from(proto).unwrap();
     assert!(stock.compat.non_negative);
     assert!(stock.compat.can_be_module_input);
     assert_eq!(stock.compat.visibility, Visibility::Public);
@@ -1004,7 +1079,7 @@ fn test_queue_compat_proto_roundtrip() {
         !stock.compat.is_empty(),
         "queue must count as non-empty compat"
     );
-    let actual = Stock::from(project_io::variable::Stock::from(stock.clone()));
+    let actual = Stock::try_from(project_io::variable::Stock::from(stock.clone())).unwrap();
     assert_eq!(stock, actual);
     assert!(actual.compat.queue.is_some());
 
@@ -1026,7 +1101,7 @@ fn test_queue_compat_proto_roundtrip() {
         !flow.compat.is_empty(),
         "overflow must count as non-empty compat"
     );
-    let actual = Flow::from(project_io::variable::Flow::from(flow.clone()));
+    let actual = Flow::try_from(project_io::variable::Flow::from(flow.clone())).unwrap();
     assert_eq!(flow, actual);
     assert!(actual.compat.overflow);
 }
@@ -1049,8 +1124,10 @@ impl From<Flow> for project_io::variable::Flow {
     }
 }
 
-impl From<project_io::variable::Flow> for Flow {
-    fn from(flow: project_io::variable::Flow) -> Self {
+impl TryFrom<project_io::variable::Flow> for Flow {
+    type Error = Error;
+
+    fn try_from(flow: project_io::variable::Flow) -> Result<Self> {
         let legacy_ai = flow
             .equation
             .as_option()
@@ -1062,22 +1139,24 @@ impl From<project_io::variable::Flow> for Flow {
             flow.can_be_module_input,
             flow.visibility,
         );
-        Flow {
+        let equation = variable_equation(flow.equation.into_option(), &flow.ident)?;
+        let gf = variable_gf(flow.gf.into_option(), &flow.ident)?;
+        Ok(Flow {
             // ident-typed field: migrate a pre-#559 raw-`.` literal period to
             // the sentinel so re-canonicalization can't mistake it for `·` (#690).
             ident: migrate_stored_ident(flow.ident),
-            equation: flow.equation.unwrap().into(),
+            equation,
             documentation: flow.documentation,
             units: if flow.units.is_empty() {
                 None
             } else {
                 Some(flow.units)
             },
-            gf: flow.gf.map(GraphicalFunction::from),
+            gf,
             compat,
             ai_state: None,
             uid: if flow.uid == 0 { None } else { Some(flow.uid) },
-        }
+        })
     }
 }
 
@@ -1126,7 +1205,7 @@ fn test_flow_roundtrip() {
     ];
     for expected in cases {
         let expected = expected.clone();
-        let actual = Flow::from(project_io::variable::Flow::from(expected.clone()));
+        let actual = Flow::try_from(project_io::variable::Flow::from(expected.clone())).unwrap();
         assert_eq!(expected, actual);
     }
 }
@@ -1148,8 +1227,10 @@ impl From<Aux> for project_io::variable::Aux {
     }
 }
 
-impl From<project_io::variable::Aux> for Aux {
-    fn from(aux: project_io::variable::Aux) -> Self {
+impl TryFrom<project_io::variable::Aux> for Aux {
+    type Error = Error;
+
+    fn try_from(aux: project_io::variable::Aux) -> Result<Self> {
         let legacy_ai = aux
             .equation
             .as_option()
@@ -1161,22 +1242,24 @@ impl From<project_io::variable::Aux> for Aux {
             aux.can_be_module_input,
             aux.visibility,
         );
-        Aux {
+        let equation = variable_equation(aux.equation.into_option(), &aux.ident)?;
+        let gf = variable_gf(aux.gf.into_option(), &aux.ident)?;
+        Ok(Aux {
             // ident-typed field: migrate a pre-#559 raw-`.` literal period to
             // the sentinel so re-canonicalization can't mistake it for `·` (#690).
             ident: migrate_stored_ident(aux.ident),
-            equation: aux.equation.unwrap().into(),
+            equation,
             documentation: aux.documentation,
             units: if aux.units.is_empty() {
                 None
             } else {
                 Some(aux.units)
             },
-            gf: aux.gf.map(GraphicalFunction::from),
+            gf,
             compat,
             ai_state: None,
             uid: if aux.uid == 0 { None } else { Some(aux.uid) },
-        }
+        })
     }
 }
 
@@ -1225,7 +1308,7 @@ fn test_aux_roundtrip() {
     ];
     for expected in cases {
         let expected = expected.clone();
-        let actual = Aux::from(project_io::variable::Aux::from(expected.clone()));
+        let actual = Aux::try_from(project_io::variable::Aux::from(expected.clone())).unwrap();
         assert_eq!(expected, actual);
     }
 }
@@ -1252,7 +1335,7 @@ fn test_aux_ident_literal_period_migrated_on_deserialize() {
         }),
         ..Default::default()
     };
-    let aux = Aux::from(proto);
+    let aux = Aux::try_from(proto).unwrap();
     assert_eq!(aux.ident, "goal_1\u{2024}5_for_temperature");
     assert!(
         !aux.ident.contains('.'),
@@ -1285,7 +1368,7 @@ fn test_aux_ident_literal_period_migrated_on_deserialize() {
 #[test]
 fn test_equation_dimension_and_subscript_references_migrated_on_deserialize() {
     // ApplyToAll dimension_names reference.
-    let a2a = Equation::from(project_io::variable::Equation {
+    let a2a = Equation::try_from(project_io::variable::Equation {
         equation: Some(project_io::variable::equation::Equation::ApplyToAll(
             project_io::variable::ApplyToAllEquation {
                 dimension_names: vec!["fig._3".to_string()],
@@ -1293,7 +1376,8 @@ fn test_equation_dimension_and_subscript_references_migrated_on_deserialize() {
                 initial_equation: None,
             },
         )),
-    });
+    })
+    .unwrap();
     match a2a {
         Equation::ApplyToAll(dims, _) => {
             assert_eq!(dims, vec!["fig\u{2024}_3".to_string()]);
@@ -1306,7 +1390,7 @@ fn test_equation_dimension_and_subscript_references_migrated_on_deserialize() {
     // is the comma-joined element-name list the xmile reader stores; every `.`
     // in it is a literal period within a leaf element name (commas separate
     // names), so migrating the whole string is correct and commas are kept.
-    let arrayed = Equation::from(project_io::variable::Equation {
+    let arrayed = Equation::try_from(project_io::variable::Equation {
         equation: Some(project_io::variable::equation::Equation::Arrayed(
             project_io::variable::ArrayedEquation {
                 dimension_names: vec!["fig._3".to_string()],
@@ -1320,7 +1404,8 @@ fn test_equation_dimension_and_subscript_references_migrated_on_deserialize() {
                 default_equation: None,
             },
         )),
-    });
+    })
+    .unwrap();
     match arrayed {
         Equation::Arrayed(dims, elements, _, _) => {
             assert_eq!(dims, vec!["fig\u{2024}_3".to_string()]);
@@ -1484,14 +1569,22 @@ impl From<Variable> for project_io::Variable {
     }
 }
 
-impl From<project_io::Variable> for Variable {
-    fn from(var: project_io::Variable) -> Self {
-        match var.v.unwrap() {
-            project_io::variable::V::Stock(stock) => Variable::Stock(Stock::from(stock)),
-            project_io::variable::V::Flow(flow) => Variable::Flow(Flow::from(flow)),
-            project_io::variable::V::Aux(aux) => Variable::Aux(Aux::from(aux)),
+/// A variable message whose kind is unset is refused: it is either no variable
+/// at all or a kind a later schema added, and dropping it would lose it on the
+/// next save and leave what reads it dangling.
+impl TryFrom<project_io::Variable> for Variable {
+    type Error = Error;
+
+    fn try_from(var: project_io::Variable) -> Result<Self> {
+        let Some(v) = var.v else {
+            return Err(unreadable("a variable is of no kind this reader knows"));
+        };
+        Ok(match v {
+            project_io::variable::V::Stock(stock) => Variable::Stock(Stock::try_from(stock)?),
+            project_io::variable::V::Flow(flow) => Variable::Flow(Flow::try_from(flow)?),
+            project_io::variable::V::Aux(aux) => Variable::Aux(Aux::try_from(aux)?),
             project_io::variable::V::Module(module) => Variable::Module(Module::from(module)),
-        }
+        })
     }
 }
 
@@ -1527,7 +1620,7 @@ fn test_variable_roundtrip() {
     ];
     for expected in cases {
         let expected = expected.clone();
-        let actual = Variable::from(project_io::Variable::from(expected.clone()));
+        let actual = Variable::try_from(project_io::Variable::from(expected.clone())).unwrap();
         assert_eq!(expected, actual);
     }
 }
@@ -1589,6 +1682,9 @@ fn view_compat_to_proto(
             width: Some(c.width),
             height: Some(c.height),
             bits: Some(c.bits),
+            shape: Some(c.shape),
+            name_field: c.name_field.clone(),
+            tail: c.tail.clone(),
         })
 }
 
@@ -1598,16 +1694,22 @@ fn view_compat_from_proto(
     compat.into().and_then(|c| {
         // Only produce Some if at least one field was explicitly set,
         // otherwise treat a default-valued proto message as absent.
-        if c.width.is_none() && c.height.is_none() && c.bits.is_none() {
+        if c.width.is_none()
+            && c.height.is_none()
+            && c.bits.is_none()
+            && c.shape.is_none()
+            && c.name_field.is_none()
+            && c.tail.is_none()
+        {
             return None;
         }
         Some(view_element::ViewElementCompat {
             width: c.width.unwrap_or(0.0),
             height: c.height.unwrap_or(0.0),
-            shape: 0,
+            shape: c.shape.unwrap_or(0),
             bits: c.bits.unwrap_or(0),
-            name_field: None,
-            tail: None,
+            name_field: c.name_field,
+            tail: c.tail,
         })
     })
 }
@@ -2128,9 +2230,17 @@ fn test_view_element_cloud_roundtrip() {
     }
 }
 
-impl From<project_io::ViewElement> for ViewElement {
-    fn from(v: project_io::ViewElement) -> Self {
-        match v.element.unwrap() {
+/// A view element message whose kind is unset is refused: it is either no
+/// element at all or a kind a later schema added, and dropping it would lose
+/// it on the next save.
+impl TryFrom<project_io::ViewElement> for ViewElement {
+    type Error = Error;
+
+    fn try_from(v: project_io::ViewElement) -> Result<Self> {
+        let Some(element) = v.element else {
+            return Err(unreadable("a view element is of no kind this reader knows"));
+        };
+        Ok(match element {
             project_io::view_element::Element::Aux(v) => {
                 ViewElement::Aux(view_element::Aux::from(v))
             }
@@ -2155,7 +2265,7 @@ impl From<project_io::ViewElement> for ViewElement {
             project_io::view_element::Element::Group(v) => {
                 ViewElement::Group(view_element::Group::from(v))
             }
-        }
+        })
     }
 }
 
@@ -2214,7 +2324,8 @@ fn test_view_element_roundtrip() {
     ];
     for expected in cases {
         let expected = expected.clone();
-        let actual = ViewElement::from(project_io::ViewElement::from(expected.clone()));
+        let actual =
+            ViewElement::try_from(project_io::ViewElement::from(expected.clone())).unwrap();
         assert_eq!(expected, actual);
     }
 }
@@ -2241,14 +2352,17 @@ impl From<View> for project_io::View {
                     name,
                     has_name,
                     font: view.font,
+                    sketch_compat: view.sketch_compat.map(sketch_compat_to_proto).into(),
                 }
             }
         }
     }
 }
 
-impl From<project_io::View> for View {
-    fn from(view: project_io::View) -> Self {
+impl TryFrom<project_io::View> for View {
+    type Error = Error;
+
+    fn try_from(view: project_io::View) -> Result<Self> {
         let project_io::View {
             elements,
             view_box,
@@ -2257,16 +2371,22 @@ impl From<project_io::View> for View {
             name,
             has_name,
             font,
-            ..
+            sketch_compat,
+            // A view is a stock-and-flow view, the one kind there is.
+            kind: _,
         } = view;
 
-        View::StockFlow(StockFlow {
+        let elements = elements
+            .into_iter()
+            .map(ViewElement::try_from)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(View::StockFlow(StockFlow {
             name: if has_name || !name.is_empty() {
                 Some(name)
             } else {
                 None
             },
-            elements: elements.into_iter().map(ViewElement::from).collect(),
+            elements: elements.into(),
             view_box: view_box.map(Rect::from).unwrap_or_default(),
             zoom: if crate::float::approx_eq(zoom, 0.0) {
                 1.0
@@ -2275,8 +2395,59 @@ impl From<project_io::View> for View {
             },
             use_lettered_polarity,
             font,
-            sketch_compat: None,
-        })
+            sketch_compat: sketch_compat.into_option().map(sketch_compat_from_proto),
+        }))
+    }
+}
+
+fn sketch_compat_to_proto(
+    compat: view_element::StockFlowSketchCompat,
+) -> project_io::view::SketchCompat {
+    use project_io::view::sketch_compat::{Link, Point, Segment};
+    project_io::view::SketchCompat {
+        segments: compat
+            .segments
+            .into_iter()
+            .map(|s| Segment {
+                x_offset: s.x_offset,
+                y_offset: s.y_offset,
+            })
+            .collect(),
+        links: compat
+            .links
+            .into_iter()
+            .map(|l| Link {
+                uid: l.uid,
+                field4: l.field4,
+                field10: l.field10,
+                control_point: l.control_point.map(|(x, y)| Point { x, y }).into(),
+            })
+            .collect(),
+    }
+}
+
+fn sketch_compat_from_proto(
+    compat: project_io::view::SketchCompat,
+) -> view_element::StockFlowSketchCompat {
+    view_element::StockFlowSketchCompat {
+        segments: compat
+            .segments
+            .into_iter()
+            .map(|s| view_element::SketchSegmentCompat {
+                x_offset: s.x_offset,
+                y_offset: s.y_offset,
+            })
+            .collect(),
+        links: compat
+            .links
+            .into_iter()
+            .map(|l| view_element::LinkSketchCompat {
+                uid: l.uid,
+                field4: l.field4,
+                field10: l.field10,
+                control_point: l.control_point.into_option().map(|p| (p.x, p.y)),
+            })
+            .collect(),
     }
 }
 
@@ -2292,7 +2463,7 @@ fn test_view_roundtrip_preserves_explicit_empty_title() {
         sketch_compat: None,
     });
 
-    let roundtrip = View::from(project_io::View::from(view));
+    let roundtrip = View::try_from(project_io::View::from(view)).unwrap();
     let View::StockFlow(stock_flow) = roundtrip;
     assert_eq!(
         stock_flow.name,
@@ -2313,7 +2484,7 @@ fn test_view_roundtrip_preserves_absent_title() {
         sketch_compat: None,
     });
 
-    let roundtrip = View::from(project_io::View::from(view));
+    let roundtrip = View::try_from(project_io::View::from(view)).unwrap();
     let View::StockFlow(stock_flow) = roundtrip;
     assert_eq!(stock_flow.name, None);
 }
@@ -2329,9 +2500,10 @@ fn test_view_deserialize_keeps_nonempty_name_without_presence_flag() {
         name: "Overview".to_string(),
         has_name: false,
         font: None,
+        ..Default::default()
     };
 
-    let view = View::from(proto);
+    let view = View::try_from(proto).unwrap();
     let View::StockFlow(stock_flow) = view;
     assert_eq!(stock_flow.name.as_deref(), Some("Overview"));
 }
@@ -2339,8 +2511,6 @@ fn test_view_deserialize_keeps_nonempty_name_without_presence_flag() {
 impl From<Model> for project_io::Model {
     fn from(mut model: Model) -> Self {
         use crate::canonicalize;
-
-        let _ = model.sim_specs;
 
         // Sort ALL variables by their canonical identifier for deterministic ordering
         // This ensures consistent proto serialization regardless of file order or variable type
@@ -2371,6 +2541,7 @@ impl From<Model> for project_io::Model {
                 .map(project_io::ModelGroup::from)
                 .collect(),
             macro_spec: model.macro_spec.map(project_io::MacroSpec::from).into(),
+            sim_specs: model.sim_specs.map(project_io::SimSpecs::from).into(),
         }
     }
 }
@@ -2486,22 +2657,35 @@ fn test_model_group_roundtrip() {
     }
 }
 
-impl From<project_io::Model> for Model {
-    fn from(model: project_io::Model) -> Self {
+impl TryFrom<project_io::Model> for Model {
+    type Error = Error;
+
+    fn try_from(model: project_io::Model) -> Result<Self> {
         use crate::canonicalize;
 
-        let mut variables: Vec<Variable> =
-            model.variables.into_iter().map(Variable::from).collect();
+        let in_this_model = || within(format!("model '{}'", model.name));
+        let mut variables = model
+            .variables
+            .into_iter()
+            .map(Variable::try_from)
+            .collect::<Result<Vec<Variable>>>()
+            .map_err(in_this_model())?;
+        let views = model
+            .views
+            .into_iter()
+            .map(View::try_from)
+            .collect::<Result<Vec<View>>>()
+            .map_err(in_this_model())?;
         // Sort variables by canonical identifier for deterministic ordering
         variables.sort_by_cached_key(|a| canonicalize(a.get_ident()).into_owned());
 
-        Model {
+        Ok(Model {
             // ident-typed field: migrate a pre-#559 raw-`.` literal period to
             // the sentinel so re-canonicalization can't mistake it for `·` (#690).
             name: migrate_stored_ident(model.name),
-            sim_specs: None,
+            sim_specs: model.sim_specs.into_option().map(SimSpecs::from),
             variables: variables.into(),
-            views: model.views.into_iter().map(View::from).collect(),
+            views,
             loop_metadata: model
                 .loop_metadata
                 .into_iter()
@@ -2509,7 +2693,7 @@ impl From<project_io::Model> for Model {
                 .collect(),
             groups: model.groups.into_iter().map(ModelGroup::from).collect(),
             macro_spec: model.macro_spec.map(MacroSpec::from),
-        }
+        })
     }
 }
 
@@ -2550,7 +2734,7 @@ fn test_model_with_loop_metadata_roundtrip() {
     }];
     for expected in cases {
         let expected = expected.clone();
-        let actual = Model::from(project_io::Model::from(expected.clone()));
+        let actual = Model::try_from(project_io::Model::from(expected.clone())).unwrap();
         assert_eq!(expected, actual);
     }
 }
@@ -2609,7 +2793,7 @@ fn test_model_with_macro_spec_roundtrip() {
     ];
     for expected in cases {
         let expected = expected.clone();
-        let actual = Model::from(project_io::Model::from(expected.clone()));
+        let actual = Model::try_from(project_io::Model::from(expected.clone())).unwrap();
         assert_eq!(expected, actual);
     }
 }
@@ -2653,7 +2837,7 @@ fn test_model_with_groups_roundtrip() {
     }];
     for expected in cases {
         let expected = expected.clone();
-        let actual = Model::from(project_io::Model::from(expected.clone()));
+        let actual = Model::try_from(project_io::Model::from(expected.clone())).unwrap();
         assert_eq!(expected, actual);
     }
 }
@@ -2860,21 +3044,38 @@ impl From<Project> for project_io::Project {
     }
 }
 
-impl From<project_io::Project> for Project {
-    fn from(project: project_io::Project) -> Self {
-        Project {
+/// A project stored without simulation specs is refused: there is no run to
+/// give it, and every writer writes them. An empty buffer decodes to such a
+/// message.
+impl TryFrom<project_io::Project> for Project {
+    type Error = Error;
+
+    fn try_from(project: project_io::Project) -> Result<Self> {
+        let sim_specs = project
+            .sim_specs
+            .into_option()
+            .ok_or_else(|| unreadable("the project has no simulation specs"))?;
+        let models = project
+            .models
+            .into_iter()
+            .map(Model::try_from)
+            .collect::<Result<Vec<Model>>>()?;
+        Ok(Project {
             name: project.name,
-            sim_specs: SimSpecs::from(project.sim_specs.unwrap()),
+            sim_specs: SimSpecs::from(sim_specs),
             dimensions: project
                 .dimensions
                 .into_iter()
                 .map(Dimension::from)
                 .collect(),
             units: project.units.into_iter().map(Unit::from).collect(),
-            models: project.models.into_iter().map(Model::from).collect(),
+            models,
             source: project.source.map(|source| source.into()),
+            // ISEE's AI information (this record and each variable's
+            // `ai_state`) is not stored: keeping ISEE's provenance record is
+            // outside the engine's scope, and the schema has no field for it.
             ai_information: None,
-        }
+        })
     }
 }
 
@@ -2882,16 +3083,29 @@ pub fn serialize(project: &Project) -> Result<project_io::Project> {
     Ok(project_io::Project::from(project.clone()))
 }
 
-pub fn deserialize(project: project_io::Project) -> Project {
-    project.into()
+/// The project a stored message holds, or a `ProtobufDecode` error saying what
+/// the message lacks.
+///
+/// Total: any message that decodes is either read or refused, never a panic.
+/// Bytes that decode are not thereby a project (an empty buffer decodes to the
+/// default message), and a host opening stored bytes must get an error it can
+/// show. A message is refused when it lacks what every writer writes and the
+/// reader has no reading for: the project's simulation specs, a variable's
+/// kind or equation, an equation's kind, a view element's kind, a graphical
+/// function's scales. Every other absent field has the reading the schema
+/// gives it.
+pub fn deserialize(project: project_io::Project) -> Result<Project> {
+    Project::try_from(project)
 }
 
-pub fn deserialize_view(view: project_io::View) -> View {
-    view.into()
+pub fn deserialize_view(view: project_io::View) -> Result<View> {
+    View::try_from(view)
 }
 
-pub fn deserialize_graphical_function(gf: project_io::GraphicalFunction) -> GraphicalFunction {
-    gf.into()
+pub fn deserialize_graphical_function(
+    gf: project_io::GraphicalFunction,
+) -> Result<GraphicalFunction> {
+    GraphicalFunction::try_from(gf)
 }
 
 #[cfg(test)]
@@ -2973,7 +3187,7 @@ fn test_quoted_period_ident_simulates_after_deserialize_690() {
 
     // Round-trip through protobuf: this is where the load-time ident migration
     // fires (and where a 2022 blob enters the engine).
-    let reloaded = deserialize(serialize(&datamodel).unwrap());
+    let reloaded = deserialize(serialize(&datamodel).unwrap()).unwrap();
 
     // Sanity: the stored ident's raw `.` was migrated to the sentinel, not the
     // `·` module separator.
@@ -3021,9 +3235,9 @@ fn test_quoted_period_ident_deserialize_is_idempotent_690() {
     );
 
     // First load migrates the raw `.` to the sentinel.
-    let once = deserialize(serialize(&datamodel).unwrap());
+    let once = deserialize(serialize(&datamodel).unwrap()).unwrap();
     // Re-serialize the migrated model and load it again: a fixed point.
-    let twice = deserialize(serialize(&once).unwrap());
+    let twice = deserialize(serialize(&once).unwrap()).unwrap();
     assert_eq!(once, twice, "deserialize is not idempotent after migration");
 
     let migrated = once.get_model("main").unwrap().variables[0].get_ident();
@@ -3086,7 +3300,7 @@ fn test_period_dimension_name_simulates_after_deserialize_690() {
         }],
     );
 
-    let reloaded = deserialize(serialize(&datamodel).unwrap());
+    let reloaded = deserialize(serialize(&datamodel).unwrap()).unwrap();
 
     // Both the dimension declaration and the A2A reference migrated to the
     // sentinel, so they still match.
@@ -3147,7 +3361,7 @@ fn test_period_element_subscript_resolves_after_deserialize_690() {
         }],
     );
 
-    let reloaded = deserialize(serialize(&datamodel).unwrap());
+    let reloaded = deserialize(serialize(&datamodel).unwrap()).unwrap();
 
     let project = TestProject::from_datamodel(reloaded);
     project.assert_compiles_incremental();
@@ -3179,7 +3393,7 @@ fn test_protobuf_roundtrips_except_equation() {
         vec![],
     );
     let pb = serialize(&project).unwrap();
-    let roundtripped = deserialize(pb);
+    let roundtripped = deserialize(pb).unwrap();
     assert_eq!(project, roundtripped);
 }
 
@@ -3201,7 +3415,7 @@ fn test_protobuf_roundtrips_element_level_dimension_mapping() {
         }],
     );
     let pb = serialize(&project).unwrap();
-    let roundtripped = deserialize(pb);
+    let roundtripped = deserialize(pb).unwrap();
     assert_eq!(project, roundtripped);
 }
 
@@ -3230,7 +3444,7 @@ fn test_protobuf_roundtrips_data_source() {
         vec![],
     );
     let pb = serialize(&project).unwrap();
-    let roundtripped = deserialize(pb);
+    let roundtripped = deserialize(pb).unwrap();
     assert_eq!(project, roundtripped);
 }
 
@@ -3249,7 +3463,7 @@ fn test_protobuf_roundtrips_simple_dimension_mapping() {
         }],
     );
     let pb = serialize(&project).unwrap();
-    let roundtripped = deserialize(pb);
+    let roundtripped = deserialize(pb).unwrap();
     assert_eq!(project, roundtripped);
 }
 
@@ -3274,7 +3488,7 @@ fn test_protobuf_roundtrips_multi_target_mappings() {
         }],
     );
     let pb = serialize(&project).unwrap();
-    let roundtripped = deserialize(pb);
+    let roundtripped = deserialize(pb).unwrap();
     assert_eq!(project, roundtripped);
 }
 
@@ -3296,7 +3510,7 @@ fn test_protobuf_backward_compat_old_protos() {
             },
         )),
     };
-    let eq = Equation::from(proto);
+    let eq = Equation::try_from(proto).unwrap();
     match eq {
         Equation::Arrayed(_, _, default_eq, has_except) => {
             assert_eq!(default_eq, None);
@@ -3364,3 +3578,7 @@ fn test_protobuf_accepts_arrayed_without_default() {
     let result = serialize(&project);
     assert!(result.is_ok());
 }
+
+#[cfg(test)]
+#[path = "serde_stored_tests.rs"]
+mod stored_tests;

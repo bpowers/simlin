@@ -11,7 +11,7 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 - `canonicalize.ts` -- Variable name canonicalization (spaces, underscores, case normalization)
 - `common.ts` -- Common types and utilities
 - `collections.ts` -- Collection utility functions
-- `errors.ts` -- Error type definitions
+- `errors.ts` -- `ErrorCode` and `errorCodeDescription`: a copy of `@simlin/engine`'s table (core imports only types from the engine, so using core loads none of it), held to that table by `tests/errors.test.ts`
 - `index.ts` -- Public exports
 
 ## Contracts
@@ -26,3 +26,4 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
 - `tests/datamodel.test.ts` -- Data model tests (includes round-trip serialization for `canBeModuleInput`/`isPublic` and the conveyor/queue compat markers)
 - `tests/datamodel-roundtrip-e2e.test.ts` -- Drives the REAL WASM engine serializer to pin the editor's full-upsert fidelity contract (skips when the engine build is absent)
+- `tests/errors.test.ts` -- The error-code table against `@simlin/engine`'s: same codes, same descriptions

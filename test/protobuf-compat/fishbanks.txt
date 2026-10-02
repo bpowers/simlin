@@ -1,0 +1,818 @@
+Project {
+    name: "Morecroft Fishbanks",
+    sim_specs: SimSpecs {
+        start: 0.0,
+        stop: 40.0,
+        dt: Dt(
+            0.25,
+        ),
+        save_step: None,
+        sim_method: Euler,
+        time_units: None,
+    },
+    dimensions: [],
+    units: [],
+    models: [
+        Model {
+            name: "main",
+            sim_specs: None,
+            variables: [
+                Aux(
+                    Aux {
+                        ident: "catch",
+                        equation: Scalar(
+                            "catch_per_ship * ships_at_sea",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "catch_per_ship",
+                        equation: Scalar(
+                            "effect_of_fish_density_on_catch_per_ship * normal_catch_per_ship",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "effect_of_fish_density_on_catch_per_ship",
+                        equation: Scalar(
+                            "fish_density",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: Some(
+                            GraphicalFunction {
+                                kind: Continuous,
+                                x_points: None,
+                                y_points: [
+                                    0.0,
+                                    0.2961538461538461,
+                                    0.5576923076923077,
+                                    0.6923076923076923,
+                                    0.7884615384615384,
+                                    0.8846153846153846,
+                                    0.9346153846153846,
+                                    0.9846153846153847,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                ],
+                                x_scale: GraphicalFunctionScale {
+                                    min: 0.0,
+                                    max: 1.0,
+                                },
+                                y_scale: GraphicalFunctionScale {
+                                    min: 0.0,
+                                    max: 1.0,
+                                },
+                            },
+                        ),
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "fish_density",
+                        equation: Scalar(
+                            "fish_stock / maximum_fishery_size",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "fish_stock",
+                        equation: Scalar(
+                            "500",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [
+                            "new_fish_per_year",
+                        ],
+                        outflows: [
+                            "harvest_rate",
+                        ],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "harvest_rate",
+                        equation: Scalar(
+                            "catch",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "maximum_fishery_size",
+                        equation: Scalar(
+                            "4000",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "net_regeneration",
+                        equation: Scalar(
+                            "fish_density",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: Some(
+                            GraphicalFunction {
+                                kind: Continuous,
+                                x_points: None,
+                                y_points: [
+                                    0.0,
+                                    57.692307692307686,
+                                    131.53846153846155,
+                                    212.3076923076923,
+                                    339.2307692307692,
+                                    516.9230769230769,
+                                    581.5384615384615,
+                                    516.9230769230769,
+                                    240.0,
+                                    73.84615384615385,
+                                    0.0,
+                                ],
+                                x_scale: GraphicalFunctionScale {
+                                    min: 0.0,
+                                    max: 1.0,
+                                },
+                                y_scale: GraphicalFunctionScale {
+                                    min: 0.0,
+                                    max: 600.0,
+                                },
+                            },
+                        ),
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "new_fish_per_year",
+                        equation: Scalar(
+                            "net_regeneration",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "normal_catch_per_ship",
+                        equation: Scalar(
+                            "25",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "purchase_of_new_ships_this_year",
+                        equation: Scalar(
+                            "1.5",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "ships_at_sea",
+                        equation: Scalar(
+                            "0",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [
+                            "purchase_of_new_ships_this_year",
+                        ],
+                        outflows: [
+                            "ships_moved_to_harbor_this_year",
+                        ],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "ships_in_harbor",
+                        equation: Scalar(
+                            "0",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [
+                            "ships_moved_to_harbor_this_year",
+                        ],
+                        outflows: [],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "ships_moved_to_harbor_this_year",
+                        equation: Scalar(
+                            "ships_at_sea / 10",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: None,
+                        elements: [
+                            Stock(
+                                Stock {
+                                    name: "Fish stock",
+                                    uid: 1,
+                                    x: 703.8400268554688,
+                                    y: 198.8789031982422,
+                                    label_side: Top,
+                                    compat: None,
+                                },
+                            ),
+                            Flow(
+                                Flow {
+                                    name: "New fish per year",
+                                    uid: 2,
+                                    x: 602.9211145488756,
+                                    y: 197.56003723144534,
+                                    label_side: Top,
+                                    points: [
+                                        FlowPoint {
+                                            x: 514.0000610351563,
+                                            y: 197.56003723144534,
+                                            attached_to_uid: Some(
+                                                26,
+                                            ),
+                                        },
+                                        FlowPoint {
+                                            x: 681.3400268554688,
+                                            y: 197.56003723144534,
+                                            attached_to_uid: Some(
+                                                1,
+                                            ),
+                                        },
+                                    ],
+                                    compat: None,
+                                    label_compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "Net regeneration",
+                                    uid: 3,
+                                    x: 594.3203735351563,
+                                    y: 276.2367248535156,
+                                    label_side: Left,
+                                    compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "Fish density",
+                                    uid: 4,
+                                    x: 686.3999633789063,
+                                    y: 285.0,
+                                    label_side: Right,
+                                    compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "Maximum\\nfishery size",
+                                    uid: 5,
+                                    x: 656.1351318359375,
+                                    y: 334.9687194824219,
+                                    label_side: Bottom,
+                                    compat: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 6,
+                                    from_uid: 5,
+                                    to_uid: 4,
+                                    shape: Arc(
+                                        302.69016009253414,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 7,
+                                    from_uid: 1,
+                                    to_uid: 4,
+                                    shape: Arc(
+                                        60.610177600237876,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 8,
+                                    from_uid: 4,
+                                    to_uid: 3,
+                                    shape: Arc(
+                                        140.4482917862046,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 9,
+                                    from_uid: 3,
+                                    to_uid: 2,
+                                    shape: Arc(
+                                        222.11845308113948,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Flow(
+                                Flow {
+                                    name: "Harvest Rate",
+                                    uid: 10,
+                                    x: 790.2969412608011,
+                                    y: 195.79998474121095,
+                                    label_side: Bottom,
+                                    points: [
+                                        FlowPoint {
+                                            x: 726.3400268554688,
+                                            y: 195.79998474121095,
+                                            attached_to_uid: Some(
+                                                1,
+                                            ),
+                                        },
+                                        FlowPoint {
+                                            x: 882.3538312520709,
+                                            y: 195.79998474121095,
+                                            attached_to_uid: Some(
+                                                27,
+                                            ),
+                                        },
+                                    ],
+                                    compat: None,
+                                    label_compat: None,
+                                },
+                            ),
+                            Stock(
+                                Stock {
+                                    name: "Ships at Sea",
+                                    uid: 11,
+                                    x: 927.7937726583209,
+                                    y: 488.74885075471775,
+                                    label_side: Bottom,
+                                    compat: None,
+                                },
+                            ),
+                            Stock(
+                                Stock {
+                                    name: "Ships in Harbor",
+                                    uid: 12,
+                                    x: 1117.873801955196,
+                                    y: 487.38888981721783,
+                                    label_side: Bottom,
+                                    compat: None,
+                                },
+                            ),
+                            Flow(
+                                Flow {
+                                    name: "Purchase of new\\nships this year",
+                                    uid: 13,
+                                    x: 829.8343076625704,
+                                    y: 491.30890934846775,
+                                    label_side: Bottom,
+                                    points: [
+                                        FlowPoint {
+                                            x: 762.3538068380083,
+                                            y: 491.30890934846775,
+                                            attached_to_uid: Some(
+                                                28,
+                                            ),
+                                        },
+                                        FlowPoint {
+                                            x: 905.2937726583209,
+                                            y: 491.30890934846775,
+                                            attached_to_uid: Some(
+                                                11,
+                                            ),
+                                        },
+                                    ],
+                                    compat: None,
+                                    label_compat: None,
+                                },
+                            ),
+                            Flow(
+                                Flow {
+                                    name: "Ships moved to\\nharbor this year",
+                                    uid: 14,
+                                    x: 1019.1400010526096,
+                                    y: 487.1488995828428,
+                                    label_side: Bottom,
+                                    points: [
+                                        FlowPoint {
+                                            x: 950.2937726583209,
+                                            y: 487.1488995828428,
+                                            attached_to_uid: Some(
+                                                11,
+                                            ),
+                                        },
+                                        FlowPoint {
+                                            x: 1095.373801955196,
+                                            y: 487.1488995828428,
+                                            attached_to_uid: Some(
+                                                12,
+                                            ),
+                                        },
+                                    ],
+                                    compat: None,
+                                    label_compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "Catch",
+                                    uid: 15,
+                                    x: 871.0496747579303,
+                                    y: 269.7663129129208,
+                                    label_side: Right,
+                                    compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "Catch per ship",
+                                    uid: 16,
+                                    x: 862.1937726583208,
+                                    y: 362.3488995828427,
+                                    label_side: Left,
+                                    compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "Normal catch\\nper ship",
+                                    uid: 17,
+                                    x: 894.0290347025917,
+                                    y: 449.4422915099262,
+                                    label_side: Left,
+                                    compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "Effect of fish density\non catch per ship",
+                                    uid: 18,
+                                    x: 740.113792189571,
+                                    y: 392.2288800515929,
+                                    label_side: Bottom,
+                                    compat: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 19,
+                                    from_uid: 4,
+                                    to_uid: 18,
+                                    shape: Arc(
+                                        96.2815305134717,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 20,
+                                    from_uid: 17,
+                                    to_uid: 16,
+                                    shape: Arc(
+                                        250.11972167236354,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 21,
+                                    from_uid: 18,
+                                    to_uid: 16,
+                                    shape: Arc(
+                                        16.193791074864862,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 22,
+                                    from_uid: 16,
+                                    to_uid: 15,
+                                    shape: Arc(
+                                        304.54149501830165,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 23,
+                                    from_uid: 15,
+                                    to_uid: 10,
+                                    shape: Arc(
+                                        256.04866408331725,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 24,
+                                    from_uid: 11,
+                                    to_uid: 15,
+                                    shape: Arc(
+                                        258.5382602530739,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 25,
+                                    from_uid: 11,
+                                    to_uid: 14,
+                                    shape: Arc(
+                                        294.13006426509435,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Cloud(
+                                Cloud {
+                                    uid: 26,
+                                    flow_uid: 2,
+                                    x: 514.0000610351563,
+                                    y: 197.56003723144534,
+                                    compat: None,
+                                },
+                            ),
+                            Cloud(
+                                Cloud {
+                                    uid: 27,
+                                    flow_uid: 10,
+                                    x: 882.3538312520709,
+                                    y: 195.79998474121095,
+                                    compat: None,
+                                },
+                            ),
+                            Cloud(
+                                Cloud {
+                                    uid: 28,
+                                    flow_uid: 13,
+                                    x: 762.3538068380083,
+                                    y: 491.30890934846775,
+                                    compat: None,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.0,
+                            height: 0.0,
+                        },
+                        zoom: 1.0,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+    ],
+    source: None,
+    ai_information: None,
+}

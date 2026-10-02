@@ -26,10 +26,56 @@ describe('ErrorDetails', () => {
     expect(screen.getByText(/your model is error free/i)).not.toBeNull();
   });
 
-  test('renders a simulation error', () => {
-    render(<ErrorDetails {...noErrors} simError={{ code: ErrorCode.Generic, details: undefined }} />);
-    expect(screen.getByText(/simulation error:/i)).not.toBeNull();
+  test('falls back to the code description for a simulation error without a reason', () => {
+    render(<ErrorDetails {...noErrors} simError={{ code: ErrorCode.NotSimulatable, details: undefined }} />);
+    expect(screen.getByText(/^simulation error: Model has errors and is not simulatable$/)).not.toBeNull();
     expect(screen.queryByText(/error free/i)).toBeNull();
+  });
+
+  test('renders the reason of a simulation error in place of its code description', () => {
+    render(
+      <ErrorDetails
+        {...noErrors}
+        simError={{ code: ErrorCode.NotSimulatable, details: "the model has no variable named 'main'" }}
+      />,
+    );
+    expect(screen.getByText(/^simulation error: the model has no variable named 'main'$/)).not.toBeNull();
+    expect(screen.queryByText(/not simulatable/i)).toBeNull();
+  });
+
+  test('renders the reason of a variable error in place of its code description', () => {
+    render(
+      <ErrorDetails
+        {...noErrors}
+        varErrors={
+          new Map([
+            [
+              'inflow',
+              [
+                {
+                  code: ErrorCode.UnknownDependency,
+                  start: 0,
+                  end: 7,
+                  details: "'missing' is not a variable of this model",
+                },
+              ],
+            ],
+          ])
+        }
+      />,
+    );
+    expect(screen.getByText(/^variable "inflow" error: 'missing' is not a variable of this model$/)).not.toBeNull();
+    expect(screen.queryByText(/refers to unknown variable/i)).toBeNull();
+  });
+
+  test('falls back to the code description for a variable error without a reason', () => {
+    render(
+      <ErrorDetails
+        {...noErrors}
+        varErrors={new Map([['inflow', [{ code: ErrorCode.UnknownDependency, start: 0, end: 7, details: undefined }]]])}
+      />,
+    );
+    expect(screen.getByText(/^variable "inflow" error: Equation refers to unknown variable$/)).not.toBeNull();
   });
 
   test('suppresses a NotSimulatable sim error when model errors are present', () => {

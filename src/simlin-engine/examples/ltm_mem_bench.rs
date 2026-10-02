@@ -34,7 +34,7 @@
 
 use mimalloc::MiMalloc as Backing;
 use std::alloc::{GlobalAlloc, Layout};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -283,7 +283,7 @@ fn build_synthetic_edges_result(
     scc_sizes: &[(usize, usize)],
     padding_acyclic_nodes: usize,
 ) -> CausalEdgesResult {
-    let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut next_scc_idx = 0usize;
     for &(count, size) in scc_sizes {
         for _ in 0..count {

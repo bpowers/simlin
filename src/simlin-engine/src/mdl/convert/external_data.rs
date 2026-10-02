@@ -14,6 +14,8 @@ use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::data_provider::DataProvider;
 use crate::datamodel::{GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale};
 
+use super::variables::points_in_x_order;
+
 /// Parsed GET DIRECT function call.
 #[derive(Clone)]
 pub(super) enum GetDirectCall {
@@ -409,7 +411,13 @@ pub(super) fn resolve_get_direct(
     }
 }
 
-/// Convert (x, y) pairs to a GraphicalFunction lookup table.
+/// Convert (x, y) pairs to a GraphicalFunction lookup table, its points put in
+/// ascending x order by the importer's one ordering rule
+/// (`variables::points_in_x_order`), since the compiler refuses a table whose
+/// x decreases (`variable::parse_table`). How Vensim reads a data file's
+/// series listed out of x order is undocumented, so reading it as the curve
+/// through its points, as Vensim reads a lookup in the model file, is the
+/// engine's rule, unverified.
 fn pairs_to_graphical_function(pairs: &[(f64, f64)]) -> GraphicalFunction {
     if pairs.is_empty() {
         return GraphicalFunction {
@@ -421,8 +429,10 @@ fn pairs_to_graphical_function(pairs: &[(f64, f64)]) -> GraphicalFunction {
         };
     }
 
-    let x_points: Vec<f64> = pairs.iter().map(|(x, _)| *x).collect();
-    let y_points: Vec<f64> = pairs.iter().map(|(_, y)| *y).collect();
+    let (x_points, y_points) = points_in_x_order(
+        pairs.iter().map(|(x, _)| *x).collect(),
+        pairs.iter().map(|(_, y)| *y).collect(),
+    );
 
     let x_min = x_points.iter().cloned().fold(f64::INFINITY, f64::min);
     let x_max = x_points.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -751,6 +761,65 @@ mod tests {
         assert_eq!(gf.x_scale.max, 2020.0);
         assert_eq!(gf.y_scale.min, 10.0);
         assert_eq!(gf.y_scale.max, 30.0);
+    }
+
+    /// A data file whose series lists its points out of x order.
+    struct UnsortedSeries;
+
+    const UNSORTED: [(f64, f64); 4] = [(2.0, 30.0), (0.0, 10.0), (3.0, 40.0), (1.0, 20.0)];
+
+    impl DataProvider for UnsortedSeries {
+        fn load_data(&self, _: &str, _: &str, _: &str, _: &str) -> Result<Vec<(f64, f64)>> {
+            Ok(UNSORTED.to_vec())
+        }
+
+        fn load_constant(&self, _: &str, _: &str, _: &str, _: &str) -> Result<f64> {
+            Ok(0.0)
+        }
+
+        fn load_lookup(&self, _: &str, _: &str, _: &str, _: &str) -> Result<Vec<(f64, f64)>> {
+            Ok(UNSORTED.to_vec())
+        }
+
+        fn load_subscript(&self, _: &str, _: &str, _: &str, _: &str) -> Result<Vec<String>> {
+            Ok(vec!["1".to_string()])
+        }
+    }
+
+    #[test]
+    fn an_external_series_listed_out_of_x_order_is_read_in_x_order() {
+        // One row per GET DIRECT call; the match says which of them build a
+        // table, so a new call kind needs a row and an answer.
+        let calls = [
+            "{GET DIRECT DATA('d.csv', ',', 'A', 'B2')}",
+            "{GET DIRECT CONSTANTS('d.csv', ',', 'B2')}",
+            "{GET DIRECT LOOKUPS('d.csv', ',', '1', 'E2')}",
+            "{GET DIRECT SUBSCRIPT('d.csv', ',', 'A2', 'A', '')}",
+        ];
+        let mut tables = 0;
+        for expr in calls {
+            let builds_a_table = match parse_get_direct(expr).expect("the call parses") {
+                GetDirectCall::Data { .. } | GetDirectCall::Lookups { .. } => true,
+                GetDirectCall::Constants { .. } | GetDirectCall::Subscript { .. } => false,
+            };
+            let resolved = try_resolve_data_expr(expr, Some(&UnsortedSeries), &HashMap::new(), &[])
+                .expect("the call parses")
+                .expect("the call resolves");
+            match resolved {
+                ResolvedData::Lookup(_, gf) => {
+                    assert!(builds_a_table, "{expr}");
+                    tables += 1;
+                    assert_eq!(gf.x_points, Some(vec![0.0, 1.0, 2.0, 3.0]), "{expr}");
+                    assert_eq!(gf.y_points, vec![10.0, 20.0, 30.0, 40.0], "{expr}");
+                    let table = crate::variable::parse_table(Some(&gf))
+                        .expect("the compiler accepts the table")
+                        .expect("a table");
+                    assert_eq!(table.x, vec![0.0, 1.0, 2.0, 3.0], "{expr}");
+                }
+                _ => assert!(!builds_a_table, "{expr}"),
+            }
+        }
+        assert_eq!(tables, 2);
     }
 
     #[test]

@@ -1,0 +1,480 @@
+Project {
+    name: "p",
+    sim_specs: SimSpecs {
+        start: 0.0,
+        stop: 10.0,
+        dt: Reciprocal(
+            4.0,
+        ),
+        save_step: Some(
+            Reciprocal(
+                4.0,
+            ),
+        ),
+        sim_method: RungeKutta4,
+        time_units: Some(
+            "years",
+        ),
+    },
+    dimensions: [
+        Dimension {
+            name: "dim",
+            elements: Indexed(
+                3,
+            ),
+            mappings: [
+                DimensionMapping {
+                    target: "o1",
+                    element_map: [],
+                },
+                DimensionMapping {
+                    target: "o2",
+                    element_map: [],
+                },
+            ],
+            parent: Some(
+                "full",
+            ),
+        },
+    ],
+    units: [
+        Unit {
+            name: "widget",
+            equation: Some(
+                "kg",
+            ),
+            disabled: true,
+            aliases: [
+                "widgets",
+            ],
+        },
+    ],
+    models: [
+        Model {
+            name: "main",
+            sim_specs: None,
+            variables: [
+                Aux(
+                    Aux {
+                        ident: "a_aux",
+                        equation: Arrayed(
+                            [
+                                "dim",
+                            ],
+                            [],
+                            None,
+                            false,
+                        ),
+                        documentation: "doc",
+                        units: Some(
+                            "kg",
+                        ),
+                        gf: Some(
+                            GraphicalFunction {
+                                kind: Extrapolate,
+                                x_points: Some(
+                                    [
+                                        0.0,
+                                        1.0,
+                                    ],
+                                ),
+                                y_points: [
+                                    2.0,
+                                    3.0,
+                                ],
+                                x_scale: GraphicalFunctionScale {
+                                    min: 0.0,
+                                    max: 1.0,
+                                },
+                                y_scale: GraphicalFunctionScale {
+                                    min: 2.0,
+                                    max: 3.0,
+                                },
+                            },
+                        ),
+                        ai_state: None,
+                        uid: Some(
+                            -1,
+                        ),
+                        compat: Compat {
+                            active_initial: Some(
+                                "3",
+                            ),
+                            non_negative: true,
+                            can_be_module_input: true,
+                            visibility: Public,
+                            data_source: Some(
+                                DataSource {
+                                    kind: Data,
+                                    file: "",
+                                    tab_or_delimiter: "",
+                                    row_or_col: "",
+                                    cell: "",
+                                },
+                            ),
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "b_flow",
+                        equation: Scalar(
+                            "1",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: Some(
+                            GraphicalFunction {
+                                kind: Continuous,
+                                x_points: Some(
+                                    [
+                                        0.0,
+                                        1.0,
+                                    ],
+                                ),
+                                y_points: [
+                                    2.0,
+                                    3.0,
+                                ],
+                                x_scale: GraphicalFunctionScale {
+                                    min: 0.0,
+                                    max: 1.0,
+                                },
+                                y_scale: GraphicalFunctionScale {
+                                    min: 2.0,
+                                    max: 3.0,
+                                },
+                            },
+                        ),
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: true,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: Some(
+                                Leakage {
+                                    fraction: Some(
+                                        "",
+                                    ),
+                                    integers: true,
+                                    zone_start: Some(
+                                        "",
+                                    ),
+                                    zone_end: Some(
+                                        "",
+                                    ),
+                                },
+                            ),
+                            spreadflow: Some(
+                                Dist(
+                                    "g",
+                                ),
+                            ),
+                            queue: None,
+                            overflow: true,
+                        },
+                    },
+                ),
+                Module(
+                    Module {
+                        ident: "c_module",
+                        model_name: "main",
+                        documentation: "",
+                        units: None,
+                        references: [
+                            ModuleReference {
+                                src: "a_aux",
+                                dst: "c_module.in",
+                            },
+                        ],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: Some(
+                                "3",
+                            ),
+                            non_negative: true,
+                            can_be_module_input: true,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "d_stock",
+                        equation: Scalar(
+                            "1",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [
+                            "b_flow",
+                        ],
+                        outflows: [
+                            "b_flow",
+                            "b_flow",
+                        ],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: true,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: Some(
+                                Conveyor {
+                                    transit_time: "3",
+                                    capacity: Some(
+                                        "",
+                                    ),
+                                    inflow_limit: Some(
+                                        "",
+                                    ),
+                                    sample: Some(
+                                        "",
+                                    ),
+                                    arrest: Some(
+                                        "",
+                                    ),
+                                    discrete: true,
+                                    batch_integrity: true,
+                                    one_at_a_time: true,
+                                    exponential_leak: true,
+                                    ignore_earlier_zone_losses: true,
+                                },
+                            ),
+                            leakage: None,
+                            spreadflow: None,
+                            queue: Some(
+                                Queue,
+                            ),
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: Some(
+                            "v",
+                        ),
+                        elements: [
+                            Aux(
+                                Aux {
+                                    name: "a_aux",
+                                    uid: 1,
+                                    x: 1.0,
+                                    y: 2.0,
+                                    label_side: Center,
+                                    compat: Some(
+                                        ViewElementCompat {
+                                            width: 40.0,
+                                            height: 20.0,
+                                            shape: 0,
+                                            bits: 131,
+                                            name_field: None,
+                                            tail: None,
+                                        },
+                                    ),
+                                },
+                            ),
+                            Flow(
+                                Flow {
+                                    name: "b_flow",
+                                    uid: 2,
+                                    x: 1.0,
+                                    y: 2.0,
+                                    label_side: Bottom,
+                                    points: [
+                                        FlowPoint {
+                                            x: 0.0,
+                                            y: 0.0,
+                                            attached_to_uid: None,
+                                        },
+                                        FlowPoint {
+                                            x: 9.0,
+                                            y: 0.0,
+                                            attached_to_uid: Some(
+                                                3,
+                                            ),
+                                        },
+                                    ],
+                                    compat: None,
+                                    label_compat: Some(
+                                        ViewElementCompat {
+                                            width: 40.0,
+                                            height: 20.0,
+                                            shape: 0,
+                                            bits: 131,
+                                            name_field: None,
+                                            tail: None,
+                                        },
+                                    ),
+                                },
+                            ),
+                            Stock(
+                                Stock {
+                                    name: "d_stock",
+                                    uid: 3,
+                                    x: 1.0,
+                                    y: 2.0,
+                                    label_side: Top,
+                                    compat: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 4,
+                                    from_uid: 1,
+                                    to_uid: 2,
+                                    shape: MultiPoint(
+                                        [
+                                            FlowPoint {
+                                                x: 1.0,
+                                                y: 2.0,
+                                                attached_to_uid: None,
+                                            },
+                                        ],
+                                    ),
+                                    polarity: Some(
+                                        Negative,
+                                    ),
+                                },
+                            ),
+                            Cloud(
+                                Cloud {
+                                    uid: 5,
+                                    flow_uid: 2,
+                                    x: 0.0,
+                                    y: 0.0,
+                                    compat: Some(
+                                        ViewElementCompat {
+                                            width: 40.0,
+                                            height: 20.0,
+                                            shape: 0,
+                                            bits: 131,
+                                            name_field: None,
+                                            tail: None,
+                                        },
+                                    ),
+                                },
+                            ),
+                            Alias(
+                                Alias {
+                                    uid: 6,
+                                    alias_of_uid: 1,
+                                    x: 4.0,
+                                    y: 4.0,
+                                    label_side: Left,
+                                    compat: Some(
+                                        ViewElementCompat {
+                                            width: 40.0,
+                                            height: 20.0,
+                                            shape: 0,
+                                            bits: 131,
+                                            name_field: None,
+                                            tail: None,
+                                        },
+                                    ),
+                                },
+                            ),
+                            Module(
+                                Module {
+                                    name: "c_module",
+                                    uid: 7,
+                                    x: 5.0,
+                                    y: 5.0,
+                                    label_side: Right,
+                                },
+                            ),
+                            Group(
+                                Group {
+                                    uid: 8,
+                                    name: "g",
+                                    x: 5.0,
+                                    y: 5.0,
+                                    width: 10.0,
+                                    height: 10.0,
+                                    is_mdl_view_marker: true,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.0,
+                            height: 0.0,
+                        },
+                        zoom: 2.0,
+                        use_lettered_polarity: true,
+                        font: Some(
+                            "Arial",
+                        ),
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [
+                LoopMetadata {
+                    uids: [
+                        1,
+                        2,
+                    ],
+                    deleted: true,
+                    name: "R1",
+                    description: "d",
+                },
+            ],
+            groups: [
+                ModelGroup {
+                    name: "sector",
+                    doc: Some(
+                        "d",
+                    ),
+                    parent: Some(
+                        "q",
+                    ),
+                    members: [
+                        "a_aux",
+                    ],
+                    run_enabled: true,
+                },
+            ],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [
+                        "x",
+                    ],
+                    primary_output: "main",
+                    additional_outputs: [
+                        "y",
+                    ],
+                },
+            ),
+        },
+    ],
+    source: Some(
+        Source {
+            extension: Unspecified,
+            content: "",
+        },
+    ),
+    ai_information: None,
+}

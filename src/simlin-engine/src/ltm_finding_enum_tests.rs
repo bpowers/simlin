@@ -2221,7 +2221,8 @@ fn hub_fan_out_discovery_inputs(
         *slot = 1.0;
     }
     let mut results = enum_results(n_offsets, step_count, data);
-    let mut edges: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    let mut edges: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
     for (i, (from, to)) in names.iter().enumerate() {
         let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}");
         results.offsets.insert(Ident::new(&name), i);
@@ -2274,7 +2275,7 @@ fn no_recorded_link_scores_is_unknown_unless_the_graph_has_no_edges() {
     assert!(!found.truncated);
 
     let edgeless = crate::db::causal_graph_from_edges(&CausalEdgesResult {
-        edges: HashMap::new(),
+        edges: Default::default(),
         stocks: ["hub".to_string()].into_iter().collect(),
         dynamic_modules: HashMap::new(),
         module_outputs_read: Default::default(),

@@ -1089,6 +1089,7 @@ fn test_sim_lifecycle() {
             loop_metadata: vec![],
             groups: vec![],
             macro_spec: MessageField::none(),
+            sim_specs: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],

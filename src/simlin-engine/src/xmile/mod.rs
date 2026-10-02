@@ -310,6 +310,7 @@ impl From<datamodel::Project> for File {
                 uuid: None,
                 includes: None,
             }),
+            // Not written: ISEE's AI information is signed, and the engine cannot sign.
             ai_information: None,
             sim_specs: Some(project.sim_specs.into()),
             dimensions: if project.dimensions.is_empty() {

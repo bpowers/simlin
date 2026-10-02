@@ -64,7 +64,14 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
                     .with_message(format!("failed to decode project protobuf: {decode_err}"))
             })?;
 
-        let datamodel_project: engine::datamodel::Project = engine_serde::deserialize(pb_project);
+        // Bytes that decode are not thereby a project: one that lacks what
+        // every writer writes (an empty buffer, a truncated save) is refused
+        // with what it lacks.
+        let datamodel_project: engine::datamodel::Project = engine_serde::deserialize(pb_project)
+            .map_err(|err| {
+            FfiError::new(SimlinErrorCode::ProtobufDecode)
+                .with_message(format!("the protobuf is not a project: {}", err.reason()))
+        })?;
         Ok(Box::into_raw(Box::new(SimlinProject::new(
             datamodel_project,
         ))))

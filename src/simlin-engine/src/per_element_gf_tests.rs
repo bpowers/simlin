@@ -1387,3 +1387,246 @@ fn array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Per-element graphical functions of different kinds
+// ---------------------------------------------------------------------------
+
+/// A graphical function of `kind` through `points`.
+fn kinded_gf(
+    kind: datamodel::GraphicalFunctionKind,
+    points: &[(f64, f64)],
+) -> datamodel::GraphicalFunction {
+    datamodel::GraphicalFunction {
+        kind,
+        x_points: Some(points.iter().map(|p| p.0).collect()),
+        y_points: points.iter().map(|p| p.1).collect(),
+        x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 3.0 },
+        y_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 10.0,
+        },
+    }
+}
+
+/// One element of each kind, each with a table whose value at `time = 1`
+/// (where the one-step run ends) is the one only its own kind's reading
+/// gives: the continuous table interpolates to 5, the discrete one holds the
+/// 0 of the point below, and the extrapolating one, whose points start at 2,
+/// extends its first segment down to -10.
+fn one_element_of_each_kind() -> Vec<(&'static str, Option<datamodel::GraphicalFunction>)> {
+    use datamodel::GraphicalFunctionKind::{Continuous, Discrete, Extrapolate};
+    vec![
+        (
+            "smooth",
+            Some(kinded_gf(Continuous, &[(0.0, 0.0), (2.0, 10.0)])),
+        ),
+        (
+            "stepped",
+            Some(kinded_gf(Discrete, &[(0.0, 0.0), (2.0, 10.0)])),
+        ),
+        (
+            "extended",
+            Some(kinded_gf(Extrapolate, &[(2.0, 0.0), (3.0, 10.0)])),
+        ),
+    ]
+}
+
+const KIND_ELEMENTS: [&str; 3] = ["smooth", "stepped", "extended"];
+
+/// `out[Dim] = LOOKUP(g[Dim], time)` reads each element's table by name, so
+/// each is read by its own kind.
+#[test]
+fn each_element_is_read_by_its_own_tables_kind() {
+    let project = arrayed_gf_project("Dim", &KIND_ELEMENTS, one_element_of_each_kind());
+    assert_elements(
+        &project,
+        "out",
+        &[
+            ("out[extended]", -10.0),
+            ("out[smooth]", 5.0),
+            ("out[stepped]", 0.0),
+        ],
+    );
+}
+
+/// A lookup that applies every element's table at once has one mode for all
+/// of them, so tables of different kinds under it are refused, on the
+/// variable, rather than read by one another's kind.
+#[test]
+fn a_lookup_over_every_element_refuses_tables_of_different_kinds() {
+    use crate::db::{DiagnosticSeverity, collect_all_diagnostics};
+
+    let project = arrayed_gf_vector_select_project(
+        "Dim",
+        &KIND_ELEMENTS,
+        one_element_of_each_kind(),
+        &["0", "1", "0"],
+    );
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    assert!(
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off).is_err()
+    );
+    let diagnostics = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
+    assert!(
+        diagnostics.iter().any(|d| {
+            d.severity == DiagnosticSeverity::Error
+                && d.variable.as_deref() == Some("total")
+                && d.reason().is_some_and(|r| r.contains("of different kinds"))
+        }),
+        "{:?}",
+        diagnostics
+            .iter()
+            .map(|d| format!("{:?} on {:?}", d.error, d.variable))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The same lookup over tables of one kind reads them all by that kind: the
+/// selected element's extrapolating table, whose points start at 2, answers
+/// -10 at `time = 1`, where a continuous reading would answer 0.
+#[test]
+fn a_lookup_over_every_element_reads_tables_of_one_kind_by_it() {
+    use datamodel::GraphicalFunctionKind::Extrapolate;
+    let project = arrayed_gf_vector_select_project(
+        "Dim",
+        &["a", "b"],
+        vec![
+            ("a", Some(kinded_gf(Extrapolate, &[(2.0, 5.0), (3.0, 5.0)]))),
+            (
+                "b",
+                Some(kinded_gf(Extrapolate, &[(2.0, 0.0), (3.0, 10.0)])),
+            ),
+        ],
+        &["0", "1"],
+    );
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off).unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    let series = crate::test_common::collect_results(&results);
+    assert_eq!(series["total"].last(), Some(&-10.0));
+}
+
+/// Every lookup builtin applies a per-element table under an array-producing
+/// builtin and reads it in its own way, whichever element is selected. The
+/// rows are the builtin table's lookup family, so a lookup builtin added to
+/// it fails here until it has a row.
+#[test]
+fn every_lookup_builtin_applies_each_elements_table_under_a_vector_builtin() {
+    use datamodel::GraphicalFunctionKind::Continuous;
+
+    /// What `reader` answers at 1 over `(0,0),(2,10)` (an index between the
+    /// points) and over `(2,0),(3,10)` (an index below them).
+    fn at_one(reader: &str) -> (f64, f64) {
+        match reader {
+            "lookup" => (5.0, 0.0),
+            "lookup_forward" => (10.0, 0.0),
+            "lookup_backward" => (0.0, 0.0),
+            "lookup_extrapolate" => (5.0, -10.0),
+            other => panic!("the lookup builtin `{other}` has no row"),
+        }
+    }
+
+    for reader in crate::builtins::BuiltinSig::table_readers() {
+        for (mask, pick) in [(["1", "0"], 0), (["0", "1"], 1)] {
+            let mut project = arrayed_gf_vector_select_project(
+                "Dim",
+                &["between", "below"],
+                vec![
+                    (
+                        "between",
+                        Some(kinded_gf(Continuous, &[(0.0, 0.0), (2.0, 10.0)])),
+                    ),
+                    (
+                        "below",
+                        Some(kinded_gf(Continuous, &[(2.0, 0.0), (3.0, 10.0)])),
+                    ),
+                ],
+                &mask,
+            );
+            set_total(
+                &mut project,
+                &format!("VECTOR SELECT(sel[*], {reader}(g[*], time), 0, 0, 0)"),
+            );
+
+            let mut db = SimlinDb::default();
+            let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+            let compiled =
+                compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+                    .unwrap_or_else(|err| panic!("{reader} compiles: {err}"));
+            let mut vm = Vm::new(compiled).unwrap();
+            vm.run_to_end().unwrap();
+            let results = vm.into_results();
+            let series = crate::test_common::collect_results(&results);
+            let expected = [at_one(reader).0, at_one(reader).1][pick];
+            assert_eq!(
+                series["total"].last(),
+                Some(&expected),
+                "{reader} with element {pick} selected"
+            );
+        }
+    }
+}
+
+/// Gives the fixture's scalar consumer `total` the equation `equation`.
+fn set_total(project: &mut datamodel::Project, equation: &str) {
+    let total = project.models[0]
+        .variables
+        .find_mut(|v| v.get_ident() == "total")
+        .expect("the fixture has a `total`");
+    let datamodel::Variable::Aux(total) = total else {
+        unreachable!("`total` is an auxiliary");
+    };
+    total.equation = datamodel::Equation::Scalar(equation.to_string());
+}
+
+/// `total` at the end of the one-step run, or what the model is refused for:
+/// each error diagnostic's variable and reason.
+fn total_or_refusal(project: &datamodel::Project) -> std::result::Result<f64, Vec<String>> {
+    use crate::db::{DiagnosticSeverity, collect_all_diagnostics};
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    match compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off) {
+        Ok(compiled) => {
+            let mut vm = Vm::new(compiled).unwrap();
+            vm.run_to_end().unwrap();
+            let results = vm.into_results();
+            let series = crate::test_common::collect_results(&results);
+            Ok(*series["total"].last().expect("a saved step"))
+        }
+        Err(err) => Err(std::iter::once(err.to_string())
+            .chain(
+                collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
+                    .iter()
+                    .filter(|d| d.severity == DiagnosticSeverity::Error)
+                    .map(|d| format!("{:?}: {:?}", d.variable, d.reason())),
+            )
+            .collect()),
+    }
+}
+
+/// An element with no table has no kind: a lookup over every element takes
+/// the one kind of the tables there are, and is not refused for the element
+/// that has none.
+#[test]
+fn a_lookup_over_every_element_passes_over_an_element_with_no_table() {
+    use datamodel::GraphicalFunctionKind::Extrapolate;
+    let project = arrayed_gf_vector_select_project(
+        "Dim",
+        &["bare", "tabled"],
+        vec![
+            ("bare", None),
+            (
+                "tabled",
+                Some(kinded_gf(Extrapolate, &[(2.0, 0.0), (3.0, 10.0)])),
+            ),
+        ],
+        &["0", "1"],
+    );
+    assert_eq!(total_or_refusal(&project), Ok(-10.0));
+}

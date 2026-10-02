@@ -2498,12 +2498,7 @@ impl Vm {
                     } else {
                         let gf_idx = (*base_gf as usize) + (element_offset as usize);
                         let gf = &context.graphical_functions[gf_idx];
-                        let result = match mode {
-                            LookupMode::Interpolate => lookup(gf, lookup_index),
-                            LookupMode::Forward => lookup_forward(gf, lookup_index),
-                            LookupMode::Backward => lookup_backward(gf, lookup_index),
-                        };
-                        stack.push(result);
+                        stack.push(lookup_in_mode(*mode, gf, lookup_index));
                     }
                 }
                 // The element offset was resolved and bounds-checked at emit
@@ -2517,12 +2512,7 @@ impl Vm {
                 } => {
                     let lookup_index = stack.pop();
                     let gf = &context.graphical_functions[*base_gf as usize + *elem as usize];
-                    let result = match mode {
-                        LookupMode::Interpolate => lookup(gf, lookup_index),
-                        LookupMode::Forward => lookup_forward(gf, lookup_index),
-                        LookupMode::Backward => lookup_backward(gf, lookup_index),
-                    };
-                    stack.push(result);
+                    stack.push(lookup_in_mode(*mode, gf, lookup_index));
                 }
                 Opcode::Ret => {
                     break;
@@ -3043,11 +3033,7 @@ impl Vm {
                                 f64::NAN
                             } else {
                                 let gf = &context.graphical_functions[*base_gf as usize + elem_off];
-                                match mode {
-                                    LookupMode::Interpolate => lookup(gf, index),
-                                    LookupMode::Forward => lookup_forward(gf, index),
-                                    LookupMode::Backward => lookup_backward(gf, index),
-                                }
+                                lookup_in_mode(*mode, gf, index)
                             };
                             temp_storage[temp_off + i] = result;
                             increment_indices(&mut indices, &input_view.dims);
@@ -3447,9 +3433,58 @@ pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval:
     0.0
 }
 
+/// The lookup a lookup opcode's `mode` names, over `table` at `index`: the one
+/// dispatch every lookup opcode arm goes through. The wasm backend's twin is
+/// `wasmgen::lower::HelperFns::lookup`.
+#[inline]
+pub(crate) fn lookup_in_mode(mode: LookupMode, table: &[(f64, f64)], index: f64) -> f64 {
+    match mode {
+        LookupMode::Interpolate => lookup(table, index),
+        LookupMode::Forward => lookup_forward(table, index),
+        LookupMode::Backward => lookup_backward(table, index),
+        LookupMode::Extrapolate => lookup_extrapolate(table, index),
+    }
+}
+
+/// Linear interpolation between a table's points, and beyond them the line
+/// through the two points at that end, extended (`LookupMode::Extrapolate`,
+/// which cites XMILE and Vensim).
+///
+/// A one-point table has no line to extend and answers with its point. So
+/// does an end whose two points share an x (a vertical step at the edge of the
+/// table): that is the engine's rule, unverified against Vensim and Stella,
+/// neither of which documents the case.
+#[inline(never)]
+pub(crate) fn lookup_extrapolate(table: &[(f64, f64)], index: f64) -> f64 {
+    let size = table.len();
+    if size >= 2 {
+        if index < table[0].0 {
+            return extend_end_segment(table[0], table[1], index);
+        }
+        if index > table[size - 1].0 {
+            return extend_end_segment(table[size - 1], table[size - 2], index);
+        }
+    }
+    lookup(table, index)
+}
+
+/// The line through a table's end point `end` and its neighbor `inner`, at
+/// `index`; `end`'s own y when the two share an x (no line) or a y (a flat
+/// line, which is its y at every index: computed, an infinite index times a
+/// zero slope would be NaN).
+#[inline]
+fn extend_end_segment(end: (f64, f64), inner: (f64, f64), index: f64) -> f64 {
+    let dx = end.0 - inner.0;
+    let dy = end.1 - inner.1;
+    if dx == 0.0 || dy == 0.0 {
+        return end.1;
+    }
+    end.1 + (index - end.0) * (dy / dx)
+}
+
 // `pub(crate)` so the wasm backend's lookup-helper tests can compare the
 // emitted helpers directly against the VM functions they reproduce
-// (`wasmgen::lookup`), the byte-faithful oracle for `vm.rs:3055-3186`.
+// (`wasmgen::lookup`).
 #[inline(never)]
 pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
@@ -3503,9 +3538,10 @@ pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     }
 }
 
-/// Step function lookup that returns the y-value of the next point >= x.
-/// If x is beyond the last point, returns the y-value of the last point.
-/// This is a "sample and hold" interpolation where we look forward.
+/// Step function lookup: the y of the first point whose x is at or above the
+/// index, and the last point's y beyond the table. Of points that share an x
+/// it therefore answers, at that x, with the first listed -- inside the table
+/// and at its last x alike.
 #[inline(never)]
 pub(crate) fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
@@ -3521,9 +3557,10 @@ pub(crate) fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
         return table[0].1;
     }
 
-    // If index is at or above the last point, return last y
+    // Past the last point, its y. An index AT the last x is searched for, so
+    // a step at the end of the table answers as a step anywhere else does.
     let size = table.len();
-    if index >= table[size - 1].0 {
+    if index > table[size - 1].0 {
         return table[size - 1].1;
     }
 
@@ -3543,11 +3580,10 @@ pub(crate) fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
     table[low].1
 }
 
-/// Step function lookup that returns the y-value of the last point where x <= index.
-/// If x is before the first point, returns the y-value of the first point.
-/// This is a "sample and hold" interpolation where we look backward.
-///
-/// For duplicate x-values, returns the y of the LAST point with that x.
+/// Step function lookup: the y of the last point whose x is at or below the
+/// index, and the first point's y before the table. Of points that share an x
+/// it therefore answers, at that x, with the last listed -- inside the table
+/// and at its first x alike.
 #[inline(never)]
 pub(crate) fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
@@ -3558,8 +3594,10 @@ pub(crate) fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
         return f64::NAN;
     }
 
-    // If index is at or below the first point, return first y
-    if index <= table[0].0 {
+    // Before the first point, its y. An index AT the first x is searched for,
+    // so a step at the start of the table answers as a step anywhere else
+    // does.
+    if index < table[0].0 {
         return table[0].1;
     }
 

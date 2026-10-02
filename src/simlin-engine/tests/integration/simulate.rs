@@ -977,7 +977,7 @@ fn ensure_wasm_matches_runs_supported_scalar_model() {
 /// `DELAY1`/`DELAY3`/`SMTH1`/`SMTH3` with the INPUT as the initial value (the
 /// stdlib model's `isModuleInput(initial_value)` guard, XMILE 1.0 section
 /// 3.5.3), an explicit fourth argument is that twin with the argument as the
-/// initial value, and `DELAY` is `DELAY1` -- on the VM, on wasm
+/// initial value -- on the VM, on wasm
 /// (`ensure_wasm_matches` panics on any divergence), and across a reset and
 /// rerun. The input varies in time so the initial value is observable: the
 /// default twins start at the input's `t0` value, the explicit ones at 7.
@@ -1000,8 +1000,6 @@ fn delayn_and_smthn_omitted_initial_values_are_the_input_on_both_backends() {
         .aux("d3_explicit_twin", "DELAY3(inp, 2, 7)", None)
         .aux("s1_explicit", "SMTHN(inp, 2, 1, 7)", None)
         .aux("s1_explicit_twin", "SMTH1(inp, 2, 7)", None)
-        .aux("alias", "DELAY(inp, 2)", None)
-        .aux("alias_twin", "DELAY1(inp, 2)", None)
         .build_datamodel();
 
     let expected = vm_results(&datamodel);
@@ -1018,7 +1016,6 @@ fn delayn_and_smthn_omitted_initial_values_are_the_input_on_both_backends() {
         ("s3_default", "s3_twin"),
         ("d3_explicit", "d3_explicit_twin"),
         ("s1_explicit", "s1_explicit_twin"),
-        ("alias", "alias_twin"),
     ] {
         assert_eq!(
             series(&expected, spelling),
@@ -1911,7 +1908,8 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
 
         let buf = serialize(&datamodel_project).unwrap().encode_to_vec();
 
-        let datamodel_project2 = deserialize(project_io::Project::decode_from_slice(&buf).unwrap());
+        let datamodel_project2 =
+            deserialize(project_io::Project::decode_from_slice(&buf).unwrap()).unwrap();
         assert_eq!(datamodel_project, datamodel_project2);
     }
 
@@ -1949,8 +1947,8 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
 /// (`WasmGenError::Unsupported`) here means a model the VM handles is NOT
 /// covered by the wasm backend -- a hard failure (AC3.2: every core-simulation
 /// model runs through both backends). A model the VM itself cannot simulate
-/// (DELAY FIXED, GET DATA) is `#[ignore]`d and never reaches this hook, so it
-/// stays out of scope. A supported-but-divergent model panics inside
+/// never reaches this hook: one the engine refuses (DELAY FIXED) is held to its
+/// refusal instead, and one waiting on data (GET DATA) is `#[ignore]`d. A supported-but-divergent model panics inside
 /// `ensure_wasm_matches`.
 ///
 /// Special-stock fixtures (`test/conveyors/`, `test/queues/`) must NOT be routed
@@ -2048,7 +2046,7 @@ fn simulate_special_path(xmile_path: &str) {
         use simlin_engine::buffa::Message;
 
         let buf = serialize(&datamodel_project).unwrap().encode_to_vec();
-        deserialize(project_io::Project::decode_from_slice(&buf).unwrap())
+        deserialize(project_io::Project::decode_from_slice(&buf).unwrap()).unwrap()
     };
     assert_eq!(datamodel_project, datamodel_proto);
     ensure_results(&baseline, &vm_results_for_special(&datamodel_proto, "main"));
@@ -2518,7 +2516,7 @@ fn except_defaults_survive_a_protobuf_round_trip() {
         let contents = std::fs::read_to_string(path).unwrap();
         let project = open_vensim(&contents).unwrap();
         let buf = serialize(&project).unwrap().encode_to_vec();
-        let decoded = deserialize(project_io::Project::decode_from_slice(&buf).unwrap());
+        let decoded = deserialize(project_io::Project::decode_from_slice(&buf).unwrap()).unwrap();
 
         let run = |project: &simlin_engine::datamodel::Project| {
             let mut vm = Vm::new(compile_vm(project)).unwrap();
@@ -2930,6 +2928,160 @@ fn simulates_lookup_arrayed() {
     simulate_path("../../test/lookup_arrayed/lookup_arrayed.xmile");
 }
 
+/// Per-element lookups against Vensim's own run, one of them listed out of x
+/// order: `lookup2dim[B,E]((2,-3),(1,-7),(0,-1))`, which Vensim reads as the
+/// curve through its points in x order (`variable::parse_table`).
+#[test]
+fn simulates_subscripted_lookups_mdl() {
+    simulate_mdl_path(
+        "../../test/test-models/tests/subscripted_lookups/test_subscripted_lookups.mdl",
+    );
+}
+
+/// Vensim reads a lookup listed out of x order as the curve through its points
+/// (`simulates_subscripted_lookups_mdl` is its own output for one), so the
+/// importer holds the points in x order, the ones sharing an x in the order
+/// listed. The project then has one table: what it holds is what the compiler
+/// reads, what an editor draws, and what an XMILE save writes, which XMILE 1.0
+/// section 4.1.3 requires to be ascending.
+#[test]
+fn a_vensim_lookup_listed_out_of_x_order_is_imported_in_x_order() {
+    let table = |name: &str, points: &str| format!("{name}({points})\n\t~\t\n\t~\t\t|\n\n");
+    let mut mdl = "{UTF-8}\n".to_string();
+    mdl.push_str(&table("descending", "(2,-3),(1,-7),(0,-1)"));
+    mdl.push_str(&table("stepped", "(0,1),(1,2),(1,5),(2,6)"));
+    mdl.push_str(&table("stepped out of order", "(2,6),(1,2),(1,5),(0,1)"));
+    mdl.push_str("reader = descending(Time)\n\t~\t\n\t~\t\t|\n\n");
+    for control in ["INITIAL TIME = 0", "FINAL TIME = 2", "TIME STEP = 0.5"] {
+        mdl.push_str(&format!("{control}\n\t~\t\n\t~\t\t|\n\n"));
+    }
+    mdl.push_str("SAVEPER = TIME STEP\n\t~\t\n\t~\t\t|\n\n");
+    mdl.push_str("\\\\\\---/// Sketch information - do not modify anything except names\n");
+
+    let datamodel = open_vensim(&mdl).unwrap();
+    let points = |name: &str| -> (Vec<f64>, Vec<f64>) {
+        let variable = datamodel.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == name)
+            .unwrap_or_else(|| panic!("{name} is imported"));
+        let simlin_engine::datamodel::Variable::Aux(aux) = variable else {
+            panic!("{name} is an auxiliary");
+        };
+        let gf = aux.gf.as_ref().expect("its table is imported");
+        (gf.x_points.clone().expect("x points"), gf.y_points.clone())
+    };
+    assert_eq!(
+        points("descending"),
+        (vec![0.0, 1.0, 2.0], vec![-1.0, -7.0, -3.0])
+    );
+    let stepped = (vec![0.0, 1.0, 1.0, 2.0], vec![1.0, 2.0, 5.0, 6.0]);
+    assert_eq!(points("stepped"), stepped);
+    assert_eq!(points("stepped_out_of_order"), stepped);
+
+    // The curve through the points: -1 at 0, -4 at 0.5, -7 at 1, -5 at 1.5.
+    let results = vm_results(&datamodel);
+    let reader = results.offsets[&simlin_engine::common::Ident::new("reader")];
+    let series: Vec<f64> = results.iter().map(|row| row[reader]).collect();
+    assert_eq!(series, [-1.0, -4.0, -7.0, -5.0, -3.0]);
+
+    let saved = simlin_engine::to_xmile(&datamodel).unwrap();
+    assert!(saved.contains("<xpts>0,1,2</xpts>"), "{saved}");
+    assert!(!saved.contains("<xpts>2,1"), "{saved}");
+}
+
+/// The example on Vensim's reference pages for its three lookup functions,
+/// read from MDL: `LOOK((0,1),(1,1),(2,2))` at -1, 1.5 and 2.5
+/// (vensim.com/documentation/fn_lookup_extrapolate.html, fn_lookup_forward.html
+/// and fn_lookup_backward.html give the values asserted here), on the VM and
+/// on wasm.
+#[test]
+fn vensims_documented_lookup_examples_simulate_as_documented() {
+    let call = |name: &str, function: &str, at: &str| {
+        format!("{name} = {function}(look, {at})\n\t~\t\n\t~\t\t|\n\n")
+    };
+    let mut mdl = "{UTF-8}\nlook((0,1),(1,1),(2,2))\n\t~\t\n\t~\t\t|\n\n".to_string();
+    let documented = [
+        ("extrapolate below", "LOOKUP EXTRAPOLATE", "-1", 1.0),
+        ("extrapolate inside", "LOOKUP EXTRAPOLATE", "1.5", 1.5),
+        ("extrapolate above", "LOOKUP EXTRAPOLATE", "2.5", 2.5),
+        ("forward below", "LOOKUP FORWARD", "-1", 1.0),
+        ("forward inside", "LOOKUP FORWARD", "1.5", 2.0),
+        ("forward above", "LOOKUP FORWARD", "2.5", 2.0),
+        ("backward below", "LOOKUP BACKWARD", "-1", 1.0),
+        ("backward inside", "LOOKUP BACKWARD", "1.5", 1.0),
+        ("backward above", "LOOKUP BACKWARD", "2.5", 2.0),
+    ];
+    for (name, function, at, _) in documented {
+        mdl.push_str(&call(name, function, at));
+    }
+    for control in ["INITIAL TIME = 0", "FINAL TIME = 1", "TIME STEP = 1"] {
+        mdl.push_str(&format!("{control}\n\t~\t\n\t~\t\t|\n\n"));
+    }
+    mdl.push_str("SAVEPER = TIME STEP\n\t~\t\n\t~\t\t|\n\n");
+    mdl.push_str("\\\\\\---/// Sketch information - do not modify anything except names\n");
+
+    let datamodel = open_vensim(&mdl).unwrap();
+    let expected = vm_results(&datamodel);
+    let row = vm_last_row(&datamodel);
+    for (name, function, at, want) in documented {
+        assert_eq!(
+            cell(&row, &name.replace(' ', "_")),
+            want,
+            "{function}(LOOK, {at})"
+        );
+    }
+    let outcome = ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    assert!(matches!(outcome, WasmRunOutcome::Ran), "{outcome:?}");
+}
+
+/// A graphical function's `type` is read from XMILE and decides how the
+/// variable that holds it reads it: XMILE 1.0 section 3.1.4, quoted on
+/// `LookupMode::of_kind`. The points are `(0,0), (1,10), (2,10)`.
+#[test]
+fn an_xmile_graphical_functions_type_decides_how_it_is_read() {
+    let model = |gf_type: &str, input: &str| {
+        let xmile = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>gf</name><vendor>x</vendor><product version="1">x</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+  <model>
+    <variables>
+      <aux name="out"><eqn>{input}</eqn><gf type="{gf_type}"><xpts>0,1,2</xpts><ypts>0,10,10</ypts></gf></aux>
+    </variables>
+  </model>
+</xmile>"#
+        );
+        simlin_engine::open_xmile(&mut BufReader::new(xmile.as_bytes())).unwrap()
+    };
+    // (type, input, value): an intermediate input and one below the points.
+    let rows = [
+        ("continuous", "0.5", 5.0),
+        ("continuous", "-1", 0.0),
+        ("extrapolate", "0.5", 5.0),
+        ("extrapolate", "-1", -10.0),
+        ("discrete", "0.5", 0.0),
+        ("discrete", "-1", 0.0),
+    ];
+    for (gf_type, input, want) in rows {
+        let datamodel = model(gf_type, input);
+        assert_eq!(
+            cell(&vm_last_row(&datamodel), "out"),
+            want,
+            "a {gf_type} function at {input}"
+        );
+        // The writer writes the type where the reader reads it.
+        let saved = simlin_engine::to_xmile(&datamodel).unwrap();
+        let reopened = simlin_engine::open_xmile(&mut BufReader::new(saved.as_bytes())).unwrap();
+        assert_eq!(
+            cell(&vm_last_row(&reopened), "out"),
+            want,
+            "a saved {gf_type} function at {input}"
+        );
+    }
+}
+
 #[test]
 fn simulates_subscript_mdl() {
     simulate_mdl_path("../../test/sdeverywhere/models/subscript/subscript.mdl");
@@ -2950,32 +3102,75 @@ fn simulates_npv_mdl() {
     simulate_mdl_path("../../test/sdeverywhere/models/npv/npv.mdl");
 }
 
-// DELAY FIXED requires ring-buffer (pipeline delay) semantics, not
-// exponential smoothing (delay1).  Currently mapped to delay1 as a rough
-// approximation; these tests are ignored until VM-level ring buffer state
-// is implemented.
-#[test]
-#[ignore]
-fn simulates_delayfixed_xmile() {
-    simulate_path("../../test/sdeverywhere/models/delayfixed/delayfixed.xmile");
+/// The model at `path`, with every variable `delayed` names refused for its
+/// fixed delay: the model does not compile, and each of those variables
+/// carries a `NotSimulatable` error whose reason names `DELAY FIXED`. Vensim's
+/// own results for these models are beside them (`delayfixed.dat`,
+/// `delayfixed2.dat`); they are the acceptance data for a pipeline delay, and
+/// a first-order delay in its place does not reproduce them.
+fn assert_fixed_delays_are_refused(path: &str, delayed: &[&str]) {
+    use simlin_engine::db::{DiagnosticSeverity, LtmOverlay, collect_all_diagnostics};
+
+    let contents = std::fs::read_to_string(path).unwrap();
+    let datamodel = if path.ends_with(".mdl") {
+        open_vensim(&contents).unwrap()
+    } else {
+        simlin_engine::open_xmile(&mut BufReader::new(contents.as_bytes())).unwrap()
+    };
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    assert!(
+        compile_project_incremental(&db, sync.project, "main", LtmOverlay::Off).is_err(),
+        "{path}: a model with a fixed delay does not compile"
+    );
+    let diagnostics = collect_all_diagnostics(&db, sync.project, LtmOverlay::Off);
+    for name in delayed {
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.severity == DiagnosticSeverity::Error
+                    && d.variable.as_deref() == Some(name)
+                    && d.code() == ErrorCode::NotSimulatable
+                    && d.reason().is_some_and(|r| r.contains("DELAY FIXED"))
+            }),
+            "{path}: `{name}` is refused for its fixed delay; diagnostics: {:?}",
+            diagnostics
+                .iter()
+                .map(|d| format!("{:?} on {:?}", d.error, d.variable))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
-#[ignore]
-fn simulates_delayfixed_mdl() {
-    simulate_mdl_path("../../test/sdeverywhere/models/delayfixed/delayfixed.mdl");
+fn refuses_delayfixed_xmile() {
+    assert_fixed_delays_are_refused(
+        "../../test/sdeverywhere/models/delayfixed/delayfixed.xmile",
+        &["receiving", "output", "a", "b"],
+    );
 }
 
 #[test]
-#[ignore]
-fn simulates_delayfixed2_xmile() {
-    simulate_path("../../test/sdeverywhere/models/delayfixed2/delayfixed2.xmile");
+fn refuses_delayfixed_mdl() {
+    assert_fixed_delays_are_refused(
+        "../../test/sdeverywhere/models/delayfixed/delayfixed.mdl",
+        &["receiving", "output", "a", "b"],
+    );
 }
 
 #[test]
-#[ignore]
-fn simulates_delayfixed2_mdl() {
-    simulate_mdl_path("../../test/sdeverywhere/models/delayfixed2/delayfixed2.mdl");
+fn refuses_delayfixed2_xmile() {
+    assert_fixed_delays_are_refused(
+        "../../test/sdeverywhere/models/delayfixed2/delayfixed2.xmile",
+        &["output1", "output2"],
+    );
+}
+
+#[test]
+fn refuses_delayfixed2_mdl() {
+    assert_fixed_delays_are_refused(
+        "../../test/sdeverywhere/models/delayfixed2/delayfixed2.mdl",
+        &["output1", "output2"],
+    );
 }
 
 #[test]
@@ -5351,7 +5546,7 @@ fn mark2_mdl_compiles_after_protobuf_roundtrip() {
 
     // Deserialize from protobuf (as the app does when loading from storage)
     let pb2 = project_io::Project::decode_from_slice(&buf).expect("decode protobuf");
-    let project2 = deserialize(pb2);
+    let project2 = deserialize(pb2).unwrap();
 
     // Compile the round-tripped project
     let mut db = SimlinDb::default();

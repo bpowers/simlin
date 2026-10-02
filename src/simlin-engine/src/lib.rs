@@ -106,6 +106,8 @@ mod rk_integration_tests;
 mod round_builtin_tests;
 pub mod save_check;
 pub mod serde;
+#[cfg(test)]
+mod serde_proptest;
 mod shared_vec;
 mod snapshot_arg;
 #[path = "stdlib.gen.rs"]

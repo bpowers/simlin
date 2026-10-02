@@ -1913,8 +1913,8 @@ fn test_partial_equation_lookup_table_arg_not_wrapped() {
         "the table argument must stay a bare identifier; only value deps are wrapped"
     );
 
-    // Same invariant for the extrapolating variants.
-    for func in ["lookup_forward", "lookup_backward"] {
+    // The same invariant for every builtin that reads a table.
+    for func in crate::builtins::BuiltinSig::table_readers() {
         let equation = format!("{func}(food_table, food_per_capita / subsistence)");
         let partial = build_partial_equation_shaped(
             &equation,
@@ -1990,7 +1990,7 @@ fn test_partial_equation_lookup_table_index_is_frozen() {
             "g[PREVIOUS(idx, idx)]",
         ),
     ] {
-        for func in ["lookup", "lookup_forward", "lookup_backward"] {
+        for func in crate::builtins::BuiltinSig::table_readers() {
             let equation = format!("{func}({table_arg}, food / subsistence)");
             // Production's dep set for this exact equation, through the exact
             // function production calls.

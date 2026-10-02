@@ -312,10 +312,8 @@ fn collect_expr0_occurrences(
         Expr0::App(UntypedBuiltinFn(name, args), _) => {
             let lname = name.to_ascii_lowercase();
             let child_in_reducer = in_reducer || expr0_routes_through_agg(&lname, args.len());
-            let skip_first = matches!(
-                lname.as_str(),
-                "lookup" | "lookup_forward" | "lookup_backward"
-            ) && !args.is_empty();
+            let skip_first =
+                crate::builtins::BuiltinSig::name_reads_a_table(&lname) && !args.is_empty();
             for (i, arg) in args.iter().enumerate() {
                 if skip_first && i == 0 {
                     continue;

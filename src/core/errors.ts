@@ -7,8 +7,9 @@
 // TypeScript as raw integers from that enum, NOT from the engine's internal
 // `ErrorCode` (which numbers some variants differently). Engine codes that
 // libsimlin collapses (e.g. the `Todo*` family) arrive as `Generic`.
-// An identical copy lives in src/engine/src/errors.ts (the packages don't
-// depend on each other); keep the two in sync.
+// An identical copy lives in src/engine/src/errors.ts: core imports only types
+// from the engine package, so that using core loads none of the engine.
+// tests/errors.test.ts holds the two copies together.
 export enum ErrorCode {
   NoError = 0,
   DoesNotExist = 1,

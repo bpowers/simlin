@@ -959,11 +959,7 @@ fn run_lookup_opcode(
 
 /// The VM oracle for `mode` -- the exact function the opcode dispatches to.
 fn vm_lookup_oracle(mode: LookupMode, knots: &[(f64, f64)], index: f64) -> f64 {
-    match mode {
-        LookupMode::Interpolate => crate::vm::lookup(knots, index),
-        LookupMode::Forward => crate::vm::lookup_forward(knots, index),
-        LookupMode::Backward => crate::vm::lookup_backward(knots, index),
-    }
+    crate::vm::lookup_in_mode(mode, knots, index)
 }
 
 fn assert_lookup_opcode_matches_vm(mode: LookupMode, knots: &[(f64, f64)], index: f64) {
@@ -984,11 +980,7 @@ fn lookup_opcode_dispatches_to_each_mode_and_reads_directory() {
     // to the mode's helper. Probe below/above range, on a knot, and between
     // knots for all three modes against the VM oracle.
     let probes = [-1.0, 0.0, 0.5, 1.0, 1.75, 2.5, 3.0, 4.0, 9.0];
-    for mode in [
-        LookupMode::Interpolate,
-        LookupMode::Forward,
-        LookupMode::Backward,
-    ] {
+    for mode in LookupMode::ALL {
         for &index in &probes {
             assert_lookup_opcode_matches_vm(mode, LOOKUP_OPCODE_TABLE, index);
         }
@@ -1000,11 +992,7 @@ fn lookup_opcode_out_of_range_element_offset_is_nan() {
     // The VM pushes NaN when element_offset < 0 or >= table_count, BEFORE
     // touching the table; the opcode must match (the directory is seeded for
     // table 0 only, so an OOB offset must short-circuit, never read garbage).
-    for mode in [
-        LookupMode::Interpolate,
-        LookupMode::Forward,
-        LookupMode::Backward,
-    ] {
+    for mode in LookupMode::ALL {
         // table_count = 1, so offset 1 and -1 are both out of range.
         assert!(
             run_lookup_opcode(mode, LOOKUP_OPCODE_TABLE, 1, 1.0, 2.0).is_nan(),
@@ -1024,11 +1012,7 @@ fn lookup_opcode_out_of_range_element_offset_is_nan() {
 
 #[test]
 fn lookup_opcode_nan_index_is_nan() {
-    for mode in [
-        LookupMode::Interpolate,
-        LookupMode::Forward,
-        LookupMode::Backward,
-    ] {
+    for mode in LookupMode::ALL {
         assert!(
             run_lookup_opcode(mode, LOOKUP_OPCODE_TABLE, 1, 0.0, f64::NAN).is_nan(),
             "{mode:?}: a NaN index must be NaN"
@@ -1124,11 +1108,7 @@ fn lookup_opcode_selects_table_by_element_offset() {
     let table1: &[(f64, f64)] = &[(0.0, 1.0), (10.0, 2.0)];
     let index = 5.0;
 
-    for mode in [
-        LookupMode::Interpolate,
-        LookupMode::Forward,
-        LookupMode::Backward,
-    ] {
+    for mode in LookupMode::ALL {
         // The two tables must genuinely disagree here, otherwise selecting
         // the wrong table would silently pass.
         let want0 = vm_lookup_oracle(mode, table0, index);
@@ -4386,11 +4366,7 @@ fn lookup_array_all_modes_over_domain_match_vm() {
     let tables = [LA_TABLE_A, LA_TABLE_B];
     let input = dense_view(0, &[2]);
     let input_data = [0.0, 0.0];
-    for mode in [
-        LookupMode::Interpolate,
-        LookupMode::Forward,
-        LookupMode::Backward,
-    ] {
+    for mode in LookupMode::ALL {
         for &index in &[-1.0, 0.0, 0.5, 1.0, 2.0, 2.001, 3.25, 4.0, 100.0] {
             assert_lookup_array_matches(&input, 0, 2, mode, index, &tables, 2, &input_data);
         }

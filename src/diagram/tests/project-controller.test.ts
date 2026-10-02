@@ -2236,6 +2236,32 @@ describe('convertErrorDetails', () => {
     expect(unitErrors.get('x')![0].kind).toBe('definition');
   });
 
+  it("carries an equation error's bare reason, never the formatted message", () => {
+    const at = (variableName: string, details: string | null): ErrorDetail =>
+      ({
+        modelName: 'main',
+        variableName,
+        kind: SimlinErrorKind.Variable,
+        severity: SimlinErrorSeverity.Error,
+        unitErrorKind: SimlinUnitErrorKind.NotApplicable,
+        code: 29,
+        startOffset: 0,
+        endOffset: 7,
+        message: "    missing * 2\n    ~~~~~~~\nerror in model 'main' variable 'x': unknown_dependency",
+        details,
+      }) as unknown as ErrorDetail;
+    const { varErrors } = convertErrorDetails(
+      [at('with_reason', "'missing' is not a variable of this model"), at('without', null)],
+      'main',
+    );
+    expect(varErrors.get('with_reason')).toEqual([
+      { start: 0, end: 7, code: 29, details: "'missing' is not a variable of this model" },
+    ]);
+    // The message is terminal-formatted (a snippet and an underline), so it
+    // never stands in: the renderer falls back to the code's description.
+    expect(varErrors.get('without')![0].details).toBeUndefined();
+  });
+
   it('sorts per-variable errors by kind and severity', () => {
     // Every arm of the classification: a unit error is a unit error whatever its
     // severity; any other Warning is an advisory; everything else is an error.
@@ -2303,6 +2329,65 @@ describeWithEngine('convertErrorDetails over the real engine', () => {
     } finally {
       await project.dispose();
     }
+  });
+});
+
+describeWithEngine('error reasons over the real engine', () => {
+  it('an equation error names what the equation got wrong', async () => {
+    const engine = await loadEngine();
+    const project = await engine.Project.openJson(
+      JSON.stringify({
+        name: 'reasons',
+        simSpecs: { startTime: 0, endTime: 3, dt: '1' },
+        models: [
+          {
+            name: 'main',
+            stocks: [],
+            flows: [],
+            auxiliaries: [{ name: 'x', equation: 'missing_input * 2' }],
+            views: [{ elements: [] }],
+          },
+        ],
+      }),
+    );
+    try {
+      const { varErrors } = convertErrorDetails(await project.getErrors(), 'main');
+      const errors = varErrors.get('x') ?? [];
+      expect(errors).toHaveLength(1);
+      // The code alone says "unknown dependency"; the reason says which name.
+      expect(errors[0].details).toContain('missing_input');
+      // The bare reason, not the terminal message with its snippet underline.
+      expect(errors[0].details).not.toContain('~');
+    } finally {
+      await project.dispose();
+    }
+  });
+});
+
+describe('ProjectController simulation errors', () => {
+  const simulationError = (details: string | null): ErrorDetail =>
+    ({
+      modelName: 'main',
+      variableName: null,
+      kind: SimlinErrorKind.Simulation,
+      severity: SimlinErrorSeverity.Error,
+      code: 17,
+      message: "error compiling model 'main': not_simulatable -- the reason",
+      details,
+    }) as unknown as ErrorDetail;
+
+  it("keeps the engine's bare reason as the simulation error's details", async () => {
+    const opened = await openController({ errors: [simulationError('the reason')] });
+    expect(opened.controller.getSnapshot().cachedErrors.simError).toEqual({ code: 17, details: 'the reason' });
+    await opened.controller.dispose();
+  });
+
+  it('falls back to the message when the engine gives no bare reason', async () => {
+    const opened = await openController({ errors: [simulationError(null)] });
+    expect(opened.controller.getSnapshot().cachedErrors.simError?.details).toBe(
+      "error compiling model 'main': not_simulatable -- the reason",
+    );
+    await opened.controller.dispose();
   });
 });
 

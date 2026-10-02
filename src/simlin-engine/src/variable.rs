@@ -43,6 +43,9 @@ use crate::{ErrorCode, eqn_err, units};
 pub struct Table {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
+    /// How a plain application of the table reads it between and beyond its
+    /// points (`bytecode::LookupMode::of_kind`).
+    pub kind: datamodel::GraphicalFunctionKind,
     x_range: datamodel::GraphicalFunctionScale,
     y_range: datamodel::GraphicalFunctionScale,
 }
@@ -53,6 +56,7 @@ impl Table {
         Table {
             x: Vec::new(),
             y: Vec::new(),
+            kind: datamodel::GraphicalFunctionKind::Continuous,
             x_range: datamodel::GraphicalFunctionScale { min: 0.0, max: 0.0 },
             y_range: datamodel::GraphicalFunctionScale { min: 0.0, max: 0.0 },
         }
@@ -68,6 +72,7 @@ impl Table {
         Table {
             x,
             y,
+            kind: datamodel::GraphicalFunctionKind::Continuous,
             x_range: datamodel::GraphicalFunctionScale {
                 min: x_min,
                 max: x_max,
@@ -282,9 +287,29 @@ impl<MI, E> Variable<MI, E> {
 /// writes it: a one-point table answers every lookup with its one y, wherever
 /// its x is.
 ///
-/// An x that is not a number is a `BadTable` error. The lookups binary-search
-/// the x values, and a NaN compares false against every index, so a search
-/// over one lands on no knot.
+/// The table holds the graphical function's points as listed, and the lookups
+/// binary-search the x values, so the x values have to be in ascending order.
+/// XMILE 1.0 section 4.1.3 requires it ("When `<xpts>` are included, the
+/// x-values MUST be in ascending order", with `<xpts>2,1,3,0</xpts>` given as
+/// invalid), so a graphical function whose x decreases anywhere is a
+/// `BadTable` error naming the two values. Nothing here reorders: an importer
+/// whose format reads out-of-order points as the curve through them (Vensim:
+/// `mdl::convert`) puts them in order as it reads them, so the datamodel, the
+/// writers, the editors and the compiler hold one table.
+///
+/// Neighbouring points that share an x are in order: they are a vertical
+/// step, which modelers write, and each lookup says which of the two it
+/// answers with at that x (`bytecode::LookupMode`). Whether XMILE's
+/// "ascending" admits them is not stated; accepting them is the engine's rule.
+///
+/// An x that is not a finite number is a `BadTable` error too. A NaN has no
+/// place in an order, and compares false against every index, so a search
+/// over one lands on no knot. An infinite x has no segment to interpolate or
+/// extrapolate along: two end points sharing x = infinity extend to
+/// `inf - inf`, a NaN. When the x points are spread over the scale, the scale
+/// is checked instead, so the refusal names what the graphical function
+/// holds: a bound that is not a finite number, or a minimum above the
+/// maximum, which would spread the points downward.
 pub(crate) fn parse_table(
     gf: Option<&datamodel::GraphicalFunction>,
 ) -> EquationResult<Option<Table>> {
@@ -298,6 +323,28 @@ pub(crate) fn parse_table(
         None => {
             let x_min = gf.x_scale.min;
             let x_max = gf.x_scale.max;
+            if !x_min.is_finite() || !x_max.is_finite() {
+                return eqn_err!(
+                    BadTable,
+                    0,
+                    0,
+                    format!(
+                        "the graphical function's x scale has a bound that is not a finite \
+                         number: {x_min} to {x_max}"
+                    )
+                );
+            }
+            if x_min > x_max {
+                return eqn_err!(
+                    BadTable,
+                    0,
+                    0,
+                    format!(
+                        "the graphical function's x scale bounds are reversed: its minimum \
+                         {x_min} is above its maximum {x_max}"
+                    )
+                );
+            }
             let size = gf.y_points.len() as f64;
             gf.y_points
                 .iter()
@@ -314,10 +361,31 @@ pub(crate) fn parse_table(
             "the graphical function has an x value that is not a number"
         );
     }
+    if x.iter().any(|x| x.is_infinite()) {
+        return eqn_err!(
+            BadTable,
+            0,
+            0,
+            "the graphical function has an x value that is infinite"
+        );
+    }
+    if let Some(pair) = x.windows(2).find(|pair| pair[1] < pair[0]) {
+        return eqn_err!(
+            BadTable,
+            0,
+            0,
+            format!(
+                "the graphical function's x values are not in ascending order: {} comes after {}",
+                pair[1], pair[0]
+            )
+        );
+    }
+    let y = gf.y_points.clone();
 
     Ok(Some(Table {
         x,
-        y: gf.y_points.clone(),
+        y,
+        kind: gf.kind,
         x_range: gf.x_scale.clone(),
         y_range: gf.y_scale.clone(),
     }))
@@ -403,7 +471,14 @@ fn build_tables(
                     present.insert(CanonicalElementName::from_subscript(subscript), table);
                 }
                 Ok(None) => {}
-                Err(err) => errors.push(err),
+                // The diagnostic names the variable; which of its tables was
+                // refused is the element's to say.
+                Err(mut err) => {
+                    err.details = err
+                        .details
+                        .map(|reason| format!("in element '{subscript}', {reason}"));
+                    errors.push(err);
+                }
             }
         }
 
@@ -805,6 +880,278 @@ mod parse_table_tests {
         for name in ["interp_val", "fwd_val", "bwd_val", "with_lookup"] {
             project.assert_vm_result(name, &[7.0, 7.0, 7.0]);
         }
+    }
+
+    /// A graphical function of `kind` through `points`.
+    fn through(
+        kind: datamodel::GraphicalFunctionKind,
+        points: &[(f64, f64)],
+    ) -> datamodel::GraphicalFunction {
+        datamodel::GraphicalFunction {
+            kind,
+            x_points: Some(points.iter().map(|p| p.0).collect()),
+            y_points: points.iter().map(|p| p.1).collect(),
+            ..implied(&[])
+        }
+    }
+
+    /// The inputs a kind's reading is checked at, one per saved step: below
+    /// the table, between its first two points, on a point, between its last
+    /// two, and above it.
+    const INPUTS: [f64; 5] = [-1.0, 0.5, 1.0, 1.5, 3.0];
+
+    /// A model that applies a table of `kind` through `(0,0), (1,10), (2,10)`
+    /// at each of `INPUTS`, as a plain `LOOKUP` and as a `WITH LOOKUP`.
+    fn kind_project(kind: datamodel::GraphicalFunctionKind) -> TestProject {
+        let points = [(0.0, 0.0), (1.0, 10.0), (2.0, 10.0)];
+        let steps = [(0.0, INPUTS[0]), (1.0, INPUTS[1]), (2.0, INPUTS[2])];
+        let later = [(3.0, INPUTS[3]), (4.0, INPUTS[4])];
+        let schedule: Vec<(f64, f64)> = steps.into_iter().chain(later).collect();
+        TestProject::new("kinds")
+            .with_sim_time(0.0, 4.0, 1.0)
+            .aux_with_gf(
+                "input",
+                "TIME",
+                through(datamodel::GraphicalFunctionKind::Continuous, &schedule),
+            )
+            .aux_with_gf("curve", "0", through(kind, &points))
+            .aux("applied", "LOOKUP(curve, input)", None)
+            .aux_with_gf("with_lookup", "input", through(kind, &points))
+            .aux("stepped_up", "LOOKUP_FORWARD(curve, input)", None)
+            .aux("stepped_back", "LOOKUP_BACKWARD(curve, input)", None)
+    }
+
+    /// What a plain application of a table through `(0,0), (1,10), (2,10)`
+    /// answers at each of `INPUTS`, by the table's kind (XMILE 1.0 section
+    /// 3.1.4; `LookupMode::of_kind` quotes it). The match is exhaustive, so a
+    /// kind added to the datamodel has no row here until it is given one.
+    fn plain_reading(kind: datamodel::GraphicalFunctionKind) -> [f64; 5] {
+        match kind {
+            // Interpolated between points, the end values beyond them.
+            datamodel::GraphicalFunctionKind::Continuous => [0.0, 5.0, 10.0, 10.0, 10.0],
+            // The end segments extended: slope 10 below, slope 0 above.
+            datamodel::GraphicalFunctionKind::Extrapolate => [-10.0, 5.0, 10.0, 10.0, 10.0],
+            // The value of the next lower x, the end values beyond them.
+            datamodel::GraphicalFunctionKind::Discrete => [0.0, 0.0, 10.0, 10.0, 10.0],
+        }
+    }
+
+    const KINDS: [datamodel::GraphicalFunctionKind; 3] = [
+        datamodel::GraphicalFunctionKind::Continuous,
+        datamodel::GraphicalFunctionKind::Extrapolate,
+        datamodel::GraphicalFunctionKind::Discrete,
+    ];
+
+    #[test]
+    fn a_tables_kind_decides_how_a_plain_application_reads_it() {
+        for kind in KINDS {
+            let project = kind_project(kind);
+            let expected = plain_reading(kind);
+            for name in ["applied", "with_lookup"] {
+                assert_eq!(
+                    project.vm_result(name),
+                    expected,
+                    "{name} over a {kind:?} table"
+                );
+            }
+        }
+    }
+
+    /// `LOOKUP_FORWARD` and `LOOKUP_BACKWARD` name their own reading, and
+    /// keep it whatever kind the table is: Vensim documents each as
+    /// controlling "the interpolation mode of a lookup table"
+    /// (vensim.com/documentation/fn_lookup_forward.html, fn_lookup_backward.html).
+    #[test]
+    fn a_lookup_that_names_its_reading_keeps_it_whatever_the_tables_kind() {
+        for kind in KINDS {
+            let project = kind_project(kind);
+            assert_eq!(
+                project.vm_result("stepped_up"),
+                [0.0, 10.0, 10.0, 10.0, 10.0],
+                "LOOKUP_FORWARD over a {kind:?} table"
+            );
+            assert_eq!(
+                project.vm_result("stepped_back"),
+                [0.0, 0.0, 10.0, 10.0, 10.0],
+                "LOOKUP_BACKWARD over a {kind:?} table"
+            );
+        }
+    }
+
+    /// XMILE 1.0 section 4.1.3: "the x-values MUST be in ascending order". A
+    /// table whose x decreases anywhere is refused, with the two values, and
+    /// is never reordered: the points the compiler reads are the points the
+    /// datamodel holds.
+    #[test]
+    fn x_values_out_of_ascending_order_are_a_bad_table() {
+        let continuous = datamodel::GraphicalFunctionKind::Continuous;
+        let refused = |gf: &datamodel::GraphicalFunction| match parse_table(Some(gf)) {
+            Err(err) => {
+                assert_eq!(err.code, ErrorCode::BadTable);
+                err.details.expect("the refusal says why")
+            }
+            Ok(_) => panic!("a table with decreasing x is refused"),
+        };
+
+        // XMILE's own example of invalid points, with a y for each.
+        let spec_example = through(
+            continuous,
+            &[(2.0, 0.05), (1.0, 0.1), (3.0, 0.2), (0.0, 0.25)],
+        );
+        assert_eq!(
+            refused(&spec_example),
+            "the graphical function's x values are not in ascending order: 1 comes after 2"
+        );
+        // Wholly descending, and one point out of place at the end.
+        refused(&through(
+            continuous,
+            &[(2.0, -3.0), (1.0, -7.0), (0.0, -1.0)],
+        ));
+        assert_eq!(
+            refused(&through(continuous, &[(0.0, 0.0), (2.0, 1.0), (1.5, 2.0)])),
+            "the graphical function's x values are not in ascending order: 1.5 comes after 2"
+        );
+        // An x scale that runs backward would spread the implied x points
+        // downward; the refusal names the scale the file holds, not them.
+        let backward_scale = datamodel::GraphicalFunction {
+            x_scale: datamodel::GraphicalFunctionScale { min: 4.0, max: 0.0 },
+            ..implied(&[1.0, 2.0, 3.0])
+        };
+        assert_eq!(
+            refused(&backward_scale),
+            "the graphical function's x scale bounds are reversed: its minimum 4 is above its maximum 0"
+        );
+        // A lone point sits at the scale's start whichever way it runs.
+        let lone = datamodel::GraphicalFunction {
+            x_scale: datamodel::GraphicalFunctionScale { min: 4.0, max: 0.0 },
+            ..implied(&[7.0])
+        };
+        assert_eq!(parse_table(Some(&lone)).unwrap().unwrap().x, [4.0]);
+    }
+
+    /// An infinite x has no segment to interpolate along: two end points that
+    /// share x = infinity extrapolate to `inf - inf`, a NaN. It is refused as
+    /// a NaN x is, whether the points list it or the scale spreads it.
+    #[test]
+    fn an_infinite_x_is_a_bad_table() {
+        let continuous = datamodel::GraphicalFunctionKind::Continuous;
+        let refused = |gf: &datamodel::GraphicalFunction| match parse_table(Some(gf)) {
+            Err(err) => {
+                assert_eq!(err.code, ErrorCode::BadTable);
+                err.details.expect("the refusal says why")
+            }
+            Ok(_) => panic!("an infinite x is refused: {:?}", gf.x_points),
+        };
+        let listed = [
+            through(continuous, &[(f64::NEG_INFINITY, 1.0), (0.0, 2.0)]),
+            through(continuous, &[(0.0, 1.0), (f64::INFINITY, 2.0)]),
+            through(
+                continuous,
+                &[(0.0, 1.0), (f64::INFINITY, 2.0), (f64::INFINITY, 3.0)],
+            ),
+        ];
+        for gf in &listed {
+            assert_eq!(
+                refused(gf),
+                "the graphical function has an x value that is infinite"
+            );
+        }
+        for (min, max) in [(0.0, f64::INFINITY), (f64::NEG_INFINITY, 4.0)] {
+            let spread = datamodel::GraphicalFunction {
+                x_scale: datamodel::GraphicalFunctionScale { min, max },
+                ..implied(&[1.0, 2.0, 3.0])
+            };
+            assert_eq!(
+                refused(&spread),
+                format!(
+                    "the graphical function's x scale has a bound that is not a finite number: \
+                     {min} to {max}"
+                )
+            );
+        }
+    }
+
+    /// A per-element table's refusal names the element, since the variable
+    /// holds one table per element and the diagnostic names the variable.
+    #[test]
+    fn a_per_element_bad_table_names_its_element() {
+        let dimensions = vec![datamodel::Dimension::named(
+            "place".to_string(),
+            vec!["north".to_string(), "south".to_string()],
+        )];
+        let continuous = datamodel::GraphicalFunctionKind::Continuous;
+        let equation = datamodel::Equation::Arrayed(
+            vec!["place".to_string()],
+            vec![
+                (
+                    "north".to_string(),
+                    String::new(),
+                    None,
+                    Some(through(continuous, &[(0.0, 1.0), (1.0, 2.0)])),
+                ),
+                (
+                    "south".to_string(),
+                    String::new(),
+                    None,
+                    Some(through(continuous, &[(1.0, 1.0), (0.0, 2.0)])),
+                ),
+            ],
+            None,
+            false,
+        );
+        let (tables, errors) = build_tables(None, &equation, &DimensionsContext::from(&dimensions));
+        assert_eq!(tables.len(), 2);
+        let reasons: Vec<(ErrorCode, Option<String>)> = errors
+            .into_iter()
+            .map(|err| (err.code, err.details))
+            .collect();
+        assert_eq!(
+            reasons,
+            [(
+                ErrorCode::BadTable,
+                Some(
+                    "in element 'south', the graphical function's x values are not in \
+                     ascending order: 0 comes after 1"
+                        .to_string()
+                )
+            )]
+        );
+    }
+
+    /// Neighbouring points that share an x are a vertical step, in order as
+    /// they stand; the table holds them as listed.
+    #[test]
+    fn points_that_share_an_x_are_in_order_and_kept_as_listed() {
+        let stepped = through(
+            datamodel::GraphicalFunctionKind::Continuous,
+            &[(0.0, 1.0), (1.0, 2.0), (1.0, 5.0), (2.0, 6.0)],
+        );
+        let table = parse_table(Some(&stepped)).unwrap().unwrap();
+        assert_eq!(
+            (table.x, table.y),
+            (vec![0.0, 1.0, 1.0, 2.0], vec![1.0, 2.0, 5.0, 6.0])
+        );
+    }
+
+    #[test]
+    fn a_model_with_decreasing_x_reports_a_bad_table_on_its_variable() {
+        let project = TestProject::new("decreasing_x")
+            .aux("input", "TIME", None)
+            .aux_with_gf(
+                "curve",
+                "input",
+                through(
+                    datamodel::GraphicalFunctionKind::Continuous,
+                    &[(2.0, -3.0), (1.0, -7.0), (0.0, -1.0)],
+                ),
+            );
+        assert!(
+            project
+                .error_diagnostics()
+                .contains(&("main.curve".to_string(), ErrorCode::BadTable)),
+            "{:?}",
+            project.error_diagnostics()
+        );
     }
 
     #[test]
@@ -2431,6 +2778,7 @@ fn test_tables() {
             tables: vec![Table {
                 x: vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0],
                 y: vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0],
+                kind: datamodel::GraphicalFunctionKind::Continuous,
                 x_range: datamodel::GraphicalFunctionScale {
                     min: 0.0,
                     max: 45.0,

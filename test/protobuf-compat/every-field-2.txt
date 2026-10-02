@@ -1,0 +1,1804 @@
+Project {
+    name: "every field",
+    sim_specs: SimSpecs {
+        start: 1.0,
+        stop: 12.5,
+        dt: Reciprocal(
+            4.0,
+        ),
+        save_step: Some(
+            Dt(
+                0.5,
+            ),
+        ),
+        sim_method: RungeKutta4,
+        time_units: Some(
+            "Months",
+        ),
+    },
+    dimensions: [
+        Dimension {
+            name: "I_xQoL",
+            elements: Named(
+                [
+                    "e",
+                    "S_B",
+                    "g8hY",
+                ],
+            ),
+            mappings: [
+                DimensionMapping {
+                    target: "r sYZ",
+                    element_map: [
+                        (
+                            "O",
+                            "Y",
+                        ),
+                        (
+                            "Kt",
+                            "o",
+                        ),
+                    ],
+                },
+            ],
+            parent: Some(
+                "y_4cOI ",
+            ),
+        },
+        Dimension {
+            name: "o_0k",
+            elements: Indexed(
+                1,
+            ),
+            mappings: [
+                DimensionMapping {
+                    target: "aXB",
+                    element_map: [],
+                },
+            ],
+            parent: None,
+        },
+    ],
+    units: [
+        Unit {
+            name: "yi_PS_",
+            equation: None,
+            disabled: true,
+            aliases: [
+                "Q n",
+            ],
+        },
+        Unit {
+            name: "F3Sd1h",
+            equation: Some(
+                "b4O$%ZJ~&S",
+            ),
+            disabled: false,
+            aliases: [
+                "u02",
+                "h_",
+            ],
+        },
+    ],
+    models: [
+        Model {
+            name: "Aux",
+            sim_specs: None,
+            variables: [
+                Flow(
+                    Flow {
+                        ident: "En",
+                        equation: Arrayed(
+                            [
+                                "W_8_u",
+                                "L nL",
+                            ],
+                            [
+                                (
+                                    "d_7_ao",
+                                    "",
+                                    Some(
+                                        "+\"K(#{V|",
+                                    ),
+                                    Some(
+                                        GraphicalFunction {
+                                            kind: Discrete,
+                                            x_points: None,
+                                            y_points: [
+                                                -0.0,
+                                            ],
+                                            x_scale: GraphicalFunctionScale {
+                                                min: NaN,
+                                                max: 5e-324,
+                                            },
+                                            y_scale: GraphicalFunctionScale {
+                                                min: -12.5,
+                                                max: -20.0,
+                                            },
+                                        },
+                                    ),
+                                ),
+                                (
+                                    "ps",
+                                    "?E$s",
+                                    Some(
+                                        "#w)x=P",
+                                    ),
+                                    None,
+                                ),
+                            ],
+                            None,
+                            true,
+                        ),
+                        documentation: "M`y&",
+                        units: Some(
+                            "O^ KnT\\#",
+                        ),
+                        gf: Some(
+                            GraphicalFunction {
+                                kind: Extrapolate,
+                                x_points: None,
+                                y_points: [
+                                    inf,
+                                    10.0,
+                                ],
+                                x_scale: GraphicalFunctionScale {
+                                    min: 0.5,
+                                    max: 14.5,
+                                },
+                                y_scale: GraphicalFunctionScale {
+                                    min: -19.5,
+                                    max: 5e-324,
+                                },
+                            },
+                        ),
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: true,
+                            visibility: Private,
+                            data_source: Some(
+                                DataSource {
+                                    kind: Data,
+                                    file: "^V=52/[!",
+                                    tab_or_delimiter: "B",
+                                    row_or_col: "H",
+                                    cell: "?A",
+                                },
+                            ),
+                            conveyor: Some(
+                                Conveyor {
+                                    transit_time: "/GWdx",
+                                    capacity: Some(
+                                        "_:B$eEw",
+                                    ),
+                                    inflow_limit: None,
+                                    sample: None,
+                                    arrest: Some(
+                                        "://+b",
+                                    ),
+                                    discrete: true,
+                                    batch_integrity: true,
+                                    one_at_a_time: false,
+                                    exponential_leak: true,
+                                    ignore_earlier_zone_losses: false,
+                                },
+                            ),
+                            leakage: Some(
+                                Leakage {
+                                    fraction: None,
+                                    integers: true,
+                                    zone_start: None,
+                                    zone_end: None,
+                                },
+                            ),
+                            spreadflow: Some(
+                                Source,
+                            ),
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "U_e",
+                        equation: Scalar(
+                            "",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [],
+                        outflows: [
+                            "VLF_79",
+                        ],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Public,
+                            data_source: None,
+                            conveyor: Some(
+                                Conveyor {
+                                    transit_time: "\"HnuC",
+                                    capacity: None,
+                                    inflow_limit: Some(
+                                        "o\"<|\"m/",
+                                    ),
+                                    sample: Some(
+                                        "",
+                                    ),
+                                    arrest: None,
+                                    discrete: true,
+                                    batch_integrity: false,
+                                    one_at_a_time: true,
+                                    exponential_leak: true,
+                                    ignore_earlier_zone_losses: false,
+                                },
+                            ),
+                            leakage: Some(
+                                Leakage {
+                                    fraction: Some(
+                                        "2\\s*{!/q`",
+                                    ),
+                                    integers: true,
+                                    zone_start: None,
+                                    zone_end: Some(
+                                        "",
+                                    ),
+                                },
+                            ),
+                            spreadflow: Some(
+                                Dist(
+                                    "%",
+                                ),
+                            ),
+                            queue: None,
+                            overflow: true,
+                        },
+                    },
+                ),
+            ],
+            views: [],
+            loop_metadata: [
+                LoopMetadata {
+                    uids: [
+                        0,
+                        18,
+                    ],
+                    deleted: false,
+                    name: "M`9r<rq?r",
+                    description: "",
+                },
+            ],
+            groups: [],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [],
+                    primary_output: "EJi3 4",
+                    additional_outputs: [
+                        "lFuDAS",
+                    ],
+                },
+            ),
+        },
+        Model {
+            name: "jHI__A9",
+            sim_specs: Some(
+                SimSpecs {
+                    start: 4.5,
+                    stop: inf,
+                    dt: Dt(
+                        -0.0,
+                    ),
+                    save_step: Some(
+                        Reciprocal(
+                            0.0,
+                        ),
+                    ),
+                    sim_method: RungeKutta2,
+                    time_units: Some(
+                        "F/9&@=Q",
+                    ),
+                },
+            ),
+            variables: [
+                Stock(
+                    Stock {
+                        ident: "K",
+                        equation: ApplyToAll(
+                            [],
+                            ".{G=A",
+                        ),
+                        documentation: "/n3K>p9Q",
+                        units: Some(
+                            "$%",
+                        ),
+                        inflows: [],
+                        outflows: [],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: true,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: Some(
+                                Conveyor {
+                                    transit_time: "$d",
+                                    capacity: None,
+                                    inflow_limit: None,
+                                    sample: None,
+                                    arrest: Some(
+                                        "g?",
+                                    ),
+                                    discrete: false,
+                                    batch_integrity: true,
+                                    one_at_a_time: false,
+                                    exponential_leak: true,
+                                    ignore_earlier_zone_losses: true,
+                                },
+                            ),
+                            leakage: Some(
+                                Leakage {
+                                    fraction: Some(
+                                        "",
+                                    ),
+                                    integers: false,
+                                    zone_start: None,
+                                    zone_end: None,
+                                },
+                            ),
+                            spreadflow: None,
+                            queue: None,
+                            overflow: true,
+                        },
+                    },
+                ),
+            ],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: None,
+                        elements: [
+                            Stock(
+                                Stock {
+                                    name: "swER",
+                                    uid: 0,
+                                    x: NaN,
+                                    y: -inf,
+                                    label_side: Right,
+                                    compat: Some(
+                                        ViewElementCompat {
+                                            width: 4.5,
+                                            height: -8.5,
+                                            shape: 13,
+                                            bits: 188,
+                                            name_field: Some(
+                                                "}3d",
+                                            ),
+                                            tail: Some(
+                                                "",
+                                            ),
+                                        },
+                                    ),
+                                },
+                            ),
+                            Group(
+                                Group {
+                                    uid: 0,
+                                    name: "0t$z-9t'",
+                                    x: inf,
+                                    y: 1.0,
+                                    width: 5e-324,
+                                    height: 0.0,
+                                    is_mdl_view_marker: true,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "F mg1b",
+                                    uid: 0,
+                                    x: 5e-324,
+                                    y: -14.0,
+                                    label_side: Bottom,
+                                    compat: None,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 15.0,
+                            y: 9.0,
+                            width: inf,
+                            height: -0.0,
+                        },
+                        zoom: -inf,
+                        use_lettered_polarity: true,
+                        font: None,
+                        sketch_compat: Some(
+                            StockFlowSketchCompat {
+                                segments: [],
+                                links: [],
+                            },
+                        ),
+                    },
+                ),
+            ],
+            loop_metadata: [
+                LoopMetadata {
+                    uids: [],
+                    deleted: true,
+                    name: "WhPR%Y",
+                    description: "?@%!Tq=",
+                },
+            ],
+            groups: [],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [
+                        "T07_2a_",
+                        "b 9 __",
+                    ],
+                    primary_output: "B7ZM",
+                    additional_outputs: [],
+                },
+            ),
+        },
+        Model {
+            name: "sBc z",
+            sim_specs: Some(
+                SimSpecs {
+                    start: NaN,
+                    stop: 0.0,
+                    dt: Reciprocal(
+                        -inf,
+                    ),
+                    save_step: Some(
+                        Dt(
+                            0.0,
+                        ),
+                    ),
+                    sim_method: Euler,
+                    time_units: None,
+                },
+            ),
+            variables: [
+                Flow(
+                    Flow {
+                        ident: "E",
+                        equation: Scalar(
+                            "P",
+                        ),
+                        documentation: "`uG'",
+                        units: Some(
+                            "&%@$u$fi",
+                        ),
+                        gf: None,
+                        ai_state: None,
+                        uid: Some(
+                            29,
+                        ),
+                        compat: Compat {
+                            active_initial: Some(
+                                "",
+                            ),
+                            non_negative: true,
+                            can_be_module_input: false,
+                            visibility: Public,
+                            data_source: Some(
+                                DataSource {
+                                    kind: Data,
+                                    file: "",
+                                    tab_or_delimiter: "U2's8(5i'",
+                                    row_or_col: "=m*`fx",
+                                    cell: "D-G:E=",
+                                },
+                            ),
+                            conveyor: Some(
+                                Conveyor {
+                                    transit_time: "",
+                                    capacity: Some(
+                                        "z",
+                                    ),
+                                    inflow_limit: Some(
+                                        "@=Q.r",
+                                    ),
+                                    sample: None,
+                                    arrest: Some(
+                                        "",
+                                    ),
+                                    discrete: true,
+                                    batch_integrity: false,
+                                    one_at_a_time: true,
+                                    exponential_leak: true,
+                                    ignore_earlier_zone_losses: false,
+                                },
+                            ),
+                            leakage: Some(
+                                Leakage {
+                                    fraction: None,
+                                    integers: false,
+                                    zone_start: Some(
+                                        ")`oT%&fy/",
+                                    ),
+                                    zone_end: Some(
+                                        "",
+                                    ),
+                                },
+                            ),
+                            spreadflow: Some(
+                                Beginning,
+                            ),
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: Some(
+                            "",
+                        ),
+                        elements: [
+                            Group(
+                                Group {
+                                    uid: -2,
+                                    name: "I$?'\"",
+                                    x: -inf,
+                                    y: NaN,
+                                    width: 0.0,
+                                    height: -0.0,
+                                    is_mdl_view_marker: true,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 19.0,
+                            y: -16.5,
+                            width: NaN,
+                            height: 0.0,
+                        },
+                        zoom: -5.0,
+                        use_lettered_polarity: true,
+                        font: Some(
+                            "",
+                        ),
+                        sketch_compat: Some(
+                            StockFlowSketchCompat {
+                                segments: [
+                                    SketchSegmentCompat {
+                                        x_offset: 14.0,
+                                        y_offset: 3.0,
+                                    },
+                                ],
+                                links: [],
+                            },
+                        ),
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+        Model {
+            name: "e",
+            sim_specs: None,
+            variables: [
+                Flow(
+                    Flow {
+                        ident: "o",
+                        equation: Arrayed(
+                            [],
+                            [
+                                (
+                                    "h_8q_gs,b__",
+                                    "?c&Gm{",
+                                    None,
+                                    Some(
+                                        GraphicalFunction {
+                                            kind: Extrapolate,
+                                            x_points: Some(
+                                                [
+                                                    18.5,
+                                                ],
+                                            ),
+                                            y_points: [
+                                                -15.0,
+                                                inf,
+                                                19.5,
+                                            ],
+                                            x_scale: GraphicalFunctionScale {
+                                                min: -4.0,
+                                                max: -5.5,
+                                            },
+                                            y_scale: GraphicalFunctionScale {
+                                                min: -inf,
+                                                max: inf,
+                                            },
+                                        },
+                                    ),
+                                ),
+                            ],
+                            None,
+                            true,
+                        ),
+                        documentation: "r%&./7r)*e",
+                        units: None,
+                        gf: Some(
+                            GraphicalFunction {
+                                kind: Extrapolate,
+                                x_points: None,
+                                y_points: [
+                                    0.0,
+                                    12.5,
+                                    -1.0,
+                                ],
+                                x_scale: GraphicalFunctionScale {
+                                    min: NaN,
+                                    max: 18.0,
+                                },
+                                y_scale: GraphicalFunctionScale {
+                                    min: -10.0,
+                                    max: 5e-324,
+                                },
+                            },
+                        ),
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: Some(
+                                "",
+                            ),
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: Some(
+                                Leakage {
+                                    fraction: None,
+                                    integers: true,
+                                    zone_start: None,
+                                    zone_end: Some(
+                                        "P/9%.",
+                                    ),
+                                },
+                            ),
+                            spreadflow: Some(
+                                Dest,
+                            ),
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+        Model {
+            name: "H1Rshz",
+            sim_specs: Some(
+                SimSpecs {
+                    start: NaN,
+                    stop: -inf,
+                    dt: Dt(
+                        -inf,
+                    ),
+                    save_step: None,
+                    sim_method: RungeKutta4,
+                    time_units: Some(
+                        "]%a",
+                    ),
+                },
+            ),
+            variables: [
+                Stock(
+                    Stock {
+                        ident: "Agh",
+                        equation: ApplyToAll(
+                            [],
+                            "",
+                        ),
+                        documentation: "e<&+//y",
+                        units: None,
+                        inflows: [
+                            "X_S7o",
+                        ],
+                        outflows: [],
+                        ai_state: None,
+                        uid: Some(
+                            36,
+                        ),
+                        compat: Compat {
+                            active_initial: Some(
+                                "7p`hwNrF}d",
+                            ),
+                            non_negative: true,
+                            can_be_module_input: true,
+                            visibility: Public,
+                            data_source: Some(
+                                DataSource {
+                                    kind: Data,
+                                    file: "",
+                                    tab_or_delimiter: "Y{<Q+e{",
+                                    row_or_col: "",
+                                    cell: "<m*\\)_",
+                                },
+                            ),
+                            conveyor: Some(
+                                Conveyor {
+                                    transit_time: "",
+                                    capacity: Some(
+                                        "b.:8g<<}6",
+                                    ),
+                                    inflow_limit: None,
+                                    sample: Some(
+                                        ". 1%1",
+                                    ),
+                                    arrest: None,
+                                    discrete: false,
+                                    batch_integrity: false,
+                                    one_at_a_time: false,
+                                    exponential_leak: true,
+                                    ignore_earlier_zone_losses: true,
+                                },
+                            ),
+                            leakage: Some(
+                                Leakage {
+                                    fraction: None,
+                                    integers: true,
+                                    zone_start: None,
+                                    zone_end: None,
+                                },
+                            ),
+                            spreadflow: None,
+                            queue: Some(
+                                Queue,
+                            ),
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: Some(
+                            "cx_{'{M/1#",
+                        ),
+                        elements: [
+                            Module(
+                                Module {
+                                    name: "BxZ ",
+                                    uid: 10,
+                                    x: NaN,
+                                    y: -16.5,
+                                    label_side: Bottom,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 7.0,
+                            y: -20.0,
+                            width: NaN,
+                            height: 2.5,
+                        },
+                        zoom: 1.0,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: Some(
+                            StockFlowSketchCompat {
+                                segments: [
+                                    SketchSegmentCompat {
+                                        x_offset: -17.5,
+                                        y_offset: inf,
+                                    },
+                                    SketchSegmentCompat {
+                                        x_offset: 5e-324,
+                                        y_offset: 9.0,
+                                    },
+                                ],
+                                links: [
+                                    LinkSketchCompat {
+                                        uid: 2,
+                                        field4: 2,
+                                        field10: 21,
+                                        control_point: None,
+                                    },
+                                ],
+                            },
+                        ),
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [
+                ModelGroup {
+                    name: "?@",
+                    doc: Some(
+                        "wZ&:?\"y>o",
+                    ),
+                    parent: None,
+                    members: [
+                        "yr",
+                        "v3 _FB_",
+                    ],
+                    run_enabled: true,
+                },
+            ],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [
+                        "yF Izw",
+                        "f  OsRm",
+                    ],
+                    primary_output: "D65v0",
+                    additional_outputs: [
+                        "ho",
+                        "x _",
+                    ],
+                },
+            ),
+        },
+        Model {
+            name: "G",
+            sim_specs: None,
+            variables: [],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: Some(
+                            "sfy",
+                        ),
+                        elements: [
+                            Alias(
+                                Alias {
+                                    uid: 11,
+                                    alias_of_uid: 0,
+                                    x: -0.0,
+                                    y: -13.0,
+                                    label_side: Center,
+                                    compat: Some(
+                                        ViewElementCompat {
+                                            width: 5e-324,
+                                            height: -7.5,
+                                            shape: 10,
+                                            bits: 236,
+                                            name_field: None,
+                                            tail: Some(
+                                                "",
+                                            ),
+                                        },
+                                    ),
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: -8.0,
+                            y: -17.5,
+                            width: -18.5,
+                            height: -16.5,
+                        },
+                        zoom: 3.5,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [
+                        "Nv9_r",
+                    ],
+                    primary_output: "J_ MA",
+                    additional_outputs: [],
+                },
+            ),
+        },
+        Model {
+            name: "nF",
+            sim_specs: Some(
+                SimSpecs {
+                    start: -0.0,
+                    stop: 17.5,
+                    dt: Dt(
+                        -20.0,
+                    ),
+                    save_step: None,
+                    sim_method: RungeKutta4,
+                    time_units: None,
+                },
+            ),
+            variables: [
+                Aux(
+                    Aux {
+                        ident: "v__rDl",
+                        equation: Arrayed(
+                            [
+                                "wmO_1x",
+                            ],
+                            [
+                                (
+                                    "b__2,n_l4_s5",
+                                    ":#%rI",
+                                    None,
+                                    None,
+                                ),
+                            ],
+                            Some(
+                                "A",
+                            ),
+                            false,
+                        ),
+                        documentation: "(?L$K",
+                        units: None,
+                        gf: Some(
+                            GraphicalFunction {
+                                kind: Extrapolate,
+                                x_points: None,
+                                y_points: [
+                                    inf,
+                                    -15.0,
+                                ],
+                                x_scale: GraphicalFunctionScale {
+                                    min: -0.0,
+                                    max: -7.0,
+                                },
+                                y_scale: GraphicalFunctionScale {
+                                    min: inf,
+                                    max: -inf,
+                                },
+                            },
+                        ),
+                        ai_state: None,
+                        uid: Some(
+                            4,
+                        ),
+                        compat: Compat {
+                            active_initial: Some(
+                                "{><c#`:^``",
+                            ),
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Public,
+                            data_source: None,
+                            conveyor: Some(
+                                Conveyor {
+                                    transit_time: "`JgY5f",
+                                    capacity: Some(
+                                        "@`;?^?$",
+                                    ),
+                                    inflow_limit: Some(
+                                        "Xlv_]hQo",
+                                    ),
+                                    sample: Some(
+                                        "",
+                                    ),
+                                    arrest: None,
+                                    discrete: false,
+                                    batch_integrity: false,
+                                    one_at_a_time: true,
+                                    exponential_leak: true,
+                                    ignore_earlier_zone_losses: true,
+                                },
+                            ),
+                            leakage: None,
+                            spreadflow: Some(
+                                Beginning,
+                            ),
+                            queue: Some(
+                                Queue,
+                            ),
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: None,
+                        elements: [
+                            Link(
+                                Link {
+                                    uid: 0,
+                                    from_uid: 30,
+                                    to_uid: 0,
+                                    shape: Arc(
+                                        -0.0,
+                                    ),
+                                    polarity: Some(
+                                        Positive,
+                                    ),
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 6.5,
+                            y: -inf,
+                            width: 11.0,
+                            height: 3.0,
+                        },
+                        zoom: -15.5,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [
+                        "XMi5T_4",
+                    ],
+                    primary_output: "AW_Ij0",
+                    additional_outputs: [
+                        "NrGH_",
+                    ],
+                },
+            ),
+        },
+        Model {
+            name: "F v",
+            sim_specs: None,
+            variables: [],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: Some(
+                            "%S|#U:Yf",
+                        ),
+                        elements: [
+                            Cloud(
+                                Cloud {
+                                    uid: 39,
+                                    flow_uid: 22,
+                                    x: -6.0,
+                                    y: -inf,
+                                    compat: Some(
+                                        ViewElementCompat {
+                                            width: -6.0,
+                                            height: -0.0,
+                                            shape: 30,
+                                            bits: 28,
+                                            name_field: Some(
+                                                ":PT%",
+                                            ),
+                                            tail: None,
+                                        },
+                                    ),
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: NaN,
+                            y: 16.0,
+                            width: -15.0,
+                            height: 5e-324,
+                        },
+                        zoom: -11.0,
+                        use_lettered_polarity: true,
+                        font: Some(
+                            "",
+                        ),
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+        Model {
+            name: "q__77",
+            sim_specs: None,
+            variables: [
+                Module(
+                    Module {
+                        ident: "gz",
+                        model_name: "u0tg_",
+                        documentation: "dfj%U.D",
+                        units: Some(
+                            "<j{'",
+                        ),
+                        references: [
+                            ModuleReference {
+                                src: ".pv",
+                                dst: "..",
+                            },
+                            ModuleReference {
+                                src: "imn.",
+                                dst: "...qys",
+                            },
+                        ],
+                        ai_state: None,
+                        uid: Some(
+                            2,
+                        ),
+                        compat: Compat {
+                            active_initial: Some(
+                                ")`R",
+                            ),
+                            non_negative: false,
+                            can_be_module_input: true,
+                            visibility: Public,
+                            data_source: Some(
+                                DataSource {
+                                    kind: Constants,
+                                    file: "n1",
+                                    tab_or_delimiter: "$[8G?h",
+                                    row_or_col: "5.<w}'(",
+                                    cell: "",
+                                },
+                            ),
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: Some(
+                                Queue,
+                            ),
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [
+                        "RU0f3_9",
+                    ],
+                    primary_output: "TvPC__ ",
+                    additional_outputs: [
+                        "a f59i",
+                        "ei U_w",
+                    ],
+                },
+            ),
+        },
+        Model {
+            name: "y",
+            sim_specs: None,
+            variables: [],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: Some(
+                            "5\"j.",
+                        ),
+                        elements: [
+                            Link(
+                                Link {
+                                    uid: 32,
+                                    from_uid: 6,
+                                    to_uid: 8,
+                                    shape: Straight,
+                                    polarity: None,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 7.5,
+                            y: -10.5,
+                            width: 13.5,
+                            height: 0.0,
+                        },
+                        zoom: -4.0,
+                        use_lettered_polarity: true,
+                        font: Some(
+                            "",
+                        ),
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [],
+                    primary_output: "q0",
+                    additional_outputs: [],
+                },
+            ),
+        },
+        Model {
+            name: "J_KCf5_",
+            sim_specs: Some(
+                SimSpecs {
+                    start: -0.0,
+                    stop: 5e-324,
+                    dt: Reciprocal(
+                        inf,
+                    ),
+                    save_step: None,
+                    sim_method: RungeKutta4,
+                    time_units: None,
+                },
+            ),
+            variables: [],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: Some(
+                            "",
+                        ),
+                        elements: [
+                            Stock(
+                                Stock {
+                                    name: "N__ _BL",
+                                    uid: 12,
+                                    x: 0.0,
+                                    y: -inf,
+                                    label_side: Top,
+                                    compat: Some(
+                                        ViewElementCompat {
+                                            width: 5e-324,
+                                            height: 0.0,
+                                            shape: 30,
+                                            bits: 50,
+                                            name_field: None,
+                                            tail: None,
+                                        },
+                                    ),
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: -9.5,
+                            y: 2.5,
+                            width: -18.5,
+                            height: -9.0,
+                        },
+                        zoom: -inf,
+                        use_lettered_polarity: true,
+                        font: Some(
+                            "",
+                        ),
+                        sketch_compat: Some(
+                            StockFlowSketchCompat {
+                                segments: [
+                                    SketchSegmentCompat {
+                                        x_offset: NaN,
+                                        y_offset: 5.0,
+                                    },
+                                    SketchSegmentCompat {
+                                        x_offset: -11.0,
+                                        y_offset: -13.5,
+                                    },
+                                ],
+                                links: [],
+                            },
+                        ),
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [],
+                    primary_output: "p roHJf",
+                    additional_outputs: [],
+                },
+            ),
+        },
+        Model {
+            name: "N qxU0y",
+            sim_specs: Some(
+                SimSpecs {
+                    start: -0.0,
+                    stop: 0.0,
+                    dt: Reciprocal(
+                        6.0,
+                    ),
+                    save_step: Some(
+                        Dt(
+                            2.0,
+                        ),
+                    ),
+                    sim_method: Euler,
+                    time_units: Some(
+                        "<'J",
+                    ),
+                },
+            ),
+            variables: [],
+            views: [],
+            loop_metadata: [],
+            groups: [
+                ModelGroup {
+                    name: "N76ye&.",
+                    doc: None,
+                    parent: Some(
+                        ",amN\"",
+                    ),
+                    members: [],
+                    run_enabled: true,
+                },
+            ],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [
+                        "W",
+                        "ke6K_sC",
+                    ],
+                    primary_output: "D0",
+                    additional_outputs: [],
+                },
+            ),
+        },
+        Model {
+            name: "JgXAdf",
+            sim_specs: None,
+            variables: [
+                Aux(
+                    Aux {
+                        ident: "X2  3",
+                        equation: ApplyToAll(
+                            [
+                                "U",
+                                "p3",
+                            ],
+                            "",
+                        ),
+                        documentation: "Py",
+                        units: Some(
+                            "'",
+                        ),
+                        gf: None,
+                        ai_state: None,
+                        uid: Some(
+                            13,
+                        ),
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: true,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: Some(
+                                Conveyor {
+                                    transit_time: "",
+                                    capacity: None,
+                                    inflow_limit: Some(
+                                        "~<%/L~a",
+                                    ),
+                                    sample: None,
+                                    arrest: Some(
+                                        "=yS&j",
+                                    ),
+                                    discrete: true,
+                                    batch_integrity: true,
+                                    one_at_a_time: false,
+                                    exponential_leak: false,
+                                    ignore_earlier_zone_losses: false,
+                                },
+                            ),
+                            leakage: Some(
+                                Leakage {
+                                    fraction: Some(
+                                        "(a5`D:",
+                                    ),
+                                    integers: false,
+                                    zone_start: Some(
+                                        "'7@|}5",
+                                    ),
+                                    zone_end: Some(
+                                        "K\"g",
+                                    ),
+                                },
+                            ),
+                            spreadflow: None,
+                            queue: Some(
+                                Queue,
+                            ),
+                            overflow: true,
+                        },
+                    },
+                ),
+            ],
+            views: [],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+        Model {
+            name: "xJrg",
+            sim_specs: None,
+            variables: [],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: None,
+                        elements: [
+                            Flow(
+                                Flow {
+                                    name: "A0",
+                                    uid: 2,
+                                    x: inf,
+                                    y: 5e-324,
+                                    label_side: Bottom,
+                                    points: [
+                                        FlowPoint {
+                                            x: NaN,
+                                            y: 7.0,
+                                            attached_to_uid: None,
+                                        },
+                                        FlowPoint {
+                                            x: -0.0,
+                                            y: -4.5,
+                                            attached_to_uid: Some(
+                                                20,
+                                            ),
+                                        },
+                                        FlowPoint {
+                                            x: 2.5,
+                                            y: 0.0,
+                                            attached_to_uid: Some(
+                                                16,
+                                            ),
+                                        },
+                                    ],
+                                    compat: Some(
+                                        ViewElementCompat {
+                                            width: 5e-324,
+                                            height: 5e-324,
+                                            shape: 29,
+                                            bits: 49,
+                                            name_field: Some(
+                                                "CS6S/|<<=G",
+                                            ),
+                                            tail: None,
+                                        },
+                                    ),
+                                    label_compat: None,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 6.5,
+                            y: -1.0,
+                            width: 11.5,
+                            height: -inf,
+                        },
+                        zoom: -inf,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+        Model {
+            name: "t1__ AK",
+            sim_specs: Some(
+                SimSpecs {
+                    start: -0.0,
+                    stop: -19.5,
+                    dt: Reciprocal(
+                        -0.0,
+                    ),
+                    save_step: None,
+                    sim_method: RungeKutta4,
+                    time_units: Some(
+                        "XP|k^] Q",
+                    ),
+                },
+            ),
+            variables: [],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: None,
+                        elements: [
+                            Aux(
+                                Aux {
+                                    name: "B ",
+                                    uid: 36,
+                                    x: 0.0,
+                                    y: -inf,
+                                    label_side: Left,
+                                    compat: Some(
+                                        ViewElementCompat {
+                                            width: 0.0,
+                                            height: -19.0,
+                                            shape: 2,
+                                            bits: 190,
+                                            name_field: Some(
+                                                "*`@%",
+                                            ),
+                                            tail: Some(
+                                                "",
+                                            ),
+                                        },
+                                    ),
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 2.0,
+                            y: -8.0,
+                            width: -15.5,
+                            height: 3.5,
+                        },
+                        zoom: 8.0,
+                        use_lettered_polarity: false,
+                        font: Some(
+                            "e@7",
+                        ),
+                        sketch_compat: Some(
+                            StockFlowSketchCompat {
+                                segments: [],
+                                links: [
+                                    LinkSketchCompat {
+                                        uid: 37,
+                                        field4: -2,
+                                        field10: 53,
+                                        control_point: None,
+                                    },
+                                    LinkSketchCompat {
+                                        uid: 38,
+                                        field4: 1,
+                                        field10: 10,
+                                        control_point: None,
+                                    },
+                                ],
+                            },
+                        ),
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+        Model {
+            name: "w_",
+            sim_specs: None,
+            variables: [],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: Some(
+                            "",
+                        ),
+                        elements: [
+                            Alias(
+                                Alias {
+                                    uid: 27,
+                                    alias_of_uid: -2,
+                                    x: 0.0,
+                                    y: 11.0,
+                                    label_side: Bottom,
+                                    compat: None,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 8.5,
+                            y: 11.0,
+                            width: inf,
+                            height: 18.5,
+                        },
+                        zoom: -16.5,
+                        use_lettered_polarity: true,
+                        font: Some(
+                            "v\"",
+                        ),
+                        sketch_compat: Some(
+                            StockFlowSketchCompat {
+                                segments: [],
+                                links: [
+                                    LinkSketchCompat {
+                                        uid: 22,
+                                        field4: -1,
+                                        field10: 14,
+                                        control_point: None,
+                                    },
+                                    LinkSketchCompat {
+                                        uid: 0,
+                                        field4: 1,
+                                        field10: 77,
+                                        control_point: Some(
+                                            (
+                                                -18,
+                                                -2,
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            },
+                        ),
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [
+                        "KcY i",
+                    ],
+                    primary_output: "pb_s ",
+                    additional_outputs: [],
+                },
+            ),
+        },
+        Model {
+            name: "M",
+            sim_specs: None,
+            variables: [],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: Some(
+                            ">4x",
+                        ),
+                        elements: [
+                            Flow(
+                                Flow {
+                                    name: "x4",
+                                    uid: 26,
+                                    x: -7.0,
+                                    y: inf,
+                                    label_side: Top,
+                                    points: [
+                                        FlowPoint {
+                                            x: NaN,
+                                            y: 0.0,
+                                            attached_to_uid: Some(
+                                                8,
+                                            ),
+                                        },
+                                    ],
+                                    compat: Some(
+                                        ViewElementCompat {
+                                            width: 6.0,
+                                            height: -4.0,
+                                            shape: 18,
+                                            bits: 278,
+                                            name_field: Some(
+                                                "e`b",
+                                            ),
+                                            tail: None,
+                                        },
+                                    ),
+                                    label_compat: Some(
+                                        ViewElementCompat {
+                                            width: 0.0,
+                                            height: 5e-324,
+                                            shape: 16,
+                                            bits: 74,
+                                            name_field: Some(
+                                                "2%e\\Z",
+                                            ),
+                                            tail: None,
+                                        },
+                                    ),
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: -0.0,
+                            y: 5e-324,
+                            width: -6.0,
+                            height: -18.5,
+                        },
+                        zoom: -8.0,
+                        use_lettered_polarity: true,
+                        font: None,
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: Some(
+                MacroSpec {
+                    parameters: [
+                        "PV 57Ql",
+                    ],
+                    primary_output: "G",
+                    additional_outputs: [
+                        "kpd",
+                    ],
+                },
+            ),
+        },
+        Model {
+            name: "ZB6 __",
+            sim_specs: Some(
+                SimSpecs {
+                    start: -1.0,
+                    stop: -inf,
+                    dt: Dt(
+                        -1.0,
+                    ),
+                    save_step: None,
+                    sim_method: RungeKutta4,
+                    time_units: Some(
+                        "G:Gk",
+                    ),
+                },
+            ),
+            variables: [],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: None,
+                        elements: [
+                            Link(
+                                Link {
+                                    uid: -1,
+                                    from_uid: 0,
+                                    to_uid: 30,
+                                    shape: MultiPoint(
+                                        [
+                                            FlowPoint {
+                                                x: -0.0,
+                                                y: 0.0,
+                                                attached_to_uid: Some(
+                                                    22,
+                                                ),
+                                            },
+                                        ],
+                                    ),
+                                    polarity: Some(
+                                        Negative,
+                                    ),
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: -2.0,
+                            y: 18.0,
+                            width: 5e-324,
+                            height: 0.0,
+                        },
+                        zoom: 1.0,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: Some(
+                            StockFlowSketchCompat {
+                                segments: [],
+                                links: [],
+                            },
+                        ),
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+    ],
+    source: Some(
+        Source {
+            extension: Vensim,
+            content: "the file as it was read",
+        },
+    ),
+    ai_information: None,
+}

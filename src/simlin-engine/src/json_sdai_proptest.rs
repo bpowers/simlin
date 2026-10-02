@@ -843,7 +843,7 @@ mod protobuf_roundtrip_tests {
         let pb_decoded = project_io::Project::decode_from_slice(&pb_bytes).unwrap();
 
         // protobuf -> datamodel -> sdai -> string
-        let dm_decoded: datamodel::Project = project_serde::deserialize(pb_decoded);
+        let dm_decoded: datamodel::Project = project_serde::deserialize(pb_decoded).unwrap();
         let sdai_decoded: SdaiModel = dm_decoded.into();
         let json_str = serde_json::to_string(&sdai_decoded).unwrap();
 

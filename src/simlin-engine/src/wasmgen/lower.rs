@@ -363,14 +363,18 @@ pub(crate) struct HelperFns {
     pub pow: u32,
     /// Graphical-function lookup helpers (`super::lookup`), each
     /// `(data_off: i32, count: i32, index: f64) -> f64`, reproducing the VM's
-    /// `lookup`/`lookup_forward`/`lookup_backward` (`vm.rs:3055-3186`). The
+    /// `lookup`/`lookup_forward`/`lookup_backward`/`lookup_extrapolate`. The
     /// `Lookup` opcode (`emit_bytecode`) reads `(data_off, count)` from the GF
-    /// directory and `call`s the mode's helper. [`lookup_interp`](Self::lookup_interp)
-    /// `call`s [`approx_eq`](Self::approx_eq) for its at-knot exact-hit test, so
-    /// `approx_eq` is pushed before it in [`build_helpers`].
+    /// directory and `call`s the mode's helper ([`HelperFns::lookup`]).
+    /// [`lookup_interp`](Self::lookup_interp) `call`s
+    /// [`approx_eq`](Self::approx_eq) for its at-knot exact-hit test, and
+    /// [`lookup_extrapolate`](Self::lookup_extrapolate) `call`s `lookup_interp`
+    /// inside the table, so each is pushed after the helper it calls in
+    /// [`build_helpers`].
     pub lookup_interp: u32,
     pub lookup_forward: u32,
     pub lookup_backward: u32,
+    pub lookup_extrapolate: u32,
     /// `stable_sort(pairs_ptr: i32, n: i32, ascending: i32) -> ()`
     /// (`super::vector`), an in-place stable comparison sort of `n` `(value: f64,
     /// idx: f64)` pairs by `value`, used by `VectorSortOrder`/`Rank`. A runtime
@@ -412,6 +416,19 @@ pub(crate) struct HelperFns {
     #[allow(dead_code)]
     pub alloc_curve: u32,
     pub allocate_available: u32,
+}
+
+impl HelperFns {
+    /// The helper a lookup opcode's `mode` calls: the one dispatch every
+    /// lowered lookup goes through, as `vm::lookup_in_mode` is the VM's.
+    pub(crate) fn lookup(&self, mode: LookupMode) -> u32 {
+        match mode {
+            LookupMode::Interpolate => self.lookup_interp,
+            LookupMode::Forward => self.lookup_forward,
+            LookupMode::Backward => self.lookup_backward,
+            LookupMode::Extrapolate => self.lookup_extrapolate,
+        }
+    }
 }
 
 /// One emitted helper function: its signature (so the assembler can register a
@@ -515,6 +532,10 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
     let lookup_interp = push_lookup(&mut functions, super::lookup::emit_lookup_interp(approx_eq));
     let lookup_forward = push_lookup(&mut functions, super::lookup::emit_lookup_forward());
     let lookup_backward = push_lookup(&mut functions, super::lookup::emit_lookup_backward());
+    let lookup_extrapolate = push_lookup(
+        &mut functions,
+        super::lookup::emit_lookup_extrapolate(lookup_interp),
+    );
 
     // `stable_sort(pairs_ptr: i32, n: i32, ascending: i32) -> ()` -- the runtime
     // insertion sort backing `VectorSortOrder`/`Rank` (`super::vector`).
@@ -585,6 +606,7 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
             lookup_interp,
             lookup_forward,
             lookup_backward,
+            lookup_extrapolate,
             stable_sort,
             erfc_approx,
             normal_cdf,
@@ -2521,11 +2543,7 @@ fn emit_lookup(
     f.instruction(&f64_const(f64::NAN));
     f.instruction(&Ins::Else);
 
-    let helper_idx = match mode {
-        LookupMode::Interpolate => ctx.helpers.lookup_interp,
-        LookupMode::Forward => ctx.helpers.lookup_forward,
-        LookupMode::Backward => ctx.helpers.lookup_backward,
-    };
+    let helper_idx = ctx.helpers.lookup(mode);
 
     // data_off = i32.load[dir_addr + 0]; count = i32.load[dir_addr + 4], where
     // dir_addr = gf_directory_base + (base_gf + (element_offset as i32)) * 8.

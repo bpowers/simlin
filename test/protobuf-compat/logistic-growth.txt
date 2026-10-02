@@ -1,0 +1,352 @@
+Project {
+    name: "logistic-growth",
+    sim_specs: SimSpecs {
+        start: 0.0,
+        stop: 100.0,
+        dt: Dt(
+            1.0,
+        ),
+        save_step: None,
+        sim_method: Euler,
+        time_units: None,
+    },
+    dimensions: [],
+    units: [],
+    models: [
+        Model {
+            name: "main",
+            sim_specs: None,
+            variables: [
+                Aux(
+                    Aux {
+                        ident: "carrying_capacity",
+                        equation: Scalar(
+                            "1000",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "fraction_of_carrying_capacity_used",
+                        equation: Scalar(
+                            "population/carrying_capacity",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "fractional_growth_rate",
+                        equation: Scalar(
+                            "maximum_growth_rate * (1 - fraction_of_carrying_capacity_used)",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "maximum_growth_rate",
+                        equation: Scalar(
+                            ".12",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "net_birth_rate",
+                        equation: Scalar(
+                            "fractional_growth_rate * population",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "population",
+                        equation: Scalar(
+                            "5",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [
+                            "net_birth_rate",
+                        ],
+                        outflows: [],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: None,
+                        elements: [
+                            Stock(
+                                Stock {
+                                    name: "Population",
+                                    uid: 1,
+                                    x: 602.4000244140625,
+                                    y: 259.8000183105469,
+                                    label_side: Top,
+                                    compat: None,
+                                },
+                            ),
+                            Flow(
+                                Flow {
+                                    name: "net birth rate",
+                                    uid: 2,
+                                    x: 518.2726610523725,
+                                    y: 258.60003662109375,
+                                    label_side: Top,
+                                    points: [
+                                        FlowPoint {
+                                            x: 456.79998779296875,
+                                            y: 258.60003662109375,
+                                            attached_to_uid: Some(
+                                                13,
+                                            ),
+                                        },
+                                        FlowPoint {
+                                            x: 579.9000244140625,
+                                            y: 258.60003662109375,
+                                            attached_to_uid: Some(
+                                                1,
+                                            ),
+                                        },
+                                    ],
+                                    compat: None,
+                                    label_compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "maximum\ngrowth rate",
+                                    uid: 3,
+                                    x: 463.2000244140625,
+                                    y: 400.44000244140625,
+                                    label_side: Left,
+                                    compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "carrying capacity",
+                                    uid: 4,
+                                    x: 651.8400146484374,
+                                    y: 399.23996582031253,
+                                    label_side: Right,
+                                    compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "fractional \ngrowth rate",
+                                    uid: 5,
+                                    x: 498.0,
+                                    y: 344.20001220703125,
+                                    label_side: Left,
+                                    compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "fraction of carrying\ncapacity used",
+                                    uid: 6,
+                                    x: 610.800048828125,
+                                    y: 344.6000061035156,
+                                    label_side: Right,
+                                    compat: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 7,
+                                    from_uid: 4,
+                                    to_uid: 6,
+                                    shape: Arc(
+                                        230.32515249820716,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 8,
+                                    from_uid: 1,
+                                    to_uid: 6,
+                                    shape: Arc(
+                                        49.638563408603886,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 9,
+                                    from_uid: 6,
+                                    to_uid: 5,
+                                    shape: Arc(
+                                        131.65921988573643,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 10,
+                                    from_uid: 3,
+                                    to_uid: 5,
+                                    shape: Arc(
+                                        300.9615515537398,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 11,
+                                    from_uid: 5,
+                                    to_uid: 2,
+                                    shape: Arc(
+                                        241.17801396704323,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 12,
+                                    from_uid: 1,
+                                    to_uid: 2,
+                                    shape: Arc(
+                                        102.57380061282629,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Cloud(
+                                Cloud {
+                                    uid: 13,
+                                    flow_uid: 2,
+                                    x: 456.79998779296875,
+                                    y: 258.60003662109375,
+                                    compat: None,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.0,
+                            height: 0.0,
+                        },
+                        zoom: 1.0,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+    ],
+    source: None,
+    ai_information: None,
+}

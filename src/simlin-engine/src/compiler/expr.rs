@@ -103,9 +103,21 @@ impl VarRef {
 #[derive(Clone, PartialEq)]
 pub struct Table {
     pub data: Vec<(f64, f64)>,
+    /// The graphical function's kind, which a plain application of the table
+    /// is read by (`Compiler::lookup_mode`).
+    pub kind: crate::datamodel::GraphicalFunctionKind,
 }
 
 impl Table {
+    /// A table that holds no points, which every lookup answers NaN for: the
+    /// placeholder for an element with no graphical function of its own.
+    pub(crate) fn empty() -> Self {
+        Self {
+            data: vec![],
+            kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+        }
+    }
+
     pub(crate) fn new(ident: &str, t: &crate::variable::Table) -> Result<Self> {
         if t.x.len() != t.y.len() {
             return sim_err!(
@@ -120,7 +132,7 @@ impl Table {
 
         let data: Vec<(f64, f64)> = t.x.iter().copied().zip(t.y.iter().copied()).collect();
 
-        Ok(Self { data })
+        Ok(Self { data, kind: t.kind })
     }
 }
 

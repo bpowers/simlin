@@ -149,6 +149,33 @@ describe('VariableDetails equation preview', () => {
   });
 });
 
+describe('VariableDetails equation errors', () => {
+  const unknownDependency = (details: string | undefined): EquationError => ({
+    start: 0,
+    end: 7,
+    code: ErrorCode.UnknownDependency,
+    details,
+  });
+
+  it("shows the engine's reason in place of the code description", () => {
+    const { container } = renderDetails(
+      makeAux('x', 'missing * 2', { errors: [unknownDependency("'missing' is not a variable of this model")] }),
+    );
+
+    const error = container.querySelector('.errorList');
+    expect(error).not.toBeNull();
+    expect(error!.textContent).toBe("error: 'missing' is not a variable of this model");
+  });
+
+  it('falls back to the code description when the error carries no reason', () => {
+    const { container } = renderDetails(makeAux('x', 'missing * 2', { errors: [unknownDependency(undefined)] }));
+
+    const error = container.querySelector('.errorList');
+    expect(error).not.toBeNull();
+    expect(error!.textContent).toBe('error: Equation refers to unknown variable');
+  });
+});
+
 describe('VariableDetails unit errors', () => {
   const mismatch = (details: string | undefined): UnitError => ({
     start: 0,

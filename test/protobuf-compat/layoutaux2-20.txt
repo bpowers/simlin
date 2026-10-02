@@ -1,0 +1,255 @@
+Project {
+    name: "layoutaux2",
+    sim_specs: SimSpecs {
+        start: 0.0,
+        stop: 100.0,
+        dt: Dt(
+            1.0,
+        ),
+        save_step: None,
+        sim_method: Euler,
+        time_units: None,
+    },
+    dimensions: [],
+    units: [],
+    models: [
+        Model {
+            name: "main",
+            sim_specs: None,
+            variables: [
+                Flow(
+                    Flow {
+                        ident: "inflow",
+                        equation: Scalar(
+                            "10",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "observed_stock",
+                        equation: Scalar(
+                            "SMTH1(stock, 1)",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "outflow",
+                        equation: Scalar(
+                            "10",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "stock",
+                        equation: Scalar(
+                            "10",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [
+                            "inflow",
+                        ],
+                        outflows: [
+                            "outflow",
+                        ],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: None,
+                        elements: [
+                            Stock(
+                                Stock {
+                                    name: "stock",
+                                    uid: 1,
+                                    x: 610.484375,
+                                    y: 383.38671875,
+                                    label_side: Bottom,
+                                    compat: None,
+                                },
+                            ),
+                            Flow(
+                                Flow {
+                                    name: "inflow",
+                                    uid: 2,
+                                    x: 523.0954348828379,
+                                    y: 382.8828125,
+                                    label_side: Bottom,
+                                    points: [
+                                        FlowPoint {
+                                            x: 463.0234375,
+                                            y: 382.8828125,
+                                            attached_to_uid: Some(
+                                                6,
+                                            ),
+                                        },
+                                        FlowPoint {
+                                            x: 587.984375,
+                                            y: 382.8828125,
+                                            attached_to_uid: Some(
+                                                1,
+                                            ),
+                                        },
+                                    ],
+                                    compat: None,
+                                    label_compat: None,
+                                },
+                            ),
+                            Flow(
+                                Flow {
+                                    name: "outflow",
+                                    uid: 3,
+                                    x: 682.9570169736586,
+                                    y: 383.38671875,
+                                    label_side: Bottom,
+                                    points: [
+                                        FlowPoint {
+                                            x: 632.984375,
+                                            y: 383.38671875,
+                                            attached_to_uid: Some(
+                                                1,
+                                            ),
+                                        },
+                                        FlowPoint {
+                                            x: 761.3984375,
+                                            y: 383.38671875,
+                                            attached_to_uid: Some(
+                                                7,
+                                            ),
+                                        },
+                                    ],
+                                    compat: None,
+                                    label_compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "observed_stock",
+                                    uid: 4,
+                                    x: 606.17578125,
+                                    y: 301.1015625,
+                                    label_side: Right,
+                                    compat: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 5,
+                                    from_uid: 1,
+                                    to_uid: 4,
+                                    shape: Arc(
+                                        271.2506629140396,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Cloud(
+                                Cloud {
+                                    uid: 6,
+                                    flow_uid: 2,
+                                    x: 463.0234375,
+                                    y: 382.8828125,
+                                    compat: None,
+                                },
+                            ),
+                            Cloud(
+                                Cloud {
+                                    uid: 7,
+                                    flow_uid: 3,
+                                    x: 761.3984375,
+                                    y: 383.38671875,
+                                    compat: None,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.0,
+                            height: 0.0,
+                        },
+                        zoom: 1.0,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+    ],
+    source: None,
+    ai_information: None,
+}

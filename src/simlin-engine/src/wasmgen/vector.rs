@@ -1037,11 +1037,7 @@ fn emit_lookup_array_body(
     ctx: &EmitCtx,
     f: &mut Function,
 ) -> Result<(), WasmGenError> {
-    let helper_idx = match mode {
-        LookupMode::Interpolate => ctx.helpers.lookup_interp,
-        LookupMode::Forward => ctx.helpers.lookup_forward,
-        LookupMode::Backward => ctx.helpers.lookup_backward,
-    };
+    let helper_idx = ctx.helpers.lookup(mode);
     let size = input_view.size();
     for i in 0..size {
         // elem_off (compile-time) = flat offset of element i over the view.

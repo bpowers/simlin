@@ -638,7 +638,11 @@ impl XmileFormatter {
             "random uniform" => "UNIFORM".to_string(),
             "zidz" => "SAFEDIV".to_string(),
             "xidz" => "SAFEDIV".to_string(),
-            "lookup extrapolate" => "LOOKUP".to_string(),
+            // The call, not the table, carries the extrapolation
+            // (vensim.com/documentation/fn_lookup_extrapolate.html), so it
+            // keeps a builtin of its own beside LOOKUP_FORWARD and
+            // LOOKUP_BACKWARD rather than becoming a plain LOOKUP.
+            "lookup extrapolate" => "LOOKUP_EXTRAPOLATE".to_string(),
             "quantum" => "QUANTUM".to_string(),
             "ramp from to" => "RAMP_FROM_TO".to_string(),
             "sshape" => "SSHAPE".to_string(),

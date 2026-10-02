@@ -265,12 +265,47 @@ impl From<datamodel::GraphicalFunctionScale> for GraphicalFunctionScale {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphicalFunctionKind {
     Continuous,
     Extrapolate,
     Discrete,
+}
+
+impl GraphicalFunctionKind {
+    /// The kind a `<gf type="...">` attribute names (XMILE 1.0 section 3.1.4:
+    /// `continuous`, `extrapolate`, `discrete`), read whatever its case and
+    /// the space around it, or `None` for a value that names none of them.
+    ///
+    /// The one statement of which values the reader knows: the reader reads
+    /// any other value as the default kind, and `xmile::unread` reports it.
+    pub(crate) fn from_type_attribute(value: &str) -> Option<GraphicalFunctionKind> {
+        let value = value.trim();
+        [
+            ("continuous", GraphicalFunctionKind::Continuous),
+            ("extrapolate", GraphicalFunctionKind::Extrapolate),
+            ("discrete", GraphicalFunctionKind::Discrete),
+        ]
+        .into_iter()
+        .find(|(name, _)| value.eq_ignore_ascii_case(name))
+        .map(|(_, kind)| kind)
+    }
+}
+
+/// A `<gf>`'s `type` attribute. A value that names no kind reads as no
+/// attribute at all -- the default kind -- so a file a tool wrote with a type
+/// of its own still opens; `xmile::unread` reports the value.
+fn gf_kind_from_attribute<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<GraphicalFunctionKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value
+        .as_deref()
+        .and_then(GraphicalFunctionKind::from_type_attribute))
 }
 
 impl From<GraphicalFunctionKind> for datamodel::GraphicalFunctionKind {
@@ -296,8 +331,12 @@ impl From<datamodel::GraphicalFunctionKind> for GraphicalFunctionKind {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Gf {
+    // `name` and `type` are attributes (XMILE 1.0 section 4.1.3: `name="..."`,
+    // `type="..."`), which is how `write_xml` writes them; the `@` is what
+    // makes the reader take them from attributes rather than child elements.
+    #[serde(rename = "@name", default)]
     pub name: Option<String>,
-    #[serde(rename = "type")]
+    #[serde(rename = "@type", default, deserialize_with = "gf_kind_from_attribute")]
     pub kind: Option<GraphicalFunctionKind>,
     #[serde(rename = "xscale")]
     pub x_scale: Option<GraphicalFunctionScale>,

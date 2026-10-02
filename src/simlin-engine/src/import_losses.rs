@@ -127,8 +127,26 @@ pub(crate) fn not_kept(
     where_: &str,
     names: &[String],
 ) -> ImportWarning {
-    let verb = if n == 1 { "is" } else { "are" };
-    let mut message = format!("{} {where_} {verb} not kept", count(n, one, many));
+    counted(n, one, many, where_, ("is not kept", "are not kept"), names)
+}
+
+/// A warning about `n` things of a kind, found `where_`, with up to three of
+/// their `names` as examples: [`not_kept`]'s sentence with what is said of
+/// them given, for one and for several. It is for a thing the project does
+/// hold, but not as the file has it:
+///
+/// - `1 graphical function type in the model is not one the reader knows, so
+///   its function is read as continuous: 'type="stepwise" on effect'`
+pub(crate) fn counted(
+    n: usize,
+    one: &str,
+    many: &str,
+    where_: &str,
+    said: (&str, &str),
+    names: &[String],
+) -> ImportWarning {
+    let said = if n == 1 { said.0 } else { said.1 };
+    let mut message = format!("{} {where_} {said}", count(n, one, many));
     let shown = shown_names(names);
     if !shown.is_empty() {
         let listed: Vec<&str> = shown.iter().map(String::as_str).collect();

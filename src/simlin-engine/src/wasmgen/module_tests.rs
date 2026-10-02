@@ -325,6 +325,71 @@ fn compile_simulation_gf_lookup_modes_match_vm() {
     }
 }
 
+/// A plain application reads a table by its kind in the wasm backend as in the
+/// VM: one curve of each kind over the same points, applied at an index that
+/// sweeps below, across and above them. The three series must also differ from
+/// one another, or the parity would hold for a backend that ignored the kind.
+#[test]
+fn compile_simulation_reads_each_table_by_its_kind() {
+    use crate::datamodel::GraphicalFunctionKind;
+    let knots = [(0.0, 10.0), (1.0, 20.0), (2.5, 5.0), (4.0, 40.0)];
+    let of_kind = |kind| crate::datamodel::GraphicalFunction {
+        kind,
+        ..gf_from_knots(&knots)
+    };
+    // The name each kind's applied series is saved under; exhaustive, so a new
+    // kind has no series here until it is given one.
+    let series_name = |kind| match kind {
+        GraphicalFunctionKind::Continuous => "continuous_val",
+        GraphicalFunctionKind::Extrapolate => "extrapolate_val",
+        GraphicalFunctionKind::Discrete => "discrete_val",
+    };
+    let kinds = [
+        GraphicalFunctionKind::Continuous,
+        GraphicalFunctionKind::Extrapolate,
+        GraphicalFunctionKind::Discrete,
+    ];
+    let mut project = crate::test_common::TestProject::new("gf_kinds")
+        .with_sim_time(0.0, 6.0, 0.25)
+        .aux("input", "TIME - 1", None);
+    for kind in kinds {
+        let name = series_name(kind);
+        let curve = format!("{name}_curve");
+        project = project
+            .aux_with_gf(&curve, "0", of_kind(kind))
+            .aux(name, &format!("LOOKUP({curve}, input)"), None)
+            .aux_with_gf(&format!("{name}_inline"), "input", of_kind(kind));
+    }
+    let datamodel = project.build_datamodel();
+
+    let sim = compile_sim(&datamodel, "main");
+    let artifact = compile_simulation(&sim).expect("wasm codegen");
+    let wasm_data = run_artifact_results(&artifact);
+    let n_slots = artifact.layout.n_slots;
+    let series = |name: &str| -> Vec<f64> {
+        let (_, off) = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("{name} should be in the layout"));
+        (0..artifact.layout.n_chunks)
+            .map(|c| wasm_data[c * n_slots + off])
+            .collect()
+    };
+    let applied: Vec<Vec<f64>> = kinds.iter().map(|k| series(series_name(*k))).collect();
+    for (i, a) in applied.iter().enumerate() {
+        for b in &applied[i + 1..] {
+            assert_ne!(a, b, "two kinds read the table alike");
+        }
+    }
+    for kind in kinds {
+        let name = series_name(kind);
+        assert_eq!(series(name), series(&format!("{name}_inline")), "{name}");
+    }
+    assert!(assert_matches_vm(sim, &artifact) >= 10);
+}
+
 /// A one-point graphical function that leaves out its x point sits at its
 /// scale's start, so both backends answer every lookup with its one y, in
 /// every mode, below the point, at it and above it.
