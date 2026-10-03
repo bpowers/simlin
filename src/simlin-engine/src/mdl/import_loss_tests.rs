@@ -145,3 +145,20 @@ fn a_sketch_that_holds_only_what_the_diagram_keeps_reports_nothing() {
     let (_, warnings) = parse_mdl_with_warnings(&source).unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
 }
+
+#[test]
+fn a_sketch_record_with_a_huge_number_reads() {
+    // From a fuzzed file: a connector numbered 12999999999999999999998, and
+    // one naming a record at i32::MAX. Sketch elements are kept by number in
+    // a map, so the number sizes nothing, and the file reads.
+    let sketch = "*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,Stock,300,200,40,20,3,3,0,0,0,0,0,0
+10,6,Rate,215,225,30,11,8,3,0,0,-1,0,0,0
+1,12999999999999999999998,6,1,0,0,0,0,64,0,-1--1--1,,1|(406,267)|
+1,7,2147483647,1,0,0,0,0,64,0,-1--1--1,,1|(406,267)|
+///---\\\\\\
+";
+    let project = parse_mdl(&format!("{EQUATIONS}{sketch}")).expect("the file reads");
+    assert_eq!(project.models[0].views.len(), 1);
+}

@@ -347,7 +347,8 @@ macro_rules! convert_equation(
     ($var:expr) => {{
         if let Some(elements) = $var.elements {
             let dimensions = match $var.dimensions {
-                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect(),
+                // A `<dimensions>` naming no dimension is a file's to hold.
+                Some(dimensions) => dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect(),
                 None => vec![],
             };
             let elements = elements.into_iter().map(|e| {
@@ -1032,13 +1033,15 @@ pub enum Var {
 }
 
 impl Var {
-    pub fn get_noncanonical_name(&self) -> &str {
+    /// The variable's name as the file spells it; None for an element the
+    /// reader does not handle, which a file's `<variables>` may hold.
+    pub fn get_noncanonical_name(&self) -> Option<&str> {
         match self {
-            Var::Stock(stock) => stock.name.as_str(),
-            Var::Flow(flow) => flow.name.as_str(),
-            Var::Aux(aux) => aux.name.as_str(),
-            Var::Module(module) => module.name.as_str(),
-            Var::Unhandled => unreachable!(),
+            Var::Stock(stock) => Some(stock.name.as_str()),
+            Var::Flow(flow) => Some(flow.name.as_str()),
+            Var::Aux(aux) => Some(aux.name.as_str()),
+            Var::Module(module) => Some(module.name.as_str()),
+            Var::Unhandled => None,
         }
     }
 }

@@ -4,64 +4,51 @@
 
 //! Property-based tests for the MDL writer.
 //!
-//! These close the coverage gaps the curated `writer_tests.rs` /
-//! `writer_lossiness_tests.rs` cases miss by generating a large space of inputs
-//! for each of three properties the hardening work established:
+//! The properties:
 //!
 //! 1. **Free-text sanitization** (#849): adversarial documentation strings --
 //!    full of the structural characters (`|`, `~`, newlines, `\r`) and the
-//!    section-terminator runs the confirmed corruption exploited -- must
-//!    re-parse to exactly the real variable, never injecting a phantom or
-//!    dropping it. Adversarial *units* get the weaker structural-only guarantee
-//!    (see `units_free_text_is_structurally_safe` for why the units field, a
-//!    typed unit expression, cannot promise the same).
-//! 2. **Equation round-trip** (#846/#847/#850/#852): the context-aware
-//!    expression printer's output must re-parse as MDL and be a re-write
-//!    fixpoint.
-//! 3. **Idempotence**: a whole generated model (scalar + arrayed variables with
-//!    adversarial docs and valid units) must reach a `write(parse(...))`
-//!    fixpoint.
+//!    section-terminator runs a corruption would exploit -- re-parse to exactly
+//!    the real variable, never injecting a phantom or dropping it. Adversarial
+//!    *units* get the weaker structural-only guarantee (see
+//!    `units_free_text_is_structurally_safe` for why the units field, a typed
+//!    unit expression, cannot promise the same).
+//! 2. **A save keeps what it saves and is a fixed point**
+//!    (`first_save_is_a_fixed_point`), over generated equations, small
+//!    arrayed models and rich models with and without a view: the save reads
+//!    back as the variables, elements, equations, initials and tables the
+//!    generated project defines (`reads_back_as_generated`); every equation it
+//!    writes holds Vensim's subscript rule (`subscript_rule`); the second save
+//!    is the first; and the project the second save reads back as is the one
+//!    the first does.
 //!
 //! ## Generator design choices
 //!
-//! - Property 2 generates `Expr0` ASTs directly from a bounded recursive grammar
-//!   and serializes them with `ast::print_eqn` to obtain the XMILE-syntax
-//!   equation the datamodel stores. This is strictly more robust than generating
-//!   MDL/XMILE equation *strings*: `print_eqn` produces valid XMILE by
-//!   construction, so no case is lost to an accidentally-malformed input, and it
-//!   lets the grammar aim precisely at the printer fixes (wildcard subscript
-//!   recovery, the `pi` literal, INITIAL arity). Any well-formed AST that fails
-//!   to re-parse or is not a fixpoint is a genuine writer bug, which is the point.
-//! - The fixpoint for properties 2 and 3 is asserted between the *second* and
-//!   *third* MDL renders (`write -> parse -> write -> parse -> write`), never the
-//!   first, so the one-time XMILE->MDL normalization and any first-import
-//!   variable reordering are absorbed before the comparison. Only the equations
-//!   section is compared, sidestepping the separately-tracked control-variable
-//!   value-substitution non-idempotence; the generated models carry no views, so
-//!   the sketch-instability class never arises.
-//! - Case counts are deliberately modest (each case runs a full
-//!   `project_to_mdl` + `parse_mdl`, far heavier than a JSON round-trip) so the
-//!   whole module stays within the few-seconds debug budget.
+//! - Equations are generated as `Expr0` ASTs from a bounded recursive grammar
+//!   and serialized with `ast::print_eqn` to obtain the XMILE-syntax equation
+//!   the datamodel stores, so no case is lost to an accidentally malformed
+//!   input.
+//! - A generator makes only what MDL can hold: a two-argument `INIT` (ACTIVE
+//!   INITIAL) only at the top of an equation, and the grammar only the
+//!   operators whose grouping `mdl::parser` reads as Vensim does (#914).
+//! - Case counts are modest (each case runs full writes and reads) so the
+//!   module stays within the few-seconds debug budget; a release run takes
+//!   thousands (`PROPTEST_CASES`).
 
 use super::*;
 use crate::ast::{Loc, print_eqn};
 use crate::builtins::UntypedBuiltinFn;
 use crate::common::RawIdent;
 use crate::datamodel::{
-    Aux, Compat, Dimension, DimensionElements, Dt, Equation, Model, Project, SimMethod, SimSpecs,
+    self, Aux, Compat, Dimension, DimensionElements, Dt, Equation, Flow, GraphicalFunction,
+    GraphicalFunctionKind, GraphicalFunctionScale, Model, Project, SimMethod, SimSpecs, Stock,
     Variable,
 };
 use crate::mdl::{parse_mdl, project_to_mdl, project_to_mdl_with_warnings};
 use proptest::prelude::*;
+use std::collections::BTreeMap;
 
 // ---- shared helpers ----
-
-/// The equations section of MDL output (everything before the `.Control`
-/// group). A round-trip fixpoint check compares only this, ignoring the
-/// separately-tracked control-variable value-substitution non-idempotence.
-fn equations_section(mdl: &str) -> &str {
-    mdl.split("\t.Control").next().unwrap_or(mdl)
-}
 
 /// Sorted list of canonical variable idents in a project's single model.
 fn model_idents(project: &Project) -> Vec<String> {
@@ -270,13 +257,14 @@ fn expr0_strategy() -> BoxedStrategy<Expr0> {
         )),
     ];
 
-    leaf.prop_recursive(4, 48, 4, move |inner| {
+    let expr = leaf.prop_recursive(4, 48, 4, move |inner| {
         // DELIBERATELY narrow: arithmetic only, no comparisons and no `and`/`or`.
         //
         // This generator drives an MDL write -> `mdl::parser` re-read fixpoint, and
         // `mdl::parser`'s BINARY precedence table is inverted relative to Vensim and
         // XMILE (GH #914): it puts `+`/`-` at the lowest level and `:AND:` above the
-        // comparisons. `mdl_paren_if_necessary` correctly targets *Vensim's* table,
+        // comparisons. The writer's grouping (`written_shape` with
+        // `ast::paren_if_necessary`) correctly targets *Vensim's* table,
         // so widening this generator to comparisons or logical operators would fail
         // the fixpoint against our own reader -- a true finding about #914, but not
         // one this property can act on. Widen it when #914 lands.
@@ -311,16 +299,13 @@ fn expr0_strategy() -> BoxedStrategy<Expr0> {
                     UntypedBuiltinFn(f.to_owned(), Box::new([e])),
                     Loc::default()
                 )),
-            // INITIAL arity DISPATCH (#852): 1-arg `init` -> INITIAL, 2-arg
-            // `init` -> ACTIVE INITIAL. Both arms exercise the call-site arity
-            // branch the writer uses; the fixpoint then pins that each survives
-            // a full re-import (ACTIVE INITIAL re-imports back to a 2-arg init).
+            // INITIAL arity DISPATCH (#852): 1-arg `init` -> INITIAL here,
+            // 2-arg `init` -> ACTIVE INITIAL at the top of the equation only
+            // (below), the one place Vensim allows it: it "must appear first
+            // on the right of the = sign and not be followed by anything
+            // else" (vensim.com/documentation/fn_active_initial.html).
             inner.clone().prop_map(|e| Expr0::App(
                 UntypedBuiltinFn("init".to_owned(), Box::new([e])),
-                Loc::default()
-            )),
-            (inner.clone(), inner.clone()).prop_map(|(e, ai)| Expr0::App(
-                UntypedBuiltinFn("init".to_owned(), Box::new([e, ai])),
                 Loc::default()
             )),
             // two-argument builtins
@@ -340,7 +325,14 @@ fn expr0_strategy() -> BoxedStrategy<Expr0> {
                 Loc::default()
             )),
         ]
-    })
+    });
+    prop_oneof![
+        4 => expr.clone(),
+        1 => (expr.clone(), expr).prop_map(|(e, ai)| Expr0::App(
+            UntypedBuiltinFn("init".to_owned(), Box::new([e, ai])),
+            Loc::default()
+        )),
+    ]
     .boxed()
 }
 
@@ -402,6 +394,446 @@ fn idempotence_model() -> impl Strategy<Value = Project> {
         vars.push(arr);
         project_of(model_of(vars), vec![named_dim("DimB", &elem_refs)])
     })
+}
+
+// ---- whole-model generator (property 4) ----
+
+/// Numbers whose shortest spelling is awkward: tiny, huge, subnormal, not
+/// representable in decimal, and one past where f64 counts integers.
+const AWKWARD_NUMBERS: &[f64] = &[
+    1e-7,
+    0.1 + 0.2,
+    1e21,
+    5e-324,
+    f64::MAX,
+    2.5e-5,
+    123_456_789.123,
+    1.0 / 3.0,
+    4.35,
+    1e15 + 1.0,
+    -2.5,
+    0.0,
+];
+
+/// A number's text, as Rust spells an f64 shortest.
+fn number_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        prop::sample::select(AWKWARD_NUMBERS).prop_map(|v| format!("{v}")),
+        any::<f64>()
+            .prop_filter("finite", |v| v.is_finite())
+            .prop_map(|v| format!("{v}")),
+    ]
+}
+
+/// An element's equation: a number, or one that reads the model.
+fn element_equation() -> impl Strategy<Value = String> {
+    prop_oneof![
+        3 => number_text(),
+        1 => Just("TIME".to_owned()),
+        1 => Just("alpha * 2 + 1".to_owned()),
+    ]
+}
+
+const DIM_A: &[&str] = &["a1", "a2", "a3"];
+const SUB_A: &[&str] = &["a2", "a3"];
+const DIM_B: &[&str] = &["b1", "b2"];
+
+/// The element keys of each choice of dimensions an arrayed variable is
+/// over: `DimA`, its subrange `SubA`, or `DimA` by `DimB`.
+fn arrayed_shape() -> impl Strategy<Value = (Vec<String>, Vec<String>)> {
+    prop_oneof![
+        Just((
+            vec!["DimA".to_owned()],
+            DIM_A.iter().map(|e| e.to_string()).collect()
+        )),
+        Just((
+            vec!["SubA".to_owned()],
+            SUB_A.iter().map(|e| e.to_string()).collect()
+        )),
+        Just((
+            vec!["DimA".to_owned(), "DimB".to_owned()],
+            DIM_A
+                .iter()
+                .flat_map(|a| DIM_B.iter().map(move |b| format!("{a},{b}")))
+                .collect()
+        )),
+    ]
+}
+
+/// An arrayed variable's equation: some or all of its elements, each with
+/// its own equation and maybe its own initial (an element's ACTIVE INITIAL,
+/// so elements that agree on the equation can differ in it), and maybe an
+/// `:EXCEPT:` default, applied or not.
+fn arrayed_equation() -> impl Strategy<Value = Equation> {
+    arrayed_shape()
+        .prop_flat_map(|(dims, keys)| {
+            let n = keys.len();
+            (
+                Just(dims),
+                Just(keys),
+                prop::collection::vec(any::<bool>(), n),
+                prop::collection::vec(element_equation(), n),
+                prop::collection::vec(prop::option::weighted(0.25, number_text()), n),
+                prop::option::of(number_text()),
+                any::<bool>(),
+            )
+        })
+        .prop_map(
+            |(dims, keys, kept, equations, initials, default, applies)| {
+                let mut slots: Vec<_> = keys
+                    .into_iter()
+                    .zip(kept)
+                    .zip(equations.into_iter().zip(initials))
+                    .filter(|((_, kept), _)| *kept)
+                    .map(|((key, _), (eqn, initial))| (key, eqn, initial, None))
+                    .collect();
+                if slots.is_empty() {
+                    slots.push((
+                        match dims[0].as_str() {
+                            "SubA" => "a2".to_owned(),
+                            _ if dims.len() == 2 => "a1,b1".to_owned(),
+                            _ => "a1".to_owned(),
+                        },
+                        "1".to_owned(),
+                        None,
+                        None,
+                    ));
+                }
+                let applies = applies && default.is_some();
+                Equation::Arrayed(dims, slots, default, applies)
+            },
+        )
+}
+
+fn table(ys: Vec<f64>) -> GraphicalFunction {
+    let n = ys.len();
+    GraphicalFunction {
+        kind: GraphicalFunctionKind::Continuous,
+        x_points: Some((0..n).map(|i| i as f64).collect()),
+        y_points: ys,
+        x_scale: GraphicalFunctionScale {
+            min: 0.0,
+            max: (n - 1) as f64,
+        },
+        y_scale: GraphicalFunctionScale { min: 0.0, max: 1.0 },
+    }
+}
+
+fn aux(ident: &str, equation: Equation, gf: Option<GraphicalFunction>) -> Variable {
+    Variable::Aux(Aux {
+        ident: ident.to_owned(),
+        equation,
+        documentation: String::new(),
+        units: None,
+        gf,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    })
+}
+
+fn flow(ident: &str, equation: Equation) -> Variable {
+    Variable::Flow(Flow {
+        ident: ident.to_owned(),
+        equation,
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    })
+}
+
+fn stock(ident: &str, equation: Equation, inflows: &[&str], outflows: &[&str]) -> Variable {
+    Variable::Stock(Stock {
+        ident: ident.to_owned(),
+        equation,
+        documentation: String::new(),
+        units: None,
+        inflows: inflows.iter().map(|f| f.to_string()).collect(),
+        outflows: outflows.iter().map(|f| f.to_string()).collect(),
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    })
+}
+
+/// A model with a bit of everything an MDL save writes: awkward numbers,
+/// arrayed variables over a dimension, a subrange and two dimensions (some
+/// elements defined, an `:EXCEPT:` default or not), a scalar and an arrayed
+/// stock with their flows, a lookup table and its call, a WITH LOOKUP,
+/// groups and a time unit or none.
+fn rich_model() -> impl Strategy<Value = Project> {
+    (
+        number_text(),
+        arrayed_equation(),
+        arrayed_equation(),
+        number_text(),
+        prop::collection::vec(prop::sample::select(AWKWARD_NUMBERS), 2..5),
+        prop::option::of(prop::sample::subsequence(
+            vec!["alpha", "level", "fill", "tbl", "arr"],
+            1..4,
+        )),
+        prop::option::of(Just("Months".to_owned())),
+    )
+        .prop_map(|(alpha, arr, arr2, level, ys, grouped, time_units)| {
+            let ys: Vec<f64> = ys.into_iter().map(|y| y.clamp(-1e300, 1e300)).collect();
+            let variables = vec![
+                aux("alpha", Equation::Scalar(alpha), None),
+                aux("arr", arr, None),
+                aux("arr2", arr2, None),
+                stock("level", Equation::Scalar(level), &["fill"], &["drain"]),
+                flow("fill", Equation::Scalar("alpha".to_owned())),
+                flow("drain", Equation::Scalar("level / 4".to_owned())),
+                stock(
+                    "pool",
+                    Equation::Arrayed(
+                        vec!["DimA".to_owned()],
+                        DIM_A
+                            .iter()
+                            .enumerate()
+                            .map(|(i, e)| (e.to_string(), (i + 1).to_string(), None, None))
+                            .collect(),
+                        None,
+                        false,
+                    ),
+                    &["pour"],
+                    &[],
+                ),
+                flow(
+                    "pour",
+                    Equation::ApplyToAll(vec!["DimA".to_owned()], "1".to_owned()),
+                ),
+                aux(
+                    "tbl",
+                    Equation::Scalar(String::new()),
+                    Some(table(ys.clone())),
+                ),
+                aux(
+                    "looked up",
+                    Equation::Scalar("LOOKUP(tbl, TIME)".to_owned()),
+                    None,
+                ),
+                aux(
+                    "with lookup",
+                    Equation::Scalar("TIME".to_owned()),
+                    Some(table(ys)),
+                ),
+            ];
+            let mut model = model_of(variables);
+            if let Some(members) = grouped {
+                model.groups = vec![datamodel::ModelGroup {
+                    name: "Sector".to_owned(),
+                    doc: None,
+                    parent: None,
+                    members: members.into_iter().map(str::to_owned).collect(),
+                    run_enabled: false,
+                }];
+            }
+            let mut project = project_of(
+                model,
+                vec![
+                    named_dim("DimA", DIM_A),
+                    named_dim("SubA", SUB_A),
+                    named_dim("DimB", DIM_B),
+                ],
+            );
+            project.sim_specs.time_units = time_units;
+            project
+        })
+}
+
+/// What each element of each variable of `project` is: its kind, and per
+/// element (canonical element names, in its dimensions' order; none for a
+/// scalar) the equation, initial and table that define it -- a slot's, or the
+/// `:EXCEPT:` default where it applies to an element no slot holds. An element
+/// nothing defines is not in the map.
+type Elements = BTreeMap<Vec<String>, (String, Option<String>, Option<GraphicalFunction>)>;
+
+fn defined_elements(project: &Project) -> BTreeMap<String, (&'static str, Vec<String>, Elements)> {
+    let elements_of = |dim: &str| -> Vec<String> {
+        project
+            .dimensions
+            .iter()
+            .find(|d| crate::common::canonicalize(&d.name) == crate::common::canonicalize(dim))
+            .map(|d| match &d.elements {
+                DimensionElements::Named(names) => names
+                    .iter()
+                    .map(|e| crate::common::canonicalize(e).into_owned())
+                    .collect(),
+                DimensionElements::Indexed(n) => (1..=*n).map(|i| i.to_string()).collect(),
+            })
+            .unwrap_or_default()
+    };
+    let product = |dims: &[String]| -> Vec<Vec<String>> {
+        dims.iter().fold(vec![Vec::new()], |keys, dim| {
+            keys.into_iter()
+                .flat_map(|key| {
+                    elements_of(dim).into_iter().map(move |e| {
+                        let mut next = key.clone();
+                        next.push(e);
+                        next
+                    })
+                })
+                .collect()
+        })
+    };
+    let key_of = |key: &str| -> Vec<String> {
+        key.split(',')
+            .map(|p| crate::common::canonicalize(p.trim()).into_owned())
+            .collect()
+    };
+    let mut out = BTreeMap::new();
+    for var in project.models[0].variables.iter() {
+        let (kind, gf, compat) = match var {
+            Variable::Stock(s) => ("stock", None, &s.compat),
+            Variable::Flow(f) => ("flow", f.gf.clone(), &f.compat),
+            Variable::Aux(a) => ("aux", a.gf.clone(), &a.compat),
+            Variable::Module(_) => continue,
+        };
+        // A two-argument INIT is an ACTIVE INITIAL, which the reader keeps as
+        // the equation and its initial.
+        let active = |eqn: &str| -> (String, Option<String>) {
+            if let Ok(Some(Expr0::App(UntypedBuiltinFn(f, args), _))) =
+                Expr0::new(eqn, crate::lexer::LexerType::Equation)
+                && f == "init"
+                && let [equation, initial] = &args[..]
+            {
+                return (print_eqn(equation), Some(print_eqn(initial)));
+            }
+            (eqn.to_owned(), compat.active_initial.clone())
+        };
+        let mut elements = Elements::new();
+        match var.get_equation() {
+            Some(Equation::Scalar(eqn)) => {
+                let (eqn, initial) = active(eqn);
+                elements.insert(Vec::new(), (eqn, initial, gf));
+            }
+            Some(Equation::ApplyToAll(dims, eqn)) => {
+                let (eqn, initial) = active(eqn);
+                for key in product(dims) {
+                    elements.insert(key, (eqn.clone(), initial.clone(), gf.clone()));
+                }
+            }
+            Some(Equation::Arrayed(dims, slots, default, applies)) => {
+                for (key, eqn, initial, slot_gf) in slots {
+                    elements.insert(key_of(key), (eqn.clone(), initial.clone(), slot_gf.clone()));
+                }
+                if let Some(default) = default.as_ref().filter(|_| *applies) {
+                    for key in product(dims) {
+                        elements
+                            .entry(key)
+                            .or_insert_with(|| (default.clone(), None, None));
+                    }
+                }
+            }
+            None => {}
+        }
+        let dims: Vec<String> = match var.get_equation() {
+            Some(Equation::ApplyToAll(dims, _)) | Some(Equation::Arrayed(dims, ..)) => dims
+                .iter()
+                .map(|d| crate::common::canonicalize(d).into_owned())
+                .collect(),
+            _ => Vec::new(),
+        };
+        out.insert(
+            crate::common::canonicalize(var.get_ident()).into_owned(),
+            (kind, dims, elements),
+        );
+    }
+    out
+}
+
+/// Whether `read` defines what `generated` does: the same variables, each of
+/// the same kind, over the same dimensions by name unless the save warns
+/// that it is read back over others, with the same elements, each the same equation (numbers by
+/// value, names canonically), initial and table. Err with the first
+/// difference.
+fn reads_back_as_generated(
+    generated: &Project,
+    read: &Project,
+    warnings: &[super::ExportWarning],
+) -> std::result::Result<(), String> {
+    use super::arrayed::same_equation;
+    let (a, b) = (defined_elements(generated), defined_elements(read));
+    for (ident, (kind, dims, elements)) in &a {
+        let Some((read_kind, read_dims, read_elements)) = b.get(ident) else {
+            return Err(format!("'{ident}' does not read back"));
+        };
+        if kind != read_kind {
+            return Err(format!(
+                "'{ident}' is a {kind} and reads back as a {read_kind}"
+            ));
+        }
+        // A variable over some elements of a dimension reads back over the
+        // dimension of exactly those, and the save says so.
+        let warned = warnings.iter().any(|w| {
+            w.message.contains(&format!("'{ident}'")) && w.message.contains("read back over")
+        });
+        if dims != read_dims && !warned {
+            return Err(format!(
+                "'{ident}' is over {dims:?} and reads back over {read_dims:?}"
+            ));
+        }
+        let keys = |e: &Elements| e.keys().cloned().collect::<Vec<_>>();
+        if keys(elements) != keys(read_elements) {
+            return Err(format!(
+                "'{ident}' defines {:?} and reads back defining {:?}",
+                keys(elements),
+                keys(read_elements)
+            ));
+        }
+        for (key, (eqn, initial, gf)) in elements {
+            let (read_eqn, read_initial, read_gf) = &read_elements[key];
+            let same_initial = match (initial, read_initial) {
+                (Some(x), Some(y)) => same_equation(x, y),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same_equation(eqn, read_eqn) || !same_initial || gf != read_gf {
+                return Err(format!(
+                    "'{ident}'{key:?} is {eqn:?} (initial {initial:?}) and reads back as \
+                     {read_eqn:?} (initial {read_initial:?})"
+                ));
+            }
+        }
+    }
+    if let Some(extra) = b.keys().find(|ident| !a.contains_key(*ident)) {
+        return Err(format!("'{extra}' is new in the save"));
+    }
+    Ok(())
+}
+
+/// The first save of `project` keeps it and is a fixed point: it reads back
+/// as what `project` defines (`reads_back_as_generated`), and as a project
+/// whose save is the same text, and the project read back from that is the
+/// one read back from the first (`save_roundtrip_tests::normalized`). Err
+/// with what differs.
+fn first_save_is_a_fixed_point(project: &Project) -> std::result::Result<(), String> {
+    use crate::mdl::save_roundtrip_tests::{first_difference, normalized};
+    let (save1, warnings) =
+        project_to_mdl_with_warnings(project).map_err(|e| format!("first write: {e}"))?;
+    let read1 = parse_mdl(&save1).map_err(|e| format!("first read: {e}\n{save1}"))?;
+    reads_back_as_generated(project, &read1, &warnings).map_err(|why| format!("{why}\n{save1}"))?;
+    let unheld = crate::mdl::subscript_rule::ranges_not_on_the_left(&save1, &read1);
+    if !unheld.is_empty() {
+        return Err(format!(
+            "the save names a subscript range its left-hand side does not hold: {}\n{save1}",
+            unheld.join("; ")
+        ));
+    }
+    let save2 = project_to_mdl(&read1).map_err(|e| format!("second write: {e}"))?;
+    if save1 != save2 {
+        return Err(format!(
+            "the save is not a fixed point:\n{save1}\n----\n{save2}"
+        ));
+    }
+    let read2 = parse_mdl(&save2).map_err(|e| format!("second read: {e}"))?;
+    match first_difference(&normalized(&read1), &normalized(&read2)) {
+        Some(change) => Err(format!("{change}\n{save1}")),
+        None => Ok(()),
+    }
 }
 
 // ---- properties ----
@@ -506,51 +938,65 @@ proptest! {
         vars.push(scalar_aux("target", &xmile_eqn, None, ""));
         let project = project_of(model_of(vars), vec![named_dim("DimA", &["A1", "A2"])]);
 
-        let mdl1 = project_to_mdl(&project);
-        prop_assert!(mdl1.is_ok(), "first write failed: {:?}", mdl1.err());
-        let mdl1 = mdl1.unwrap();
-
-        // The printer's output MUST re-parse as MDL.
-        let p2 = parse_mdl(&mdl1);
-        prop_assert!(p2.is_ok(), "printer output did not re-parse; mdl:\n{}", mdl1);
-        let mdl2 = project_to_mdl(&p2.unwrap()).expect("second write");
-
-        let p3 = parse_mdl(&mdl2);
-        prop_assert!(p3.is_ok(), "second render did not re-parse; mdl:\n{}", mdl2);
-        let mdl3 = project_to_mdl(&p3.unwrap()).expect("third write");
-
-        // A second write is a fixpoint (first render absorbs XMILE->MDL
-        // normalization and any first-import reordering).
-        prop_assert_eq!(
-            equations_section(&mdl2),
-            equations_section(&mdl3),
-            "equation render is not a fixpoint\nmdl2:\n{}\nmdl3:\n{}",
-            mdl2,
-            mdl3
-        );
+        // The printer's output MUST re-parse as MDL, and the first save is
+        // the last that changes anything.
+        if let Err(why) = first_save_is_a_fixed_point(&project) {
+            prop_assert!(false, "{}", why);
+        }
     }
 
     /// A whole generated model reaches a `write(parse(...))` fixpoint, and the
     /// warnings channel never errors on it.
     #[test]
     fn model_write_is_idempotent(project in idempotence_model()) {
-        let (mdl1, _warnings) = project_to_mdl_with_warnings(&project)
-            .expect("first write should succeed");
+        project_to_mdl_with_warnings(&project).expect("first write should succeed");
+        if let Err(why) = first_save_is_a_fixed_point(&project) {
+            prop_assert!(false, "{}", why);
+        }
+    }
+}
 
-        let p2 = parse_mdl(&mdl1);
-        prop_assert!(p2.is_ok(), "first re-parse failed; mdl:\n{}", mdl1);
-        let mdl2 = project_to_mdl(&p2.unwrap()).expect("second write");
+proptest! {
+    // Each case writes and reads a whole model twice.
+    #![proptest_config(ProptestConfig::with_cases(64))]
 
-        let p3 = parse_mdl(&mdl2);
-        prop_assert!(p3.is_ok(), "second re-parse failed; mdl:\n{}", mdl2);
-        let mdl3 = project_to_mdl(&p3.unwrap()).expect("third write");
+    /// A model with a bit of everything an MDL save writes: the first save is
+    /// a fixed point, as text and as the datamodel it reads back as.
+    #[test]
+    fn a_rich_models_first_save_is_a_fixed_point(project in rich_model()) {
+        if let Err(why) = first_save_is_a_fixed_point(&project) {
+            prop_assert!(false, "{}", why);
+        }
+    }
+}
 
-        prop_assert_eq!(
-            equations_section(&mdl2),
-            equations_section(&mdl3),
-            "model write is not idempotent\nmdl2:\n{}\nmdl3:\n{}",
-            mdl2,
-            mdl3
-        );
+/// `project` with a stock-and-flow view laid out for it, kept by its save.
+fn a_save_with_a_view_is_a_fixed_point(project: Project) -> std::result::Result<(), TestCaseError> {
+    let mut project = project;
+    let view = crate::layout::generate_layout(&project, "main", None)
+        .map_err(|e| TestCaseError::fail(format!("layout: {e}")))?;
+    project.models[0].views = vec![datamodel::View::StockFlow(view)];
+    first_save_is_a_fixed_point(&project).map_err(TestCaseError::fail)
+}
+
+proptest! {
+    // Each case lays the model out before writing it; the gate below runs
+    // many more.
+    #![proptest_config(ProptestConfig::with_cases(2))]
+
+    /// The same, with a stock-and-flow view laid out for the model.
+    #[test]
+    fn a_rich_models_first_save_with_a_view_is_a_fixed_point(project in rich_model()) {
+        a_save_with_a_view_is_a_fixed_point(project)?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    #[test]
+    #[ignore = "lays out and saves 200 generated models; run under the gates profile"]
+    fn many_rich_models_first_saves_with_a_view_are_fixed_points(project in rich_model()) {
+        a_save_with_a_view_is_a_fixed_point(project)?;
     }
 }

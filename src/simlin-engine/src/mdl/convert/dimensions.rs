@@ -4,6 +4,8 @@
 
 //! Dimension building methods for MDL to datamodel conversion.
 
+use std::collections::{BTreeSet, HashMap};
+
 use crate::datamodel::{self, Dimension, DimensionElements};
 
 use crate::mdl::ast::{Equation as MdlEquation, MdlItem, SubscriptElement};
@@ -72,34 +74,8 @@ impl<'input> ConversionContext<'input> {
             }
         }
 
-        // Phase 4: establish element ownership. The largest dimension holding an
-        // element owns it, and of dimensions of one size, the one declared
-        // first. The rule has to be total: an element two dimensions of one
-        // size both hold (`DimA: A1, A2, A3` beside `DimX: SubA, A1`) used to go
-        // to whichever a hash map yielded first, so one file imported with a
-        // variable over either dimension from run to run, and a save of it
-        // re-imported over the other (GH #859).
-        let mut dims_by_size: Vec<(String, Vec<String>)> = self
-            .dimensions
-            .iter()
-            .filter_map(|dim| match &dim.elements {
-                DimensionElements::Named(elements) => {
-                    Some((canonical_name(&dim.name), elements.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        // A stable sort, so declaration order breaks ties.
-        dims_by_size.sort_by_key(|(_, elems)| std::cmp::Reverse(elems.len()));
-
-        for (dim_name, elements) in dims_by_size {
-            for elem in elements {
-                let elem_canonical = canonical_name(&elem);
-                self.element_owners
-                    .entry(elem_canonical)
-                    .or_insert_with(|| dim_name.clone());
-            }
-        }
+        // Phase 4: establish element ownership.
+        self.element_owners = element_owners(&self.dimensions);
 
         // Phase 5: materialize equivalence dimensions as actual Dimension entries
         // and add them to dimension_elements for expand_subscript to find them
@@ -403,6 +379,43 @@ impl<'input> ConversionContext<'input> {
             .position(|e| canonical_name(e) == elem_canonical)
     }
 
+    /// The dimension an arrayed variable is over on one axis, given the
+    /// dimensions its left-hand sides name there (`named`) and the elements
+    /// its equations define there (`defined`), all `to_lower_space`: a named
+    /// dimension of exactly the defined elements, else the smallest declared
+    /// dimension that holds them all (of several that size, the one declared
+    /// first). None when no declared dimension holds them.
+    ///
+    /// The variable is over the dimension its equations define, never one
+    /// larger: Vensim runs a variable whose equations define only some
+    /// elements of a dimension over those elements (`test/test-models/tests/
+    /// except_subranges`, whose `my var2` Vensim saves over X and Z only).
+    /// Which dimension that is, among several holding the elements, is
+    /// Simlin's rule, not Vensim's: Vensim keeps no dimension per variable,
+    /// only the subscripts of each equation. The rule takes the one a
+    /// left-hand side names, since an element's name alone does not say which
+    /// of several dimensions holding it the variable is over (GH #1059), and
+    /// otherwise the smallest, first declared.
+    pub(super) fn axis_dimension(
+        &self,
+        named: &[String],
+        defined: &BTreeSet<String>,
+    ) -> Option<String> {
+        let elements_of = |dim: &str| -> Option<BTreeSet<String>> {
+            self.dimension_elements
+                .get(dim)
+                .map(|elements| elements.iter().map(|e| canonical_name(e)).collect())
+        };
+        let exact = named
+            .iter()
+            .find(|dim| elements_of(dim).as_ref() == Some(defined));
+        if let Some(dim) = exact {
+            return Some(self.get_formatted_dimension_name(dim));
+        }
+        let smallest = smallest_dimension_holding(&self.dimensions, defined)?;
+        Some(space_to_underbar(&smallest.name))
+    }
+
     /// Get the formatted dimension name (space_to_underbar) from a canonical name.
     pub(super) fn get_formatted_dimension_name(&self, canonical: &str) -> String {
         // Find the original dimension name and format it
@@ -455,6 +468,60 @@ impl<'input> ConversionContext<'input> {
         }
         canonical.to_string()
     }
+}
+
+/// The smallest of `dimensions` holding every one of `elements`
+/// (`to_lower_space` names), and of several that size the one declared
+/// first; None when none holds them all. The writer asks it which dimension
+/// the reader reads a variable's elements as.
+pub(in crate::mdl) fn smallest_dimension_holding<'a>(
+    dimensions: &'a [Dimension],
+    elements: &BTreeSet<String>,
+) -> Option<&'a Dimension> {
+    let mut best: Option<(usize, &Dimension)> = None;
+    for dim in dimensions {
+        let DimensionElements::Named(names) = &dim.elements else {
+            continue;
+        };
+        let holds: BTreeSet<String> = names.iter().map(|e| canonical_name(e)).collect();
+        if elements.is_subset(&holds) && best.is_none_or(|(size, _)| holds.len() < size) {
+            best = Some((holds.len(), dim));
+        }
+    }
+    best.map(|(_, dim)| dim)
+}
+
+/// The dimension that owns each named element: the largest dimension holding
+/// it, and of dimensions of one size, the one declared first. Keys and values
+/// are `to_lower_space` names.
+///
+/// The rule has to be total, so that a file imports one way on every run: an
+/// element two dimensions of one size both hold (`DimA: A1, A2, A3` beside
+/// `DimX: SubA, A1`) goes to the one declared first, never to whichever a
+/// hash map yields (GH #859). The writer asks the same function which
+/// dimension a bare element name will be read as an element of.
+pub(in crate::mdl) fn element_owners(dimensions: &[Dimension]) -> HashMap<String, String> {
+    let mut dims_by_size: Vec<(String, &[String])> = dimensions
+        .iter()
+        .filter_map(|dim| match &dim.elements {
+            DimensionElements::Named(elements) => {
+                Some((canonical_name(&dim.name), elements.as_slice()))
+            }
+            _ => None,
+        })
+        .collect();
+    // A stable sort, so declaration order breaks ties.
+    dims_by_size.sort_by_key(|(_, elems)| std::cmp::Reverse(elems.len()));
+
+    let mut owners = HashMap::new();
+    for (dim_name, elements) in dims_by_size {
+        for elem in elements {
+            owners
+                .entry(canonical_name(elem))
+                .or_insert_with(|| dim_name.clone());
+        }
+    }
+    owners
 }
 
 #[cfg(test)]

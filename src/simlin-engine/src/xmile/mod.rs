@@ -3304,3 +3304,44 @@ mod attribute_escape_tests {
         assert_eq!(names, vec!["from\\npython"]);
     }
 }
+
+#[cfg(test)]
+mod malformed_input_tests {
+    use super::project_from_reader;
+
+    fn file(dimensions: &str, variables: &str, views: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><vendor>x</vendor><product version="1">x</product></header>
+  <sim_specs><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+  <dimensions>{dimensions}</dimensions>
+  <model><variables>{variables}</variables><views>{views}</views></model>
+</xmile>"#
+        )
+    }
+
+    /// A file's contents never abort the reader: each of these, found by
+    /// fuzzing corpus files, is read or refused. Rows: an arrayed variable
+    /// whose `<dimensions>` names no dimension; a view drawing a stock beside
+    /// a variable element the reader does not handle.
+    #[test]
+    fn a_malformed_file_is_read_or_refused() {
+        let rows = [
+            file(
+                r#"<dim name="D"><elem name="a"/></dim>"#,
+                r#"<aux name="x"><dimensions></dimensions><element subscript="a"><eqn>1</eqn></element></aux>"#,
+                "",
+            ),
+            file(
+                "",
+                r#"<unknown_thing name="u"/><stock name="s"><eqn>1</eqn></stock>"#,
+                r#"<view><stock name="s" x="10" y="10"/></view>"#,
+            ),
+        ];
+        for text in rows {
+            // Read or refused; the point is that this returns.
+            let _ = project_from_reader(&mut text.as_bytes());
+        }
+    }
+}

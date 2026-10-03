@@ -58,6 +58,33 @@ struct UnitEvaluator<'a> {
 }
 
 impl UnitEvaluator<'_> {
+    /// The units of a builtin whose two arguments must have the same units,
+    /// which are the result's. A literal argument is unit-polymorphic:
+    /// `MAX(0, x)` has x's units.
+    fn check_matching(&self, a: &Expr2, b: &Expr2) -> UnitResult<Units> {
+        let a_units = self.check(a)?;
+        let b_units = self.check(b)?;
+        if !a_units.equals(&b_units) {
+            let a_units = match a_units {
+                Units::Explicit(units) => units,
+                Units::Constant => Default::default(),
+            };
+            let b_units = match b_units {
+                Units::Explicit(units) => units,
+                Units::Constant => Default::default(),
+            };
+            let loc = a.get_loc().union(&b.get_loc());
+            return Err(UnitError::ConsistencyError(
+                ErrorCode::UnitDefinitionErrors,
+                loc,
+                Some(format!(
+                    "expected left and right argument units to match, but '{a_units}' and '{b_units}' don't",
+                )),
+            ));
+        }
+        Ok(a_units.first_explicit(b_units))
+    }
+
     fn check(&self, expr: &Expr2) -> UnitResult<Units> {
         use UnitError::ConsistencyError;
         match expr {
@@ -150,6 +177,7 @@ impl UnitEvaluator<'_> {
                     | BuiltinFn::Sign(a)
                     | BuiltinFn::Sin(a)
                     | BuiltinFn::Tan(a)
+                    | BuiltinFn::Trunc(a)
                     | BuiltinFn::Size(a)
                     | BuiltinFn::Stddev(a)
                     | BuiltinFn::Sum(a) => self.check(a),
@@ -207,35 +235,15 @@ impl UnitEvaluator<'_> {
                             None => Ok(Units::Constant),
                         }
                     }
-                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
-                        let a_units = self.check(a)?;
-                        if let Some(b) = b {
-                            let b_units = self.check(b)?;
-                            if !a_units.equals(&b_units) {
-                                let a_units = match a_units {
-                                    Units::Explicit(units) => units,
-                                    Units::Constant => Default::default(),
-                                };
-                                let b_units = match b_units {
-                                    Units::Explicit(units) => units,
-                                    Units::Constant => Default::default(),
-                                };
-                                let loc = a.get_loc().union(&b.get_loc());
-                                return Err(ConsistencyError(
-                                    ErrorCode::UnitDefinitionErrors,
-                                    loc,
-                                    Some(format!(
-                                        "expected left and right argument units to match, but '{a_units}' and '{b_units}' don't",
-                                    )),
-                                ));
-                            }
-                            // A literal argument is unit-polymorphic:
-                            // `MAX(0, x)` has x's units.
-                            return Ok(a_units.first_explicit(b_units));
-                        }
-                        Ok(a_units)
-                    }
-                    BuiltinFn::Quantum(a, _) => self.check(a),
+                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => match b {
+                        Some(b) => self.check_matching(a, b),
+                        None => self.check(a),
+                    },
+                    // Both arguments have the result's units: "QUANTUM(unit,
+                    // unit) --> unit (both arguments have the same units)"
+                    // (vensim.com/documentation/fn_quantum.html), and MODULO,
+                    // the engine's REM, requires matching units (fn_modulo.html).
+                    BuiltinFn::Quantum(a, b) | BuiltinFn::Rem(a, b) => self.check_matching(a, b),
                     // SSHAPE(x, bottom, top) = bottom + (top-bottom)*sigmoid(x)
                     // (vm.rs), so bottom and top carry the result units and
                     // must agree; a literal in either position is

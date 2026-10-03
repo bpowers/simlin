@@ -158,24 +158,27 @@ pub(super) fn is_top_level_integ(expr: &Expr<'_>) -> bool {
     }
 }
 
-/// Extract a constant value from an equation if it's a simple constant.
-pub(super) fn extract_constant_value(eq: &MdlEquation<'_>) -> Option<f64> {
-    match eq {
-        MdlEquation::Regular(_, expr) => extract_expr_constant(expr),
-        _ => None,
-    }
-}
+/// The most elements a subscript range or a left-hand side's product of
+/// subscripts is read with, so a number in the file never sizes an
+/// allocation (the engine's bound; Vensim's is unverified).
+const MAX_ELEMENTS: usize = 1 << 22;
 
 /// Compute the Cartesian product of multiple vectors in row-major order.
 ///
 /// For example: `[[a, b], [1, 2]]` produces `["a,1", "a,2", "b,1", "b,2"]`
 /// (first dimension varies slowest).
-pub(super) fn cartesian_product(dim_elements: &[Vec<String>]) -> Vec<String> {
+pub(super) fn cartesian_product(dim_elements: &[Vec<String>]) -> Result<Vec<String>, ConvertError> {
     if dim_elements.is_empty() {
-        return vec![];
+        return Ok(vec![]);
+    }
+    let count = dim_elements
+        .iter()
+        .try_fold(1usize, |n, dim| n.checked_mul(dim.len()));
+    if count.is_none_or(|n| n > MAX_ELEMENTS) {
+        return Err(too_many());
     }
     if dim_elements.len() == 1 {
-        return dim_elements[0].clone();
+        return Ok(dim_elements[0].clone());
     }
 
     // Start with the first dimension
@@ -198,19 +201,11 @@ pub(super) fn cartesian_product(dim_elements: &[Vec<String>]) -> Vec<String> {
     // spelling: every consumer re-keys a stored subscript through
     // `CanonicalElementName::from_subscript`, so the reader owes it only a
     // subscript that names its element under that rule.
-    result.into_iter().map(|combo| combo.join(",")).collect()
+    Ok(result.into_iter().map(|combo| combo.join(",")).collect())
 }
 
-/// Extract a constant from an expression if it's a simple constant.
-pub(super) fn extract_expr_constant(expr: &Expr<'_>) -> Option<f64> {
-    match expr {
-        Expr::Const(v, _) => Some(*v),
-        Expr::Op1(crate::mdl::ast::UnaryOp::Negative, inner, _) => {
-            extract_expr_constant(inner).map(|v| -v)
-        }
-        Expr::Paren(inner, _) => extract_expr_constant(inner),
-        _ => None,
-    }
+fn too_many() -> ConvertError {
+    ConvertError::InvalidRange(format!("more than {MAX_ELEMENTS} elements"))
 }
 
 /// Expand a numeric range like (A1-A10) to individual elements.
@@ -249,6 +244,9 @@ pub(super) fn expand_range(start: &str, end: &str) -> Result<Vec<String>, Conver
         )));
     }
 
+    if (high - low) as usize >= MAX_ELEMENTS {
+        return Err(too_many());
+    }
     Ok((low..=high)
         .map(|n| format!("{}{}", space_to_underbar(start_prefix), n))
         .collect())

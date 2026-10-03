@@ -91,8 +91,6 @@ pub struct SymbolInfo<'input> {
     pub outflows: Vec<String>,
     /// Whether this is a "unwanted" variable (control var)
     pub unwanted: bool,
-    /// Alternate name for XMILE output (e.g., "DT" for "TIME STEP")
-    pub alternate_name: Option<String>,
 }
 
 impl<'input> SymbolInfo<'input> {
@@ -103,7 +101,6 @@ impl<'input> SymbolInfo<'input> {
             inflows: Vec::new(),
             outflows: Vec::new(),
             unwanted: false,
-            alternate_name: None,
         }
     }
 }
@@ -121,8 +118,10 @@ pub(super) struct SyntheticFlow {
 pub(super) struct SimSpecsBuilder {
     pub start: Option<f64>,
     pub stop: Option<f64>,
-    pub dt: Option<f64>,
-    pub save_step: Option<f64>,
+    pub dt: Option<Dt>,
+    /// None when the save step follows the time step: no SAVEPER, one that
+    /// is `TIME STEP`, or one that is not a constant.
+    pub save_step: Option<Dt>,
     pub time_units: Option<String>,
     pub sim_method: Option<SimMethod>,
 }
@@ -132,13 +131,13 @@ impl SimSpecsBuilder {
         SimSpecs {
             start: self.start.unwrap_or(0.0),
             stop: self.stop.unwrap_or(200.0),
-            dt: self.dt.map(Dt::Dt).unwrap_or_default(),
-            // A SAVEPER that is a number is that number. Any other SAVEPER
-            // (`TIME STEP` itself, one the importer cannot evaluate, or none)
+            dt: self.dt.unwrap_or_default(),
+            // A SAVEPER that is a constant is that number. Any other SAVEPER
+            // (`TIME STEP` itself, one that is not a constant, or none)
             // follows the time step, which the datamodel says with no save
             // step, so the writer writes it back as `TIME STEP` and a number
             // as that number: a save never changes which one the file means.
-            save_step: self.save_step.map(Dt::Dt),
+            save_step: self.save_step,
             sim_method: self.sim_method.unwrap_or(SimMethod::Euler),
             // Default to "Months" to match xmutil
             time_units: self.time_units.or_else(|| Some("Months".to_string())),

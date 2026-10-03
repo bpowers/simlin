@@ -273,13 +273,6 @@ fn embedded_extrapolate_gf_warns() {
 
 // ---- #858: EXCEPT default reconstruction ----
 
-/// The equation section of MDL output (everything before the `.Control`
-/// group), so a round-trip check can ignore the unrelated, pre-existing
-/// sim-specs / control-variable value-substitution non-idempotence.
-fn equations_section(mdl: &str) -> &str {
-    mdl.split("\t.Control").next().unwrap_or(mdl)
-}
-
 fn named_dim(name: &str, elems: &[&str]) -> datamodel::Dimension {
     datamodel::Dimension {
         name: name.to_owned(),
@@ -337,7 +330,10 @@ fn arrayed_element_value(project: &datamodel::Project, var: &str, element: &str)
     let Some(Equation::Arrayed(_, elements, default, has_except_default)) = v.get_equation() else {
         return None;
     };
-    if let Some((_, eqn, _, _)) = elements.iter().find(|(k, _, _, _)| k == element) {
+    if let Some((_, eqn, _, _)) = elements
+        .iter()
+        .find(|(k, _, _, _)| k.eq_ignore_ascii_case(element))
+    {
         return Some(eqn.clone());
     }
     if *has_except_default {
@@ -383,39 +379,80 @@ fn except_default_fills_missing_element_and_roundtrips() {
     // Idempotence: writing the re-imported model again is byte-identical.
     let mdl2 = crate::mdl::project_to_mdl(&reparsed).expect("second write");
     assert_eq!(
-        equations_section(&mdl),
-        equations_section(&mdl2),
+        mdl, mdl2,
         "EXCEPT reconstruction must be a re-import fixpoint"
     );
 }
 
+/// What a save of `project` changes, by `check_save`, and whether a second
+/// save writes what the first did.
+fn except_round_trip(
+    project: &datamodel::Project,
+) -> (Vec<crate::save_check::MeaningChange>, bool) {
+    let changes = crate::save_check::check_save(project, crate::save_check::SaveFormat::Mdl)
+        .expect("the check runs");
+    let save1 = crate::mdl::project_to_mdl(project).expect("first write");
+    let save2 =
+        crate::mdl::project_to_mdl(&crate::mdl::parse_mdl(&save1).expect("reparse")).unwrap();
+    (changes, save1 == save2)
+}
+
 #[test]
-fn except_default_all_explicit_is_inert() {
-    // When every declared element is explicit, the default fills nothing; no
-    // EXCEPT machinery is emitted and there is no warning.
-    let z = arrayed_aux(
-        "z",
+fn an_except_default_is_written_as_the_except_equation_it_was() {
+    // Each variable is written as an :EXCEPT: equation, so the save keeps the
+    // default and every element. Rows: every element explicit and one taking
+    // the default; a default that names the variable's own dimension, which
+    // the reader substitutes per element, beside an element that is that
+    // substitution and one that is not; a default no element differs from;
+    // and a default that fills elements no slot holds.
+    let a = arrayed_aux(
+        "a",
         &["DimA"],
-        vec![("A1", "10"), ("A2", "1"), ("A3", "1")],
-        Some("10"),
-        true,
+        vec![("A1", "1"), ("A2", "2"), ("A3", "3")],
+        None,
+        false,
     );
-    let project = project_with_dims(
-        vec![make_model(vec![z])],
-        vec![named_dim("DimA", &["A1", "A2", "A3"])],
-    );
-    let (mdl, warnings) = project_to_mdl_with_warnings(&project).expect("write");
-    assert!(
-        warnings.is_empty(),
-        "all-explicit EXCEPT is inert: {warnings:?}"
-    );
-    assert!(!mdl.contains(":EXCEPT:"));
-    let mdl2 = crate::mdl::project_to_mdl(&crate::mdl::parse_mdl(&mdl).unwrap()).unwrap();
-    assert_eq!(
-        equations_section(&mdl),
-        equations_section(&mdl2),
-        "must be idempotent"
-    );
+    let z = |elements: Vec<(&str, &str)>, default: &str| {
+        arrayed_aux("z", &["DimA"], elements, Some(default), true)
+    };
+    let rows = [
+        (z(vec![("A1", "10"), ("A2", "1"), ("A3", "1")], "10"), false),
+        (
+            z(
+                vec![("A1", "a[A1] * 2"), ("A2", "5"), ("A3", "a[A3] * 2")],
+                "a[DimA] * 2",
+            ),
+            false,
+        ),
+        (z(vec![("A1", "4"), ("A2", "4"), ("A3", "4")], "4"), false),
+        (z(vec![("A2", "14"), ("A3", "13")], "14"), false),
+        // The reader spells a filled element's dimension reference per
+        // element (`a[a1] * 2`), which means what the default does for it.
+        (z(vec![("A2", "5")], "a[DimA] * 2"), true),
+    ];
+    for (var, respelled) in rows {
+        let project = project_with_dims(
+            vec![make_model(vec![a.clone(), var])],
+            vec![named_dim("DimA", &["A1", "A2", "A3"])],
+        );
+        let (mdl, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(mdl.contains(":EXCEPT:"), "{mdl}");
+        let (changes, fixed_point) = except_round_trip(&project);
+        assert!(fixed_point, "{mdl}");
+        if respelled {
+            assert!(
+                !changes.is_empty()
+                    && changes.iter().all(|c| {
+                        c.kind == crate::save_check::ChangeKind::Structure
+                            && c.reason.starts_with("'z' is computed as 'a[a")
+                    }),
+                "{changes:?}"
+            );
+        } else {
+            assert!(changes.is_empty(), "{changes:?}\n{mdl}");
+        }
+    }
 }
 
 #[test]
@@ -429,21 +466,6 @@ fn except_default_warns_when_dimension_unknown() {
     assert!(
         message_mentioning(&warnings, "'s'").is_some(),
         "unknown dimension membership must warn: {warnings:?}"
-    );
-}
-
-#[test]
-fn except_default_warns_when_default_references_dimension() {
-    // Default `a[DimA]` needs per-element substitution we do not perform.
-    let s = arrayed_aux("s", &["DimA"], vec![("A2", "5")], Some("a[DimA]"), true);
-    let project = project_with_dims(
-        vec![make_model(vec![s])],
-        vec![named_dim("DimA", &["A1", "A2", "A3"])],
-    );
-    let warnings = warnings_of(&project);
-    assert!(
-        message_mentioning(&warnings, "references its own dimensions").is_some(),
-        "dimension-referencing default must warn: {warnings:?}"
     );
 }
 
@@ -754,12 +776,12 @@ fn unparseable_equation_warning_does_not_change_emitted_text() {
 /// A stacked unary minus is what the MDL importer produces for the legal Vensim
 /// `x = - -3` (#912). Once the equation grammar accepts it, the writer parses it
 /// like any other equation -- no fallback, no warning, and `INTEGER` is properly
-/// restored from the XMILE `int`.
+/// restored from the engine's `trunc`.
 #[test]
 fn stacked_unary_equation_parses_and_does_not_warn() {
     let project = make_project(vec![make_model(vec![make_aux(
         "target",
-        "--(0 ^ int(0))",
+        "--(0 ^ trunc(0))",
         None,
         "",
     )])]);
@@ -773,8 +795,8 @@ fn stacked_unary_equation_parses_and_does_not_warn() {
         "the builtin-rename table must have run (no raw-text fallback):\n{text}"
     );
     assert!(
-        !text.contains("INT(0)"),
-        "the raw XMILE `int` must not leak into the MDL:\n{text}"
+        !text.contains("TRUNC(0)"),
+        "the engine's `trunc` must not leak into the MDL:\n{text}"
     );
 }
 
@@ -904,13 +926,12 @@ fn round_builtin_warns_on_export() {
 }
 
 /// A ROUND nested under other expression shapes still warns (the predicate
-/// walks the whole tree), and INT -- which has a genuine Vensim mapping
-/// (INTEGER) -- must not trigger it.
+/// walks the whole tree), and TRUNC -- which is Vensim's INTEGER -- does not.
 #[test]
-fn nested_round_warns_and_int_does_not() {
+fn nested_round_warns_and_trunc_does_not() {
     let project = make_project(vec![make_model(vec![make_aux(
         "nested",
-        "1 + int(round(a) / 2)",
+        "1 + trunc(round(a) / 2)",
         None,
         "",
     )])]);
@@ -921,11 +942,64 @@ fn nested_round_warns_and_int_does_not() {
     );
 
     let project = make_project(vec![make_model(vec![make_aux(
-        "plain", "int(a)", None, "",
+        "plain", "trunc(a)", None, "",
     )])]);
     assert!(
         warnings_of(&project).is_empty(),
-        "INT maps cleanly to INTEGER and must not warn"
+        "TRUNC is INTEGER and must not warn"
+    );
+}
+
+/// The flooring pair is not Vensim's: `INT` and `MOD` are written by name,
+/// which Simlin reads back as what they were and Vensim does not read, and
+/// each says so. The truncating pair is Vensim's own INTEGER and MODULO and is
+/// written without a word, as is the `MOD` a PULSE TRAIN holds, which the
+/// writer spells as the call it came from.
+#[test]
+fn the_flooring_functions_warn_and_the_truncating_ones_do_not() {
+    let rows: &[(&str, &str, Option<&str>)] = &[
+        ("int(a)", "INT(a)", Some("calls INT")),
+        ("a mod 3", "MOD(a, 3)", Some("calls MOD")),
+        ("trunc(a)", "INTEGER(a)", None),
+        ("rem(a, 3)", "MODULO(a, 3)", None),
+        (
+            "if time + dt / 2 > 1 and time <= 9 and (time + dt / 2 - 1) mod 2 < max(dt, 1) then 1 else 0",
+            "PULSE TRAIN(1, 1, 2, 9)",
+            None,
+        ),
+    ];
+    for (equation, written, warning) in rows {
+        let project = make_project(vec![make_model(vec![make_aux("y", equation, None, "")])]);
+        let (text, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+        assert!(text.contains(written), "{equation}:\n{text}");
+        match warning {
+            Some(words) => {
+                assert_eq!(warnings.len(), 1, "{equation}: {warnings:?}");
+                assert!(
+                    warnings[0].message.contains(words) && warnings[0].message.contains("'y'"),
+                    "{equation}: {warnings:?}"
+                );
+            }
+            None => assert!(warnings.is_empty(), "{equation}: {warnings:?}"),
+        }
+    }
+}
+
+/// In a model that defines its own `mod`, a `MOD(a, b)` call is that
+/// variable's, so the floored modulus is written as Vensim's MODULO, which
+/// truncates, and the warning says so.
+#[test]
+fn a_modulus_beside_a_variable_named_mod_is_written_as_modulo_and_warns() {
+    let project = make_project(vec![make_model(vec![
+        make_aux("mod", "3", None, ""),
+        make_aux("y", "a mod 3", None, ""),
+    ])]);
+    let (text, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    assert!(text.contains("MODULO(a, 3)"), "{text}");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].message.contains("'y'") && warnings[0].message.contains("MODULO"),
+        "{warnings:?}"
     );
 }
 
@@ -1035,4 +1109,103 @@ a[DimA] = b[DimB] * 10 ~~|
     );
     assert_eq!(mappings(&reread), mappings(&original));
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_function_of_is_written_as_nan_with_a_warning() {
+    let source = "x = 1 ~~|\ny = A FUNCTION OF(x) ~~|\nINITIAL TIME = 0 ~~|\nFINAL TIME = 1 ~~|\n\
+                  TIME STEP = 1 ~~|\nSAVEPER = TIME STEP ~~|\n\\\\\\---///\n";
+    let project = crate::mdl::parse_mdl(source).expect("the source reads");
+    let (mdl, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    assert!(
+        mdl.contains("y = NaN") || mdl.contains("y=\n\tNaN"),
+        "{mdl}"
+    );
+    assert!(
+        message_mentioning(&warnings, "'y'").is_some_and(|m| m.message.contains("not a number")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn an_active_initial_inside_an_equation_is_warned_of() {
+    // Rows: inside arithmetic, and inside the top one's own arguments; and
+    // the top of an equation, which is not warned of.
+    let rows = [
+        ("1 + INIT(TIME, 2)", true),
+        ("INIT(INIT(TIME, 2), 3)", true),
+        ("INIT(TIME, 2)", false),
+    ];
+    for (equation, warned) in rows {
+        let var = Variable::Aux(datamodel::Aux {
+            ident: "y".to_owned(),
+            equation: Equation::Scalar(equation.to_owned()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        });
+        let project = project_with_dims(vec![make_model(vec![var])], vec![]);
+        let (_, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+        assert_eq!(
+            message_mentioning(&warnings, "initial value inside it").is_some(),
+            warned,
+            "{equation}: {warnings:?}"
+        );
+    }
+}
+
+#[test]
+fn an_except_default_written_as_elements_names_the_elements_it_loses() {
+    // A default that reads external data has no :EXCEPT: equation; the
+    // elements only it defines are not written, and the warning names them.
+    // Hand-built: the MDL reader keeps such a default only with every element
+    // in a slot, but a datamodel from elsewhere (XMILE, an edit) need not.
+    let z = arrayed_aux(
+        "z",
+        &["DimA"],
+        vec![("A1", "1")],
+        Some("{GET DIRECT DATA('data.csv', 'B', '2', 'C')}"),
+        true,
+    );
+    let project = project_with_dims(
+        vec![make_model(vec![z])],
+        vec![named_dim("DimA", &["A1", "A2", "A3"])],
+    );
+    let (_, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    let warned = message_mentioning(&warnings, "default is not kept").expect("a warning");
+    assert!(
+        warned
+            .message
+            .contains("the 2 elements only the default defines (a2; a3) are not written")
+            && !warned.message.contains("table's input"),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn the_elements_a_dropped_default_defines_are_named_a_few_and_counted() {
+    // Four dimensions of 100 elements: the warning names a few of the
+    // elements only the default defines and counts the rest, never building
+    // the 100 million keys.
+    let names: Vec<String> = (1..=100).map(|i| format!("e{i}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let dims = ["D1", "D2", "D3", "D4"];
+    let z = arrayed_aux(
+        "z",
+        &dims,
+        vec![("e1,e1,e1,e1", "1")],
+        Some("{GET DIRECT DATA('data.csv', 'B', '2', 'C')}"),
+        true,
+    );
+    let project = project_with_dims(
+        vec![make_model(vec![z])],
+        dims.iter().map(|d| named_dim(d, &refs)).collect(),
+    );
+    let (_, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    let warned = message_mentioning(&warnings, "default is not kept").expect("a warning");
+    assert!(warned.message.len() < 1000, "{}", warned.message.len());
+    assert!(warned.message.contains("99999999"), "{}", warned.message);
 }

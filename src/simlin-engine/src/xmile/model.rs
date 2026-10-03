@@ -730,16 +730,10 @@ impl Model {
     // TODO: if this is a bottleneck, we should have a normalize pass over
     //   the model to canonicalize things once (and build a map)
     pub fn get_var(&self, ident: &str) -> Option<&Var> {
-        self.variables.as_ref()?;
-
-        for var in self.variables.as_ref().unwrap().variables.iter() {
-            let name = var.get_noncanonical_name();
-            if ident == name || ident == &*canonicalize(name) {
-                return Some(var);
-            }
-        }
-
-        None
+        self.variables.as_ref()?.variables.iter().find(|var| {
+            var.get_noncanonical_name()
+                .is_some_and(|name| ident == name || ident == &*canonicalize(name))
+        })
     }
 }
 

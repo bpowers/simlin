@@ -265,7 +265,7 @@ pub fn transform_view_coordinates(
     view.y_offset = off_y.round() as i32;
 
     // Transform all elements
-    for elem in view.elements.iter_mut().flatten() {
+    for elem in view.elements.values_mut() {
         // Connectors have special handling: (0,0) control point is a sentinel
         // for straight lines and must not be scaled (xmutil VensimView.cpp:154-160)
         if let VensimElement::Connector(conn) = elem {
@@ -288,7 +288,7 @@ pub fn transform_view_coordinates(
         elem.set_height(new_h);
     }
 
-    uid_offset + view.elements.len() as i32
+    uid_offset.saturating_add(view.uid_span())
 }
 
 /// Compose multiple views by stacking them vertically.
@@ -501,8 +501,10 @@ fn model_stock(
 /// other side's stock is not a pipe end, the route to that stock continues
 /// through the valve, so the open side takes the pipe end on the valve's far
 /// side from the stock; when the view does not draw that stock, the open side
-/// takes the pipe end whose connector field 4 marks it: usually 100 upstream
-/// and 4 downstream, and otherwise the first pipe end in sketch order. When
+/// takes the pipe end whose connector field 4 marks it: 100 upstream and 4
+/// downstream in Vensim's own files (the field's values are undocumented:
+/// vensim.com/documentation/24305.html calls it `shape` and enumerates
+/// none), and otherwise the first pipe end in sketch order. When
 /// both sides are open (a flow that touches no stock), sketch order decides
 /// the source: unverified against Vensim, and it decides only which end of a
 /// stockless flow carries the arrowhead.
@@ -519,10 +521,13 @@ pub fn resolve_flow_ends(
         control: (i32, i32),
         anchor: (i32, i32),
         target: PipeTarget,
-        /// The connector's field 4, which usually marks the pipe's upstream
-        /// (source) end with 100 and its downstream (sink) end with 4. The
-        /// corpus also has 36 and 68 on source ends and 68 on a sink end,
-        /// which mark neither, so such an end is chosen by sketch order.
+        /// The connector's field 4, its `shape`, whose values Vensim's
+        /// sketch reference does not enumerate
+        /// (vensim.com/documentation/24305.html). Vensim's own files mostly
+        /// mark the pipe's upstream (source) end with 100 and its downstream
+        /// (sink) end with 4; the corpus also has 36 and 68 on source ends
+        /// and 68 on a sink end, which mark neither, so such an end is chosen
+        /// by sketch order.
         direction: i32,
     }
 
@@ -1089,7 +1094,6 @@ mod tests {
             inflows,
             outflows,
             unwanted: false,
-            alternate_name: None,
         }
     }
 

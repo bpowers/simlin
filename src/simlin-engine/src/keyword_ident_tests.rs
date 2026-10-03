@@ -555,73 +555,77 @@ fn mdl_with_control(variables: &str) -> datamodel::Project {
     crate::compat::open_vensim(&mdl).expect("MDL must parse")
 }
 
-// The three tests below pin a KNOWN GAP of the MDL importer and writer, so
-// that it can neither be forgotten nor change silently. A Vensim model may
-// declare a variable named like one of this engine's zero-argument builtins
-// (`dt = TIME STEP` in `test/metasd/theil-statistics/Theil_2011.mdl`,
-// `PI = 3.14159` in `test/metasd/industrial-dynamics/IDch15/IDch15d.mdl`);
-// what Vensim itself does with such a name is unverified against its
-// documentation, but a model that declares one can only mean the variable.
-// The engine reads a bare `dt` or `pi` as its builtin and a quoted one as the
-// variable, and the importer (`mdl::xmile_compat::quote_reference`) leaves
-// such a reference bare. The fix is the importer quoting a reference to a
-// variable the model declares, and the MDL writer telling `TIME STEP` from a
-// variable named `dt`; each test is named for what the engine does today, and
-// that fix deletes it.
+// A Vensim model may declare a variable named like one of this engine's
+// zero-argument builtins (`dt = TIME STEP` in
+// `test/metasd/theil-statistics/Theil_2011.mdl`, `PI = 3.14159` in
+// `test/metasd/industrial-dynamics/IDch15/IDch15d.mdl`). The engine reads a
+// bare `dt` or `pi` as its builtin and a quoted one as the variable, so the
+// MDL importer (`mdl::xmile_compat::quote_reference`) quotes a reference to a
+// variable the model declares, and the MDL writer writes the builtin as
+// Vensim's keyword and the variable as its name.
 
-/// Known gap: in an MDL file a bare reference to a variable named like a
-/// builtin reads the builtin. `x = dt * 2` beside `dt = 0.25` and
-/// `TIME STEP = 0.125` computes 0.25, where the variable gives 0.5; `pi * 2`
-/// beside `pi = 3` computes 2π, where the variable gives 6.
+/// In an MDL file a reference to a variable named like a builtin reads the
+/// variable: `x = dt * 2` beside `dt = 0.25` and `TIME STEP = 0.125` is 0.5,
+/// and `pi * 2` beside `pi = 3` is 6.
 #[test]
-fn a_bare_mdl_reference_to_a_variable_named_like_a_builtin_reads_the_builtin() {
-    for (name, value, builtin) in [("dt", "0.25", 0.125), ("pi", "3", std::f64::consts::PI)] {
+fn an_mdl_reference_to_a_variable_named_like_a_builtin_reads_the_variable() {
+    for (name, value) in [("dt", 0.25), ("pi", 3.0)] {
         let project = mdl_with_control(&format!(
             "{name} = {value}\n\t~\t\n\t~\t|\n\n\
              x = {name} * 2\n\t~\t\n\t~\t|\n\n"
         ));
         assert_compiles_clean(&project, name);
-        assert_eq!(final_value(&project, "x"), builtin * 2.0, "{name}");
+        assert_eq!(final_value(&project, "x"), value * 2.0, "{name}");
     }
 }
 
-/// Known gap: one name means two things in one MDL model. A stock whose
-/// inflow list names `dt` (`S = INTEG(dt, 0)`) reads the variable, since a
-/// flow list holds names; one whose net flow is an expression
-/// (`T = INTEG(dt * 1, 0)`) reads the builtin, through the net flow
-/// auxiliary's bare `dt`.
+/// One name means one thing in an MDL model: a stock whose inflow list names
+/// `dt` and one whose net flow is an expression of it both read the variable.
 #[test]
-fn an_mdl_flow_list_name_reads_the_variable_and_a_net_flow_expression_the_builtin() {
+fn an_mdl_flow_list_name_and_a_net_flow_expression_read_the_same_variable() {
     let project = mdl_with_control(
         "dt = 0.25\n\t~\t\n\t~\t|\n\n\
          S = INTEG(dt, 0)\n\t~\t\n\t~\t|\n\n\
          T = INTEG(dt * 1, 0)\n\t~\t\n\t~\t|\n\n",
     );
     assert_compiles_clean(&project, "the two stocks");
-    assert_eq!(
-        final_value(&project, "s"),
-        0.25 * 2.0,
-        "the variable, over 2 months"
-    );
-    assert_eq!(
-        final_value(&project, "t"),
-        0.125 * 2.0,
-        "the builtin, over 2 months"
-    );
+    assert_eq!(final_value(&project, "s"), 0.25 * 2.0, "over 2 months");
+    assert_eq!(final_value(&project, "t"), 0.25 * 2.0, "over 2 months");
 }
 
-/// Known gap: an MDL save of `dt = TIME STEP` writes `dt = dt`, which reads
-/// back as the time step only because a bare `dt` is the builtin.
+/// An MDL save of `dt = TIME STEP` writes it as it was, and a reference to
+/// `dt` as the variable: the corpus model that declares it saves its
+/// definition so and keeps its run.
 #[test]
-fn an_mdl_save_writes_a_variable_defined_as_the_time_step_as_dt_equals_dt() {
-    let project = mdl_with_control("dt = TIME STEP\n\t~\t\n\t~\t|\n\n");
-    let written = crate::compat::to_mdl(&project).expect("MDL must write");
-    assert!(
-        written.lines().any(|line| line.trim() == "dt = dt"),
-        "{written}"
+fn an_mdl_save_writes_a_variable_defined_as_the_time_step_as_it_was() {
+    let project = mdl_with_control(
+        "dt = TIME STEP\n\t~\t\n\t~\t|\n\n\
+         x = dt * 2\n\t~\t\n\t~\t|\n\n",
     );
+    let written = crate::compat::to_mdl(&project).expect("MDL must write");
+    let lines: Vec<&str> = written.lines().map(str::trim).collect();
+    assert!(lines.contains(&"dt = TIME STEP"), "{written}");
+    assert!(lines.contains(&"x = dt * 2"), "{written}");
     let read_back = crate::compat::open_vensim(&written).expect("the save reads");
     assert_eq!(final_value(&read_back, "dt"), 0.125);
+    assert_eq!(final_value(&read_back, "x"), 0.25);
+
+    let theil = std::fs::read_to_string("../../test/metasd/theil-statistics/Theil_2011.mdl")
+        .expect("the corpus file reads");
+    let theil = crate::compat::open_vensim(&theil).expect("the corpus file imports");
+    let written = crate::compat::to_mdl(&theil).expect("MDL must write");
+    assert!(
+        written.lines().any(|line| line.trim() == "dt = TIME STEP"),
+        "{written}"
+    );
+    let results: Vec<String> =
+        crate::save_check::check_save(&theil, crate::save_check::SaveFormat::Mdl)
+            .expect("the check runs")
+            .into_iter()
+            .filter(|c| c.kind == crate::save_check::ChangeKind::Results)
+            .map(|c| c.reason)
+            .collect();
+    assert_eq!(results, Vec::<String>::new());
 }
 
 /// A quoted builtin name the model declares no variable of is a name the

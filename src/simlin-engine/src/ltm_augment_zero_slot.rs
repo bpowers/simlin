@@ -8,7 +8,7 @@
 //! naming these items `crate::ltm_augment::*`.
 
 use crate::ast::{Expr0, IndexExpr0};
-use crate::builtins::UntypedBuiltinFn;
+use crate::builtins::{ArgKind, BuiltinSig, Invariance, ResultKind, UntypedBuiltinFn};
 use crate::canonicalize;
 
 use super::FROZEN_CLOCK_HELPER;
@@ -138,14 +138,24 @@ enum BuiltinReach {
 
 /// Classify a builtin by name for [`partial_is_provably_previous_target`].
 ///
-/// `lookup` is deliberately `Varying` even though a graphical function is a
+/// A builtin is `PureInArgs` when its signature says it is a pure function
+/// of scalar arguments (`Invariance::Pure`, `ResultKind::Elementwise`, every
+/// argument `ArgKind::Scalar`), read from [`BuiltinSig`] so a builtin added
+/// later is classified by what it is; and the two constants `PI` and `INF`.
+///
+/// Everything else is `Varying`, which is the sound answer for anything
+/// unrecognized: it only keeps an arm the proof could have dropped. That
+/// includes, deliberately, three classes the signature calls pure. The time
+/// globals (`TIME STEP`, `INITIAL TIME`, `FINAL TIME`) are not established
+/// here. `lookup` is `Varying` even though a graphical function is a
 /// compile-time constant: it would only matter for an arm whose lookup index is
 /// itself invariant, and GH #977 measured that relaxation as buying **exactly
 /// zero** additional arms on C-LEARN, measured with the clock live in every
 /// partial and not redone under the frozen clock, where a lookup's argument
 /// reads the clock helper and a table-head index reads
 /// `PREVIOUS(time(), time())`; a relaxation would also have to treat the table
-/// HEAD, a `Var`, as static. Conservative and free.
+/// HEAD, a `Var`, as static. Conservative and free. And the array builtins,
+/// whose operands are whole arrays, never scalars.
 fn classify_builtin_reach(name: &str) -> BuiltinReach {
     // Lowercased at parse time, but classify case-insensitively so a future
     // caller with raw source spelling cannot silently fall into `Varying`.
@@ -153,15 +163,20 @@ fn classify_builtin_reach(name: &str) -> BuiltinReach {
     match lowered.as_str() {
         "previous" => BuiltinReach::LagsOneStep,
         "init" => BuiltinReach::StepInvariant,
-        "abs" | "arccos" | "arcsin" | "arctan" | "cos" | "exp" | "inf" | "int" | "ln" | "log10"
-        | "max" | "min" | "pi" | "safediv" | "sign" | "sin" | "sqrt" | "tan" => {
+        "pi" | "inf" => BuiltinReach::PureInArgs,
+        _ if BuiltinSig::by_name(&lowered).is_some_and(is_pure_in_scalar_args) => {
             BuiltinReach::PureInArgs
         }
-        // Everything else -- `time`, `dt`, `initial_time`, `final_time`, `step`,
-        // `ramp`, `pulse`, `lookup`, the stateful macros, and any builtin added
-        // after this was written -- cannot be established as invariant here.
         _ => BuiltinReach::Varying,
     }
+}
+
+/// Whether `sig` is a pure function of scalar arguments.
+fn is_pure_in_scalar_args(sig: &BuiltinSig) -> bool {
+    matches!(sig.invariance, Invariance::Pure)
+        && matches!(sig.result, ResultKind::Elementwise)
+        && sig.min_args > 0
+        && sig.arg_kinds.iter().all(|k| matches!(k, ArgKind::Scalar))
 }
 
 /// Is `partial` provably equal to `PREVIOUS(target)` -- i.e. does it recompute
@@ -265,5 +280,48 @@ fn reach_of(expr: &Expr0) -> Reach {
                 .fold(Reach::Established, |acc, arg| acc.and(reach_of(arg))),
             BuiltinReach::Varying => Reach::NotEstablished,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_builtin_is_classified_by_what_it_reads() {
+        // Rows by name, the class written out. Varying: the time-dependent
+        // builtins, whose value moves with the clock whatever their
+        // arguments; a table read; the clock; an array reduction, whose
+        // operand is no scalar. Pure: functions of their scalar arguments,
+        // Vensim's INTEGER and MODULO (`trunc`, `rem`) among them.
+        let varying = ["step", "ramp", "pulse", "lookup", "time", "sum"];
+        let pure = [
+            "trunc", "rem", "quantum", "round", "sshape", "max", "min", "safediv", "int", "abs",
+            "pi", "inf",
+        ];
+        for name in varying {
+            assert!(
+                matches!(classify_builtin_reach(name), BuiltinReach::Varying),
+                "{name} is varying"
+            );
+        }
+        for name in pure {
+            assert!(
+                matches!(classify_builtin_reach(name), BuiltinReach::PureInArgs),
+                "{name} is pure in its arguments"
+            );
+        }
+        assert!(matches!(
+            classify_builtin_reach("previous"),
+            BuiltinReach::LagsOneStep
+        ));
+        assert!(matches!(
+            classify_builtin_reach("init"),
+            BuiltinReach::StepInvariant
+        ));
+        assert!(matches!(
+            classify_builtin_reach("PULSE"),
+            BuiltinReach::Varying
+        ));
     }
 }

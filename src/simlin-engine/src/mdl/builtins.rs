@@ -40,20 +40,35 @@ fn strip_quotes(s: &str) -> &str {
 /// 4. Strip trailing whitespace
 /// 5. Lowercase the result
 pub fn to_lower_space(s: &str) -> String {
+    space_normalized(s, true)
+}
+
+/// A name with its spaces as `to_lower_space` makes them -- quotes stripped,
+/// each run of whitespace (space, `_`, tab, newline) one space, none at
+/// either end -- and its case kept. The one normalization a name's
+/// definition (`to_lower_space`) and a reference to it (`xmile_compat`'s
+/// `quote_reference`) share, so the two spell one name the same way
+/// whatever run of spaces the file writes. What Vensim does with repeated
+/// spaces inside a name is unverified.
+pub fn collapse_space(s: &str) -> String {
+    space_normalized(s, false)
+}
+
+fn space_normalized(s: &str, lowercase: bool) -> String {
     let s = strip_quotes(s);
 
     // ASCII fast path: all whitespace and escaped-underscore checks involve
     // only ASCII characters, so we can process entirely at the byte level
     // and avoid char decoding and Peekable overhead.
     if s.is_ascii() {
-        return to_lower_space_ascii(s.as_bytes());
+        return to_lower_space_ascii(s.as_bytes(), lowercase);
     }
 
-    to_lower_space_unicode(s)
+    to_lower_space_unicode(s, lowercase)
 }
 
 /// ASCII-only fast path for `to_lower_space`. Processes bytes directly.
-fn to_lower_space_ascii(bytes: &[u8]) -> String {
+fn to_lower_space_ascii(bytes: &[u8], lowercase: bool) -> String {
     let mut result = Vec::with_capacity(bytes.len());
     let len = bytes.len();
 
@@ -85,7 +100,7 @@ fn to_lower_space_ascii(bytes: &[u8]) -> String {
             continue;
         }
 
-        result.push(b.to_ascii_lowercase());
+        result.push(if lowercase { b.to_ascii_lowercase() } else { b });
         i += 1;
     }
 
@@ -107,7 +122,7 @@ fn is_tls_whitespace_byte(b: u8) -> bool {
 }
 
 /// Unicode slow path for `to_lower_space`.
-fn to_lower_space_unicode(s: &str) -> String {
+fn to_lower_space_unicode(s: &str, lowercase: bool) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
 
@@ -142,7 +157,9 @@ fn to_lower_space_unicode(s: &str) -> String {
         }
 
         // Lowercase inline
-        if c.is_ascii() {
+        if !lowercase {
+            result.push(c);
+        } else if c.is_ascii() {
             result.push(c.to_ascii_lowercase());
         } else {
             for lc in c.to_lowercase() {

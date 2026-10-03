@@ -38,12 +38,14 @@ The complete mapping from Vensim MDL function names to XMILE (Simlin) equivalent
 
 | Vensim | XMILE (Simlin) | Notes |
 |--------|----------------|-------|
-| `VMAX(a, b)` | `MAX(a, b)` | |
-| `VMIN(a, b)` | `MIN(a, b)` | |
+| `MAX(a, b)` | `MAX(a, b)` | Larger of two values |
+| `MIN(a, b)` | `MIN(a, b)` | Smaller of two values |
+| `VMAX(arr[d!])` | `MAX(arr[*])` | Largest element of an array (one-argument MAX) |
+| `VMIN(arr[d!])` | `MIN(arr[*])` | Smallest element of an array (one-argument MIN) |
 | `LOG(x)` (1 arg) | `LOG10(x)` | Vensim LOG is base-10 |
 | `LOG(x, base)` (2 args) | `(LN(x) / LN(base))` | Arbitrary base |
-| `INTEGER(x)` | `INT(x)` | Vensim INTEGER truncates toward zero, but Simlin INT floors (rounds toward negative infinity) -- results differ by 1 for negative non-integers |
-| `MODULO(a, b)` | `(a) MOD (b)` | Infix operator in XMILE |
+| `INTEGER(x)` | `TRUNC(x)` | Truncates toward zero. Simlin's `INT` floors (rounds toward negative infinity), which differs for negative non-integers |
+| `MODULO(a, b)` | `REM(a, b)` | Remainder with the sign of `a`, `a - QUANTUM(a, b)`. XMILE's `a MOD b` takes the sign of `b`, which differs when the signs differ |
 | `:AND:` | `AND` / `and` | Logical operator |
 | `:OR:` | `OR` / `or` | Logical operator |
 | `:NOT:` | `NOT` / `not` | Logical operator |
@@ -73,7 +75,12 @@ The complete mapping from Vensim MDL function names to XMILE (Simlin) equivalent
 These functions keep the same name (spaces become underscores):
 
 `ABS`, `EXP`, `SQRT`, `LN`, `SIN`, `COS`, `TAN`, `ARCSIN`, `ARCCOS`, `ARCTAN`,
-`PULSE`, `STEP`, `RAMP`, `QUANTUM`, `SUM`, `SIGN`
+`STEP`, `RAMP`, `QUANTUM`, `SUM`, `SIGN`
+
+`PULSE` does not: Vensim's `PULSE(start, width)` is 1 for `width` from
+`start`, where XMILE's `PULSE(volume, first, interval)` is a train of
+impulses. A Vensim `PULSE` imports as the comparison it makes,
+`IF TIME + DT / 2 > start AND TIME + DT / 2 < start + width THEN 1 ELSE 0`.
 
 ## Naming Conventions
 

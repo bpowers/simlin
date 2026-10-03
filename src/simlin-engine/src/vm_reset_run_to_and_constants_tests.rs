@@ -830,6 +830,33 @@ fn test_quantum_negative_truncates_toward_zero() {
     );
 }
 
+/// Vensim's INTEGER and MODULO, by Vensim's own examples
+/// (vensim.com/documentation/fn_integer.html, fn_modulo.html) and the
+/// negative operands of `test/test-models/tests/rounding/output.tab`, where
+/// truncating differs from the flooring `INT` and `MOD` do.
+#[test]
+fn trunc_and_rem_truncate_toward_zero() {
+    let trunc = |x: f64| apply(BuiltinId::Trunc, 0.0, 1.0, x, 0.0, 0.0);
+    assert_eq!(trunc(5.4), 5.0);
+    assert_eq!(trunc(-9.9), -9.0);
+    assert_eq!(trunc(-0.9), 0.0);
+    // The flooring twin, for contrast.
+    assert_eq!(apply(BuiltinId::Int, 0.0, 1.0, -9.9, 0.0, 0.0), -10.0);
+
+    let rem = |a: f64, b: f64| apply(BuiltinId::Rem, 0.0, 1.0, a, b, 0.0);
+    assert_eq!(rem(9.0, 5.0), 4.0);
+    assert_eq!(rem(76.5, 70.0), 6.5);
+    assert!((rem(8.3, 7.3) - 1.0).abs() < 1e-12);
+    assert!((rem(-9.9, 3.0) - -0.9).abs() < 1e-12);
+    assert_eq!(rem(-10.0, 3.0), -1.0);
+    // The flooring twin gives the divisor's sign.
+    assert_eq!(eval_op2(Op2::Mod, -10.0, 3.0), 2.0);
+    // A divisor at or below zero leaves no remainder, as QUANTUM leaves its
+    // input: what Vensim's MODULO does there is unverified.
+    assert_eq!(rem(3.7, 0.0), 0.0);
+    assert_eq!(rem(3.7, -2.0), 0.0);
+}
+
 #[test]
 fn test_quantum_zero_quantum_returns_input() {
     let result = apply(BuiltinId::Quantum, 0.0, 1.0, 3.7, 0.0, 0.0);
@@ -837,4 +864,15 @@ fn test_quantum_zero_quantum_returns_input() {
         (result - 3.7).abs() < 1e-10,
         "QUANTUM(3.7, 0) should return 3.7, got {result}"
     );
+}
+
+/// "If B is less than or equal to zero, then A is returned"
+/// (vensim.com/documentation/fn_quantum.html), as
+/// `test/test-models/tests/subscripted_round/output.tab` has for its
+/// `QUANTUM(var, -3)`.
+#[test]
+fn a_negative_quantum_returns_its_input() {
+    assert_eq!(apply(BuiltinId::Quantum, 0.0, 1.0, 3.7, -3.0, 0.0), 3.7);
+    assert_eq!(apply(BuiltinId::Quantum, 0.0, 1.0, -7.0, -2.0, 0.0), -7.0);
+    assert!(apply(BuiltinId::Quantum, 0.0, 1.0, 3.7, f64::NAN, 0.0).is_nan());
 }

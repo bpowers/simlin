@@ -1622,7 +1622,8 @@ fn test_builtin_polarity_monotone_increasing() {
     let empty_vars = HashMap::new();
 
     // Every arm of polarity.rs's non-decreasing single-arg builtin group:
-    // Exp, Ln, Log10, Sqrt, Arctan, Int, and Round all propagate polarity.
+    // Exp, Ln, Log10, Sqrt, Arctan, Int, Trunc (Vensim's INTEGER) and Round
+    // all propagate polarity.
     let monotone_fns: Vec<(&str, BuiltinFn<Expr2>)> = vec![
         ("Exp", BuiltinFn::Exp(x_expr())),
         ("Ln", BuiltinFn::Ln(x_expr())),
@@ -1630,6 +1631,7 @@ fn test_builtin_polarity_monotone_increasing() {
         ("Sqrt", BuiltinFn::Sqrt(x_expr())),
         ("Arctan", BuiltinFn::Arctan(x_expr())),
         ("Int", BuiltinFn::Int(x_expr())),
+        ("Trunc", BuiltinFn::Trunc(x_expr())),
         ("Round", BuiltinFn::Round(x_expr())),
     ];
 

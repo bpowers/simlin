@@ -589,10 +589,10 @@ async fn create_writes_vensim_text_for_mdl_extension() {
         .expect("create");
 
     let text = fs::read_to_string(&abs).expect("read created file");
-    // Vensim text: the encoding marker and the .Control section, not JSON
+    // Vensim text: the encoding marker and the control variables, not JSON
     // or XML.
     assert!(
-        text.starts_with("{UTF-8}") && text.contains(".Control"),
+        text.starts_with("{UTF-8}") && text.contains("INITIAL TIME"),
         "an .mdl is Vensim text: {text}"
     );
     simlin_engine::open_vensim(&text).expect("created .mdl parses");

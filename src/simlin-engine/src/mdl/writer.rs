@@ -13,8 +13,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use super::builtins::to_lower_space;
-use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp, Visitor};
+use super::builtins::{SymbolClass, classify_symbol, to_lower_space};
+use super::convert::is_external_data_placeholder;
+use crate::ast::{BinaryOp, Expr0, IndexExpr0, NodeShape, UnaryOp, Visitor, paren_if_necessary};
 use crate::builtins::UntypedBuiltinFn;
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::view_element::{self, LinkPolarity, LinkShape};
@@ -179,6 +180,14 @@ fn needs_mdl_quoting(name: &str) -> bool {
     if name.is_empty() || name != name.trim() {
         return true;
     }
+    // The reader takes a bare name it knows as a function (or as WITH LOOKUP,
+    // TABBED ARRAY or a GET call) for the start of that construct, whatever
+    // follows it, so a variable of that name is written quoted. Whether
+    // Vensim reserves these names is unverified; a quoted name is a name
+    // either way.
+    if !matches!(classify_symbol(name), SymbolClass::Regular) {
+        return true;
+    }
 
     let mut chars = name.chars();
     match chars.next() {
@@ -187,8 +196,13 @@ fn needs_mdl_quoting(name: &str) -> bool {
         _ => {}
     }
 
+    // The MDL lexer reads an apostrophe after a name's first character as
+    // part of the name (`mdl::lexer::RawLexer::is_symbol_char`), and Vensim
+    // writes such a name bare (`DimC'` in
+    // `test/sdeverywhere/models/arrays_cname`); a leading one opens a
+    // literal.
     for c in chars {
-        if c == ' ' {
+        if c == ' ' || c == '\'' {
             continue;
         }
         if !UnicodeXID::is_xid_continue(c) && c != '_' {
@@ -235,23 +249,32 @@ fn escape_mdl_quoted_ident(name: &str) -> String {
 /// Format a canonical identifier for MDL output, preserving spaces and
 /// adding quotes when the bare form would not round-trip through MDL parsing.
 ///
-/// A display newline collapses first (`collapse_display_newlines`), in every
-/// identifier the writer prints -- a definition, a reference, a sketch
-/// element's name -- so each spells a name the MDL reader matches to the
-/// others: the reader does not read `\n` as a space, so a reference that kept
-/// it while its definition collapsed it would name nothing.
+/// A display newline -- the two-character `\n` the datamodel stores, or a
+/// real newline -- is written as the `\n` escape inside a quoted name, as
+/// Vensim itself writes such a name in the equations and the sketch alike
+/// (`"Stock with \n Newline Character"` in
+/// `test/test-models/tests/special_characters/test_special_variable_names.mdl`),
+/// and the reader keeps the escape, so the name reads back as the same name.
 fn format_mdl_ident(name: &str) -> String {
-    let name = collapse_display_newlines(name);
     // An already-quoted identifier is literal to Vensim -- its interior is
     // verbatim. Detect it BEFORE any transformation: running
     // `underbar_to_space` over the whole string would turn interior
     // underscores into spaces (changing which variable Vensim resolves,
     // e.g. `"rate_of_change!"` vs `"rate of change!"`) and re-escaping would
-    // grow the escaping each pass. Pass it through unchanged (#846).
-    if is_mdl_quoted_ident(&name) {
-        return name;
+    // grow the escaping each pass. Pass it through unchanged (#846), but for
+    // a real line break, written as the `\n` escape (raw, it would end the
+    // equation), and a final backslash, doubled so it cannot escape the
+    // closing quote.
+    if is_mdl_quoted_ident(name) {
+        let mut inner = name[1..name.len() - 1]
+            .replace("\r\n", "\\n")
+            .replace('\n', "\\n");
+        if inner.ends_with('\\') && !inner.ends_with("\\\\") {
+            inner.push('\\');
+        }
+        return format!("\"{inner}\"");
     }
-    let display = underbar_to_space(&name);
+    let display = underbar_to_space(name);
     if needs_mdl_quoting(&display) {
         format!("\"{}\"", escape_mdl_quoted_ident(&display))
     } else {
@@ -259,17 +282,10 @@ fn format_mdl_ident(name: &str) -> String {
     }
 }
 
-/// Collapse a display newline -- a literal `\n` (backslash + `n`) that XMILE
-/// name attributes use, or a real newline character -- to a single space.
-///
-/// Vensim MDL sketch records are single-line, and the equation section spells
-/// such names with the newline collapsed, so the sketch and equation must
-/// agree on this collapsed form or Vensim cannot link the sketch element to
-/// its variable definition (it silently drops or mispositions the element).
-///
-/// The break and the whitespace around it become one space, so `Stock with \n
-/// Newline` collapses to `Stock with Newline`, not to a run of spaces the
-/// reader would take for a different name.
+/// Collapse a display newline -- the two-character `\n` or a real newline --
+/// and the whitespace around it to a single space, so `Stock with \n Newline`
+/// becomes `Stock with Newline`, not a run of spaces the reader would take for
+/// a different name. A name's own leading or trailing space stays.
 fn collapse_display_newlines(name: &str) -> String {
     let lines = split_display_lines(name);
     let last = lines.len() - 1;
@@ -295,19 +311,97 @@ fn collapse_display_newlines(name: &str) -> String {
         .join(" ")
 }
 
+/// Whether `name` holds a display newline.
+fn has_display_newline(name: &str) -> bool {
+    name.contains("\\n") || name.contains('\n')
+}
+
+/// `model`'s views with each element named as its variable is, one space
+/// between words (`single_spaced`): an element keeps a display newline where
+/// its variable's name holds one, and drops it where the variable's name has
+/// none (a Stella model breaks a name over two
+/// lines in its diagram alone, `Maximum\nfishery size` drawing
+/// `maximum_fishery_size`).
+///
+/// The equations and the sketch are written from these names, and the MDL
+/// reader, like Vensim, links a sketch element to the variable its name
+/// spells, so the two have to spell one name -- the variable's, which is what
+/// reads back. The engine's names fold a break into the space around it, so
+/// both spellings name one variable before the save.
+fn views_named_as_defined(model: &datamodel::Model) -> Vec<View> {
+    let broken: HashSet<String> = model
+        .variables
+        .iter()
+        .filter(|var| has_display_newline(var.get_ident()))
+        .map(|var| crate::common::canonicalize(var.get_ident()).into_owned())
+        .collect();
+    // The name an element is written under, when that is not the name it has.
+    let named_as_defined = |name: &str| {
+        let mut written = name.to_string();
+        if has_display_newline(&written)
+            && !broken.contains(crate::common::canonicalize(&written).as_ref())
+        {
+            written = collapse_display_newlines(&written);
+        }
+        written = single_spaced(&written);
+        (written != name).then_some(written)
+    };
+    let mut views = model.views.clone();
+    for view in &mut views {
+        let View::StockFlow(sf) = view;
+        sf.elements.update(|element| match element {
+            ViewElement::Aux(aux) => named_as_defined(&aux.name).map(|name| {
+                ViewElement::Aux(view_element::Aux {
+                    name,
+                    ..aux.clone()
+                })
+            }),
+            ViewElement::Stock(stock) => named_as_defined(&stock.name).map(|name| {
+                ViewElement::Stock(view_element::Stock {
+                    name,
+                    ..stock.clone()
+                })
+            }),
+            ViewElement::Flow(flow) => named_as_defined(&flow.name).map(|name| {
+                ViewElement::Flow(view_element::Flow {
+                    name,
+                    ..flow.clone()
+                })
+            }),
+            ViewElement::Link(_)
+            | ViewElement::Module(_)
+            | ViewElement::Alias(_)
+            | ViewElement::Cloud(_)
+            | ViewElement::Group(_) => None,
+        });
+    }
+    views
+}
+
 /// Split a display name on its line breaks -- the literal two-character `\n`
 /// XMILE name attributes use (`Maximum\nfishery size`), or a real newline
 /// character. Always returns at least one segment.
 ///
-/// This is the line-preserving counterpart of `collapse_display_newlines`
-/// (which joins these same segments with spaces); the two must agree on what
-/// counts as a break. Used when sizing a sketch element's box to the modeler's
-/// chosen multi-line layout even though the name itself is written collapsed.
+/// Used when sizing a sketch element's box to the modeler's chosen multi-line
+/// layout.
 fn split_display_lines(name: &str) -> Vec<String> {
     name.replace("\\n", "\n")
         .split('\n')
         .map(str::to_string)
         .collect()
+}
+
+/// `name` with each run of spaces or tabs one space and none at either end:
+/// a label wrapped after a space (`fractional \ngrowth rate`, whose break
+/// XML reads as a second space) names a variable whose words one space
+/// separates, and the reader matches names as written. A display newline
+/// escape is kept. What Vensim does with repeated spaces inside a name is
+/// unverified.
+fn single_spaced(name: &str) -> String {
+    name.split([' ', '\t'])
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Build a mapping from canonical variable ident to display name (with
@@ -326,44 +420,55 @@ fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
                 ViewElement::Flow(f) => &f.name,
                 _ => continue,
             };
-            let normalized_name = collapse_display_newlines(name);
-            let canonical = crate::common::canonicalize(&normalized_name).into_owned();
-            let display = underbar_to_space(&normalized_name);
-            map.entry(canonical).or_insert(display);
+            let canonical = crate::common::canonicalize(name).into_owned();
+            map.entry(canonical)
+                .or_insert_with(|| underbar_to_space(name));
         }
     }
     map
 }
 
 /// The display name for an ident: a view element's spelling of it, or the
-/// ident itself when no view element draws it. Either way display newlines
-/// collapse (`collapse_display_newlines`), as the sketch collapses them, so an
-/// equation and the sketch element drawing its variable spell one name.
+/// ident itself when no view element draws it.
 fn display_name_for_ident(ident: &str, display_names: &HashMap<String, String>) -> String {
-    // Keyed as `build_display_name_map` keys: the collapsed name, canonical.
-    let collapsed = collapse_display_newlines(ident);
-    match display_names.get(crate::common::canonicalize(&collapsed).as_ref()) {
-        Some(name) => {
-            let name = collapse_display_newlines(name);
-            if needs_mdl_quoting(&name) {
-                format!("\"{}\"", escape_mdl_quoted_ident(&name))
-            } else {
-                name
-            }
+    match display_names.get(crate::common::canonicalize(ident).as_ref()) {
+        Some(name) if needs_mdl_quoting(name) => {
+            format!("\"{}\"", escape_mdl_quoted_ident(name))
         }
+        Some(name) => name.clone(),
         None => format_mdl_ident(ident),
     }
 }
 
 /// Arrayed element keys encode multidimensional indices as comma-separated
 /// canonical names (for example `c,a,f`). Preserve tuple structure so MDL
-/// parsers can split indices, and format each token independently.
-fn format_mdl_element_key(element_key: &str) -> String {
+/// parsers can split indices, and format each token independently: as the
+/// dimension of `dims` at its position spells the element
+/// ([`WriterContext::declared_element`]), so the modeler's spelling survives a
+/// save, and a position over an indexed dimension, which holds a number, as
+/// the name the dimension's definition gives that element
+/// ([`WriterContext::element_at`]).
+fn format_mdl_element_key(element_key: &str, dims: &[String], ctx: &WriterContext) -> String {
     element_key
         .split(',')
-        .map(format_mdl_ident)
+        .enumerate()
+        .map(|(at, part)| {
+            let Some(dim) = dims.get(at) else {
+                return format_mdl_ident(part);
+            };
+            ctx.indexed_element(dim, part.trim())
+                .or_else(|| ctx.declared_element(dim, part))
+                .unwrap_or_else(|| format_mdl_ident(part))
+        })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// The name an indexed dimension's element at `position` (1-based) is
+/// written under. Vensim's subscript elements are names, so a dimension that
+/// is only a size is written as the range of these.
+fn indexed_element_name(dimension: &str, position: usize) -> String {
+    format_mdl_ident(&format!("{dimension}{position}"))
 }
 
 /// Map zero-argument XMILE builtins that are bare keywords in MDL.
@@ -446,6 +551,22 @@ pub struct WriterContext {
     /// to compute which elements the dropped `default_equation` covered.
     /// Indexed dimensions are absent (they have no named elements to except).
     dim_elements: HashMap<String, Vec<String>>,
+    /// Canonical name of each indexed dimension -> its name as declared and
+    /// its size. Its elements are written under names
+    /// ([`indexed_element_name`]).
+    indexed_dims: HashMap<String, (String, usize)>,
+    /// Each named element (in the reader's `to_lower_space` form) -> the
+    /// canonical name of the dimension the reader gives it to, by the
+    /// reader's own rule.
+    element_owners: HashMap<String, String>,
+    /// Canonical names of the project's macros: a call of one is a call
+    /// Vensim reads.
+    macros: HashSet<String>,
+    /// The project's dimensions, in declared order.
+    dimensions: Vec<datamodel::Dimension>,
+    /// Each variable of the model, by canonical name, with the name as its
+    /// definition is written ([`WriterContext::reference`]).
+    written_names: HashMap<String, String>,
     /// Subset of `extrapolate_lookups` that is actually referenced by at least
     /// one `LOOKUP(table, _)` call the printer rewrites to a kind-preserving
     /// `TABXL`. A standalone extrapolating lookup NOT in this set has no call
@@ -463,7 +584,9 @@ impl WriterContext {
         let mut var_dims = HashMap::new();
         let mut extrapolate_lookups = HashSet::new();
         for var in &model.variables {
-            let ident = var.get_ident().to_owned();
+            // A reader other than MDL's keeps a name as its file spells it
+            // (`A_Values`), and every lookup here is by canonical name.
+            let ident = crate::common::canonicalize(var.get_ident()).into_owned();
             if let Some(dims) = declared_dims(var) {
                 var_dims.insert(ident.clone(), dims);
             }
@@ -473,11 +596,19 @@ impl WriterContext {
             var_idents.insert(ident);
         }
         let mut dim_elements = HashMap::new();
+        let mut indexed_dims = HashMap::new();
         for dim in dimensions {
-            if let DimensionElements::Named(elems) = &dim.elements {
-                dim_elements.insert(crate::common::canonicalize(&dim.name).into(), elems.clone());
+            let canonical: String = crate::common::canonicalize(&dim.name).into();
+            match &dim.elements {
+                DimensionElements::Named(elems) => {
+                    dim_elements.insert(canonical, elems.clone());
+                }
+                DimensionElements::Indexed(size) => {
+                    indexed_dims.insert(canonical, (dim.name.clone(), *size as usize));
+                }
             }
         }
+        let element_owners = super::convert::element_owners(dimensions);
         // Only scan for call sites when there is an extrapolating lookup to
         // preserve -- the overwhelmingly common model has none, so this is a
         // no-op there (and a one-time equation parse pass otherwise).
@@ -491,8 +622,156 @@ impl WriterContext {
             var_dims,
             extrapolate_lookups,
             dim_elements,
+            indexed_dims,
+            element_owners,
+            macros: HashSet::new(),
+            dimensions: dimensions.to_vec(),
+            // As a definition is written with no view to name it;
+            // `with_written_names` gives each the name its view draws.
+            written_names: model
+                .variables
+                .iter()
+                .map(|var| {
+                    (
+                        crate::common::canonicalize(var.get_ident()).into_owned(),
+                        display_name_for_ident(var.get_ident(), &HashMap::new()),
+                    )
+                })
+                .collect(),
             referenced_extrapolate_lookups,
         }
+    }
+
+    /// How a reference to the variable `ident` is written: as the variable's
+    /// own name is, by the one function that spells a definition
+    /// (`display_name_for_ident`). The engine's names fold case, a display
+    /// newline and a quoted spelling into one name, so an equation can spell
+    /// a reference otherwise than its variable's definition, but the MDL
+    /// reader matches names as written, and a reference spelled otherwise
+    /// than its definition names nothing. A name the model does not define
+    /// is spelled on its own (`format_mdl_ident`).
+    fn reference(&self, ident: &str) -> String {
+        match self
+            .written_names
+            .get(crate::common::canonicalize(ident).as_ref())
+        {
+            Some(defined) => defined.clone(),
+            None => format_mdl_ident(ident),
+        }
+    }
+
+    /// The context, knowing the names `model`'s definitions are written
+    /// under (`display_name_for_ident` over `display_names`).
+    fn with_written_names(
+        mut self,
+        model: &datamodel::Model,
+        display_names: &HashMap<String, String>,
+    ) -> Self {
+        for var in &model.variables {
+            self.written_names.insert(
+                crate::common::canonicalize(var.get_ident()).into_owned(),
+                display_name_for_ident(var.get_ident(), display_names),
+            );
+        }
+        self
+    }
+
+    /// The context, knowing the macros `project` defines.
+    fn with_macros(mut self, project: &datamodel::Project) -> Self {
+        self.macros = project
+            .models
+            .iter()
+            .filter(|model| model.macro_spec.is_some())
+            .map(|model| crate::common::canonicalize(&model.name).into_owned())
+            .collect();
+        self
+    }
+
+    /// True when a call of `function` (an engine name) written as `mdl_name`
+    /// is one Vensim reads: a function the reader's table holds, a macro of
+    /// the project, or a call of one of the model's own tables.
+    fn vensim_reads_call(&self, function: &str, mdl_name: &str) -> bool {
+        let canonical = crate::common::canonicalize(function);
+        !matches!(classify_symbol(mdl_name), SymbolClass::Regular)
+            || self.macros.contains(canonical.as_ref())
+            || self.is_variable(&canonical)
+    }
+
+    /// The written name of the element at `position` (1-based, as its text)
+    /// of the indexed dimension `dim`; `None` when `dim` is not an indexed
+    /// dimension or holds no such position.
+    fn indexed_element(&self, dim: &str, position: &str) -> Option<String> {
+        let (name, size) = self
+            .indexed_dims
+            .get(crate::common::canonicalize(dim).as_ref())?;
+        let position: usize = position.parse().ok()?;
+        (1..=*size)
+            .contains(&position)
+            .then(|| indexed_element_name(name, position))
+    }
+
+    /// The written name of the element at `position` (1-based) of `dim`,
+    /// named or indexed.
+    fn element_at(&self, dim: &str, position: usize) -> Option<String> {
+        match self.dim_named_elements(dim) {
+            Some(elements) => elements
+                .get(position.checked_sub(1)?)
+                .map(|element| format_mdl_ident(element)),
+            None => self.indexed_element(dim, &position.to_string()),
+        }
+    }
+
+    /// How `dimension.element`, an element named as a value (its position in
+    /// the dimension), is written; `None` when `ident` names no element this
+    /// way.
+    ///
+    /// Vensim names the element alone. That is its position in the dimension
+    /// the reader gives the element to, so an element named through another
+    /// dimension that holds it at another position (a subrange) is written as
+    /// the number it is.
+    fn element_value(&self, ident: &str) -> Option<String> {
+        let canonical = crate::common::canonicalize(ident);
+        if self.is_variable(&canonical) {
+            return None;
+        }
+        let (dim, element) = canonical.split_once('\u{b7}')?;
+        let Some(elements) = self.dim_elements.get(dim) else {
+            return self
+                .indexed_element(dim, element)
+                .map(|_| element.to_owned());
+        };
+        let at = elements
+            .iter()
+            .position(|e| crate::common::canonicalize(e) == element)?;
+        let owner = self.element_owners.get(&to_lower_space(&elements[at]))?;
+        let position_in_owner = self
+            .dim_elements
+            .get(crate::common::canonicalize(owner).as_ref())?
+            .iter()
+            .position(|e| crate::common::canonicalize(e) == element)?;
+        if position_in_owner == at {
+            Some(format_mdl_ident(&elements[at]))
+        } else {
+            Some((at + 1).to_string())
+        }
+    }
+
+    /// How `dim` spells its element `element` (any spelling of it), written;
+    /// `None` when `dim` is not a named dimension holding it.
+    fn declared_element(&self, dim: &str, element: &str) -> Option<String> {
+        let canonical = crate::common::canonicalize(element.trim());
+        self.dim_named_elements(dim)?
+            .iter()
+            .find(|e| crate::common::canonicalize(e) == canonical)
+            .map(|e| format_mdl_ident(e))
+    }
+
+    /// The project's dimension `name` (any spelling).
+    fn dimension(&self, name: &str) -> Option<&datamodel::Dimension> {
+        let name = crate::common::canonicalize(name);
+        self.dimensions
+            .iter()
+            .find(|d| crate::common::canonicalize(&d.name) == name)
     }
 
     /// The named elements (display form, declared order) of dimension `name`,
@@ -668,7 +947,11 @@ fn xmile_to_mdl_function_name(xmile_name: &str) -> String {
         "delay3" => "DELAY3".to_owned(),
         "delayn" => "DELAY N".to_owned(),
         "smthn" => "SMOOTH N".to_owned(),
-        "int" => "INTEGER".to_owned(),
+        // The engine's TRUNC and REM are Vensim's INTEGER and MODULO. Its INT
+        // floors, which no Vensim function does, so it keeps its own name
+        // (`unknown_function_warning`).
+        "trunc" => "INTEGER".to_owned(),
+        "rem" => "MODULO".to_owned(),
         "lookupinv" => "LOOKUP INVERT".to_owned(),
         "uniform" => "RANDOM UNIFORM".to_owned(),
         "safediv" => "ZIDZ".to_owned(),
@@ -678,6 +961,8 @@ fn xmile_to_mdl_function_name(xmile_name: &str) -> String {
         "lookup" => "LOOKUP".to_owned(),
         "integ" => "INTEG".to_owned(),
         "size" => "ELMCOUNT".to_owned(),
+        // Vensim's ranking function (vensim.com/documentation/fn_vector_rank.html).
+        "rank" => "VECTOR RANK".to_owned(),
         // Built-in function names are always plain ASCII identifiers.
         _ => underbar_to_space(xmile_name).to_uppercase(),
     }
@@ -730,82 +1015,27 @@ fn reorder_args(mdl_name: &str, mut args: Vec<String>) -> Vec<String> {
     }
 }
 
-/// Parenthesize `eqn` when the child's precedence or associativity requires it,
-/// for text that **Vensim** will read back.
+/// The shape `expr` is written as, for [`ast::paren_if_necessary`], the one
+/// grouping rule, which the writer shares with `print_eqn`: an `If` is written
+/// as `IF THEN ELSE(...)`, the `MOD` operator as `MOD(...)` and a recognized
+/// builtin expansion (`LN(x) / LN(2)` as `LOG(x, 2)`) as its call, so each is
+/// a call to the operator around it, and needs no grouping.
 ///
-/// Note the operand here: this keys on `ast::BinaryOp::precedence()`, the
-/// XMILE/Vensim table, NOT on the precedence `mdl::parser` actually implements --
-/// which is inverted for the binary operators (it puts `+`/`-` at the lowest
-/// level and `:AND:` above the comparisons; GH #914). Vensim's table is the
-/// correct target, since Vensim is who reads the file. But `writer_proptest` then
-/// re-reads the writer's output with `mdl::parser`, so its fixpoint property is
-/// only sound over the operators where the two tables agree. That holds today
-/// because `expr0_strategy` generates no comparisons and no logical operators --
-/// see the note there.
-///
-/// For left children: parenthesize when the parent has strictly higher
-/// precedence (lower-precedence child needs grouping).
-///
-/// At equal precedence, the operator's associativity picks the side to group --
-/// always the side the reader would NOT have chosen on its own:
-///
-/// * every left-to-right operator groups its RIGHT child -- `a - (b - c)` !=
-///   `(a - b) - c`, and (floating-point addition being non-associative)
-///   `a + (b + c)` != `(a + b) + c`;
-/// * `^` is RIGHT-associative in Vensim (`mdl::parser::parse_power`), so it
-///   groups its LEFT child. Emitting `(a^b)^c` as the bare `a^b^c` re-imports as
-///   `a^(b^c)` -- a silent value change (`(4^3)^2 = 4096` becomes `262144`).
-///
-/// A prefix unary binds LOOSER than `^` in MDL too, so a prefixed BASE must be
-/// grouped: `(-a)^b` emitted bare re-imports as `-(a^b)`, flipping the sign. The
-/// exponent needs no parens (`mdl::parser::parse_power` reads it with
-/// `parse_unary`, so `a^-b` is already correct).
-///
-/// The postfix transpose groups ANY non-atomic operand, like [`ast::paren_if_necessary`].
-/// Vensim has no transpose, so such an equation is degraded regardless (the
-/// writer warns -- see `transpose_warning`); grouping at least makes the emitted
-/// text denote the tree the model actually has, instead of the silently different
-/// `a + b'`.
-fn mdl_paren_if_necessary(
-    parent: &Expr0,
-    child: &Expr0,
-    is_right_child: bool,
-    eqn: String,
-) -> String {
-    let needs = match parent {
-        Expr0::Const(_, _, _) | Expr0::Var(_, _) => false,
-        Expr0::App(_, _) | Expr0::Subscript(_, _, _) => false,
-        Expr0::Op1(UnaryOp::Transpose, _, _) => !matches!(
-            child,
-            Expr0::Const(_, _, _) | Expr0::Var(_, _) | Expr0::Subscript(_, _, _)
-        ),
-        Expr0::Op1(_, _, _) => matches!(child, Expr0::Op2(_, _, _, _)),
-        Expr0::Op2(parent_op, _, _, _) => match child {
-            Expr0::Op2(child_op, _, _, _) => {
-                let parent_prec = parent_op.precedence();
-                let child_prec = child_op.precedence();
-                if parent_prec > child_prec {
-                    true
-                } else if parent_prec == child_prec {
-                    if matches!(parent_op, BinaryOp::Exp) {
-                        !is_right_child
-                    } else {
-                        is_right_child
-                    }
-                } else {
-                    false
-                }
-            }
-            Expr0::Op1(child_op, _, _) => {
-                matches!(parent_op, BinaryOp::Exp)
-                    && !is_right_child
-                    && !matches!(child_op, UnaryOp::Transpose)
-            }
-            _ => false,
-        },
-        Expr0::If(_, _, _, _) => false,
-    };
-    if needs { format!("({eqn})") } else { eqn }
+/// The rule keys on `ast::BinaryOp::precedence()`, the XMILE/Vensim table, NOT
+/// on the precedence `mdl::parser` implements -- which is inverted for the
+/// binary operators (it puts `+`/`-` at the lowest level and `:AND:` above the
+/// comparisons; GH #914). Vensim's table is the correct target, since Vensim is
+/// who reads the file. But `writer_proptest` then re-reads the writer's output
+/// with `mdl::parser`, so its fixpoint property is only sound over the
+/// operators where the two tables agree, which `expr0_strategy` keeps to.
+fn written_shape(expr: &Expr0) -> NodeShape {
+    if recognize_vensim_patterns(expr, &mut |_| String::new()).is_some() {
+        return NodeShape::Call;
+    }
+    match expr {
+        Expr0::If(..) | Expr0::Op2(BinaryOp::Mod, _, _, _) => NodeShape::Call,
+        other => other.shape(),
+    }
 }
 
 /// Returns true when `expr` is a 0-arity builtin call with the given name.
@@ -813,35 +1043,17 @@ fn is_call(expr: &Expr0, name: &str) -> bool {
     matches!(expr, Expr0::App(UntypedBuiltinFn(f, args), _) if f == name && args.is_empty())
 }
 
-/// Returns true when `expr` is a variable reference with the given name.
+/// Returns true when `expr` is a reference to the variable with the given
+/// canonical name, however the reference spells it (the reader's SAMPLE IF
+/// TRUE expansion writes `SELF`).
 fn is_var(expr: &Expr0, name: &str) -> bool {
-    matches!(expr, Expr0::Var(id, _) if id.as_str() == name)
+    matches!(expr, Expr0::Var(id, _) if crate::common::canonicalize(id.as_str()) == name)
 }
 
-/// Returns true when `expr` is `Const(_, v, _)` with value exactly `v`.
+/// Returns true when `expr` is the constant `v`, bit for bit: a recognizer
+/// that took a number near `v` for it would write another number.
 fn is_const(expr: &Expr0, v: f64) -> bool {
-    matches!(expr, Expr0::Const(_, n, _) if (n.value() - v).abs() < f64::EPSILON)
-}
-
-/// Structurally compare two Expr0 trees, ignoring source locations.
-fn exprs_equal(a: &Expr0, b: &Expr0) -> bool {
-    match (a, b) {
-        (Expr0::Const(_, av, _), Expr0::Const(_, bv, _)) => {
-            (av.value() - bv.value()).abs() < f64::EPSILON
-        }
-        (Expr0::Var(aid, _), Expr0::Var(bid, _)) => aid == bid,
-        (Expr0::App(UntypedBuiltinFn(af, aa), _), Expr0::App(UntypedBuiltinFn(bf, ba), _)) => {
-            af == bf && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| exprs_equal(x, y))
-        }
-        (Expr0::Op1(ao, al, _), Expr0::Op1(bo, bl, _)) => ao == bo && exprs_equal(al, bl),
-        (Expr0::Op2(ao, al, ar, _), Expr0::Op2(bo, bl, br, _)) => {
-            ao == bo && exprs_equal(al, bl) && exprs_equal(ar, br)
-        }
-        (Expr0::If(ac, at, af, _), Expr0::If(bc, bt, bf, _)) => {
-            exprs_equal(ac, bc) && exprs_equal(at, bt) && exprs_equal(af, bf)
-        }
-        _ => false,
-    }
+    matches!(expr, Expr0::Const(_, n, _) if n.value().to_bits() == v.to_bits())
 }
 
 // ---- pattern recognizers ----
@@ -874,76 +1086,90 @@ fn recognize_log_2arg(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> 
     None
 }
 
-/// Match QUANTUM: `q * int(x / q)` where both occurrences of q are structurally equal.
-fn recognize_quantum(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> Option<String> {
-    if let Expr0::Op2(BinaryOp::Mul, q_outer, int_call, _) = expr
-        && let Expr0::App(UntypedBuiltinFn(f, args), _) = int_call.as_ref()
-        && f == "int"
-        && args.len() == 1
-        && let Expr0::Op2(BinaryOp::Div, x, q_inner, _) = &args[0]
-        && exprs_equal(q_outer, q_inner)
-    {
-        return Some(format!("QUANTUM({}, {})", walk(x), walk(q_outer)));
-    }
-    None
+/// Whether `expr` is the time half a step on, `time() + dt() / 2`, which is
+/// what Vensim's PULSE compares (`xmile_compat`'s `pulse` arm).
+fn is_time_plus(expr: &Expr0) -> bool {
+    match_binop(expr, BinaryOp::Add).is_some_and(|(time, half_step)| {
+        is_call(time, "time")
+            && match_binop(half_step, BinaryOp::Div)
+                .is_some_and(|(dt, two)| is_call(dt, "dt") && is_const(two, 2.0))
+    })
 }
 
-/// Match PULSE: `if (time() >= A :AND: time() < A + max(dt(), B)) then 1 else 0`.
+/// Match PULSE, as the reader expands it (`xmile_compat`'s `pulse` arm):
+/// `if (time_plus > A :AND: time_plus < A + W) then 1 else 0`, where the
+/// window `W` is the width: `dt()` for a width of 0, the number for any other
+/// number, and `if B = 0 then dt() else B` for a width `B` that is not one.
 fn recognize_pulse(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> Option<String> {
     let (cond, t, f) = match_if(expr)?;
     if !is_const(t, 1.0) || !is_const(f, 0.0) {
         return None;
     }
-    // cond = And(Gte(time(), A), Lt(time(), Add(A2, max(dt(), B))))
     let (and_l, and_r) = match_binop(cond, BinaryOp::And)?;
-    let (gte_l, a1) = match_binop(and_l, BinaryOp::Gte)?;
-    if !is_call(gte_l, "time") {
-        return None;
-    }
+    let (gt_l, a1) = match_binop(and_l, BinaryOp::Gt)?;
     let (lt_l, lt_r) = match_binop(and_r, BinaryOp::Lt)?;
-    if !is_call(lt_l, "time") {
+    if !is_time_plus(gt_l) || !is_time_plus(lt_l) {
         return None;
     }
-    // lt_r = Add(A2, max(dt(), B))
-    let (a2, max_call) = match_binop(lt_r, BinaryOp::Add)?;
-    if !exprs_equal(a1, a2) {
+    let (a2, window) = match_binop(lt_r, BinaryOp::Add)?;
+    if !a1.eq_ignoring_loc(a2) {
         return None;
     }
-    if let Expr0::App(UntypedBuiltinFn(f, args), _) = max_call
-        && f == "max"
-        && args.len() == 2
-        && is_call(&args[0], "dt")
-    {
-        return Some(format!("PULSE({}, {})", walk(a1), walk(&args[1])));
-    }
-    None
+    let width = if is_call(window, "dt") {
+        "0".to_owned()
+    } else if number_literal(window).is_some_and(|v| v != 0.0) {
+        walk(window)
+    } else {
+        let (is_zero, step, width) = match_if(window)?;
+        let (b, zero) = match_binop(is_zero, BinaryOp::Eq)?;
+        if !is_const(zero, 0.0) || !is_call(step, "dt") || !b.eq_ignoring_loc(width) {
+            return None;
+        }
+        walk(width)
+    };
+    Some(format!("PULSE({}, {width})", walk(a1)))
 }
 
-/// Match PULSE TRAIN:
-/// `if (time() >= A :AND: time() <= D :AND: (time() - A) MOD C < B) then 1 else 0`.
+/// The number `expr` is, with any sign.
+fn number_literal(expr: &Expr0) -> Option<f64> {
+    match expr {
+        Expr0::Const(_, n, _) => Some(n.value()),
+        Expr0::Op1(UnaryOp::Negative, inner, _) => number_literal(inner).map(|v| -v),
+        Expr0::Op1(UnaryOp::Positive, inner, _) => number_literal(inner),
+        _ => None,
+    }
+}
+
+/// Match PULSE TRAIN, as the reader expands it (`xmile_compat`'s `pulse
+/// train` arm):
+/// `if (time_plus > A :AND: time() <= D :AND: (time_plus - A) MOD C < max(dt(), B)) then 1 else 0`.
 fn recognize_pulse_train(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> Option<String> {
     let (cond, t, f) = match_if(expr)?;
     if !is_const(t, 1.0) || !is_const(f, 0.0) {
         return None;
     }
-    // cond = And(And(Gte(time(), A), Lte(time(), D)), Lt(Mod(Sub(time(), A), C), B))
     let (outer_and_l, outer_and_r) = match_binop(cond, BinaryOp::And)?;
     let (inner_and_l, inner_and_r) = match_binop(outer_and_l, BinaryOp::And)?;
 
-    let (gte_l, a1) = match_binop(inner_and_l, BinaryOp::Gte)?;
-    if !is_call(gte_l, "time") {
-        return None;
-    }
+    let (gt_l, a1) = match_binop(inner_and_l, BinaryOp::Gt)?;
     let (lte_l, d) = match_binop(inner_and_r, BinaryOp::Lte)?;
-    if !is_call(lte_l, "time") {
+    if !is_time_plus(gt_l) || !is_call(lte_l, "time") {
         return None;
     }
 
-    // outer_and_r = Lt(Mod(Sub(time(), A), C), B)
-    let (mod_expr, b) = match_binop(outer_and_r, BinaryOp::Lt)?;
+    let (mod_expr, window) = match_binop(outer_and_r, BinaryOp::Lt)?;
     let (sub_expr, c) = match_binop(mod_expr, BinaryOp::Mod)?;
     let (sub_l, a2) = match_binop(sub_expr, BinaryOp::Sub)?;
-    if !is_call(sub_l, "time") || !exprs_equal(a1, a2) {
+    if !is_time_plus(sub_l) || !a1.eq_ignoring_loc(a2) {
+        return None;
+    }
+    let Expr0::App(UntypedBuiltinFn(max, max_args), _) = window else {
+        return None;
+    };
+    let [step, b] = &max_args[..] else {
+        return None;
+    };
+    if max != "max" || !is_call(step, "dt") {
         return None;
     }
 
@@ -1052,7 +1278,9 @@ fn recognize_allocate(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> 
     None
 }
 
-/// Match TIME BASE: `t + dt_val * time()`.
+/// Match TIME BASE: `t + dt_val * time()`, which is the value Vensim gives it
+/// ("equivalent to (START + Time*SLOPE)",
+/// vensim.com/documentation/fn_time_base.html).
 fn recognize_time_base(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> Option<String> {
     let (add_l, mul_expr) = match_binop(expr, BinaryOp::Add)?;
     let (dt_val, time_call) = match_binop(mul_expr, BinaryOp::Mul)?;
@@ -1128,9 +1356,6 @@ fn recognize_vensim_patterns(
     if let Some(s) = recognize_log_2arg(expr, walk) {
         return Some(s);
     }
-    if let Some(s) = recognize_quantum(expr, walk) {
-        return Some(s);
-    }
     if let Some(s) = recognize_pulse_train(expr, walk) {
         return Some(s);
     }
@@ -1154,6 +1379,23 @@ fn recognize_vensim_patterns(
 
 struct MdlPrintVisitor<'a> {
     ctx: &'a WriterContext,
+    /// What the walk wrote as the nearest thing Vensim has rather than as
+    /// itself, for the caller to warn about.
+    inexact: Inexact,
+}
+
+/// The constructs an equation holds that Vensim has no spelling for. They are
+/// recorded where the printer writes them, not found by a scan of the tree: a
+/// `MOD` inside a recognized PULSE TRAIN is written as Vensim's call.
+#[derive(Default)]
+struct Inexact {
+    /// The functions called that Vensim does not have, as they were written.
+    unknown_functions: Vec<String>,
+    /// A floored modulus written as Vensim's MODULO, a truncated remainder,
+    /// because the model names something MOD.
+    modulus_as_modulo: bool,
+    /// A NaN written as `NaN`.
+    not_a_number: bool,
 }
 
 impl MdlPrintVisitor<'_> {
@@ -1170,8 +1412,80 @@ impl MdlPrintVisitor<'_> {
                 // fallback rather than a panic.
                 None => "*".to_string(),
             },
+            // An element named by its position: Vensim names it.
+            IndexExpr0::Expr(Expr0::Const(_, position, _)) => {
+                let position = position.value();
+                let named = (position.fract() == 0.0 && position >= 1.0)
+                    .then(|| self.ctx.dim_at(subscripted, pos))
+                    .flatten()
+                    .and_then(|dim| self.ctx.element_at(dim, position as usize));
+                named.unwrap_or_else(|| self.walk_index(expr))
+            }
             other => self.walk_index(other),
         }
+    }
+
+    /// The floored modulus `l MOD r`. Vensim has no modulus operator, and its
+    /// MODULO function is a truncated remainder where `MOD` is a floored
+    /// modulus (XMILE 1.0 section 3.3.1; vensim.com/documentation/
+    /// fn_modulo.html). So it is written as a call of MOD, which Vensim does
+    /// not have and the reader reads back as the operator.
+    ///
+    /// In a model that defines its own `mod`, a MOD call is that variable's,
+    /// so the modulus is written as MODULO, the nearest thing Vensim has, and
+    /// noted so the caller can warn.
+    fn write_modulus(&mut self, l: &Expr0, r: &Expr0) -> String {
+        let function = if self.ctx.is_variable("mod") || self.ctx.macros.contains("mod") {
+            self.inexact.modulus_as_modulo = true;
+            "MODULO"
+        } else {
+            self.inexact.unknown_functions.push("MOD".to_owned());
+            "MOD"
+        };
+        let l = self.walk(l);
+        let r = self.walk(r);
+        format!("{function}({l}, {r})")
+    }
+
+    /// `expr` as an operand of the operators the writer composes around it.
+    fn walk_operand(&mut self, expr: &Expr0) -> String {
+        let text = self.walk(expr);
+        match expr {
+            Expr0::Const(..) | Expr0::Var(..) | Expr0::App(..) | Expr0::Subscript(..) => text,
+            Expr0::Op1(..) | Expr0::Op2(..) | Expr0::If(..) => format!("({text})"),
+        }
+    }
+
+    /// XMILE's `PULSE(volume, first, interval)` in Vensim's terms.
+    ///
+    /// The two PULSEs are different functions. XMILE's is an impulse:
+    /// `volume / DT` for the one step at `first`, and again every `interval`
+    /// after when one is given (XMILE 1.0 section 3.5.4). Vensim's
+    /// `PULSE(start, width)` is 1 from `start` for `width`
+    /// (vensim.com/documentation/fn_pulse.html). So the call is written as
+    /// the comparison the engine's own `vm::pulse` makes, `first <= Time <
+    /// first + TIME STEP`, on each interval. An interval that is not a
+    /// number in the equation decides which at run time, as the engine does:
+    /// one at or below zero is a single pulse.
+    fn xmile_pulse(&mut self, args: &[Expr0]) -> String {
+        let volume = self.walk_operand(&args[0]);
+        let first = self.walk_operand(&args[1]);
+        let once = format!("Time < {first} + TIME STEP");
+        let within = match args.get(2) {
+            None => once,
+            Some(Expr0::Const(_, interval, _)) if interval.value() <= 0.0 => once,
+            Some(interval) => {
+                let is_number = matches!(interval, Expr0::Const(..));
+                let interval = self.walk_operand(interval);
+                let repeating = format!("MODULO(Time - {first}, {interval}) < TIME STEP");
+                if is_number {
+                    repeating
+                } else {
+                    format!("IF THEN ELSE({interval} > 0, {repeating}, {once})")
+                }
+            }
+        };
+        format!("IF THEN ELSE(Time >= {first} :AND: {within}, {volume} / TIME STEP, 0)")
     }
 }
 
@@ -1199,22 +1513,43 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
             return s;
         }
         match expr {
-            Expr0::Const(s, _, _) => s.clone(),
-            Expr0::Var(id, _) => format_mdl_ident(id.as_str()),
+            // A number is written as the reader stores it (`format_number`),
+            // so a save reads back as the text it writes: `0.0000001` and
+            // `1e-07` are one number, and only one spelling is a fixed point.
+            Expr0::Const(s, n, _) => {
+                if n.value().is_finite() {
+                    super::xmile_compat::format_number(n.value())
+                } else {
+                    self.inexact.not_a_number |= n.value().is_nan();
+                    s.clone()
+                }
+            }
+            Expr0::Var(id, _) => self
+                .ctx
+                .element_value(id.as_str())
+                .unwrap_or_else(|| self.ctx.reference(id.as_str())),
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
+                // The engine reads a MODULO call as its MOD operator
+                // (`builtins_visitor`), unless the project defines a MODULO
+                // macro; a variable of that name is no function.
+                if func == "modulo" && args.len() == 2 && !self.ctx.macros.contains("modulo") {
+                    return self.write_modulus(&args[0], &args[1]);
+                }
+                // A variable named `pulse` is no function, so the call is the
+                // builtin whatever the model names; a macro of that name is
+                // the call's.
+                if func == "pulse"
+                    && (2..=3).contains(&args.len())
+                    && !self.ctx.macros.contains("pulse")
+                {
+                    return self.xmile_pulse(args);
+                }
                 if args.is_empty() {
-                    // The parser reifies a `pi`/`time`/`time_step`/... reference
-                    // into a zero-arg `App`, so a model variable that shadows
-                    // one of these builtin names is INDISTINGUISHABLE from the
-                    // builtin except via the variable set. A declared variable
-                    // wins: emit it as the identifier, not the builtin, so a
-                    // user aux named "Time Step" or "PI" does not silently
-                    // rebind to the simulation dt / lose its definition
-                    // (#853, #850).
-                    if self.ctx.is_variable(&crate::common::canonicalize(func)) {
-                        return format_mdl_ident(func);
-                    }
-                    // Vensim has no PI builtin and rejects the zero-arg call
+                    // A zero-argument `App` is the builtin, and a reference to
+                    // a variable of a builtin's name is a `Var` (quoted in the
+                    // equation, as the importer writes it), which the `Var`
+                    // arm spells as the variable's name; so `dt = TIME STEP`
+                    // writes back as it was. Vensim has no PI builtin and rejects the zero-arg call
                     // `PI()`; emit a numeric literal instead (#850).
                     if func == "pi" {
                         return PI_LITERAL.to_owned();
@@ -1230,7 +1565,7 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
                     && args.len() == 2
                     && let Expr0::Var(table_ident, _) = &args[0]
                 {
-                    let table_name = format_mdl_ident(table_ident.as_str());
+                    let table_name = self.ctx.reference(table_ident.as_str());
                     let input = self.walk(&args[1]);
                     // An Extrapolate lookup table is marked extrapolating only
                     // by a `TABXL` call site on re-import (MDL has no
@@ -1249,7 +1584,27 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
                 //   - safediv 3+ args -> XIDZ (3-arg), else ZIDZ (2-arg)
                 //   - init 1 arg -> INITIAL, else ACTIVE INITIAL (which
                 //     requires two args -- emitting it 1-arg is invalid) (#852)
-                let mdl_name = if func == "safediv" && args.len() >= 3 {
+                //   - a smooth or delay with an initial value is Vensim's
+                //     `I` function: SMOOTH and DELAY1 take two arguments and
+                //     SMOOTHI and DELAY1I three
+                //     (vensim.com/documentation/fn_smoothi.html,
+                //     fn_delay1i.html)
+                //   - a one-argument MAX or MIN is the engine's reduction over
+                //     an array, Vensim's VMAX and VMIN; Vensim's MAX and MIN
+                //     are of two alternatives (vensim.com/documentation/
+                //     fn_vmax.html, fn_vmin.html, fn_max.html, fn_min.html)
+                let with_initial = match (func.as_str(), args.len()) {
+                    ("smth1", 3) => Some("SMOOTHI"),
+                    ("smth3", 3) => Some("SMOOTH3I"),
+                    ("delay1", 3) => Some("DELAY1I"),
+                    ("delay3", 3) => Some("DELAY3I"),
+                    ("max", 1) => Some("VMAX"),
+                    ("min", 1) => Some("VMIN"),
+                    _ => None,
+                };
+                let mdl_name = if let Some(name) = with_initial {
+                    name.to_owned()
+                } else if func == "safediv" && args.len() >= 3 {
                     "XIDZ".to_owned()
                 } else if func == "init" {
                     if args.len() == 1 {
@@ -1260,6 +1615,9 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
                 } else {
                     xmile_to_mdl_function_name(func)
                 };
+                if !self.ctx.vensim_reads_call(func, &mdl_name) {
+                    self.inexact.unknown_functions.push(mdl_name.clone());
+                }
                 let converted: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
                 let reordered = reorder_args(&mdl_name, converted);
                 format!("{}({})", mdl_name, reordered.join(", "))
@@ -1274,12 +1632,14 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
                     .enumerate()
                     .map(|(pos, e)| self.walk_index_at(e, canonical.as_ref(), pos))
                     .collect();
-                format!("{}[{}]", format_mdl_ident(id.as_str()), args.join(", "))
+                format!("{}[{}]", self.ctx.reference(id.as_str()), args.join(", "))
             }
             Expr0::Op1(op, l, _) => {
-                // The operand groups through the shared rule in every arm; the
-                // transpose case is explained on `mdl_paren_if_necessary`.
-                let l = mdl_paren_if_necessary(expr, l, false, self.walk(l));
+                // The operand groups through the shared rule in every arm. Vensim
+                // has no transpose, so such an equation is degraded regardless
+                // (`transpose_warning`); grouping its operand at least makes the
+                // text denote the tree the model has, not the different `a + b'`.
+                let l = paren_if_necessary(expr.shape(), written_shape(l), false, self.walk(l));
                 match op {
                     UnaryOp::Transpose => format!("{l}'"),
                     UnaryOp::Positive => format!("+{l}"),
@@ -1289,17 +1649,11 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
                 }
             }
             Expr0::Op2(op, l, r, _) => {
-                // Vensim uses MODULO(a, b) function form rather than the
-                // binary MOD operator that the XMILE equation parser
-                // produces.  Emit the function call so the MDL roundtrip
-                // re-parses correctly.
                 if *op == BinaryOp::Mod {
-                    let l = self.walk(l);
-                    let r = self.walk(r);
-                    return format!("MODULO({l}, {r})");
+                    return self.write_modulus(l, r);
                 }
-                let l = mdl_paren_if_necessary(expr, l, false, self.walk(l));
-                let r = mdl_paren_if_necessary(expr, r, true, self.walk(r));
+                let l = paren_if_necessary(expr.shape(), written_shape(l), false, self.walk(l));
+                let r = paren_if_necessary(expr.shape(), written_shape(r), true, self.walk(r));
                 let op_str = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
@@ -1341,8 +1695,17 @@ pub fn expr0_to_mdl(expr: &Expr0) -> String {
 /// Convert an `Expr0` AST to MDL-format equation text using model context for
 /// wildcard-subscript recovery and builtin/variable disambiguation.
 pub fn expr0_to_mdl_ctx(expr: &Expr0, ctx: &WriterContext) -> String {
-    let mut visitor = MdlPrintVisitor { ctx };
-    visitor.walk(expr)
+    expr0_to_mdl_noting(expr, ctx).0
+}
+
+/// [`expr0_to_mdl_ctx`], with what the text spells inexactly.
+fn expr0_to_mdl_noting(expr: &Expr0, ctx: &WriterContext) -> (String, Inexact) {
+    let mut visitor = MdlPrintVisitor {
+        ctx,
+        inexact: Inexact::default(),
+    };
+    let text = visitor.walk(expr);
+    (text, visitor.inexact)
 }
 
 /// Convert an XMILE equation string to MDL text via Expr0 round-trip.
@@ -1375,7 +1738,7 @@ fn equation_to_mdl(
     // Data equation placeholders (GET DIRECT DATA, GET XLS, etc.) are opaque
     // strings that cannot be parsed as Expr0.  Emit them verbatim, stripping
     // the outer braces that the normalizer adds.
-    if is_data_equation(xmile_eqn) {
+    if is_external_data_placeholder(xmile_eqn) {
         let stripped = xmile_eqn
             .strip_prefix('{')
             .and_then(|s| s.strip_suffix('}'))
@@ -1387,10 +1750,22 @@ fn equation_to_mdl(
             if expr0_contains_transpose(&ast) {
                 warnings.push(transpose_warning(name, xmile_eqn));
             }
-            if expr0_contains_round(&ast) {
-                warnings.push(round_warning(name, xmile_eqn));
+            if holds_a_nested_active_initial(&ast, true) {
+                warnings.push(nested_active_initial_warning(name, xmile_eqn));
             }
-            expr0_to_mdl_ctx(&ast, ctx)
+            let (text, mut inexact) = expr0_to_mdl_noting(&ast, ctx);
+            inexact.unknown_functions.sort();
+            inexact.unknown_functions.dedup();
+            for function in &inexact.unknown_functions {
+                warnings.push(unknown_function_warning(name, function, xmile_eqn));
+            }
+            if inexact.modulus_as_modulo {
+                warnings.push(modulo_warning(name, xmile_eqn));
+            }
+            if inexact.not_a_number {
+                warnings.push(not_a_number_warning(name, xmile_eqn));
+            }
+            text
         }
         // A non-empty equation that lexes to NOTHING (whitespace, or a bare
         // comment) parsed fine; it just has no AST and no content to mis-render.
@@ -1401,6 +1776,55 @@ fn equation_to_mdl(
             underbar_to_space(xmile_eqn)
         }
     }
+}
+
+/// The [`ExportWarning`] for an equation that is or holds NaN: the reader's
+/// form of Vensim's `A FUNCTION OF` placeholder, which "is not intended for
+/// use in writing equations, and precludes simulation"
+/// (vensim.com/documentation/fn_a_function_of.html). It is written as `NaN`,
+/// which Simlin reads back; whether Vensim reads it is unverified.
+fn not_a_number_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
+    ExportWarning::new(format!(
+        "the equation for '{name}' is not a number ({xmile_eqn:?}), as a variable \
+         defined only as A FUNCTION OF is; it was written as NaN, which Vensim's \
+         function reference does not define"
+    ))
+}
+
+/// Whether `expr` holds a two-argument `INIT` (written as ACTIVE INITIAL)
+/// anywhere but at the top of the equation (`top`), where Vensim does not
+/// read it: ACTIVE INITIAL "must appear first on the right of the = sign and
+/// not be followed by anything else"
+/// (vensim.com/documentation/fn_active_initial.html), and the reader keeps
+/// only one at the top.
+fn holds_a_nested_active_initial(expr: &Expr0, top: bool) -> bool {
+    let nested = |e: &Expr0| holds_a_nested_active_initial(e, false);
+    match expr {
+        Expr0::Const(..) | Expr0::Var(..) => false,
+        Expr0::App(UntypedBuiltinFn(f, args), _) => {
+            (f == "init" && args.len() == 2 && !top) || args.iter().any(nested)
+        }
+        Expr0::Subscript(_, indices, _) => indices.iter().any(|index| match index {
+            IndexExpr0::Expr(e) => nested(e),
+            IndexExpr0::Range(l, r, _) => nested(l) || nested(r),
+            IndexExpr0::Wildcard(_)
+            | IndexExpr0::StarRange(_, _)
+            | IndexExpr0::DimPosition(_, _) => false,
+        }),
+        Expr0::Op1(_, e, _) => nested(e),
+        Expr0::Op2(_, l, r, _) => nested(l) || nested(r),
+        Expr0::If(c, t, f, _) => nested(c) || nested(t) || nested(f),
+    }
+}
+
+/// The [`ExportWarning`] for an ACTIVE INITIAL that is not the whole
+/// equation ([`holds_a_nested_active_initial`]).
+fn nested_active_initial_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
+    ExportWarning::new(format!(
+        "the equation for '{name}' has an initial value inside it ({xmile_eqn:?}); it was \
+         written as an ACTIVE INITIAL there, which Vensim reads only as a whole equation, \
+         and the initial value is not kept"
+    ))
 }
 
 /// The [`ExportWarning`] for the [`equation_to_mdl`] raw-text fallback (#912).
@@ -1421,56 +1845,45 @@ fn transpose_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
     ))
 }
 
-/// The [`ExportWarning`] for an equation calling the ROUND builtin. ROUND is
-/// a Simlin extension: Vensim defines no ROUND function (it is absent from
-/// `mdl/builtins.rs`' own recognition table, and vensim.com has no fn_round
-/// page), so the catch-all rename emits a `ROUND(...)` call Vensim rejects.
+/// The [`ExportWarning`] for an equation calling a function Vensim does not
+/// have: one the reader's own table of Vensim functions (`mdl/builtins.rs`,
+/// after vensim.com/documentation's function reference) does not hold, and
+/// that is no macro or table of the model. ROUND, MEAN and PREVIOUS are such
+/// functions, and so are INT, the floor (XMILE 1.0 footnote 7), and MOD, the
+/// floored modulus: Vensim's INTEGER and MODULO truncate toward zero
+/// (vensim.com/documentation/fn_integer.html, fn_modulo.html), and its
+/// function reference has no INT or MOD.
 ///
-/// The writer deliberately does NOT lower the call to Vensim primitives.
-/// Round-half-to-even IS arithmetically composable for finite values from
-/// IF THEN ELSE / INTEGER / MODULO, but such a lowering would (a) duplicate
-/// the argument expression several times, which is wrong outright for a
-/// stochastic argument (RANDOM UNIFORM etc. would be re-drawn per copy) and
-/// bloats every exported equation; and (b) rest on Vensim edge semantics
-/// this repo has not verified or knows to diverge -- INTEGER truncates
-/// where our INT floors and MODULO disagrees with our MOD (GH #610), and
-/// Vensim's `=` behavior at an exact .5 comparison is unverified -- so a
-/// subtly-wrong silent lowering is strictly worse than a loud warning.
-/// Emitting the call as-is and saying so is the transpose operator's exact
-/// contract (see above).
-fn round_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
+/// The call is written by name. Simlin reads it back as the function it is
+/// (the reader takes a call of a name the file does not define for a
+/// function), and Vensim will not read it. The writer deliberately does NOT
+/// lower such a call to Vensim primitives. ROUND, say, is composable from IF
+/// THEN ELSE / INTEGER / MODULO, but the composition repeats the argument
+/// expression, which is wrong outright for a stochastic argument (RANDOM
+/// UNIFORM would be drawn once per copy), and it rests on what Vensim does at
+/// an exact .5, which is unverified -- so a subtly wrong silent lowering is
+/// worse than a loud warning.
+fn unknown_function_warning(name: &str, function: &str, xmile_eqn: &str) -> ExportWarning {
     ExportWarning::new(format!(
-        "the equation for '{name}' uses ROUND ({xmile_eqn:?}), a Simlin extension \
-         that Vensim does not define; it was written through as ROUND(...), which \
+        "the equation for '{name}' calls {function} ({xmile_eqn:?}), a function \
+         Vensim does not have; it was written through as {function}(...), which \
          Vensim will not recognize"
     ))
 }
 
-/// Does this AST call the ROUND builtin anywhere? Mirrors
-/// [`expr0_contains_transpose`]; the parser stores builtin call names
-/// lowercased, so the comparison is against `"round"`.
-fn expr0_contains_round(expr: &Expr0) -> bool {
-    fn index_has(idx: &IndexExpr0) -> bool {
-        match idx {
-            IndexExpr0::Wildcard(_)
-            | IndexExpr0::StarRange(_, _)
-            | IndexExpr0::DimPosition(_, _) => false,
-            IndexExpr0::Range(l, r, _) => expr0_contains_round(l) || expr0_contains_round(r),
-            IndexExpr0::Expr(e) => expr0_contains_round(e),
-        }
-    }
-    match expr {
-        Expr0::Const(_, _, _) | Expr0::Var(_, _) => false,
-        Expr0::App(UntypedBuiltinFn(func, args), _) => {
-            func == "round" || args.iter().any(expr0_contains_round)
-        }
-        Expr0::Subscript(_, indices, _) => indices.iter().any(index_has),
-        Expr0::Op1(_, l, _) => expr0_contains_round(l),
-        Expr0::Op2(_, l, r, _) => expr0_contains_round(l) || expr0_contains_round(r),
-        Expr0::If(c, t, f, _) => {
-            expr0_contains_round(c) || expr0_contains_round(t) || expr0_contains_round(f)
-        }
-    }
+/// The [`ExportWarning`] for a floored modulus written as MODULO. XMILE's
+/// MOD is the floored modulus (XMILE 1.0 section 3.3.1) and Vensim's MODULO
+/// the remainder of a truncated division
+/// (vensim.com/documentation/fn_modulo.html), so the two differ when the
+/// operands' signs do. A model that names something MOD has no other
+/// spelling for it.
+fn modulo_warning(name: &str, xmile_eqn: &str) -> ExportWarning {
+    ExportWarning::new(format!(
+        "the equation for '{name}' uses MOD ({xmile_eqn:?}), whose result has the sign \
+         of its divisor; the model names a variable MOD, so it was written as Vensim's \
+         MODULO, whose result has the sign of what is divided, and the two differ for \
+         a negative operand"
+    ))
 }
 
 /// Does this AST contain a transpose anywhere?
@@ -1503,25 +1916,6 @@ fn expr0_contains_transpose(expr: &Expr0) -> bool {
                 || expr0_contains_transpose(f)
         }
     }
-}
-
-/// Data equations use `:=` instead of `=`.  Detect by checking if the
-/// raw XMILE equation string begins with one of Vensim's data-fetch
-/// function tokens (stored as `{GET_...}` after canonicalization).
-fn is_data_equation(xmile_eqn: &str) -> bool {
-    let s = xmile_eqn.trim_start_matches('{');
-    // The normalizer produces space-separated prefixes like "{GET DIRECT DATA(...)}",
-    // but some code paths may store underscore-separated forms.  Accept both.
-    s.starts_with("GET DIRECT")
-        || s.starts_with("GET XLS")
-        || s.starts_with("GET VDF")
-        || s.starts_with("GET DATA")
-        || s.starts_with("GET 123")
-        || s.starts_with("GET_DIRECT")
-        || s.starts_with("GET_XLS")
-        || s.starts_with("GET_VDF")
-        || s.starts_with("GET_DATA")
-        || s.starts_with("GET_123")
 }
 
 /// Write the inner body of a lookup table into `buf` (no outer parens).
@@ -1705,20 +2099,18 @@ fn write_variable_entry_ctx_warn(
                 warnings,
             );
         }
-        Equation::Arrayed(dims, elements, default_eq, has_except_default) => {
-            write_arrayed_entries(
-                buf,
-                &name,
+        Equation::Arrayed(dims, slots, default, has_except_default) => {
+            let var = arrayed::Arrayed {
+                name: &name,
                 dims,
-                elements,
-                default_eq,
-                *has_except_default,
-                compat,
+                slots,
+                default,
+                has_except_default: *has_except_default,
+                rhs: arrayed::Rhs::Value { compat },
                 units,
                 doc,
-                ctx,
-                warnings,
-            );
+            };
+            arrayed::write_arrayed(buf, &var, ctx, warnings);
         }
     }
 }
@@ -1836,10 +2228,10 @@ fn warn_unrepresentable_gf_kinds(
         }
     }
 
-    if let Equation::Arrayed(_, elements, _, _) = equation {
+    if let Equation::Arrayed(dims, elements, _, _) = equation {
         for (elem_key, _elem_eqn, _comment, elem_gf) in elements {
             let Some(elem_gf) = elem_gf else { continue };
-            let elem_name = format!("{name}[{}]", format_mdl_element_key(elem_key));
+            let elem_name = format!("{name}[{}]", format_mdl_element_key(elem_key, dims, ctx));
             match elem_gf.kind {
                 Discrete => warnings.push(discrete_gf_warning(&elem_name)),
                 // The standalone-lookup TABXL rewrite only covers scalar
@@ -2021,11 +2413,11 @@ fn write_stock_variable(
         if i > 0 {
             net_flow.push('+');
         }
-        net_flow.push_str(&format_mdl_ident(inflow));
+        net_flow.push_str(&ctx.reference(inflow));
     }
     for outflow in &outflows {
         net_flow.push('-');
-        net_flow.push_str(&format_mdl_ident(outflow));
+        net_flow.push_str(&ctx.reference(outflow));
     }
     if net_flow.is_empty() {
         net_flow.push('0');
@@ -2073,21 +2465,21 @@ fn write_stock_variable(
                 &stock.documentation,
             );
         }
-        Equation::Arrayed(dims, elements, default_eq, has_except_default) => {
-            write_arrayed_stock_entries(
-                buf,
-                &name,
-                &net_flow,
+        Equation::Arrayed(dims, slots, default, has_except_default) => {
+            let var = arrayed::Arrayed {
+                name: &name,
                 dims,
-                elements,
-                default_eq,
-                *has_except_default,
-                &stock.compat,
-                &stock.units,
-                &stock.documentation,
-                ctx,
-                warnings,
-            );
+                slots,
+                default,
+                has_except_default: *has_except_default,
+                rhs: arrayed::Rhs::Stock {
+                    net_flow: &net_flow,
+                    compat: &stock.compat,
+                },
+                units: &stock.units,
+                doc: &stock.documentation,
+            };
+            arrayed::write_arrayed(buf, &var, ctx, warnings);
         }
     }
 }
@@ -2122,51 +2514,6 @@ fn write_stock_entry(
     buf.push_str("\n\t");
     buf.push_str(&format!("INTEG({net_flow}, {initial})"));
     write_units_and_comment(buf, units, doc);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_arrayed_stock_entries(
-    buf: &mut String,
-    name: &str,
-    net_flow: &str,
-    dims: &[String],
-    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    default_equation: &Option<String>,
-    has_except_default: bool,
-    compat: &datamodel::Compat,
-    units: &Option<String>,
-    doc: &str,
-    ctx: &WriterContext,
-    warnings: &mut Vec<ExportWarning>,
-) {
-    let entries = resolve_arrayed_entries(
-        name,
-        dims,
-        elements,
-        default_equation,
-        has_except_default,
-        ctx,
-        warnings,
-    );
-
-    let last_idx = entries.len().saturating_sub(1);
-    for (i, (elem_name, raw_eqn, _comment, _gf)) in entries.iter().enumerate() {
-        let elem_display = format_mdl_element_key(elem_name);
-        // Wrap the per-element INITIAL with ACTIVE INITIAL when the stock
-        // carries that compat (#857), mirroring the scalar stock path.
-        let initial_src = wrap_active_initial(raw_eqn, compat);
-        let initial = normalized_stock_initial(&equation_to_mdl(&initial_src, name, ctx, warnings));
-
-        write!(buf, "{name}[{elem_display}]=").unwrap();
-        buf.push_str("\n\t");
-        buf.push_str(&format!("INTEG({net_flow}, {initial})"));
-
-        if i < last_idx {
-            buf.push_str("\n\t~~|\n");
-        } else {
-            write_units_and_comment(buf, units, doc);
-        }
-    }
 }
 
 /// If a variable has ACTIVE INITIAL metadata, wrap the equation.
@@ -2342,7 +2689,11 @@ fn write_single_entry(
             buf.push(')');
         } else {
             // Embedded lookup: name=\n\tWITH LOOKUP(input, (body))
-            let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+            let assign_op = if is_external_data_placeholder(eqn) {
+                ":="
+            } else {
+                "="
+            };
             write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
             let mdl_eqn = equation_to_mdl(eqn, name, ctx, warnings);
             buf.push_str("\n\tWITH LOOKUP(");
@@ -2352,13 +2703,19 @@ fn write_single_entry(
             buf.push(')');
         }
     } else {
-        let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+        let assign_op = if is_external_data_placeholder(eqn) {
+            ":="
+        } else {
+            "="
+        };
         let mdl_eqn = equation_to_mdl(eqn, name, ctx, warnings);
 
         // Short, single-line equations use inline format with spaces around
         // the operator (e.g. `average repayment rate = 0.03`).  Longer or
         // multiline equations use the traditional Vensim multiline format.
-        let inline_line = format!("{name}{dim_suffix} {assign_op} {mdl_eqn}");
+        let inline_line = format!("{name}{dim_suffix} {assign_op} {mdl_eqn}")
+            .trim_end()
+            .to_owned();
         if inline_line.len() <= 80 && !mdl_eqn.contains('\n') {
             buf.push_str(&inline_line);
         } else {
@@ -2370,283 +2727,6 @@ fn write_single_entry(
     }
 
     write_units_and_comment(buf, units, doc);
-}
-
-/// Write arrayed (per-element) entries, reconstructing a load-bearing EXCEPT
-/// default when one was dropped (#858).
-///
-/// When `has_except_default` is set, the datamodel's `default_equation` fills
-/// every *declared* element not explicitly listed (Vensim EXCEPT semantics; the
-/// AST layer applies it at compile time). The prior writer dropped it, so those
-/// implicit elements silently became 0 on re-import. Here we materialize each
-/// missing declared element as an explicit entry carrying the default equation,
-/// then emit the whole (explicit + filled) set in key order
-/// ([`order_arrayed_entries`]). That preserves the fill's effect AND is
-/// idempotent -- re-importing the output yields the same fully-listed element
-/// set, which re-writes identically.
-///
-/// Reconstruction is declined (kept explicit-only, with an [`ExportWarning`])
-/// when dimension membership is unavailable or the default references the
-/// variable's own dimensions (needing per-element substitution we do not
-/// perform); see [`plan_except_default`].
-#[allow(clippy::too_many_arguments)]
-fn write_arrayed_entries(
-    buf: &mut String,
-    name: &str,
-    dims: &[String],
-    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    default_equation: &Option<String>,
-    has_except_default: bool,
-    compat: &datamodel::Compat,
-    units: &Option<String>,
-    doc: &str,
-    ctx: &WriterContext,
-    warnings: &mut Vec<ExportWarning>,
-) {
-    let entries = resolve_arrayed_entries(
-        name,
-        dims,
-        elements,
-        default_equation,
-        has_except_default,
-        ctx,
-        warnings,
-    );
-    write_arrayed_element_entries(buf, name, &entries, compat, units, doc, ctx, warnings);
-}
-
-/// Apply the EXCEPT-default plan and return the element list to emit: the
-/// input elements, plus the default-filled missing declared elements when the
-/// plan fills them, in the order [`order_arrayed_entries`] gives. Pushes an
-/// [`ExportWarning`] when reconstruction is declined.
-fn resolve_arrayed_entries(
-    name: &str,
-    dims: &[String],
-    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    default_equation: &Option<String>,
-    has_except_default: bool,
-    ctx: &WriterContext,
-    warnings: &mut Vec<ExportWarning>,
-) -> Vec<(String, String, Option<String>, Option<GraphicalFunction>)> {
-    let mut entries = elements.to_vec();
-    match plan_except_default(
-        name,
-        dims,
-        elements,
-        default_equation,
-        has_except_default,
-        ctx,
-    ) {
-        ExceptDefaultPlan::None => {}
-        ExceptDefaultPlan::Warn(msg) => warnings.push(ExportWarning::new(msg)),
-        ExceptDefaultPlan::Fill(missing) => {
-            let default = default_equation
-                .as_ref()
-                .expect("Fill plan implies a default equation is present");
-            for key in missing {
-                entries.push((key, default.clone(), None, None));
-            }
-        }
-    }
-    order_arrayed_entries(&mut entries);
-    entries
-}
-
-/// Put an arrayed variable's entries in order of their canonical element keys
-/// (`canonical_element_key`), ties broken by the key as written.
-///
-/// The order is a function of the element set alone, never of the order the
-/// entries are stored in or the dimension they are stored under. That is what
-/// makes a write a fixed point: the MDL importer stores the elements a number
-/// list defines in the list's order and sorts the elements of separate
-/// equations by key, and a file of separate element equations names no
-/// dimension, so the re-imported variable can sit over another dimension of
-/// the same elements in another order (`x[DimX] = 1, 2, 3` beside `DimA: A1,
-/// A2, A3` and `DimX: A2, A3, A1` re-imports over `DimA`). Canonical keys are
-/// compared because the writer respells elements, and a respelled key can sort
-/// elsewhere as written (`_` and a space).
-fn order_arrayed_entries(
-    entries: &mut [(String, String, Option<String>, Option<GraphicalFunction>)],
-) {
-    entries.sort_by_cached_key(|(key, _, _, _)| (canonical_element_key(key), key.clone()));
-}
-
-/// Emit one MDL entry per arrayed element. An element's own initial equation
-/// wraps its equation in ACTIVE INITIAL: the importer stores an arrayed
-/// variable's ACTIVE INITIAL on each element, `X[COP] = ACTIVE INITIAL(expr,
-/// init)` as every element of COP with initial `init`. An element without one
-/// takes the per-variable wrap (`compat.active_initial`, #857), the same way
-/// the Scalar / Apply-to-All paths wrap it.
-// An emit helper: every parameter is a local of the one `write_variable` arm that
-// calls it, threaded straight through to the per-element entry it writes.
-#[allow(clippy::too_many_arguments)]
-fn write_arrayed_element_entries(
-    buf: &mut String,
-    name: &str,
-    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    compat: &datamodel::Compat,
-    units: &Option<String>,
-    doc: &str,
-    ctx: &WriterContext,
-    warnings: &mut Vec<ExportWarning>,
-) {
-    let last_idx = elements.len().saturating_sub(1);
-    for (i, (elem_name, raw_eqn, elem_initial, elem_gf)) in elements.iter().enumerate() {
-        let elem_display = format_mdl_element_key(elem_name);
-        let eqn = match elem_initial {
-            Some(initial) => wrap_initial(raw_eqn, initial),
-            None => wrap_active_initial(raw_eqn, compat),
-        };
-        let eqn = eqn.as_str();
-
-        if let Some(gf) = elem_gf {
-            if is_lookup_only_equation(eqn) {
-                write!(buf, "{name}[{elem_display}](").unwrap();
-                buf.push_str("\n\t");
-                write_lookup_body(buf, gf);
-                buf.push(')');
-            } else {
-                let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-                write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-                let mdl_eqn = equation_to_mdl(eqn, name, ctx, warnings);
-                buf.push_str("\n\tWITH LOOKUP(");
-                buf.push_str(&mdl_eqn);
-                buf.push_str(", ");
-                write_lookup(buf, gf);
-                buf.push(')');
-            }
-        } else {
-            let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-            write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
-            let mdl_eqn = equation_to_mdl(eqn, name, ctx, warnings);
-            let wrapped = wrap_equation_with_continuations(&mdl_eqn, 80);
-            buf.push_str("\n\t");
-            buf.push_str(&wrapped);
-        }
-
-        if i < last_idx {
-            buf.push_str("\n\t~~|\n");
-        } else {
-            write_units_and_comment(buf, units, doc);
-        }
-    }
-}
-
-/// The action to take for an arrayed variable's EXCEPT `default_equation`.
-enum ExceptDefaultPlan {
-    /// No load-bearing default: emit explicit elements only (unchanged).
-    None,
-    /// The default fills these declared element keys (display form, comma-joined
-    /// per dimension) that are not explicitly listed.
-    Fill(Vec<String>),
-    /// Reconstruction is unsafe; keep explicit-only behavior and warn with this
-    /// message.
-    Warn(String),
-}
-
-/// Decide how to handle an arrayed variable's EXCEPT default on export (#858).
-///
-/// The default is load-bearing only when `has_except_default` is set (the AST
-/// layer applies it to declared elements not explicitly listed). We reconstruct
-/// it by materializing those missing declared elements, which needs the full
-/// declared element set (from [`WriterContext`]) and a default that does not
-/// itself reference the variable's dimensions (which we cannot substitute per
-/// element). When either is unavailable we decline and warn rather than emit
-/// possibly-wrong output.
-fn plan_except_default(
-    name: &str,
-    dims: &[String],
-    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
-    default_equation: &Option<String>,
-    has_except_default: bool,
-    ctx: &WriterContext,
-) -> ExceptDefaultPlan {
-    if !has_except_default {
-        return ExceptDefaultPlan::None;
-    }
-    let Some(default) = default_equation.as_ref().filter(|d| !d.trim().is_empty()) else {
-        return ExceptDefaultPlan::Warn(format!(
-            "arrayed variable '{name}' has EXCEPT-default semantics but no default \
-             equation text; elements covered only by the default were dropped on export"
-        ));
-    };
-    let Some(declared) = declared_element_keys(dims, ctx) else {
-        return ExceptDefaultPlan::Warn(format!(
-            "arrayed variable '{name}' uses an EXCEPT default over a dimension whose \
-             named elements are unavailable to the writer; elements covered only by \
-             the default were dropped on export"
-        ));
-    };
-    let explicit: HashSet<String> = elements
-        .iter()
-        .map(|(k, _, _, _)| canonical_element_key(k))
-        .collect();
-    let missing: Vec<String> = declared
-        .into_iter()
-        .filter(|k| !explicit.contains(&canonical_element_key(k)))
-        .collect();
-    if missing.is_empty() {
-        // Every declared element is already explicit, so the default fills
-        // nothing; the flag is inert and the plain element list is faithful.
-        return ExceptDefaultPlan::None;
-    }
-    if default_references_dims(default, dims) {
-        return ExceptDefaultPlan::Warn(format!(
-            "arrayed variable '{name}' has an EXCEPT default equation that references \
-             its own dimensions and cannot be reconstructed per element; elements \
-             covered only by the default were dropped on export"
-        ));
-    }
-    ExceptDefaultPlan::Fill(missing)
-}
-
-/// The full declared element key set (display form, comma-joined per dimension)
-/// of an arrayed variable over `dims`, or `None` if any dimension is indexed or
-/// unknown (so has no named elements the writer can enumerate).
-fn declared_element_keys(dims: &[String], ctx: &WriterContext) -> Option<Vec<String>> {
-    let per_dim: Vec<&[String]> = dims
-        .iter()
-        .map(|d| ctx.dim_named_elements(d))
-        .collect::<Option<Vec<_>>>()?;
-    let mut keys = vec![String::new()];
-    for elems in per_dim {
-        let mut next = Vec::with_capacity(keys.len() * elems.len());
-        for prefix in &keys {
-            for e in elems {
-                if prefix.is_empty() {
-                    next.push(e.clone());
-                } else {
-                    next.push(format!("{prefix},{e}"));
-                }
-            }
-        }
-        keys = next;
-    }
-    Some(keys)
-}
-
-/// Canonicalize an element key (comma-joined per-dimension element names) for
-/// membership comparison, so a declared element and an explicit element key
-/// match regardless of casing / spacing.
-fn canonical_element_key(key: &str) -> String {
-    key.split(',')
-        .map(|p| crate::common::canonicalize(p.trim()).into_owned())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// True when the EXCEPT default equation references any of the variable's own
-/// declared dimensions as an identifier token -- meaning the default is
-/// per-element and would need substitution we do not perform, so it must not be
-/// materialized verbatim into element equations.
-fn default_references_dims(default: &str, dims: &[String]) -> bool {
-    let canon = crate::common::canonicalize(default);
-    let tokens: HashSet<&str> = canon
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .filter(|t| !t.is_empty())
-        .collect();
-    dims.iter()
-        .any(|d| tokens.contains(crate::common::canonicalize(d).as_ref()))
 }
 
 /// Append the `~\tunits\n\t~\tcomment\n\t|` trailer.
@@ -2662,8 +2742,10 @@ fn write_units_and_comment(buf: &mut String, units: &Option<String>, doc: &str) 
         buf.push_str(&sanitize_free_text(u, FreeTextLineMode::SingleLine, &['~']));
     }
     buf.push_str("\n\t~\t");
-    // The `~`-comment is raw text up to `|`; multi-line is legal.
-    buf.push_str(&sanitize_free_text(doc, FreeTextLineMode::Multiline, &[]));
+    // The `~`-comment is raw text up to `|`; multi-line is legal. The reader
+    // trims it (`EquationReader::capture_comment`), so it is written trimmed
+    // and reads back as written.
+    buf.push_str(sanitize_free_text(doc, FreeTextLineMode::Multiline, &[]).trim());
     buf.push_str("\n\t|");
 }
 
@@ -2984,7 +3066,16 @@ fn write_dimension_def_warn(
             buf.push_str(&elem_strs.join(", "));
         }
         DimensionElements::Indexed(size) => {
-            write!(buf, "\n\t(1-{size})").unwrap();
+            // Vensim's subscript elements are names, and a numeric range is a
+            // range of names that end in a number (`(A1-A5)`).
+            let size = *size as usize;
+            let first = indexed_element_name(&dim.name, 1);
+            if size > 1 {
+                let last = indexed_element_name(&dim.name, size);
+                write!(buf, "\n\t({first}-{last})").unwrap();
+            } else {
+                write!(buf, "\n\t{first}").unwrap();
+            }
         }
     }
 
@@ -3063,13 +3154,11 @@ fn write_dimension_def_warn(
 
 /// Format a view element name for an MDL sketch record.
 ///
-/// Sketch records are comma-delimited single lines, so the name needs the
-/// same treatment the equation section gives identifiers: collapse display
-/// newlines to a space (see `collapse_display_newlines` -- the equation
-/// section does this too, and the spellings must match for Vensim to link the
-/// sketch element to its variable), turn underscores into spaces, and quote
-/// names containing characters that would otherwise break the record (`$`,
-/// `|`, `/`, ...).
+/// A sketch record names its variable as the equation section does
+/// ([`format_mdl_ident`]), so Vensim links the element to the variable:
+/// underscores as spaces, a display newline as the quoted `\n` escape, and
+/// quotes around a name holding a character that would otherwise break the
+/// comma-delimited record (`$`, `|`, `/`, ...).
 fn format_sketch_name(name: &str) -> String {
     format_mdl_ident(name)
 }
@@ -3169,8 +3258,6 @@ struct SketchUidRemap {
     /// Old flow UID -> new UID of that flow's first pipe connector. The flow's
     /// pipe connectors occupy a contiguous block immediately before the valve.
     pipe_start_uids: HashMap<i32, i32>,
-    /// One past the highest UID allocated -- the smallest still-free UID.
-    next_uid: i32,
     /// Old flow UID -> the clouds its cut ends are written with.
     cut_ends: HashMap<i32, CutEnds>,
 }
@@ -3277,7 +3364,6 @@ impl SketchUidRemap {
             element_uids,
             valve_uids,
             pipe_start_uids,
-            next_uid,
             cut_ends,
         }
     }
@@ -3302,11 +3388,6 @@ impl SketchUidRemap {
     fn pipe_start_uid(&self, flow_uid: i32) -> Option<i32> {
         self.pipe_start_uids.get(&flow_uid).copied()
     }
-
-    /// Smallest UID not used by any element/valve/pipe in this segment.
-    fn next_connector_uid(&self) -> i32 {
-        self.next_uid
-    }
 }
 
 const STOCK_WIDTH: f64 = 45.0;
@@ -3319,14 +3400,16 @@ const STOCK_EDGE_TOLERANCE: f64 = 1.0;
 /// quoting is not used.
 #[cfg(test)]
 fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
-    write_aux_element_with_context(buf, aux, SketchTransform::identity(), None);
+    let element = ViewElement::Aux(aux.clone());
+    let remap = SketchUidRemap::dense_for_segment(&[&element], &HashMap::new());
+    write_aux_element_with_context(buf, aux, SketchTransform::identity(), &remap);
 }
 
 fn write_aux_element_with_context(
     buf: &mut String,
     aux: &view_element::Aux,
     transform: SketchTransform,
-    uid_remap: Option<&SketchUidRemap>,
+    uid_remap: &SketchUidRemap,
 ) {
     let name = format_sketch_name(&aux.name);
     let (w, h, shape, bits) = match &aux.compat {
@@ -3338,7 +3421,7 @@ fn write_aux_element_with_context(
     };
     let (x, y) = transform.point(aux.x, aux.y);
     let tail = compat_tail(aux.compat.as_ref(), "0,0,-1,0,0,0");
-    let uid = uid_remap.map_or(aux.uid, |ids| ids.element_uid(aux.uid));
+    let uid = uid_remap.element_uid(aux.uid);
     write!(
         buf,
         "10,{},{},{},{},{},{},{},{},{}",
@@ -3350,14 +3433,16 @@ fn write_aux_element_with_context(
 /// Write a type 10 line for a Stock element.
 #[cfg(test)]
 fn write_stock_element(buf: &mut String, stock: &view_element::Stock) {
-    write_stock_element_with_context(buf, stock, SketchTransform::identity(), None);
+    let element = ViewElement::Stock(stock.clone());
+    let remap = SketchUidRemap::dense_for_segment(&[&element], &HashMap::new());
+    write_stock_element_with_context(buf, stock, SketchTransform::identity(), &remap);
 }
 
 fn write_stock_element_with_context(
     buf: &mut String,
     stock: &view_element::Stock,
     transform: SketchTransform,
-    uid_remap: Option<&SketchUidRemap>,
+    uid_remap: &SketchUidRemap,
 ) {
     let name = format_sketch_name(&stock.name);
     let (w, h, shape, bits) = match &stock.compat {
@@ -3366,65 +3451,13 @@ fn write_stock_element_with_context(
     };
     let (x, y) = transform.point(stock.x, stock.y);
     let tail = compat_tail(stock.compat.as_ref(), "0,0,0,0,0,0");
-    let uid = uid_remap.map_or(stock.uid, |ids| ids.element_uid(stock.uid));
+    let uid = uid_remap.element_uid(stock.uid);
     write!(
         buf,
         "10,{},{},{},{},{},{},{},{},{}",
         uid, name, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
-}
-
-/// Allocate non-conflicting valve UIDs for flow elements.
-///
-/// In MDL, each flow is two sketch elements: a valve (type 11) and an attached
-/// variable (type 10).  The valve needs a UID that doesn't collide with any
-/// existing element UID.  We find the max UID across all elements and allocate
-/// valve UIDs starting from max+1.
-fn allocate_valve_uids(elements: &[ViewElement]) -> HashMap<i32, i32> {
-    let mut max_uid: i32 = 0;
-    for elem in elements {
-        let uid = match elem {
-            ViewElement::Aux(a) => a.uid,
-            ViewElement::Stock(s) => s.uid,
-            ViewElement::Flow(f) => f.uid,
-            ViewElement::Cloud(c) => c.uid,
-            ViewElement::Alias(a) => a.uid,
-            ViewElement::Module(m) => m.uid,
-            ViewElement::Link(l) => l.uid,
-            ViewElement::Group(_) => continue,
-        };
-        max_uid = max_uid.max(uid);
-    }
-
-    let mut valve_uids = HashMap::new();
-    let mut next_uid = max_uid + 1;
-    for elem in elements {
-        if let ViewElement::Flow(f) = elem {
-            valve_uids.insert(f.uid, next_uid);
-            next_uid += 1;
-        }
-    }
-    valve_uids
-}
-
-#[allow(dead_code)]
-fn max_sketch_uid(elements: &[ViewElement], valve_uids: &HashMap<i32, i32>) -> i32 {
-    let mut max_uid = valve_uids.values().copied().max().unwrap_or(0);
-    for elem in elements {
-        let uid = match elem {
-            ViewElement::Aux(a) => a.uid,
-            ViewElement::Stock(s) => s.uid,
-            ViewElement::Flow(f) => f.uid,
-            ViewElement::Cloud(c) => c.uid,
-            ViewElement::Alias(a) => a.uid,
-            ViewElement::Module(m) => m.uid,
-            ViewElement::Link(l) => l.uid,
-            ViewElement::Group(_) => continue,
-        };
-        max_uid = max_uid.max(uid);
-    }
-    max_uid
 }
 
 /// MDL view titles are written on a single `*<title>` line.
@@ -3582,17 +3615,12 @@ fn widest_multiline_width(lines: &[String], min: i32) -> i32 {
 /// `40x20` is what plenty of Vensim's own single-line auxes use. But a name
 /// with an explicit break -- the literal two-character `\n` XMILE name
 /// attributes use (`Maximum\nfishery size`, `Effect of fish density\non catch
-/// per ship`), or a real newline -- is the modeler's chosen multi-line layout,
-/// and the writer collapses that break when it emits the name (the equation
-/// section has no break, and the two spellings must match for Vensim to link
-/// the sketch element to its variable; see `collapse_display_newlines`). Left
-/// at `40x20`, Vensim then re-wraps the now-unbroken name to fit the 40px box
-/// and crams the result into 20px of height -- the overlapping "effect of fish
-/// density on catch per ship" in the fishbanks export. Sizing the box to the
-/// modeler's lines instead -- width = the widest line at
-/// `SKETCH_MULTILINE_PX_PER_CHAR` (the calibrated real per-char width, so
-/// Vensim re-wraps the collapsed name to the modeler's line count and break
-/// points), height = `SKETCH_LINE_HEIGHT` per line -- reproduces the intended
+/// per ship`), or a real newline -- is the modeler's chosen multi-line layout.
+/// Left at `40x20`, a box crams those lines into 20px of height -- the
+/// overlapping "effect of fish density on catch per ship" in the fishbanks
+/// export. Sizing the box to the modeler's lines instead -- width = the widest
+/// line at `SKETCH_MULTILINE_PX_PER_CHAR` (the calibrated real per-char
+/// width), height = `SKETCH_LINE_HEIGHT` per line -- reproduces the intended
 /// layout. Widths still floor at the historical `40`, heights at `20`, so a
 /// name with short lines never collapses to a degenerate box.
 fn default_aux_size(display_name: &str) -> (i32, i32) {
@@ -3609,64 +3637,54 @@ fn default_aux_size(display_name: &str) -> (i32, i32) {
 /// type 10 (attached flow variable).
 ///
 /// Vensim requires this exact ordering: pipe connectors first, then valve,
-/// then flow label. The valve UID is looked up from the pre-allocated
-/// valve_uids map to avoid collisions.
+/// then flow label. The UIDs are the ones `SketchUidRemap::dense_for_segment`
+/// allocated for the flow, in this order.
 #[cfg(test)]
-fn write_flow_element(
-    buf: &mut String,
-    flow: &view_element::Flow,
-    valve_uids: &HashMap<i32, i32>,
-    cloud_uids: &HashSet<i32>,
-    next_connector_uid: &mut i32,
-) {
+fn write_flow_element(buf: &mut String, flow: &view_element::Flow) {
+    let element = ViewElement::Flow(flow.clone());
+    let remap = SketchUidRemap::dense_for_segment(&[&element], &HashMap::new());
     write_flow_element_with_context(
         buf,
         flow,
-        valve_uids,
-        cloud_uids,
-        next_connector_uid,
         SketchTransform::identity(),
         &HashMap::new(),
         &HashSet::new(),
-        None,
+        &remap,
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn write_flow_element_with_context(
     buf: &mut String,
     flow: &view_element::Flow,
-    valve_uids: &HashMap<i32, i32>,
-    _cloud_uids: &HashSet<i32>,
-    next_connector_uid: &mut i32,
     transform: SketchTransform,
     elem_positions: &HashMap<i32, (i32, i32)>,
     stock_uids: &HashSet<i32>,
-    uid_remap: Option<&SketchUidRemap>,
+    uid_remap: &SketchUidRemap,
 ) {
     let name = format_sketch_name(&flow.name);
-    let valve_uid = uid_remap
-        .and_then(|ids| ids.valve_uid(flow.uid))
-        .or_else(|| valve_uids.get(&flow.uid).copied())
-        .unwrap_or(flow.uid - 1);
+    let (Some(valve_uid), Some(pipe_start)) = (
+        uid_remap.valve_uid(flow.uid),
+        uid_remap.pipe_start_uid(flow.uid),
+    ) else {
+        // The remap is built from the segment the flow is written in, so it
+        // holds every flow; a flow it does not hold has no record to write.
+        debug_assert!(false, "the remap holds no uids for flow {}", flow.uid);
+        return;
+    };
     let valve_compat = flow.compat.as_ref();
     let label_compat = flow.label_compat.as_ref();
     let (valve_x, valve_y) = transform.point(flow.x, flow.y);
 
-    // On the production path UIDs are pre-allocated in file order, so this
-    // flow's pipe connectors occupy a known contiguous block; anchor the
-    // running connector counter at its start. (The test path passes a bare
-    // counter and no remap, so we leave it alone.)
-    if let Some(start) = uid_remap.and_then(|ids| ids.pipe_start_uid(flow.uid)) {
-        *next_connector_uid = start;
-    }
+    // The UIDs are allocated in file order, so this flow's pipe connectors
+    // occupy a known contiguous block.
+    let mut next_connector_uid = pipe_start;
 
     // Pipe connectors must come before the valve and flow label.
     let had_pipes = write_flow_pipe_connectors_with_context(
         buf,
         flow,
         valve_uid,
-        next_connector_uid,
+        &mut next_connector_uid,
         FlowConnectorContext {
             transform,
             elem_positions,
@@ -3712,7 +3730,7 @@ fn write_flow_element_with_context(
 
     let (label_x, label_y) = default_flow_label_point(flow, transform);
     let label_tail = compat_tail(label_compat, "0,0,-1,0,0,0");
-    let label_uid = uid_remap.map_or(flow.uid, |ids| ids.element_uid(flow.uid));
+    let label_uid = uid_remap.element_uid(flow.uid);
     write!(
         buf,
         "\n10,{},{},{},{},{},{},{},{},{}",
@@ -3725,7 +3743,7 @@ struct FlowConnectorContext<'a> {
     transform: SketchTransform,
     elem_positions: &'a HashMap<i32, (i32, i32)>,
     stock_uids: &'a HashSet<i32>,
-    uid_remap: Option<&'a SketchUidRemap>,
+    uid_remap: &'a SketchUidRemap,
 }
 
 fn write_flow_pipe_connectors_with_context(
@@ -3737,12 +3755,14 @@ fn write_flow_pipe_connectors_with_context(
 ) -> bool {
     let mut wrote_any = false;
 
-    // Flow pipe connectors use field 7 = 22 (pipe type) and field 4 for the
-    // endpoint role: 4 = the downstream/sink endpoint (where the flow's
-    // material goes), 100 = the upstream/source endpoint (where it comes
-    // from) -- this is the side the flow attaches to, *not* whether that
-    // element is a stock or a cloud. Vensim's own files set 4 on a sink that
-    // happens to be a cloud and 100 on a source that happens to be a stock.
+    // A flow's pipe connector is a type-1 record with field 7, the
+    // thickness, at 22 ("Larger than 20 is used for double parallel lines").
+    // Field 4 is the record's `shape`, which "determines the shape of the
+    // arrow (arc, polyline and so on)"; the reference enumerates no values
+    // (vensim.com/documentation/24305.html), so what they mean for a pipe is
+    // undocumented. Vensim's own files write 4 on the pipe to the flow's
+    // downstream end (where its material goes) and 100 on the pipe to its
+    // upstream end, whether a stock or a cloud is there, and so does this.
     let write_pipe = |buf: &mut String,
                       first: bool,
                       connector_uid: i32,
@@ -3791,9 +3811,7 @@ fn write_flow_pipe_connectors_with_context(
         point_xy
     };
 
-    let cut = ctx
-        .uid_remap
-        .map_or_else(CutEnds::default, |ids| ids.cut_ends(flow.uid));
+    let cut = ctx.uid_remap.cut_ends(flow.uid);
     // An end the segment cannot draw runs into its cut cloud.
     let end_target =
         |point: &view_element::FlowPoint, cloud: Option<i32>, is_sink: bool| match cloud {
@@ -3803,9 +3821,7 @@ fn write_flow_pipe_connectors_with_context(
             ),
             None => {
                 let endpoint_uid = point.attached_to_uid.unwrap_or_default();
-                let endpoint_uid = ctx
-                    .uid_remap
-                    .map_or(endpoint_uid, |ids| ids.element_uid(endpoint_uid));
+                let endpoint_uid = ctx.uid_remap.element_uid(endpoint_uid);
                 (endpoint_uid, connector_point(point))
             }
         };
@@ -3878,14 +3894,15 @@ fn write_flow_pipe_connectors_with_context(
 /// Write a type 12 line for a Cloud element.
 #[cfg(test)]
 fn write_cloud_element(buf: &mut String, cloud: &view_element::Cloud) {
-    write_cloud_element_with_context(buf, cloud, SketchTransform::identity(), None);
+    let remap = SketchUidRemap::dense_for_segment(&[], &HashMap::new());
+    write_cloud_element_with_context(buf, cloud, SketchTransform::identity(), &remap);
 }
 
 fn write_cloud_element_with_context(
     buf: &mut String,
     cloud: &view_element::Cloud,
     transform: SketchTransform,
-    uid_remap: Option<&SketchUidRemap>,
+    uid_remap: &SketchUidRemap,
 ) {
     let (w, h, shape, bits) = match &cloud.compat {
         Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
@@ -3894,7 +3911,7 @@ fn write_cloud_element_with_context(
     let (x, y) = transform.point(cloud.x, cloud.y);
     let name_field = compat_name_field(cloud.compat.as_ref(), "48");
     let tail = compat_tail(cloud.compat.as_ref(), "0,0,-1,0,0,0");
-    let uid = uid_remap.map_or(cloud.uid, |ids| ids.element_uid(cloud.uid));
+    let uid = uid_remap.element_uid(cloud.uid);
     write!(
         buf,
         "12,{},{},{},{},{},{},{},{},{}",
@@ -3910,13 +3927,15 @@ fn write_alias_element(
     alias: &view_element::Alias,
     name_map: &HashMap<i32, &str>,
 ) {
+    let element = ViewElement::Alias(alias.clone());
+    let remap = SketchUidRemap::dense_for_segment(&[&element], &HashMap::new());
     write_alias_element_with_context(
         buf,
         alias,
         name_map,
         &HashSet::new(),
         SketchTransform::identity(),
-        None,
+        &remap,
     );
 }
 
@@ -3926,7 +3945,7 @@ fn write_alias_element_with_context(
     name_map: &HashMap<i32, &str>,
     stock_uids: &HashSet<i32>,
     transform: SketchTransform,
-    uid_remap: Option<&SketchUidRemap>,
+    uid_remap: &SketchUidRemap,
 ) {
     let raw_name = name_map.get(&alias.alias_of_uid).copied().unwrap_or("");
     let name = format_sketch_name(raw_name);
@@ -3949,7 +3968,7 @@ fn write_alias_element_with_context(
         alias.compat.as_ref(),
         "0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128",
     );
-    let uid = uid_remap.map_or(alias.uid, |ids| ids.element_uid(alias.uid));
+    let uid = uid_remap.element_uid(alias.uid);
     // shape=8
     write!(
         buf,
@@ -3970,6 +3989,8 @@ fn write_link_element(
     elem_positions: &HashMap<i32, (i32, i32)>,
     use_lettered_polarity: bool,
 ) {
+    let element = ViewElement::Link(link.clone());
+    let remap = SketchUidRemap::dense_for_segment(&[&element], &HashMap::new());
     write_link_element_with_context(
         buf,
         link,
@@ -3977,7 +3998,7 @@ fn write_link_element(
         use_lettered_polarity,
         None,
         SketchTransform::identity(),
-        None,
+        &remap,
     );
 }
 
@@ -3988,7 +4009,7 @@ fn write_link_element_with_context(
     use_lettered_polarity: bool,
     link_compat: Option<&view_element::LinkSketchCompat>,
     transform: SketchTransform,
-    uid_remap: Option<&SketchUidRemap>,
+    uid_remap: &SketchUidRemap,
 ) {
     let polarity_val = match link.polarity {
         Some(LinkPolarity::Positive) if use_lettered_polarity => 83, // 'S'
@@ -4002,9 +4023,9 @@ fn write_link_element_with_context(
     let to_uid = link.to_uid;
     let from_pos = elem_positions.get(&from_uid).copied().unwrap_or((0, 0));
     let to_pos = elem_positions.get(&to_uid).copied().unwrap_or((0, 0));
-    let link_uid = uid_remap.map_or(link.uid, |ids| ids.element_uid(link.uid));
-    let from_uid = uid_remap.map_or(from_uid, |ids| ids.element_uid(from_uid));
-    let to_uid = uid_remap.map_or(to_uid, |ids| ids.element_uid(to_uid));
+    let link_uid = uid_remap.element_uid(link.uid);
+    let from_uid = uid_remap.element_uid(from_uid);
+    let to_uid = uid_remap.element_uid(to_uid);
     // Field 4 marks whether the connector carries a meaningful control point.
     // Vensim writes 1 on every curved influence connector and 0 on straight
     // ones (see Vensim-authored test/.../active_initial.mdl, pop.mdl,
@@ -4267,8 +4288,8 @@ impl MdlWriter {
         self.write_macro_blocks(project);
         let model = super::main_model(project).expect(super::MAIN_MODEL_EXPECT);
         self.write_equations_section(model, project)?;
-        self.write_sketch_section(&model.views);
-        self.write_settings_section(project);
+        self.write_sketch_section(&views_named_as_defined(model));
+        self.write_settings_section(project, model);
         warn_dropped_loop_metadata(model, &mut self.warnings);
         // Collapse exact-duplicate warnings while preserving first-seen order,
         // so a construct emitted from more than one path (or an incidental
@@ -4301,11 +4322,13 @@ impl MdlWriter {
             // The body equations may carry original casing in the macro
             // model's own views; fall back to the underbar->space /
             // quoting helpers (the params/name are canonicalized idents).
-            let display_names = build_display_name_map(&model.views);
+            let display_names = build_display_name_map(&views_named_as_defined(model));
             // Context is scoped to the macro model so a body reference to a
             // parameter or a body-local variable resolves against its own
             // variable set (e.g. a wildcard subscript over a body variable).
-            let ctx = WriterContext::from_model(model, &project.dimensions);
+            let ctx = WriterContext::from_model(model, &project.dimensions)
+                .with_macros(project)
+                .with_written_names(model, &display_names);
 
             let params = spec
                 .parameters
@@ -4349,7 +4372,19 @@ impl MdlWriter {
 
     /// Write sim spec control variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER).
     fn write_sim_specs(&mut self, sim_specs: &datamodel::SimSpecs) {
-        let units = sim_specs.time_units.as_deref().unwrap_or("");
+        // The time unit is a units field like a variable's, so it goes through
+        // the same choke point. A model that names no time unit is written
+        // with the name the engine checks it under
+        // (`units_check::model_time_units`): the reader gives an empty field
+        // its own default and reads a bare range as dimensionless, and either
+        // would be a different unit on the way back.
+        let units = sim_specs
+            .time_units
+            .as_deref()
+            .map(|units| sanitize_free_text(units, FreeTextLineMode::SingleLine, &['~']))
+            .filter(|units| !units.trim().is_empty())
+            .unwrap_or_else(|| "time".to_owned());
+        let units = units.trim();
 
         // INITIAL TIME
         write!(
@@ -4374,11 +4409,7 @@ impl MdlWriter {
             datamodel::Dt::Dt(v) => format_f64(*v),
             datamodel::Dt::Reciprocal(v) => format!("1/{}", format_f64(*v)),
         };
-        let units_with_range = if units.is_empty() {
-            "[0,?]".to_owned()
-        } else {
-            format!("{units} [0,?]")
-        };
+        let units_with_range = format!("{units} [0,?]");
         write!(
             self.buf,
             "\nTIME STEP  = \n\t{}\n\t~\t{}\n\t~\tThe time step for the simulation.\n\t|\n",
@@ -4415,11 +4446,13 @@ impl MdlWriter {
             write_dimension_def_warn(&mut self.buf, dim, &project.dimensions, &mut self.warnings);
         }
 
-        let display_names = build_display_name_map(&model.views);
+        let display_names = build_display_name_map(&views_named_as_defined(model));
         // Model-scoped writer context: the variable set (for builtin/variable
         // shadowing) and per-variable declared dimensions (for wildcard
         // subscript recovery), threaded into every equation's printer.
-        let ctx = WriterContext::from_model(model, &project.dimensions);
+        let ctx = WriterContext::from_model(model, &project.dimensions)
+            .with_macros(project)
+            .with_written_names(model, &display_names);
 
         // Reconstruct each Phase-4-materialized multi-output cluster
         // (`<lhs> = <macro>(<args> : <bindings>)`) and collect the idents
@@ -4452,71 +4485,30 @@ impl MdlWriter {
             ));
         }
 
-        // Build a set of variable idents that belong to any group
-        // (skip .Control -- those vars are sim specs emitted separately)
-        let mut grouped_idents: HashSet<&str> = HashSet::new();
-        for group in &model.groups {
-            if group.name.eq_ignore_ascii_case("Control") {
-                continue;
-            }
-            for member in &group.members {
-                grouped_idents.insert(member.as_str());
-            }
-        }
+        // Where a variable is written says which group it is in: the reader
+        // puts each variable in the group whose marker last came before it.
+        // So the variables no group holds come first, before any marker, and
+        // each group's follow its own, in the model's group order (which is
+        // also what the reader derives a group's parent from). The control
+        // variables are the sim specs: they are written in the model's
+        // Control group when it has one, and with the ungrouped variables
+        // otherwise, so a save adds no group the model does not have.
+        let control_group = model
+            .groups
+            .iter()
+            .position(|group| group.name.eq_ignore_ascii_case("Control"));
+        let grouped_idents: HashSet<&str> = model
+            .groups
+            .iter()
+            .flat_map(|group| group.members.iter().map(String::as_str))
+            .collect();
+        let sim_specs = model.sim_specs.as_ref().unwrap_or(&project.sim_specs);
 
-        // 2. Variables in group order (skip .Control -- emitted with sim specs)
-        for group in &model.groups {
-            if group.name.eq_ignore_ascii_case("Control") {
-                continue;
-            }
-            warn_group_lossiness(group, &mut self.warnings);
-            // Group marker. Both free-text fields route through the
-            // sanitization choke point (GH #849): the name is a single banner
-            // line (`try_group_star` stops it at whitespace), and the doc is
-            // skipped up to `|` -- so a raw `|` in either, an embedded section
-            // terminator, or a line break in the name would corrupt the file.
-            write!(
-                self.buf,
-                "\n********************************************************\n\t.{}\n********************************************************~\n\t\t{}\n\t|\n",
-                sanitize_free_text(
-                    &underbar_to_space(&group.name),
-                    FreeTextLineMode::SingleLine,
-                    &[],
-                ),
-                sanitize_free_text(
-                    group.doc.as_deref().unwrap_or(""),
-                    FreeTextLineMode::Multiline,
-                    &[],
-                ),
-            )
-            .unwrap();
-
-            for member_ident in &group.members {
-                if reconstruction.suppressed.contains(member_ident.as_str()) {
-                    continue;
-                }
-                if let Some(var) = model
-                    .variables
-                    .iter()
-                    .find(|v| v.get_ident() == member_ident)
-                {
-                    write_variable_entry_ctx_warn(
-                        &mut self.buf,
-                        var,
-                        &display_names,
-                        &ctx,
-                        &mut self.warnings,
-                    );
-                    self.buf.push('\n');
-                }
-            }
-        }
-
-        // 3. Ungrouped variables (alphabetical by ident for deterministic
-        // output). The reconstructed multi-output invocations are
-        // interleaved here by LHS ident so the whole section stays sorted
-        // and deterministic across passes (the round-trip harness's
-        // zip-index model pairing relies on stable ordering).
+        // 2. Ungrouped variables (alphabetical by ident for deterministic
+        // output), with the reconstructed multi-output invocations
+        // interleaved by LHS ident so the whole section stays sorted across
+        // passes (the round-trip harness's zip-index model pairing relies on
+        // stable ordering).
         let mut ungrouped: Vec<UngroupedEntry<'_>> = model
             .variables
             .iter()
@@ -4526,8 +4518,17 @@ impl MdlWriter {
             })
             .map(UngroupedEntry::Variable)
             .collect();
+        // A reconstructed call is written where its left-hand side is: in
+        // its group, or here.
+        let reconstructed: HashMap<&str, &str> = reconstruction
+            .entries
+            .iter()
+            .map(|(lhs, text)| (lhs.as_str(), text.as_str()))
+            .collect();
         for (lhs_ident, text) in &reconstruction.entries {
-            ungrouped.push(UngroupedEntry::Reconstructed(lhs_ident, text));
+            if !grouped_idents.contains(lhs_ident.as_str()) {
+                ungrouped.push(UngroupedEntry::Reconstructed(lhs_ident, text));
+            }
         }
         ungrouped.sort_by(|a, b| a.sort_key().cmp(b.sort_key()));
 
@@ -4548,15 +4549,69 @@ impl MdlWriter {
             }
             self.buf.push('\n');
         }
+        if control_group.is_none() {
+            self.write_sim_specs(sim_specs);
+        }
 
-        // 4. .Control group header + sim spec variables
-        self.buf.push_str(
-            "\n********************************************************\n\t.Control\n********************************************************~\n\t\tSimulation Control Parameters\n\t|\n",
-        );
-        let sim_specs = model.sim_specs.as_ref().unwrap_or(&project.sim_specs);
-        self.write_sim_specs(sim_specs);
+        // 3. Each group's marker and members.
+        for (at, group) in model.groups.iter().enumerate() {
+            let holds_sim_specs = control_group == Some(at);
+            // Both free-text fields route through the sanitization choke
+            // point (GH #849): the name is a single banner line
+            // (`try_group_star` stops it at whitespace), and the doc is
+            // skipped up to `|` -- so a raw `|` in either, an embedded section
+            // terminator, or a line break in the name would corrupt the file.
+            // The group holding the sim specs is the model's like any other:
+            // its name as the model spells it, and its documentation.
+            warn_group_lossiness(group, &mut self.warnings);
+            let (name, doc) = (
+                sanitize_free_text(
+                    &underbar_to_space(&group.name),
+                    FreeTextLineMode::SingleLine,
+                    &[],
+                ),
+                sanitize_free_text(
+                    group.doc.as_deref().unwrap_or(""),
+                    FreeTextLineMode::Multiline,
+                    &[],
+                ),
+            );
+            write!(
+                self.buf,
+                "\n********************************************************\n\t.{name}\n********************************************************~\n\t\t{doc}\n\t|\n",
+            )
+            .unwrap();
 
-        // 5. Section terminator
+            for member_ident in &group.members {
+                if let Some(text) = reconstructed.get(member_ident.as_str()) {
+                    self.buf.push_str(text);
+                    self.buf.push('\n');
+                    continue;
+                }
+                if reconstruction.suppressed.contains(member_ident.as_str()) {
+                    continue;
+                }
+                if let Some(var) = model
+                    .variables
+                    .iter()
+                    .find(|v| v.get_ident() == member_ident)
+                {
+                    write_variable_entry_ctx_warn(
+                        &mut self.buf,
+                        var,
+                        &display_names,
+                        &ctx,
+                        &mut self.warnings,
+                    );
+                    self.buf.push('\n');
+                }
+            }
+            if holds_sim_specs {
+                self.write_sim_specs(sim_specs);
+            }
+        }
+
+        // 4. Section terminator
         self.buf
             .push_str("\\\\\\---/// Sketch information - do not modify anything except names\n");
 
@@ -4591,7 +4646,6 @@ impl MdlWriter {
             // Build shared maps from ALL elements so that cross-view
             // references (links, aliases) resolve correctly.
             let all_elements = sf.elements.to_vec();
-            let valve_uids = allocate_valve_uids(&all_elements);
             let name_map = build_name_map(&all_elements);
             let mut link_compat_by_uid: HashMap<i32, &view_element::LinkSketchCompat> =
                 HashMap::new();
@@ -4621,7 +4675,6 @@ impl MdlWriter {
                     .unwrap_or_else(SketchTransform::identity);
                 elem_positions.extend(build_element_positions_with_transform(
                     elements,
-                    &valve_uids,
                     transform,
                     &stock_uids,
                 ));
@@ -4687,17 +4740,14 @@ impl MdlWriter {
         // importer placed after the views merged (`routes`) sits at the end of
         // the element list, in the last segment, whichever segment its flow is
         // drawn in, and it is written with its flow.
-        let mut cloud_uids: HashSet<i32> = HashSet::new();
         let mut flow_clouds: HashMap<i32, Vec<&view_element::Cloud>> = HashMap::new();
         for elem in view_elements {
             if let ViewElement::Cloud(c) = elem {
-                cloud_uids.insert(c.uid);
                 flow_clouds.entry(c.flow_uid).or_default().push(c);
             }
         }
 
         let uid_remap = SketchUidRemap::dense_for_segment(elements, &flow_clouds);
-        let mut next_connector_uid = uid_remap.next_connector_uid();
         let view_title = sanitize_view_title_for_mdl(view_name);
         writeln!(self.buf, "*{}", view_title).unwrap();
 
@@ -4712,16 +4762,11 @@ impl MdlWriter {
         for elem in elements {
             match elem {
                 ViewElement::Aux(aux) => {
-                    write_aux_element_with_context(&mut self.buf, aux, transform, Some(&uid_remap));
+                    write_aux_element_with_context(&mut self.buf, aux, transform, &uid_remap);
                     self.buf.push('\n');
                 }
                 ViewElement::Stock(stock) => {
-                    write_stock_element_with_context(
-                        &mut self.buf,
-                        stock,
-                        transform,
-                        Some(&uid_remap),
-                    );
+                    write_stock_element_with_context(&mut self.buf, stock, transform, &uid_remap);
                     self.buf.push('\n');
                 }
                 ViewElement::Flow(flow) => {
@@ -4732,7 +4777,7 @@ impl MdlWriter {
                                 &mut self.buf,
                                 cloud,
                                 transform,
-                                Some(&uid_remap),
+                                &uid_remap,
                             );
                             self.buf.push('\n');
                         }
@@ -4752,13 +4797,10 @@ impl MdlWriter {
                     write_flow_element_with_context(
                         &mut self.buf,
                         flow,
-                        &uid_remap.valve_uids,
-                        &cloud_uids,
-                        &mut next_connector_uid,
                         transform,
                         elem_positions,
                         stock_uids,
-                        Some(&uid_remap),
+                        &uid_remap,
                     );
                     self.buf.push('\n');
                 }
@@ -4770,7 +4812,7 @@ impl MdlWriter {
                         use_lettered_polarity,
                         link_compat_by_uid.get(&link.uid).copied(),
                         transform,
-                        Some(&uid_remap),
+                        &uid_remap,
                     );
                     self.buf.push('\n');
                 }
@@ -4783,7 +4825,7 @@ impl MdlWriter {
                         name_map,
                         stock_uids,
                         transform,
-                        Some(&uid_remap),
+                        &uid_remap,
                     );
                     self.buf.push('\n');
                 }
@@ -4797,12 +4839,12 @@ impl MdlWriter {
     /// The settings section follows the sketch terminator (`///---\\\`) and
     /// starts with the `:L<%^E!@` marker. It contains type-coded setting
     /// lines that Vensim reads to restore UI and simulation state.
-    fn write_settings_section(&mut self, project: &datamodel::Project) {
-        let sim_specs = project
-            .models
-            .first()
-            .and_then(|m| m.sim_specs.as_ref())
-            .unwrap_or(&project.sim_specs);
+    ///
+    /// The specs are the main model's, as the control variables are
+    /// (`write_equations_section`): the integration method and the display
+    /// range follow the run the file defines.
+    fn write_settings_section(&mut self, project: &datamodel::Project, model: &datamodel::Model) {
+        let sim_specs = model.sim_specs.as_ref().unwrap_or(&project.sim_specs);
 
         // The ///---\\\ separator is already emitted by write_sketch_section.
         // The 0x7F (DEL) between :L and <%^E!@ is required by Vensim's parser.
@@ -4874,7 +4916,6 @@ impl MdlWriter {
 
 fn build_element_positions_with_transform(
     elements: &[&ViewElement],
-    valve_uids: &HashMap<i32, i32>,
     transform: SketchTransform,
     stock_uids: &HashSet<i32>,
 ) -> HashMap<i32, (i32, i32)> {
@@ -4890,12 +4931,6 @@ fn build_element_positions_with_transform(
                 (s.uid, x, y)
             }
             ViewElement::Flow(f) => {
-                let (valve_x, valve_y) = transform.point(f.x, f.y);
-                // Also register the allocated valve UID so connectors that
-                // reference the valve position can resolve.
-                if let Some(&valve_uid) = valve_uids.get(&f.uid) {
-                    positions.insert(valve_uid, (valve_x, valve_y));
-                }
                 let (label_x, label_y) = default_flow_label_point(f, transform);
                 (f.uid, label_x, label_y)
             }
@@ -4969,3 +5004,12 @@ mod proptest_tests;
 #[cfg(test)]
 #[path = "writer_fixpoint_tests.rs"]
 mod fixpoint_tests;
+
+// An `Equation::Arrayed`'s equations.
+#[path = "writer_arrayed.rs"]
+mod arrayed;
+
+// What an XMILE model's save as MDL keeps.
+#[cfg(test)]
+#[path = "writer_xmile_tests.rs"]
+mod xmile_tests;

@@ -279,15 +279,16 @@ fn analyze_builtin_polarity(
     }
     match builtin {
         // Non-decreasing single-arg builtins: propagate inner polarity.
-        // Int (floor) and Round (nearest, ties to even) are step functions
-        // with discontinuities, but are still non-decreasing, which is
-        // sufficient for polarity propagation.
+        // Int (floor), Trunc (toward zero) and Round (nearest, ties to even)
+        // are step functions with discontinuities, but are still
+        // non-decreasing, which is sufficient for polarity propagation.
         BuiltinFn::Exp(inner)
         | BuiltinFn::Ln(inner)
         | BuiltinFn::Log10(inner)
         | BuiltinFn::Sqrt(inner)
         | BuiltinFn::Arctan(inner)
         | BuiltinFn::Int(inner)
+        | BuiltinFn::Trunc(inner)
         | BuiltinFn::Round(inner) => {
             analyze_expr_polarity_with_context(inner, from_var, current_polarity, variables)
         }

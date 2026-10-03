@@ -195,6 +195,7 @@ impl Expr1 {
                         required(&mut args),
                         optional(&mut args),
                     ),
+                    "rem" => BuiltinFn::Rem(required(&mut args), required(&mut args)),
                     "round" => BuiltinFn::Round(required(&mut args)),
                     "safediv" => BuiltinFn::SafeDiv(
                         required(&mut args),
@@ -211,6 +212,7 @@ impl Expr1 {
                     "sqrt" => BuiltinFn::Sqrt(required(&mut args)),
                     "step" => BuiltinFn::Step(required(&mut args), required(&mut args)),
                     "tan" => BuiltinFn::Tan(required(&mut args)),
+                    "trunc" => BuiltinFn::Trunc(required(&mut args)),
                     "time" => BuiltinFn::Time,
                     "time_step" => BuiltinFn::TimeStep,
                     "initial_time" => BuiltinFn::StartTime,

@@ -647,6 +647,7 @@ impl UnitInferer<'_> {
                 | BuiltinFn::Sign(a)
                 | BuiltinFn::Sin(a)
                 | BuiltinFn::Tan(a)
+                | BuiltinFn::Trunc(a)
                 | BuiltinFn::Size(a)
                 | BuiltinFn::Stddev(a)
                 | BuiltinFn::Sum(a) => self.gen_constraints(a, prefix, current_var, constraints),
@@ -728,8 +729,22 @@ impl UnitInferer<'_> {
                     }
                     a_units
                 }
-                BuiltinFn::Quantum(a, _) => {
-                    self.gen_constraints(a, prefix, current_var, constraints)
+                // Both arguments have the result's units (fn_quantum.html,
+                // fn_modulo.html), mirroring `units_check`.
+                BuiltinFn::Quantum(a, b) | BuiltinFn::Rem(a, b) => {
+                    let a_units = self.gen_constraints(a, prefix, current_var, constraints);
+                    let b_units = self.gen_constraints(b, prefix, current_var, constraints);
+                    if let Units::Explicit(ref lunits) = a_units
+                        && let Units::Explicit(ref runits) = b_units
+                    {
+                        let loc = a.get_loc().union(&b.get_loc());
+                        constraints.push(LocatedConstraint::new(
+                            combine(UnitOp::Div, lunits.clone(), runits.clone()),
+                            current_var,
+                            Some(loc),
+                        ));
+                    }
+                    a_units.first_explicit(b_units)
                 }
                 // SSHAPE(x, bottom, top): bottom and top carry the result
                 // units and must agree; x is visited for its own constraints

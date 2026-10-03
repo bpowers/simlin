@@ -60,8 +60,10 @@ Variables use XMILE equation syntax. Key functions and their behavior:
 | `ABS(x)`, `EXP(x)`, `LN(x)`, `LOG10(x)` | Math functions |
 | `SIN(x)`, `COS(x)`, `ARCTAN(x)` | Trigonometric functions |
 | `INT(x)` | Integer part (floor: rounds toward negative infinity) |
+| `TRUNC(x)` | Integer part toward zero (Vensim's `INTEGER`) |
 | `ROUND(x)` | Round to nearest integer; exact .5 ties go to the even neighbor (like Python's `round()`) |
-| `MODULO(a, b)` | Modulo (a MOD b) |
+| `MODULO(a, b)` | Modulo (a MOD b): the sign of `b` |
+| `REM(a, b)` | Remainder: the sign of `a` (Vensim's `MODULO`) |
 | `SIZE(dimension)` | Number of elements in a dimension |
 | `SUM(array)`, `MEAN(array)` | Array aggregation |
 | `UNIFORM(min, max, seed)` | Random uniform distribution |

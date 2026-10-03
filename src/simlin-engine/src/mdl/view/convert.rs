@@ -461,7 +461,7 @@ fn convert_view(
     let mut dropped: HashSet<i32> = HashSet::new();
 
     for (local_uid, elem) in view.iter_with_uids() {
-        let uid = uid_offset + local_uid;
+        let uid = uid_offset.saturating_add(local_uid);
 
         match elem {
             VensimElement::Variable(var) => {
@@ -662,7 +662,7 @@ fn convert_variable(
         if let Some((primary_view_idx, primary_local_uid)) = primary_map.get(&canonical) {
             // Calculate the aliased UID with the primary's view offset
             let primary_offset = view_offsets.get(*primary_view_idx).copied().unwrap_or(0);
-            let alias_of_uid = primary_offset + *primary_local_uid;
+            let alias_of_uid = primary_offset.saturating_add(*primary_local_uid);
 
             // For stock ghosts, apply xmutil offset: x - 22, y - 17
             // (XMILEGenerator.cpp:921-929)
@@ -848,7 +848,7 @@ fn compute_flow_data(
                 RouteEnd::Point(view_element::FlowPoint {
                     x: x as f64,
                     y: y as f64,
-                    attached_to_uid: Some(uid_offset + local_uid),
+                    attached_to_uid: Some(uid_offset.saturating_add(local_uid)),
                 })
             }
             FlowEnd::PipeAtUnlinkedStock { x, y, stock } => RouteEnd::CloudNearStock {
@@ -930,8 +930,8 @@ fn convert_connector(
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
     valve_to_flow: &HashMap<i32, i32>,
 ) -> Option<(ViewElement, view_element::LinkSketchCompat)> {
-    let from_uid = uid_offset + conn.from_uid;
-    let to_uid = uid_offset + conn.to_uid;
+    let from_uid = uid_offset.saturating_add(conn.from_uid);
+    let to_uid = uid_offset.saturating_add(conn.to_uid);
 
     // Skip invalid connectors
     if conn.from_uid <= 0 || conn.to_uid <= 0 {
@@ -1144,7 +1144,6 @@ mod tests {
             inflows: vec![],
             outflows: vec![],
             unwanted: false,
-            alternate_name: None,
         }
     }
 
@@ -1824,7 +1823,6 @@ mod tests {
                 inflows: vec![],
                 outflows: vec!["flow rate".to_string()],
                 unwanted: false,
-                alternate_name: None,
             },
         );
         symbols.insert(
@@ -1835,7 +1833,6 @@ mod tests {
                 inflows: vec!["flow rate".to_string()],
                 outflows: vec![],
                 unwanted: false,
-                alternate_name: None,
             },
         );
         symbols.insert(
@@ -1966,7 +1963,6 @@ mod tests {
                 inflows: vec![],
                 outflows: vec!["flow rate".to_string()],
                 unwanted: false,
-                alternate_name: None,
             },
         );
         symbols.insert(
@@ -1977,7 +1973,6 @@ mod tests {
                 inflows: vec!["flow rate".to_string()],
                 outflows: vec![],
                 unwanted: false,
-                alternate_name: None,
             },
         );
         symbols.insert(
@@ -2269,7 +2264,6 @@ mod tests {
                 inflows: vec![],
                 outflows: vec!["flow rate".to_string()],
                 unwanted: false,
-                alternate_name: None,
             },
         );
         symbols.insert(
@@ -2280,7 +2274,6 @@ mod tests {
                 inflows: vec!["flow rate".to_string()],
                 outflows: vec![],
                 unwanted: false,
-                alternate_name: None,
             },
         );
         symbols.insert(

@@ -98,6 +98,71 @@ fn is_excluded_var(ident: &str, excluded: &[&str]) -> bool {
     })
 }
 
+/// Each series of `expected` that `results` lacks or holds another value
+/// for, with what differs, in `expected`'s key order: the comparison
+/// [`ensure_results`] asserts, as a list. A series is compared at every step
+/// both hold; the step counts are the caller's to check.
+#[allow(dead_code)]
+pub fn series_that_differ(
+    expected: &Results,
+    results: &Results,
+    excluded: &[&str],
+) -> Vec<(String, String)> {
+    let mut differ = Vec::new();
+    for ident in expected.offsets.keys() {
+        if is_excluded_var(ident.as_str(), excluded) {
+            continue;
+        }
+        if !results.offsets.contains_key(ident)
+            && (IGNORABLE_COLS.contains(&ident.as_str())
+                || is_vensim_internal_module_var(ident.as_str()))
+        {
+            continue;
+        }
+        // Skip implicit module variables (from SMOOTH/DELAY/TREND
+        // expansion). These internal variables may legitimately have
+        // different initial values across compilation paths due to
+        // evaluation order differences.
+        if is_implicit_module_var(ident.as_str()) {
+            continue;
+        }
+        let Some(&off) = results.offsets.get(ident) else {
+            differ.push((
+                ident.as_str().to_owned(),
+                "output missing variable".to_owned(),
+            ));
+            continue;
+        };
+        for (step, (expected_row, results_row)) in expected.iter().zip(results.iter()).enumerate() {
+            let expected_value = expected_row[expected.offsets[ident]];
+            let actual = results_row[off];
+            let around_zero =
+                approx_eq_eps(expected_value, 0.0, 3e-6) && approx_eq_eps(actual, 0.0, 1e-6);
+            if around_zero {
+                continue;
+            }
+            let epsilon = if results.is_vensim || expected.is_vensim {
+                // Vensim outputs ~6 significant figures. Use relative comparison
+                // to handle large magnitudes (where small relative errors become
+                // large absolute errors). For small values, maintain the original
+                // absolute tolerance of 2e-3 so we don't become too strict.
+                let max_val = expected_value.abs().max(actual.abs()).max(1e-10);
+                (max_val * 5e-6).max(2e-3)
+            } else {
+                2e-3
+            };
+            if !approx_eq_eps(expected_value, actual, epsilon) {
+                differ.push((
+                    ident.as_str().to_owned(),
+                    format!("step {step}: {expected_value} (expected) != {actual} (actual)"),
+                ));
+                break;
+            }
+        }
+    }
+    differ
+}
+
 /// Compare expected results against simulation output.
 ///
 /// Iterates expected variable keys only, so extra variables in `results`
@@ -117,63 +182,13 @@ pub fn ensure_results(expected: &Results, results: &Results) {
 pub fn ensure_results_excluding(expected: &Results, results: &Results, excluded: &[&str]) {
     assert_eq!(expected.step_count, results.step_count);
     assert_eq!(expected.iter().len(), results.iter().len());
-
-    let expected_results = expected;
-
-    let mut step = 0;
-    for (expected_row, results_row) in expected.iter().zip(results.iter()) {
-        for ident in expected.offsets.keys() {
-            if is_excluded_var(ident.as_str(), excluded) {
-                continue;
-            }
-            let expected = expected_row[expected.offsets[ident]];
-            if !results.offsets.contains_key(ident)
-                && (IGNORABLE_COLS.contains(&ident.as_str())
-                    || is_vensim_internal_module_var(ident.as_str()))
-            {
-                continue;
-            }
-            // Skip implicit module variables (from SMOOTH/DELAY/TREND
-            // expansion). These internal variables may legitimately have
-            // different initial values across compilation paths due to
-            // evaluation order differences.
-            if is_implicit_module_var(ident.as_str()) {
-                continue;
-            }
-            if !results.offsets.contains_key(ident) {
-                panic!("output missing variable '{ident}'");
-            }
-            let off = results.offsets[ident];
-            let actual = results_row[off];
-
-            let around_zero =
-                approx_eq_eps(expected, 0.0, 3e-6) && approx_eq_eps(actual, 0.0, 1e-6);
-
-            if !around_zero {
-                let (exp_cmp, act_cmp, epsilon) = if results.is_vensim || expected_results.is_vensim
-                {
-                    // Vensim outputs ~6 significant figures. Use relative comparison
-                    // to handle large magnitudes (where small relative errors become
-                    // large absolute errors). For small values, maintain the original
-                    // absolute tolerance of 2e-3 so we don't become too strict.
-                    let max_val = expected.abs().max(actual.abs()).max(1e-10);
-                    let relative_eps = max_val * 5e-6;
-                    (expected, actual, relative_eps.max(2e-3))
-                } else {
-                    (expected, actual, 2e-3)
-                };
-
-                if !approx_eq_eps(exp_cmp, act_cmp, epsilon) {
-                    eprintln!("step {step}: {ident}: {expected} (expected) != {actual} (actual)");
-                    panic!("not equal");
-                }
-            }
-        }
-
-        step += 1;
+    if let Some((ident, why)) = series_that_differ(expected, results, excluded)
+        .into_iter()
+        .next()
+    {
+        eprintln!("{ident}: {why}");
+        panic!("not equal");
     }
-
-    assert_eq!(expected.step_count, step);
 
     // UNKNOWN is a sentinel value we use -- it should never show up
     // unless we've wrongly sized our data slices

@@ -351,7 +351,7 @@ fn an_element_pinned_axis_blocks_the_collapse_by_spelling() {
     match equation_of(&mdl, "y") {
         Equation::Arrayed(_, elements, _, _) => {
             assert_eq!(elements.len(), 3, "one slot per DimA element, pinned at B2");
-            assert!(elements.iter().all(|(key, _, _, _)| key.ends_with(",B2")));
+            assert!(elements.iter().all(|(key, _, _, _)| key.ends_with(",b2")));
         }
         other => panic!("expected Arrayed (element-pinned axis), got {other:?}"),
     }
