@@ -16,7 +16,7 @@ Core simulation engine. Compiles, type-checks, unit-checks, and simulates SD mod
 - An alternative WebAssembly code-generation backend (`wasmgen/`) lowers a compiled model to one self-contained wasm module (no host imports) for fast repeated re-simulation; the VM stays the correctness oracle (every emitted module is checked against it). Surfaced through libsimlin `simlin_model_compile_to_wasm`
 - `builtins.rs` defines builtin functions (including `PREVIOUS`, `INIT`); stateful module functions (TREND, SMOOTH3) are model definitions in `stdlib/*.stmx`, generated into `stdlib.gen.rs`
 - Loops That Matter (`db/ltm/`, `db/ltm_ir.rs`, `db/analysis.rs`, `ltm_agg.rs`, `ltm_augment.rs`, `ltm_finding.rs`) compiles its synthetic variables through the same fragment pipeline as user variables; see [docs/design/ltm--loops-that-matter.md](/docs/design/ltm--loops-that-matter.md)
-- Native Vensim MDL parser in `mdl/` (replaces C++ xmutil); see [docs/design/mdl-parser.md](/docs/design/mdl-parser.md)
+- Native Vensim MDL parser in `mdl/`; see [docs/design/mdl-parser.md](/docs/design/mdl-parser.md)
 
 ### `src/libsimlin` (Rust)
 Flat "C" FFI wrapper around simlin-engine. Used from TypeScript (WASM), Go (CGo), and C/C++ (`simlin.h`).
@@ -39,9 +39,6 @@ anywidget front-end module for pysimlin's `ModelWidget`: hosts `@simlin/diagram`
 
 ### `src/server` (TypeScript)
 Express.js backend. Firebase Auth (`authn.ts`), Firestore persistence (`models/db-firestore.ts`) in protobuf form.
-
-### `src/xmutil` (C++ and Rust)
-Rust wrapper around Bob Eberlein's xmutil C++ tool for converting Vensim models to XMILE. Only used for testing -- `src/simlin-engine/src/mdl` now fully implements this in Rust.
 
 ### `src/simlin-mcp-core` (Rust)
 Transport-agnostic core library shared by every Simlin MCP server. Owns the `ProjectAccess` trait (the storage abstraction), the three reused tools (`read_model`, `edit_model`, `create_model`) as async free functions, the rmcp `ServerHandler` impl as `SimlinMcpServer<A: ProjectAccess>`, and the wire-format types (`ErrorOutput`, `LoopDominanceSummary`, `DominantPeriodOutput`).
@@ -68,10 +65,7 @@ The allowed dependency graph is enforced by `scripts/check-deps.py` reading from
 ### Rust
 
 ```
-xmutil (standalone)
-  ^
-  | (optional, feature-gated)
-simlin-engine
+simlin-engine (leaf)
   ^       ^             ^
   |       |             |
 simlin    simlin-mcp-core
@@ -81,13 +75,12 @@ simlin-cli  simlin-mcp  simlin-serve
             (also depends on simlin-engine directly)
 ```
 
-- `simlin-engine` -> `xmutil` (optional, feature-gated via `dep:xmutil`)
+- `simlin-engine` -> (none)
 - `simlin` (libsimlin) -> `simlin-engine`
 - `simlin-mcp-core` -> `simlin-engine`
 - `simlin-mcp` -> `simlin-mcp-core`, `simlin-engine`
 - `simlin-serve` -> `simlin-mcp-core`, `simlin-engine`
 - `simlin-cli` -> `simlin-engine`, `simlin`
-- `xmutil` -> (none)
 
 ### TypeScript
 

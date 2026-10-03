@@ -8,7 +8,6 @@ members = [
     "src/simlin-mcp",
     "src/simlin-mcp-core",
     "src/simlin-serve",
-    "src/xmutil",
 ]
 
 # Release builds optimize for speed (opt-level = 3) on every target. The wasm32
@@ -69,6 +68,23 @@ codegen-units = 1
 [profile.wasm-gate]
 inherits = "release"
 lto = false
+
+# `gates` is what the `#[ignore]`d tests run under: scripts/gates.sh, by hand
+# and in CI's `gates` job (.github/workflows/ci.yaml).
+#
+# They are ignored because a debug build takes minutes over the model corpus,
+# C-LEARN and World3, so they need optimized code -- but not the shipping
+# artifact. Dropping LTO makes the build parallel (each `release` test binary
+# is its own single-threaded fat-LTO link), and the checks a debug build
+# carries stay on, because these are the only tests that put the largest
+# models through the engine and an overflow or a failed `debug_assert!` there
+# is exactly what they should catch.
+[profile.gates]
+inherits = "release"
+lto = false
+strip = false
+debug-assertions = true
+overflow-checks = true
 
 [profile.bench]
 debug = true

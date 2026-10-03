@@ -4488,8 +4488,7 @@ fn check_labeled_corpus(include: impl Fn(&LabeledModel) -> bool) -> (usize, usiz
 /// the labeled corpus, every listed check that did not pass has been judged,
 /// and the ones a modeler would not accept are few.
 ///
-/// Run with: cargo test --release -p simlin-engine --lib -- --ignored
-/// the_batterys_findings_over_the_corpus_are_ones_a_modeler_accepts
+/// Run with: scripts/gates.sh the_batterys_findings_over_the_corpus_are_ones_a_modeler_accepts
 #[test]
 #[ignore = "runs the battery on 29 corpus models, World3 and C-LEARN among them; run under the \
             gates profile"]

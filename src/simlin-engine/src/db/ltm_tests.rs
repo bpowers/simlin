@@ -895,12 +895,12 @@ fn unparseable_generated_arm_degrades_loudly_without_panicking() {
 ///
 /// `#[ignore]`d: this is the measuring instrument, not a gate. Checked in
 /// (rather than the numbers) so the measurement is reproducible -- run with
-/// `cargo test -p simlin-engine --release --lib -- --ignored --nocapture
-/// per_element_generation_scaling`. A timing assertion in the default suite
-/// would be flaky and would risk the 3-minute wall-clock cap; the structural
-/// guarantee is instead pinned by `slot_occurrence_index_groups_every_slot`.
+/// `scripts/gates.sh --nocapture per_element_generation_scaling`. A timing
+/// assertion in the default suite would be flaky and would risk the 3-minute
+/// wall-clock cap; the structural guarantee is instead pinned by
+/// `slot_occurrence_index_groups_every_slot`.
 #[test]
-#[ignore]
+#[ignore = "an instrument: prints link-score generation time per target width and asserts no timing; run under the gates profile"]
 fn per_element_generation_scaling() {
     use std::time::Instant;
 

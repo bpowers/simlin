@@ -19,8 +19,11 @@ Authoritative sources used (cited inline throughout):
   sections 2.2.1, 2.10, 3.6/3.6.1/3.6.2, and 4.8/4.8.1/4.8.2/4.8.3.
 - Local repository: the six `test/test-models/tests/macro_*` fixtures, the
   C-LEARN hero model, the engine MDL parser (`src/simlin-engine/src/mdl/`), the
-  XMILE serde layer (`src/simlin-engine/src/xmile/mod.rs`), and the bundled
-  `xmutil` Vensim-to-XMILE converter (`src/xmutil/third_party/xmutil/`).
+  XMILE serde layer (`src/simlin-engine/src/xmile/mod.rs`).
+- `xmutil`, Bob Eberlein's C++ Vensim-to-XMILE converter
+  (https://github.com/bobeberlein/xmutil). File references of the form
+  `xmutil:Vensim/VYacc.y:99` are paths under its `src/` directory; the line
+  numbers are approximate, since that tree moves.
 
 A note on terminology: throughout, "the model" or "the whole-model" means the
 top-level model that *invokes* a macro, as distinguished from the contents of
@@ -360,7 +363,7 @@ fixtures show:
   macro body, but at the model level functions-implemented-as-macros such as
   `SMOOTH`/`DELAY3` routinely receive full expressions as arguments). The MDL
   grammar both in `xmutil` and in the engine parses macro-call arguments as a
-  general `exprlist` (`src/xmutil/.../Vensim/VYacc.y:99`,
+  general `exprlist` (`xmutil:Vensim/VYacc.y:99`,
   `src/simlin-engine/src/mdl/parser.rs:528`), so *syntactically* any expression
   is accepted.
 
@@ -429,7 +432,7 @@ form of the macro header and call. Specifically:
 
 - `xmutil`'s grammar rule for a macro header is
   `VPTT_macro VPTT_symbol '(' exprlist ')'`
-  (`src/xmutil/third_party/xmutil/Vensim/VYacc.y:99`), and `exprlist` only
+  (`xmutil:Vensim/VYacc.y:99`), and `exprlist` only
   permits `,` and `;` as separators (`VYacc.y:203-207`). There is no production
   that consumes a `:` between an input list and an output list. `xmutil`
   therefore supports only macros whose sole output is the macro-named variable.
@@ -540,7 +543,7 @@ every internal variable; see section 7).
 - The macro's primary output is the value of the variable whose name equals the
   macro name. At a call site `lhs = MACRONAME(args)`, `lhs` takes that value.
   In `xmutil`'s XMILE output the macro's `<eqn>` is literally just the macro
-  name (`src/xmutil/.../Xmile/XMILEGenerator.cpp:60-63`), and the macro's
+  name (`xmutil:Xmile/XMILEGenerator.cpp:60-63`), and the macro's
   `<variables>` block contains the equation that actually defines that
   macro-named variable -- the `<eqn>` says "the output is the variable called
   `<macroname>`," and `<variables>` says how that variable is computed.
@@ -572,7 +575,7 @@ either the whole-model or other macros" (XMILE 1.0 section 3.6.1).
 `:MACRO:` it pushes a fresh `SymbolNameSpace` and on `:END OF MACRO:` it pops
 back to the model's namespace; the macro *name* alone is registered into the
 model's (main) namespace so it can be called
-(`src/xmutil/third_party/xmutil/Vensim/VensimParse.cpp:679-694`). The only
+(`xmutil:Vensim/VensimParse.cpp:679-694`). The only
 escape from the local namespace is the `$`-suffixed model-variable reference
 (section 3.1).
 
@@ -838,22 +841,23 @@ datamodel/compiler.
 
 ## 7. xmutil's mapping (Vensim `:MACRO:` -> XMILE `<macro>`)
 
-`xmutil` is the bundled C++ Vensim-to-XMILE converter
-(`src/xmutil/third_party/xmutil/`). It is the tool that produced the `.xmile`
-and `.stmx` files in the local fixtures, so its mapping is the de facto
-"expected" Vensim->XMILE translation the engine's own MDL pipeline is measured
-against. Reading its source, the mapping is:
+`xmutil` is Bob Eberlein's C++ Vensim-to-XMILE converter
+(https://github.com/bobeberlein/xmutil). It is the tool that produced the
+`.xmile` and `.stmx` files in the local fixtures, so its mapping is the shape
+those fixtures have, and the shape the engine's XMILE reader has to accept.
+What a model computes is settled by Vensim's own output, not by `xmutil`.
+Reading its source, the mapping is:
 
 ### 7.1 Parse-time (Vensim side)
 
 - The Vensim lexer recognizes `:MACRO:` and `:END OF MACRO:` as dedicated
   tokens `VPTT_macro` / `VPTT_end_of_macro`
-  (`src/xmutil/third_party/xmutil/Vensim/VensimLex.cpp:427-438`).
+  (`xmutil:Vensim/VensimLex.cpp:427-438`).
 - The grammar rule is
   `macrostart: VPTT_macro { vpyy_macro_start(); } VPTT_symbol '(' exprlist ')'
   { vpyy_macro_expression($3, $5); }` and
   `macroend: VPTT_end_of_macro { vpyy_macro_end(); }`
-  (`src/xmutil/third_party/xmutil/Vensim/VYacc.y:98-104`). Note again: the
+  (`xmutil:Vensim/VYacc.y:98-104`). Note again: the
   header parses `(' exprlist ')'` with **no `:` output-list production** -- so
   `xmutil` supports only the macro-name-is-the-output form.
 - `VensimParse::MacroStart()` pushes a *new local `SymbolNameSpace`* for the
@@ -861,18 +865,18 @@ against. Reading its source, the mapping is:
   `MacroFunction` registered against the *main* (model) namespace -- so the
   macro name is callable from the model -- while its body variables live in the
   local namespace; `VensimParse::MacroEnd()` restores the model namespace
-  (`src/xmutil/third_party/xmutil/Vensim/VensimParse.cpp:679-694`).
+  (`xmutil:Vensim/VensimParse.cpp:679-694`).
 - A `MacroFunction` (subclass of `Function`) holds: the macro name, an
   `ExpressionList* mArgs` (the formal parameters), a private
   `SymbolNameSpace* pSymbolNameSpace` (the local namespace), and a vector of
   `EqUnitPair` (each body equation + its units)
-  (`src/xmutil/third_party/xmutil/Function/Function.h:106-135`). Body equations
+  (`xmutil:Function/Function.h:106-135`). Body equations
   encountered between `:MACRO:` and `:END OF MACRO:` are added to the active
   macro rather than to a model group -- `AddFullEq` checks `!mInMacro` before
   assigning a variable to a group
-  (`src/xmutil/third_party/xmutil/Vensim/VensimParse.cpp:181`). The completed
+  (`xmutil:Vensim/VensimParse.cpp:181`). The completed
   list of `MacroFunction`s is handed to the `Model`
-  (`src/xmutil/third_party/xmutil/Vensim/VensimParse.cpp:387`,
+  (`xmutil:Vensim/VensimParse.cpp:387`,
   `Model.h:58-62,127`).
 - Because a `MacroFunction` is a `Function`, a call to it inside an equation is
   parsed like any function call -- there is no special call-site syntax.
@@ -881,7 +885,7 @@ against. Reading its source, the mapping is:
 
 The whole-model translation runs first, then "macros are presented as separate
 models." For each `MacroFunction`
-(`src/xmutil/third_party/xmutil/Xmile/XMILEGenerator.cpp:55-78`):
+(`xmutil:Xmile/XMILEGenerator.cpp:55-78`):
 
 1. Create a `<macro>` element with `name="<macro name>"` (original Vensim
    casing, spaces preserved -- e.g. `name="EXPRESSION MACRO"`).
@@ -902,7 +906,7 @@ models." For each `MacroFunction`
    `<model>` (`XMILEGenerator.cpp:77`).
 
 `MacroFunction::ComputableName()` returns `SpaceToUnderBar(name)`
-(`src/xmutil/third_party/xmutil/Function/Function.cpp:21-23`), so when the macro
+(`xmutil:Function/Function.cpp:21-23`), so when the macro
 is *called* in a model equation, `xmutil` emits the underscored name -- e.g.
 the Vensim call `EXPRESSION MACRO(macro input, macro parameter)` becomes the
 XMILE equation `EXPRESSION_MACRO(macro_input, macro_parameter)` (exactly what
@@ -991,9 +995,9 @@ by its underscored name.
 
 ### 7.5 What the engine's *native* MDL parser does today
 
-The engine's pure-Rust MDL parser (`src/simlin-engine/src/mdl/`) -- which is
-replacing `xmutil` -- already *parses* macros into a `MacroDef { name, args:
-Vec<Expr>, equations: Vec<FullEquation>, loc }`
+The engine's pure-Rust MDL parser (`src/simlin-engine/src/mdl/`) *parses*
+macros into a `MacroDef { name, args: Vec<Expr>, equations: Vec<FullEquation>,
+loc }`
 (`src/simlin-engine/src/mdl/ast.rs:483-493`), assembled by the reader's
 `MacroState` machine (`src/simlin-engine/src/mdl/reader.rs:59-70,300-330`). But
 the AST-to-datamodel conversion **discards** it: `MdlItem::Macro(_)` is matched

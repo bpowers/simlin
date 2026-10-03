@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::io::BufRead;
-#[cfg(any(feature = "file_io", feature = "xmutil"))]
+#[cfg(feature = "file_io")]
 use std::io::BufReader;
 
 use crate::common::Result;
@@ -45,24 +45,6 @@ pub fn to_mdl_with_warnings(project: &Project) -> Result<(String, Vec<mdl::Expor
 
 pub fn to_systems(project: &Project) -> Result<String> {
     systems::project_to_systems(project)
-}
-
-#[cfg(feature = "xmutil")]
-pub fn open_vensim_xmutil(contents: &str) -> Result<Project> {
-    use crate::common::{Error, ErrorCode, ErrorKind};
-    use xmutil::convert_vensim_mdl;
-
-    let (xmile_src, logs) = convert_vensim_mdl(contents, false);
-    if xmile_src.is_none() {
-        return Err(Error::new(
-            ErrorKind::Import,
-            ErrorCode::VensimConversion,
-            Some("xmutil error: ".to_owned() + logs.as_ref().unwrap_or(&"(no logs)".to_owned())),
-        ));
-    }
-    let xmile_src = xmile_src.unwrap();
-    let mut f = BufReader::new(xmile_src.as_bytes());
-    xmile::project_from_reader(&mut f)
 }
 
 /// Parse a Vensim MDL file using the native Rust parser.

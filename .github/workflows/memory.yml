@@ -12,21 +12,27 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# `issues: write` is for the scheduled run alone, which has no author to tell
+# that it failed and files an issue instead (scripts/ci-report-failure.sh).
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   asan-pysimlin:
     name: AddressSanitizer Testing (pysimlin)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
 
@@ -63,7 +69,9 @@ jobs:
           # Find the AddressSanitizer runtime library
           ASAN_LIB=$(gcc -print-file-name=libasan.so)
           
-          # Run tests with verbose ASAN output and timeout
+          # Run tests with verbose ASAN output and timeout. With halt_on_error=0
+          # a leak here is a line in the log, not a failure: CPython's own
+          # exit-time leaks would otherwise turn every run red.
           RUST_BACKTRACE=1 \
           ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:verbosity=1:print_stats=1:halt_on_error=0:print_module_map=1:log_path=/tmp/asan.log" \
           LD_PRELOAD=$ASAN_LIB \
@@ -88,12 +96,18 @@ jobs:
           
           exit ${EXIT_CODE:-0}
 
+      - name: Report a scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci-report-failure.sh "The scheduled AddressSanitizer run of pysimlin fails on main"
+
   asan-full:
     name: AddressSanitizer Testing (Full Rust Suite)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -103,3 +117,9 @@ jobs:
 
       - name: Run ASAN tests
         run: ./test-asan.sh
+
+      - name: Report a scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci-report-failure.sh "The scheduled AddressSanitizer run of the Rust suite fails on main" asan-test.log

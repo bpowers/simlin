@@ -804,9 +804,7 @@ impl<'input> ConversionContext<'input> {
                 // correct through our XMILE reader, failed to compile through this
                 // one. Collapsing loses nothing by construction (see
                 // `slots_are_one_apply_to_all` for the two things `ApplyToAll`
-                // cannot carry), and it is the rule the MDL equivalence harness
-                // already applies to compare us with xmutil, which emits
-                // apply-to-all here.
+                // cannot carry), and it is what xmutil emits here.
                 Equation::ApplyToAll(formatted_dims.clone(), elements[0].1.clone())
             } else {
                 Equation::Arrayed(

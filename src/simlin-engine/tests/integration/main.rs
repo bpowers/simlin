@@ -17,12 +17,11 @@
 //!
 //! Feature gating: `file_io` is always on for this harness -- the crate takes a
 //! self dev-dependency that enables it (see Cargo.toml), because `file_io`
-//! gates a production dependency, not test coverage (GH #925). `xmutil` gates a
-//! heavyweight optional C++ converter that only one module compares against, so
-//! that one module stays `#[cfg]`-gated below. A `cfg`-gated module compiles to
-//! nothing when its feature is off, which has the same effect as the
-//! `required-features` entries these replaced (the tests only exist when the
-//! feature is enabled) without skipping the whole harness.
+//! gates a production dependency, not test coverage (GH #925). No module here
+//! needs another feature. One that comes to need one gates itself with
+//! `#[cfg(feature = ...)]` on its `mod` line rather than taking a
+//! `required-features` entry, which would skip the whole harness when the
+//! feature is off.
 
 mod test_helpers;
 
@@ -42,10 +41,6 @@ mod ltm_integration_method;
 mod ltm_loop_nodes;
 mod ltm_relative_scores;
 mod ltm_snapshot_inputs;
-// Compares xmutil-based MDL parsing against the native Rust parser, so it
-// needs the optional xmutil C++ converter compiled in.
-#[cfg(feature = "xmutil")]
-mod mdl_equivalence;
 mod mdl_roundtrip;
 mod mdl_vensim_truth;
 mod metasd_macros;

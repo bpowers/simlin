@@ -88,7 +88,7 @@ env:
 jobs:
   wasm-opt:
     name: Build with wasm-opt and run the engine tests against it
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # wasm-opt -O3 is ~225s on our two blobs (120s + 105s on a fast desktop),
     # on top of the ~120s the two wasm-release cargo builds take in parallel
     # (each is single-threaded under LTO and codegen-units=1, so they overlap
@@ -96,7 +96,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup show
@@ -109,16 +109,16 @@ jobs:
         run: ./scripts/install-binaryen.sh
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: 'pnpm'
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/

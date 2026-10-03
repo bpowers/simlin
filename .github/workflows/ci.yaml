@@ -28,24 +28,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     env:
       RUSTFLAGS: -D warnings
       RUST_BACKTRACE: 1
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          # simlin-mcp's pysimlin_version_matches_latest_tag needs the
-          # pysimlin-v* tags (setuptools-scm makes the tag the version's
-          # source of truth); without them the guard skips on every run.
-          fetch-tags: true
+        uses: actions/checkout@v7
+
+      # simlin-mcp's pysimlin_version_matches_latest_tag reads the
+      # pysimlin-v* tags (setuptools-scm makes the tag the version's
+      # source of truth) and skips when it sees none. The checkout is
+      # one commit deep and `fetch-tags: true` adds no tag refspec to
+      # that fetch (the step's own log line is `git fetch --depth=1
+      # origin +<sha>:refs/remotes/origin/main`), so the tags are
+      # fetched by name here; the step fails if there are none, which
+      # is what keeps the guard from skipping on every run.
+      - name: Fetch the pysimlin release tags
+        shell: bash
+        run: |
+          git fetch --depth=1 origin 'refs/tags/pysimlin-v*:refs/tags/pysimlin-v*'
+          test -n "$(git tag --list 'pysimlin-v*')"
 
       - name: Install Rust toolchain
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -62,11 +71,14 @@ jobs:
       - name: Compile tests
         run: cargo test --workspace --no-run
 
-      # 3-minute wall-clock cap on `cargo test` (post-compile).  CI
-      # baseline on ubuntu-latest is ~60s; the cap is a ~3x safety
-      # rail against the kind of regression that made PR #461's job
+      # 3-minute wall-clock cap on `cargo test` (post-compile).  On a
+      # 4-core runner the step takes 56 to 127 s for the same suite
+      # (the spread is the runner, not the commit), so the cap is
+      # 1.4x the slow end: a rail
+      # against the kind of regression that made PR #461's job
       # hit GitHub's 60-minute per-job cap (one test binary there
-      # took 44 minutes).  Uses the step-level `timeout-minutes`
+      # took 44 minutes), with little room for the suite to grow.
+      # Uses the step-level `timeout-minutes`
       # field rather than coreutils `timeout(1)` so we do not need
       # to special-case macos-latest (which has no `timeout` on
       # PATH).  Raise in lockstep with scripts/pre-commit if the
@@ -78,19 +90,19 @@ jobs:
 
   rust:
     name: Lint and format Rust
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: -D warnings
       RUST_BACKTRACE: 1
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -104,32 +116,96 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check --color=auto
 
+      # The same invocation scripts/pre-commit runs. Without `--all-targets`
+      # no test, example or bench is linted, and without `--all-features` no
+      # code behind `ext_data` or `ltm_bench` is even compiled, so
+      # a change that never went through the hook would be held to less here
+      # than a local commit is.
       - name: Lint with Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
 
-      - name: Run cargo-deny
-        run: cargo deny check
+      # The checks that are a function of this tree alone. `advisories` is
+      # not: a RUSTSEC entry published tomorrow fails the same commit that
+      # passed today, so it runs in .github/workflows/advisories.yml (daily,
+      # and on every change to Cargo.lock or deny.toml), which opens an issue
+      # rather than turning an unrelated pull request red.
+      - name: Run cargo-deny (bans, licenses, sources)
+        run: cargo deny check bans licenses sources
 
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
+  # The gates: every test the Build job cannot run. A test is `#[ignore]`d
+  # when a debug build takes too long over it (a sweep of the model corpus,
+  # C-LEARN or World3 compiled and run), so `cargo test` and the pre-commit
+  # hook skip it and this job is the only thing that holds what it pins. An
+  # ignored test nothing runs goes stale silently: a pin a later change moved
+  # is found by whoever next runs it by hand, long after the change.
+  #
+  # So `#[ignore]` means exactly "needs an optimized build", and every ignored
+  # test has to pass here. A test that records a known defect is not ignored:
+  # it asserts the defect and runs in the Build job, so it fails when the
+  # defect is fixed.
+  #
+  # scripts/gates.sh is the one statement of what runs (the packages, the
+  # features, the `gates` cargo profile: optimized, with debug assertions and
+  # overflow checks) and is what a developer runs too. It runs the rest of
+  # each suite as well, with `ext_data` on: the only run of the suite with the
+  # Excel data provider compiled in.
+  #
+  # The run is about two minutes on four desktop cores (5 CPU-minutes); the
+  # caps leave room for several times that, since corpus sweeps are added
+  # here rather than to the capped debug suite.
+  gates:
+    name: Gates (ignored tests, optimized)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       RUSTFLAGS: -D warnings
       RUST_BACKTRACE: 1
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-gates-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            cargo-gates-
+
+      - name: Compile the gates
+        run: scripts/gates.sh --no-run
+
+      - name: Run the gates
+        timeout-minutes: 25
+        run: scripts/gates.sh
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: -D warnings
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -139,6 +215,13 @@ jobs:
           key: cargo-llvm-cov-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-llvm-cov-
+
+      # The suite's pysimlin_version_matches_latest_tag needs the release
+      # tags, as in the Build job.
+      - name: Fetch the pysimlin release tags
+        run: |
+          git fetch --depth=1 origin 'refs/tags/pysimlin-v*:refs/tags/pysimlin-v*'
+          test -n "$(git tag --list 'pysimlin-v*')"
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
@@ -157,8 +240,8 @@ jobs:
       # suite 5-50x slower than native, first blowing a 90-minute cap
       # and later violating timing assumptions in libsimlin's
       # concurrency tests. llvm-cov instrumentation runs tests at
-      # near-native speed (native `cargo test --workspace` is ~60s
-      # post-compile), so this cap is a generous backstop dominated by
+      # near-native speed (native `cargo test --workspace` is one to
+      # two minutes post-compile), so this cap is a generous backstop dominated by
       # the instrumented build: a warm-cache run fits comfortably in
       # 30 minutes, and the headroom above that absorbs the cold-cache
       # case (first run after a Cargo.lock change or cache eviction
@@ -172,22 +255,22 @@ jobs:
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
 
       - name: Upload Coverage
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
 
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: 'pnpm'
@@ -196,7 +279,7 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -208,7 +291,7 @@ jobs:
             cargo-wasm-
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -255,18 +338,18 @@ jobs:
 
   pysimlin:
     name: pysimlin type check and tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUST_BACKTRACE: 1
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -278,7 +361,7 @@ jobs:
             cargo-pysimlin-
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
 
@@ -320,22 +403,22 @@ jobs:
       RUST_BACKTRACE: 1
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup show
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: 'pnpm'
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -347,7 +430,7 @@ jobs:
             cargo-pysimlin-e2e-
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
 
@@ -394,13 +477,13 @@ jobs:
 
       # Screenshots, the trace, and the jupyter server log are what a failed
       # journey needs to be understood. They live in a dot-directory, and
-      # upload-artifact@v4 skips hidden files unless told otherwise (it then
+      # upload-artifact skips hidden files unless told otherwise (it then
       # finds nothing at all). Nothing to upload is a warning, not an error:
       # this step also runs when an earlier build step failed, before the
       # journey wrote anything.
       - name: Upload journey output
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pysimlin-e2e-output
           path: src/pysimlin/e2e/.output/
@@ -409,16 +492,16 @@ jobs:
 
   policy:
     name: Policy checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install ripgrep
         run: sudo apt-get install -y ripgrep
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -438,20 +521,20 @@ jobs:
   # the Windows leg past its cap (GH #1054).
   serve-web:
     name: simlin-serve embedded SPA
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup show
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -459,7 +542,7 @@ jobs:
       # Same key family as the frontend job: both build the same gate-profile
       # wasm engine into the same target directories, so they share one cache.
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -489,7 +572,7 @@ jobs:
         run: pnpm --filter "@simlin/serve-web..." run build
 
       - name: Upload the SPA for the smoke legs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: serve-web-dist
           path: src/simlin-serve/web/dist
@@ -516,18 +599,18 @@ jobs:
         # npm matrix (serve-release.yml) additionally ships linux-arm64 and
         # win32-x64, both cross-compiled; neither is a GitHub-hosted runner
         # option, and linux-x64 covers the Linux runtime path.
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     env:
       RUST_BACKTRACE: 1
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -542,7 +625,7 @@ jobs:
       # test spawns embeds this SPA. The smoke test asserts the entry point is
       # actually served, which is what catches a missing or empty embed.
       - name: Download the embedded SPA
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: serve-web-dist
           path: src/simlin-serve/web/dist
@@ -574,13 +657,13 @@ jobs:
       RUST_BACKTRACE: 1
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/

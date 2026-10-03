@@ -731,16 +731,15 @@ fn discovery_arms_race_matches_vm() {
 /// VM-side peer `clearn_ltm_discovery_compiles` already runs at
 /// `#[ignore]`); running it counts against the 3-minute
 /// `cargo test --workspace` cap if left in the default suite. Run
-/// explicitly with:
-///     cargo test --release -p simlin-engine --test integration \
-///         -- --ignored --nocapture discovery_clearn_matches_vm_wasm
+/// with:
+///     scripts/gates.sh --nocapture discovery_clearn_matches_vm_wasm
 ///
 /// The model lives outside the XMILE loader's `test/` root (it is a
 /// Vensim MDL under `test/xmutil_test_models/`), so it is loaded via
 /// `open_vensim` directly rather than through this binary's
 /// XMILE-only `load` helper.
 #[test]
-#[ignore = "wasm compile of 1.4 MB MDL is slow; run with `cargo test --release -- --ignored`"]
+#[ignore = "C-LEARN under LTM discovery on the VM and on wasm under the interpreter; run under the gates profile"]
 fn discovery_clearn_matches_vm_wasm() {
     let path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let mdl =
@@ -752,20 +751,15 @@ fn discovery_clearn_matches_vm_wasm() {
 
 /// AC2.5 (heavy ignored twin): World3-03 discovery parity.
 ///
-/// `#[ignore]`d because (a) wasm-compiling a 166-variable Vensim
-/// model is slow, and (b) the VM-side discovery on World3 currently
-/// does not terminate -- see `world3_discovery_single_timestep` for
-/// the documented Finding 3 (GH #540) and the surrounding RSS/time-
-/// budget bound. Until #540 is fixed the VM run alone exhausts the
-/// budget, so this twin cannot complete; once #540 is fixed the
-/// twin's VM and wasm runs both terminate and this test asserts they
-/// agree on the discovered loop set and per-loop score series.
+/// `#[ignore]`d for runtime only: World3 runs under LTM discovery on
+/// the VM and again on wasm under the interpreter, about 20 s on a
+/// debug build. The two agree on the discovered loop set and on each
+/// loop's score series.
 ///
-/// Run explicitly with:
-///     cargo test --release -p simlin-engine --test integration \
-///         -- --ignored --nocapture discovery_world3_matches_vm_wasm
+/// Run with:
+///     scripts/gates.sh --nocapture discovery_world3_matches_vm_wasm
 #[test]
-#[ignore = "wasm compile of 166-var World3 is slow; VM discovery is also blocked on #540"]
+#[ignore = "World3 under LTM discovery on the VM and on wasm under the interpreter; run under the gates profile"]
 fn discovery_world3_matches_vm_wasm() {
     let path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
     let mdl =

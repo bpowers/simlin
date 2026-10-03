@@ -27,19 +27,34 @@ Conventions inside a harness:
 
 ### Test time budgets
 
-Individual tests should finish in a few seconds on a debug build. Target is under 2s per test; 5s is the soft ceiling. Slow tests compound: we have thousands of them and they run on every pre-commit and every CI push.
-
-`cargo test --workspace` is wrapped in a 3-minute wall-clock cap in both `scripts/pre-commit` (via `timeout(1)` from GNU coreutils) and `.github/workflows/ci.yaml` (via the step-level `timeout-minutes` field). CI baseline is ~60s, so the cap is ~3x headroom; a run that trips it means something has regressed and the build will fail. If the whole suite legitimately grows past the cap, raise both call sites in the same commit -- do not bypass the hook with `--no-verify`.
+`cargo test --workspace` is wrapped in a 3-minute wall-clock cap in both `scripts/pre-commit` (via `timeout(1)` from GNU coreutils) and `.github/workflows/ci.yaml` (via the step-level `timeout-minutes` field). A run that trips it fails the build. If the whole suite legitimately grows past the cap, raise both call sites in the same commit -- do not bypass the hook with `--no-verify`.
 
 Pre-commit needs `timeout(1)` on PATH. Linux distros ship it as `timeout`; on macOS install via `brew install coreutils` (the binary is named `gtimeout` there, and the pre-commit hook picks up whichever is present).
 
-To find slow tests, grep the per-binary durations from a regular run:
+**The budget is CPU-seconds, not seconds.** The cap is wall-clock on a CI runner with four cores, and cargo runs the test binaries one after another, so every CPU-second a test spends on any thread is a quarter of a second of that runner's wall clock, or more on a slow one. A test that fans out over rayon finishes in a second on a 32-core desktop and still costs what it costs: libtest's per-test time and a desktop's wall clock both hide it. The suite has little room left (the capped step takes 56 to 127 s across CI runners for one and the same commit, and the slow end is the one that matters), so:
+
+- A test in the default suite is small: well under one CPU-second on a debug build. Measure CPU, not wall, with the test alone in its process:
+
+  ```bash
+  # from the crate directory (src/simlin-engine), where fixture paths resolve
+  /usr/bin/time -f '%e s wall, %U s cpu' ../../target/debug/deps/<binary> --exact <module>::<test>
+  ```
+
+- Anything heavier is a gate (below): a sweep of the model corpus, C-LEARN or World3 compiled or run, a large proptest. Parallelism inside the test does not make it cheap.
+- Compare the whole suite before and after a change by its CPU on four cores, which is what a runner has:
+
+  ```bash
+  cargo test --workspace --no-run
+  RUST_TEST_THREADS=4 taskset -c 0-3 /usr/bin/time -v cargo test --workspace   # read "User time"
+  ```
+
+  CI's own wall clock is no measure of a change: runner to runner it varies by more than a factor of two.
+
+To find what is slow, grep the per-binary durations from a regular run:
 
 ```bash
 cargo test --workspace 2>&1 | grep 'finished in'
 ```
-
-Anything over a few seconds is worth looking at.
 
 For PER-TEST durations, run the compiled test binary directly with libtest's
 (nightly-gated, but stable-toolchain-accessible) report-time flag:
@@ -52,10 +67,43 @@ RUSTC_BOOTSTRAP=1 ../../target/debug/deps/<binary> -Z unstable-options --report-
   2>&1 | grep 'ok <' | sort -t'<' -k2 -rn | head -20
 ```
 
-A binary's parallel wall clock is `max(longest single test, total/threads)`, so
-one serial mega-test sets the floor no matter how many cores are available.
-Prefer one `#[test]` per fixture (or a rayon `par_iter` inside a corpus test)
-over a single test that loops a fixture list serially.
+That is wall time under contention, so it ranks single-threaded tests and says nothing about one that fans out; use the CPU measurement above for those. A binary's parallel wall clock is `max(longest single test, total CPU/threads)`, so one serial mega-test sets the floor no matter how many cores are available: prefer one `#[test]` per fixture over a single test that loops a fixture list serially.
+
+#### Gates: the tests the default suite cannot run
+
+A gate is a test that is `#[ignore]`d because a debug build takes too long over it. `cargo test` and the pre-commit hook skip it; `scripts/gates.sh` runs it, under the `gates` cargo profile (optimized, with debug assertions and overflow checks), and CI's `gates` job runs that script on every push to main and every pull request to main. An ignored test nothing runs holds nothing -- a pin a later change moves is found by whoever next runs it by hand -- so the job is what makes an ignored test a check.
+
+```rust
+/// Every corpus model's save keeps what the model simulates.
+#[test]
+#[ignore = "every corpus model saved, read back and simulated; run under the gates profile"]
+fn every_corpus_save_keeps_what_the_model_simulates() { ... }
+```
+
+```bash
+scripts/gates.sh                              # every gate
+scripts/gates.sh every_corpus_save            # the tests a filter selects, ignored or not
+scripts/gates.sh --nocapture clearn           # libtest flags pass through
+```
+
+The rules:
+
+- **`#[ignore]` means "needs an optimized build", and nothing else.** The reason string says what the test sweeps and ends `; run under the gates profile`. Say what makes it heavy in a way that stays true ("C-LEARN under the wasm interpreter"), not how long it took one day.
+- **Every ignored test passes in the gates job.** A test that records a known defect is not ignored: it asserts the defect (or lists it in an allowlist that fails when a listed entry stops reproducing) and runs in the default suite, so it fails when the defect is fixed. An ignored test that is expected to fail is a test nobody reads.
+- **A gate fails when its property breaks.** Check that the same way as any other test: make the obvious wrong change and see it fail under `scripts/gates.sh`.
+- **An instrument** -- an ignored test that prints a measurement or writes files for a person, and asserts nothing about them -- runs in the job too, so it has to run to completion; its reason string says it is one.
+- Where it is cheap, keep a small default-suite test beside a gate that exercises the same code on one or two models, so the hook sees a break before CI does.
+- `scripts/gates.sh` also runs the rest of each suite it covers, with the `ext_data` feature on: the only run of the suite with the Excel data provider compiled in. To give another crate gates, add it to `PACKAGES` in that script.
+
+The simlin-serve smoke test is ignored for a different reason (it spawns the built binary with its embedded SPA) and has a CI job of its own, `serve-smoke`.
+
+**`#[ignore]` for runtime is a judgement about today's engine, so re-take it after the engine gets faster.** Time the ignored set on a debug build and un-ignore what now fits the default suite's budget:
+
+```bash
+cargo test -p simlin-engine --test integration --no-run
+RUSTC_BOOTSTRAP=1 cargo test -p simlin-engine --test integration -- --ignored \
+  -Z unstable-options --report-time 2>&1 | grep 'ok <' | sort -t'<' -k2 -rn
+```
 
 #### Testing threshold gates without building giant fixtures
 
@@ -65,33 +113,6 @@ Instead:
 
 - Expose a test-only constant (e.g. a `#[cfg(test)] const` or a field threaded through the API) that the test can set to a tiny value (5, 10) and trip with a correspondingly tiny fixture.
 - Or pick a gate whose shape is cheap to exercise (e.g. the `MAX_LTM_SCC_NODES = 50` structural gate at the checkpoint needed a 51-node SCC to trip -- that's 51 variables, not 30,000).
-
-If a test MUST do expensive work (full compilation of a real-world model, enumeration over a large graph for a correctness claim), gate it with `#[ignore]` and document the opt-in command next to the test, for example:
-
-```rust
-// Run with: cargo test --release -- --ignored my_expensive_test
-#[test]
-#[ignore]
-fn my_expensive_test() { ... }
-```
-
-Prefer `--release` for expensive tests -- enumeration, simulation, and layout code can be 10-50x faster than debug.
-
-**`#[ignore]` for runtime is a judgement about today's engine, so re-take it after the engine gets faster.** An ignored gate does not run in pre-commit or CI, which means it catches nothing until someone remembers to ask for it -- `clearn_ltm_var_count_guardrail`'s own doc comment recorded a regression that slipped through for exactly that reason. After a compile-time improvement, time the ignored set and un-ignore what now fits:
-
-```bash
-cargo test -p simlin-engine --test integration --no-run
-RUSTC_BOOTSTRAP=1 cargo test -p simlin-engine --test integration -- --ignored \
-  -Z unstable-options --report-time 2>&1 | grep 'ok <' | sort -t'<' -k2 -rn
-```
-
-Then check the whole suite against CI's budget rather than trusting a developer machine, which has far more cores than a runner:
-
-```bash
-RUST_TEST_THREADS=4 taskset -c 0-3 cargo test --workspace   # approximates a CI runner
-```
-
-When a test stays ignored, say WHY in the attribute or the doc comment, and make the reason falsifiable: "runtime class" goes stale, while "executing C-LEARN under the non-JIT wasm interpreter, which no compiler speedup touches" or "a strict subset of a test that now runs by default" does not.
 
 ## Code Quality
 

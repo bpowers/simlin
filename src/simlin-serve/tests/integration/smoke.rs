@@ -375,7 +375,7 @@ fn dump_buffer(label: &str, buf: &Mutex<Vec<String>>) {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "spawns the simlin-serve binary with its embedded SPA; CI's serve-smoke job runs it"]
 async fn smoke_end_to_end_browser_and_mcp_paths() {
     // ---- 1. Tempdir + fixtures ----
     let temp = TempDir::new().expect("tempdir");

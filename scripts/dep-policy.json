@@ -1,12 +1,11 @@
 {
   "rust": {
-    "simlin-engine": ["xmutil"],
+    "simlin-engine": [],
     "simlin": ["simlin-engine"],
     "simlin-cli": ["simlin-engine", "simlin"],
     "simlin-mcp": ["simlin-engine", "simlin-mcp-core"],
     "simlin-mcp-core": ["simlin-engine"],
-    "simlin-serve": ["simlin-engine", "simlin-mcp-core"],
-    "xmutil": []
+    "simlin-serve": ["simlin-engine", "simlin-mcp-core"]
   },
   "typescript": {
     "@simlin/engine": [],

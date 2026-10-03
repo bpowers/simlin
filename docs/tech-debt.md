@@ -4,16 +4,6 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 ## Items
 
-### 1. MDL Parser C-LEARN Equivalence
-
-- **Component**: simlin-engine (src/simlin-engine/src/mdl/)
-- **Severity**: medium
-- **Description**: 26 differences remain between the native Rust MDL parser and the C++ xmutil reference path. Root causes: missing initial-value comments, trailing tabs in dimension names, net flow synthesis differences, middle-dot canonicalization, GF y-scale computation.
-- **Measure**: `cargo test -p simlin-engine --features xmutil test_clearn_equivalence -- --ignored --nocapture 2>&1 | grep 'DIFF'`
-- **Count**: 26 diffs (as of January 2026)
-- **Owner**: unassigned
-- **Last reviewed**: 2026-02-15
-
 ### 2. `unwrap_or_default()` Usage in simlin-engine
 
 - **Component**: simlin-engine
@@ -102,16 +92,6 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Count**: 40 occurrences across 22 files (as of 2026-09-03)
 - **Owner**: unassigned
 - **Last reviewed**: 2026-09-03
-
-### 13. Ignored Rust Tests
-
-- **Component**: simlin-engine
-- **Severity**: low
-- **Description**: 23 tests are marked `#[ignore]`. 11 are in tests/simulate.rs (tracked individually by GitHub issues: #346 DELAY FIXED ring-buffer [4 tests], #347 GET DATA BETWEEN TIMES+implicit .dat loading [2 tests], #348 directdata/directconst/directlookups/directsubs [4 tests], #349 C-LEARN macro expansion [1 test]). 8 are in vdf.rs (VDF binary format tests). 2 are in json_sdai_proptest.rs (file system writes). 1 is in tests/mdl_equivalence.rs (tracked by item 1). 1 is in tests/mdl_roundtrip.rs. The close-array-gaps work enabled all 8 array_tests.rs tests plus 5 simulate.rs tests (#345 EXCEPT tests and the basic EXCEPT test).
-- **Measure**: `rg '#\[ignore\]' --type rust src/simlin-engine/ -c`
-- **Count**: 23 ignored tests across 5 files (as of 2026-03-12)
-- **Owner**: unassigned
-- **Last reviewed**: 2026-03-12
 
 ### 14. TypeScript Test Coverage Gaps
 
@@ -552,7 +532,7 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: build / CI (`scripts/pre-commit`, `.github/workflows/`, `src/simlin-engine/Cargo.toml`)
 - **Severity**: low (was medium; the dev-target half of this is now structurally impossible — see below)
-- **Description**: Neither the pre-commit hook nor CI exercises a Cargo **feature matrix** for `simlin-engine`, so feature-gating bugs in the **library** are invisible to the canonical gate. simlin-engine features: `file_io`, `schema`, `ai_info`, `debug-derive` (default = `schema, ai_info, debug-derive`), plus `xmutil`, `ext_data`, `png_render`, `ltm_bench`.
+- **Description**: Neither the pre-commit hook nor CI exercises a Cargo **feature matrix** for `simlin-engine`, so feature-gating bugs in the **library** are invisible to the canonical gate. simlin-engine features: `file_io`, `schema`, `ai_info`, `debug-derive` (default = `schema, ai_info, debug-derive`), plus `ext_data`, `png_render`, `ltm_bench`.
 
   **Historical failure (no longer reachable).** During Phase 7c of the Vensim macro epic a subagent added `src/simlin-engine/tests/metasd_macros.rs` (which calls the `file_io`-gated `load_dat`/`load_csv`) WITHOUT the mirroring `required-features = ["file_io"]` entry. That broke `cargo build -p simlin-engine --all-targets` whenever `file_io` was *not* enabled (`error[E0425]`, `load_dat`/`load_csv` configured out), and survived multiple commits because the workspace build pulls `file_io` into scope via cross-crate feature unification (`simlin-cli` requests `simlin-engine/file_io`). The Cargo.toml fix landed in `7cba4ad2`. GH #925 then removed the underlying hazard: the crate takes a self dev-dependency (`simlin-engine = { path = ".", default-features = false, features = ["file_io"] }`), so `file_io` is unconditionally on for every test/bench/example target. A dev target can no longer break under a missing `file_io` — that entire failure class is gone, and the `#[cfg]`/`required-features` bookkeeping it demanded is gone with it.
 

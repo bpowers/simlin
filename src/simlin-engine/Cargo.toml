@@ -24,7 +24,6 @@ png_render = ["dep:resvg"]
 # leaves it out, since no browser code calls it (it is about 5% of that
 # bundle).
 agent_tools = []
-xmutil = ["dep:xmutil"]
 # Compiles in the `generate_loop_score_variables` loop-score tracing
 # instrumentation (per-loop cumulative equation bytes + RSS sampling), a
 # benchmarking/diagnostic aid only. Off by default so production builds carry
@@ -66,7 +65,6 @@ quick-xml = { version = "0.41", features = [ "serialize", "overlapped-lists" ] }
 csv = { version = "1", optional = true }
 calamine = { version = "0.33", optional = true }
 resvg = { version = "0.47", optional = true, default-features = false, features = ["text"] }
-xmutil = { version = "1", path = "../xmutil", optional = true }
 
 # 0.28.5 is the floor: earlier 0.28 releases can free an interned value's
 # storage while it is in use (RUSTSEC-2026-0308).
@@ -135,7 +133,6 @@ jsonschema = { version = "0.26", default-features = false }
 # terminal summary, so trim to the bench-runner harness alone.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 sha2 = "0.10"
-test-generator = { version = "0.3.0", git = "https://github.com/bpowers/test-generator", rev = "b78145bfb6a6f81425dfd6fbacb9c03624e79b2c" }
 ed25519-dalek = "2"
 tempfile = "3"
 

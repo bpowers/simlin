@@ -1199,13 +1199,13 @@ fn pinned_scalar_feeder_agg_loop_dedups_in_exhaustive_mode() {
 /// loop score over `scenario` whose deterministic-scenario slot is finite,
 /// eventually non-zero, and negative (it is a balancing loop).
 ///
-/// `#[ignore]`d for runtime class only: C-LEARN's debug-mode parse +
-/// LTM-discovery compile measures ~40s against the 3-minute
+/// `#[ignore]`d for runtime only: C-LEARN's debug-mode parse +
+/// LTM-discovery compile measures ~35s against the 3-minute
 /// `cargo test --workspace` budget (see the design plan's "Additional
-/// Considerations"). Run explicitly with:
-///   cargo test --release -p simlin-engine --test integration -- --ignored clearn
+/// Considerations"). Run with:
+///   scripts/gates.sh clearn_pinned_climate_loop_is_scored
 #[test]
-#[ignore]
+#[ignore = "C-LEARN compiled and run under LTM with a pinned loop; run under the gates profile"]
 fn clearn_pinned_climate_loop_is_scored() {
     use simlin_engine::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
 

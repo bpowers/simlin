@@ -2730,14 +2730,6 @@ TIME STEP = 1 ~~|
     }
 }
 
-// Commented out: test_generator approach is useful for discovery but generates many tests.
-// Use the corpus_tests! invocation below for the curated list.
-// #[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
-// fn simulates_sdeverywhere(resource: &str) {
-//     let resource = format!("../../{}", resource);
-//     simulate_path(&resource);
-// }
-
 // SDEverywhere test models from test/sdeverywhere/models/**/*.xmile
 // These are Vensim models converted to XMILE format.
 corpus_tests! {
@@ -3907,8 +3899,7 @@ fn simulates_wrld3_03_wasm() {
 /// NaN-vs-`:NA:` / boundary); none is "unknown".
 ///
 /// This set is GUARDED for exactness by the committed `clearn_residual_exactness`
-/// regression test (run it to re-derive/verify after an engine change:
-/// `cargo test --release -- --ignored clearn_residual_exactness`). That test
+/// regression test, which runs in the default suite. That test
 /// re-runs C-LEARN through the same `classify_vdf_ident` comparator with NO
 /// exclusion and asserts the live failing set equals this list, failing loudly
 /// (with the symmetric difference) if the residual grew (a regression) or shrank
@@ -3979,14 +3970,10 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
     "last_set_target_year", // INIT(VECTOR SELECT(...)); every cell is -2*NA (vdf -1.298e33 vs sim -6.49e32 sentinel).
 ];
 
-// FULL end-to-end C-LEARN simulation against `Ref.vdf`. Un-stubbed (no longer a
-// permanently-skipped placeholder): C-LEARN compiles via the incremental path,
-// runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
-// tolerance on every matched, non-excluded ident (~2924 of ~2951 matched, after
-// the pinned 434-column reference-missing skip). Kept `#[test] #[ignore]`
-// purely for RUNTIME CLASS (C-LEARN is ~53k lines / 1.4 MB, ~5s just to parse on
-// release), so the capped default `cargo test` set stays under the 3-minute cap;
-// run it explicitly via `--ignored` (AC8.3).
+// FULL end-to-end C-LEARN simulation against `Ref.vdf`: C-LEARN compiles via
+// the incremental path, runs to FINAL TIME, and matches `Ref.vdf` within the 1%
+// cross-simulator tolerance on every matched, non-excluded ident (~2924 of
+// ~2951 matched, after the pinned 434-column reference-missing skip).
 //
 // History (the formerly-listed blockers are CLEARED on this branch):
 //   * C-LEARN's four macros (SAMPLE UNTIL, SSHAPE, RAMP FROM TO, INIT) parse,
@@ -4107,9 +4094,9 @@ fn run_clearn_vs_vdf() -> (Results, Results) {
 /// checked against the VDF oracle -- so the resumable cursor is proven on a real
 /// model at C-LEARN scale (wasm-backend.AC2.3 segmented-run parity).
 ///
-/// Run with: cargo test --release -- --ignored simulates_clearn_wasm
+/// Run with: scripts/gates.sh simulates_clearn_wasm
 #[test]
-#[ignore]
+#[ignore = "C-LEARN compiled to wasm and run under the interpreter, whole and in two segments; run under the gates profile"]
 fn simulates_clearn_wasm() {
     let datamodel_project = clearn_datamodel();
 
@@ -7244,9 +7231,9 @@ fn clearn_ltm_var_count_guardrail() {
 ///
 /// C-LEARN had 50 such failures before #912/#913; the remaining 28
 /// partial-equation warnings are the separately-tracked non-parse kinds.
-// Run with: cargo test --release -- --ignored clearn_ltm_partials_all_parse
+// Run with: scripts/gates.sh clearn_ltm_partials_all_parse
 #[test]
-#[ignore]
+#[ignore = "C-LEARN's diagnostics under LTM, every generated partial; run under the gates profile"]
 fn clearn_ltm_partials_all_parse() {
     use simlin_engine::db::collect_all_diagnostics;
 
@@ -7277,13 +7264,13 @@ fn clearn_ltm_partials_all_parse() {
     );
 }
 
-// Still `#[ignore]`d, but no longer for time: `simulates_clearn` now runs by
-// default and checks C-LEARN's numbers against `Ref.vdf`, which subsumes
-// "compiles and runs". Kept as the structural-only probe to reach for when the
-// numeric gate fails and the question is whether compilation itself broke.
-// Run with: cargo test -- --ignored compiles_and_runs_clearn_structural
+// `simulates_clearn` runs by default and checks C-LEARN's numbers against
+// `Ref.vdf`, which subsumes "compiles and runs". This is the structural-only
+// check to reach for when the numeric gate fails and the question is whether
+// compilation itself broke.
+// Run with: scripts/gates.sh compiles_and_runs_clearn_structural
 #[test]
-#[ignore]
+#[ignore = "C-LEARN compiled and run with no numeric comparison, a second C-LEARN compile the default suite does not need; run under the gates profile"]
 fn compiles_and_runs_clearn_structural() {
     use simlin_engine::common::ErrorCode;
 

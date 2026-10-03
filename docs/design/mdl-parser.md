@@ -6,9 +6,11 @@ For current status and agent guidance, see `src/simlin-engine/src/mdl/CLAUDE.md`
 
 ## Motivation
 
-**Problems being solved:**
-1. **Build complexity**: The C++ xmutil requires Bison/Flex, a C++ toolchain, and complex cross-compilation setup
-2. **WASM compatibility**: Cannot easily include xmutil in WASM builds today; would require a large WASI build dependency
+The reader is native Rust for two reasons:
+1. **Build complexity**: it needs no parser generator, no C++ toolchain, and no cross-compilation setup beyond the engine's own.
+2. **WASM compatibility**: it builds for wasm with the rest of the engine, so the browser imports `.mdl` files directly.
+
+Its algorithms are ported from xmutil, Bob Eberlein's C++ Vensim-to-XMILE converter (https://github.com/bobeberlein/xmutil). Where a comment cites an xmutil function or a `File.cpp:line`, it names the code a rule was ported from, under that repository's `src/` directory. What a model computes is settled by Vensim's own output (see "What Holds the Reader to Ground Truth"), not by xmutil.
 
 ## Architecture
 
@@ -43,7 +45,7 @@ Some Vensim concepts require intermediate representations before conversion to d
 
 ## Vensim MDL Format Features
 
-All features implemented in xmutil must be supported. This section documents the full feature set organized by implementation phase.
+The feature set is xmutil's. This section documents it, organized by implementation phase.
 
 ### Phase 1: Lexer (`lexer.rs`)
 
@@ -176,23 +178,17 @@ The production paths return errors rather than panicking:
 4. Normalizer invariant (`normalizer.rs`): returns `Ok(None)` instead of panicking
 5. Invariant unwraps in conversion/view processing: all use `match`/`continue`/`Option`
 
-## C-LEARN Equivalence Analysis
+## What Holds the Reader to Ground Truth
 
-The C-LEARN model (`test/xmutil_test_models/C-LEARN v77 for Vensim.mdl`) exercises subscripts, subranges, bang notation, and element-specific equations extensively, and the equivalence harness compares the native import of it with xmutil's:
+Vensim's own output does. The MDL corpus tests in `tests/integration/simulate.rs` (`simulate_mdl_path` and its variants) import a corpus `.mdl` that has a Vensim run beside it (`output.csv`, `output.tab`, or the model's `.dat`), simulate it, and compare the result with that run. A change to how a file imports is right when every such test still passes.
 
-```bash
-cargo test --release -p simlin-engine --features xmutil --test integration test_clearn_equivalence -- --ignored --nocapture
-```
+The census in `tests/integration/mdl_vensim_truth.rs` asks the same question of every corpus `.mdl` with a Vensim run beside it, and pins, for each file that differs, the series that differ (`mdl_vensim_truth_series.tsv`). It is a gate: `scripts/gates.sh mdl_vensim_truth`.
 
-The differences fall into these classes:
+The gates that read a `.mdl` and compare Simlin with Simlin (the save fixed point, the save-meaning check) cannot stand in for them: a reader that is wrong is wrong on both sides of those.
 
-- `:NA:` is the finite `float::NA` (`-2^109`), where xmutil writes `nan`.
-- A lookup-only table's equation is empty, where xmutil writes the `0+0` sentinel; the engine reads both as a table-only variable.
-- A variable's own name in its equation, where xmutil writes `self`; `time` in a macro, where xmutil writes `time$`.
-- A dimension's element-level mapping onto `cop`, which xmutil leaves empty.
-- A graphical function's y scale (two tables), unexamined.
+C-LEARN (`test/xmutil_test_models/C-LEARN v77 for Vensim.mdl`) exercises subscripts, subranges, bang notation, and element-specific equations extensively. It is held to its own Vensim reference run by `simulates_clearn` and its companions in `tests/integration/simulate.rs`.
 
-### Key C++ Reference Code for Subscript Handling
+### Key xmutil Reference Code for Subscript Handling
 
 - `ContextInfo.cpp:7-60` (`GetLHSSpecific`): Per-element dimension reference substitution
 - `SymbolList.cpp:29-50` (`SetOwner`): Ownership assignment for subrange detection

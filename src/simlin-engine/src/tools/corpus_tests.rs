@@ -9,8 +9,7 @@
 //! corpus has what no fixture was made for -- a series that goes undefined, a
 //! Vensim macro, a model too large to enumerate.
 //!
-//! Run with: cargo test --release -p simlin-engine --lib tools::corpus_tests
-//! -- --ignored --nocapture
+//! Run with: scripts/gates.sh --nocapture tools::corpus_tests
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -335,7 +334,7 @@ fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
 }
 
 #[test]
-#[ignore = "every corpus model through every tool: minutes on a debug build"]
+#[ignore = "every corpus model through every tool; run under the gates profile"]
 fn every_corpus_answer_matches_its_schema_and_fits_the_budget() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
     let mut sweep = Sweep::new();

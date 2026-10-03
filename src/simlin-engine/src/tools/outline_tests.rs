@@ -347,10 +347,9 @@ fn a_sector_outline_over_the_budget_lists_the_stocks_that_fit_and_counts_the_res
 /// The corpus's two largest models are outlined within the budget, and a read
 /// of their first stocks answers, each call timed.
 ///
-/// Run with: cargo test --release -p simlin-engine --lib -- --ignored
-/// the_largest_corpus_models_are_outlined_within_the_budget --nocapture
+/// Run with: scripts/gates.sh --nocapture the_largest_corpus_models_are_outlined_within_the_budget
 #[test]
-#[ignore = "compiles World3 and C-LEARN for their diagnostics: several seconds on a debug build"]
+#[ignore = "compiles World3 and C-LEARN for their diagnostics; run under the gates profile"]
 fn the_largest_corpus_models_are_outlined_within_the_budget() {
     for path in [
         "../../test/metasd/WRLD3-03/wrld3-03.mdl",

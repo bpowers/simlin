@@ -1,0 +1,19 @@
+---
+# Action versions only. The workflows name each action by its major tag, and a
+# major is retired on GitHub's schedule (the Node 20 runtime was), not ours:
+# one grouped pull request a month keeps them current, so a retirement is never
+# the first time anyone looks at them.
+#
+# Cargo and npm dependencies are not here on purpose. Cargo advisories are
+# checked daily by .github/workflows/advisories.yml, and routine version bumps
+# of either ecosystem are made by hand, with the lockfile reviewed.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns:
+          - "*"

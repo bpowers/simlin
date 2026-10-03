@@ -1,5 +1,8 @@
 #!/bin/bash
-set -ex
+# `pipefail` is what makes this a test: the suite below is piped into `tee`,
+# and without it the pipeline reports tee's status, so a failing test or an
+# ASan report leaves the script -- and the scheduled job that runs it -- green.
+set -exo pipefail
 
 # Test full Rust suite with ASAN on Linux
 echo "Running full test suite with ASAN..."
@@ -28,20 +31,26 @@ export ASAN=1
 TARGET=$(rustc -vV | sed -n 's/^host: //p')
 echo "Using target: $TARGET"
 
-# Run tests with ASAN - testing xmutil directly and simlin-engine
-# Include xmutil feature to ensure xmutil C/C++ code is exercised
+# Run the engine's suite under ASan: the VM, the bytecode it runs, and the
+# hashing it leans on are where the engine's `unsafe` is.
 # Use -Zbuild-std to rebuild std library with ASAN
 # Log to file for analysis
-echo "Testing xmutil package..."
-RUST_BACKTRACE=1 \
-ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:verbosity=0:print_stats=1:halt_on_error=0" \
-cargo +"$NIGHTLY_TOOLCHAIN" test -Zbuild-std --target "$TARGET" -p xmutil 2>&1 | tee asan-test.log
+# Every test binary runs and the summaries below print before the script
+# reports a failure: `--no-fail-fast` keeps a failing unit-test binary from
+# hiding the integration harness, and the status is collected rather than left
+# to `set -e`, which would stop before the summaries.
+# ASAN_OPTIONS deliberately leaves `halt_on_error` at its default: with
+# `halt_on_error=0` a test binary that leaks prints its leak report and exits
+# 0, so a leak would be a line in the log of a green job.
+# `allocator_may_return_null=1` keeps the allocator's contract: a request no
+# allocator can meet returns null, which `try_reserve` reports as an error the
+# engine refuses a run with. ASan's default aborts the process instead.
+STATUS=0
 
-echo ""
-echo "Testing simlin-engine with xmutil feature..."
+echo "Testing simlin-engine..."
 RUST_BACKTRACE=1 \
-ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:verbosity=0:print_stats=1:halt_on_error=0" \
-cargo +"$NIGHTLY_TOOLCHAIN" test -Zbuild-std --target "$TARGET" -p simlin-engine --features "xmutil,file_io" 2>&1 | tee -a asan-test.log
+ASAN_OPTIONS="allocator_may_return_null=1:detect_leaks=1:check_initialization_order=1:strict_init_order=1:verbosity=0:print_stats=1" \
+cargo +"$NIGHTLY_TOOLCHAIN" test -Zbuild-std --target "$TARGET" -p simlin-engine --features file_io --no-fail-fast 2>&1 | tee asan-test.log || STATUS=$?
 
 echo ""
 echo "=== ASAN Summary ==="
@@ -52,4 +61,8 @@ echo "=== Memory Leaks Detected ==="
 grep "Direct leak" asan-test.log | head -10 || echo "No direct leaks found"
 
 echo ""
+if [ "$STATUS" -ne 0 ]; then
+    echo "ASAN test FAILED (cargo exit $STATUS). Full log saved to asan-test.log"
+    exit "$STATUS"
+fi
 echo "ASAN test complete! Full log saved to asan-test.log"
