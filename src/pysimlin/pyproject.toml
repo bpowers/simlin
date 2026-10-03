@@ -96,9 +96,18 @@ notebooks = [
 # never import. It must live in THIS venv (not `uv run --with jupyterlab`,
 # whose ephemeral prefix hides the anywidget/ipywidgets labextensions that
 # ship under this venv's share/jupyter).
+#
+# ipykernel 7.4 is the first release that sends shell replies through the
+# shell socket's ZMQStream (ipython/ipykernel#1529). Before it, a reply sent
+# raw on that socket could consume the edge of a request arriving at the same
+# moment, and the kernel then sat idle with the request unread, for good.
+# Lab's burst of requests when it connects a notebook (history, debug, the
+# widget manager's comm) makes that race likely on a notebook's first cell:
+# the cell shows [*] and never runs.
 e2e = [
     "pysimlin[notebook]",
     "jupyterlab>=4.3",
+    "ipykernel>=7.4",
 ]
 
 [project.urls]
