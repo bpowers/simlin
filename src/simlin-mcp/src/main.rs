@@ -129,43 +129,95 @@ mod tests {
         );
     }
 
+    /// What the tag guard does with what `git tag --list` printed.
+    #[derive(Debug, PartialEq)]
+    enum TagCheck<'a> {
+        /// Compare `pysimlin.version` with this version, the newest tag's.
+        Compare(&'a str),
+        /// No tags in a clone that is not CI's: nothing to compare against.
+        Skip,
+        /// No tags where there must be some, or a tag of an unexpected form.
+        Fail(String),
+    }
+
+    /// Decide the tag guard from the tag listing (newest first, one per
+    /// line; `None` when git itself failed) and whether this is a CI run.
+    ///
+    /// A clone without the tags (a developer's fresh shallow clone) skips. CI
+    /// does not get to: its Build job fetches the tags by name
+    /// (`.github/workflows/ci.yaml`), and a guard that skipped there whenever
+    /// that fetch brought nothing would pass on every run while checking
+    /// nothing.
+    fn tag_check(tags: Option<&str>, in_ci: bool) -> TagCheck<'_> {
+        let newest = tags.and_then(|tags| tags.lines().map(str::trim).find(|l| !l.is_empty()));
+        match newest {
+            Some(tag) => match tag.strip_prefix("pysimlin-v") {
+                Some(version) => TagCheck::Compare(version),
+                None => TagCheck::Fail(format!("unexpected tag format: {tag}")),
+            },
+            None if in_ci => TagCheck::Fail(
+                "no pysimlin-v* tags are visible in a CI checkout: the job that runs this \
+                 test must fetch them (`git fetch origin \
+                 'refs/tags/pysimlin-v*:refs/tags/pysimlin-v*'`)"
+                    .to_string(),
+            ),
+            None => TagCheck::Skip,
+        }
+    }
+
+    #[test]
+    fn the_tag_guard_skips_only_outside_ci() {
+        let newest_first = "pysimlin-v0.8.5\npysimlin-v0.8.4\n";
+        for in_ci in [false, true] {
+            assert_eq!(
+                tag_check(Some(newest_first), in_ci),
+                TagCheck::Compare("0.8.5")
+            );
+            assert!(matches!(
+                tag_check(Some("v0.8.5\n"), in_ci),
+                TagCheck::Fail(_)
+            ));
+        }
+        // No tags, whether git listed none or could not run.
+        for tags in [Some(""), Some("\n"), None] {
+            assert_eq!(tag_check(tags, false), TagCheck::Skip);
+            assert!(matches!(tag_check(tags, true), TagCheck::Fail(_)));
+        }
+    }
+
     // version-mgmt.AC1.7: pysimlin.version matches latest pysimlin git tag.
     //
     // pysimlin's version has no in-tree source of truth to compare against --
     // setuptools-scm derives it from the `pysimlin-v*` tag itself (see
     // `tag_regex` in src/pysimlin/pyproject.toml) -- so the tag is the only
     // thing this can be checked against, and the check needs the tags to be
-    // present locally. CI's Build-job checkout sets `fetch-tags: true`
-    // specifically so this guard runs there. A clone without the tags (e.g. a
-    // developer's fresh shallow clone) skips rather than fails -- announced
-    // rather than silent, so a run that unexpectedly finds no tags is
-    // attributable.
+    // present locally. `tag_check` says what happens when they are not.
     #[test]
     fn pysimlin_version_matches_latest_tag() {
         let output = std::process::Command::new("git")
             .args(["tag", "--list", "pysimlin-v*", "--sort=-v:refname"])
             .output()
             .expect("git tag command failed");
-        let tags = String::from_utf8(output.stdout).unwrap();
-        if !output.status.success() || tags.trim().is_empty() {
-            eprintln!(
+        let tags = output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned());
+        // The runners whose workflow fetches the tags; GitHub Actions sets
+        // this for every step.
+        let in_ci = std::env::var_os("GITHUB_ACTIONS").is_some();
+        match tag_check(tags.as_deref(), in_ci) {
+            TagCheck::Compare(version) => assert_eq!(
+                env!("PYSIMLIN_VERSION"),
+                version,
+                "pysimlin.version is stale (contains {}, latest tag is {version})",
+                env!("PYSIMLIN_VERSION"),
+            ),
+            TagCheck::Skip => eprintln!(
                 "SKIPPING pysimlin_version_matches_latest_tag: no pysimlin-v* tags are \
-                 visible. CI fetches tags (fetch-tags: true in ci.yaml), so this skip is \
-                 expected only on a local clone without them; run `git fetch --tags` to \
-                 exercise this guard."
-            );
-            return;
+                 visible in this clone; run `git fetch --tags` to exercise this guard."
+            ),
+            TagCheck::Fail(reason) => panic!("{reason}"),
         }
-        let latest_tag = tags.lines().next().expect("no pysimlin tags found");
-        let version = latest_tag
-            .strip_prefix("pysimlin-v")
-            .expect("unexpected tag format");
-        assert_eq!(
-            env!("PYSIMLIN_VERSION"),
-            version,
-            "pysimlin.version is stale (contains {}, latest tag is {version})",
-            env!("PYSIMLIN_VERSION"),
-        );
     }
 
     // version-mgmt.AC1.8: compiled content contains the substituted version

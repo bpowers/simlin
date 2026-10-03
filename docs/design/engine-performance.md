@@ -841,7 +841,7 @@ unreferenced constant leaves 5.4 MiB (plain) or 116.9 MiB (LTM) waiting.
 LTM), and libsimlin's database lock (`DbLock`) runs it when it drops, at the
 end of every entry point, so the drop is paid inside the edit that caused it
 rather than one edit late. The release is an exclusive salsa access
-(`trigger_lru_eviction` -> `zalsa_mut` -> `cancel_others`, salsa 0.28.1
+(`trigger_lru_eviction` -> `zalsa_mut` -> `cancel_others`, salsa's
 `storage.rs`), which salsa counts in a `u8` and answers with a synthetic
 revision on the 256th without an input write (`runtime.rs`). `Durability::LOW`'s
 last-changed revision is the current revision itself, so after that bump

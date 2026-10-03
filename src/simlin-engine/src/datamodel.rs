@@ -77,16 +77,9 @@ macro_rules! bitwise_eq {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Default, Eq, Clone)]
+#[derive(Default, PartialEq, Eq, Clone)]
 pub struct UnitMap {
     pub map: BTreeMap<String, i32>,
-    pub ctx: Option<Vec<String>>,
-}
-
-impl PartialEq for UnitMap {
-    fn eq(&self, other: &Self) -> bool {
-        self.map == other.map
-    }
 }
 
 impl UnitMap {
@@ -127,14 +120,6 @@ impl UnitMap {
         self
     }
 
-    pub fn push_ctx(mut self, ctx: String) -> Self {
-        let mut full_ctx = self.ctx.take().unwrap_or_default();
-        full_ctx.push(ctx);
-        self.ctx = Some(full_ctx);
-
-        self
-    }
-
     #[allow(dead_code)]
     pub fn pretty_print(&self) -> String {
         format!("{self}")
@@ -154,7 +139,6 @@ impl std::ops::Mul for UnitMap {
     type Output = Self;
 
     fn mul(mut self, rhs: Self) -> Self::Output {
-        let mut rhs = rhs;
         for (unit, n) in rhs.map.into_iter() {
             let new_value = match self.map.get(&unit) {
                 None => n,
@@ -168,14 +152,6 @@ impl std::ops::Mul for UnitMap {
             } else {
                 self.map.insert(unit, new_value);
             }
-        }
-
-        if let Some(rctx) = rhs.ctx.take()
-            && !rctx.is_empty()
-        {
-            let mut ctx = self.ctx.take().unwrap_or_default();
-            ctx.extend(rctx);
-            self.ctx = Some(ctx);
         }
 
         self
@@ -242,7 +218,6 @@ impl FromIterator<(String, i32)> for UnitMap {
     fn from_iter<I: IntoIterator<Item = (String, i32)>>(iter: I) -> Self {
         UnitMap {
             map: iter.into_iter().collect(),
-            ctx: None,
         }
     }
 }

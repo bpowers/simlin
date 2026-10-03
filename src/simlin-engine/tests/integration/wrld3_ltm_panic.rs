@@ -102,10 +102,9 @@ fn wrld3_ltm_compilation_finishes_in_time() {
 /// every-push compilation path under its own 60s thread budget.  Run this
 /// one on demand when changing enumeration logic:
 ///
-///     cargo test --release -p simlin-engine --test integration \
-///         -- --ignored wrld3_element_level_enumeration_is_uncapped
+///     scripts/gates.sh wrld3_element_level_enumeration_is_uncapped
 #[test]
-#[ignore]
+#[ignore = "Johnson's algorithm over World3's 166-node SCC; run under the gates profile"]
 fn wrld3_element_level_enumeration_is_uncapped() {
     let project = load_wrld3();
     let mut db = SimlinDb::default();

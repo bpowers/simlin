@@ -1,0 +1,76 @@
+---
+# `cargo deny check advisories`: the one cargo-deny check whose answer changes
+# while the tree does not. A RUSTSEC entry published overnight (or a crate
+# yanked, which `yanked = "deny"` in deny.toml files under this check) fails a
+# commit that passed the day before, so in `ci.yaml` it turned `main` and every
+# open pull request red for a reason none of them caused. The checks that ARE a
+# function of the tree -- bans, licenses, sources -- stay in ci.yaml's lint job.
+#
+# This runs where an advisory can actually arrive:
+#
+# * daily, against `main`: a new advisory opens (or adds to) an issue through
+#   scripts/ci-report-failure.sh, because a scheduled run has no author to
+#   notify;
+# * on any change to the lockfile or the policy, where a failure belongs to the
+#   change: that pull request is the one adding the affected dependency or
+#   dropping the ignore entry.
+#
+# Do NOT make this a required status check: it is path-filtered, so it reports
+# nothing on a pull request that touches none of these paths, and a required
+# check that never reports blocks the pull request forever.
+name: Dependency advisories
+
+"on":
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/advisories.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/advisories.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: cargo-deny advisories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # No pipe into `tee`: the step's status has to be cargo-deny's, and a
+      # pipeline reports its last command's.
+      - name: Check advisories
+        shell: bash
+        run: |
+          status=0
+          cargo deny check advisories > advisories.txt 2>&1 || status=$?
+          cat advisories.txt
+          exit "$status"
+
+      - name: Report a scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci-report-failure.sh "cargo-deny reports an advisory against main" advisories.txt

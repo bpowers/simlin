@@ -252,7 +252,7 @@ pub struct SimlinDb {
     /// re-syncs onto the PRIOR handles, so the set is created once and reused
     /// forever after. An ordinary model never allocates it at all.
     ///
-    /// The slot is deliberately never cleared. Salsa 0.26 has no input reclamation,
+    /// The slot is deliberately never cleared. Salsa has no input reclamation,
     /// so dropping these handles would free nothing -- the `SourceProject`/
     /// `SourceModel`/`SourceVariable` inputs and their memos stay in the arena --
     /// while forcing the next expanded sync down the `prev == None` path, which
@@ -372,7 +372,7 @@ impl SimlinDb {
     /// Free the memos this revision's queries replaced.
     ///
     /// Salsa does not drop a superseded memo when a query re-executes:
-    /// `insert_memo` (salsa 0.28.1 `function.rs`) pushes the old one onto the
+    /// `insert_memo` (salsa's `function.rs`) pushes the old one onto the
     /// ingredient's deferred-delete list, which `reset_for_new_revision`
     /// clears at the START of the next revision, i.e. inside the next input
     /// write. A long-lived database that answers queries after a sync and
@@ -1493,6 +1493,8 @@ mod implicit_diag_tests;
 mod implicit_module_tests;
 #[cfg(test)]
 mod incremental_compile_tests;
+#[cfg(test)]
+mod interned_reuse_tests;
 #[cfg(test)]
 mod lowered_variable_tests;
 #[cfg(test)]

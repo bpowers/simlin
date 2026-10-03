@@ -142,13 +142,16 @@ trap cleanup_pipelines EXIT INT TERM
     cargo test --no-run
 
     # Wall-clock cap on `cargo test`.  A healthy post-compile run is
-    # well under a minute; 180s is a ~3x safety rail that trips only
-    # when a single test or the whole suite regresses into the
-    # pathological territory that caused PR #461 (a single test binary
-    # took 44 minutes there, and the CI job hit GitHub's 60-minute
-    # per-job cap).  SIGTERM first, SIGKILL 30s later so the in-flight
-    # test output flushes before we lose the process.  See
-    # docs/dev/rust.md for per-test budget guidance.
+    # well under a minute on a developer machine; 180s is a safety rail
+    # that trips only when a single test or the whole suite regresses
+    # into the pathological territory that caused PR #461 (a single
+    # test binary took 44 minutes there, and the CI job hit GitHub's
+    # 60-minute per-job cap).  The same cap in CI is far tighter: a
+    # runner has four cores, so the suite's budget is its CPU, and a
+    # run that is comfortable here can be at the cap there.  SIGTERM
+    # first, SIGKILL 30s later so the in-flight test output flushes
+    # before we lose the process.  See docs/dev/rust.md for the budget
+    # and for what belongs in the gates instead.
     echo "[rust] Running tests..."
     TEST_TMP="$(mktemp)"
     # The `&& TEST_EXIT=0 || TEST_EXIT=$?` pattern is load-bearing:

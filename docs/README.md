@@ -71,7 +71,7 @@
 ## Domain Knowledge
 
 - [reference/xmile-v1.0.html](reference/xmile-v1.0.html) -- XMILE interchange format specification
-- [reference/vensim-macros.md](reference/vensim-macros.md) -- Vensim macros (`:MACRO:`): definition/call syntax, semantics (per-invocation stock state, locality, recursion), XMILE `<macro>` representation, xmutil's mapping, and implementation implications
+- [reference/vensim-macros.md](reference/vensim-macros.md) -- Vensim macros (`:MACRO:`): definition/call syntax, semantics (per-invocation stock state, locality, recursion), XMILE `<macro>` representation, the mapping xmutil (the converter that produced the `.xmile` fixtures) gives them, and implementation implications
 - [reference/ltm--loops-that-matter.md](reference/ltm--loops-that-matter.md) -- Loops That Matter technique: link scores, loop scores, algorithm reference
 - [array-design.md](array-design.md) -- Array/subscript design notes
 

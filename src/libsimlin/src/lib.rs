@@ -544,7 +544,7 @@ impl Drop for Waiting<'_> {
 /// execution is what replaces a memo) needs an event callback registered on
 /// the storage, and with one registered salsa constructs a
 /// `WillCheckCancellation` event -- `thread::current().id()` included -- on
-/// every memo fetch (salsa 0.28.1 `zalsa.rs` `unwind_if_revision_cancelled`,
+/// every memo fetch (salsa's `zalsa.rs` `unwind_if_revision_cancelled`,
 /// `function/fetch.rs`, `event.rs` `Event::new`): a cost on every hit to save
 /// a bounded walk.
 pub struct DbLock<'a>(MutexGuard<'a, engine::db::SimlinDb>);

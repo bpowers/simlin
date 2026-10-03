@@ -1291,11 +1291,10 @@ fn test_results_offsets_agree_with_layout_under_ltm() {
     );
 }
 
-/// C-LEARN-scale version of the offsets-vs-layout consistency check.
-/// Ignored by default (loads a 1.4 MB model); run explicitly with
-/// `cargo test -- --ignored test_clearn_results_offsets_agree_with_layout`.
+/// C-LEARN-scale version of the offsets-vs-layout consistency check
+/// (`scripts/gates.sh test_clearn_results_offsets_agree_with_layout`).
 #[test]
-#[ignore]
+#[ignore = "C-LEARN compiled under LTM, every results offset against the layout; run under the gates profile"]
 fn test_clearn_results_offsets_agree_with_layout() {
     use crate::db::flattened_offsets;
     use salsa::Setter;

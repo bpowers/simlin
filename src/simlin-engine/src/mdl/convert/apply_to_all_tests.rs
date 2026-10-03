@@ -14,12 +14,11 @@
 //! dimension-position arithmetic hits it, not just the `VECTOR ELM MAP` offset
 //! that surfaced it.
 //!
-//! The rule implemented is the one the MDL equivalence harness already applies
-//! when comparing against xmutil (`mdl_equivalence::normalize_equation`): slots
-//! that are identical in equation text, initial text and graphical function ARE
-//! an apply-to-all, so collapsing them loses nothing. The tests below are in two
-//! halves -- shapes that must collapse, and shapes that must NOT, each named for
-//! the reason it is per-element.
+//! The rule implemented: slots that are identical in equation text, initial
+//! text and graphical function ARE an apply-to-all, so collapsing them loses
+//! nothing (it is also what xmutil emits for such an equation). The tests below
+//! are in two halves -- shapes that must collapse, and shapes that must NOT,
+//! each named for the reason it is per-element.
 
 use crate::datamodel::Equation;
 

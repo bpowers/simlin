@@ -9,7 +9,7 @@
 //! "template" so we can see WHAT kinds of unit errors Simlin emits and how
 //! many of each.  Run with:
 //!
-//!   cargo test -p simlin-engine --test integration -- --ignored --nocapture
+//!   cargo test -p simlin-engine --test integration clearn_unit_errors -- --nocapture
 
 use simlin_engine::common::UnitError;
 use simlin_engine::db::{

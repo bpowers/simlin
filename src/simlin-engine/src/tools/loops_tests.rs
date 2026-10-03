@@ -977,10 +977,9 @@ fn a_loops_polarity_reads_the_same_from_a_run_and_from_structure() {
 /// The corpus's two largest models' loops are analyzed within a budget of
 /// time and size, each call timed.
 ///
-/// Run with: cargo test --release -p simlin-engine --features schema --lib --
-/// --ignored the_largest_corpus_models_loops_are_analyzed_within_bounds --nocapture
+/// Run with: scripts/gates.sh --nocapture the_largest_corpus_models_loops_are_analyzed_within_bounds
 #[test]
-#[ignore = "compiles World3 and C-LEARN under the LTM overlay: seconds on a debug build"]
+#[ignore = "compiles World3 and C-LEARN under the LTM overlay; run under the gates profile"]
 fn the_largest_corpus_models_loops_are_analyzed_within_bounds() {
     for path in [
         "../../test/metasd/WRLD3-03/wrld3-03.mdl",

@@ -29,11 +29,12 @@ Run at the start of every session:
 
 | Command | Description |
 |---------|-------------|
-| `cargo test` | Run all Rust tests |
+| `cargo test` | Run all Rust tests but the gates |
+| `scripts/gates.sh` | Run the gates: the `#[ignore]`d tests, and the rest of the engine suite with the `ext_data` feature on, optimized (`scripts/gates.sh <filter>` for some of them) |
 | `pnpm test` | Run all TypeScript tests |
 | `pnpm tsc` | TypeScript type checking |
 
-`cargo test --workspace` runs under a 3-minute wall-clock cap in both the pre-commit hook (`timeout(1)`) and CI (GitHub Actions `timeout-minutes: 3`). See [rust.md](rust.md#test-time-budgets) for per-test budget guidance and how to handle legitimately expensive tests.
+`cargo test --workspace` runs under a 3-minute wall-clock cap in both the pre-commit hook (`timeout(1)`) and CI (GitHub Actions `timeout-minutes: 3`). A test too heavy for that suite is a gate: `#[ignore = "<what it sweeps>; run under the gates profile"]`, run by `scripts/gates.sh` and by CI's `gates` job on every push to main and every pull request to main. See [rust.md](rust.md#test-time-budgets) for the budget and for what makes a test a gate.
 
 ## Code Coverage
 
@@ -69,16 +70,6 @@ Results are saved in `target/criterion/` with HTML reports. See [benchmarks.md](
 ```bash
 cargo test -p simlin-engine              # Engine tests only
 cargo test -p simlin-engine mdl::        # MDL parser tests
-```
-
-### simlin-engine MDL equivalence tests
-
-```bash
-# Run MDL equivalence tests (requires xmutil feature)
-cargo test -p simlin-engine --features xmutil test_mdl_equivalence -- --nocapture
-
-# Run C-LEARN equivalence test (large model, ignored by default)
-cargo test -p simlin-engine --features xmutil test_clearn_equivalence -- --ignored --nocapture
 ```
 
 ### pysimlin (Python)

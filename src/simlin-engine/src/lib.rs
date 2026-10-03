@@ -118,8 +118,6 @@ pub mod systems;
 mod systems_stdlib_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_common;
-#[cfg(all(test, feature = "xmutil"))]
-mod test_open_vensim;
 #[cfg(test)]
 mod test_sir_xmile;
 #[cfg(test)]
@@ -161,8 +159,6 @@ pub use self::vm::{CompiledSimulation, Vm};
 pub use self::vm_profile::BytecodeProfile;
 
 // Re-export compat functions at the crate root for convenience
-#[cfg(feature = "xmutil")]
-pub use self::compat::open_vensim_xmutil;
 #[cfg(feature = "file_io")]
 pub use self::compat::{load_csv, load_dat};
 pub use self::compat::{

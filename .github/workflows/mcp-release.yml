@@ -9,14 +9,19 @@ on:
 permissions:
   contents: read
 
+# mlugg/setup-zig's latest release (v2.2.1) still declares the Node 20 runtime
+# GitHub is retiring; every other action here is Node 24 already.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   validate:
     name: Validate version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract and validate version
         id: version
@@ -44,17 +49,17 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-24.04
             artifact: mcp-linux-x64
             binary: simlin-mcp
             use-zigbuild: true
           - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-24.04
             artifact: mcp-linux-arm64
             binary: simlin-mcp
             use-zigbuild: true
           - target: x86_64-pc-windows-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             artifact: mcp-win32-x64
             binary: simlin-mcp.exe
             use-zigbuild: true
@@ -64,7 +69,7 @@ jobs:
             binary: simlin-mcp
             use-zigbuild: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: |
@@ -72,7 +77,7 @@ jobs:
           rustup target add ${{ matrix.target }}
 
       - name: Cache Cargo artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin
@@ -105,7 +110,7 @@ jobs:
         run: cargo build -p simlin-mcp --locked --release --target ${{ matrix.target }}
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
@@ -115,23 +120,23 @@ jobs:
   publish-platform:
     name: Publish platform packages
     needs: [validate, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/mcp-v')
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
       # Intentionally omit registry-url: it injects a token-based .npmrc that
       # conflicts with npm's OIDC provenance flow.  Trusted publishing handles auth.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts/
 
@@ -200,18 +205,18 @@ jobs:
   publish-wrapper:
     name: Publish @simlin/mcp
     needs: [validate, publish-platform]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/mcp-v')
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
       # Intentionally omit registry-url: trusted publishing handles auth (see publish-platform)
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 

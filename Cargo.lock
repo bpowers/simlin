@@ -1313,12 +1313,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glob"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
-
-[[package]]
 name = "globset"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3333,11 +3327,9 @@ dependencies = [
  "simlin-engine",
  "smallvec",
  "tempfile",
- "test-generator",
  "unicode-xid",
  "wasm-encoder",
  "wasm-interpreter",
- "xmutil",
 ]
 
 [[package]]
@@ -3603,17 +3595,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "test-generator"
-version = "0.3.0"
-source = "git+https://github.com/bpowers/test-generator?rev=b78145bfb6a6f81425dfd6fbacb9c03624e79b2c#b78145bfb6a6f81425dfd6fbacb9c03624e79b2c"
-dependencies = [
- "glob",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -4391,13 +4372,6 @@ name = "xmlwriter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
-
-[[package]]
-name = "xmutil"
-version = "1.1.0"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "xxhash-rust"

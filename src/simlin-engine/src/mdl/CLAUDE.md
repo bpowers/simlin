@@ -1,6 +1,6 @@
 # Vensim MDL Parser
 
-Pure Rust reader and writer of Vensim MDL files: it reads a file into a `datamodel::Project` and writes a project back as MDL.
+Pure Rust reader and writer of Vensim MDL files: it reads a file into a `datamodel::Project` and writes a project back as MDL. Its reading algorithms are ported from xmutil, Bob Eberlein's C++ Vensim-to-XMILE converter (https://github.com/bobeberlein/xmutil), which is what a comment citing an xmutil function or `File.cpp:line` names.
 
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
 For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
@@ -26,7 +26,7 @@ For the design and the Vensim format notes, see [docs/design/mdl-parser.md](/doc
   - **An `:EXCEPT:` default fills no element**: it applies only where every element has a slot, so an excepted element nothing defines stays undefined (the engine's rule, unverified).
   - **A number list defines the elements its left-hand side does, less those it excepts, one number each, in order** (`convert/number_list_tests.rs`). A list of another length, or one no element takes numbers from, is refused: which number an element would take is a guess. Whether Vensim refuses such a list is unverified.
   - **An element's name as a value is its position**, written `Dimension.Element` in the dimension that owns it, the largest (`xmile_compat`'s `element_value`, `convert::element_owners`; `convert/element_value_tests.rs`).
-  - **A single apply-to-all MDL equation imports as one `Equation::ApplyToAll`**, not as N identical per-element slots. A dimension name in an expression is the element's 1-based position, which only an apply-to-all equation has an active dimension for, so `y[DimA] = VECTOR ELM MAP(x[three], (DimA - 1))` compiles only in that form. The collapse is gated by `slots_are_one_apply_to_all` plus a `single_apply_to_all` precondition: ONE source equation with no `:EXCEPT:`; not backed by external data (the whole opaque `{GET ...}` family, `external_data::is_external_data_placeholder`: a resolvable one's slots agree only as a property of the spreadsheet, and an unresolvable one leaves an empty equation in every slot, which `ApplyToAll(dims, "")` turns into an `EmptyEquation` error); no slot with an INITIAL equation or a graphical function (`ApplyToAll` has nowhere to put either); and slots covering the dimensions' full cartesian product. The INITIAL, graphical-function and coverage clauses are each load-bearing (dropping one reds its own test); the `:EXCEPT:`/default/equation-text clauses are belt-and-braces, since `needs_substitution` is exactly `expanded_eqs.len() > 1 || has_except_eq`. The rule is a stricter form of the one [mdl_equivalence.rs](/src/simlin-engine/tests/integration/mdl_equivalence.rs)'s `normalize_equation` applies when comparing against xmutil (which collapses on slot agreement alone), so anything the importer collapses the harness does too. Rows: `convert/apply_to_all_tests.rs`; corpus gate `simulate::simulates_vector_mdl_genuine` (`vector.mdl` against real-Vensim `vector.dat`).
+  - **A single apply-to-all MDL equation imports as one `Equation::ApplyToAll`**, not as N identical per-element slots. A dimension name in an expression is the element's 1-based position, which only an apply-to-all equation has an active dimension for, so `y[DimA] = VECTOR ELM MAP(x[three], (DimA - 1))` compiles only in that form. The collapse is gated by `slots_are_one_apply_to_all` plus a `single_apply_to_all` precondition: ONE source equation with no `:EXCEPT:`; not backed by external data (the whole opaque `{GET ...}` family, `external_data::is_external_data_placeholder`: a resolvable one's slots agree only as a property of the spreadsheet, and an unresolvable one leaves an empty equation in every slot, which `ApplyToAll(dims, "")` turns into an `EmptyEquation` error); no slot with an INITIAL equation or a graphical function (`ApplyToAll` has nowhere to put either); and slots covering the dimensions' full cartesian product. The INITIAL, graphical-function and coverage clauses are each load-bearing (dropping one reds its own test); the `:EXCEPT:`/default/equation-text clauses are belt-and-braces, since `needs_substitution` is exactly `expanded_eqs.len() > 1 || has_except_eq`. Rows: `convert/apply_to_all_tests.rs`; corpus gate `simulate::simulates_vector_mdl_genuine` (`vector.mdl` against real-Vensim `vector.dat`).
   - **An empty right-hand side is no equation** (`""`), the same as a lookup-only table's.
 - `stocks.rs` -- Stock/flow linking via is_all_plus_minus algorithm and the synthetic net flow
 - `dimensions.rs` -- Dimension/subscript building with range expansion and `DimensionMapping` construction; `axis_dimension` and `smallest_dimension_holding`, the reader's dimension rule, which the writer asks too
@@ -101,14 +101,12 @@ On every run, in one process or many: element ownership among dimensions of one 
 
 - Name post-processing (`SpaceToUnderBar`, `MakeViewNamesUnique`)
 - Variable filtering (Time, ARRAY types in views)
-- The C-LEARN differences from xmutil (`test_clearn_equivalence`; see the design doc)
 - `mdl::parser`'s binary precedence table (GH #914)
 
 ## Commands
 
 ```bash
 cargo test -p simlin-engine mdl::                    # MDL-specific tests
-cargo test --release -p simlin-engine mdl:: -- --ignored   # the corpus gates
-cargo test -p simlin-engine --features xmutil --test integration test_mdl_equivalence -- --nocapture  # equivalence with xmutil
-cargo test -p simlin-engine --features xmutil --test integration test_clearn_equivalence -- --ignored --nocapture  # C-LEARN
+scripts/gates.sh mdl::                               # the corpus gates, optimized
+cargo test -p simlin-engine --test integration simulate::  # The corpus against Vensim's output
 ```

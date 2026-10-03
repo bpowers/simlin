@@ -10,9 +10,8 @@
 //! now the surface is minimal: one dispatcher per `ProjectFormat`. The
 //! reverse direction (project -> canonical JSON) belongs to
 //! `ProjectDoc::current_state_as_json_string`, which every read path goes
-//! through so the doc stays the source of truth. Note: `.mdl` is parsed
-//! via the native Rust parser (`open_vensim`), not the xmutil C++ path —
-//! see Phase 1 note 4 in the implementation plan.
+//! through so the doc stays the source of truth. `.mdl` is parsed by the
+//! engine's native Rust parser (`open_vensim`).
 
 use std::io::Cursor;
 

@@ -5,8 +5,7 @@
 //! Vensim MDL file parser.
 //!
 //! This module provides a pure Rust implementation for parsing Vensim MDL files
-//! directly into `crate::datamodel::Project` structures, replacing the
-//! C++ xmutil dependency.
+//! directly into `crate::datamodel::Project` structures.
 //!
 //! See `CLAUDE.md` in this directory for implementation context and goals.
 

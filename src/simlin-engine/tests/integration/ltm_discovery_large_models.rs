@@ -505,14 +505,11 @@ fn discovery_contract_holds_on_tractable_arrayed_model() {
 /// out of scope here and would be tracked separately.
 ///
 /// `#[ignore]`d for the `cargo test --workspace` time budget: parsing
-/// C-LEARN's 1.4 MB MDL plus a discovery-mode compile runs several
-/// seconds in release and proportionally longer in the debug build CI
-/// uses, so on-demand execution is appropriate. Run explicitly with:
-///     cargo test --release -p simlin-engine \
-///         --test integration -- --ignored --nocapture \
-///         clearn_ltm_discovery_compiles
+/// C-LEARN's 1.4 MB MDL plus a discovery-mode compile runs about a second
+/// optimized and 15 s on a debug build. Run with:
+///     scripts/gates.sh --nocapture clearn_ltm_discovery_compiles
 #[test]
-#[ignore]
+#[ignore = "C-LEARN compiled in LTM discovery mode; run under the gates profile"]
 fn clearn_ltm_discovery_compiles() {
     let mdl = match std::fs::read_to_string(CLEARN_MDL) {
         Ok(contents) => contents,
@@ -546,11 +543,12 @@ fn clearn_ltm_discovery_compiles() {
 /// dominance yet were entirely absent from the sampled report -- must be
 /// present.
 ///
-/// `#[ignore]`d for runtime class only (a full 401-step simulate plus the
-/// ~150k-circuit enumeration and its scoring passes run minutes in a debug
-/// build); run with `cargo test --release -- --ignored`.
+/// `#[ignore]`d for runtime only: a full 401-step simulate plus the
+/// ~150k-circuit enumeration and its scoring passes, well over the per-test
+/// budget on a debug build. Run with
+/// `scripts/gates.sh world3_full_run_enumeration_is_complete`.
 #[test]
-#[ignore]
+#[ignore = "World3 simulated under LTM and every circuit enumerated and scored; run under the gates profile"]
 fn world3_full_run_enumeration_is_complete() {
     let inputs = world3_discovery_inputs();
     let found = ltm_finding::discover_loops_with_graph(

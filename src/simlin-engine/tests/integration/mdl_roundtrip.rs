@@ -768,7 +768,7 @@ fn view_element_roundtrip() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[ignore = "an instrument: writes four saved models to the temp directory for a person to open in Vensim; run under the gates profile"]
 fn write_mdl_for_vensim_validation() {
     let output_dir = std::env::temp_dir().join("simlin-mdl-roundtrip");
     fs::create_dir_all(&output_dir).expect("create output dir");
@@ -2040,10 +2040,10 @@ fn writer_output_idempotence_ratchet() {
 }
 
 /// The corpus ratchets skip C-LEARN (1.4 MB) to fit a debug build's budget;
-/// this gate holds it to the same fixed point in a release run
-/// (`cargo test --release -- --ignored`).
+/// this gate holds it to the same fixed point
+/// (`scripts/gates.sh clearn_save_is_a_fixed_point`).
 #[test]
-#[ignore]
+#[ignore = "C-LEARN saved as MDL twice; run under the gates profile"]
 fn clearn_save_is_a_fixed_point() {
     let path = resolve_path("test/xmutil_test_models/C-LEARN v77 for Vensim.mdl");
     let source = fs::read_to_string(&path).expect("C-LEARN reads");
@@ -2058,12 +2058,12 @@ fn clearn_save_is_a_fixed_point() {
 }
 
 /// C-LEARN's MDL save simulates as C-LEARN does, series for series and bit
-/// for bit, in a release run (`cargo test --release -- --ignored`). The save
+/// for bit (`scripts/gates.sh clearn_save_simulates_as_clearn_does`). The save
 /// used to lose its regional mappings' element maps (`-> (COP: ..., COP
 /// Remaining Developing)`, one element to a subrange) and the initial values
 /// of four arrayed ACTIVE INITIAL variables, so it did not compile.
 #[test]
-#[ignore]
+#[ignore = "C-LEARN and its MDL save both compiled and run; run under the gates profile"]
 fn clearn_save_simulates_as_clearn_does() {
     use simlin_engine::db::{
         LtmOverlay, SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,

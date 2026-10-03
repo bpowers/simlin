@@ -1304,17 +1304,27 @@ pub fn nested_instance_arrayed_submodel_project() -> Project {
 }
 
 /// The series [`nested_instance_arrayed_submodel_project`] must produce.
+///
+/// The names are literals rather than formatted and leaked into `'static`:
+/// the suite runs under a leak checker (`test-asan.sh`), where a leak is a
+/// failure whoever made it.
 pub fn nested_instance_arrayed_submodel_expected() -> Vec<(&'static str, Vec<f64>)> {
-    let p = |instance: &str, var: &str| -> &'static str {
-        Box::leak(format!("m_{instance}\u{b7}inr\u{b7}{var}").into_boxed_str())
-    };
     vec![
-        (p("a", "out_curr"), vec![70.0, 140.0, 210.0, 280.0]),
-        (p("b", "out_curr"), vec![7000.0, 14000.0, 21000.0, 28000.0]),
-        (p("a", "out_prev"), vec![0.0, 70.0, 140.0, 210.0]),
-        (p("b", "out_prev"), vec![0.0, 7000.0, 14000.0, 21000.0]),
-        (p("a", "out_init"), vec![70.0; 4]),
-        (p("b", "out_init"), vec![7000.0; 4]),
+        (
+            "m_a\u{b7}inr\u{b7}out_curr",
+            vec![70.0, 140.0, 210.0, 280.0],
+        ),
+        (
+            "m_b\u{b7}inr\u{b7}out_curr",
+            vec![7000.0, 14000.0, 21000.0, 28000.0],
+        ),
+        ("m_a\u{b7}inr\u{b7}out_prev", vec![0.0, 70.0, 140.0, 210.0]),
+        (
+            "m_b\u{b7}inr\u{b7}out_prev",
+            vec![0.0, 7000.0, 14000.0, 21000.0],
+        ),
+        ("m_a\u{b7}inr\u{b7}out_init", vec![70.0; 4]),
+        ("m_b\u{b7}inr\u{b7}out_init", vec![7000.0; 4]),
     ]
 }
 

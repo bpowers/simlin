@@ -9545,10 +9545,10 @@ fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
 /// instrumentation corrupted the simulation itself.
 ///
 /// `#[ignore]`d for runtime only (C-LEARN is ~53k lines / 1.4 MB and the LTM
-/// compile is heavy); run explicitly with:
-///   cargo test --release --test integration -- --ignored clearn_with_ltm
+/// compile is heavy); run with:
+///   scripts/gates.sh clearn_with_ltm_simulates_model_vars_identically
 #[test]
-#[ignore]
+#[ignore = "C-LEARN compiled and run with and without LTM, every model series compared; run under the gates profile"]
 fn clearn_with_ltm_simulates_model_vars_identically() {
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let contents = std::fs::read_to_string(mdl_path)
@@ -11695,7 +11695,7 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 ///   cargo test -p simlin-engine --release --test integration -- --ignored \
 ///     clearn_ltm_slot_maxima_digest
 #[test]
-#[ignore]
+#[ignore = "C-LEARN compiled and run under LTM, every LTM slot read; run under the gates profile"]
 fn clearn_ltm_slot_maxima_digest() {
     use simlin_engine::common::CanonicalDimensionName;
     use simlin_engine::db::project_dimensions_context;

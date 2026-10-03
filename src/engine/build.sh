@@ -29,8 +29,6 @@ mkdir -p core
 # only, under LTO) on a clean build. Nesting them keeps both inside whatever
 # `cargo clean` and the CI caches cover.
 #
-# The xmutil feature is always off here (C++ dependency, not wasm-buildable).
-#
 # The workspace target directory is RESOLVED, not assumed: `CARGO_TARGET_DIR`
 # and a cargo config's `build.target-dir` both move it, and a hardcoded
 # `../../target` turns that into a `cp: cannot stat` below -- which reads as a
