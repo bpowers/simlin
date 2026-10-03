@@ -91,18 +91,7 @@ impl Sweep {
                 (tool.name(), jsonschema::validator_for(&schema).unwrap())
             })
             .collect();
-        let refusal = jsonschema::validator_for(&json!({
-            "type": "object",
-            "properties": {
-                "error": {"type": "string"},
-                "suggestions": {"type": "array", "items": {"type": "string"}},
-                "interrupted": {"type": "boolean"},
-                "cancelled": {"type": "boolean"},
-            },
-            "required": ["error"],
-            "additionalProperties": false,
-        }))
-        .unwrap();
+        let refusal = jsonschema::validator_for(&catalog["refusalSchema"]).unwrap();
         Sweep {
             outputs,
             refusal,
@@ -224,6 +213,7 @@ fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
         })
         .unwrap_or_default();
     let constant = model.and_then(first_constant);
+    let most_read = model.and_then(most_read);
     let mut host = Host::new(project);
     let mut session = Session::new("main");
     if sweep
@@ -284,6 +274,27 @@ fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
             .into_iter()
             .flatten()
             .flat_map(|partition| partition["loops"].as_array().into_iter().flatten());
+        let listed: Vec<&Value> = listed.collect();
+        // Every loop in one call, as many findings as a call takes, each
+        // citing as many loops as a finding may: the longest verdict.
+        let citations: Vec<Value> = listed
+            .iter()
+            .map(|report| json!({"cites": "loop", "id": report["id"], "polarity": "balancing"}))
+            .collect();
+        let findings: Vec<Value> = citations
+            .chunks(super::verify::MAX_CITATIONS)
+            .take(super::verify::MAX_FINDINGS)
+            .map(|cited| json!({"kind": "observation", "claim": "loops", "citations": cited}))
+            .collect();
+        if !findings.is_empty() {
+            sweep.call(
+                display,
+                &mut host,
+                &mut session,
+                ToolName::VerifyFindings,
+                json!({ "findings": findings }),
+            );
+        }
         for report in listed {
             let citation =
                 json!({"cites": "loop", "id": report["id"], "polarity": report["polarity"]});
@@ -331,10 +342,66 @@ fn sweep_model(sweep: &mut Sweep, display: &str, project: datamodel::Project) {
             json!({ "phrase": first }),
         );
     }
+    // The longest answers an edit gives: units every reader disagrees with
+    // (made or refused, with a diagnostic per variable), and a delete of
+    // the variable most read, which each reader still names.
+    let units: Vec<Value> = names
+        .iter()
+        .take(super::edit::MAX_OPERATIONS)
+        .map(|name| json!({"op": "set_units", "variable": name, "units": "widget"}))
+        .collect();
+    if !units.is_empty() {
+        sweep.call(
+            display,
+            &mut host,
+            &mut session,
+            ToolName::EditModel,
+            json!({"summary": "units", "operations": units}),
+        );
+    }
+    if let Some(most_read) = most_read {
+        sweep.call(
+            display,
+            &mut host,
+            &mut session,
+            ToolName::EditModel,
+            json!({"summary": "delete", "operations": [{"op": "delete", "variable": most_read}]}),
+        );
+    }
+    sweep.call(
+        display,
+        &mut host,
+        &mut session,
+        ToolName::FindVariables,
+        json!({ "phrase": "a" }),
+    );
+}
+
+/// The variable of `model` the most equations name.
+fn most_read(model: &datamodel::Model) -> Option<String> {
+    let mut counts: std::collections::HashMap<String, usize> = Default::default();
+    for var in &model.variables {
+        for (_, text) in var.expression_texts() {
+            let references = crate::patch::text_references(text).unwrap_or_default();
+            for (_, name) in references {
+                *counts.entry(name.as_str().to_string()).or_default() += 1;
+            }
+        }
+    }
+    model
+        .variables
+        .iter()
+        .max_by_key(|var| {
+            counts
+                .get(&*crate::canonicalize(var.get_ident()))
+                .copied()
+                .unwrap_or(0)
+        })
+        .map(|var| var.get_ident().to_string())
 }
 
 #[test]
-#[ignore = "every corpus model through every tool; run under the gates profile"]
+#[ignore = "every corpus model through every tool, each answer against its schema and the budget; run under the gates profile"]
 fn every_corpus_answer_matches_its_schema_and_fits_the_budget() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
     let mut sweep = Sweep::new();

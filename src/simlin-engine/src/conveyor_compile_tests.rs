@@ -954,7 +954,7 @@ fn the_driven_flow_scan_reads_an_equations_own_texts() {
     for role in [
         ExpressionRole::Equation,
         ExpressionRole::Initial,
-        ExpressionRole::Option,
+        ExpressionRole::Option(crate::datamodel::StockOption::TransitTime),
     ] {
         match role {
             ExpressionRole::Equation => {
@@ -995,7 +995,7 @@ fn the_driven_flow_scan_reads_an_equations_own_texts() {
             ),
             // An equation holds no option text: those are a stock's and a
             // flow's, scanned by the conveyor-parameter check.
-            ExpressionRole::Option => {}
+            ExpressionRole::Option(_) => {}
         }
     }
 }
@@ -3671,5 +3671,56 @@ fn explicit_list_single_entry_with_trailing_comma() {
             "belt[{i}] = {} (want {want})",
             belt[i]
         );
+    }
+}
+
+/// Every helper the build names for a conveyor's parameter is described as
+/// the option it is, of the stock it serves: the rows are
+/// `StockOption::ALL`, and a leak's fraction and a container access are
+/// described too. A name the build gives no helper is not.
+#[test]
+#[cfg(feature = "agent_tools")]
+fn a_helpers_name_is_described_as_what_it_stands_for() {
+    use crate::datamodel::StockOption;
+    for option in StockOption::ALL {
+        match param_segment(option) {
+            Some(_) => {
+                let described = describe_helper(&param_aux_name("Belt", option)).unwrap();
+                assert_eq!(
+                    described,
+                    format!("the {} of the conveyor 'belt'", option.describe())
+                );
+            }
+            // A leak's options are the leak flow's, named apart.
+            None => assert!(matches!(
+                option,
+                StockOption::LeakFraction | StockOption::LeakZoneStart | StockOption::LeakZoneEnd
+            )),
+        }
+    }
+    assert_eq!(
+        describe_helper(&leak_frac_name("Seepage")).as_deref(),
+        Some("the leak fraction of 'seepage'")
+    );
+    assert_eq!(
+        describe_helper(&container_var_name(
+            &ContainerNaming::CONVEYOR,
+            "belt",
+            &ContainerKind::Sum
+        ))
+        .as_deref(),
+        Some("the contents of the conveyor 'belt'")
+    );
+    assert_eq!(
+        describe_helper(&container_var_name(
+            &ContainerNaming::QUEUE,
+            "line",
+            &ContainerKind::Slat(2)
+        ))
+        .as_deref(),
+        Some("the contents of the queue 'line'")
+    );
+    for plain in ["belt", "$x", "$conv$", "$conv$what$belt"] {
+        assert_eq!(describe_helper(plain), None, "{plain}");
     }
 }

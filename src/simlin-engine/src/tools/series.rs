@@ -503,34 +503,58 @@ pub(crate) fn keyed_series_upto(
             None => (vec![], 0),
         };
     }
-    if let Some(&offset) = offsets.get(&Ident::<Canonical>::new(&canonical)) {
-        return (
-            vec![KeyedSeries {
-                label: display,
-                key: canonical,
-                values: run.series(offset),
-            }],
-            0,
-        );
-    }
-    let prefix = format!("{canonical}[");
-    let mut elements: Vec<(&Ident<Canonical>, usize)> = offsets
-        .iter()
-        .filter(|(key, _)| key.as_str().starts_with(&prefix))
-        .map(|(key, &offset)| (key, offset))
-        .collect();
-    elements.sort_by_key(|(_, offset)| *offset);
+    let elements = variable_columns(&run.results, model, &canonical);
     let omitted = elements.len().saturating_sub(limit);
     let series = elements
         .into_iter()
         .take(limit)
-        .map(|(key, offset)| KeyedSeries {
-            label: format!("{display}{}", &key.as_str()[canonical.len()..]),
-            key: key.as_str().to_string(),
-            values: run.series(offset),
+        .map(|column| {
+            let key = format!("{canonical}{}", column.subscript);
+            KeyedSeries {
+                label: format!("{display}{}", column.subscript),
+                values: run.series(column.offset),
+                key,
+            }
         })
         .collect();
     (series, omitted)
+}
+
+/// One results column of a variable.
+pub(crate) struct VariableColumn<'a> {
+    /// What the key adds to the variable's name: `[e1,e2]` for an element,
+    /// empty for a scalar's one column.
+    pub subscript: &'a str,
+    pub offset: usize,
+}
+
+/// The results columns of the variable `canonical` of `model`, in slot
+/// order: those `save_check::column_variable` gives the variable, the one
+/// owner of which variable a column belongs to, so a name that holds `[` or
+/// `$` itself is no prefix of another's. A module instance's columns are its
+/// model's variables', reached through it, and are not the instance's own.
+pub(crate) fn variable_columns<'a>(
+    results: &'a crate::Results,
+    model: &datamodel::Model,
+    canonical: &str,
+) -> Vec<VariableColumn<'a>> {
+    let declared: std::collections::BTreeSet<String> = model
+        .variables
+        .iter()
+        .map(|var| crate::canonicalize(var.get_ident()).into_owned())
+        .collect();
+    let mut columns: Vec<VariableColumn<'a>> = results
+        .offsets
+        .iter()
+        .filter_map(|(key, &offset)| {
+            let owner = crate::save_check::column_variable(key.as_str(), &declared)?;
+            let subscript = &key.as_str()[owner.len()..];
+            (owner == canonical && (subscript.is_empty() || subscript.starts_with('[')))
+                .then_some(VariableColumn { subscript, offset })
+        })
+        .collect();
+    columns.sort_by_key(|column| column.offset);
+    columns
 }
 
 /// An element's results key, from its name as the project spells it: each
@@ -663,6 +687,7 @@ pub(crate) fn read_behavior(
             Err(suggestions) => not_found.push(NotFound {
                 name: name.clone(),
                 suggestions,
+                reason: None,
             }),
         }
     }

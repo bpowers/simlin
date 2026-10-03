@@ -174,7 +174,7 @@ pub struct RunExperimentOutput {
     /// started from.
     pub behavior: Vec<Comparison>,
     /// Recorded variables and elements left out, when there were more than a
-    /// summary lists.
+    /// summary lists or than fit the answer; read_behavior reads them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub omitted: Option<usize>,
     /// Whether the run replaced an earlier run of the same name.
@@ -265,6 +265,17 @@ pub(crate) fn run_experiment(
             input.record.len()
         )));
     }
+    // An equation deep enough overflows the stack of what parses it, so a
+    // replacement's depth is read from its tokens before anything does.
+    for (i, change) in input.set.iter().enumerate() {
+        if let Some(too_deep) = change
+            .equation
+            .as_deref()
+            .and_then(super::input::equation_too_deep)
+        {
+            return Err(ToolError::new(format!("set[{i}].equation: {too_deep}")));
+        }
+    }
     let resolved = resolve_model(ws.project, ws.db, &session.model_name)?;
     let model = resolved.model;
     let from = input
@@ -329,8 +340,11 @@ pub(crate) fn run_experiment(
     let mut seen: Vec<String> = Vec::new();
     for change in &input.set {
         let var = names::resolve(model, &change.variable).map_err(|suggestions| {
-            ToolError::new(format!("the model has no variable '{}'", change.variable))
-                .with_suggestions(suggestions)
+            ToolError::new(format!(
+                "the model has no variable '{}'",
+                super::evidence::echo(&change.variable)
+            ))
+            .with_suggestions(suggestions)
         })?;
         let canonical = crate::canonicalize(var.get_ident()).into_owned();
         if seen.contains(&canonical) {
@@ -448,8 +462,11 @@ pub(crate) fn run_experiment(
         let mut record = Vec::new();
         for name in &input.record {
             let var = names::resolve(model, name).map_err(|suggestions| {
-                ToolError::new(format!("the model has no variable '{name}' to record"))
-                    .with_suggestions(suggestions)
+                ToolError::new(format!(
+                    "the model has no variable '{}' to record",
+                    super::evidence::echo(name)
+                ))
+                .with_suggestions(suggestions)
             })?;
             record.push(var);
         }
@@ -470,7 +487,7 @@ pub(crate) fn run_experiment(
     let (behavior, omitted) = compare(&run, base.as_deref(), model, &record);
     let specs = run_specs(&run, model, ws.project);
     let (replaced, forgotten) = session.runs.keep(run);
-    Ok(RunExperimentOutput {
+    let mut output = RunExperimentOutput {
         revision: ws.revision,
         run: name,
         from,
@@ -481,7 +498,18 @@ pub(crate) fn run_experiment(
         replaced,
         forgotten,
         note,
-    })
+    };
+    // The last recorded comparisons are left out, counted, until the answer
+    // fits: the run is kept whole, and read_behavior reads any of them.
+    super::fit(&mut output, session.outline_budget, |output| {
+        if output.behavior.len() <= 1 {
+            return false;
+        }
+        output.behavior.pop();
+        *output.omitted.get_or_insert(0) += 1;
+        true
+    });
+    Ok(output)
 }
 
 /// Whether a variable holds a value an experiment can set: a constant, or a

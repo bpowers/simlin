@@ -930,6 +930,7 @@ fn resolve_all<'m>(
                 not_found.push(NotFound {
                     name: name.clone(),
                     suggestions,
+                    reason: None,
                 });
                 None
             }

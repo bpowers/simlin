@@ -409,7 +409,7 @@
             ]
           },
           "DiagnosticCategoryName": {
-            "description": "Where a diagnostic was raised: the engine's [`DiagnosticCategory`], named\nfor a reader.",
+            "description": "Where a diagnostic was raised, named for a reader: one per category of\nthe engine's (`DiagnosticCategory`).",
             "oneOf": [
               {
                 "description": "An equation that does not parse, names something that does not\nexist, or cannot be compiled.",
@@ -449,7 +449,7 @@
             ]
           },
           "Changes": {
-            "description": "What changed since a read. Each list is capped at 30 names, with the total\ncounted beside it when the cap binds.",
+            "description": "What changed since a read. Each list of variables is capped at 30 names,\nand an outline cuts the lists further to fit its budget\n([`Changes::fitted`]), with the total counted beside a list when either\nbinds.",
             "type": "object",
             "properties": {
               "sinceRevision": {
@@ -518,6 +518,14 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "modelsChangedCount": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0
               }
             },
             "required": [
@@ -624,12 +632,19 @@
                 "type": "integer",
                 "format": "uint",
                 "minimum": 0
+              },
+              "sectors": {
+                "description": "The sectors left out; a sector with no variable is never listed and\nis not counted.",
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
               }
             },
             "required": [
               "stocks",
               "diagnostics",
-              "otherNames"
+              "otherNames",
+              "sectors"
             ]
           }
         },
@@ -708,7 +723,7 @@
             ]
           },
           "sectors": {
-            "description": "Present when the model is outlined by sector: its sectors, each with\nhow many variables it holds and which stocks.",
+            "description": "Present when the model is outlined by sector: its sectors that hold a\nvariable, each with how many it holds and which stocks.",
             "type": [
               "array",
               "null"
@@ -725,7 +740,7 @@
             }
           },
           "omitted": {
-            "description": "How many stocks, diagnostics and other names a sector outline left out.",
+            "description": "How many stocks, diagnostics, sectors and other names an outline left\nout to keep to its budget.",
             "anyOf": [
               {
                 "$ref": "#/$defs/Omitted"
@@ -812,6 +827,10 @@
                   "string",
                   "null"
                 ]
+              },
+              "truncated": {
+                "description": "Set when the equation, the initial value or `otherElements` was cut\n(it then ends in an ellipsis) because the record did not fit one\nanswer whole.",
+                "type": "boolean"
               },
               "initial": {
                 "description": "A stock's initial value; absent for per-element initial values.",
@@ -901,7 +920,7 @@
                 ]
               },
               "inputs": {
-                "description": "The variables this one reads, each link with its polarity, at most 24.",
+                "description": "The variables this one reads, each with its link's polarity, at most 24.",
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/LinkRef"
@@ -916,7 +935,7 @@
                 "minimum": 0
               },
               "readers": {
-                "description": "The variables that read this one, each link with its polarity, at\nmost 24.",
+                "description": "The variables that read this one, each with its link's polarity, at\nmost 24.",
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/LinkRef"
@@ -936,6 +955,15 @@
                 "items": {
                   "$ref": "#/$defs/DiagnosticReport"
                 }
+              },
+              "moreDiagnostics": {
+                "description": "How many more diagnostics it has than `diagnostics` lists.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0
               },
               "behavior": {
                 "description": "What it did in the current run: a scalar variable's start and end,\nextremes and behavior mode (`read_behavior` has an arrayed one's, and\nmore).",
@@ -1023,7 +1051,7 @@
                 }
               },
               "morePoints": {
-                "description": "How many more points the table has than the 64 listed.",
+                "description": "How many more points the table has than are listed (at most 64).",
                 "type": [
                   "integer",
                   "null"
@@ -1093,14 +1121,34 @@
             ]
           },
           "LinkRef": {
-            "description": "One end of a causal link, from the variable a record describes.",
+            "description": "One end of a read, from the variable a record describes.",
             "type": "object",
             "properties": {
               "name": {
                 "type": "string"
               },
               "polarity": {
+                "description": "The sign of the causal link; `?` for a read that is no causal link (a\ntable looked up, a read made only at the start).",
                 "$ref": "#/$defs/LinkPolarityName"
+              },
+              "startOnly": {
+                "description": "Set when the read is made only as the model starts (a stock's initial\nvalue, an `INIT` argument): it sets where the reader starts and does\nnot move it afterwards, so it is on no feedback loop.",
+                "type": "boolean"
+              },
+              "option": {
+                "description": "The stock's or flow's option the read is made in, when it is one: the\nengine reads it there, outside the reader's equation.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StockOptionName"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unchecked": {
+                "description": "Set when the read is written in an equation the engine cannot compile\n(an unknown function, a wrong argument count): the reader reads it\nonce that equation compiles.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -1115,6 +1163,51 @@
               "+",
               "-",
               "?"
+            ]
+          },
+          "StockOptionName": {
+            "description": "A stock's or a flow's option, as a read record names it.",
+            "oneOf": [
+              {
+                "description": "A conveyor's transit time.",
+                "type": "string",
+                "const": "transit_time"
+              },
+              {
+                "description": "A conveyor's capacity.",
+                "type": "string",
+                "const": "capacity"
+              },
+              {
+                "description": "A conveyor's inflow limit.",
+                "type": "string",
+                "const": "inflow_limit"
+              },
+              {
+                "description": "A conveyor's sample condition.",
+                "type": "string",
+                "const": "sample"
+              },
+              {
+                "description": "A conveyor's arrest condition.",
+                "type": "string",
+                "const": "arrest"
+              },
+              {
+                "description": "A leak flow's fraction.",
+                "type": "string",
+                "const": "leak_fraction"
+              },
+              {
+                "description": "Where a leak's zone starts.",
+                "type": "string",
+                "const": "leak_zone_start"
+              },
+              {
+                "description": "Where a leak's zone ends.",
+                "type": "string",
+                "const": "leak_zone_end"
+              }
             ]
           },
           "DiagnosticReport": {
@@ -1166,7 +1259,7 @@
             ]
           },
           "DiagnosticCategoryName": {
-            "description": "Where a diagnostic was raised: the engine's [`DiagnosticCategory`], named\nfor a reader.",
+            "description": "Where a diagnostic was raised, named for a reader: one per category of\nthe engine's (`DiagnosticCategory`).",
             "oneOf": [
               {
                 "description": "An equation that does not parse, names something that does not\nexist, or cannot be compiled.",
@@ -1425,10 +1518,18 @@
                 "type": "string"
               },
               "suggestions": {
+                "description": "The closest names of variables, when no variable has the name.",
                 "type": "array",
                 "items": {
                   "type": "string"
                 }
+              },
+              "reason": {
+                "description": "Why not, when the variable exists and what was asked of it does not:\nan element it does not have, or a subscript on a variable with none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1490,7 +1591,7 @@
         "type": "object",
         "properties": {
           "phrase": {
-            "description": "A name, part of one, a misspelling, or a few words of description.",
+            "description": "A name, part of one (the starts of its words: \"pop gr\" finds\n\"population growth\"), a misspelling, or a few words of description;\nat most 256 characters. The name itself ranks first, then names whose\nwords the phrase starts, then names and descriptions like it; a\nphrase under four characters finds only the first two.",
             "type": "string"
           }
         },
@@ -1572,6 +1673,12 @@
             "items": {
               "$ref": "#/$defs/VariableMatch"
             }
+          },
+          "omitted": {
+            "description": "Matches left out, the least close, to keep the answer within its\nbudget: names too long to list them all.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
           }
         },
         "required": [
@@ -2154,7 +2261,7 @@
             }
           },
           "omitted": {
-            "description": "Recorded variables and elements left out, when there were more than a\nsummary lists.",
+            "description": "Recorded variables and elements left out, when there were more than a\nsummary lists or than fit the answer; read_behavior reads them.",
             "type": [
               "integer",
               "null"
@@ -2467,10 +2574,18 @@
                 "type": "string"
               },
               "suggestions": {
+                "description": "The closest names of variables, when no variable has the name.",
                 "type": "array",
                 "items": {
                   "type": "string"
                 }
+              },
+              "reason": {
+                "description": "Why not, when the variable exists and what was asked of it does not:\nan element it does not have, or a subscript on a variable with none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -2718,7 +2833,7 @@
             ]
           },
           "SpecsChange": {
-            "description": "Run specs a plan changes; `None` keeps the model's.",
+            "description": "The specs a run ran under where they are not the model's; one left out\nis the model's.",
             "type": "object",
             "properties": {
               "start": {
@@ -3971,10 +4086,18 @@
                 "type": "string"
               },
               "suggestions": {
+                "description": "The closest names of variables, when no variable has the name.",
                 "type": "array",
                 "items": {
                   "type": "string"
                 }
+              },
+              "reason": {
+                "description": "Why not, when the variable exists and what was asked of it does not:\nan element it does not have, or a subscript on a variable with none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -4040,17 +4163,21 @@
     },
     {
       "name": "edit_model",
-      "description": "Plans an edit to the model -- add stocks, flows and variables, set equations, units, notes and lookups, connect flows, rename, delete, name loops, change the sim specs -- without applying it. The gate refuses an edit that adds an error, stops the model simulating, makes a value not a number, or gives a model its first unit warning. A plan that passes gets an id (P1, P2, ...); the person sees its changes and decides whether it lands. Read the model first, and again when it changed under you.",
-      "effect": "plan_edit",
+      "description": "Edits the model: add stocks, flows and variables, set equations, units, notes and lookups, connect flows, rename, delete, name loops, change the sim specs. The edit is made when its gate passes, and the answer lists what changed and the warnings it added. The gate refuses an edit, changing nothing, that would add an error anywhere in the project, leave an error in an equation it writes, stop the model simulating, make a value not a number, or give a model its first unit warning. Read the model first: an edit of something that changed since you read it is refused, naming what changed.",
+      "effect": "edit",
       "inputSchema": {
         "$defs": {
           "EditOperation": {
-            "description": "One operation of an edit.",
+            "description": "One operation of an edit. An equation names a variable as the equation\nlanguage spells it: `room_heat`, or `\"Room Heat\"` in quotes, for a\nvariable shown as Room Heat.",
             "oneOf": [
               {
                 "description": "Add a stock with its initial value, and the flows (existing ones, or\nones added earlier in this edit) that fill and drain it.",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "add_stock"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -4084,10 +4211,6 @@
                       "type": "string"
                     },
                     "default": []
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "add_stock"
                   }
                 },
                 "additionalProperties": false,
@@ -4101,6 +4224,10 @@
                 "description": "Add a flow with its equation, draining the stock `from` and filling\nthe stock `to`; a side left out is a cloud, outside the model.",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "add_flow"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -4134,10 +4261,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "add_flow"
                   }
                 },
                 "additionalProperties": false,
@@ -4151,6 +4274,10 @@
                 "description": "Add an auxiliary: a constant, or a variable computed from others.",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "add_variable"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -4170,10 +4297,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "add_variable"
                   }
                 },
                 "additionalProperties": false,
@@ -4184,9 +4307,13 @@
                 ]
               },
               {
-                "description": "Replace a variable's equation (a stock's: its initial value). For an\narrayed variable, the equation applies to every element, or to the\none `element` names (elements of several dimensions joined by commas).",
+                "description": "Replace a variable's equation (a stock's: its initial value). For an\narrayed variable, the equation applies to every element, or to the\none `element` names (`north`; `north, young` for an element of several\ndimensions).",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_equation"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -4199,10 +4326,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "set_equation"
                   }
                 },
                 "additionalProperties": false,
@@ -4216,15 +4339,15 @@
                 "description": "Set a variable's units; empty clears them.",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_units"
+                  },
                   "variable": {
                     "type": "string"
                   },
                   "units": {
                     "type": "string"
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "set_units"
                   }
                 },
                 "additionalProperties": false,
@@ -4238,15 +4361,15 @@
                 "description": "Set a variable's documentation; empty clears it.",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_notes"
+                  },
                   "variable": {
                     "type": "string"
                   },
                   "notes": {
                     "type": "string"
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "set_notes"
                   }
                 },
                 "additionalProperties": false,
@@ -4257,9 +4380,13 @@
                 ]
               },
               {
-                "description": "Make a variable a lookup of its equation: `points` are `[x, y]` pairs,\nx increasing.",
+                "description": "Make a variable a lookup of its equation: `points` are `[x, y]` pairs,\nx never decreasing (two points at one x are a vertical step).",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_lookup"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -4285,10 +4412,6 @@
                         "type": "null"
                       }
                     ]
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "set_lookup"
                   }
                 },
                 "additionalProperties": false,
@@ -4302,6 +4425,10 @@
                 "description": "Set which stock a flow drains (`from`) and fills (`to`); a side left\nout is a cloud.",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "connect_flow"
+                  },
                   "flow": {
                     "type": "string"
                   },
@@ -4318,10 +4445,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "connect_flow"
                   }
                 },
                 "additionalProperties": false,
@@ -4331,18 +4454,18 @@
                 ]
               },
               {
-                "description": "Rename a variable; every equation that reads it is rewritten.",
+                "description": "Rename a variable; every equation that reads it is rewritten. A new\nname that differs only in case or spacing changes how the name is\nwritten and nothing else.",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "rename"
+                  },
                   "variable": {
                     "type": "string"
                   },
                   "to": {
                     "type": "string"
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "rename"
                   }
                 },
                 "additionalProperties": false,
@@ -4353,15 +4476,15 @@
                 ]
               },
               {
-                "description": "Delete a variable; a deleted flow leaves the stocks it filled and\ndrained.",
+                "description": "Delete a variable; a deleted flow leaves the stocks it filled and\ndrained, and a module input it fed is left unwired.",
                 "type": "object",
                 "properties": {
-                  "variable": {
-                    "type": "string"
-                  },
                   "op": {
                     "type": "string",
                     "const": "delete"
+                  },
+                  "variable": {
+                    "type": "string"
                   }
                 },
                 "additionalProperties": false,
@@ -4374,6 +4497,10 @@
                 "description": "Name a feedback loop, by the id analyze_loops gave it or by its\nvariables.",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "name_loop"
+                  },
                   "loop": {
                     "type": [
                       "string",
@@ -4397,10 +4524,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "name_loop"
                   }
                 },
                 "additionalProperties": false,
@@ -4413,6 +4536,10 @@
                 "description": "Change the run's start, stop, DT or integration method.",
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_sim_specs"
+                  },
                   "start": {
                     "type": [
                       "number",
@@ -4447,10 +4574,6 @@
                       }
                     ],
                     "default": null
-                  },
-                  "op": {
-                    "type": "string",
-                    "const": "set_sim_specs"
                   }
                 },
                 "additionalProperties": false,
@@ -4482,7 +4605,7 @@
         "type": "object",
         "properties": {
           "summary": {
-            "description": "What the edit does and why, in a sentence, for the person approving\nit.",
+            "description": "What the edit does and why, in a sentence: what the person whose\nmodel it is reads of it, beside its undo.",
             "type": "string"
           },
           "operations": {
@@ -4503,26 +4626,11 @@
       },
       "outputSchema": {
         "$defs": {
-          "Verdict": {
-            "description": "The gate's verdict.",
-            "oneOf": [
-              {
-                "description": "The edit adds no error: the host may land it.",
-                "type": "string",
-                "const": "ready"
-              },
-              {
-                "description": "The edit adds an error, stops the model simulating, makes a value\nnot a number, or gives a model its first unit warning: fix the\noperations and plan again.",
-                "type": "string",
-                "const": "refused"
-              }
-            ]
-          },
-          "PlannedChange": {
+          "ChangeLine": {
             "type": "object",
             "properties": {
               "variable": {
-                "description": "The variable, as the model names it (before a rename), a loop's name,\nor \"sim specs\".",
+                "description": "The variable, as the model names it (before a rename; with its model\nwhen it is another model's), a loop's name, or \"sim specs\".",
                 "type": "string"
               },
               "action": {
@@ -4550,10 +4658,17 @@
               "sim_specs"
             ]
           },
-          "PlannedDiagnostic": {
-            "description": "A diagnostic the edit would add.",
+          "EditDiagnostic": {
+            "description": "A diagnostic the edit adds or leaves, or would.",
             "type": "object",
             "properties": {
+              "id": {
+                "description": "The session's id for it (`D1`, ...), the one `read_model` reports it\nunder, so a finding can cite it: present once the edit is made, for a\ndiagnostic of the model the edit is of.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "severity": {
                 "$ref": "#/$defs/Severity"
               },
@@ -4562,6 +4677,13 @@
               },
               "code": {
                 "type": "string"
+              },
+              "model": {
+                "description": "The model it is in, when that is not the model the edit is of.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "variable": {
                 "type": [
@@ -4591,7 +4713,7 @@
             ]
           },
           "DiagnosticCategoryName": {
-            "description": "Where a diagnostic was raised: the engine's [`DiagnosticCategory`], named\nfor a reader.",
+            "description": "Where a diagnostic was raised, named for a reader: one per category of\nthe engine's (`DiagnosticCategory`).",
             "oneOf": [
               {
                 "description": "An equation that does not parse, names something that does not\nexist, or cannot be compiled.",
@@ -4635,28 +4757,19 @@
         "type": "object",
         "properties": {
           "revision": {
+            "description": "The revision of the model the edit was made on. The edited model has\na revision of its own, which the host gives it and the next read\nreports.",
             "type": "integer",
             "format": "uint64",
             "minimum": 0
-          },
-          "verdict": {
-            "$ref": "#/$defs/Verdict"
-          },
-          "plan": {
-            "description": "The plan's id, for the host to land it once the person approves:\npresent when the verdict is ready.",
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "summary": {
             "type": "string"
           },
           "changes": {
-            "description": "One line per variable the edit changes, and for the sim specs and\nloop names. A line's detail is cut at 240 characters.",
+            "description": "One line per variable the edit changes, in any model of the project,\nand for the sim specs and loop names. A line's detail is cut at 240\ncharacters.",
             "type": "array",
             "items": {
-              "$ref": "#/$defs/PlannedChange"
+              "$ref": "#/$defs/ChangeLine"
             }
           },
           "omitted": {
@@ -4665,19 +4778,32 @@
             "format": "uint",
             "minimum": 0
           },
+          "omittedDiagnostics": {
+            "description": "Diagnostics left out to keep the answer within its budget, the last\nlisted: a read lists them all.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "unchanged": {
+            "description": "That the model was already as the edit asks: nothing changed, and\nthere is no edit for the host to make.",
+            "type": "boolean"
+          },
           "diagnostics": {
-            "description": "What the edit would add: the errors and values that are not a number\n(why it is refused), and every warning (to fix; the first unit warning\nof a model without one refuses it).",
+            "description": "What the edit adds or leaves: every warning it adds (to fix), and an\nerror whose reason it changes, each under the id a read gives it.",
             "type": "array",
             "items": {
-              "$ref": "#/$defs/PlannedDiagnostic"
+              "$ref": "#/$defs/EditDiagnostic"
             }
           },
           "simulates": {
-            "description": "Whether the model simulates as the edit leaves it.",
-            "type": "boolean"
+            "description": "Whether the model simulates as the edit leaves it; absent when the\nedit changed nothing (`unchanged`), which compiles and runs nothing.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "note": {
-            "description": "Why the edit is refused, and anything else the plan needs said.",
+            "description": "Anything else that needs saying of the edit.",
             "type": [
               "string",
               "null"
@@ -4686,10 +4812,8 @@
         },
         "required": [
           "revision",
-          "verdict",
           "summary",
-          "changes",
-          "simulates"
+          "changes"
         ]
       }
     },
@@ -4752,12 +4876,12 @@
                 "description": "The model has the variable.",
                 "type": "object",
                 "properties": {
-                  "variable": {
-                    "type": "string"
-                  },
                   "cites": {
                     "type": "string",
                     "const": "variable"
+                  },
+                  "variable": {
+                    "type": "string"
                   }
                 },
                 "additionalProperties": false,
@@ -4767,18 +4891,18 @@
                 ]
               },
               {
-                "description": "The variable's equation (a stock's: its initial value) is `equation`,\nwritten any way that parses the same: spacing, case and the spelling\nof names aside. For an arrayed variable, name an element\n(`Population[north]`) for that element's equation. A variable with a\ntable is its table at its equation's value: `LOOKUP(effect, input)`,\nnot `input`.",
+                "description": "The variable's equation (a stock's: its initial value) is `equation`,\nwritten any way that parses the same: spacing, case and the spelling\nof names aside. For an arrayed variable, name an element it has\n(`Population[north]`) for that element's equation. A variable with a\ntable is its table at its equation's value: `LOOKUP(effect, input)`,\nnot `input`. A table with no equation of its own, which other\nequations look up, is cited with an empty equation.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "equation"
+                  },
                   "variable": {
                     "type": "string"
                   },
                   "equation": {
                     "type": "string"
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "equation"
                   }
                 },
                 "additionalProperties": false,
@@ -4789,9 +4913,13 @@
                 ]
               },
               {
-                "description": "The variable (or one element of it) is within 5% of `value` at `time`\nin the run, or so near zero beside the series that the difference\nreads as none: at the run's start when `time` is absent, which for a\nconstant is its value. A time outside the run is refused.",
+                "description": "The variable (or one element of it) is within 5% of `value` at `time`\nin the run (of the larger of the two); a `value` of zero holds for a\nvalue under a hundred-thousandth of the series' largest. At the run's\nstart when `time` is absent, which for a constant is its value. A\ntime outside the run is refused.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "value"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -4813,10 +4941,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "value"
                   }
                 },
                 "additionalProperties": false,
@@ -4827,9 +4951,13 @@
                 ]
               },
               {
-                "description": "The variables `variable` links to -- those whose equations read it,\nand for a flow the stocks it fills and drains -- are exactly\n`readers`: none, when it is empty, for a variable nothing reads.",
+                "description": "The variables that read `variable` -- those whose equations read it in\nany phase, an initial value or `INIT` included, those that look it up\nas a table, a stock or flow whose option names it (a conveyor's\ntransit time), and for a flow the stocks it fills and drains -- are\nexactly `readers`: none, when it is empty, for a variable nothing\nreads. It cannot hold while an equation of the model does not parse,\nsince that equation may read it.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "readers"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -4838,10 +4966,6 @@
                     "items": {
                       "type": "string"
                     }
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "readers"
                   }
                 },
                 "additionalProperties": false,
@@ -4855,6 +4979,10 @@
                 "description": "`variable` reads `reads`, through a link of `polarity` (its equation's\nsign) when given.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "reads"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -4871,10 +4999,6 @@
                       }
                     ],
                     "default": null
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "reads"
                   }
                 },
                 "additionalProperties": false,
@@ -4888,12 +5012,12 @@
                 "description": "The model has the diagnostic of this id now.",
                 "type": "object",
                 "properties": {
-                  "id": {
-                    "type": "string"
-                  },
                   "cites": {
                     "type": "string",
                     "const": "diagnostic"
+                  },
+                  "id": {
+                    "type": "string"
                   }
                 },
                 "additionalProperties": false,
@@ -4906,6 +5030,10 @@
                 "description": "The model has no diagnostic of `category`, or none at all.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "no_diagnostics"
+                  },
                   "category": {
                     "anyOf": [
                       {
@@ -4916,10 +5044,6 @@
                       }
                     ],
                     "default": null
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "no_diagnostics"
                   }
                 },
                 "additionalProperties": false,
@@ -4931,6 +5055,10 @@
                 "description": "The run has the loop of this id, of `polarity` when given (a mostly\nreinforcing loop is reinforcing, a mostly balancing one balancing).",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "loop"
+                  },
                   "id": {
                     "type": "string"
                   },
@@ -4951,10 +5079,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "loop"
                   }
                 },
                 "additionalProperties": false,
@@ -4967,6 +5091,10 @@
                 "description": "The loop was its partition's strongest for most of the steps between\n`from` and `to` in which a loop was active.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "leads"
+                  },
                   "loop": {
                     "type": "string"
                   },
@@ -4984,10 +5112,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "leads"
                   }
                 },
                 "additionalProperties": false,
@@ -5002,6 +5126,10 @@
                 "description": "No loop of the run goes through the variable.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "no_loop_through"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -5011,10 +5139,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "no_loop_through"
                   }
                 },
                 "additionalProperties": false,
@@ -5027,6 +5151,10 @@
                 "description": "The variable (an element of it, for an arrayed one) goes below zero\nin the run: exactly when its summary says when it went negative.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "goes_negative"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -5036,10 +5164,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "goes_negative"
                   }
                 },
                 "additionalProperties": false,
@@ -5049,9 +5173,13 @@
                 ]
               },
               {
-                "description": "The variable is at its largest at `time`, within 5% of the run.",
+                "description": "The variable peaks at `time`, within 5% of the run: it is at its\nlargest there, and lower at the run's start and at its end. A series\nstill rising when the run ends, or falling from its start, has no\npeak in the run.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "peaks_at"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -5065,10 +5193,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "peaks_at"
                   }
                 },
                 "additionalProperties": false,
@@ -5079,9 +5203,13 @@
                 ]
               },
               {
-                "description": "The variable ends within 5% of `value`.",
+                "description": "The variable ends within 5% of `value`, judged as `value` judges one.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "ends_near"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -5095,10 +5223,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "ends_near"
                   }
                 },
                 "additionalProperties": false,
@@ -5112,6 +5236,10 @@
                 "description": "The variable's behavior mode in the run is `mode`.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "behavior_mode"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -5124,10 +5252,6 @@
                       "null"
                     ],
                     "default": null
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "behavior_mode"
                   }
                 },
                 "additionalProperties": false,
@@ -5141,6 +5265,10 @@
                 "description": "The variable ends higher (or lower) in `run` than in `than`.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "compares"
+                  },
                   "variable": {
                     "type": "string"
                   },
@@ -5152,10 +5280,6 @@
                   },
                   "than": {
                     "type": "string"
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "compares"
                   }
                 },
                 "additionalProperties": false,
@@ -5171,15 +5295,15 @@
                 "description": "The battery check of this id comes out `outcome`, run again when the\nmodel has changed since.",
                 "type": "object",
                 "properties": {
+                  "cites": {
+                    "type": "string",
+                    "const": "test"
+                  },
                   "id": {
                     "type": "string"
                   },
                   "outcome": {
                     "$ref": "#/$defs/Outcome"
-                  },
-                  "cites": {
-                    "type": "string",
-                    "const": "test"
                   }
                 },
                 "additionalProperties": false,
@@ -5201,7 +5325,7 @@
             ]
           },
           "DiagnosticCategoryName": {
-            "description": "Where a diagnostic was raised: the engine's [`DiagnosticCategory`], named\nfor a reader.",
+            "description": "Where a diagnostic was raised, named for a reader: one per category of\nthe engine's (`DiagnosticCategory`).",
             "oneOf": [
               {
                 "description": "An equation that does not parse, names something that does not\nexist, or cannot be compiled.",
@@ -5389,6 +5513,12 @@
                 "items": {
                   "$ref": "#/$defs/CitationFailure"
                 }
+              },
+              "omittedFailures": {
+                "description": "Failures left out, the last of the finding's, to keep the answer\nwithin its budget.",
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
               }
             },
             "required": [
@@ -5427,6 +5557,12 @@
             "items": {
               "$ref": "#/$defs/FindingVerdict"
             }
+          },
+          "omitted": {
+            "description": "The last findings, left out to keep the answer within its budget:\nthey get no id and no verdict here; verify them in a call of their\nown.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
           }
         },
         "required": [
@@ -5435,5 +5571,250 @@
         ]
       }
     }
-  ]
+  ],
+  "refusalSchema": {
+    "$defs": {
+      "RefusedEdit": {
+        "description": "What a refusal of an edit by its gate carries beside its reason\n(`refusedEdit` in the one refusal shape): the rule that refused it and\nwhat the edit would have done, for the agent to repair its operations.\nNothing changed.",
+        "type": "object",
+        "properties": {
+          "rule": {
+            "description": "The rule that refused the edit.",
+            "$ref": "#/$defs/GateRule"
+          },
+          "changes": {
+            "description": "One line per variable the edit would have changed, as a made edit's\nlines say them. A line's detail is cut at 240 characters.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ChangeLine"
+            }
+          },
+          "omitted": {
+            "description": "Lines left out to keep the refusal within its budget.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "omittedDiagnostics": {
+            "description": "Diagnostics left out to keep the refusal within its budget, the last\nlisted.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "diagnostics": {
+            "description": "What the edit would add or leave: the errors it would add, an error\nin an equation it writes, the values that would not be a number, the\nfirst unit warning of a model without one, and the warnings it would\nadd. None has an id: they are of no model.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/EditDiagnostic"
+            }
+          },
+          "simulates": {
+            "description": "Whether the model would simulate as the edit would leave it.",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "rule",
+          "changes",
+          "simulates"
+        ]
+      },
+      "GateRule": {
+        "description": "A rule of the gate, as a refusal names the one that refused an edit.",
+        "oneOf": [
+          {
+            "description": "The edit adds an error the project did not have, in any of its\nmodels, or leaves one in an equation it writes.",
+            "type": "string",
+            "const": "errors"
+          },
+          {
+            "description": "The edit's specs ask more of a run than a run may.",
+            "type": "string",
+            "const": "run_cost"
+          },
+          {
+            "description": "A model that simulated would not: the model the edit is of, or the\nproject's root model.",
+            "type": "string",
+            "const": "simulation"
+          },
+          {
+            "description": "A value would not be a number where the run of the model as it is\nhas a number throughout.",
+            "type": "string",
+            "const": "values"
+          },
+          {
+            "description": "A model without unit warnings would get its first.",
+            "type": "string",
+            "const": "unit_warnings"
+          }
+        ]
+      },
+      "ChangeLine": {
+        "type": "object",
+        "properties": {
+          "variable": {
+            "description": "The variable, as the model names it (before a rename; with its model\nwhen it is another model's), a loop's name, or \"sim specs\".",
+            "type": "string"
+          },
+          "action": {
+            "$ref": "#/$defs/ChangeAction"
+          },
+          "detail": {
+            "description": "What changes, in words.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "variable",
+          "action",
+          "detail"
+        ]
+      },
+      "ChangeAction": {
+        "type": "string",
+        "enum": [
+          "added",
+          "changed",
+          "renamed",
+          "deleted",
+          "loop_named",
+          "sim_specs"
+        ]
+      },
+      "EditDiagnostic": {
+        "description": "A diagnostic the edit adds or leaves, or would.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "The session's id for it (`D1`, ...), the one `read_model` reports it\nunder, so a finding can cite it: present once the edit is made, for a\ndiagnostic of the model the edit is of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "severity": {
+            "$ref": "#/$defs/Severity"
+          },
+          "category": {
+            "$ref": "#/$defs/DiagnosticCategoryName"
+          },
+          "code": {
+            "type": "string"
+          },
+          "model": {
+            "description": "The model it is in, when that is not the model the edit is of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "variable": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "severity",
+          "category",
+          "code"
+        ]
+      },
+      "Severity": {
+        "description": "Whether a diagnostic stops the model from simulating or only warns.",
+        "type": "string",
+        "enum": [
+          "error",
+          "warning"
+        ]
+      },
+      "DiagnosticCategoryName": {
+        "description": "Where a diagnostic was raised, named for a reader: one per category of\nthe engine's (`DiagnosticCategory`).",
+        "oneOf": [
+          {
+            "description": "An equation that does not parse, names something that does not\nexist, or cannot be compiled.",
+            "type": "string",
+            "const": "equation"
+          },
+          {
+            "description": "A problem with the model as a whole: a cycle, a duplicate name, a bad\ntable.",
+            "type": "string",
+            "const": "model"
+          },
+          {
+            "description": "A units string that does not parse.",
+            "type": "string",
+            "const": "unit_definition"
+          },
+          {
+            "description": "An equation whose computed units disagree with its declared units.",
+            "type": "string",
+            "const": "unit_consistency"
+          },
+          {
+            "description": "A contradiction among the units the model's equations imply.",
+            "type": "string",
+            "const": "unit_inference"
+          },
+          {
+            "description": "A construct the compiler refuses.",
+            "type": "string",
+            "const": "assembly"
+          },
+          {
+            "description": "A value a run produces that is not a number: what an edit's gate\nfinds in the run, where the engine's diagnostics are silent.",
+            "type": "string",
+            "const": "value"
+          }
+        ]
+      }
+    },
+    "title": "Refusal",
+    "description": "A refusal: what rule the call broke and how to repair it. Every tool\nrefuses in this one shape, which the catalog publishes beside the tools'\nown schemas (`refusalSchema`).",
+    "type": "object",
+    "properties": {
+      "error": {
+        "description": "The rule the call broke, and the repair.",
+        "type": "string"
+      },
+      "suggestions": {
+        "description": "Names the call may have meant: variables, models or runs.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "interrupted": {
+        "description": "That the call stopped for other work on the project and kept nothing:\nwhat a host that retries by itself looks for. It retries once that\nwork is done -- after an edit, at the next revision -- and never in a\nloop against a project that stays busy.",
+        "type": "boolean"
+      },
+      "cancelled": {
+        "description": "That the host cancelled the call, which stopped and kept nothing: no\nhost calls it again.",
+        "type": "boolean"
+      },
+      "refusedEdit": {
+        "description": "For an edit its gate refused: the rule that refused it and what the\nedit would have done, for the agent to repair its operations.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RefusedEdit"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "error"
+    ]
+  }
 }

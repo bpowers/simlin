@@ -29,7 +29,7 @@ import threading
 import warnings
 import weakref
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self, Union
+from typing import TYPE_CHECKING, Any, Self, TypeVar, Union, cast
 
 from . import _sync
 from ._disk import FileWatcher, atomic_write, content_hash
@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     Dispatch = Callable[[Callable[[], None]], None]
 
 _PathLike = Union[str, Path]
+_T = TypeVar("_T")
 
 # JSON format constants
 JSON_FORMAT_SIMLIN = "simlin"
@@ -1323,10 +1324,23 @@ class Project:
                     f"{self._sync.revision}); the edit was not applied, re-run it "
                     f"against the current contents"
                 )
+            raised: BaseException | None = None
             with self._lock:
                 self._check_alive()
-                diagnostics = _ffi_apply_patch_json(self._ptr, patch_json, dry_run, allow_errors)
-            if dry_run:
+                before = self._engine_revision_locked()
+                try:
+                    diagnostics = _ffi_apply_patch_json(
+                        self._ptr, patch_json, dry_run, allow_errors
+                    )
+                except BaseException as exc:
+                    # A KeyboardInterrupt can surface as the call returns,
+                    # after the engine applied the patch: whether it did is
+                    # the engine's revision, and what it did is committed.
+                    raised = exc
+                changed = self._engine_revision_locked() != before
+            if not changed:
+                if raised is not None:
+                    raise raised
                 return diagnostics
             # Every accepted mutation funnels through here (edit(),
             # set_sim_specs()); the diagram is brought in step with the
@@ -1334,40 +1348,73 @@ class Project:
             self._sync_diagram_for_patch(patch_json)
             revision, write_error = self._commit_change_locked()
         self._notify(ChangeEvent("edit", revision))
+        if raised is not None:
+            if write_error is not None:
+                raised.add_note(f"the edit was committed but not written: {write_error!r}")
+            raise raised
         if write_error is not None:
             raise write_error
         return diagnostics
 
-    def _land_tool_plan(self, session: Any, id: str) -> dict[str, Any]:
-        """Land the plan ``id`` of the tool session ``session`` (a
-        ``ToolSession``), as :meth:`_apply_patch_json` lands an edit: the
-        engine lands the plan on the contents as they are, and an accepted
-        landing is committed (revision, model caches, autosave) and announced.
-        The plan places what it adds on the diagram itself. Returns the
-        engine's answer: ``{"landed": True}``, or ``{"landed": False,
-        "reason": ...}``.
+    def _commit_tool_edit(self, call: Callable[[], _T]) -> _T:
+        """Run ``call`` -- a tool call that may edit this project inside the
+        engine -- and commit what it changed as :meth:`_apply_patch_json`
+        commits an edit: the revision moves, model caches are dropped, a
+        file-backed project autosaves, and subscribers are told. The locks
+        are an edit's (``_file_lock``, then ``_lock``), held across the call
+        so nothing else edits the project between the engine's edit and its
+        commit here.
+
+        Whether the engine changed the project is the engine's own statement,
+        its contents revision before and after the call: a refused,
+        interrupted or cancelled edit leaves it where it was, and nothing is
+        committed. That holds whatever the call raised: a KeyboardInterrupt
+        that surfaces as the engine returns, after it made the edit, still
+        finds the edit committed, and then continues.
+
+        Raises:
+            SimlinWriteError: When the edit was made and committed in memory
+                but the autosave failed; its ``answer`` is what ``call``
+                returned, and ``__cause__`` the failure.
         """
-        out_buf = ffi.new("uint8_t **")
-        out_len = ffi.new("uintptr_t *")
-        err_ptr = ffi.new("SimlinError **")
+        raised: BaseException | None = None
+        output: _T | None = None
         with self._file_lock:
-            with self._lock, session._lock:
+            with self._lock:
                 self._check_alive()
-                lib.simlin_tool_session_land_plan(
-                    session._ptr, string_to_c(id), out_buf, out_len, err_ptr
-                )
-            check_out_error(err_ptr, f"Land plan {id}")
-            try:
-                answer: dict[str, Any] = json.loads(bytes(ffi.buffer(out_buf[0], out_len[0])))
-            finally:
-                lib.simlin_free(out_buf[0])
-            if not answer.get("landed"):
-                return answer
+                before = self._engine_revision_locked()
+                try:
+                    output = call()
+                except BaseException as exc:
+                    raised = exc
+                changed = self._engine_revision_locked() != before
+            if not changed:
+                if raised is not None:
+                    raise raised
+                return cast("_T", output)
             revision, write_error = self._commit_change_locked()
         self._notify(ChangeEvent("edit", revision))
+        if raised is not None:
+            if write_error is not None:
+                raised.add_note(f"the edit was committed but not written: {write_error!r}")
+            raise raised
         if write_error is not None:
-            raise write_error
-        return answer
+            raise SimlinWriteError(
+                f"the tool's edit was made (revision {revision}) but not written: {write_error}",
+                revision,
+                answer=output,
+            ) from write_error
+        return cast("_T", output)
+
+    def _engine_revision_locked(self) -> int:
+        """The engine's revision of the project's contents, which every
+        mutation of them advances and no read does; the caller holds
+        ``_lock``."""
+        out_revision = ffi.new("uint64_t *")
+        err_ptr = ffi.new("SimlinError **")
+        lib.simlin_project_get_revision(self._ptr, out_revision, err_ptr)
+        check_out_error(err_ptr, "Read the project's revision")
+        return int(out_revision[0])
 
     def serialize_json(self, format: str = JSON_FORMAT_SIMLIN) -> bytes:
         """Serialize the project to JSON.

@@ -133,22 +133,71 @@ fn a_new_session_numbers_from_one() {
 }
 
 /// Rows alike in variable, severity, code and reason are told apart by their
-/// order. No model this suite builds produces two such rows (the engine
-/// reports one row per failing variable and code), so the arm is pinned on the
-/// numbering itself.
+/// order: an equation that fails the same way at two places (each `PREVIOUS`
+/// argument is compiled on its own, and each names the same missing
+/// variable) reports two problems, under two ids.
 #[test]
-fn rows_alike_but_for_their_order_get_ids_of_their_own() {
-    let mut evidence = Evidence::default();
-    let key = |occurrence| DiagnosticKey {
-        variable: Some("x".to_string()),
-        severity: Severity::Error,
-        code: ErrorCode::UnknownDependency,
-        reason: None,
-        occurrence,
-    };
-    assert_eq!(evidence.diagnostic_id(key(0)), "D1");
-    assert_eq!(evidence.diagnostic_id(key(1)), "D2");
-    assert_eq!(evidence.diagnostic_id(key(0)), "D1");
+fn rows_alike_but_for_their_place_get_ids_of_their_own() {
+    let mut project = inventory().build_datamodel();
+    set_equation(
+        &mut project,
+        "shipments",
+        "PREVIOUS(ordrs + 1) + PREVIOUS(ordrs + 2)",
+    );
+    let mut host = Host::new(project);
+    let mut session = Session::new("main");
+    let both = diagnostics(&mut host, &mut session);
+    let alike: Vec<(&Value, &Value)> = both.iter().map(|d| (&d["id"], &d["code"])).collect();
+    assert_eq!(
+        alike,
+        [
+            (&json!("D1"), &json!("does_not_exist")),
+            (&json!("D2"), &json!("does_not_exist"))
+        ],
+        "{both:?}"
+    );
+    assert_ne!(both[0]["reason"], both[1]["reason"], "each names its place");
+
+    // One of the two fixed: the one left is the first of its kind. Both
+    // back: the same two ids, and no third.
+    host.edit(|p| set_equation(p, "shipments", "PREVIOUS(orders + 1) + PREVIOUS(ordrs + 2)"));
+    let one = diagnostics(&mut host, &mut session);
+    assert_eq!(one.len(), 1, "{one:?}");
+    assert_eq!(one[0]["id"], "D1");
+    host.edit(|p| set_equation(p, "shipments", "PREVIOUS(ordrs + 3) + PREVIOUS(ordrs + 4)"));
+    let again = diagnostics(&mut host, &mut session);
+    let ids: Vec<&Value> = again.iter().map(|d| &d["id"]).collect();
+    assert_eq!(ids, [&json!("D1"), &json!("D2")], "{again:?}");
+}
+
+/// The reason is part of what a problem is: a variable that fails with the
+/// same code for another reason has another problem, under another id, and
+/// the first problem's id is its own when it comes back.
+#[test]
+fn the_same_code_for_another_reason_is_another_problem() {
+    let mut project = inventory().build_datamodel();
+    set_equation(&mut project, "shipments", "ordrs");
+    let mut host = Host::new(project);
+    let mut session = Session::new("main");
+    let first = diagnostics(&mut host, &mut session);
+    assert_eq!(on(&first, "shipments")["id"], "D1");
+
+    host.edit(|p| set_equation(p, "shipments", "ordrz"));
+    let second = diagnostics(&mut host, &mut session);
+    assert_eq!(
+        on(&second, "shipments")["code"],
+        on(&first, "shipments")["code"],
+        "the same code"
+    );
+    assert_eq!(
+        on(&second, "shipments")["id"],
+        "D2",
+        "another missing name is another problem: {second:?}"
+    );
+
+    host.edit(|p| set_equation(p, "shipments", "ordrs"));
+    let third = diagnostics(&mut host, &mut session);
+    assert_eq!(on(&third, "shipments")["id"], "D1");
 }
 
 #[test]
@@ -169,8 +218,22 @@ fn a_project_level_problem_is_every_models_and_another_models_is_not() {
     project.models.push(other);
     let mut host = Host::new(project);
 
+    // A unit's declaration is no variable: the diagnostic names none, and
+    // its reason names the unit.
+    let declaration = |diagnostics: &[Value]| -> Value {
+        diagnostics
+            .iter()
+            .find(|d| d["category"] == "unit_definition")
+            .cloned()
+            .unwrap_or_else(|| panic!("a unit_definition diagnostic: {diagnostics:?}"))
+    };
     let main = diagnostics(&mut host, &mut Session::new("main"));
-    assert_eq!(on(&main, "gizmo")["category"], "unit_definition");
+    let unit = declaration(&main);
+    assert!(unit["variable"].is_null(), "{unit}");
+    assert!(
+        unit["reason"].as_str().unwrap().contains("unit 'gizmo'"),
+        "{unit}"
+    );
     assert!(
         main.iter().all(|d| d["code"] != "unknown_dependency"),
         "another model's problem is not main's: {main:?}"
@@ -178,7 +241,7 @@ fn a_project_level_problem_is_every_models_and_another_models_is_not() {
 
     let other = diagnostics(&mut host, &mut Session::new("other"));
     assert_eq!(on(&other, "shipments")["code"], "unknown_dependency");
-    assert_eq!(on(&other, "gizmo")["category"], "unit_definition");
+    assert!(declaration(&other)["variable"].is_null());
 }
 
 #[test]
@@ -279,5 +342,31 @@ fn a_diagnostic_with_neither_reason_nor_span_says_what_its_code_means() {
     assert_eq!(
         reason_given(&diagnostic, &formatted, &model).as_deref(),
         Some(ErrorCode::CircularDependency.description())
+    );
+}
+
+/// An engine message that names the special-stock build's hidden variables
+/// is said with what each stands for, and every other word is kept.
+#[test]
+fn a_message_naming_a_helper_says_what_it_stands_for() {
+    assert_eq!(
+        explain_helpers("failed to compile fragments for variables: $conv$belt$len, x, $y."),
+        "failed to compile fragments for variables: the transit time of the conveyor \
+         'belt', x, $y."
+    );
+    assert_eq!(explain_helpers("no helper here"), "no helper here");
+    assert_eq!(
+        explain_helpers(
+            "implicit variable '$⁚new_var_1⁚0⁚smth1' failed; \
+             $⁚macro_output⁚0⁚expression_macro·expression_macro is not a number, $⁚x⁚2⁚arg0."
+        ),
+        "implicit variable 'the SMTH1 in 'new_var_1'' failed; the EXPRESSION_MACRO in \
+         'macro_output' is not a number, a part of the equation of 'x'."
+    );
+    // A dollar in units, and the loop scores the LTM build names, are no
+    // helper of a variable.
+    assert_eq!(
+        explain_helpers("units $/week and $⁚ltm⁚loop_score⁚r1"),
+        "units $/week and $⁚ltm⁚loop_score⁚r1"
     );
 }

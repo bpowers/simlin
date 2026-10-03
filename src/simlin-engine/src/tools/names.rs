@@ -24,6 +24,11 @@ use crate::datamodel::{Model, Variable};
 pub(crate) const SUGGESTION_THRESHOLD: f64 = 0.6;
 /// How many suggestions an unresolved name comes back with.
 pub(crate) const MAX_SUGGESTIONS: usize = 3;
+/// The longest phrase the fuzzy matcher compares, in characters: a
+/// comparison costs the product of the two lengths, for every variable, and
+/// no model's name comes near this. A longer phrase names nothing, and a
+/// tool that searches by phrase refuses it.
+pub(crate) const MAX_QUERY_CHARS: usize = 256;
 
 /// Words a phrase carries that say nothing about which variable it means.
 const STOP_WORDS: [&str; 9] = ["a", "an", "and", "of", "the", "in", "on", "to", "for"];
@@ -38,6 +43,51 @@ pub(crate) fn resolve<'a>(model: &'a Model, query: &str) -> Result<&'a Variable,
             .map(|(_, var)| var.get_ident().to_string())
             .collect()
     })
+}
+
+/// Why a reference names nothing to read: the closest names when no variable
+/// has the name, or the reason when the variable exists and the element asked
+/// of it does not.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Default)]
+pub(crate) struct Unresolved {
+    pub suggestions: Vec<String>,
+    pub reason: Option<String>,
+}
+
+/// What `reference` names: a variable, or with a subscript one element of an
+/// arrayed variable, spelled as the project's dimensions spell it.
+pub(crate) fn resolve_reference<'a>(
+    project: &crate::datamodel::Project,
+    model: &'a Model,
+    reference: &str,
+) -> Result<(&'a Variable, Option<String>), Unresolved> {
+    let unknown = |suggestions| Unresolved {
+        suggestions,
+        reason: None,
+    };
+    if let Some(var) = model.get_variable(reference) {
+        return Ok((var, None));
+    }
+    let Some((base, subscripts)) = split_subscript(reference) else {
+        return resolve(model, reference)
+            .map(|var| (var, None))
+            .map_err(unknown);
+    };
+    let var = resolve(model, base).map_err(unknown)?;
+    let dims = match var.get_equation() {
+        Some(
+            crate::datamodel::Equation::ApplyToAll(dims, _)
+            | crate::datamodel::Equation::Arrayed(dims, ..),
+        ) => dims.as_slice(),
+        Some(crate::datamodel::Equation::Scalar(_)) | None => &[],
+    };
+    resolve_element(project, dims, &subscripts)
+        .map(|element| (var, Some(element)))
+        .map_err(|reason| Unresolved {
+            suggestions: vec![],
+            reason: Some(format!("{}: {reason}", var.get_ident())),
+        })
 }
 
 /// A name with a subscript, `population[north]` or `flow[a, b]`: the name
@@ -120,8 +170,12 @@ pub(crate) fn resolve_element(
 }
 
 /// Every variable of `model` with its similarity to `phrase`, closest first
-/// (ties by name, so the order is a function of the model).
+/// (ties by name, so the order is a function of the model); none for a
+/// phrase longer than [`MAX_QUERY_CHARS`].
 pub(crate) fn rank<'a>(model: &'a Model, phrase: &str) -> Vec<(f64, &'a Variable)> {
+    if phrase.chars().count() > MAX_QUERY_CHARS {
+        return Vec::new();
+    }
     let query = query_words(phrase);
     let mut ranked: Vec<(f64, &Variable)> = model
         .variables
@@ -135,9 +189,10 @@ pub(crate) fn rank<'a>(model: &'a Model, phrase: &str) -> Vec<(f64, &'a Variable
     ranked
 }
 
-/// How well `query` names or describes `var`: its name's similarity, or three
-/// quarters of how much of the query its documentation covers, whichever is
-/// higher.
+/// How well `query` names or describes `var`: its name's similarity, or
+/// how much of the query its documentation covers, a likeness (at most
+/// [`FUZZY_CEILING`]), whichever is higher. A query shorter than
+/// [`MIN_FUZZY_CHARS`] covers documentation only by the words it starts.
 fn score(query: &[String], var: &Variable) -> f64 {
     let name = similarity(query, &words(var.get_ident()));
     let documentation = match var {
@@ -146,8 +201,17 @@ fn score(query: &[String], var: &Variable) -> f64 {
         Variable::Aux(a) => a.documentation.as_str(),
         Variable::Module(m) => m.documentation.as_str(),
     };
-    let described = 0.75 * covered(query, &words(documentation));
-    name.max(described)
+    let documentation = words(documentation);
+    let covers = if query.join(" ").chars().count() < MIN_FUZZY_CHARS {
+        let begun = query
+            .iter()
+            .filter(|q| documentation.iter().any(|w| w.starts_with(q.as_str())))
+            .count();
+        begun as f64 / query.len().max(1) as f64
+    } else {
+        covered(query, &documentation)
+    };
+    name.max(FUZZY_CEILING * covers)
 }
 
 /// The words of a name or text: canonicalized (lowercase, spaces and
@@ -172,30 +236,59 @@ pub(crate) fn query_words(phrase: &str) -> Vec<String> {
     if content.is_empty() { all } else { content }
 }
 
-/// The similarity of a query's words to a name's, in `[0, 1]`: the best of
+/// The similarity of a query's words to a name's, in `[0, 1]`, in three
+/// tiers that never overlap, so a match of a better kind always ranks first:
 ///
-/// - the two joined, compared as strings (a typo across a word boundary, a
-///   missing space),
-/// - the words compared as sets: how well each query word is matched by some
-///   name word, and each name word by some query word (a misspelled word,
-///   words reordered, a word missing or extra), and
-/// - the query appearing in the name (a phrase that is part of a name), scored
-///   by how much of the name it is.
+/// - 1 for the name itself;
+/// - from 0.75 for the query's words starting the name's words, in order (a
+///   phrase that is part of a name, its words whole or begun: "pop" or
+///   "population gr"), higher the more of the name it is. A word is matched
+///   from its start, never inside it: "age" is no part of "average" or
+///   "usage";
+/// - below that ([`FUZZY_CEILING`]), a likeness: the best of the two joined
+///   compared as strings (a typo across a word boundary, a missing space)
+///   and the words compared as sets (a misspelled word, words reordered, a
+///   word missing or extra). A query shorter than [`MIN_FUZZY_CHARS`] has
+///   none: one letter off in three is another word, not a typo.
 pub(crate) fn similarity(query: &[String], name: &[String]) -> f64 {
     if query.is_empty() || name.is_empty() {
         return 0.0;
     }
+    if query == name {
+        return 1.0;
+    }
     let q = query.join(" ");
     let n = name.join(" ");
+    let begun = |run: &[String]| {
+        run.iter()
+            .zip(query)
+            .all(|(n, q)| n.starts_with(q.as_str()))
+    };
+    // A query's stop words are dropped ([`query_words`]), so its words
+    // start a name's with the name's dropped too: "life of land".
+    let content: Vec<String> = name
+        .iter()
+        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
+        .cloned()
+        .collect();
+    if name.windows(query.len()).any(begun) || content.windows(query.len()).any(begun) {
+        return 0.75 + 0.25 * (q.len() as f64 / n.len() as f64);
+    }
+    if q.chars().count() < MIN_FUZZY_CHARS {
+        return 0.0;
+    }
     let whole = string_similarity(&q, &n);
     let words = 0.7 * covered(query, name) + 0.3 * covered(name, query);
-    let contained = if n.contains(&q) {
-        0.75 + 0.25 * (q.len() as f64 / n.len() as f64)
-    } else {
-        0.0
-    };
-    whole.max(words).max(contained)
+    whole.max(words).min(FUZZY_CEILING)
 }
+
+/// The highest a likeness scores ([`similarity`]): under the least a
+/// phrase that starts a name's words scores, so word starts outrank it.
+pub(crate) const FUZZY_CEILING: f64 = 0.74;
+
+/// The fewest characters a query has for a likeness to count
+/// ([`similarity`]).
+pub(crate) const MIN_FUZZY_CHARS: usize = 4;
 
 /// How well `words` are matched by `by`: the mean, over `words`, of each
 /// word's best string similarity to a word of `by`.

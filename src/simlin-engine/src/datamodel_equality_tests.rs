@@ -138,6 +138,7 @@ fn a_variables_expression_texts_are_the_same_to_read_and_to_write() {
         },
     });
     use ExpressionRole::{Equation as Eqn, Initial, Option as Opt};
+    use StockOption::{LeakFraction, LeakZoneEnd};
     let read = variable.expression_texts();
     assert_eq!(
         read,
@@ -147,8 +148,8 @@ fn a_variables_expression_texts_are_the_same_to_read_and_to_write() {
             (Eqn, "e2"),
             (Eqn, "default"),
             (Initial, "active"),
-            (Opt, "fraction"),
-            (Opt, "end"),
+            (Opt(LeakFraction), "fraction"),
+            (Opt(LeakZoneEnd), "end"),
         ],
         "a spread flow's distribution is a name, not an expression"
     );
@@ -302,5 +303,53 @@ fn a_variables_names_are_the_same_to_read_and_to_write() {
             })
             .collect();
         assert_eq!(after, want);
+    }
+}
+
+/// Every stock and flow option is an expression text of its variable, under
+/// its own role: the rows are `StockOption::ALL`, so a new option fails here
+/// until a conveyor or a leak holds it.
+#[test]
+fn every_stock_and_flow_option_is_an_expression_text_with_its_role() {
+    let conveyor = Compat {
+        conveyor: Some(Conveyor {
+            transit_time: "len".to_string(),
+            capacity: Some("capacity".to_string()),
+            inflow_limit: Some("in limit".to_string()),
+            sample: Some("sample".to_string()),
+            arrest: Some("arrest".to_string()),
+            discrete: false,
+            batch_integrity: false,
+            one_at_a_time: true,
+            exponential_leak: false,
+            ignore_earlier_zone_losses: false,
+        }),
+        ..Compat::default()
+    };
+    let leak = Compat {
+        leakage: Some(Leakage {
+            fraction: Some("fraction".to_string()),
+            integers: false,
+            zone_start: Some("start".to_string()),
+            zone_end: Some("end".to_string()),
+        }),
+        ..Compat::default()
+    };
+    let mut found: Vec<StockOption> = [conveyor, leak]
+        .iter()
+        .flat_map(|compat| compat.expression_texts())
+        .map(|(role, text)| match role {
+            ExpressionRole::Option(option) => option,
+            ExpressionRole::Equation | ExpressionRole::Initial => {
+                panic!("{text} is an option's text")
+            }
+        })
+        .collect();
+    found.sort();
+    let mut all = StockOption::ALL.to_vec();
+    all.sort();
+    assert_eq!(found, all);
+    for option in StockOption::ALL {
+        assert!(!option.describe().is_empty());
     }
 }

@@ -58,6 +58,16 @@ pub fn open_vensim_with_warnings(contents: &str) -> Result<(Project, Vec<crate::
     mdl::parse_mdl_with_warnings(contents)
 }
 
+/// [`open_vensim_with_warnings`] with an optional DataProvider for resolving
+/// GET DIRECT external data references: the report of a file
+/// [`open_vensim_with_data`] reads.
+pub fn open_vensim_with_data_and_warnings(
+    contents: &str,
+    data_provider: Option<&dyn crate::data_provider::DataProvider>,
+) -> Result<(Project, Vec<crate::ImportWarning>)> {
+    mdl::parse_mdl_with_data_and_warnings(contents, data_provider)
+}
+
 /// Parse a Vensim MDL file with an optional DataProvider for resolving
 /// GET DIRECT external data references (CSV, Excel).
 pub fn open_vensim_with_data(

@@ -12,7 +12,8 @@
 //! regenerates it and compares; `UPDATE_TOOL_CATALOG=1` rewrites it.
 //!
 //! Property order in every schema is declaration order (schemars'
-//! `preserve_order`), so a host that bridges the catalog into a structured
+//! `preserve_order`), except that a tagged variant's tag comes first
+//! (`tag_first`), so a host that bridges the catalog into a structured
 //! generation framework can take a property order from it.
 
 use serde::Serialize;
@@ -40,8 +41,10 @@ pub enum ToolName {
 pub enum ToolEffect {
     /// Reads the project and changes nothing.
     Read,
-    /// Returns a plan for the host to apply; applies nothing itself.
-    PlanEdit,
+    /// Edits the project when its gate passes: the call answers with the
+    /// project as the edit leaves it, which the host makes the project's
+    /// contents.
+    Edit,
 }
 
 impl ToolName {
@@ -149,13 +152,14 @@ impl ToolName {
                  Run it before judging a model."
             }
             ToolName::EditModel => {
-                "Plans an edit to the model -- add stocks, flows and variables, set equations, \
-                 units, notes and lookups, connect flows, rename, delete, name loops, change the \
-                 sim specs -- without applying it. The gate refuses an edit that adds an error, \
-                 stops the model simulating, makes a value not a number, or gives a model its \
-                 first unit warning. A plan that passes gets an id (P1, P2, ...); the person sees \
-                 its changes and decides whether it lands. Read the model first, and again when \
-                 it changed under you."
+                "Edits the model: add stocks, flows and variables, set equations, units, notes \
+                 and lookups, connect flows, rename, delete, name loops, change the sim specs. \
+                 The edit is made when its gate passes, and the answer lists what changed and \
+                 the warnings it added. The gate refuses an edit, changing nothing, that would \
+                 add an error anywhere in the project, leave an error in an equation it writes, \
+                 stop the model simulating, make a value not a number, or give a model its \
+                 first unit warning. Read the model first: an edit of something that changed \
+                 since you read it is refused, naming what changed."
             }
             ToolName::VerifyFindings => {
                 "Checks the evidence of findings before the person sees them. A finding is a \
@@ -182,13 +186,16 @@ impl ToolName {
             | ToolName::AnalyzeLoops
             | ToolName::RunTests
             | ToolName::VerifyFindings => ToolEffect::Read,
-            ToolName::EditModel => ToolEffect::PlanEdit,
+            ToolName::EditModel => ToolEffect::Edit,
         }
     }
 }
 
 /// The catalog as JSON: `{"tools": [{"name", "description", "effect",
-/// "inputSchema", "outputSchema"}, ...]}`, in [`ToolName::ALL`] order.
+/// "inputSchema", "outputSchema"}, ...], "refusalSchema"}`, the tools in
+/// [`ToolName::ALL`] order. `refusalSchema` is the one shape every tool's
+/// refusal has (an answer with `is_error` set), so a host validates a
+/// refusal against it and a tool's result against the tool's `outputSchema`.
 pub fn catalog_json() -> &'static str {
     include_str!("catalog.json")
 }
@@ -215,8 +222,10 @@ pub fn generate_catalog_json() -> String {
     }
 
     #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct Catalog {
         tools: Vec<Entry>,
+        refusal_schema: serde_json::Value,
     }
 
     /// An input's schema describes what the tool deserializes, an output's
@@ -232,7 +241,37 @@ pub fn generate_catalog_json() -> String {
         if let Some(object) = value.as_object_mut() {
             object.remove("$schema");
         }
+        tag_first(&mut value);
         value
+    }
+    /// Each tagged variant's tag (`op`, `cites`: the property its `required`
+    /// names first, which holds a `const`) listed first among its
+    /// properties, where schemars lists it last: a reader, and a model
+    /// writing a call, meets what the object is before its fields.
+    fn tag_first(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                let tag = object
+                    .get("required")
+                    .and_then(|required| required.get(0))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                if let (Some(tag), Some(serde_json::Value::Object(properties))) =
+                    (tag, object.get_mut("properties"))
+                    && properties
+                        .get(&tag)
+                        .is_some_and(|property| property.get("const").is_some())
+                    && let Some(property) = properties.remove(&tag)
+                {
+                    let rest = std::mem::take(properties);
+                    properties.insert(tag, property);
+                    properties.extend(rest);
+                }
+                object.values_mut().for_each(tag_first);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(tag_first),
+            _ => {}
+        }
     }
     fn input<T: schemars::JsonSchema>() -> serde_json::Value {
         schema::<T>(schemars::generate::SchemaSettings::draft2020_12().for_deserialize())
@@ -281,8 +320,11 @@ pub fn generate_catalog_json() -> String {
             }
         })
         .collect();
-    let mut json =
-        serde_json::to_string_pretty(&Catalog { tools }).expect("the catalog serializes");
+    let catalog = Catalog {
+        tools,
+        refusal_schema: output::<super::ToolError>(),
+    };
+    let mut json = serde_json::to_string_pretty(&catalog).expect("the catalog serializes");
     json.push('\n');
     json
 }

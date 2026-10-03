@@ -198,7 +198,19 @@ pub fn parse_mdl(source: &str) -> Result<Project> {
 /// to any of those. From the file: its custom graphs, custom tables and
 /// reports. The project is the one [`parse_mdl`] returns.
 pub fn parse_mdl_with_warnings(source: &str) -> Result<(Project, Vec<ImportWarning>)> {
-    convert_mdl_reporting(source, None).map_err(|e| {
+    parse_mdl_with_data_and_warnings(source, None)
+}
+
+/// [`parse_mdl_with_warnings`] with an optional DataProvider for resolving
+/// GET DIRECT external data references: the report of a file that
+/// [`parse_mdl_with_data`] reads. The report is made as the file is
+/// converted, and the conversion fails on a data reference it cannot
+/// resolve, so a file with such references is reported on only with its data.
+pub fn parse_mdl_with_data_and_warnings(
+    source: &str,
+    data_provider: Option<&dyn crate::data_provider::DataProvider>,
+) -> Result<(Project, Vec<ImportWarning>)> {
+    convert_mdl_reporting(source, data_provider).map_err(|e| {
         Error::new(
             ErrorKind::Import,
             ErrorCode::Generic,

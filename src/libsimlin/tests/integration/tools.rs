@@ -114,18 +114,6 @@ unsafe fn apply(proj: *mut SimlinProject, patch: &Value) {
     expect_no_error(err, "the patch");
 }
 
-/// Land the plan `id` as a host does once the person approves it, and
-/// return the answer: whether it landed, and why not.
-unsafe fn land(session: *mut SimlinToolSession, id: &str) -> Value {
-    let id = CString::new(id).unwrap();
-    let (mut buf, mut len, mut err) = (ptr::null_mut(), 0, ptr::null_mut());
-    simlin_tool_session_land_plan(session, id.as_ptr(), &mut buf, &mut len, &mut err);
-    expect_no_error(err, "landing the plan");
-    let answer = serde_json::from_slice(std::slice::from_raw_parts(buf, len)).expect("JSON");
-    simlin_free(buf);
-    answer
-}
-
 unsafe fn revision_of(proj: *mut SimlinProject) -> u64 {
     let (mut revision, mut err) = (0, ptr::null_mut());
     simlin_project_get_revision(proj, &mut revision, &mut err);
@@ -363,6 +351,64 @@ fn a_session_keeps_its_model_and_project_alive() {
     }
 }
 
+/// A session holds one reference to its model while it lives, and its last
+/// release gives it back: a session that kept it would keep the model, and
+/// through it the project, alive for the life of the process.
+#[test]
+fn a_sessions_last_release_gives_back_its_model() {
+    use std::sync::atomic::Ordering;
+    unsafe {
+        let proj = project();
+        let model = main_model(proj);
+        let refs = |model: *mut SimlinModel| (*model).ref_count.load(Ordering::SeqCst);
+        assert_eq!(refs(model), 1);
+        let session = new_session(model);
+        assert_eq!(refs(model), 2, "the session holds the model");
+        simlin_tool_session_ref(session);
+        simlin_tool_session_unref(session);
+        assert_eq!(refs(model), 2, "a release that is not the last keeps it");
+        simlin_tool_session_unref(session);
+        assert_eq!(refs(model), 1, "the last release gives it back");
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A session whose model the project no longer has is refused by its change
+/// report as by its calls: "nothing changed" would be false of it.
+#[test]
+fn a_change_report_of_a_model_the_project_no_longer_has_is_refused() {
+    unsafe {
+        let proj = project();
+        let other = CString::new("other").unwrap();
+        let mut err = ptr::null_mut();
+        simlin_project_add_model(proj, other.as_ptr(), &mut err);
+        expect_no_error(err, "adding a model");
+        let model = simlin_project_get_model(proj, other.as_ptr(), &mut err);
+        expect_no_error(err, "getting the added model");
+        let session = new_session(model);
+        call(session, "read_model", "{}");
+        // The contents replaced by a project with `main` alone, as a host
+        // reloading its file does.
+        let reloaded = project();
+        simlin_project_replace_contents(proj, reloaded, &mut err);
+        expect_no_error(err, "replacing the contents");
+        simlin_project_unref(reloaded);
+        let (_, refused) = call(session, "read_model", "{}");
+        assert!(
+            refused,
+            "a call refuses the model the project no longer has"
+        );
+        let (mut buf, mut len) = (ptr::null_mut(), 0);
+        simlin_tool_session_get_changes(session, &mut buf, &mut len, &mut err);
+        assert!(buf.is_null());
+        expect_error_code(err, SimlinErrorCode::DoesNotExist, "the change report");
+        simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// A tool call locks the session, the datamodel and the db in that order, and
 /// a patch the datamodel and the db, so calls and edits from two threads
 /// interleave without deadlock: every call answers at a revision some edit
@@ -451,49 +497,57 @@ unsafe fn run_series(session: *mut SimlinToolSession, run: &str, variable: &str)
     series
 }
 
+/// `edit_model` with one operation setting `rate`'s equation.
+unsafe fn edit_rate(session: *mut SimlinToolSession, equation: &str) -> (Value, bool) {
+    call(
+        session,
+        "edit_model",
+        &json!({"summary": "a growth rate", "operations": [
+            {"op": "set_equation", "variable": "rate", "equation": equation}
+        ]})
+        .to_string(),
+    )
+}
+
+/// A tool that edits makes its edit in the call that passes its gate: the
+/// project's contents are the edited ones when the call returns, at a later
+/// revision, and the database with them. An edit the gate refuses changes
+/// nothing.
 #[test]
-fn a_host_lands_a_plan_the_session_made() {
+fn an_edit_is_made_in_the_call_that_passes_its_gate() {
     unsafe {
         let proj = project();
         let model = main_model(proj);
         let session = new_session(model);
         call(session, "read_model", "{}");
-        let (plan, is_error) = call(
-            session,
-            "edit_model",
-            &json!({"summary": "a faster growth rate", "operations": [
-                {"op": "set_equation", "variable": "rate", "equation": "0.2"}
-            ]})
-            .to_string(),
-        );
-        assert!(!is_error, "{plan}");
-        assert_eq!(plan["verdict"], "ready");
-        let id = plan["plan"].as_str().unwrap();
+        let before = run_series(session, "current", "population");
 
         let revision = revision_of(proj);
-        assert_eq!(land(session, id), json!({"landed": true}));
-        assert!(revision_of(proj) > revision, "landing is an edit");
+        let (output, is_error) = edit_rate(session, "0.2");
+        assert!(!is_error, "{output}");
+        assert!(revision_of(proj) > revision, "the edit is a change");
+        assert_eq!(equation_of(proj, "rate"), "0.2");
         let (record, _) = call(session, "read_variables", r#"{"names": ["rate"]}"#);
         assert_eq!(record["variables"][0]["equation"], "0.2");
-        let again = land(session, id);
-        assert_eq!(again["landed"], false, "{again}");
-        assert!(again["reason"].as_str().unwrap().contains("landed already"));
-
-        let unknown = CString::new("P9").unwrap();
-        let (mut buf, mut len, mut err) = (ptr::null_mut(), 0, ptr::null_mut());
-        simlin_tool_session_land_plan(session, unknown.as_ptr(), &mut buf, &mut len, &mut err);
-        expect_error_code(
-            err,
-            SimlinErrorCode::DoesNotExist,
-            "a plan the session lacks",
+        // The database was synced to the edit: the model runs as edited.
+        let after = run_series(session, "current", "population");
+        assert!(after[10] > before[10], "{after:?} {before:?}");
+        assert_eq!(
+            changes(session),
+            Value::Null,
+            "its own edit is no news to it"
         );
-        let mut err = ptr::null_mut();
-        simlin_tool_session_land_plan(session, ptr::null(), &mut buf, &mut len, &mut err);
-        expect_error_code(err, SimlinErrorCode::Generic, "a NULL id");
-        let id = CString::new(id).unwrap();
-        let mut err = ptr::null_mut();
-        simlin_tool_session_land_plan(session, id.as_ptr(), ptr::null_mut(), &mut len, &mut err);
-        expect_error_code(err, SimlinErrorCode::Generic, "a NULL buffer");
+
+        let revision = revision_of(proj);
+        let (output, is_error) = edit_rate(session, "nothing_here * 2");
+        assert!(is_error, "a refused edit is a refusal: {output}");
+        assert_eq!(output["refusedEdit"]["rule"], "errors", "{output}");
+        assert_eq!(
+            revision_of(proj),
+            revision,
+            "an edit the gate refuses is not made: {output}"
+        );
+        assert_eq!(equation_of(proj, "rate"), "0.2");
 
         simlin_tool_session_unref(session);
         simlin_model_unref(model);
@@ -501,64 +555,25 @@ fn a_host_lands_a_plan_the_session_made() {
     }
 }
 
-/// A plan the person's edits since have made wrong does not land: one that
-/// now reads a variable the person deleted, and one of a variable the person
-/// changed. The agent is told why, and plans again.
+/// An edit of a variable the person changed since the session read it is
+/// refused, and the person's edit stands: the agent reads again.
 #[test]
-fn a_plan_the_model_changed_under_does_not_land() {
+fn an_edit_of_what_the_person_changed_since_the_read_is_refused() {
     unsafe {
         let proj = project();
         let model = main_model(proj);
         let session = new_session(model);
         call(session, "read_model", "{}");
-        let plan = |ops: Value| {
-            let (plan, _) = call(
-                session,
-                "edit_model",
-                &json!({"summary": "an edit", "operations": ops}).to_string(),
-            );
-            assert_eq!(plan["verdict"], "ready", "{plan}");
-            plan["plan"].as_str().unwrap().to_string()
-        };
-        apply(proj, &set_bonus("0.05"));
-        call(session, "read_model", "{}");
-        let reads_bonus = plan(json!([
-            {"op": "set_equation", "variable": "rate", "equation": "0.1 + bonus"}
-        ]));
-        // The person deletes what the plan reads.
-        apply(
-            proj,
-            &json!({"models": [{"name": "main", "ops": [
-                {"type": "deleteVariable", "payload": {"ident": "bonus"}}
-            ]}]}),
-        );
-        let answer = land(session, &reads_bonus);
-        assert_eq!(answer["landed"], false, "{answer}");
-        assert!(
-            answer["reason"]
-                .as_str()
-                .unwrap()
-                .contains("no longer passes the gate"),
-            "{answer}"
-        );
-
-        call(session, "read_model", "{}");
-        let sets_rate =
-            plan(json!([{"op": "set_equation", "variable": "rate", "equation": "0.3"}]));
         apply(proj, &set_rate("0.15"));
         assert_ne!(changes(session), Value::Null, "the person's edit is news");
-        let answer = land(session, &sets_rate);
-        assert_eq!(answer["landed"], false, "{answer}");
-        assert!(
-            answer["reason"]
-                .as_str()
-                .unwrap()
-                .contains("rate changed since the plan"),
-            "{answer}"
-        );
-        let (record, _) = call(session, "read_variables", r#"{"names": ["rate"]}"#);
+
+        let revision = revision_of(proj);
+        let (output, is_error) = edit_rate(session, "0.3");
+        assert!(is_error, "{output}");
+        assert_eq!(revision_of(proj), revision, "{output}");
         assert_eq!(
-            record["variables"][0]["equation"], "0.15",
+            equation_of(proj, "rate"),
+            "0.15",
             "the person's edit stands"
         );
 
@@ -596,99 +611,26 @@ unsafe fn equation_of(proj: *mut SimlinProject, variable: &str) -> String {
 /// Whether `a` and `b` share one datamodel, as a copy does until either is
 /// edited.
 unsafe fn share_contents(a: *mut SimlinProject, b: *mut SimlinProject) -> bool {
-    let (a, b) = (
-        (*a).datamodel.lock().unwrap(),
-        (*b).datamodel.lock().unwrap(),
-    );
-    std::ptr::eq::<simlin_engine::datamodel::Project>(&**a, &**b)
+    // One project's lock at a time, as the lock order requires: the datamodel
+    // each holds stays where it is while neither is edited.
+    let datamodel_of = |proj: *mut SimlinProject| {
+        let contents = (*proj).datamodel.lock().unwrap();
+        &**contents as *const simlin_engine::datamodel::Project
+    };
+    datamodel_of(a) == datamodel_of(b)
 }
 
-/// A plan made before the project's contents were replaced -- an undo
-/// restoring a copy, a reload -- is planned again on what the replacement
-/// left, never landed as it was made: it lands keeping what the replacement
-/// changed elsewhere, and is refused when the replacement changed what it
-/// writes.
+/// An edit made on a project an undo copy shares its contents with leaves
+/// the copy as it was: the edit replaces the project's contents, and the
+/// tools that read leave the two sharing until then.
 #[test]
-fn a_plan_made_before_a_replacement_is_planned_again_on_what_it_left() {
+fn an_edit_beside_a_copy_leaves_the_copy_as_it_was() {
     unsafe {
         let proj = project();
         let model = main_model(proj);
         let session = new_session(model);
         call(session, "read_model", "{}");
-        let plan = |equation: &str| {
-            let (plan, _) = call(
-                session,
-                "edit_model",
-                &json!({"summary": "a growth rate", "operations": [
-                    {"op": "set_equation", "variable": "rate", "equation": equation}
-                ]})
-                .to_string(),
-            );
-            assert_eq!(plan["verdict"], "ready", "{plan}");
-            plan["plan"].as_str().unwrap().to_string()
-        };
-        let faster = plan("0.3");
-        let elsewhere = copy_of(proj);
-        apply(
-            elsewhere,
-            &json!({"models": [{"name": "main", "ops": [
-                {"type": "upsertFlow", "payload": {"flow": {
-                    "name": "births", "equation": "population * rate * 1", "units": "person/month"
-                }}}
-            ]}]}),
-        );
-        let before = revision_of(proj);
-        let mut err = ptr::null_mut();
-        simlin_project_replace_contents(proj, elsewhere, &mut err);
-        expect_no_error(err, "replacing the contents");
-        assert!(revision_of(proj) > before, "a replacement is a change");
-        assert_eq!(land(session, &faster), json!({"landed": true}));
-        assert_eq!(equation_of(proj, "rate"), "0.3");
-        assert_eq!(
-            equation_of(proj, "births"),
-            "population * rate * 1",
-            "what the replacement changed stays"
-        );
-
-        call(session, "read_model", "{}");
-        let slower = plan("0.05");
-        let changed = copy_of(proj);
-        apply(changed, &set_rate("0.15"));
-        simlin_project_replace_contents(proj, changed, &mut err);
-        expect_no_error(err, "replacing the contents");
-        let answer = land(session, &slower);
-        assert_eq!(answer["landed"], false, "{answer}");
-        assert_eq!(equation_of(proj, "rate"), "0.15", "the replacement stands");
-
-        simlin_project_unref(changed);
-        simlin_project_unref(elsewhere);
-        simlin_tool_session_unref(session);
-        simlin_model_unref(model);
-        simlin_project_unref(proj);
-    }
-}
-
-/// A plan landed on a project an undo copy shares its contents with leaves
-/// the copy as it was: the landing replaces the project's contents, and tool
-/// calls, which read them, leave the two sharing until then.
-#[test]
-fn a_plan_landed_beside_a_copy_leaves_the_copy_as_it_was() {
-    unsafe {
-        let proj = project();
-        let model = main_model(proj);
-        let session = new_session(model);
-        call(session, "read_model", "{}");
-        let (plan, _) = call(
-            session,
-            "edit_model",
-            &json!({"summary": "faster", "operations": [
-                {"op": "set_equation", "variable": "rate", "equation": "0.3"}
-            ]})
-            .to_string(),
-        );
-        let id = plan["plan"].as_str().unwrap().to_string();
         let copy = copy_of(proj);
-        call(session, "read_model", "{}");
         let (out, is_error) = call(
             session,
             "run_experiment",
@@ -697,11 +639,12 @@ fn a_plan_landed_beside_a_copy_leaves_the_copy_as_it_was() {
         assert!(!is_error, "{out}");
         assert!(
             share_contents(proj, copy),
-            "tool calls read, and copy nothing"
+            "tool calls that read copy nothing"
         );
         let before = revision_of(proj);
-        assert_eq!(land(session, &id), json!({"landed": true}));
-        assert!(revision_of(proj) > before, "landing is an edit");
+        let (output, is_error) = edit_rate(session, "0.3");
+        assert!(!is_error, "{output}");
+        assert!(revision_of(proj) > before, "the edit is a change");
         assert_eq!(equation_of(proj, "rate"), "0.3");
         assert_eq!(
             equation_of(copy, "rate"),
@@ -715,12 +658,6 @@ fn a_plan_landed_beside_a_copy_leaves_the_copy_as_it_was() {
         simlin_model_unref(model);
         simlin_project_unref(proj);
     }
-}
-
-fn set_bonus(equation: &str) -> Value {
-    json!({"models": [{"name": "main", "ops": [
-        {"type": "upsertAux", "payload": {"aux": {"name": "bonus", "equation": equation, "units": "1/month"}}}
-    ]}]})
 }
 
 /// How many loops the host's own structural loop surface reports.

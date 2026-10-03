@@ -29,10 +29,13 @@
 //!
 //! The revision is what a host compares to learn whether a project changed:
 //! equal revisions mean equal contents. The converse does not hold -- a
-//! mutable borrow that ends up changing nothing (a view-only patch that fails
-//! part way, say) still advances it -- which errs the safe way for every
-//! reader, since a spurious advance costs a re-read and a missed one would
-//! serve stale state.
+//! mutable borrow that ends up changing nothing, or a replacement by an equal
+//! datamodel, still advances it -- which errs the safe way for every reader,
+//! since a spurious advance costs a re-read and a missed one would serve
+//! stale state. What is known to change nothing without looking at the
+//! contents is not counted: a replacement by the very datamodel they hold
+//! (`ProjectContents::replace`), and a patch with no operations, which
+//! `simlin_project_apply_patch` applies without a mutable borrow.
 
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
@@ -75,10 +78,20 @@ impl ProjectContents {
         Arc::clone(&self.datamodel)
     }
 
+    /// Whether `datamodel` is the very datamodel these contents hold, as a
+    /// copy's is until either side is edited.
+    pub(crate) fn holds(&self, datamodel: &Arc<datamodel::Project>) -> bool {
+        Arc::ptr_eq(&self.datamodel, datamodel)
+    }
+
     /// Makes `datamodel` these contents, dropping every index and advancing
     /// the revision: a replacement that shares the datamodel it is given
-    /// rather than copying it.
+    /// rather than copying it. The datamodel they hold already is no
+    /// replacement, and changes nothing.
     pub(crate) fn replace(&mut self, datamodel: Arc<datamodel::Project>) {
+        if self.holds(&datamodel) {
+            return;
+        }
         self.hit_indexes.clear();
         self.revision += 1;
         self.datamodel = datamodel;

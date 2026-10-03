@@ -2,9 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! The agent tool surface: the tools an agent uses to read a model, with their
-//! semantics stated once so every host that mounts them answers alike.
-//! libsimlin mounts them for native hosts (`simlin_tool_session_*`).
+//! The agent tool surface: the tools an agent uses to read, run, analyze and
+//! edit a model, with their semantics stated once so every host that mounts
+//! them answers alike. libsimlin mounts them for native hosts
+//! (`simlin_tool_session_*`), and pysimlin through it.
 //!
 //! A host calls a tool by name with JSON input through a [`Session`] bound to
 //! one model and gets JSON back ([`ToolOutput`]); [`catalog_json`] describes
@@ -15,23 +16,32 @@
 //! Rules every tool keeps:
 //!
 //! - **Bounded, quiet results.** No tool returns a whole model or a raw
-//!   series, and an outline that would exceed its budget is outlined by
-//!   sector instead. Success says little.
+//!   series. Every answer, a refusal included, keeps to the session's budget:
+//!   one over it leaves things out, counted or named (an outline is outlined
+//!   by sector instead), and one that is over with everything it can leave
+//!   out left out is refused. Text a caller sent is echoed cut, with its
+//!   length. Success says little.
 //! - **Ids a claim can cite.** A diagnostic or a loop is reported under an id
 //!   that is stable for the life of the session (`evidence`), so an agent can
 //!   refer to "D3" or "L2" across calls and a verifier can check what it
 //!   names.
-//! - **Edits are plans.** No tool changes the project: `edit_model` returns a
-//!   plan the gate passed, which the host lands, once the person approves,
-//!   with `Session::land_plan`: a plan lands by construction, on the project
-//!   as it is then.
-//! - **Refusals are output.** A domain failure -- an unknown variable, input
-//!   that does not match the schema -- is a [`ToolOutput`] with `is_error` set,
-//!   naming the rule and the repair, for the agent to read and answer. Only a
-//!   host's misuse (a tool name the catalog does not list) is an `Err`.
+//! - **An edit is made by its host.** No tool changes the project it is
+//!   given. `edit_model`, the one tool whose effect is an edit
+//!   ([`ToolEffect::Edit`]), answers an edit its gate passed with the project
+//!   as the edit leaves it ([`ToolOutput::edited`]), and the host makes that
+//!   its project's contents in one edit, one step of its undo. The host holds
+//!   the project's contents for the whole call, so nothing changes between
+//!   the gate and the edit.
+//! - **Refusals are output.** `is_error` is set exactly when the call did not
+//!   do what was asked -- input that does not match the schema, an edit of
+//!   what changed since the read, an edit its gate refused -- and the answer
+//!   is then the one refusal shape the catalog publishes, naming the rule
+//!   and the repair, for the agent to read and answer. Only a host's misuse
+//!   (a tool name the catalog does not list) is an `Err`.
 //! - **One owner per decision.** Names resolve through `names`, diagnostics
-//!   are reported through `evidence`, and a model's causal links come from
-//!   [`crate::analysis::model_links`].
+//!   are reported through `evidence`, what a variable reads and what reads
+//!   it come from [`crate::analysis::model_reads`], and a model's causal
+//!   links, which loops are made of, from [`crate::analysis::model_links`].
 //! - **A person's work comes first.** A call that other work on the project
 //!   waits for -- an edit, a run of the model, a read of its diagnostics --
 //!   stops between units
@@ -47,11 +57,13 @@ mod changes;
 mod edit;
 mod evidence;
 mod experiment;
+mod input;
 mod loops;
 mod names;
 mod outline;
 mod runs;
 mod series;
+mod strict_schema;
 mod variables;
 mod verify;
 
@@ -66,8 +78,8 @@ pub use catalog::generate_catalog_json;
 pub use catalog::{ToolEffect, ToolName, catalog_json};
 pub use changes::{ChangedField, ChangedVariable, Changes};
 pub use edit::{
-    ChangeAction, EditModelInput, EditModelOutput, EditOperation, Landing, LookupShape,
-    PlannedChange, PlannedDiagnostic, Verdict,
+    ChangeAction, ChangeLine, EditDiagnostic, EditModelInput, EditModelOutput, EditOperation,
+    GateRule, LookupShape, RefusedEdit,
 };
 pub use evidence::{DiagnosticCategoryName, DiagnosticReport, Severity};
 pub use experiment::{
@@ -90,10 +102,11 @@ pub use series::{
     LeftOut, OmittedElements, Point, ReadBehaviorInput, ReadBehaviorOutput, SeriesCore,
     SeriesSummary, StaleRun,
 };
+pub use strict_schema::{STRICT_FORMATS, StrictCost, strict_cost, strict_input_schema};
 pub use variables::{
     ElementEquation, FindVariablesInput, FindVariablesOutput, LinkPolarityName, LinkRef, Lookup,
-    LookupKind, ModuleRecord, NotFound, ReadVariablesInput, ReadVariablesOutput, VariableKind,
-    VariableMatch, VariableRecord,
+    LookupKind, ModuleRecord, NotFound, ReadVariablesInput, ReadVariablesOutput, StockOptionName,
+    VariableKind, VariableMatch, VariableRecord,
 };
 pub use verify::{
     Citation, CitationFailure, Finding, FindingKind, FindingVerdict, Relation, VerifyFindingsInput,
@@ -150,10 +163,11 @@ impl Workspace<'_> {
     }
 }
 
-/// A tool's answer: JSON, and whether it is a refusal for the agent to read and
-/// repair rather than a result.
+/// A tool's answer: JSON, whether it is a refusal for the agent to read and
+/// repair rather than a result, and for an edit that was made, the project
+/// as it leaves it.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 pub struct ToolOutput {
     pub json: String,
     pub is_error: bool,
@@ -164,6 +178,13 @@ pub struct ToolOutput {
     /// That the host cancelled the call, which stopped and kept nothing
     /// ([`Workspace::cancelled`]): a refusal no host retries.
     pub cancelled: bool,
+    /// The project as the call's edit leaves it: present exactly when a tool
+    /// whose effect is an edit ([`ToolEffect::Edit`]) made one that changes
+    /// the project. The host makes it the project's contents in one edit and
+    /// syncs its database to it; the session already holds what the edit
+    /// changed as read. Absent for every read, every refusal, a call that
+    /// stopped, and an edit that changes nothing.
+    pub edited: Option<datamodel::Project>,
 }
 
 /// A tool name the catalog does not list: the host's mistake, not the agent's,
@@ -178,6 +199,42 @@ impl std::fmt::Display for UnknownTool {
 }
 
 impl std::error::Error for UnknownTool {}
+
+/// How many bytes `answer` is as JSON: what the session's budget is in.
+pub(crate) fn json_len<T: Serialize>(answer: &T) -> usize {
+    serde_json::to_string(answer).map_or(0, |json| json.len())
+}
+
+/// Cut `answer` one step at a time with `cut` until its JSON is within
+/// `budget` bytes, or until `cut` has nothing left to leave out (it answers
+/// `false`); whether it fits. The one loop answers are fitted by: each tool
+/// says only what it leaves out, in what order, and how it counts it.
+pub(crate) fn fit<T: Serialize>(
+    answer: &mut T,
+    budget: usize,
+    mut cut: impl FnMut(&mut T) -> bool,
+) -> bool {
+    while json_len(answer) > budget {
+        if !cut(answer) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The most characters of a refusal's reason: what it says of the rule it
+/// broke and the repair, and what a reason the engine wrote at length is cut
+/// to.
+pub(crate) const MAX_REFUSAL_CHARS: usize = 2_000;
+
+/// The most names an answer lists of a set it reports (readers, variables
+/// that changed), the rest counted.
+pub(crate) const MAX_NAMED: usize = 12;
+
+/// Whether a count is zero: what an answer leaves out of its JSON.
+pub(crate) fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
 
 /// The outline budget, in bytes of the outline's JSON: roughly 3,000 tokens.
 /// An outline over it is outlined by sector instead.
@@ -194,7 +251,6 @@ pub struct Session {
     evidence: evidence::Evidence,
     last_read: Option<changes::ReadSnapshot>,
     runs: runs::RunStore,
-    plans: edit::PlanStore,
     checks: battery::CheckLog,
     outline_budget: usize,
 }
@@ -208,7 +264,6 @@ impl Session {
             evidence: evidence::Evidence::default(),
             last_read: None,
             runs: runs::RunStore::default(),
-            plans: edit::PlanStore::default(),
             checks: battery::CheckLog::default(),
             outline_budget: OUTLINE_BUDGET,
         }
@@ -239,7 +294,7 @@ impl Session {
             self.evidence = evidence;
         }
         Ok(if cancelled {
-            ToolOutput::refusal(&ToolError::cancelled())
+            ToolOutput::cancelled()
         } else {
             output
         })
@@ -248,31 +303,45 @@ impl Session {
     /// Answer a call of the tool `name`.
     fn answer(&mut self, ws: &mut Workspace<'_>, name: ToolName, input: &str) -> ToolOutput {
         if let Err(interrupted) = ws.yield_point() {
-            return ToolOutput::refusal(&interrupted);
+            return ToolOutput::refusal(&interrupted, self.outline_budget);
         }
+        let budget = self.outline_budget;
         match name {
-            ToolName::ReadModel => {
-                respond(name, input, |input| outline::read_model(self, ws, input))
-            }
-            ToolName::ReadVariables => respond(name, input, |input| {
+            ToolName::ReadModel => respond(name, input, budget, |input| {
+                outline::read_model(self, ws, input)
+            }),
+            ToolName::ReadVariables => respond(name, input, budget, |input| {
                 variables::read_variables(self, ws, input)
             }),
-            ToolName::FindVariables => respond(name, input, |input| {
-                variables::find_variables(ws, &self.model_name, input)
+            ToolName::FindVariables => respond(name, input, budget, |input| {
+                variables::find_variables(ws, &self.model_name, input, self.outline_budget)
             }),
-            ToolName::RunExperiment => respond(name, input, |input| {
+            ToolName::RunExperiment => respond(name, input, budget, |input| {
                 experiment::run_experiment(self, ws, input)
             }),
-            ToolName::ReadBehavior => {
-                respond(name, input, |input| series::read_behavior(self, ws, input))
+            ToolName::ReadBehavior => respond(name, input, budget, |input| {
+                series::read_behavior(self, ws, input)
+            }),
+            ToolName::ListRuns => respond(name, input, budget, |input| {
+                runs::list_runs(self, ws, input)
+            }),
+            ToolName::AnalyzeLoops => respond(name, input, budget, |input| {
+                loops::analyze_loops(self, ws, input)
+            }),
+            ToolName::RunTests => respond(name, input, budget, |input| {
+                battery::run_tests(self, ws, input)
+            }),
+            ToolName::EditModel => {
+                let mut edited = None;
+                let mut output = respond(name, input, budget, |input| {
+                    let (output, project) = edit::edit_model(self, ws, input)?;
+                    edited = project;
+                    Ok(output)
+                });
+                output.edited = edited;
+                output
             }
-            ToolName::ListRuns => respond(name, input, |input| runs::list_runs(self, ws, input)),
-            ToolName::AnalyzeLoops => {
-                respond(name, input, |input| loops::analyze_loops(self, ws, input))
-            }
-            ToolName::RunTests => respond(name, input, |input| battery::run_tests(self, ws, input)),
-            ToolName::EditModel => respond(name, input, |input| edit::edit_model(self, ws, input)),
-            ToolName::VerifyFindings => respond(name, input, |input| {
+            ToolName::VerifyFindings => respond(name, input, budget, |input| {
                 verify::verify_findings(self, ws, input)
             }),
         }
@@ -312,10 +381,32 @@ impl Session {
     /// the revision it was made at, whether it is stale, whether it is gone
     /// (stale, with its results no longer kept), the run it started from, and
     /// everything it changed from the model. "current", the model as it is,
-    /// is always there and is not listed.
-    pub fn runs(&mut self, ws: &Workspace<'_>) -> Vec<RunListing> {
-        let model = resolve_datamodel_model(ws.project, &self.model_name);
-        self.runs.listing(ws, model)
+    /// is always there and is not listed. `project` is the contents at
+    /// `revision`; the listing reads them alone, never the database, so a
+    /// host lists runs while another call holds it.
+    pub fn runs(&mut self, project: &datamodel::Project, revision: u64) -> Vec<RunListing> {
+        let model = resolve_datamodel_model(project, &self.model_name);
+        self.runs.listing(project, revision, model)
+    }
+
+    /// The results of the run named `name` when the session keeps them, read
+    /// from `project`, the contents at `revision`, without the database:
+    /// what a host reads first, so a read of a run made earlier waits for no
+    /// one's work. `None` for a run that must be made (the current run of a
+    /// model changed since, or a run whose results were dropped), which
+    /// [`Session::run_results`] makes.
+    pub fn kept_run_results(
+        &mut self,
+        project: &datamodel::Project,
+        revision: u64,
+        name: &str,
+    ) -> Option<RunResults> {
+        let (run, stale) = self.runs.kept(project, revision, name)?;
+        Some(RunResults {
+            results: run.results.clone(),
+            revision: run.revision,
+            stale,
+        })
     }
 
     /// Forget the named run `name`, its results and its plan, as when the
@@ -332,53 +423,39 @@ impl Session {
         Ok(self.runs.forget(name.trim()))
     }
 
-    /// Land the plan `edit_model` gave the id `id` on the project as `ws`
-    /// has it: the project as the plan leaves it, for the host to make its
-    /// contents in one edit, or why it cannot land there, for the agent to
-    /// plan again. `None` for an id the session never gave, or a plan it
-    /// has forgotten (it keeps the last 16).
-    ///
-    /// A plan lands by construction: at the revision it was planned at, its
-    /// patch, gated against those very contents; at another, planned again
-    /// on the contents as they are, and landed only when what it writes is
-    /// as it was, the gate passes again and its lines are the ones the
-    /// person approved. The host holds the project's contents for the call,
-    /// so nothing lands between the check and the edit.
-    pub fn land_plan(&mut self, ws: Workspace<'_>, id: &str) -> Option<Landing> {
-        let (landing, cancelled) = checkpointed(ws, |ws| edit::land_plan(self, ws, id));
-        match landing {
-            Some(Landing::Refused(_)) if cancelled => {
-                Some(Landing::Refused(ToolError::cancelled().error))
-            }
-            landing => landing,
-        }
-    }
-
     /// What changed in the model's variables and sim specs since this
     /// session's last `read_model`, or `None` before the first read and when
     /// nothing did: what a host tells an agent about the person's work before
     /// its next turn. The revision alone cannot say, since a layout-only
     /// change advances it and changes no variable.
     ///
-    /// What the session's own plans left, once a host landed them, is the
-    /// agent's work and not news to it, so a variable or the sim specs as one
-    /// of its plans would leave them is left out; a change the person made
-    /// after the plan landed is reported.
+    /// What the session's own edits changed is the agent's work and not news
+    /// to it: the session holds it as read from the moment the edit is made,
+    /// so it is no change here; a change someone else makes afterwards is
+    /// reported.
     ///
     /// `project` at `revision` is the project as it is now, as a
-    /// [`Workspace`] carries it.
+    /// [`Workspace`] carries it. A project that no longer has the session's
+    /// model is refused, naming the models it has, as every tool refuses it:
+    /// "nothing changed" would be false of it.
     pub fn changes_since_read(
         &self,
         project: &datamodel::Project,
         revision: u64,
-    ) -> Option<Changes> {
-        let snapshot = self.last_read.as_ref()?;
+    ) -> Result<Option<Changes>, String> {
+        let Some(model) = resolve_datamodel_model(project, &self.model_name) else {
+            return Err(model_not_found(project, &self.model_name).error);
+        };
+        let Some(snapshot) = self.last_read.as_ref() else {
+            return Ok(None);
+        };
+        // An optimization: a host's revision is equal exactly when the
+        // contents are, so the diff at the read's revision is empty.
         if snapshot.revision == revision {
-            return None;
+            return Ok(None);
         }
-        let model = resolve_datamodel_model(project, &self.model_name)?;
-        let changes = changes::diff(snapshot, project, model, &self.plans);
-        (!changes.is_empty()).then_some(changes)
+        let changes = changes::diff(snapshot, project, model);
+        Ok((!changes.is_empty()).then_some(changes))
     }
 }
 
@@ -448,11 +525,17 @@ impl From<ToolError> for RunUnavailable {
     }
 }
 
-/// A refusal: what rule the call broke and how to repair it.
+/// A refusal: what rule the call broke and how to repair it. Every tool
+/// refuses in this one shape, which the catalog publishes beside the tools'
+/// own schemas (`refusalSchema`).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "Refusal", deny_unknown_fields))]
 pub(crate) struct ToolError {
+    /// The rule the call broke, and the repair.
     error: String,
+    /// Names the call may have meant: variables, models or runs.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     suggestions: Vec<String>,
     /// That the call stopped for other work on the project and kept nothing:
@@ -465,6 +548,10 @@ pub(crate) struct ToolError {
     /// host calls it again.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     cancelled: bool,
+    /// For an edit its gate refused: the rule that refused it and what the
+    /// edit would have done, for the agent to repair its operations.
+    #[serde(rename = "refusedEdit", skip_serializing_if = "Option::is_none")]
+    refused_edit: Option<Box<edit::RefusedEdit>>,
 }
 
 impl ToolError {
@@ -474,6 +561,7 @@ impl ToolError {
             suggestions: vec![],
             interrupted: false,
             cancelled: false,
+            refused_edit: None,
         }
     }
 
@@ -506,8 +594,14 @@ impl ToolError {
         }
     }
 
+    /// The refusal with names the call may have meant: at most
+    /// [`MAX_NAMED`], each as an answer echoes a name.
     pub(crate) fn with_suggestions(mut self, suggestions: Vec<String>) -> ToolError {
-        self.suggestions = suggestions;
+        self.suggestions = suggestions
+            .iter()
+            .take(MAX_NAMED)
+            .map(|name| evidence::echo(name))
+            .collect();
         self
     }
 
@@ -524,16 +618,12 @@ impl ToolError {
 fn respond<I: DeserializeOwned, O: Serialize>(
     name: ToolName,
     input: &str,
+    budget: usize,
     run: impl FnOnce(I) -> Result<O, ToolError>,
 ) -> ToolOutput {
     let text = if input.trim().is_empty() { "{}" } else { input };
-    let result = serde_json::from_str::<I>(text)
-        .map_err(|err| {
-            ToolError::new(format!(
-                "the input does not match {}'s schema: {err}",
-                name.name()
-            ))
-        })
+    let result = input::parse::<I>(text)
+        .map_err(|err| mismatch(name, err))
         .and_then(run);
     match result {
         Ok(output) => ToolOutput {
@@ -541,9 +631,39 @@ fn respond<I: DeserializeOwned, O: Serialize>(
             is_error: false,
             interrupted: false,
             cancelled: false,
+            edited: None,
         },
-        Err(error) => ToolOutput::refusal(&error),
+        Err(error) => ToolOutput::refusal(&error, budget),
     }
+}
+
+/// The refusal of input that is not what `tool` takes, naming where in the
+/// input the mismatch is ([`input::parse`]). The parser's reason repeats
+/// what the input holds there (a field's name, a string), so it and the
+/// place are echoed as any caller's text is ([`evidence::echo`]).
+fn mismatch(tool: ToolName, mismatch: input::Mismatch) -> ToolError {
+    let tool = tool.name();
+    ToolError::new(match mismatch {
+        input::Mismatch::NotJson(reason) => {
+            format!(
+                "the input to {tool} is not JSON: {}",
+                evidence::echo(&reason)
+            )
+        }
+        input::Mismatch::NotInput { path, reason } if path.is_empty() => {
+            format!(
+                "the input does not match {tool}'s schema: {}",
+                evidence::echo(&reason)
+            )
+        }
+        input::Mismatch::NotInput { path, reason } => {
+            format!(
+                "the input does not match {tool}'s schema at `{}`: {}",
+                evidence::echo(&path),
+                evidence::echo(&reason)
+            )
+        }
+    })
 }
 
 impl ToolOutput {
@@ -552,15 +672,41 @@ impl ToolOutput {
     /// as a call does that waited for its session, answers without making the
     /// call.
     pub fn cancelled() -> ToolOutput {
-        ToolOutput::refusal(&ToolError::cancelled())
+        ToolOutput::refusal(&ToolError::cancelled(), OUTLINE_BUDGET)
     }
 
-    fn refusal(error: &ToolError) -> ToolOutput {
+    /// `error` as an answer within `budget` bytes. Every refusal is built to
+    /// its budget (echoed names, fitted edits); a reason the engine wrote at
+    /// length (a compile message naming a model's every variable) is cut to
+    /// [`MAX_REFUSAL_CHARS`] here, and under a budget smaller still its
+    /// suggestions are left out and then its reason is halved, down to
+    /// [`evidence::ECHO_CHARS`].
+    fn refusal(error: &ToolError, budget: usize) -> ToolOutput {
+        let mut error = error.clone();
+        if error.error.chars().count() > MAX_REFUSAL_CHARS {
+            error.error = evidence::window(&error.error, 0, 0, MAX_REFUSAL_CHARS);
+        }
+        fit(&mut error, budget, |error| {
+            if error.suggestions.pop().is_some() {
+                return true;
+            }
+            // A cut reason ends with an ellipsis, so it is halved only while
+            // that leaves more than the floor: a cut that cannot shrink it
+            // would never end.
+            let length = error.error.chars().count();
+            if length / 2 < evidence::ECHO_CHARS {
+                return false;
+            }
+            error.error = evidence::window(&error.error, 0, 0, length / 2);
+            true
+        });
+        let error = &error;
         ToolOutput {
             json: serde_json::to_string(error).expect("refusals serialize"),
             is_error: true,
             interrupted: error.interrupted,
             cancelled: error.cancelled,
+            edited: None,
         }
     }
 }
@@ -579,6 +725,18 @@ pub(crate) fn resolve_datamodel_model<'a>(
     })
 }
 
+/// The refusal of a session whose model `name` the project does not have,
+/// suggesting the models it has.
+fn model_not_found(project: &datamodel::Project, name: &str) -> ToolError {
+    let names: Vec<String> = project
+        .models
+        .iter()
+        .filter(|m| m.macro_spec.is_none() && !m.name.starts_with("stdlib\u{205A}"))
+        .map(|m| m.name.clone())
+        .collect();
+    ToolError::new(format!("the project has no model named '{name}'")).with_suggestions(names)
+}
+
 /// A session's model in both representations: the datamodel a tool reads text
 /// from and the salsa handles it runs queries against.
 pub(crate) struct ResolvedModel<'a> {
@@ -595,15 +753,7 @@ pub(crate) fn resolve_model<'p>(
     db: &SimlinDb,
     name: &str,
 ) -> Result<ResolvedModel<'p>, ToolError> {
-    let not_found = || {
-        let names: Vec<String> = project
-            .models
-            .iter()
-            .filter(|m| m.macro_spec.is_none() && !m.name.starts_with("stdlib\u{205A}"))
-            .map(|m| m.name.clone())
-            .collect();
-        ToolError::new(format!("the project has no model named '{name}'")).with_suggestions(names)
-    };
+    let not_found = || model_not_found(project, name);
     let model = resolve_datamodel_model(project, name).ok_or_else(not_found)?;
     let source_project = db.current_source_project().ok_or_else(|| {
         ToolError::new(

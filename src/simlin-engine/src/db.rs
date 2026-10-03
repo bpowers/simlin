@@ -139,6 +139,7 @@ pub use dep_graph::{
 };
 
 mod ltm;
+pub(crate) use ltm::model_pinned_loops;
 use ltm::*;
 pub use ltm::{
     LtmArm, LtmEquation, LtmImplicitVarMeta, ShapedLinkScore, compile_ltm_var_fragment,

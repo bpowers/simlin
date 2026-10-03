@@ -15,10 +15,10 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double};
 use std::ptr;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Mutex;
 
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
+use crate::lock_order::{OrderedMutex, Rank};
 use crate::{
     clear_out_error, drop_c_string, ffi_error_from_engine, require_model, require_sim, store_error,
     store_ffi_error, SimState, SimlinErrorCode, SimlinModel, SimlinSim,
@@ -63,20 +63,14 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ptr = model_ref.project;
     let project_ref = &*project_ptr;
 
-    // Lock the datamodel before the db -- the order `get_errors`/`apply_patch`
-    // use, so no site can invert it and deadlock -- because the shared dispatch
-    // `queue_compile::compile_sim` needs both: the datamodel drives the
-    // conveyor/queue marker scan and the expansion, the db holds the salsa inputs
-    // both branches compile against.
-    //
-    // Holding BOTH for the whole compile is deliberate, not incidental. The prior
-    // code took them SEQUENTIALLY (datamodel for the marker scan, released, then db
-    // for the compile), so a concurrent `apply_patch` could commit in between and
-    // the build would proceed on a stale marker verdict -- a TOCTOU. The cost is
-    // that datamodel readers block for the length of a compile; the db lock was
-    // already held that long, and a compile is exactly what it exists to serialize.
-    let datamodel_locked = project_ref.datamodel.lock().unwrap();
-    let mut db_locked = project_ref.lock_db_with(&datamodel_locked);
+    // The shared dispatch `queue_compile::compile_sim` needs both the contents
+    // (the conveyor/queue marker scan and the expansion) and the db (the salsa
+    // inputs both branches compile against), and the two must agree: a build
+    // on a marker verdict from one revision and inputs from another is wrong.
+    // `lock_contents_and_db` hands out such a pair, which stays one for as
+    // long as the db is held, with the datamodel lock released, so its
+    // readers do not wait for the compile.
+    let (contents, mut db_locked) = project_ref.lock_contents_and_db();
 
     // Salsa-based incremental compilation. Both LTM and non-LTM paths use the
     // same pipeline, keyed on the requested overlay, so the two variants stay
@@ -119,7 +113,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             let result = engine::queue_compile::compile_sim(
                 db,
                 source_project,
-                &datamodel_locked,
+                &contents,
                 &model_ref.model_name,
                 engine::db::LtmOverlay::from(enable_ltm),
             );
@@ -212,27 +206,29 @@ pub unsafe extern "C" fn simlin_sim_new(
         Err(err) => (None, None, Some(err), None, None),
     };
 
-    // Release both locks before the (lock-free) handle construction below.
+    // Release the db before the (lock-free) handle construction below.
     drop(db_locked);
-    drop(datamodel_locked);
 
     crate::model_ref(model);
     let sim = Box::new(SimlinSim {
         model: model_ref as *const _,
         enable_ltm,
-        state: Mutex::new(SimState {
-            compiled,
-            vm,
-            vm_error,
-            results: None,
-            overrides: HashMap::new(),
-            loop_partitions: captured_loop_partitions,
-            loop_element_index: captured_loop_element_index,
-            ltm_mode: captured_ltm_mode,
-            cached_rel_loop_scores: None,
-            conveyor_plans,
-            queue_plans,
-        }),
+        state: OrderedMutex::new(
+            Rank::SimState,
+            SimState {
+                compiled,
+                vm,
+                vm_error,
+                results: None,
+                overrides: HashMap::new(),
+                loop_partitions: captured_loop_partitions,
+                loop_element_index: captured_loop_element_index,
+                ltm_mode: captured_ltm_mode,
+                cached_rel_loop_scores: None,
+                conveyor_plans,
+                queue_plans,
+            },
+        ),
         ref_count: AtomicUsize::new(1),
     });
 

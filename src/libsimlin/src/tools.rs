@@ -16,65 +16,15 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
 
 use simlin_engine::tools;
 
 use crate::ffi_error::SimlinError;
+use crate::lock_order::{OrderedMutex, Rank};
 use crate::{
     clear_out_error, require_model, store_anyhow_error, store_error, write_bytes_to_ffi_output,
     SimlinErrorCode, SimlinModel, SimlinResults,
 };
-
-#[cfg(test)]
-type ToolTestHook = std::sync::Arc<dyn Fn(&crate::SimlinProject) + Send + Sync + 'static>;
-
-#[cfg(test)]
-static TOOL_TEST_HOOK: std::sync::Mutex<Option<ToolTestHook>> = std::sync::Mutex::new(None);
-
-/// Held by each installed hook's guard, so tests that install one run one at
-/// a time: there is one hook for every call.
-#[cfg(test)]
-static TOOL_TEST_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Runs `hook` inside every tool call made while the guard lives, at the point
-/// a call holds the database and has released the datamodel: what a test of
-/// the call's locks waits at.
-#[cfg(test)]
-pub(crate) fn install_tool_test_hook(hook: ToolTestHook) -> ToolTestHookGuard {
-    let lock = TOOL_TEST_HOOK_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *TOOL_TEST_HOOK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
-    ToolTestHookGuard { _lock: lock }
-}
-
-#[cfg(test)]
-pub(crate) struct ToolTestHookGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl Drop for ToolTestHookGuard {
-    fn drop(&mut self) {
-        *TOOL_TEST_HOOK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    }
-}
-
-#[cfg(test)]
-fn invoke_tool_test_hook(project: &crate::SimlinProject) {
-    let hook = TOOL_TEST_HOOK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    if let Some(hook) = hook {
-        hook(project);
-    }
-}
 
 /// One agent's work on one model: the evidence ids it has been given, what it
 /// last read, and the runs it made (`simlin_engine::tools::Session`), over the
@@ -82,14 +32,18 @@ fn invoke_tool_test_hook(project: &crate::SimlinProject) {
 pub struct SimlinToolSession {
     /// Counted: the session keeps its model, and through it the project, alive.
     model: *const SimlinModel,
-    session: Mutex<tools::Session>,
+    session: OrderedMutex<tools::Session>,
     ref_count: AtomicUsize,
-    /// How many calls have begun: each takes the count as its ticket as it
-    /// begins, before it waits for the session.
+    /// How many times the session's calls have been cancelled
+    /// (`simlin_tool_session_cancel`). A call reads it as it begins, before it
+    /// waits for the session, and is cancelled once it reads anything else:
+    /// a cancel covers exactly the calls that began before it, however many
+    /// cancels race.
+    cancellations: AtomicU64,
+    /// How many calls have begun on the session, the ones waiting for it
+    /// included: what a test waits on before it cancels them.
+    #[cfg(test)]
     calls_begun: AtomicU64,
-    /// A call whose ticket is below this was cancelled
-    /// (`simlin_tool_session_cancel`).
-    cancelled_below: AtomicU64,
 }
 
 #[cfg(test)]
@@ -153,10 +107,11 @@ pub unsafe extern "C" fn simlin_tool_session_new(
     crate::model_ref(model);
     Box::into_raw(Box::new(SimlinToolSession {
         model: model_ref as *const SimlinModel,
-        session: Mutex::new(tools::Session::new(&model_ref.model_name)),
+        session: OrderedMutex::new(Rank::Session, tools::Session::new(&model_ref.model_name)),
         ref_count: AtomicUsize::new(1),
+        cancellations: AtomicU64::new(0),
+        #[cfg(test)]
         calls_begun: AtomicU64::new(0),
-        cancelled_below: AtomicU64::new(0),
     }))
 }
 
@@ -206,23 +161,46 @@ unsafe fn require_session<'a>(
 /// for the agent to read: a host hands it back as the tool's result, never as
 /// an exception that ends the agent's turn.
 ///
-/// A call reads the project as it is when the call starts, at that revision.
-/// It holds the session for the call, and the project's datamodel only while
-/// it takes the contents it answers from (shared, not copied) and their
-/// revision: it then answers under the database lock alone, so a host's hit
-/// tests, planners and revision reads, which lock only the datamodel, never
-/// wait behind an analysis. An entry point that holds the datamodel and waits
-/// for the database meanwhile -- an edit landing (`simlin_project_apply_patch`,
-/// or an undo's `simlin_project_replace_contents`), a simulation
-/// (`simlin_sim_new`), a read of the diagnostics, the others
-/// `SimlinProject::waiting_for_db` lists -- keeps those readers waiting with
-/// it, so the call stops for it between units of its work (a slice of a
-/// simulation, a stage of an analysis) and answers a refusal with `"interrupted": true` that
-/// kept nothing: the entry point waits at most one unit. A host that retries
-/// by itself does so once that work is done -- after an edit, at the next
-/// revision -- and never in a loop against a project that stays busy. A call
-/// its host cancels (`simlin_tool_session_cancel`) stops at the same points
-/// and answers a refusal with `"cancelled": true`, which no host retries.
+/// One entry point, two lock footprints, chosen by the tool's effect
+/// (`simlin_engine::tools::ToolName::effect`) before any lock is taken.
+///
+/// A tool that reads answers the project as it is when the call starts, at
+/// that revision. It holds the session for the call, and the project's
+/// datamodel only while it takes the contents it answers from (shared, not
+/// copied) and their revision: it then answers under the database lock alone,
+/// so a host's hit tests, planners and revision reads, which lock only the
+/// datamodel, never wait behind an analysis. Any other entry point that waits
+/// for the database meanwhile is the person's work, or an edit: an edit
+/// landing (`simlin_project_apply_patch`, an undo's
+/// `simlin_project_replace_contents`, a call of a tool that edits), a
+/// simulation (`simlin_sim_new`), a read of the diagnostics and the others
+/// `SimlinProject::waiting_for_db` lists, which hold the datamodel while they
+/// wait and so keep those readers waiting with them, and a query that takes
+/// the database alone (an equation's rendering, the model's links). So the
+/// call stops for it between units of its work (a slice of a simulation, a
+/// stage of an analysis) and answers a refusal with `"interrupted": true`
+/// that kept nothing: the entry point waits at most one unit. A host that
+/// retries by itself does so once that work is done -- after an edit, at the
+/// next revision -- and never in a loop against a project that stays busy.
+///
+/// A tool that edits (`edit_model`) is a writer, as
+/// `simlin_project_apply_patch` is: it holds the session, the datamodel and
+/// the database for the whole call, so nothing lands between its gate and its
+/// edit, and when the gate passes it makes the edit before it returns
+/// (`simlin_engine::tools::ToolOutput::edited`), the database synced to the
+/// edited project and the contents replaced by it under both locks, which
+/// advances the revision. An edit its gate refuses is a refusal, with
+/// `out_is_error` set; it and an edit that changes nothing leave the project
+/// and its revision as they were. It stops for no other work (it is the work
+/// others wait for), and counts itself among the waiters a
+/// reading call stops for from before it waits for the session: a call on the
+/// same session holds the session for the whole call, and one on another the
+/// database, so either stops at its next checkpoint rather than keep the edit
+/// waiting for the rest of it.
+///
+/// A call its host cancels (`simlin_tool_session_cancel`) stops at its
+/// checkpoints and answers a refusal with `"cancelled": true`, which no host
+/// retries.
 ///
 /// # Safety
 /// - `session` must be a valid pointer to a SimlinToolSession
@@ -292,44 +270,38 @@ pub unsafe extern "C" fn simlin_tool_session_call(
         );
         return;
     };
+    // The host's mistake, told before any lock is taken: the tool's effect
+    // is what says which locks the call takes.
+    let unknown_tool = |unknown: tools::UnknownTool| {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(unknown.to_string()),
+        );
+    };
+    let Some(tool) = tools::ToolName::from_name(name) else {
+        unknown_tool(tools::UnknownTool(name.to_string()));
+        return;
+    };
 
-    // Taken before the call waits for the session, so a cancel made while it
+    // Read before the call waits for the session, so a cancel made while it
     // waits covers it.
-    let ticket = session_ref.calls_begun.fetch_add(1, Ordering::SeqCst);
+    let cancellations = &session_ref.cancellations;
+    let began_at = cancellations.load(Ordering::SeqCst);
+    #[cfg(test)]
+    session_ref.calls_begun.fetch_add(1, Ordering::SeqCst);
+    let cancelled = || cancellations.load(Ordering::SeqCst) != began_at;
     let project = &*(*session_ref.model).project;
-    let mut tool_session = session_ref.session.lock().unwrap();
-    let cancelled_below = &session_ref.cancelled_below;
-    let cancelled = || ticket < cancelled_below.load(Ordering::SeqCst);
-    // A call cancelled while it waited for the session answers now, before it
-    // waits for the database, which another session's call may hold. A tool
-    // the catalog lacks is still the host's mistake.
-    let output = if cancelled() && tools::ToolName::from_name(name).is_some() {
-        tools::ToolOutput::cancelled()
-    } else {
-        let (contents, revision, mut db) = snapshot(project);
-        #[cfg(test)]
-        invoke_tool_test_hook(project);
-        let waiting = || project.is_waited_on();
-        let workspace = tools::Workspace {
-            project: &contents,
-            db: &mut db,
-            revision,
-            waiting: Some(&waiting),
-            cancelled: Some(&cancelled),
-        };
-        match tool_session.call(workspace, name, input) {
-            Ok(output) => output,
-            Err(unknown) => {
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::DoesNotExist)
-                        .with_message(unknown.to_string()),
-                );
-                return;
-            }
+    let answered = match tool.effect() {
+        tools::ToolEffect::Read => answer_read(session_ref, project, name, input, &cancelled),
+        tools::ToolEffect::Edit => answer_edit(session_ref, project, name, input, &cancelled),
+    };
+    let output = match answered {
+        Ok(output) => output,
+        Err(unknown) => {
+            unknown_tool(unknown);
+            return;
         }
     };
-    drop(tool_session);
     if write_bytes_to_ffi_output(
         output.json.as_bytes(),
         out_buf,
@@ -341,6 +313,87 @@ pub unsafe extern "C" fn simlin_tool_session_call(
     }
 }
 
+/// Answer a call of a tool that reads: the session held for the call, and
+/// the project's contents and database taken as a reader takes them
+/// ([`snapshot`]), so the call answers under the database alone and stops for
+/// work that waits for it.
+fn answer_read(
+    session: &SimlinToolSession,
+    project: &crate::SimlinProject,
+    name: &str,
+    input: &str,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<tools::ToolOutput, tools::UnknownTool> {
+    let mut tool_session = session.session.lock().unwrap();
+    // A call cancelled while it waited for the session answers now, before it
+    // waits for the database, which another session's call may hold.
+    if cancelled() {
+        return Ok(tools::ToolOutput::cancelled());
+    }
+    let (contents, revision, mut db) = snapshot(project);
+    #[cfg(test)]
+    crate::invoke_db_section_test_hook(project);
+    let waiting = || project.is_waited_on();
+    let workspace = tools::Workspace {
+        project: &contents,
+        db: &mut db,
+        revision,
+        waiting: Some(&waiting),
+        cancelled: Some(cancelled),
+    };
+    let output = tool_session.call(workspace, name, input)?;
+    // Only a tool that edits hands back a project, and this path makes no
+    // edit: one handed back here would be dropped.
+    debug_assert!(
+        output.edited.is_none(),
+        "{name} reads, and handed back an edited project"
+    );
+    Ok(output)
+}
+
+/// Answer a call of a tool that edits, and make its edit: the session, the
+/// datamodel and the database held for the whole call, in that order, as an
+/// edit landing holds them, so the gate judges the very contents the edit
+/// then replaces.
+fn answer_edit(
+    session: &SimlinToolSession,
+    project: &crate::SimlinProject,
+    name: &str,
+    input: &str,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<tools::ToolOutput, tools::UnknownTool> {
+    // Counted until it holds the database, which no reading call then does.
+    let waiting = project.count_waiting();
+    let mut tool_session = session.session.lock().unwrap();
+    // A call cancelled while it waited for the session answers now, before it
+    // waits for the project, whose database another session's call may hold.
+    if cancelled() {
+        return Ok(tools::ToolOutput::cancelled());
+    }
+    let mut datamodel = project.datamodel.lock().unwrap();
+    let mut db = project.lock_db_with(&datamodel);
+    drop(waiting);
+    let revision = datamodel.revision();
+    // It is the work other calls stop for, so it stops for none.
+    let workspace = tools::Workspace {
+        project: &datamodel,
+        db: &mut db,
+        revision,
+        waiting: None,
+        cancelled: Some(cancelled),
+    };
+    let mut output = tool_session.call(workspace, name, input)?;
+    // The gate staged on the database and restored it, so it is synced to
+    // the contents the call was given. The edit: the database synced to the
+    // project the call's edit leaves, then the contents replaced by it, which
+    // advances the revision.
+    if let Some(edited) = output.edited.take() {
+        db.sync(&edited);
+        datamodel.replace(std::sync::Arc::new(edited));
+    }
+    Ok(output)
+}
+
 /// Cancel the session's tool calls under way -- the one answering and any
 /// waiting for the session -- as a host does when what they were for is gone,
 /// such as the window whose analysis a call runs: each stops at its next
@@ -349,17 +402,17 @@ pub unsafe extern "C" fn simlin_tool_session_call(
 /// with `"cancelled": true` that kept nothing, which a host does not retry. A
 /// call made after this returns runs as usual. It returns at once, without
 /// waiting for the calls to stop, and takes no lock, so any thread may make
-/// it, one inside a call included. It cancels only `simlin_tool_session_call`:
-/// a host's own reads of the session's runs and a landing, the person's own
-/// act, go on. A NULL `session` is a no-op.
+/// it, one inside a call included. It cancels only `simlin_tool_session_call`,
+/// a call of a tool that edits included, which is cancelled before its edit
+/// is made or not at all: a host's own reads of the session's runs go on. A
+/// NULL `session` is a no-op.
 ///
 /// # Safety
 /// - `session` must be a valid pointer to a SimlinToolSession, or NULL
 #[no_mangle]
 pub unsafe extern "C" fn simlin_tool_session_cancel(session: *mut SimlinToolSession) {
     if let Some(session) = session.as_ref() {
-        let begun = session.calls_begun.load(Ordering::SeqCst);
-        session.cancelled_below.fetch_max(begun, Ordering::SeqCst);
+        session.cancellations.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -453,9 +506,10 @@ fn snapshot(
 /// and whether the sim specs changed -- as UTF-8 JSON to a buffer the caller
 /// frees with `simlin_free`, or `null` before the first read and when nothing
 /// did. A view edit changes nothing an agent read, so it is no change here,
-/// and what the session's own plans left once landed is the agent's work, not
-/// news to it. What a host tells an agent about the person's work before its
-/// next turn.
+/// and what the session's own edits left is the agent's work, not news to it.
+/// What a host tells an agent about the person's work before its next turn.
+/// A project that no longer has the session's model fails with
+/// `DoesNotExist`, as the session's tool calls refuse it.
 ///
 /// # Safety
 /// - `session` must be a valid pointer to a SimlinToolSession
@@ -489,120 +543,18 @@ pub unsafe extern "C" fn simlin_tool_session_get_changes(
     let changes = tool_session.changes_since_read(&datamodel, datamodel.revision());
     drop(datamodel);
     drop(tool_session);
-    let json = serde_json::to_vec(&changes).expect("a change report serializes");
-    write_bytes_to_ffi_output(&json, out_buf, out_len, out_error, "a change report");
-}
-
-/// Land the plan `edit_model` gave the id `id` on the project as it is, once
-/// the person approves it: the one way an agent's edit reaches a project.
-/// Writes `{"landed": true}`, or `{"landed": false, "reason": ...}` when it
-/// cannot land there, as UTF-8 JSON to a buffer the caller frees with
-/// `simlin_free`; a refusal is for the agent to read, which plans the edit
-/// again. `DoesNotExist` for an id the session never gave, or a plan it has
-/// forgotten (it keeps the last 16).
-///
-/// The plan lands by construction, under the datamodel lock held for the
-/// whole call, so nothing lands between the check and the edit: at the
-/// revision it was planned at, its patch, which the session's gate passed
-/// against those very contents; at another, the plan's operations planned
-/// again on the contents as they are, landed only when everything the plan
-/// writes is as it was when the plan was made, the gate passes again, and
-/// the plan comes out with the lines the person approved. A person's diagram
-/// edits meanwhile are kept. The gate is the session's own (errors the model
-/// had are tolerated, a new error or value that is not a number refused), so
-/// no host passes `allow_errors`. Landing advances the revision as any edit
-/// does. Locks the session, then the datamodel, then the database, and counts
-/// itself among the waiters a call stops for from before it waits for the
-/// session: a call on the same session holds the session for the whole call,
-/// and one on another the database, so either stops at its next checkpoint
-/// rather than keep the person's approved edit waiting for the rest of it.
-///
-/// # Safety
-/// - `session` must be a valid pointer to a SimlinToolSession
-/// - `id` must be a valid C string
-/// - `out_buf` and `out_len` must be valid pointers
-#[no_mangle]
-pub unsafe extern "C" fn simlin_tool_session_land_plan(
-    session: *mut SimlinToolSession,
-    id: *const c_char,
-    out_buf: *mut *mut u8,
-    out_len: *mut usize,
-    out_error: *mut *mut SimlinError,
-) {
-    clear_out_error(out_error);
-    if out_buf.is_null() || out_len.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("output pointers must not be NULL"),
-        );
-        return;
-    }
-    let session_ref = match require_session(session) {
-        Ok(s) => s,
-        Err(err) => {
-            store_error(out_error, err);
-            return;
-        }
-    };
-    if id.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("plan id pointer must not be NULL"),
-        );
-        return;
-    }
-    let Ok(id) = CStr::from_ptr(id).to_str() else {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic).with_message("plan id is not valid UTF-8"),
-        );
-        return;
-    };
-    let project = &*(*session_ref.model).project;
-    // Counted until it holds the database, which no call then does.
-    let waiting = project.count_waiting();
-    let mut tool_session = session_ref.session.lock().unwrap();
-    let mut datamodel = project.datamodel.lock().unwrap();
-    let mut db = project.lock_db_with(&datamodel);
-    drop(waiting);
-    let revision = datamodel.revision();
-    // The person's own approval: nothing it waits for is theirs, so it does
-    // not stop.
-    let workspace = tools::Workspace {
-        project: &datamodel,
-        db: &mut db,
-        revision,
-        waiting: None,
-        cancelled: None,
-    };
-    let landing = tool_session.land_plan(workspace, id);
-    let answer = match landing {
-        None => {
+    let changes = match changes {
+        Ok(changes) => changes,
+        Err(reason) => {
             store_error(
                 out_error,
-                SimlinError::new(SimlinErrorCode::DoesNotExist)
-                    .with_message(format!("the session has no plan '{id}'")),
+                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(reason),
             );
             return;
         }
-        Some(tools::Landing::Landed(contents)) => {
-            // The edit: the database synced to the plan's contents, then the
-            // contents replaced by them, which advances the revision.
-            db.sync(&contents);
-            datamodel.replace(std::sync::Arc::from(contents));
-            serde_json::json!({"landed": true})
-        }
-        Some(tools::Landing::Refused(reason)) => {
-            serde_json::json!({"landed": false, "reason": reason})
-        }
     };
-    drop(db);
-    drop(datamodel);
-    drop(tool_session);
-    let json = serde_json::to_vec(&answer).expect("a landing serializes");
-    write_bytes_to_ffi_output(&json, out_buf, out_len, out_error, "a landing");
+    let json = serde_json::to_vec(&changes).expect("a change report serializes");
+    write_bytes_to_ffi_output(&json, out_buf, out_len, out_error, "a change report");
 }
 
 /// The results of the session's run named `name` -- `"current"` for the model
@@ -616,6 +568,8 @@ pub unsafe extern "C" fn simlin_tool_session_land_plan(
 /// simulate. A read that must simulate stops, as a tool call does, for an
 /// edit or a simulation that waits for the project, and keeps nothing: NULL
 /// with `Interrupted`, for a host that reads it again once that work is done.
+/// A run the session keeps the results of is read from the contents alone,
+/// so it waits for no work on the database, another session's call among it.
 /// The handle holds a copy of the run's series.
 ///
 /// # Safety
@@ -656,17 +610,29 @@ pub unsafe extern "C" fn simlin_tool_session_get_run(
 
     let project = &*(*session_ref.model).project;
     let mut tool_session = session_ref.session.lock().unwrap();
-    let (contents, revision, mut db) = snapshot(project);
-    let waiting = || project.is_waited_on();
-    let workspace = tools::Workspace {
-        project: &contents,
-        db: &mut db,
-        revision,
-        waiting: Some(&waiting),
-        cancelled: None,
+    // A run the session keeps is read from the contents alone, so the read
+    // waits for no one's work on the database (another session's call among
+    // it); only a run that must be made takes the database.
+    let (contents, revision) = {
+        let datamodel = project.datamodel.lock().unwrap();
+        (datamodel.shared(), datamodel.revision())
     };
-    let results = tool_session.run_results(workspace, name);
-    drop(db);
+    let results = match tool_session.kept_run_results(&contents, revision, name) {
+        Some(kept) => Ok(kept),
+        None => {
+            drop(contents);
+            let (contents, revision, mut db) = snapshot(project);
+            let waiting = || project.is_waited_on();
+            let workspace = tools::Workspace {
+                project: &contents,
+                db: &mut db,
+                revision,
+                waiting: Some(&waiting),
+                cancelled: None,
+            };
+            tool_session.run_results(workspace, name)
+        }
+    };
     drop(tool_session);
     match results {
         Ok(run) => {
@@ -705,7 +671,8 @@ pub unsafe extern "C" fn simlin_tool_session_get_run(
 /// `{"variable", "value" | "elements" | "equation", "tableDropped"?,
 /// "fromTime"?}`, and the specs it set (`start`, `stop`, `dt`, `method`).
 /// The run `"current"`, the model as it is, is always there and is not
-/// listed. What a host's run list, chart picker and "run again" read.
+/// listed. What a host's run list, chart picker and "run again" read. Locks
+/// the session and, to take the contents, the datamodel; never the database.
 ///
 /// # Safety
 /// - `session` must be a valid pointer to a SimlinToolSession
@@ -735,16 +702,13 @@ pub unsafe extern "C" fn simlin_tool_session_list_runs(
     };
     let project = &*(*session_ref.model).project;
     let mut tool_session = session_ref.session.lock().unwrap();
-    let (contents, revision, mut db) = snapshot(project);
-    let workspace = tools::Workspace {
-        project: &contents,
-        db: &mut db,
-        revision,
-        waiting: None,
-        cancelled: None,
+    // The listing reads the contents alone, shared and released before it is
+    // made: it waits for no one's work on the database, and builds none.
+    let (contents, revision) = {
+        let datamodel = project.datamodel.lock().unwrap();
+        (datamodel.shared(), datamodel.revision())
     };
-    let runs = tool_session.runs(&workspace);
-    drop(db);
+    let runs = tool_session.runs(&contents, revision);
     drop(tool_session);
     let json = serde_json::to_vec(&runs).expect("a run listing serializes");
     write_bytes_to_ffi_output(&json, out_buf, out_len, out_error, "a run listing");

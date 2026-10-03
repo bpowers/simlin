@@ -617,23 +617,12 @@ pub unsafe extern "C" fn simlin_analyze_discover_loops(
         Some(std::time::Duration::from_millis(budget_ms))
     };
 
-    // `analyze_model` needs the datamodel project (for the model snapshot and
-    // UID resolution) plus a `&mut SimlinDb` and the current `SourceProject`.
-    // Lock both: the datamodel guard outlives the call, and `analyze_model`
-    // sets `ltm_discovery_mode` on the shared `SourceProject` and restores it
-    // before returning, so the db state stays clean.
-    let datamodel_guard = match (*model_ref.project).datamodel.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message("project datamodel lock poisoned"),
-            );
-            return ptr::null_mut();
-        }
-    };
-    let mut db_locked = (*model_ref.project).lock_db_with(&datamodel_guard);
+    // `analyze_model` needs the contents (for the model snapshot and UID
+    // resolution) plus a `&mut SimlinDb` synced to them and the current
+    // `SourceProject`. It sets `ltm_discovery_mode` on the shared
+    // `SourceProject` and restores it before returning, under the db lock it
+    // is given, so no other entry point sees the mode set.
+    let (contents, mut db_locked) = (*model_ref.project).lock_contents_and_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {
@@ -646,7 +635,7 @@ pub unsafe extern "C" fn simlin_analyze_discover_loops(
     };
 
     let analysis = match engine::analysis::analyze_model(
-        &datamodel_guard,
+        &contents,
         &mut db_locked,
         source_project,
         &model_ref.model_name,
@@ -662,7 +651,6 @@ pub unsafe extern "C" fn simlin_analyze_discover_loops(
         }
     };
     drop(db_locked);
-    drop(datamodel_guard);
 
     discovery_to_ffi(analysis, out_error)
 }

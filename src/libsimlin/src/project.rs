@@ -605,8 +605,10 @@ pub unsafe extern "C" fn simlin_project_get_model(
 ///
 /// `src`'s datamodel lock is taken alone, just long enough to share its
 /// datamodel, and released BEFORE `dst`'s locks are acquired -- so two threads
-/// replacing in opposite directions cannot deadlock, and `dst == src` (a
-/// permitted no-op re-sync) does not self-deadlock. `dst`'s datamodel and db
+/// replacing in opposite directions cannot deadlock, and `dst == src` does not
+/// self-deadlock. Replacing `dst`'s contents with the datamodel it already
+/// holds -- `dst == src`, or a copy that still shares it -- changes nothing:
+/// the revision stays, and the db is not touched. `dst`'s datamodel and db
 /// locks are then held together, in the datamodel-then-db order used
 /// project-wide, across both the db re-sync and the datamodel swap, so no
 /// concurrent reader (`simlin_sim_new`, `simlin_project_get_errors`,
@@ -640,6 +642,12 @@ pub unsafe extern "C" fn simlin_project_replace_contents(
     let new_datamodel = src_ref.datamodel.lock().unwrap().shared();
 
     let mut datamodel_locked = dst_ref.datamodel.lock().unwrap();
+    // The datamodel `dst` holds already (`dst == src`, or a copy that still
+    // shares it) is no change: nothing to sync, and nothing to wait for the
+    // db for.
+    if datamodel_locked.holds(&new_datamodel) {
+        return;
+    }
     let mut db_locked = dst_ref.built_db();
     if let Some(db) = &mut db_locked {
         db.sync(&new_datamodel);
@@ -651,7 +659,8 @@ pub unsafe extern "C" fn simlin_project_replace_contents(
 ///
 /// Parses and imports a system dynamics model from XMILE format, the industry
 /// standard interchange format for system dynamics models. Also supports the
-/// STMX variant used by Stella.
+/// STMX variant used by Stella. The reader does not keep everything a file can
+/// hold; `simlin_import_losses` reports what it leaves out of these bytes.
 ///
 /// Returns NULL and populates `out_error` on failure.
 ///
@@ -665,50 +674,7 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     len: usize,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinProject {
-    simlin_project_open_xmile_with_warnings(data, len, ptr::null_mut(), out_error)
-}
-
-/// Open a project from XMILE/STMX format data, also reporting what the file
-/// holds that the project does not keep
-///
-/// The same open as `simlin_project_open_xmile`. The XMILE reader does not
-/// keep everything a file can hold: the objects on a view besides its
-/// diagram (a graph, a text box), interface pages, story mode, a standalone
-/// graphical function. So a save of the project, over the file or in any
-/// other format, leaves those out, and a host that saves needs to say so
-/// when the file opens.
-///
-/// Each kind of loss, in each place it occurs, is one `Warning`-severity,
-/// wire-`Generic`, kind-`Model` detail on the aggregate `SimlinError` stored
-/// in `out_collected_errors` (NULL when the file loses nothing; pass NULL to
-/// discard them, and the open then costs what `simlin_project_open_xmile`
-/// costs). `message` is `"XMILE import: <reason>"` and `details` the bare
-/// reason, such as `2 sliders on interface page 1 are not kept: 'Birth Rate'
-/// and 'Population'`. The aggregate's own message counts the losses by kind
-/// over the whole file, for a host to show where a row per place would be
-/// too many: `3 graphs, 2 sliders, and 1 text box in this file are not
-/// kept`. The warnings describe the file as it was read, and the project
-/// does not keep them, so a host that shows them holds them itself.
-///
-/// Returns NULL and populates `out_error` on failure, with
-/// `out_collected_errors` NULL.
-///
-/// # Safety
-/// - `data` must be a valid pointer to at least `len` bytes
-/// - `out_collected_errors` may be null
-/// - `out_error` may be null
-/// - The returned project must be freed with `simlin_project_unref`
-#[no_mangle]
-pub unsafe extern "C" fn simlin_project_open_xmile_with_warnings(
-    data: *const u8,
-    len: usize,
-    out_collected_errors: *mut *mut SimlinError,
-    out_error: *mut *mut SimlinError,
-) -> *mut SimlinProject {
     clear_out_error(out_error);
-    if !out_collected_errors.is_null() {
-        *out_collected_errors = ptr::null_mut();
-    }
     if data.is_null() {
         store_error(
             out_error,
@@ -721,23 +687,8 @@ pub unsafe extern "C" fn simlin_project_open_xmile_with_warnings(
     let slice = std::slice::from_raw_parts(data, len);
     let mut reader = BufReader::new(slice);
 
-    // A caller that discards the warnings does not pay for them.
-    let opened = if out_collected_errors.is_null() {
-        simlin_engine::open_xmile(&mut reader).map(|project| (project, Vec::new()))
-    } else {
-        simlin_engine::open_xmile_with_warnings(&mut reader)
-    };
-    match opened {
-        Ok((datamodel_project, warnings)) => {
-            let summary = simlin_engine::ImportWarning::summary(&warnings);
-            store_warnings(
-                out_collected_errors,
-                "XMILE import",
-                warnings.into_iter().map(|w| w.message),
-                summary,
-            );
-            Box::into_raw(Box::new(SimlinProject::new(datamodel_project)))
-        }
+    match simlin_engine::open_xmile(&mut reader) {
+        Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
                 out_error,
@@ -751,7 +702,10 @@ pub unsafe extern "C" fn simlin_project_open_xmile_with_warnings(
 
 /// Open a project from Vensim MDL format data
 ///
-/// Parses and imports a system dynamics model from Vensim's MDL format.
+/// Parses and imports a system dynamics model from Vensim's MDL format. The
+/// reader does not keep everything a file can hold; `simlin_import_losses`
+/// reports what it leaves out of these bytes.
+///
 /// Returns NULL and populates `out_error` on failure.
 ///
 /// # Safety
@@ -764,52 +718,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     len: usize,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinProject {
-    simlin_project_open_vensim_with_warnings(data, len, ptr::null_mut(), out_error)
-}
-
-/// Open a project from Vensim MDL format data, also reporting what the file
-/// holds that the project does not keep
-///
-/// The same open as `simlin_project_open_vensim`. The MDL reader does not
-/// keep everything a file can hold: a sketch's comments, graphs, sliders and
-/// images, and the custom graphs, tables and reports the file defines. So a
-/// save of the project, over the file or in any other format, leaves those
-/// out, and a host that saves needs to say so when the file opens.
-///
-/// Each kind of loss is one `Warning`-severity, wire-`Generic`, kind-`Model`
-/// detail on the aggregate `SimlinError` stored in `out_collected_errors`
-/// (NULL when the file loses nothing; pass NULL to discard them, and the
-/// open then costs what `simlin_project_open_vensim` costs): one per kind
-/// and sketch view for what a modeler put on a view, and one per kind over
-/// the whole sketch for what follows from what the diagram does not draw
-/// (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is `"MDL
-/// import: <reason>"` and `details` the bare reason, such as `29 comments on
-/// view 'View 1' are not kept, such as 'The World3 Model'`. The aggregate's
-/// own message counts the losses by kind over the whole file, for a host to
-/// show where a row per place would be too many: `29 comments, 3 graphs, and
-/// 7 sliders in this file are not kept`. The warnings describe the file as
-/// it was read, and the project does not keep them, so a host that shows
-/// them holds them itself.
-///
-/// Returns NULL and populates `out_error` on failure, with
-/// `out_collected_errors` NULL.
-///
-/// # Safety
-/// - `data` must be a valid pointer to at least `len` bytes
-/// - `out_collected_errors` may be null
-/// - `out_error` may be null
-/// - The returned project must be freed with `simlin_project_unref`
-#[no_mangle]
-pub unsafe extern "C" fn simlin_project_open_vensim_with_warnings(
-    data: *const u8,
-    len: usize,
-    out_collected_errors: *mut *mut SimlinError,
-    out_error: *mut *mut SimlinError,
-) -> *mut SimlinProject {
     clear_out_error(out_error);
-    if !out_collected_errors.is_null() {
-        *out_collected_errors = ptr::null_mut();
-    }
     if data.is_null() {
         store_error(
             out_error,
@@ -832,23 +741,8 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_warnings(
         }
     };
 
-    // A caller that discards the warnings does not pay for them.
-    let opened = if out_collected_errors.is_null() {
-        simlin_engine::open_vensim(contents).map(|project| (project, Vec::new()))
-    } else {
-        simlin_engine::open_vensim_with_warnings(contents)
-    };
-    match opened {
-        Ok((datamodel_project, warnings)) => {
-            let summary = simlin_engine::ImportWarning::summary(&warnings);
-            store_warnings(
-                out_collected_errors,
-                "MDL import",
-                warnings.into_iter().map(|w| w.message),
-                summary,
-            );
-            Box::into_raw(Box::new(SimlinProject::new(datamodel_project)))
-        }
+    match simlin_engine::open_vensim(contents) {
+        Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
                 out_error,
@@ -857,6 +751,171 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_warnings(
             );
             ptr::null_mut()
         }
+    }
+}
+
+/// Report what a file holds that a project opened from it does not keep
+///
+/// The MDL and XMILE readers do not keep everything a file can hold: a
+/// Vensim sketch's comments, graphs, sliders and images, and the custom
+/// graphs, tables and reports the file defines; an XMILE view's objects
+/// besides its diagram (a graph, a text box), interface pages, story mode, a
+/// standalone graphical function. So a save of the project, over the file or
+/// in any other format, leaves those out, and a host that saves needs to say
+/// so when the file opens. The report is of the file, whichever function
+/// opens it (`simlin_project_open_xmile`, `simlin_project_open_vensim`,
+/// `simlin_project_open_vensim_with_data`), so it is one function beside the
+/// opens rather than a variant of each.
+///
+/// What it covers is what the engine's readers report
+/// (`simlin_engine::ImportWarning`): for MDL the sketch and the file's custom
+/// outputs, for XMILE what the reader skips among the variables, the views
+/// and the stories. A NULL report says the file loses none of those, not
+/// that the project holds everything the file says.
+///
+/// `format` is the file's, as `SimlinSaveFormat` numbers them: `Mdl` (0) or
+/// `Xmile` (1). The engine reports on no other format, and another is
+/// refused with `Generic` rather than answered as if it lost nothing.
+///
+/// `data_dir` (NULL for none; read only with the `file_io` feature) is the
+/// directory `simlin_project_open_vensim_with_data` is given. The MDL report
+/// is made as the file is converted, and the conversion fails on a GET DIRECT
+/// reference it cannot resolve, so a file with such references is reported
+/// on only with its data, exactly as it opens only with it. An XMILE report
+/// reads no data.
+///
+/// Each kind of loss, in each place it occurs, is one `Warning`-severity,
+/// wire-`Generic`, kind-`Model` detail on the aggregate `SimlinError` stored
+/// in `out_collected_errors` (NULL when the file loses nothing): for MDL, one
+/// per kind and sketch view for what a modeler put on a view, and one per
+/// kind over the whole sketch for what follows from what the diagram does
+/// not draw (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is
+/// `"MDL import: <reason>"` or `"XMILE import: <reason>"` and `details` the
+/// bare reason, such as `29 comments on view 'View 1' are not kept, such as
+/// 'The World3 Model'` or `2 sliders on interface page 1 are not kept:
+/// 'Birth Rate' and 'Population'`. The aggregate's own message counts the
+/// losses by kind over the whole file, for a host to show where a row per
+/// place would be too many: `29 comments, 3 graphs, and 7 sliders in this
+/// file are not kept`. The report describes the file as it was read, and no
+/// project keeps it, so a host that shows it holds it itself.
+///
+/// A file that does not read populates `out_error`, as the open of it does,
+/// with `out_collected_errors` NULL.
+///
+/// # Safety
+/// - `data` must be a valid pointer to at least `len` bytes
+/// - `data_dir` may be null; when non-null it must point to `data_dir_len`
+///   bytes of valid UTF-8 representing a directory path
+/// - `out_collected_errors` must be a valid pointer
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_import_losses(
+    format: u32,
+    data: *const u8,
+    len: usize,
+    data_dir: *const u8,
+    data_dir_len: usize,
+    out_collected_errors: *mut *mut SimlinError,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_collected_errors.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("out_collected_errors pointer must not be NULL"),
+        );
+        return;
+    }
+    *out_collected_errors = ptr::null_mut();
+    if data.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("data pointer must not be NULL"),
+        );
+        return;
+    }
+    let slice = std::slice::from_raw_parts(data, len);
+    let data_dir = if data_dir.is_null() {
+        None
+    } else {
+        match std::str::from_utf8(std::slice::from_raw_parts(data_dir, data_dir_len)) {
+            Ok(dir) => Some(dir),
+            Err(_) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("data_dir is not valid UTF-8"),
+                );
+                return;
+            }
+        }
+    };
+
+    let (source, read) = match ffi::SimlinSaveFormat::try_from(format) {
+        Ok(ffi::SimlinSaveFormat::Mdl) => {
+            let Ok(contents) = std::str::from_utf8(slice) else {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("MDL data is not valid UTF-8"),
+                );
+                return;
+            };
+            #[cfg(feature = "file_io")]
+            let provider = data_dir.map(simlin_engine::FilesystemDataProvider::new);
+            #[cfg(feature = "file_io")]
+            let provider = provider
+                .as_ref()
+                .map(|provider| provider as &dyn simlin_engine::DataProvider);
+            #[cfg(not(feature = "file_io"))]
+            let provider = {
+                let _ = data_dir;
+                None
+            };
+            (
+                "MDL",
+                simlin_engine::open_vensim_with_data_and_warnings(contents, provider)
+                    .map(|(_, warnings)| warnings),
+            )
+        }
+        Ok(ffi::SimlinSaveFormat::Xmile) => (
+            "XMILE",
+            simlin_engine::open_xmile_with_warnings(&mut BufReader::new(slice))
+                .map(|(_, warnings)| warnings),
+        ),
+        Ok(
+            ffi::SimlinSaveFormat::Json
+            | ffi::SimlinSaveFormat::JsonSdai
+            | ffi::SimlinSaveFormat::Protobuf,
+        )
+        | Err(()) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
+                    "no report of what an import does not keep for format {format}: \
+                     the formats reported on are MDL (0) and XMILE (1)"
+                )),
+            );
+            return;
+        }
+    };
+    match read {
+        Ok(warnings) => {
+            let summary = simlin_engine::ImportWarning::summary(&warnings);
+            store_warnings(
+                out_collected_errors,
+                &format!("{source} import"),
+                warnings.into_iter().map(|w| w.message),
+                summary,
+            );
+        }
+        Err(err) => store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::from(err.code))
+                .with_message(format!("failed to import {source}: {err}")),
+        ),
     }
 }
 
@@ -1035,19 +1094,17 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
         }
     };
 
-    // Lock the datamodel before the db (the order `get_errors`/`apply_patch`
-    // use) so `build_sim` can route a conveyor/queue model through its special
-    // expansion build path -- which needs the datamodel -- rather than tripping
-    // the `Conveyor/QueueNotExpanded` guard on the ordinary compile path.
-    let datamodel_locked = proj.datamodel.lock().unwrap();
-    let mut db_locked = proj.lock_db_with(&datamodel_locked);
+    // `build_sim` reads the contents as well as the db, to route a
+    // conveyor/queue model through its special expansion build path rather
+    // than trip the `Conveyor/QueueNotExpanded` guard on the ordinary one.
+    let (contents, mut db_locked) = proj.lock_contents_and_db();
     let Some(source_project) = db_locked.current_source_project() else {
         return false;
     };
     engine::build_sim(
         &mut db_locked,
         source_project,
-        &datamodel_locked,
+        &contents,
         model_name,
         engine::db::LtmOverlay::Off,
     )
@@ -1079,8 +1136,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         }
     };
 
-    let datamodel_locked = proj.datamodel.lock().unwrap();
-    let mut db_locked = proj.lock_db_with(&datamodel_locked);
+    let (contents, mut db_locked) = proj.lock_contents_and_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => return ptr::null_mut(),
@@ -1098,7 +1154,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     let vm_error = engine::build_sim(
         &mut db_locked,
         source_project,
-        &datamodel_locked,
+        &contents,
         "main",
         engine::db::LtmOverlay::Off,
     )
@@ -1119,7 +1175,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         &db_locked,
         source_project,
         vm_error.as_ref(),
-        &datamodel_locked,
+        &contents,
         engine::db::LtmOverlay::from(ltm_requested),
     );
 

@@ -60,8 +60,8 @@ impl From<DiagnosticSeverity> for Severity {
     }
 }
 
-/// Where a diagnostic was raised: the engine's [`DiagnosticCategory`], named
-/// for a reader.
+/// Where a diagnostic was raised, named for a reader: one per category of
+/// the engine's (`DiagnosticCategory`).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
@@ -196,6 +196,33 @@ impl Evidence {
         format!("D{number}")
     }
 
+    /// The ids of a model's diagnostics, from what identifies each, in the
+    /// order the engine reports them: rows alike in all that identifies them
+    /// are told apart by their place among their like.
+    pub(crate) fn diagnostic_ids(
+        &mut self,
+        identities: impl IntoIterator<Item = DiagnosticIdentity>,
+    ) -> Vec<String> {
+        let mut seen: HashMap<DiagnosticIdentity, usize> = HashMap::new();
+        identities
+            .into_iter()
+            .map(|identity| {
+                let occurrence = *seen
+                    .entry(identity.clone())
+                    .and_modify(|n| *n += 1)
+                    .or_insert(0);
+                let (variable, severity, code, reason) = identity;
+                self.diagnostic_id(DiagnosticKey {
+                    variable,
+                    severity,
+                    code,
+                    reason,
+                    occurrence,
+                })
+            })
+            .collect()
+    }
+
     /// The model's diagnostics as the engine collects them (the model as
     /// written, without the LTM overlay: an analysis's advisories belong to
     /// the analysis), each under its id. Project-level diagnostics, which
@@ -211,30 +238,15 @@ impl Evidence {
                 .into_iter()
                 .filter(|d| d.model.is_empty() || crate::canonicalize(&d.model) == model_name)
                 .collect();
-        let mut seen: HashMap<(Option<String>, Severity, ErrorCode, Option<String>), usize> =
-            HashMap::new();
-        diagnostics
+        let described: Vec<Described> = diagnostics
             .iter()
-            .map(|diagnostic| {
-                let described = describe(diagnostic, ws.project, resolved.model);
-                let occurrence = seen
-                    .entry((
-                        described.variable.clone(),
-                        described.severity,
-                        described.code,
-                        described.engine_reason.clone(),
-                    ))
-                    .and_modify(|n| *n += 1)
-                    .or_insert(0);
-                let id = self.diagnostic_id(DiagnosticKey {
-                    variable: described.variable.clone(),
-                    severity: described.severity,
-                    code: described.code,
-                    reason: described.engine_reason.clone(),
-                    occurrence: *occurrence,
-                });
-                described.report(id, resolved.model)
-            })
+            .map(|diagnostic| describe(diagnostic, ws.project, resolved.model))
+            .collect();
+        let ids = self.diagnostic_ids(described.iter().map(Described::identity));
+        described
+            .into_iter()
+            .zip(ids)
+            .map(|(described, id)| described.report(id, resolved.model))
             .collect()
     }
 }
@@ -275,7 +287,22 @@ pub(crate) struct Described {
     pub reason: Option<String>,
 }
 
+/// What identifies a problem, whatever its place in a report: its variable
+/// (canonical), severity, code and the engine's reason.
+pub(crate) type DiagnosticIdentity = (Option<String>, Severity, ErrorCode, Option<String>);
+
 impl Described {
+    /// What identifies this problem (the fields a diagnostic's id is keyed
+    /// by): two rows alike in all of it are one problem met twice.
+    pub(crate) fn identity(&self) -> DiagnosticIdentity {
+        (
+            self.variable.clone(),
+            self.severity,
+            self.code,
+            self.engine_reason.clone(),
+        )
+    }
+
     /// The report of this diagnostic under `id`, its variable named as
     /// `model` spells it.
     pub(crate) fn report(self, id: String, model: &datamodel::Model) -> DiagnosticReport {
@@ -307,10 +334,55 @@ pub(crate) fn describe(
         severity: Severity::from(diagnostic.severity),
         category: diagnostic.category().into(),
         code: diagnostic.code(),
-        variable: formatted.variable_name,
+        // A project-level problem (a unit's declaration) names no variable
+        // of any model: the engine puts the unit's name where a variable's
+        // goes, which no tool takes back, and the reason names the unit.
+        variable: formatted
+            .variable_name
+            .filter(|_| !diagnostic.model.is_empty()),
         engine_reason,
         reason,
     }
+}
+
+/// `text`, an engine message, with each name of a hidden variable the
+/// compiler made said as what it stands for: one the special-stock build
+/// added (`$conv$belt$len`, "the transit time of the conveyor 'belt'",
+/// `conveyor_compile::describe_helper`), and one a parse made for a call or
+/// an argument (`$⁚x⁚0⁚smth1`, "the SMTH1 in 'x'", `capture::synthetic_parent`),
+/// with whatever of the instance it reads (`·output`). An agent can pass no
+/// such name back to a tool, and wrote none of them.
+pub(crate) fn explain_helpers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        // A helper's name runs to the first character no name of one holds;
+        // it starts with the `$` itself, so it is never empty.
+        let end = tail
+            .char_indices()
+            .find(|&(_, c)| {
+                !(c.is_alphanumeric() || matches!(c, '_' | '$' | '⁚' | '\u{00B7}' | ','))
+            })
+            .map_or(tail.len(), |(i, _)| i);
+        let name = tail[..end].trim_end_matches(',');
+        let end = name.len();
+        let helper = name.split('\u{00B7}').next().unwrap_or(name);
+        let described = crate::conveyor_compile::describe_helper(name).or_else(|| {
+            crate::capture::synthetic_parent(helper).map(|(parent, part)| {
+                if part.starts_with("arg") {
+                    format!("a part of the equation of '{parent}'")
+                } else {
+                    format!("the {} in '{parent}'", part.to_uppercase())
+                }
+            })
+        });
+        out.push_str(described.as_deref().unwrap_or(name));
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A variable's name as the model spells it, for a name the engine reports
@@ -370,6 +442,24 @@ fn quoted_span(
 /// The most characters a quote of an equation or units string carries: an
 /// equation can run to thousands, and a quote says where, not what.
 pub(crate) const QUOTE_CHARS: usize = 240;
+
+/// The most characters an answer repeats of text a caller sent (a name, a
+/// summary, a value a refusal is about): enough to say which, never the
+/// whole of a long one.
+pub(crate) const ECHO_CHARS: usize = 120;
+
+/// `text`, which the caller sent, as an answer repeats it: whole when it has
+/// at most [`ECHO_CHARS`] characters, else its start ([`window`]) with its
+/// length, so an answer says what it is about without echoing what an agent
+/// wrote at whatever length it wrote it. The one owner of quoting a caller.
+pub(crate) fn echo(text: &str) -> String {
+    let length = text.chars().count();
+    if length <= ECHO_CHARS {
+        text.to_string()
+    } else {
+        format!("{} ({length} characters)", window(text, 0, 0, ECHO_CHARS))
+    }
+}
 
 /// `text` when it has at most `limit` characters, else the `limit` characters
 /// around the byte range `start..end` (the start when it is empty), with `…`

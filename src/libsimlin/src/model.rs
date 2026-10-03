@@ -128,11 +128,10 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
 
     let project_ref = &*model_ref.project;
     let build = {
-        // Edits and VM creation take these locks in the same order. Keep both
-        // until the snapshot is assembled so special-stock dispatch cannot
-        // observe markers from a different revision than its source inputs.
-        let datamodel = project_ref.datamodel.lock().unwrap();
-        let mut db = project_ref.lock_db_with(&datamodel);
+        // The contents and the db synced to them, as VM creation takes them,
+        // so special-stock dispatch cannot observe markers from a different
+        // revision than its source inputs.
+        let (datamodel, mut db) = project_ref.lock_contents_and_db();
         if let Some(source_project) = db.current_source_project() {
             if ltm_enabled {
                 project_ref

@@ -17,7 +17,7 @@ Python bindings for [Simlin](https://simlin.com), a system dynamics simulation e
   editor writes to the model file and follows changes made to it
 - Import Vensim `.vdf` binary output as DataFrames
 - Give an AI agent the engine's modeling tools -- read a model, run
-  experiments, analyze loops, test, plan edits, check the evidence for its
+  experiments, analyze loops, test, edit the model, check the evidence for its
   claims -- with a `ToolSession`, and evaluate agents on the same tools
 - Generate SVG and PNG diagrams of the model's structure
 - Full type hints
@@ -664,7 +664,7 @@ is not comparable across targets at all.)
 
 `simlin.ToolSession` gives an agent the engine's tool surface: reading a
 model, running what-if experiments, analyzing loops, running validation
-tests, planning edits, and checking the evidence behind its findings. Each
+tests, editing the model, and checking the evidence behind its findings. Each
 tool takes and answers JSON-shaped data, and `simlin.tools.catalog()` lists
 every tool with its description and the JSON Schema of its input and
 output, ready to hand to a model's tool-use API. An evaluation harness
@@ -697,25 +697,26 @@ the person's work on the project was waiting for it says so
 (`ToolOutput.interrupted`) and kept nothing: call it again once that work
 is done, not in a loop.
 
-`edit_model` plans an edit without applying it: the plan says what would
-change and whether the model would still simulate. `land()` lands a ready
-plan, and the project commits it as it does `model.edit()` (a file-backed
-model writes it back to its file). A plan made before the model changed is
-planned again on the model as it is; when what it changes has changed, or
-it would no longer pass the engine's checks, it does not land, and says
-why.
+`edit_model` edits the model in the one call, when the engine's checks pass:
+its answer says what changed and whether the model still simulates, and the
+project commits the edit as it does `model.edit()` (its revision moves, and
+a file-backed model writes it back to its file). An edit the checks refuse
+is a refusal like any other (`is_error`): it changes nothing, and says which
+check refused it and why, for the agent to fix its operations and call
+again. A catalog entry's `effect` (`"read"` or `"edit"`) says which tools
+can change a model.
 
 ```python
-plan = session.call("edit_model", {
+edit = session.call("edit_model", {
     "summary": "Raise the carrying capacity.",
     "operations": [
         {"op": "set_equation", "variable": "carrying_capacity", "equation": "12000"},
     ],
 })
-if plan.data["verdict"] == "ready":
-    landing = session.land(plan.data["plan"])
-    if not landing.landed:
-        print(landing.reason)   # for the agent, which plans the edit again
+if edit.is_error:
+    print(edit.data["error"])   # why not, for the agent
+else:
+    print(model.get_variable("carrying_capacity").equation)   # 12000
 ```
 
 ### Model Export

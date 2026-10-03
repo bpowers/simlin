@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::test_common::TestProject;
 use crate::tools::Session;
-use crate::tools::test_support::{Host, inventory};
+use crate::tools::test_support::{Host, initial_reads, inventory};
 
 fn read(project: datamodel::Project, names: &[&str]) -> Value {
     let mut host = Host::new(project);
@@ -100,7 +100,12 @@ fn inputs_and_readers_carry_each_links_polarity() {
     let inventory = &output["variables"][0];
     assert_eq!(
         inventory["inputs"],
-        json!([{"name": "production", "polarity": "+"}, {"name": "shipments", "polarity": "-"}])
+        json!([
+            {"name": "desired_inventory", "polarity": "?", "startOnly": true},
+            {"name": "production", "polarity": "+"},
+            {"name": "shipments", "polarity": "-"}
+        ]),
+        "a stock reads its flows, and its initial value only at the start"
     );
     assert!(
         inventory["readers"]
@@ -114,6 +119,126 @@ fn inputs_and_readers_carry_each_links_polarity() {
             .as_array()
             .unwrap()
             .contains(&json!({"name": "adjustment_time", "polarity": "-"}))
+    );
+}
+
+/// A constant the model reads only as it starts -- in a stock's initial value,
+/// or inside `INIT` -- has a reader, and the reader an input, each marked.
+#[test]
+fn a_read_made_only_at_the_start_is_an_input_and_a_reader_marked_so() {
+    let project = initial_reads().build_datamodel();
+    let output = read(project, &["base_rate", "rate", "s0", "level"]);
+    let record = |name: &str| {
+        output["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is read: {output}"))
+    };
+    let start = |name: &str| json!([{"name": name, "polarity": "?", "startOnly": true}]);
+    assert_eq!(record("rate")["inputs"], start("base_rate"));
+    assert_eq!(record("base_rate")["readers"], start("rate"));
+    assert_eq!(record("s0")["readers"], start("level"));
+    assert_eq!(
+        record("rate")["readers"],
+        json!([{"name": "growth", "polarity": "+"}]),
+        "a read made every step is not marked"
+    );
+}
+
+/// A name in an answer is spelled one way, the model's: a stock's flows as
+/// the flows are named, whatever spelling the stock's own lists hold (an
+/// import writes them canonically).
+#[test]
+fn a_stocks_flows_are_spelled_as_the_flows_are_named() {
+    let project = TestProject::new("teacup")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock(
+            "Teacup Temperature",
+            "180",
+            &[],
+            &["heat_loss_to_room"],
+            None,
+        )
+        .flow("Heat Loss to Room", "Teacup_Temperature / 10", None)
+        .build_datamodel();
+    let output = read(project, &["teacup temperature", "heat loss to room"]);
+    let stock = &output["variables"][0];
+    assert_eq!(stock["outflows"], json!(["Heat Loss to Room"]));
+    assert_eq!(stock["inputs"][0]["name"], "Heat Loss to Room");
+    assert_eq!(
+        output["variables"][1]["drains"],
+        json!(["Teacup Temperature"])
+    );
+}
+
+/// A constant is its value throughout a run, so its record says nothing of
+/// its behavior; a variable that happens to hold still says so.
+#[test]
+fn a_constant_has_no_behavior_to_report() {
+    let project = inventory()
+        .aux("held", "coverage * 1", None)
+        .build_datamodel();
+    let output = read(project, &["coverage", "held"]);
+    let (constant, held) = (&output["variables"][0], &output["variables"][1]);
+    assert_eq!(constant["kind"], "constant");
+    assert!(constant.get("behavior").is_none(), "{constant}");
+    assert_eq!(held["behavior"]["mode"]["kind"], "at_rest", "{held}");
+}
+
+/// One row per thing an importer leaves in documentation that is not prose.
+#[test]
+fn documentation_is_read_as_prose() {
+    for (written, read_as) in [
+        ("Plain words.", "Plain words."),
+        (
+            "A Vensim comment wrapped in \\\n\t\tits file, twice \\\r\n\t\tover.",
+            "A Vensim comment wrapped in its file, twice over.",
+        ),
+        (
+            "A line broken\n\t\t         in the middle  of a   sentence.",
+            "A line broken in the middle of a sentence.",
+        ),
+        ("One paragraph.\n\n  Another.", "One paragraph.\nAnother."),
+        ("  \n\t ", ""),
+    ] {
+        assert_eq!(tidy(written), read_as, "{written:?}");
+    }
+    let mut project = inventory().build_datamodel();
+    project.models[0]
+        .get_variable_mut("coverage")
+        .unwrap()
+        .set_documentation("Months of orders \\\n\t\theld as stock.");
+    let output = read(project, &["coverage"]);
+    assert_eq!(
+        output["variables"][0]["documentation"],
+        "Months of orders held as stock."
+    );
+}
+
+/// A table is read by the variable that looks it up, so "what uses this
+/// table" has an answer.
+#[test]
+fn a_table_names_the_variables_that_look_it_up() {
+    let project = inventory()
+        .aux(
+            "pressure_effect",
+            "LOOKUP(pressure_table, Inventory / 40)",
+            None,
+        )
+        .build_datamodel();
+    let output = read(project, &["pressure_table", "pressure_effect"]);
+    assert_eq!(
+        output["variables"][0]["readers"],
+        json!([{"name": "pressure_effect", "polarity": "?"}])
+    );
+    assert_eq!(
+        output["variables"][1]["inputs"],
+        json!([
+            {"name": "Inventory", "polarity": "+"},
+            {"name": "pressure_table", "polarity": "?"}
+        ])
     );
 }
 
@@ -308,13 +433,19 @@ fn an_element_is_read_by_naming_it() {
     let output = read(project, &["price[r31]", "price[r1, r2]", "level[x]"]);
     let not_found = output["notFound"].as_array().unwrap();
     assert_eq!(not_found.len(), 3, "{output}");
-    let reason = not_found[0]["suggestions"][0].as_str().unwrap();
+    let reason = not_found[0]["reason"].as_str().unwrap();
     assert!(
         reason.contains("`r31` is not an element of region"),
         "{reason}"
     );
+    for unread in not_found {
+        assert!(
+            unread.get("suggestions").is_none(),
+            "suggestions are names of variables, never a sentence: {unread}"
+        );
+    }
     assert!(
-        not_found[1]["suggestions"][0]
+        not_found[1]["reason"]
             .as_str()
             .unwrap()
             .contains("1 subscript"),
@@ -382,8 +513,8 @@ fn a_lookup_lists_at_most_64_points() {
     assert_eq!(lookup["morePoints"], 6);
 }
 
-/// Records that do not fit the budget are named for another call, in order;
-/// the first always fits, since its own caps bound it.
+/// Records that do not fit the budget are named for another call, in order,
+/// and the answer keeps to the budget.
 #[test]
 fn an_answer_over_its_budget_names_the_records_it_left_out() {
     let names = ["Inventory", "production", "shipments", "orders", "coverage"];
@@ -392,8 +523,12 @@ fn an_answer_over_its_budget_names_the_records_it_left_out() {
     let all = host.call(&mut whole, "read_variables", json!({ "names": names }));
     let whole_len = all.to_string().len();
     assert!(all.get("omitted").is_none());
+    let first_len = host
+        .call(&mut whole, "read_variables", json!({ "names": names[..1] }))
+        .to_string()
+        .len();
 
-    for budget in [1, whole_len / 2, whole_len - 1] {
+    for budget in [first_len + 60, whole_len / 2, whole_len - 1] {
         let mut session = Session::new("main");
         session.outline_budget = budget;
         let output = host.call(&mut session, "read_variables", json!({ "names": names }));
@@ -404,16 +539,229 @@ fn an_answer_over_its_budget_names_the_records_it_left_out() {
             .map(|r| r["name"].as_str().unwrap().to_string())
             .collect();
         let omitted: Vec<String> = serde_json::from_value(output["omitted"].clone()).unwrap();
-        assert!(!listed.is_empty(), "budget {budget}");
+        assert!(!listed.is_empty() && !omitted.is_empty(), "budget {budget}");
         assert_eq!(
             listed.iter().chain(&omitted).cloned().collect::<Vec<_>>(),
             names,
             "budget {budget}: in order, nothing lost"
         );
-        if listed.len() > 1 {
-            assert!(output.to_string().len() <= budget, "budget {budget}");
-        }
+        assert!(output.to_string().len() <= budget, "budget {budget}");
+        assert!(
+            output["variables"][0].get("moreReaders").is_none(),
+            "budget {budget}: whole records are left out before any record is cut"
+        );
     }
+}
+
+/// A variable with readers, inputs, a unit warning, documentation and a long
+/// equation.
+fn hub() -> datamodel::Project {
+    let inputs: Vec<String> = (0..12)
+        .map(|i| format!("an_input_of_the_hub_{i}"))
+        .collect();
+    // The sum, written out enough times to be a long equation.
+    let equation = vec![inputs.join(" + "); 4].join(" + ");
+    let mut project = TestProject::new("hub").aux("hub", &equation, None);
+    for input in &inputs {
+        project = project.aux(input, "1", Some("month"));
+    }
+    for i in 0..12 {
+        project = project.aux(&format!("a_reader_of_the_hub_{i}"), "hub * 2", None);
+    }
+    let mut project = project.build_datamodel();
+    let hub = project.models[0].get_variable_mut("hub").unwrap();
+    hub.set_units("widget");
+    hub.set_documentation(&"What the hub is for, at some length. ".repeat(8));
+    project
+}
+
+/// A variable whose value is looked up in a table of twenty points.
+fn table_hub() -> datamodel::Project {
+    let gf = datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some((0..20).map(f64::from).collect()),
+        y_points: (0..20).map(f64::from).collect(),
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 19.0,
+        },
+        y_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 19.0,
+        },
+    };
+    TestProject::new("table_hub")
+        .aux_with_gf("hub", "TIME", gf)
+        .build_datamodel()
+}
+
+/// A variable with per-element equations and a long equation for the rest.
+fn arrayed_hub() -> datamodel::Project {
+    let elements: Vec<String> = (0..12).map(|i| format!("e{i}")).collect();
+    let names: Vec<&str> = elements.iter().map(String::as_str).collect();
+    let mut project = TestProject::new("arrayed_hub")
+        .named_dimension("letters", &names)
+        .aux("an_input", "3", None)
+        .aux("reader", "SUM(hub[*])", None)
+        .build_datamodel();
+    let per_element = elements[..8]
+        .iter()
+        .map(|e| (e.clone(), format!("an_input * {}", e.len()), None, None))
+        .collect();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "hub".to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec!["letters".to_string()],
+                per_element,
+                Some(vec!["an_input"; 80].join(" + ")),
+                true,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    project
+}
+
+/// How much of what a cut names a record still carries: a row per cut, so a
+/// cut added to the ladder does not compile here until it is measured.
+fn carried(cut: Cut, record: &Value) -> usize {
+    let len = |key: &str| record[key].as_array().map_or(0, Vec::len);
+    let chars = |key: &str| record[key].as_str().map_or(0, |text| text.chars().count());
+    match cut {
+        Cut::Readers => len("readers"),
+        Cut::Inputs => len("inputs"),
+        Cut::Diagnostics => len("diagnostics"),
+        Cut::Elements => len("elements"),
+        Cut::LookupPoints => record["lookup"]["x"].as_array().map_or(0, Vec::len),
+        Cut::Documentation => usize::from(record.get("documentation").is_some()),
+        Cut::Text => chars("equation") + chars("initial") + chars("otherElements"),
+    }
+}
+
+/// Where a record counts what a cut left out, for the cuts that count.
+fn counted(cut: Cut) -> Option<&'static str> {
+    match cut {
+        Cut::Readers => Some("moreReaders"),
+        Cut::Inputs => Some("moreInputs"),
+        Cut::Diagnostics => Some("moreDiagnostics"),
+        Cut::Elements => Some("moreElements"),
+        Cut::LookupPoints => None,
+        Cut::Documentation | Cut::Text => None,
+    }
+}
+
+/// Who reads a variable goes before what it reads: what it reads is how it
+/// is computed, and its readers are a call away (their own records). The
+/// order [`Cut::ALL`] holds is pinned here by name, which the ladder test
+/// below, reading the order from `Cut::ALL`, cannot do.
+#[test]
+fn a_records_readers_are_cut_before_its_inputs() {
+    let mut host = Host::new(hub());
+    let read = |host: &mut Host, budget: usize| -> Value {
+        let mut session = Session::new("main");
+        session.outline_budget = budget;
+        let output = host.call_raw(&mut session, "read_variables", r#"{"names": ["hub"]}"#);
+        serde_json::from_str(&output.json).unwrap()
+    };
+    let whole = read(&mut host, usize::MAX)["variables"][0].clone();
+    let (readers, inputs) = (carried(Cut::Readers, &whole), carried(Cut::Inputs, &whole));
+    assert!(readers > 1 && inputs > 1, "{whole}");
+    let size = serde_json::to_string(&json!({"variables": [&whole]}))
+        .unwrap()
+        .len();
+    let first_cut = (1..size)
+        .rev()
+        .map(|budget| read(&mut host, budget)["variables"][0].clone())
+        .find(|record| carried(Cut::Readers, record) < readers)
+        .expect("a budget cuts the readers");
+    assert_eq!(carried(Cut::Inputs, &first_cut), inputs, "{first_cut}");
+}
+
+/// A record that does not fit an answer alone is cut in one order, least
+/// important first, each cut counted, and the answer keeps to its budget
+/// under every budget until nothing is left to cut, when it is refused.
+#[test]
+fn a_record_that_does_not_fit_alone_is_cut_in_order_and_then_refused() {
+    let mut cut_somewhere = [false; Cut::ALL.len()];
+    for (label, project) in [
+        ("scalar", hub()),
+        ("table", table_hub()),
+        ("arrayed", arrayed_hub()),
+    ] {
+        let mut host = Host::new(project);
+        let read = |host: &mut Host, budget: usize| {
+            let mut session = Session::new("main");
+            session.outline_budget = budget;
+            host.call_raw(&mut session, "read_variables", r#"{"names": ["hub"]}"#)
+        };
+        let whole_output = read(&mut host, usize::MAX);
+        let whole: Value = serde_json::from_str(&whole_output.json).unwrap();
+        let whole = &whole["variables"][0];
+        assert!(whole.get("truncated").is_none(), "{label}: {whole}");
+
+        let mut refused = false;
+        for budget in (1..whole_output.json.len()).rev().step_by(41) {
+            let output = read(&mut host, budget);
+            if output.is_error {
+                refused = true;
+                let refusal: Value = serde_json::from_str(&output.json).unwrap();
+                let message = refusal["error"].as_str().unwrap();
+                assert!(
+                    message.contains("does not fit") && message.contains(&budget.to_string()),
+                    "{label}: {message}"
+                );
+                continue;
+            }
+            assert!(!refused, "{label}: a larger budget was refused");
+            assert!(output.json.len() <= budget, "{label}: budget {budget}");
+            let answer: Value = serde_json::from_str(&output.json).unwrap();
+            let record = &answer["variables"][0];
+            let mut earlier_gone = true;
+            for (i, cut) in Cut::ALL.into_iter().enumerate() {
+                let (left, all) = (carried(cut, record), carried(cut, whole));
+                assert!(
+                    left == all || earlier_gone,
+                    "{label}: budget {budget}: a part is cut only once every part before it is gone: {record}"
+                );
+                cut_somewhere[i] |= left < all;
+                if let Some(count) = counted(cut) {
+                    let more = |r: &Value| r[count].as_u64().unwrap_or(0) as usize;
+                    assert_eq!(
+                        left + more(record),
+                        all + more(whole),
+                        "{label}: budget {budget}: {count}"
+                    );
+                }
+                earlier_gone &= left == 0;
+            }
+            assert_eq!(
+                record.get("truncated").is_some(),
+                carried(Cut::Text, record) < carried(Cut::Text, whole),
+                "{label}: budget {budget}: a cut equation says so"
+            );
+            if record.get("truncated").is_some() {
+                let text = record["equation"]
+                    .as_str()
+                    .or(record["otherElements"].as_str())
+                    .unwrap();
+                assert!(
+                    text.ends_with('…') && text.chars().count() >= MIN_CUT_CHARS,
+                    "{label}: {text}"
+                );
+            }
+        }
+        assert!(refused, "{label}: the smallest budgets are refused");
+    }
+    assert!(
+        cut_somewhere.iter().all(|&cut| cut),
+        "the fixtures and the budgets tried exercise every cut: {cut_somewhere:?}"
+    );
 }
 
 #[test]
@@ -447,6 +795,104 @@ fn a_phrase_like_nothing_finds_nothing_and_an_empty_phrase_is_refused() {
     assert_eq!(output["matches"], json!([]));
     let refusal = host.refuse(&mut session, "find_variables", json!({"phrase": "  "}));
     assert!(refusal["error"].as_str().unwrap().contains("phrase"));
+}
+
+/// The model the find rows ask: names that share letters without sharing
+/// words.
+fn shared_letters() -> TestProject {
+    [
+        "age",
+        "wage",
+        "stage",
+        "usage",
+        "average",
+        "average life of land",
+        "pope",
+        "population",
+        "popcorn sales",
+    ]
+    .iter()
+    .fold(TestProject::new("letters"), |project, name| {
+        project.aux(name, "1", None)
+    })
+}
+
+/// What each phrase finds, in order: the name itself first, then names
+/// whose words it starts, then names like it; a phrase under four
+/// characters is like nothing.
+#[test]
+fn a_name_and_its_word_starts_outrank_names_like_it() {
+    let mut host = Host::from_test_project(&shared_letters());
+    let mut session = Session::new("main");
+    for (phrase, found) in [
+        ("age", vec!["age"]),
+        ("the", vec![]),
+        ("a", vec!["age", "average", "average life of land"]),
+        ("pop", vec!["pope", "population", "popcorn sales"]),
+        ("aver", vec!["average", "average life of land", "age"]),
+        ("populaton", vec!["population"]),
+        ("life of land", vec!["average life of land"]),
+        ("wage", vec!["wage", "age", "stage", "usage", "average"]),
+    ] {
+        let output = host.call(&mut session, "find_variables", json!({ "phrase": phrase }));
+        let names: Vec<&str> = output["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, found, "{phrase}: {output}");
+        let scores: Vec<f64> = output["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["score"].as_f64().unwrap())
+            .collect();
+        assert!(
+            scores.windows(2).all(|w| w[0] >= w[1]),
+            "{phrase}: {scores:?}"
+        );
+    }
+}
+
+/// A phrase of the longest length is searched; one longer is refused,
+/// saying the limit and its length.
+#[test]
+fn a_phrase_longer_than_a_name_could_be_is_refused() {
+    let mut host = Host::from_test_project(&shared_letters());
+    let mut session = Session::new("main");
+    let longest = "a".repeat(names::MAX_QUERY_CHARS);
+    host.call(&mut session, "find_variables", json!({ "phrase": longest }));
+    let longer = format!("{longest}a");
+    let refusal = host.refuse(&mut session, "find_variables", json!({ "phrase": longer }));
+    let reason = refusal["error"].as_str().unwrap();
+    assert!(
+        reason.contains(&names::MAX_QUERY_CHARS.to_string())
+            && reason.contains(&(names::MAX_QUERY_CHARS + 1).to_string()),
+        "{reason}"
+    );
+}
+
+/// Under a budget too small for every match, the closest are listed and
+/// the rest counted.
+#[test]
+fn matches_that_do_not_fit_are_counted() {
+    let mut project = TestProject::new("p");
+    for i in 0..MAX_MATCHES {
+        project = project.aux(&format!("inventory_{}_{i:02}", "n".repeat(100)), "1", None);
+    }
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    session.outline_budget = 600;
+    let output = host.call(
+        &mut session,
+        "find_variables",
+        json!({"phrase": "inventory"}),
+    );
+    let listed = output["matches"].as_array().unwrap().len();
+    assert!(listed < MAX_MATCHES && listed > 0, "{output}");
+    assert_eq!(output["omitted"], MAX_MATCHES - listed);
+    assert!(output.to_string().len() <= 600);
 }
 
 /// A large arrayed variable's record summarizes its elements: long
@@ -522,4 +968,59 @@ fn records_of_a_model_that_does_not_simulate_say_why_they_carry_no_behavior() {
             .unwrap()
             .contains("does not simulate")
     );
+}
+
+/// A name the caller sent is repeated at most `evidence::ECHO_CHARS`
+/// characters of, with its length, wherever an answer repeats it.
+#[test]
+fn a_long_name_a_caller_sent_is_echoed_cut() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    let long = "n".repeat(5_000);
+    let answer = host.call(&mut session, "read_variables", json!({ "names": [long] }));
+    let echoed = answer["notFound"][0]["name"].as_str().unwrap();
+    assert!(echoed.ends_with("(5000 characters)"), "{echoed}");
+    assert!(echoed.chars().count() < 200, "{echoed}");
+    let refusal = host.refuse(
+        &mut session,
+        "run_experiment",
+        json!({"name": "e", "set": [{"variable": long, "value": 1}]}),
+    );
+    let reason = refusal["error"].as_str().unwrap();
+    assert!(
+        reason.contains("(5000 characters)") && reason.len() < 400,
+        "{reason}"
+    );
+}
+
+/// A phrase that starts a name's words outranks every name merely like it,
+/// however long the name it starts; a short phrase finds a description by
+/// the words it starts, never by a likeness.
+#[test]
+fn a_word_start_outranks_a_likeness_and_a_short_phrase_has_none_in_documentation() {
+    let mut project = TestProject::new("ranks")
+        .aux("irate", "1", None)
+        .aux("rate_of_the_birth_of_new_people", "1", None)
+        .aux("levy", "1", None)
+        .build_datamodel();
+    project.models[0]
+        .get_variable_mut("levy")
+        .unwrap()
+        .set_documentation("The tax on each sale.");
+    let mut host = Host::new(project);
+    let mut session = Session::new("main");
+    let found = |host: &mut Host, session: &mut Session, phrase: &str| -> Vec<String> {
+        host.call(session, "find_variables", json!({ "phrase": phrase }))["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        found(&mut host, &mut session, "rate"),
+        ["rate_of_the_birth_of_new_people", "irate"]
+    );
+    assert_eq!(found(&mut host, &mut session, "tax"), ["levy"]);
+    assert!(found(&mut host, &mut session, "tex").is_empty());
 }

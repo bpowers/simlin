@@ -1599,8 +1599,10 @@ SimlinModel *simlin_project_get_model(SimlinProject *project,
 //
 // `src`'s datamodel lock is taken alone, just long enough to share its
 // datamodel, and released BEFORE `dst`'s locks are acquired -- so two threads
-// replacing in opposite directions cannot deadlock, and `dst == src` (a
-// permitted no-op re-sync) does not self-deadlock. `dst`'s datamodel and db
+// replacing in opposite directions cannot deadlock, and `dst == src` does not
+// self-deadlock. Replacing `dst`'s contents with the datamodel it already
+// holds -- `dst == src`, or a copy that still shares it -- changes nothing:
+// the revision stays, and the db is not touched. `dst`'s datamodel and db
 // locks are then held together, in the datamodel-then-db order used
 // project-wide, across both the db re-sync and the datamodel swap, so no
 // concurrent reader (`simlin_sim_new`, `simlin_project_get_errors`,
@@ -1619,7 +1621,8 @@ void simlin_project_replace_contents(SimlinProject *dst,
 //
 // Parses and imports a system dynamics model from XMILE format, the industry
 // standard interchange format for system dynamics models. Also supports the
-// STMX variant used by Stella.
+// STMX variant used by Stella. The reader does not keep everything a file can
+// hold; `simlin_import_losses` reports what it leaves out of these bytes.
 //
 // Returns NULL and populates `out_error` on failure.
 //
@@ -1631,44 +1634,12 @@ SimlinProject *simlin_project_open_xmile(const uint8_t *data,
                                          uintptr_t len,
                                          SimlinError **out_error);
 
-// Open a project from XMILE/STMX format data, also reporting what the file
-// holds that the project does not keep
-//
-// The same open as `simlin_project_open_xmile`. The XMILE reader does not
-// keep everything a file can hold: the objects on a view besides its
-// diagram (a graph, a text box), interface pages, story mode, a standalone
-// graphical function. So a save of the project, over the file or in any
-// other format, leaves those out, and a host that saves needs to say so
-// when the file opens.
-//
-// Each kind of loss, in each place it occurs, is one `Warning`-severity,
-// wire-`Generic`, kind-`Model` detail on the aggregate `SimlinError` stored
-// in `out_collected_errors` (NULL when the file loses nothing; pass NULL to
-// discard them, and the open then costs what `simlin_project_open_xmile`
-// costs). `message` is `"XMILE import: <reason>"` and `details` the bare
-// reason, such as `2 sliders on interface page 1 are not kept: 'Birth Rate'
-// and 'Population'`. The aggregate's own message counts the losses by kind
-// over the whole file, for a host to show where a row per place would be
-// too many: `3 graphs, 2 sliders, and 1 text box in this file are not
-// kept`. The warnings describe the file as it was read, and the project
-// does not keep them, so a host that shows them holds them itself.
-//
-// Returns NULL and populates `out_error` on failure, with
-// `out_collected_errors` NULL.
-//
-// # Safety
-// - `data` must be a valid pointer to at least `len` bytes
-// - `out_collected_errors` may be null
-// - `out_error` may be null
-// - The returned project must be freed with `simlin_project_unref`
-SimlinProject *simlin_project_open_xmile_with_warnings(const uint8_t *data,
-                                                       uintptr_t len,
-                                                       SimlinError **out_collected_errors,
-                                                       SimlinError **out_error);
-
 // Open a project from Vensim MDL format data
 //
-// Parses and imports a system dynamics model from Vensim's MDL format.
+// Parses and imports a system dynamics model from Vensim's MDL format. The
+// reader does not keep everything a file can hold; `simlin_import_losses`
+// reports what it leaves out of these bytes.
+//
 // Returns NULL and populates `out_error` on failure.
 //
 // # Safety
@@ -1679,42 +1650,67 @@ SimlinProject *simlin_project_open_vensim(const uint8_t *data,
                                           uintptr_t len,
                                           SimlinError **out_error);
 
-// Open a project from Vensim MDL format data, also reporting what the file
-// holds that the project does not keep
+// Report what a file holds that a project opened from it does not keep
 //
-// The same open as `simlin_project_open_vensim`. The MDL reader does not
-// keep everything a file can hold: a sketch's comments, graphs, sliders and
-// images, and the custom graphs, tables and reports the file defines. So a
-// save of the project, over the file or in any other format, leaves those
-// out, and a host that saves needs to say so when the file opens.
+// The MDL and XMILE readers do not keep everything a file can hold: a
+// Vensim sketch's comments, graphs, sliders and images, and the custom
+// graphs, tables and reports the file defines; an XMILE view's objects
+// besides its diagram (a graph, a text box), interface pages, story mode, a
+// standalone graphical function. So a save of the project, over the file or
+// in any other format, leaves those out, and a host that saves needs to say
+// so when the file opens. The report is of the file, whichever function
+// opens it (`simlin_project_open_xmile`, `simlin_project_open_vensim`,
+// `simlin_project_open_vensim_with_data`), so it is one function beside the
+// opens rather than a variant of each.
 //
-// Each kind of loss is one `Warning`-severity, wire-`Generic`, kind-`Model`
-// detail on the aggregate `SimlinError` stored in `out_collected_errors`
-// (NULL when the file loses nothing; pass NULL to discard them, and the
-// open then costs what `simlin_project_open_vensim` costs): one per kind
-// and sketch view for what a modeler put on a view, and one per kind over
-// the whole sketch for what follows from what the diagram does not draw
-// (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is `"MDL
-// import: <reason>"` and `details` the bare reason, such as `29 comments on
-// view 'View 1' are not kept, such as 'The World3 Model'`. The aggregate's
-// own message counts the losses by kind over the whole file, for a host to
-// show where a row per place would be too many: `29 comments, 3 graphs, and
-// 7 sliders in this file are not kept`. The warnings describe the file as
-// it was read, and the project does not keep them, so a host that shows
-// them holds them itself.
+// What it covers is what the engine's readers report
+// (`simlin_engine::ImportWarning`): for MDL the sketch and the file's custom
+// outputs, for XMILE what the reader skips among the variables, the views
+// and the stories. A NULL report says the file loses none of those, not
+// that the project holds everything the file says.
 //
-// Returns NULL and populates `out_error` on failure, with
-// `out_collected_errors` NULL.
+// `format` is the file's, as `SimlinSaveFormat` numbers them: `Mdl` (0) or
+// `Xmile` (1). The engine reports on no other format, and another is
+// refused with `Generic` rather than answered as if it lost nothing.
+//
+// `data_dir` (NULL for none; read only with the `file_io` feature) is the
+// directory `simlin_project_open_vensim_with_data` is given. The MDL report
+// is made as the file is converted, and the conversion fails on a GET DIRECT
+// reference it cannot resolve, so a file with such references is reported
+// on only with its data, exactly as it opens only with it. An XMILE report
+// reads no data.
+//
+// Each kind of loss, in each place it occurs, is one `Warning`-severity,
+// wire-`Generic`, kind-`Model` detail on the aggregate `SimlinError` stored
+// in `out_collected_errors` (NULL when the file loses nothing): for MDL, one
+// per kind and sketch view for what a modeler put on a view, and one per
+// kind over the whole sketch for what follows from what the diagram does
+// not draw (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is
+// `"MDL import: <reason>"` or `"XMILE import: <reason>"` and `details` the
+// bare reason, such as `29 comments on view 'View 1' are not kept, such as
+// 'The World3 Model'` or `2 sliders on interface page 1 are not kept:
+// 'Birth Rate' and 'Population'`. The aggregate's own message counts the
+// losses by kind over the whole file, for a host to show where a row per
+// place would be too many: `29 comments, 3 graphs, and 7 sliders in this
+// file are not kept`. The report describes the file as it was read, and no
+// project keeps it, so a host that shows it holds it itself.
+//
+// A file that does not read populates `out_error`, as the open of it does,
+// with `out_collected_errors` NULL.
 //
 // # Safety
 // - `data` must be a valid pointer to at least `len` bytes
-// - `out_collected_errors` may be null
+// - `data_dir` may be null; when non-null it must point to `data_dir_len`
+//   bytes of valid UTF-8 representing a directory path
+// - `out_collected_errors` must be a valid pointer
 // - `out_error` may be null
-// - The returned project must be freed with `simlin_project_unref`
-SimlinProject *simlin_project_open_vensim_with_warnings(const uint8_t *data,
-                                                        uintptr_t len,
-                                                        SimlinError **out_collected_errors,
-                                                        SimlinError **out_error);
+void simlin_import_losses(uint32_t format,
+                          const uint8_t *data,
+                          uintptr_t len,
+                          const uint8_t *data_dir,
+                          uintptr_t data_dir_len,
+                          SimlinError **out_collected_errors,
+                          SimlinError **out_error);
 
 // Open a Vensim MDL model with external data file support.
 //
@@ -2324,23 +2320,46 @@ void simlin_tool_session_unref(SimlinToolSession *session);
 // for the agent to read: a host hands it back as the tool's result, never as
 // an exception that ends the agent's turn.
 //
-// A call reads the project as it is when the call starts, at that revision.
-// It holds the session for the call, and the project's datamodel only while
-// it takes the contents it answers from (shared, not copied) and their
-// revision: it then answers under the database lock alone, so a host's hit
-// tests, planners and revision reads, which lock only the datamodel, never
-// wait behind an analysis. An entry point that holds the datamodel and waits
-// for the database meanwhile -- an edit landing (`simlin_project_apply_patch`,
-// or an undo's `simlin_project_replace_contents`), a simulation
-// (`simlin_sim_new`), a read of the diagnostics, the others
-// `SimlinProject::waiting_for_db` lists -- keeps those readers waiting with
-// it, so the call stops for it between units of its work (a slice of a
-// simulation, a stage of an analysis) and answers a refusal with `"interrupted": true` that
-// kept nothing: the entry point waits at most one unit. A host that retries
-// by itself does so once that work is done -- after an edit, at the next
-// revision -- and never in a loop against a project that stays busy. A call
-// its host cancels (`simlin_tool_session_cancel`) stops at the same points
-// and answers a refusal with `"cancelled": true`, which no host retries.
+// One entry point, two lock footprints, chosen by the tool's effect
+// (`simlin_engine::tools::ToolName::effect`) before any lock is taken.
+//
+// A tool that reads answers the project as it is when the call starts, at
+// that revision. It holds the session for the call, and the project's
+// datamodel only while it takes the contents it answers from (shared, not
+// copied) and their revision: it then answers under the database lock alone,
+// so a host's hit tests, planners and revision reads, which lock only the
+// datamodel, never wait behind an analysis. Any other entry point that waits
+// for the database meanwhile is the person's work, or an edit: an edit
+// landing (`simlin_project_apply_patch`, an undo's
+// `simlin_project_replace_contents`, a call of a tool that edits), a
+// simulation (`simlin_sim_new`), a read of the diagnostics and the others
+// `SimlinProject::waiting_for_db` lists, which hold the datamodel while they
+// wait and so keep those readers waiting with them, and a query that takes
+// the database alone (an equation's rendering, the model's links). So the
+// call stops for it between units of its work (a slice of a simulation, a
+// stage of an analysis) and answers a refusal with `"interrupted": true`
+// that kept nothing: the entry point waits at most one unit. A host that
+// retries by itself does so once that work is done -- after an edit, at the
+// next revision -- and never in a loop against a project that stays busy.
+//
+// A tool that edits (`edit_model`) is a writer, as
+// `simlin_project_apply_patch` is: it holds the session, the datamodel and
+// the database for the whole call, so nothing lands between its gate and its
+// edit, and when the gate passes it makes the edit before it returns
+// (`simlin_engine::tools::ToolOutput::edited`), the database synced to the
+// edited project and the contents replaced by it under both locks, which
+// advances the revision. An edit its gate refuses is a refusal, with
+// `out_is_error` set; it and an edit that changes nothing leave the project
+// and its revision as they were. It stops for no other work (it is the work
+// others wait for), and counts itself among the waiters a
+// reading call stops for from before it waits for the session: a call on the
+// same session holds the session for the whole call, and one on another the
+// database, so either stops at its next checkpoint rather than keep the edit
+// waiting for the rest of it.
+//
+// A call its host cancels (`simlin_tool_session_cancel`) stops at its
+// checkpoints and answers a refusal with `"cancelled": true`, which no host
+// retries.
 //
 // # Safety
 // - `session` must be a valid pointer to a SimlinToolSession
@@ -2364,9 +2383,10 @@ void simlin_tool_session_call(SimlinToolSession *session,
 // with `"cancelled": true` that kept nothing, which a host does not retry. A
 // call made after this returns runs as usual. It returns at once, without
 // waiting for the calls to stop, and takes no lock, so any thread may make
-// it, one inside a call included. It cancels only `simlin_tool_session_call`:
-// a host's own reads of the session's runs and a landing, the person's own
-// act, go on. A NULL `session` is a no-op.
+// it, one inside a call included. It cancels only `simlin_tool_session_call`,
+// a call of a tool that edits included, which is cancelled before its edit
+// is made or not at all: a host's own reads of the session's runs go on. A
+// NULL `session` is a no-op.
 //
 // # Safety
 // - `session` must be a valid pointer to a SimlinToolSession, or NULL
@@ -2393,9 +2413,10 @@ void simlin_tool_session_forget_run(SimlinToolSession *session,
 // and whether the sim specs changed -- as UTF-8 JSON to a buffer the caller
 // frees with `simlin_free`, or `null` before the first read and when nothing
 // did. A view edit changes nothing an agent read, so it is no change here,
-// and what the session's own plans left once landed is the agent's work, not
-// news to it. What a host tells an agent about the person's work before its
-// next turn.
+// and what the session's own edits left is the agent's work, not news to it.
+// What a host tells an agent about the person's work before its next turn.
+// A project that no longer has the session's model fails with
+// `DoesNotExist`, as the session's tool calls refuse it.
 //
 // # Safety
 // - `session` must be a valid pointer to a SimlinToolSession
@@ -2404,40 +2425,6 @@ void simlin_tool_session_get_changes(SimlinToolSession *session,
                                      uint8_t **out_buf,
                                      uintptr_t *out_len,
                                      SimlinError **out_error);
-
-// Land the plan `edit_model` gave the id `id` on the project as it is, once
-// the person approves it: the one way an agent's edit reaches a project.
-// Writes `{"landed": true}`, or `{"landed": false, "reason": ...}` when it
-// cannot land there, as UTF-8 JSON to a buffer the caller frees with
-// `simlin_free`; a refusal is for the agent to read, which plans the edit
-// again. `DoesNotExist` for an id the session never gave, or a plan it has
-// forgotten (it keeps the last 16).
-//
-// The plan lands by construction, under the datamodel lock held for the
-// whole call, so nothing lands between the check and the edit: at the
-// revision it was planned at, its patch, which the session's gate passed
-// against those very contents; at another, the plan's operations planned
-// again on the contents as they are, landed only when everything the plan
-// writes is as it was when the plan was made, the gate passes again, and
-// the plan comes out with the lines the person approved. A person's diagram
-// edits meanwhile are kept. The gate is the session's own (errors the model
-// had are tolerated, a new error or value that is not a number refused), so
-// no host passes `allow_errors`. Landing advances the revision as any edit
-// does. Locks the session, then the datamodel, then the database, and counts
-// itself among the waiters a call stops for from before it waits for the
-// session: a call on the same session holds the session for the whole call,
-// and one on another the database, so either stops at its next checkpoint
-// rather than keep the person's approved edit waiting for the rest of it.
-//
-// # Safety
-// - `session` must be a valid pointer to a SimlinToolSession
-// - `id` must be a valid C string
-// - `out_buf` and `out_len` must be valid pointers
-void simlin_tool_session_land_plan(SimlinToolSession *session,
-                                   const char *id,
-                                   uint8_t **out_buf,
-                                   uintptr_t *out_len,
-                                   SimlinError **out_error);
 
 // The results of the session's run named `name` -- `"current"` for the model
 // as it is at the project's current revision, or a run an experiment made --
@@ -2450,6 +2437,8 @@ void simlin_tool_session_land_plan(SimlinToolSession *session,
 // simulate. A read that must simulate stops, as a tool call does, for an
 // edit or a simulation that waits for the project, and keeps nothing: NULL
 // with `Interrupted`, for a host that reads it again once that work is done.
+// A run the session keeps the results of is read from the contents alone,
+// so it waits for no work on the database, another session's call among it.
 // The handle holds a copy of the run's series.
 //
 // # Safety
@@ -2471,7 +2460,8 @@ SimlinResults *simlin_tool_session_get_run(SimlinToolSession *session,
 // `{"variable", "value" | "elements" | "equation", "tableDropped"?,
 // "fromTime"?}`, and the specs it set (`start`, `stop`, `dt`, `method`).
 // The run `"current"`, the model as it is, is always there and is not
-// listed. What a host's run list, chart picker and "run again" read.
+// listed. What a host's run list, chart picker and "run again" read. Locks
+// the session and, to take the contents, the datamodel; never the database.
 //
 // # Safety
 // - `session` must be a valid pointer to a SimlinToolSession

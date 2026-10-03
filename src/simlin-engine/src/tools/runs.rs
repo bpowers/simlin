@@ -113,9 +113,17 @@ pub(crate) enum RunFailure {
     Stopped,
 }
 
+/// The most characters of why a run failed: every answer that says so
+/// (a refusal, a skipped check, records without behavior) repeats it, and the
+/// engine's own reasons can name every variable of a model.
+pub(crate) const MAX_REASON_CHARS: usize = 400;
+
 impl From<String> for RunFailure {
+    /// The reason as answers give it: the engine's helper names said as what
+    /// they stand for, cut to [`MAX_REASON_CHARS`].
     fn from(reason: String) -> RunFailure {
-        RunFailure::Failed(reason)
+        let reason = super::evidence::explain_helpers(&reason);
+        RunFailure::Failed(super::evidence::window(&reason, 0, 0, MAX_REASON_CHARS))
     }
 }
 
@@ -192,7 +200,8 @@ impl Replacement {
     }
 }
 
-/// Run specs a plan changes; `None` keeps the model's.
+/// The specs a run ran under where they are not the model's; one left out
+/// is the model's.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Default, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
@@ -590,23 +599,26 @@ pub(crate) fn list_runs(
     let model = resolve_model(ws.project, ws.db, &session.model_name)?.model;
     let mut output = ListRunsOutput {
         revision: ws.revision,
-        runs: session.runs.listing(ws, Some(model)),
+        runs: session.runs.listing(ws.project, ws.revision, Some(model)),
         omitted: vec![],
     };
-    let fits = |output: &ListRunsOutput| {
-        serde_json::to_string(output).map_or(0, |json| json.len()) <= session.outline_budget
-    };
-    if !fits(&output) {
-        for change in output.runs.iter_mut().flat_map(|run| &mut run.changes) {
-            if let Some(equation) = &mut change.equation {
-                *equation = window(equation, 0, 0, QUOTE_CHARS);
+    let mut quoted = false;
+    super::fit(&mut output, session.outline_budget, |output| {
+        if !quoted {
+            quoted = true;
+            for change in output.runs.iter_mut().flat_map(|run| &mut run.changes) {
+                if let Some(equation) = &mut change.equation {
+                    *equation = window(equation, 0, 0, QUOTE_CHARS);
+                }
             }
+        } else if output.runs.is_empty() {
+            return false;
+        } else {
+            let oldest = output.runs.remove(0);
+            output.omitted.push(oldest.name);
         }
-    }
-    while !fits(&output) && !output.runs.is_empty() {
-        let oldest = output.runs.remove(0);
-        output.omitted.push(oldest.name);
-    }
+        true
+    });
     Ok(output)
 }
 
@@ -628,14 +640,43 @@ pub(crate) struct RunStore {
 impl RunStore {
     /// The model's simulation key at the workspace's revision.
     pub(crate) fn key(&mut self, ws: &Workspace<'_>) -> u64 {
+        self.key_of(ws.project, ws.revision)
+    }
+
+    /// The simulation key of `project`, the contents at `revision`: read
+    /// from the contents alone, never the database.
+    pub(crate) fn key_of(&mut self, project: &datamodel::Project, revision: u64) -> u64 {
         match self.key {
-            Some((revision, key)) if revision == ws.revision => key,
+            Some((at, key)) if at == revision => key,
             _ => {
-                let key = simulation_key(ws.project);
-                self.key = Some((ws.revision, key));
+                let key = simulation_key(project);
+                self.key = Some((revision, key));
                 key
             }
         }
+    }
+
+    /// The run named `name` when the store keeps its results -- the current
+    /// run while it is of the model as it is, or a named run that still has
+    /// its results -- with whether it is stale; `None` for a run that must
+    /// be made, which [`RunStore::get`] makes. Reads the contents alone, so a
+    /// host's read of a kept run waits for no one's work on the database.
+    pub(crate) fn kept(
+        &mut self,
+        project: &datamodel::Project,
+        revision: u64,
+        name: &str,
+    ) -> Option<(Arc<Run>, bool)> {
+        let key = self.key_of(project, revision);
+        let run = if name == CURRENT {
+            self.current.as_ref().filter(|run| run.key == key)?
+        } else {
+            match self.named.get(name)? {
+                Kept::Run(run) => run,
+                Kept::Planned { .. } => return None,
+            }
+        };
+        Some((run.clone(), run.key != key))
     }
 
     /// Whether `run` is of the model as it is.
@@ -702,8 +743,11 @@ impl RunStore {
             None => {
                 let mut names = vec![CURRENT.to_string()];
                 names.extend(self.named.keys().cloned());
-                return Err(ToolError::new(format!("there is no run named '{name}'"))
-                    .with_suggestions(names));
+                return Err(ToolError::new(format!(
+                    "there is no run named '{}'",
+                    super::evidence::echo(name)
+                ))
+                .with_suggestions(names));
             }
         };
         ws.yield_point()?;
@@ -742,10 +786,11 @@ impl RunStore {
     /// variables named as `model` spells them.
     pub(crate) fn listing(
         &mut self,
-        ws: &Workspace<'_>,
+        project: &datamodel::Project,
+        revision: u64,
         model: Option<&datamodel::Model>,
     ) -> Vec<RunListing> {
-        let key = self.key(ws);
+        let key = self.key_of(project, revision);
         self.named
             .iter()
             .map(|(name, kept)| match kept {
@@ -883,6 +928,10 @@ fn simulate(
 ) -> Result<Results, RunFailure> {
     let own = crate::results::Specs::from(specs);
     let run = crate::results::Specs::from(&plan.specs.applied_to(specs));
+    // Specs a plan changed are an agent's; the model's own run as they are.
+    if let Some(reason) = no_run(&run).filter(|_| !plan.specs.is_empty()) {
+        return Err(RunFailure::from(format!("under its specs, {reason}")));
+    }
     let vm = build_vm_under(
         db,
         source_project,
@@ -1114,6 +1163,36 @@ fn build_vm_under(
     Ok(vm)
 }
 
+/// Why no run can be made under `specs`, or `None`: a start, stop or DT that
+/// is no finite number, what both backends refuse (`Specs::refusal`), and a DT
+/// longer than the run, which would take no step past its start.
+pub(crate) fn no_run(specs: &crate::results::Specs) -> Option<String> {
+    let number = crate::results::written;
+    let span = specs.stop - specs.start;
+    if !(specs.start.is_finite() && specs.stop.is_finite() && specs.dt.is_finite())
+        || !span.is_finite()
+    {
+        return Some(format!(
+            "a run from {} to {} by a DT of {} is not one a computer's numbers can take",
+            number(specs.start),
+            number(specs.stop),
+            number(specs.dt)
+        ));
+    }
+    if let Some(reason) = specs.refusal() {
+        return Some(reason.to_string());
+    }
+    if specs.dt > span {
+        return Some(format!(
+            "a DT of {} is longer than the run, from {} to {}, so the run would take no step",
+            number(specs.dt),
+            number(specs.start),
+            number(specs.stop)
+        ));
+    }
+    None
+}
+
 /// Why a run under `specs` of a model with `slots` values per row would cost
 /// more than a run may, in numbers and with specs that would fit, or `None`.
 ///
@@ -1284,9 +1363,12 @@ fn staged_project(
 /// must read it (`series::scale_in_run`).
 pub(crate) fn apply_equations(model: &mut datamodel::Model, plan: &RunPlan) -> Result<(), String> {
     for change in &plan.equations {
-        let var = model
-            .get_variable_mut(&change.variable)
-            .ok_or_else(|| format!("the model has no variable '{}'", change.variable))?;
+        let var = model.get_variable_mut(&change.variable).ok_or_else(|| {
+            format!(
+                "the model has no variable '{}'",
+                super::evidence::echo(&change.variable)
+            )
+        })?;
         replace_equation(var, &change.replacement);
     }
     Ok(())
