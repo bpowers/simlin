@@ -1175,3 +1175,25 @@ fn a_reference_is_spelled_as_its_definition() {
         assert!(save.contains(written), "{written}\n{save}");
     }
 }
+
+#[test]
+fn a_quoted_name_holding_a_line_break_is_written_with_the_escape() {
+    // A name that is already quoted keeps its interior as written, but a real
+    // line break in it is written as the `\n` escape: written raw it would
+    // end the equation. Such a name comes from an API or XMILE, not the MDL
+    // reader, so the project is built with one.
+    let source = format!("x = 1 ~~|\ny = x * 2 ~~|\n{CONTROL}");
+    let mut project = parse_mdl(&source).expect("the source reads");
+    project.models[0].variables.edit_where(
+        |v| v.get_ident() == "x",
+        |v| {
+            if let datamodel::Variable::Aux(aux) = v {
+                aux.ident = "\"a\nb\"".to_owned();
+            }
+        },
+    );
+    let save = project_to_mdl(&project).expect("the model writes");
+    let save = save.replace("\r\n", "\n");
+    assert!(save.contains("\"a\\nb\" = 1"), "{save}");
+    parse_mdl(&save).expect("the save reads back");
+}

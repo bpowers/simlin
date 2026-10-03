@@ -261,9 +261,18 @@ fn format_mdl_ident(name: &str) -> String {
     // `underbar_to_space` over the whole string would turn interior
     // underscores into spaces (changing which variable Vensim resolves,
     // e.g. `"rate_of_change!"` vs `"rate of change!"`) and re-escaping would
-    // grow the escaping each pass. Pass it through unchanged (#846).
+    // grow the escaping each pass. Pass it through unchanged (#846), but for
+    // a real line break, written as the `\n` escape (raw, it would end the
+    // equation), and a final backslash, doubled so it cannot escape the
+    // closing quote.
     if is_mdl_quoted_ident(name) {
-        return name.to_owned();
+        let mut inner = name[1..name.len() - 1]
+            .replace("\r\n", "\\n")
+            .replace('\n', "\\n");
+        if inner.ends_with('\\') && !inner.ends_with("\\\\") {
+            inner.push('\\');
+        }
+        return format!("\"{inner}\"");
     }
     let display = underbar_to_space(name);
     if needs_mdl_quoting(&display) {

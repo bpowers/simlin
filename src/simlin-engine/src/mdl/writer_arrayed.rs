@@ -158,7 +158,7 @@ pub(super) fn write_arrayed(
             Err(why) => {
                 let taken = take_the_default_as_input(&mut slots, default);
                 let undefined = undefined_elements(&slots, axes.as_deref());
-                warnings.push(except_fallback_warning(var.name, why, &taken, &undefined));
+                warnings.push(except_fallback_warning(var.name, why, &taken, undefined));
             }
         }
     }
@@ -193,16 +193,34 @@ fn take_the_default_as_input(slots: &mut [Slot], default: &str) -> Vec<String> {
 
 /// The keys of the elements of `axes` that no slot holds, which only the
 /// `:EXCEPT:` default defines; none when an axis's elements are unknown.
-fn undefined_elements(slots: &[Slot], axes: Option<&[Vec<String>]>) -> Vec<String> {
+fn undefined_elements(slots: &[Slot], axes: Option<&[Vec<String>]>) -> (Vec<String>, usize) {
     let Some(axes) = axes else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
     let held: HashSet<Vec<String>> = slots.iter().map(|slot| key_parts(&slot.0)).collect();
-    product(axes)
-        .into_iter()
-        .filter(|key| !held.contains(key))
-        .map(|key| key.join(","))
-        .collect()
+    let total = axes
+        .iter()
+        .try_fold(1usize, |n, axis| n.checked_mul(axis.len()))
+        .unwrap_or(usize::MAX);
+    let in_axes = held
+        .iter()
+        .filter(|key| key.len() == axes.len() && key.iter().zip(axes).all(|(e, a)| a.contains(e)))
+        .count();
+    // The first few, found by walking the product lazily; the rest counted.
+    let mut named = Vec::new();
+    let mut at = vec![0usize; axes.len()];
+    while named.len() < 12 && axes.iter().all(|a| !a.is_empty()) {
+        let key: Vec<String> = at.iter().zip(axes).map(|(&i, a)| a[i].clone()).collect();
+        if !held.contains(&key) {
+            named.push(key.join(","));
+        }
+        let Some(axis) = (0..axes.len()).rev().find(|&i| at[i] + 1 < axes[i].len()) else {
+            break;
+        };
+        at[axis] += 1;
+        at[axis + 1..].iter_mut().for_each(|i| *i = 0);
+    }
+    (named, total.saturating_sub(in_axes))
 }
 
 /// The warning for an `:EXCEPT:` default written as its elements' equations,
@@ -211,7 +229,7 @@ fn except_fallback_warning(
     name: &str,
     why: &str,
     taken: &[String],
-    undefined: &[String],
+    (undefined, count): (Vec<String>, usize),
 ) -> ExportWarning {
     let mut message = format!(
         "arrayed variable '{name}' has an :EXCEPT: default that {why}; it is written as \
@@ -224,9 +242,15 @@ fn except_fallback_warning(
             taken.join("; ")
         ));
     }
-    if !undefined.is_empty() {
+    if count > 0 {
+        let more = count - undefined.len();
+        let more = if more > 0 {
+            format!("; and {more} more")
+        } else {
+            String::new()
+        };
         message.push_str(&format!(
-            "; the elements only the default defines ({}) are not written",
+            "; the {count} elements only the default defines ({}{more}) are not written",
             undefined.join("; ")
         ));
     }
@@ -708,21 +732,6 @@ pub(in crate::mdl) fn same_equation(a: &str, b: &str) -> bool {
         (Ok(Some(a)), Ok(Some(b))) => same_with_elements(&a, &b, &[], &[]),
         _ => a.trim() == b.trim(),
     }
-}
-
-/// Every combination of one element of each axis, in row-major order.
-fn product(axes: &[Vec<String>]) -> Vec<Vec<String>> {
-    axes.iter().fold(vec![Vec::new()], |keys, axis| {
-        keys.into_iter()
-            .flat_map(|key| {
-                axis.iter().map(move |element| {
-                    let mut next = key.clone();
-                    next.push(element.clone());
-                    next
-                })
-            })
-            .collect()
-    })
 }
 
 /// Whether `slot` is `default` with each of the variable's dimensions named

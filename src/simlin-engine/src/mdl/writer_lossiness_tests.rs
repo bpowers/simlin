@@ -1177,8 +1177,35 @@ fn an_except_default_written_as_elements_names_the_elements_it_loses() {
     let (_, warnings) = project_to_mdl_with_warnings(&project).expect("write");
     let warned = message_mentioning(&warnings, "default is not kept").expect("a warning");
     assert!(
-        warned.message.contains("(a2; a3) are not written")
+        warned
+            .message
+            .contains("the 2 elements only the default defines (a2; a3) are not written")
             && !warned.message.contains("table's input"),
         "{warnings:?}"
     );
+}
+
+#[test]
+fn the_elements_a_dropped_default_defines_are_named_a_few_and_counted() {
+    // Four dimensions of 100 elements: the warning names a few of the
+    // elements only the default defines and counts the rest, never building
+    // the 100 million keys.
+    let names: Vec<String> = (1..=100).map(|i| format!("e{i}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let dims = ["D1", "D2", "D3", "D4"];
+    let z = arrayed_aux(
+        "z",
+        &dims,
+        vec![("e1,e1,e1,e1", "1")],
+        Some("{GET DIRECT DATA('data.csv', 'B', '2', 'C')}"),
+        true,
+    );
+    let project = project_with_dims(
+        vec![make_model(vec![z])],
+        dims.iter().map(|d| named_dim(d, &refs)).collect(),
+    );
+    let (_, warnings) = project_to_mdl_with_warnings(&project).expect("write");
+    let warned = message_mentioning(&warnings, "default is not kept").expect("a warning");
+    assert!(warned.message.len() < 1000, "{}", warned.message.len());
+    assert!(warned.message.contains("99999999"), "{}", warned.message);
 }
