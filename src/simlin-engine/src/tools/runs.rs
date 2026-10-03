@@ -77,6 +77,29 @@ pub(crate) const MAX_RUN_VALUES: usize = 2_000_000;
 /// a second of a release build's simulation.
 pub(crate) const MAX_RUN_STEPS: usize = 200_000_000;
 
+/// The most bytes of results the runs of one batch ([`execute_values`])
+/// hold at once: each run holds its results until it is summarized, so this
+/// bounds how many run at a time, whatever the host's cores.
+pub(crate) const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// The batch budget a test sets on its own thread, to observe the bound
+    /// on a small model rather than a large one.
+    pub(crate) static TEST_BATCH_BYTES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(MAX_BATCH_BYTES) };
+}
+
+/// How many runs of `run_bytes` of results each a batch makes at once: as
+/// many as [`MAX_BATCH_BYTES`] holds, and one however large a run is.
+pub(crate) fn concurrent_runs(run_bytes: usize) -> usize {
+    #[cfg(test)]
+    let budget = TEST_BATCH_BYTES.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let budget = MAX_BATCH_BYTES;
+    (budget / run_bytes.max(1)).max(1)
+}
+
 /// How many slices a run is taken in. Between two, it asks whether other work
 /// waits for the project, and stops if so: that work waits at most a slice
 /// of a run, not the whole of a long one.
@@ -881,7 +904,8 @@ fn simulate(
 /// in parallel where the platform has threads, and give each run's results to
 /// `summarize` as it finishes: what a battery of checks, each a run with one
 /// value changed, costs one compile for. A run's results are dropped once
-/// summarized, so a battery holds a run per thread, not every run at once.
+/// summarized, so a battery holds the runs it makes at once, no more of them
+/// than [`concurrent_runs`] allows, not every run.
 ///
 /// Each run is a unit of the call's work: once other work waits for the
 /// project, no run starts, and the batch answers that it was interrupted
@@ -934,7 +958,20 @@ pub(crate) fn execute_values<T: Send>(
     #[cfg(not(target_arch = "wasm32"))]
     let outcomes = {
         use rayon::prelude::*;
-        plans.par_iter().map(run).collect()
+        let parallel = || plans.par_iter().map(&run).collect();
+        let run_bytes = (build.compiled.specs.n_chunks)
+            .saturating_mul(build.compiled.n_slots())
+            .saturating_mul(std::mem::size_of::<f64>());
+        let at_once = concurrent_runs(run_bytes);
+        if at_once >= rayon::current_num_threads() {
+            parallel()
+        } else {
+            match rayon::ThreadPoolBuilder::new().num_threads(at_once).build() {
+                Ok(pool) => pool.install(parallel),
+                // A pool the host will not give runs the batch one at a time.
+                Err(_) => plans.iter().map(&run).collect(),
+            }
+        }
     };
     #[cfg(target_arch = "wasm32")]
     let outcomes = plans.iter().map(run).collect();

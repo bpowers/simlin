@@ -29,13 +29,13 @@ use schemars::JsonSchema;
 
 use crate::datamodel;
 
-use super::battery::{Outcome, goes_negative, recheck};
+use super::battery::{Outcome, recheck};
 use super::behavior::{ModeKind, classify_at};
 use super::loops::{
     LoopPolarityName, analysis_of, leadership, loops_through, polarity_of, through_of,
 };
 use super::runs::{CURRENT, Run};
-use super::series::{KeyedSeries, round, scale_in_run};
+use super::series::{KeyedSeries, SeriesCore, round, scale_in_run};
 use super::variables::LinkPolarityName;
 use super::{DiagnosticCategoryName, Session, ToolError, Workspace, names, resolve_model};
 
@@ -192,7 +192,7 @@ pub enum Citation {
         run: Option<String>,
     },
     /// The variable (an element of it, for an arrayed one) goes below zero
-    /// in the run.
+    /// in the run: exactly when its summary says when it went negative.
     GoesNegative {
         variable: String,
         #[serde(default)]
@@ -568,10 +568,14 @@ fn check(
         Citation::GoesNegative { variable, run } => {
             let run = run_of(session, ws, model, run.as_deref())?;
             let series = series_of(&run, model, variable)?;
-            if series
-                .iter()
-                .any(|series| goes_negative(&series.values).is_some())
-            {
+            // The summary's own rule, so a citation of what a summary
+            // reported holds: a number reported negative went negative.
+            let times = run.times();
+            if series.iter().any(|series| {
+                SeriesCore::at(&times, &series.values, 0.0)
+                    .negative_from
+                    .is_some()
+            }) {
                 return Ok(());
             }
             let least = series
@@ -943,7 +947,10 @@ fn series_of(
     let offsets = &run.results.offsets;
     let mut keys: Vec<(&str, usize)> = offsets
         .iter()
-        .filter(|(key, _)| key.as_str() == ident || key.as_str().starts_with(&format!("{ident}[")))
+        .filter(|(key, _)| {
+            super::series::column_of(model, key.as_str()).map(|(owner, _)| owner)
+                == Some(ident.as_str())
+        })
         .map(|(key, &offset)| (key.as_str(), offset))
         .collect();
     keys.sort_by_key(|(_, offset)| *offset);

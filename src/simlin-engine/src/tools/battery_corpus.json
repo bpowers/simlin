@@ -1,0 +1,699 @@
+{
+  "models": [
+    {
+      "path": "test/test-models/samples/teacup/teacup.mdl",
+      "small": true,
+      "checks": []
+    },
+    {
+      "path": "test/test-models/samples/SIR/SIR.mdl",
+      "checks": [
+        {
+          "test": "sensitivity",
+          "variable": "duration",
+          "condition": "half",
+          "value": 2.5,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Half the infectious duration puts the reproduction number below one: infections only decline and there is no epidemic. The model's tipping point."
+        }
+      ]
+    },
+    {
+      "path": "test/test-models/samples/Lotka_Volterra/Lotka_Volterra.mdl",
+      "checks": [
+        {
+          "test": "units",
+          "outcome": "failed",
+          "accept": true,
+          "why": "Real inconsistencies the modeler fixes: the units mix 'hare'/'hares' and 'fox'/'foxes', which the engine reads as different units, and the flows' units do not balance with them."
+        },
+        {
+          "test": "extreme_conditions",
+          "variable": "reference_fractional_predation_rate",
+          "condition": "low",
+          "value": 0.0,
+          "outcome": "failed",
+          "accept": true,
+          "why": "With no predation nothing limits the prey (no carrying capacity), predator births grow with prey, and the run overflows: the classic structural weakness of Lotka-Volterra, confirmed at a tenth of DT."
+        },
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "failed",
+          "accept": true,
+          "why": "Euler at DT 1/16 on closed predator-prey orbits spirals outward: a 48% error that converges at order one. The model needs RK4 or a finer DT."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "prey_reproduction_ratio",
+          "condition": "double",
+          "value": 6.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "Exact Lotka-Volterra orbits are closed; at DT 1/16 Euler spirals outward, and with the prey ratio doubled the spiral overflows. Euler's, not the equations'."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "predator_lifespan",
+          "condition": "half",
+          "value": 5.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "Both runs are the same closed-orbit oscillation; a shorter lifespan shortens the period, so more of the cycle fits the 50 years. 'rises_then_falls -> oscillating' misdescribes a change of period as a new behavior."
+        }
+      ]
+    },
+    {
+      "path": "test/test-models/samples/Workforce/workforce.mdl",
+      "checks": [
+        {
+          "test": "units",
+          "outcome": "failed",
+          "accept": true,
+          "why": "Real unit errors: average_tenure is declared '1' so departure is persons, not persons/week; the supervision and task-completion equations do not balance either."
+        },
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "failed",
+          "accept": true,
+          "why": "The task backlog's spikes move 6% of its scale between DT 1/32 and finer runs, which converge at order one: a real integration error at the model's DT."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "hours_of_supervision_required_per_rookie_per_week",
+          "condition": "double",
+          "value": 40.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "The hiring cycle is still there: the first backlog peak is five times higher and the second wave comes after week 150. The flag reads the longer period as the oscillation disappearing."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "expert_time_per_task",
+          "condition": "half",
+          "value": 5.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "Folded row: the same cycle with a different phase or period for expert time, maturation time and task arrival; only half the target backlog, folded in here, ends the cycle for real. As a row it reads as the horizon class."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "average_tenure",
+          "condition": "double",
+          "value": 70.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "Experts decline more slowly, so the second hiring wave starts at week 136 instead of 90: the same cycle with a longer period."
+        }
+      ]
+    },
+    {
+      "path": "test/test-models/samples/pendulum/Single_Pendulum.mdl",
+      "checks": [
+        {
+          "test": "units",
+          "outcome": "failed",
+          "accept": true,
+          "why": "Real: 'kilogram' against 'kilograms' and a radian that is not declared dimensionless make the force equations' units disagree with their declarations."
+        },
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "failed",
+          "accept": true,
+          "why": "Euler gains energy on every swing of an undamped pendulum: over 100 s its amplitude grows from 1.0 to 1.4 rad where RK4 holds 1.0, and the phase drifts. The model needs RK4 or a far finer DT."
+        }
+      ]
+    },
+    {
+      "path": "test/test-models/samples/simple_harmonic_oscillator/simple_harmonic_oscillator.mdl",
+      "checks": []
+    },
+    {
+      "path": "test/test-models/samples/Roessler_Chaos/roessler_chaos.mdl",
+      "checks": [
+        {
+          "test": "extreme_conditions",
+          "variable": "a",
+          "condition": "high",
+          "value": 2.0,
+          "outcome": "failed",
+          "accept": true,
+          "why": "At a = 2 the Roessler system leaves its attractor and diverges, at a finer DT too: true of the equations, which have no limit outside the chaotic regime."
+        },
+        {
+          "test": "extreme_conditions",
+          "variable": "c",
+          "condition": "low",
+          "value": 0.0,
+          "outcome": "failed",
+          "accept": true,
+          "why": "At c = 0 the z equation has no decay and the system diverges by t = 46, at a finer DT too: true of the equations."
+        },
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "failed",
+          "accept": true,
+          "why": "A chaotic system: trajectories at different DTs part by more than the attractor's size. The estimate means little, but that no DT reproduces this trajectory is what a reader of its plots should know."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "a",
+          "condition": "double",
+          "value": 0.4,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "At a = 0.4 the trajectory escapes to infinity: the attractor exists only below it. A real limit of the model's parameter."
+        }
+      ]
+    },
+    {
+      "path": "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
+      "checks": []
+    },
+    {
+      "path": "test/metasd/theil-statistics/Theil_2011.mdl",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "The model counts data points per step (flows of x/DT): discrete by construction, and the check says so instead of reporting an integration error."
+        }
+      ]
+    },
+    {
+      "path": "test/bobby/vdf/econ/mark2.mdl",
+      "checks": [
+        {
+          "test": "units",
+          "outcome": "failed",
+          "accept": true,
+          "why": "Real: change_in_insolvency_risk computes a dimensionless value for a per-month rate, desired_home_sales' IF branches have different units, and a delay's units do not balance."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "target_federal_funds_rate",
+          "condition": "double",
+          "value": 6.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real and central: at a 6% target rate the housing bubble does not form; unsold new homes oscillate around a few million instead of growing 170-fold, and risk-taking decays."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "hud_elasticity_of_risky_behavior",
+          "condition": "half",
+          "value": -0.2,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: with half the HUD elasticity the bubble does not form, the same suppression as a higher target rate."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "max_risk",
+          "condition": "half",
+          "value": 15.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: with half the maximum risk the glut of new homes peaks at 124M and clears within the run instead of growing to 670M and staying."
+        }
+      ]
+    },
+    {
+      "path": "test/bobby/vdf/water/water.mdl",
+      "small": true,
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "failed",
+          "accept": true,
+          "why": "DT 1 against an adjustment time of 2: an 11% error, and the note names the time constant DT is too large for."
+        }
+      ]
+    },
+    {
+      "path": "test/bobby/vdf/pop/pop.mdl",
+      "checks": [
+        {
+          "test": "sensitivity",
+          "variable": "years_giving_birth",
+          "condition": "half",
+          "value": 1.1,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: the population is near replacement, and half the childbearing years turns growth into decline."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "births_per_person",
+          "condition": "half",
+          "value": 0.25,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: half the births per person turns growth into decline; the model's replacement threshold."
+        }
+      ]
+    },
+    {
+      "path": "test/arms_race_3party/arms_race.stmx",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "failed",
+          "accept": true,
+          "why": "Each party's target exceeds the others' arms (coefficients summing past one), so arms grow without bound; at DT 1 over 100 years Euler's error compounds to 67% of the scale."
+        }
+      ]
+    },
+    {
+      "path": "test/land_model/land_model.stmx",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Settlement land moves 1.2% of its scale at a finer DT, converging at order one: just over the tolerance, a real if small integration error."
+        }
+      ]
+    },
+    {
+      "path": "test/logistic_growth_ltm/logistic_growth.stmx",
+      "small": true,
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "failed",
+          "accept": true,
+          "why": "Logistic growth at its DT is 5.8% off the converged run at order one: DT is too large for the growth rate."
+        }
+      ]
+    },
+    {
+      "path": "test/metasd/WRLD3-03/wrld3-03.mdl",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "At World3's DT of half a year persistent pollution and the capitals are 2-4% off the converged run (order one): the standard run carries a real integration error."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "industrial_capital_output_ratio_1",
+          "condition": "half",
+          "value": 2.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: capital 1.5 times as productive (the half is held at four DTs, 2.0 against 3.0) brings overshoot and collapse 60 years early and deeper; children 0-14 fall to 270M by 2004 and recover only partly. Folded with maximum_total_fertility_normal half and subsistence_food_per_capita double, the same change of the same cohort."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "reproductive_lifetime",
+          "condition": "half",
+          "value": 15.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: with half the reproductive lifetime the population grows through 2100 instead of collapsing, and pollution and capital keep rising."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "desired_completed_family_size_normal",
+          "condition": "half",
+          "value": 1.9,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: smaller desired families make the population decline instead of overshoot and collapse."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "life_expectancy_normal",
+          "condition": "half",
+          "value": 14.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: a normal life expectancy of 14 years collapses the population from the start."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "life_expectancy_normal",
+          "condition": "double",
+          "value": 56.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: longer lives keep pollution rising through 2100 and land fertility falling; the collapse does not come within the horizon."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "inherent_land_fertility",
+          "condition": "double",
+          "value": 1200.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "The family change is the first movement: land fertility jumps from its hard-coded initial 600 toward the new inherent 1200. The start-up class, rejected as in reliability; that the initial value does not follow the parameter is worth a note, not this finding."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "fraction_of_industrial_output_allocated_to_consumption_constant_1",
+          "condition": "double",
+          "value": 0.86,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: consuming 86% of output leaves too little investment and industry never takes off."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "average_life_of_industrial_capital_1",
+          "condition": "half",
+          "value": 7.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: capital that lasts 7 years depreciates faster than it can be built and industry never takes off."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "gdp_pc_unit",
+          "condition": "half",
+          "value": 0.5,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "gdp_pc_unit is 1 $/(person*year), a constant that carries units into a table's input. Halving it is no condition of the system; neither its units nor its name tell the battery so (Vensim's == marking or a declared range would)."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "inherent_land_fertility",
+          "condition": "half",
+          "value": 300.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "As at double: the change is land fertility's first movement from the hard-coded 600 toward the new 300, a start-up transient."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "potentially_arable_land_total",
+          "condition": "double",
+          "value": 6400000000.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real and unexpected: with twice the potentially arable land, arable land shrinks until 1965 before it expands; a modeler would want to see why."
+        }
+      ]
+    },
+    {
+      "path": "default_projects/fishbanks/model.xmile",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "The fish stock is 2% off the converged run at order one: DT is somewhat large for the catch dynamics."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "purchase_of_new_ships_this_year",
+          "condition": "half",
+          "value": 0.75,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: with half the fleet growth the fish stock recovers instead of collapsing; the model's policy lever."
+        }
+      ]
+    },
+    {
+      "path": "default_projects/population/model.xmile",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "The population is 4.6% off the converged run at order one: DT is too large for its growth rate."
+        }
+      ]
+    },
+    {
+      "path": "default_projects/reliability/model.xmile",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Product comprehensiveness is 1.3% off the converged run at order one: just over the tolerance."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "average effort required\\nto remediate an incident",
+          "condition": "half",
+          "value": 0.5,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "Folded row of eight constants that make Mitigated fall before it rises; for six it is the start-up dip deepened (it ends near the base run), and only doubling the effort to mitigate or the remediation rate halves it for good (ends 50% lower). As a row it reads as the start-up class; the line is whether the stock ends within a fifth of the base run."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "average effort required\\nto remediate an incident",
+          "condition": "double",
+          "value": 2.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "Mitigated jumps in the first two months, dips, then rises as in the base run: a start-up transient read as an oscillation. Folded with mitigation rate double, the same."
+        }
+      ]
+    },
+    {
+      "path": "test/sdeverywhere/models/sir/sir.mdl",
+      "checks": [
+        {
+          "test": "sensitivity",
+          "variable": "average_duration_of_illness_d",
+          "condition": "half",
+          "value": 1.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Half the duration of illness puts the reproduction number below one: no epidemic."
+        }
+      ]
+    },
+    {
+      "path": "test/arrayed_population_ltm/arrayed_population.stmx",
+      "checks": [
+        {
+          "test": "sensitivity",
+          "variable": "birth_rate",
+          "condition": "double",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "LA's birth rate equals its death rate, so it rests only on that knife edge; doubling births sets it growing. A structural fact: nothing pulls a region back to rest."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "birth_rate",
+          "condition": "half",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "At half the birth rates Boston sits exactly at replacement and LA declines: each region's fate is the sign of births minus deaths."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "death_rate",
+          "condition": "double",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Doubling deaths tips LA off its knife edge into decline and puts Boston at rest."
+        }
+      ]
+    },
+    {
+      "path": "test/decoupled_stocks/decoupled.stmx",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "The flows are stock/DT: a difference equation written as stocks and flows, and the check says so rather than reporting an error."
+        }
+      ]
+    },
+    {
+      "path": "test/ai-information/GeneratedByAIThenEdited.stmx",
+      "checks": [
+        {
+          "test": "extreme_conditions",
+          "condition": "own_run",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "In the model's own run three flows it marks non-negative go far below zero (reputation building to -1.76M, order fulfillment to -224, reputation erosion to -70,704): a tool that enforces the marking would hold them at zero, so this run is not the one the author meant. The first thing a reviewer of this model should hear."
+        },
+        {
+          "test": "units",
+          "outcome": "failed",
+          "accept": true,
+          "why": "Real unit errors throughout (leads against calls, customers against orders, a rate with no time), which the diagnostics name equation by equation."
+        },
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "failed",
+          "accept": true,
+          "why": "Brand reputation and the backlog change by most of their scale at half the DT: order fulfillment drains the backlog in 0.1 month, a time written into its equation that is 0.4 DT, and the note names it."
+        }
+      ]
+    },
+    {
+      "path": "test/alias1/alias1.stmx",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "The stock is 1.8% off the converged run at order one: DT is too large for its rate."
+        }
+      ]
+    },
+    {
+      "path": "test/delays/model.xmile",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "failed",
+          "accept": true,
+          "why": "The input steps up at the first step after TIME 3 (IF TIME > 3), which moves with DT; the hand-built third-order stages carry that 6.8% difference. Real dependence of the results on DT, though from the input's timing more than the stages (6.7 DTs each)."
+        }
+      ]
+    },
+    {
+      "path": "test/sdeverywhere/models/delayfixed/delayfixed.mdl",
+      "checks": []
+    },
+    {
+      "path": "test/sdeverywhere/models/smooth3/smooth3.mdl",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "failed",
+          "accept": true,
+          "why": "A third-order smooth whose stages are a third of a DT: the note says so, and the levels are 45% off."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "delay",
+          "condition": "double",
+          "value": 4.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "The base run's oscillation in the s2 levels is Euler's own (each stage is 0.67 DT, so Euler overshoots every step); doubling the delay removes the artifact. Not a change of the model's behavior; the integration check already says why."
+        }
+      ]
+    },
+    {
+      "path": "test/sdeverywhere/models/trend/trend.mdl",
+      "checks": [
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "The trend's average is 4.5% off the converged run at order one."
+        }
+      ]
+    },
+    {
+      "path": "test/xmutil_test_models/C-LEARN v77 for Vensim.mdl",
+      "checks": [
+        {
+          "test": "extreme_conditions",
+          "variable": "aggregated_definition",
+          "condition": "low",
+          "outcome": "failed",
+          "accept": false,
+          "why": "A 0/1 matrix assigning countries to regions: all zeros leaves every region empty and divides zero by zero. It is a definition, not a quantity with extremes."
+        },
+        {
+          "test": "extreme_conditions",
+          "variable": "preindustrial_c",
+          "condition": "high",
+          "value": 5900.0,
+          "outcome": "failed",
+          "accept": false,
+          "why": "The preindustrial carbon content is a measured reference that defines the forcing formula's zero; ten times it is no condition of the system."
+        },
+        {
+          "test": "extreme_conditions",
+          "variable": "developed_stop_growth_year",
+          "condition": "low",
+          "value": 1850.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: with developed growth stopped from 1850, US fossil emissions go below zero after 2000 and cumulative CO2 falls to -4.9 Gt; nothing floors emissions at zero."
+        },
+        {
+          "test": "extreme_conditions",
+          "variable": "developing_a_stop_growth_year",
+          "condition": "low",
+          "value": 1850.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: with China's growth stopped from 1850, its fossil emissions go below zero after 2000; nothing floors emissions at zero."
+        },
+        {
+          "test": "integration_error",
+          "condition": "finer_dt",
+          "outcome": "flagged",
+          "accept": true,
+          "why": "The short-lived HFCs (HFC-152a lasts 1.4 years) are 1.4% off at a DT of a quarter year: a real integration error in the gas cycles."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "preindustrial_c",
+          "condition": "half",
+          "value": 295.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "A measured reference that defines the CO2 forcing's zero: halving it is no condition of the system, so the deep ocean's changed shape says nothing about the model."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "preindustrial_c",
+          "condition": "double",
+          "value": 1180.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "Doubling the preindustrial reference makes CO2 forcing negative and the ocean cool: a consequence of redefining the reference, not a condition of the system."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "n2o_reference_conc",
+          "condition": "double",
+          "value": 540.0,
+          "outcome": "flagged",
+          "accept": false,
+          "why": "The N2O reference concentration defines the forcing formula's zero (TAR ch. 6): doubling it is a different formula, not a condition of the system."
+        },
+        {
+          "test": "sensitivity",
+          "variable": "natural_n2o_emissions",
+          "condition": "half",
+          "value": 5.65,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "An uncertain natural flux: halving it puts the 1850 N2O concentration above its natural balance, so N2O falls for decades before emissions turn it up. True of the model, and shows the initial state assumes this flux."
+        }
+      ]
+    }
+  ]
+}

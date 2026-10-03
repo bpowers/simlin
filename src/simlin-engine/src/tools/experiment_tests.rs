@@ -361,7 +361,7 @@ fn a_run_whose_clock_is_coarser_than_its_dt_ends() {
     }
 }
 
-/// An experiment's two runs are read at one scale. A stock that holds
+/// An experiment's two runs share their series' magnitudes. A stock that holds
 /// arithmetic residue in the model's run and opens to 6 in the experiment
 /// was at rest and is rising: the residue is not a behavior of its own that
 /// the experiment merely scaled.

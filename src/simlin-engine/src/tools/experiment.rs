@@ -30,7 +30,6 @@ use schemars::JsonSchema;
 use crate::common::{Canonical, Ident};
 use crate::datamodel::{self, Variable};
 
-use super::behavior::magnitude;
 use super::outline::{
     AuxKind, IntegrationMethod, SpecsOutline, aux_kind, constant_value, equation_text,
 };
@@ -39,7 +38,8 @@ use super::runs::{
     execute, has_table,
 };
 use super::series::{
-    KeyedSeries, MAX_ELEMENTS, SeriesCore, element_series, keyed_series_upto, round, scale_in_run,
+    KeyedSeries, MAX_ELEMENTS, SeriesCore, compared_scales, element_series, keyed_series_upto,
+    round,
 };
 use super::{Session, ToolError, Workspace, names, resolve_model};
 
@@ -679,20 +679,14 @@ fn compare(
                 continue;
             }
             let base_values = that.as_ref().and_then(|that| that.get(i)).map(|(_, v)| v);
-            // The two runs' series share the larger of their magnitudes:
-            // residue in one run beside a movement in the other is at rest,
-            // not a movement of its own. Each is also read at the scale of
-            // what it is computed from in its own run, its own equations: a
-            // replacement that ends a cancellation of large terms leaves no
-            // trace of them in the run it made.
-            let shared = magnitude(&values).max(base_values.map_or(0.0, |v| magnitude(v)));
-            let this_scale = scale_in_run(&run.results, model, &run.plan, &key).max(shared);
-            let base_core = match (base, base_values, &base_times) {
-                (Some(base), Some(v), Some(times)) => {
-                    let base_scale =
-                        scale_in_run(&base.results, model, &base.plan, &key).max(shared);
-                    Some(SeriesCore::at(times, v, base_scale))
-                }
+            let (this_scale, base_scale) = compared_scales(
+                model,
+                &key,
+                (run, &values),
+                base.zip(base_values).map(|(base, v)| (base, v.as_slice())),
+            );
+            let base_core = match (base_values, base_scale, &base_times) {
+                (Some(v), Some(scale), Some(times)) => Some(SeriesCore::at(times, v, scale)),
                 _ => None,
             };
             comparisons.push(Comparison {
