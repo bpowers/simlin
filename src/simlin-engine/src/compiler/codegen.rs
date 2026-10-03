@@ -1499,6 +1499,7 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Pulse(_, _, _) => BuiltinId::Pulse,
                     BuiltinFn::Quantum(_, _) => BuiltinId::Quantum,
                     BuiltinFn::Ramp(_, _, _) => BuiltinId::Ramp,
+                    BuiltinFn::Rem(_, _) => BuiltinId::Rem,
                     BuiltinFn::SafeDiv(_, _, _) => BuiltinId::SafeDiv,
                     BuiltinFn::Sign(_) => BuiltinId::Sign,
                     BuiltinFn::Sin(_) => BuiltinId::Sin,
@@ -1506,6 +1507,7 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Sqrt(_) => BuiltinId::Sqrt,
                     BuiltinFn::Step(_, _) => BuiltinId::Step,
                     BuiltinFn::Tan(_) => BuiltinId::Tan,
+                    BuiltinFn::Trunc(_) => BuiltinId::Trunc,
                 };
 
                 // Operands in call order. `Apply` pops exactly

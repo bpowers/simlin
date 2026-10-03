@@ -271,8 +271,9 @@ impl VensimElement {
 #[derive(Clone)]
 pub struct VensimView {
     pub header: ViewHeader,
-    /// Elements indexed by UID. None entries represent missing UIDs.
-    pub elements: Vec<Option<VensimElement>>,
+    /// Elements by UID. A map, never a vector sized by a UID: a UID is a
+    /// number in the file.
+    pub elements: std::collections::BTreeMap<i32, VensimElement>,
     /// UID offset for multi-view composition.
     pub uid_offset: i32,
     /// Translation applied by MDL view composition.
@@ -306,7 +307,7 @@ impl VensimView {
     pub fn new(header: ViewHeader) -> Self {
         VensimView {
             header,
-            elements: Vec::new(),
+            elements: std::collections::BTreeMap::new(),
             uid_offset: 0,
             x_offset: 0,
             y_offset: 0,
@@ -329,7 +330,7 @@ impl VensimView {
         if uid < 0 {
             return None;
         }
-        self.elements.get(uid as usize).and_then(|e| e.as_ref())
+        self.elements.get(&uid)
     }
 
     /// Get a mutable reference to an element by UID.
@@ -337,33 +338,34 @@ impl VensimView {
         if uid < 0 {
             return None;
         }
-        self.elements.get_mut(uid as usize).and_then(|e| e.as_mut())
+        self.elements.get_mut(&uid)
     }
 
     /// Insert an element at the given UID.
-    /// Expands the elements vector if necessary.
     pub fn insert(&mut self, uid: i32, element: VensimElement) {
         if uid < 0 {
             return;
         }
-        let idx = uid as usize;
-        if idx >= self.elements.len() {
-            self.elements.resize(idx + 26, None);
-        }
-        self.elements[idx] = Some(element);
+        self.elements.insert(uid, element);
+    }
+
+    /// One past the UIDs this view takes in a composition of views: its
+    /// largest UID and 25 more (xmutil's spacing), or 0 for a view with no
+    /// element.
+    pub fn uid_span(&self) -> i32 {
+        self.elements
+            .last_key_value()
+            .map_or(0, |(uid, _)| uid.saturating_add(26))
     }
 
     /// Iterate over all present elements.
     pub fn iter(&self) -> impl Iterator<Item = &VensimElement> {
-        self.elements.iter().filter_map(|e| e.as_ref())
+        self.elements.values()
     }
 
     /// Iterate over all present elements with their UIDs.
     pub fn iter_with_uids(&self) -> impl Iterator<Item = (i32, &VensimElement)> {
-        self.elements
-            .iter()
-            .enumerate()
-            .filter_map(|(uid, e)| e.as_ref().map(|elem| (uid as i32, elem)))
+        self.elements.iter().map(|(uid, elem)| (*uid, elem))
     }
 
     /// Get the maximum x coordinate in this view.

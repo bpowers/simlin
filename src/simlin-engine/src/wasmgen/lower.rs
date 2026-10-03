@@ -2383,22 +2383,20 @@ fn emit_apply(func: BuiltinId, ctx: &EmitCtx, f: &mut Function) {
             f.instruction(&Ins::F64Le);
             f.instruction(&Ins::Select);
         }
-        // `Quantum = if b==0.0 {a} else {(a/b).trunc()*b}` (exact `==`).
-        BuiltinId::Quantum => {
-            // select(a, (a/b).trunc()*b, b == 0.0)
+        // `Quantum = if b <= 0.0 {a} else {(a/b).trunc()*b}`.
+        BuiltinId::Quantum => emit_quantum(a, b, f),
+        // `Rem = a - quantum(a, b)`, the VM's own expression, so a divisor
+        // at or below zero leaves `a - a`.
+        BuiltinId::Rem => {
             get(f, a);
-            // (a/b).trunc() * b
+            emit_quantum(a, b, f);
+            f.instruction(&Ins::F64Sub);
+        }
+        // `Trunc = a.trunc()`: wasm's `f64.trunc` rounds toward zero as
+        // Rust's does.
+        BuiltinId::Trunc => {
             get(f, a);
-            get(f, b);
-            f.instruction(&Ins::F64Div);
             f.instruction(&Ins::F64Trunc);
-            get(f, b);
-            f.instruction(&Ins::F64Mul);
-            // cond: b == 0.0
-            get(f, b);
-            f.instruction(&f64_const(0.0));
-            f.instruction(&Ins::F64Eq);
-            f.instruction(&Ins::Select);
         }
         // `SafeDiv = if b != 0.0 {a/b} else {c}` (exact `!=`, NOT approx).
         BuiltinId::SafeDiv => {
@@ -2967,6 +2965,25 @@ fn emit_reduce_fold(
 
 /// Push `helper(local)` for a unary `(f64) -> f64` helper: load the f64 local,
 /// then `call`.
+/// Push `quantum(a, b)` for the locals `a` and `b`, the VM's
+/// `if b <= 0.0 { a } else { (a / b).trunc() * b }`: `select` takes its first
+/// operand when the condition holds, and `f64.le` is false for a NaN `b`, as
+/// the VM's comparison is.
+fn emit_quantum(a: u32, b: u32, f: &mut Function) {
+    use Instruction as Ins;
+    f.instruction(&Ins::LocalGet(a));
+    f.instruction(&Ins::LocalGet(a));
+    f.instruction(&Ins::LocalGet(b));
+    f.instruction(&Ins::F64Div);
+    f.instruction(&Ins::F64Trunc);
+    f.instruction(&Ins::LocalGet(b));
+    f.instruction(&Ins::F64Mul);
+    f.instruction(&Ins::LocalGet(b));
+    f.instruction(&f64_const(0.0));
+    f.instruction(&Ins::F64Le);
+    f.instruction(&Ins::Select);
+}
+
 fn emit_call_unary(helper_idx: u32, src: u32, _ctx: &EmitCtx, f: &mut Function) {
     f.instruction(&Instruction::LocalGet(src));
     f.instruction(&Instruction::Call(helper_idx));

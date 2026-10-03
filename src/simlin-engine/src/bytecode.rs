@@ -593,6 +593,7 @@ pub(crate) enum BuiltinId {
     Pulse,
     Quantum,
     Ramp,
+    Rem,
     Round,
     SafeDiv,
     Sign,
@@ -601,6 +602,7 @@ pub(crate) enum BuiltinId {
     Sqrt,
     Step,
     Tan,
+    Trunc,
 }
 
 impl BuiltinId {
@@ -641,8 +643,13 @@ impl BuiltinId {
             | BuiltinId::Sign
             | BuiltinId::Sin
             | BuiltinId::Sqrt
-            | BuiltinId::Tan => 1,
-            BuiltinId::Max | BuiltinId::Min | BuiltinId::Quantum | BuiltinId::Step => 2,
+            | BuiltinId::Tan
+            | BuiltinId::Trunc => 1,
+            BuiltinId::Max
+            | BuiltinId::Min
+            | BuiltinId::Quantum
+            | BuiltinId::Rem
+            | BuiltinId::Step => 2,
             BuiltinId::Pulse | BuiltinId::Ramp | BuiltinId::SafeDiv | BuiltinId::Sshape => 3,
         }
     }
@@ -3656,17 +3663,19 @@ pub(crate) mod tests {
             (BuiltinId::Sin, 1),
             (BuiltinId::Sqrt, 1),
             (BuiltinId::Tan, 1),
+            (BuiltinId::Trunc, 1),
             (BuiltinId::Max, 2),
             (BuiltinId::Min, 2),
             (BuiltinId::Quantum, 2),
+            (BuiltinId::Rem, 2),
             (BuiltinId::Step, 2),
             (BuiltinId::Pulse, 3),
             (BuiltinId::Ramp, 3),
             (BuiltinId::SafeDiv, 3),
             (BuiltinId::Sshape, 3),
         ];
-        // 22 = every variant of BuiltinId. A new builtin must add a row.
-        assert_eq!(rows.len(), 22);
+        // 24 = every variant of BuiltinId. A new builtin must add a row.
+        assert_eq!(rows.len(), 24);
         for (id, want) in rows {
             assert_eq!(id.arity(), *want, "arity of {id:?}");
         }

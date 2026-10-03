@@ -4,15 +4,14 @@
 
 //! Variable building methods for MDL to datamodel conversion.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::datamodel::{
-    self, Compat, DimensionElements, Equation, GraphicalFunction, GraphicalFunctionKind,
-    GraphicalFunctionScale, Model, ModelGroup, Project, Variable, View,
+    self, Compat, Equation, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
+    Model, ModelGroup, Project, Variable, View,
 };
 
 use crate::import_losses::ImportWarning;
-use crate::mdl::LOOKUP_SENTINEL;
 use crate::mdl::settings::{PostEquationParser, custom_output_losses};
 use crate::mdl::view;
 
@@ -40,6 +39,7 @@ impl<'input> ConversionContext<'input> {
     ) -> Result<(Project, Vec<ImportWarning>), ConvertError> {
         let (model, mut losses) = self.build_model("main", materialization)?;
         if self.report_losses {
+            losses.extend(self.control_losses());
             let outputs = PostEquationParser::new(self.post_equations).custom_outputs();
             losses.extend(custom_output_losses(&outputs));
         }
@@ -82,7 +82,11 @@ impl<'input> ConversionContext<'input> {
     ) -> Result<(Model, Vec<ImportWarning>), ConvertError> {
         let mut variables: Vec<Variable> = Vec::with_capacity(self.symbols.len());
 
-        for (var_name, info) in &self.symbols {
+        // In name order, not the symbol map's: the first variable that fails
+        // is the import's error, and a file imports one way on every run.
+        let mut symbols: Vec<(&String, &SymbolInfo<'_>)> = self.symbols.iter().collect();
+        symbols.sort_by(|a, b| a.0.cmp(b.0));
+        for (var_name, info) in symbols {
             // Skip unwanted variables (control vars)
             if info.unwanted {
                 continue;
@@ -304,24 +308,45 @@ impl<'input> ConversionContext<'input> {
         Some(non_empty[0])
     }
 
-    /// Check if an equation is a NumberList or TabbedArray (which have special handling).
-    fn is_number_list_or_tabbed(&self, eq: &MdlEquation<'_>) -> bool {
-        matches!(
-            eq,
-            MdlEquation::NumberList(_, _) | MdlEquation::TabbedArray(_, _)
-        )
+    /// Settle the dimensions of a variable whose equations define the element
+    /// keys `keys` (comma-joined), each axis over the dimension of exactly
+    /// the elements defined on it (`axis_dimension`): `dims` holds the
+    /// dimension the left-hand sides resolve each axis to and is replaced,
+    /// `lhs_subscripts` are each equation's left-hand subscripts as written,
+    /// and `unsettled` the axes the left-hand sides disagree on. False when
+    /// no declared dimension holds the elements defined on such an axis: no
+    /// one dimension is the variable's there.
+    ///
+    /// The one owner of an arrayed variable's dimensions on import, for a
+    /// variable and for the net flow made of a stock's equations alike, so
+    /// the two are over the same dimensions.
+    pub(super) fn settle_dimensions<'k>(
+        &self,
+        dims: &mut [String],
+        keys: impl Iterator<Item = &'k String> + Clone,
+        lhs_subscripts: &[&[String]],
+        unsettled: &BTreeSet<usize>,
+    ) -> bool {
+        for (axis, dim) in dims.iter_mut().enumerate() {
+            let defined: BTreeSet<String> = keys
+                .clone()
+                .filter_map(|key| key.split(',').nth(axis).map(canonical_name))
+                .collect();
+            let named: Vec<String> = lhs_subscripts
+                .iter()
+                .filter_map(|subs| subs.get(axis))
+                .filter(|sub| self.subscript_names_a_dimension(sub))
+                .map(|sub| canonical_name(sub))
+                .collect();
+            match self.axis_dimension(&named, &defined) {
+                Some(chosen) => *dim = chosen,
+                None if unsettled.contains(&axis) => return false,
+                None => {}
+            }
+        }
+        true
     }
 
-    /// Build a variable with element-specific equations if applicable.
-    /// Returns None if not element-specific (should use normal handling).
-    ///
-    /// This function handles:
-    /// - Single element-specific equations (P1): x[a1] = 5
-    /// - Apply-to-all with element overrides (P2): x[DimA] = 1, x[a1] = 2
-    /// - Mixed element/dimension subscripts (High): x[a1, DimB] = expr
-    ///
-    /// NumberList and TabbedArray equations are excluded - they have special handling
-    /// in build_equation that handles their multi-value RHS correctly.
     /// Does this raw LHS subscript name a subscript RANGE (a dimension or a
     /// subrange) rather than a single element?
     ///
@@ -382,18 +407,30 @@ impl<'input> ConversionContext<'input> {
         expected > 0 && elements.len() == expected
     }
 
+    /// Build a variable from its subscripted equations, each defining the
+    /// elements its left-hand side names. Returns None for a variable with no
+    /// subscripted equation, or one whose left-hand sides do not agree on its
+    /// dimensions, which `build_variable` then builds from one equation.
+    ///
+    /// The equations it merges:
+    /// - an element's own: `x[a1] = 5`
+    /// - an apply-to-all with element overrides: `x[DimA] = 1`, `x[a1] = 2`
+    /// - mixed element and dimension subscripts: `x[a1, DimB] = expr`
+    /// - a number list or tabbed array, whose numbers go to the left-hand
+    ///   side's elements in row-major order: `x[a1, DimB] = 1, 2`. A variable
+    ///   may have several (Vensim writes an array of three or more dimensions
+    ///   as one list per element of the leading ones), or lists beside
+    ///   ordinary equations.
     fn build_variable_with_elements(
         &self,
         name: &str,
         info: &SymbolInfo<'_>,
     ) -> Result<Option<Variable>, super::types::ConvertError> {
-        // Filter to get valid equations (not empty, not AFO, not number list/tabbed)
         let valid_eqs: Vec<&FullEquation<'_>> = info
             .equations
             .iter()
             .filter(|eq| !self.is_empty_rhs(&eq.equation))
             .filter(|eq| !self.is_afo_expr_in_eq(&eq.equation))
-            .filter(|eq| !self.is_number_list_or_tabbed(&eq.equation))
             .collect();
 
         if valid_eqs.is_empty() {
@@ -410,6 +447,7 @@ impl<'input> ConversionContext<'input> {
 
         let mut expanded_eqs: Vec<ExpandedEquation<'_>> = Vec::new();
         let mut parent_dims: Option<Vec<String>> = None;
+        let mut unsettled_axes: BTreeSet<usize> = BTreeSet::new();
         let mut has_subscripted_eq = false;
         let mut has_except_eq = false;
         let mut has_non_except_eq = false;
@@ -444,28 +482,27 @@ impl<'input> ConversionContext<'input> {
                     }
                 }
 
-                // Verify all equations have the same parent dimensions (normalizing via equivalences)
+                // The equations must agree on how many dimensions the
+                // variable has. On each axis where their left-hand sides
+                // resolve to different dimensions, the equations span
+                // different subranges of one parent, or elements whose
+                // owners differ; the axis is then decided by the elements
+                // defined on it (`axis_dimension`, below).
                 if let Some(ref mut existing_dims) = parent_dims {
-                    // Normalize both sets of dimensions through equivalences for comparison
-                    let normalized_existing: Vec<_> = existing_dims
-                        .iter()
-                        .map(|d| self.normalize_dimension(d))
-                        .collect();
-                    let normalized_new: Vec<_> =
-                        dims.iter().map(|d| self.normalize_dimension(d)).collect();
-                    if normalized_existing != normalized_new {
-                        // Inconsistent dimensions - can't form a proper array
+                    if existing_dims.len() != dims.len() {
                         return Ok(None);
                     }
-                    // If the raw dimension names differ but normalized names match,
-                    // the equations span different subranges of the same parent.
-                    // Promote parent_dims to the parent dimensions (but not through
-                    // equivalences -- alias dimensions should keep their own name).
-                    if *existing_dims != dims {
-                        *existing_dims = existing_dims
-                            .iter()
-                            .map(|d| self.resolve_subrange_to_parent(&canonical_name(d)))
-                            .collect();
+                    for (axis, (existing, new)) in existing_dims.iter_mut().zip(&dims).enumerate() {
+                        if existing == new {
+                            continue;
+                        }
+                        if self.normalize_dimension(existing) == self.normalize_dimension(new) {
+                            // Subranges of one parent take the parent (an
+                            // alias dimension keeps its own name).
+                            *existing = self.resolve_subrange_to_parent(&canonical_name(existing));
+                        } else {
+                            unsettled_axes.insert(axis);
+                        }
                     }
                 } else {
                     parent_dims = Some(dims);
@@ -481,7 +518,7 @@ impl<'input> ConversionContext<'input> {
                     .collect();
 
                 // Compute Cartesian product of expanded elements
-                let mut element_keys = cartesian_product(&expanded_elements);
+                let mut element_keys = cartesian_product(&expanded_elements)?;
 
                 // Filter out excepted element keys when EXCEPT is present
                 let eq_has_except = lhs.except.is_some();
@@ -501,7 +538,7 @@ impl<'input> ConversionContext<'input> {
                             }
                         }
                         if !except_expanded.is_empty() {
-                            for key in cartesian_product(&except_expanded) {
+                            for key in cartesian_product(&except_expanded)? {
                                 excepted_keys.insert(key);
                             }
                         }
@@ -528,7 +565,7 @@ impl<'input> ConversionContext<'input> {
             return Ok(None);
         }
 
-        let parent_dims = match parent_dims {
+        let mut parent_dims = match parent_dims {
             Some(dims) => dims,
             None => return Ok(None),
         };
@@ -552,9 +589,29 @@ impl<'input> ConversionContext<'input> {
         let needs_substitution = expanded_eqs.len() > 1 || has_except_eq;
 
         for exp_eq in &expanded_eqs {
+            // A list's numbers, one per element its left-hand side defines
+            // (less those it excepts), in order. Which number a list of
+            // another length gives an element would be a guess, so such a
+            // list is refused; whether Vensim refuses it too is unverified.
+            let listed = match &exp_eq.eq.equation {
+                MdlEquation::NumberList(_, values) | MdlEquation::TabbedArray(_, values) => {
+                    if values.len() != exp_eq.element_keys.len() {
+                        return Err(super::types::ConvertError::Other(format!(
+                            "'{name}' lists {} numbers for the {} elements its left-hand side defines",
+                            values.len(),
+                            exp_eq.element_keys.len()
+                        )));
+                    }
+                    Some(values.as_slice())
+                }
+                _ => None,
+            };
+
             // When this equation has EXCEPT, capture its unsubstituted RHS as the
-            // default equation text (metadata for the Equation::Arrayed).
-            if exp_eq.has_except {
+            // default equation text (metadata for the Equation::Arrayed). A
+            // list has no equation text to be a default: it defines the
+            // elements it does not except, each by its own number.
+            if exp_eq.has_except && listed.is_none() {
                 let empty_ctx = crate::mdl::xmile_compat::ElementContext {
                     substitutions: HashMap::new(),
                     subrange_mappings: HashMap::new(),
@@ -569,7 +626,13 @@ impl<'input> ConversionContext<'input> {
                 default_equation = Some(raw_eq);
             }
 
-            for key in &exp_eq.element_keys {
+            for (position, key) in exp_eq.element_keys.iter().enumerate() {
+                if let Some(values) = listed {
+                    let text = format_number(values[position]);
+                    element_map.insert(key.clone(), (text, None, None));
+                    continue;
+                }
+
                 // Split element key to get per-dimension element names
                 let element_parts: Vec<&str> = key.split(',').collect();
                 debug_assert_eq!(
@@ -613,11 +676,28 @@ impl<'input> ConversionContext<'input> {
             }
         }
 
-        // Convert map to sorted vector
+        let lhs_subscripts: Vec<&[String]> = expanded_eqs
+            .iter()
+            .map(|e| e.lhs_subscripts.as_slice())
+            .collect();
+        if !self.settle_dimensions(
+            &mut parent_dims,
+            element_map.keys(),
+            &lhs_subscripts,
+            &unsettled_axes,
+        ) {
+            return Ok(None);
+        }
+
+        // Each element is keyed by its canonical name, as every reader of a
+        // datamodel stores one (`CanonicalElementName::from_subscript`); the
+        // spelling the file gives it is its dimension's.
         let mut elements: Vec<(String, String, Option<String>, Option<GraphicalFunction>)> =
             element_map
                 .into_iter()
-                .map(|(key, (eq_str, initial_eq, gf))| (key, eq_str, initial_eq, gf))
+                .map(|(key, (eq_str, initial_eq, gf))| {
+                    (canonical_element_key(&key), eq_str, initial_eq, gf)
+                })
                 .collect();
         elements.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -632,11 +712,22 @@ impl<'input> ConversionContext<'input> {
             .map(|d| self.get_formatted_dimension_name(d))
             .collect();
 
-        // has_except_default: the default equation should fill missing elements
-        // only when EXCEPT equations coexist with separate override equations.
-        // When EXCEPT is the sole source of elements, excepted elements should
-        // remain at 0 (undefined) rather than receiving the default.
-        let has_except_default = has_except_eq && has_non_except_eq;
+        // The default applies only where every element already has a slot,
+        // so an excepted element nothing defines stays undefined (the
+        // engine's rule, unverified against Vensim).
+        let every_element_has_a_slot = parent_dims
+            .iter()
+            .map(|dim| {
+                self.dimension_elements
+                    .get(&canonical_name(dim))
+                    .map_or(0, Vec::len)
+            })
+            .product::<usize>()
+            == elements.len();
+        let has_except_default = has_except_eq
+            && has_non_except_eq
+            && default_equation.is_some()
+            && every_element_has_a_slot;
         // Was the MDL source a SINGLE apply-to-all equation? That -- not
         // whether the expanded slots happen to agree -- is what licenses
         // collapsing, and the difference is not academic: an arrayed
@@ -669,9 +760,19 @@ impl<'input> ConversionContext<'input> {
         // Asking the spelling is also simply what "apply-to-all" means, so the
         // other blocks (a pinned axis, mixed spellings) become principled rather
         // than incidental consequences of counting elements.
+        //
+        // A number list is per-element data by its spelling, like the
+        // external data above: that its numbers agree today does not make it
+        // one equation.
         let single_apply_to_all = expanded_eqs.len() == 1
             && !has_except_eq
             && default_equation.is_none()
+            && !expanded_eqs.iter().any(|e| {
+                matches!(
+                    e.eq.equation,
+                    MdlEquation::NumberList(_, _) | MdlEquation::TabbedArray(_, _)
+                )
+            })
             && expanded_eqs.iter().all(|e| {
                 e.lhs_subscripts
                     .iter()
@@ -827,7 +928,7 @@ impl<'input> ConversionContext<'input> {
                 None,
                 Some(self.build_graphical_function(var_name, table)),
             )),
-            MdlEquation::EmptyRhs(_, _) => Ok((LOOKUP_SENTINEL.to_string(), None, None)),
+            MdlEquation::EmptyRhs(_, _) => Ok((String::new(), None, None)),
             MdlEquation::Implicit(_) => {
                 let gf = self.make_default_lookup();
                 Ok(("TIME".to_string(), None, Some(gf)))
@@ -839,15 +940,16 @@ impl<'input> ConversionContext<'input> {
                     .unwrap_or_default();
                 self.try_resolve_data_equation(&eq_str, element_offsets)
             }
-            MdlEquation::TabbedArray(_, _) | MdlEquation::NumberList(_, _) => {
-                // Per-element expansion is handled by make_array_equation at the
-                // build_equation level. If we reach here, return empty and let
-                // the caller handle it.
-                Ok((String::new(), None, None))
-            }
-            MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _) => {
-                unreachable!("SubscriptDef and Equivalence should not reach per-element expansion")
-            }
+            // A list's elements take its numbers where its left-hand side
+            // is expanded, and a subscript definition is a dimension, not a
+            // variable, so neither has an expression to format here; a
+            // caller that asks is refused rather than answered with a guess.
+            MdlEquation::TabbedArray(_, _)
+            | MdlEquation::NumberList(_, _)
+            | MdlEquation::SubscriptDef(_, _)
+            | MdlEquation::Equivalence(_, _, _) => Err(super::types::ConvertError::Other(format!(
+                "'{var_name}' has an equation that is not an expression where one is needed"
+            ))),
         }
     }
 
@@ -1145,7 +1247,7 @@ impl<'input> ConversionContext<'input> {
                 Ok((equation, compat, Some(gf)))
             }
             MdlEquation::EmptyRhs(lhs, _) => {
-                let (equation, compat) = self.make_equation(lhs, "0+0");
+                let (equation, compat) = self.make_equation(lhs, "");
                 Ok((equation, compat, None))
             }
             MdlEquation::Implicit(lhs) => {
@@ -1166,9 +1268,17 @@ impl<'input> ConversionContext<'input> {
                 Ok((equation, compat, gf))
             }
             MdlEquation::TabbedArray(lhs, values) | MdlEquation::NumberList(lhs, values) => {
-                // Create an arrayed equation from the number list
-                let (equation, gf) = self.make_array_equation(lhs, values);
-                Ok((equation, Compat::default(), gf))
+                // A list over known subscripts is built element by element
+                // (`build_variable_with_elements`). What reaches here is a
+                // list no element can take a number from: one with no
+                // subscripts, or over a subscript nothing declares. Which of
+                // its numbers the variable would be is a guess, so it is
+                // refused.
+                Err(super::types::ConvertError::Other(format!(
+                    "'{}' lists {} numbers but defines no element to take them",
+                    lhs.name,
+                    values.len()
+                )))
             }
             MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _) => {
                 Ok((Equation::Scalar(String::new()), Compat::default(), None))
@@ -1321,204 +1431,6 @@ impl<'input> ConversionContext<'input> {
         }
     }
 
-    /// Create an arrayed equation from a list of values.
-    ///
-    /// For TabbedArray and NumberList, we need to create element-specific equations.
-    /// This requires knowing the dimension elements to map values to subscripts.
-    ///
-    /// Handles mixed subscripts where some positions are dimension names (free/varying)
-    /// and others are element names (fixed). For example:
-    ///   `v[DimA, B1] = 1, 2, 3` -- DimA varies (A1,A2,A3), B1 is fixed
-    ///   `w[A1, DimB] = 1, 2, 3` -- A1 is fixed, DimB varies (B1,B2,B3)
-    ///
-    /// The resulting dims list contains only valid dimension names (the parent
-    /// dimension for any fixed element subscripts), matching the XMILE convention.
-    fn make_array_equation(
-        &self,
-        lhs: &Lhs<'_>,
-        values: &[f64],
-    ) -> (Equation, Option<GraphicalFunction>) {
-        if lhs.subscripts.is_empty() {
-            // Scalar case: just use the first value (shouldn't normally happen)
-            let eq_str = if !values.is_empty() {
-                format_number(values[0])
-            } else {
-                String::new()
-            };
-            return (Equation::Scalar(eq_str), None);
-        }
-
-        // Get all subscript names from LHS (spaces->underscores, preserving case)
-        let lhs_names: Vec<String> = lhs
-            .subscripts
-            .iter()
-            .map(|s| match s {
-                Subscript::Element(name, _) | Subscript::BangElement(name, _) => {
-                    space_to_underbar(name)
-                }
-            })
-            .collect();
-
-        // Classify each LHS subscript as a dimension (free/varying) or a fixed element.
-        //
-        // For each position, collect:
-        //   - dim_name: the dimension name for the Arrayed dims list
-        //   - is_free: whether the position varies (true) or is fixed (false)
-        //   - fixed_elem: for fixed positions, the element name to use in keys
-        //   - free_elems: for free positions, the list of dimension elements to iterate
-        struct SubscriptInfo {
-            dim_name: String,
-            is_free: bool,
-            fixed_elem: Option<String>,
-            free_elems: Vec<String>,
-        }
-
-        let mut infos: Vec<SubscriptInfo> = Vec::with_capacity(lhs_names.len());
-        let mut all_resolved = true;
-
-        for name in &lhs_names {
-            let canonical = canonical_name(name);
-            // First try to match as a dimension name
-            let mut found = None;
-            for dim in &self.dimensions {
-                if eq_lower_space(&dim.name, &canonical)
-                    && let DimensionElements::Named(elements) = &dim.elements
-                {
-                    found = Some((dim.name.clone(), true, elements.clone()));
-                    break;
-                }
-            }
-            if let Some((dim_name, is_free, elems)) = found {
-                infos.push(SubscriptInfo {
-                    dim_name,
-                    is_free,
-                    fixed_elem: None,
-                    free_elems: elems,
-                });
-                continue;
-            }
-
-            // Not a dimension name: look for it as an element in one of the dimensions
-            let mut found_parent = None;
-            for dim in &self.dimensions {
-                if let DimensionElements::Named(elements) = &dim.elements {
-                    for elem in elements {
-                        if eq_lower_space(elem, &canonical) {
-                            found_parent = Some((dim.name.clone(), elem.clone()));
-                            break;
-                        }
-                    }
-                }
-                if found_parent.is_some() {
-                    break;
-                }
-            }
-            if let Some((dim_name, elem_name)) = found_parent {
-                infos.push(SubscriptInfo {
-                    dim_name,
-                    is_free: false,
-                    fixed_elem: Some(elem_name),
-                    free_elems: vec![],
-                });
-            } else {
-                all_resolved = false;
-                break;
-            }
-        }
-
-        if !all_resolved || infos.is_empty() {
-            let eq_str = if !values.is_empty() {
-                format_number(values[0])
-            } else {
-                String::new()
-            };
-            return (Equation::ApplyToAll(lhs_names, eq_str), None);
-        }
-
-        // Build the dims list from resolved dimension names (in LHS order)
-        let dims: Vec<String> = infos.iter().map(|info| info.dim_name.clone()).collect();
-
-        // Compute Cartesian product over the free dimensions only.
-        // varying_combos[i] is a Vec<(position, element_name)> for one combination.
-        let free_positions: Vec<usize> = infos
-            .iter()
-            .enumerate()
-            .filter(|(_, info)| info.is_free)
-            .map(|(i, _)| i)
-            .collect();
-        let free_elem_lists: Vec<&Vec<String>> = infos
-            .iter()
-            .filter(|info| info.is_free)
-            .map(|info| &info.free_elems)
-            .collect();
-
-        if free_positions.is_empty() {
-            // All subscripts are fixed elements -- just one equation
-            if values.is_empty() {
-                return (Equation::ApplyToAll(dims, String::new()), None);
-            }
-            let key: String = infos
-                .iter()
-                .map(|info| info.fixed_elem.as_deref().unwrap_or(""))
-                .collect::<Vec<_>>()
-                .join(",");
-            let element_eqs = vec![(key, format_number(values[0]), None, None)];
-            return (Equation::Arrayed(dims, element_eqs, None, false), None);
-        }
-
-        // Cartesian product of free dimension elements as Vec<Vec<String>>
-        let varying_combos: Vec<Vec<String>> = if free_elem_lists.len() == 1 {
-            free_elem_lists[0].iter().map(|e| vec![e.clone()]).collect()
-        } else {
-            let mut result: Vec<Vec<String>> =
-                free_elem_lists[0].iter().map(|e| vec![e.clone()]).collect();
-            for elems in &free_elem_lists[1..] {
-                let mut new_result = Vec::with_capacity(result.len() * elems.len());
-                for prefix in &result {
-                    for elem in *elems {
-                        let mut combo = prefix.clone();
-                        combo.push(elem.clone());
-                        new_result.push(combo);
-                    }
-                }
-                result = new_result;
-            }
-            result
-        };
-
-        if varying_combos.len() != values.len() {
-            let eq_str = if !values.is_empty() {
-                format_number(values[0])
-            } else {
-                String::new()
-            };
-            return (Equation::ApplyToAll(dims, eq_str), None);
-        }
-
-        // Build element keys: for each combination of free elements, fill in fixed elements too
-        let element_eqs: Vec<(String, String, Option<String>, Option<GraphicalFunction>)> =
-            varying_combos
-                .into_iter()
-                .zip(values.iter())
-                .map(|(combo, &val)| {
-                    let mut parts = vec![String::new(); infos.len()];
-                    let mut free_idx = 0;
-                    for (pos, info) in infos.iter().enumerate() {
-                        if info.is_free {
-                            parts[pos] = combo[free_idx].clone();
-                            free_idx += 1;
-                        } else {
-                            parts[pos] = info.fixed_elem.as_deref().unwrap_or("").to_string();
-                        }
-                    }
-                    let key = parts.join(",");
-                    (key, format_number(val), None, None)
-                })
-                .collect();
-
-        (Equation::Arrayed(dims, element_eqs, None, false), None)
-    }
-
     /// Extract the initial value expression from an INTEG call.
     fn extract_integ_initial<'a>(&self, expr: &'a Expr<'input>) -> Option<&'a Expr<'input>> {
         match expr {
@@ -1665,6 +1577,15 @@ pub(super) fn points_in_x_order(x_vals: Vec<f64>, y_vals: Vec<f64>) -> (Vec<f64>
 #[cfg(test)]
 #[path = "lookup_order_tests.rs"]
 mod lookup_order_tests;
+
+/// The canonical key of an element key the converter builds (`a1,B2`, its
+/// parts as the file spells them): what every reader of a datamodel stores
+/// (`CanonicalElementName::from_subscript`, the one owner).
+pub(super) fn canonical_element_key(key: &str) -> String {
+    crate::common::CanonicalElementName::from_subscript(key)
+        .as_str()
+        .to_owned()
+}
 
 #[cfg(test)]
 mod tests {
@@ -2304,11 +2225,11 @@ v[DimA, B1] = 1, 2, 3
                     // B1 is an element of DimB, so the dims list contains the parent: DimB
                     assert_eq!(dims, &["DimA", "DimB"]);
                     assert_eq!(elements.len(), 3);
-                    assert_eq!(elements[0].0, "A1,B1");
+                    assert_eq!(elements[0].0, "a1,b1");
                     assert_eq!(elements[0].1, "1");
-                    assert_eq!(elements[1].0, "A2,B1");
+                    assert_eq!(elements[1].0, "a2,b1");
                     assert_eq!(elements[1].1, "2");
-                    assert_eq!(elements[2].0, "A3,B1");
+                    assert_eq!(elements[2].0, "a3,b1");
                     assert_eq!(elements[2].1, "3");
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
@@ -2346,11 +2267,11 @@ w[A1, DimB] = 1, 2, 3
                     // A1 is an element of DimA, so the dims list contains the parent: DimA
                     assert_eq!(dims, &["DimA", "DimB"]);
                     assert_eq!(elements.len(), 3);
-                    assert_eq!(elements[0].0, "A1,B1");
+                    assert_eq!(elements[0].0, "a1,b1");
                     assert_eq!(elements[0].1, "1");
-                    assert_eq!(elements[1].0, "A1,B2");
+                    assert_eq!(elements[1].0, "a1,b2");
                     assert_eq!(elements[1].1, "2");
-                    assert_eq!(elements[2].0, "A1,B3");
+                    assert_eq!(elements[2].0, "a1,b3");
                     assert_eq!(elements[2].1, "3");
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
@@ -2580,8 +2501,9 @@ x = y * 2
     }
 
     #[test]
-    fn test_empty_rhs_scalar_emits_0_plus_0() {
-        // An empty RHS (no expression after =) should produce "0+0" to match xmutil
+    fn an_empty_right_hand_side_is_no_equation() {
+        // `x =` with nothing after it defines nothing; a number made up for it
+        // would run a model that has no equation for x.
         let mdl = "x =
 ~ Units
 ~ Empty equation |
@@ -2600,7 +2522,7 @@ x = y * 2
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
                 Equation::Scalar(eq) => {
-                    assert_eq!(eq, "0+0", "Empty RHS should produce '0+0'");
+                    assert_eq!(eq, "", "an empty right-hand side is no equation");
                 }
                 other => panic!("Expected Scalar equation, got {:?}", other),
             }
@@ -2610,8 +2532,7 @@ x = y * 2
     }
 
     #[test]
-    fn test_empty_rhs_subscripted_emits_0_plus_0() {
-        // An empty RHS with subscripts should also produce "0+0"
+    fn an_empty_subscripted_right_hand_side_is_no_equation() {
         let mdl = "DimA: a1, a2
 ~ ~|
 x[DimA] =
@@ -2633,7 +2554,7 @@ x[DimA] =
             match &a.equation {
                 Equation::ApplyToAll(dims, eq) => {
                     assert_eq!(dims, &["DimA"]);
-                    assert_eq!(eq, "0+0", "Empty subscripted RHS should produce '0+0'");
+                    assert_eq!(eq, "", "an empty right-hand side is no equation");
                 }
                 other => panic!("Expected ApplyToAll equation, got {:?}", other),
             }
@@ -3243,9 +3164,9 @@ g[A1] = 10
                     };
 
                     assert_eq!(elements.len(), 3);
-                    assert_eq!(find_eq("A1"), "10");
-                    assert_eq!(find_eq("A2"), "7");
-                    assert_eq!(find_eq("A3"), "7");
+                    assert_eq!(find_eq("a1"), "10");
+                    assert_eq!(find_eq("a2"), "7");
+                    assert_eq!(find_eq("a3"), "7");
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }
@@ -3283,7 +3204,7 @@ h[DimA] :EXCEPT: [SubA] = 8 ~~|
                     // Only A1 should have the default equation.
                     // A2 and A3 are excepted and have no overrides, so only A1 is present.
                     assert_eq!(elements.len(), 1);
-                    assert_eq!(elements[0].0, "A1");
+                    assert_eq!(elements[0].0, "a1");
                     assert_eq!(elements[0].1, "8");
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
@@ -3331,9 +3252,9 @@ k[A1] = 10
                     };
 
                     assert_eq!(elements.len(), 3);
-                    assert_eq!(find_eq("A1"), "10");
-                    assert_eq!(find_eq("A2"), "a[A2] + 1");
-                    assert_eq!(find_eq("A3"), "a[A3] + 1");
+                    assert_eq!(find_eq("a1"), "10");
+                    assert_eq!(find_eq("a2"), "a[A2] + 1");
+                    assert_eq!(find_eq("a3"), "a[A3] + 1");
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }
@@ -3390,7 +3311,10 @@ p[DimA, DimC] :EXCEPT: [A1, C1] = 10 ~~|
     #[test]
     fn test_except_subrange_with_override() {
         // s[A3] = 13; s[SubA] :EXCEPT: [A3] = 14
-        // SubA = {A2, A3}. EXCEPT [A3] means s[A2] = 14. s[A3] = 13 from the override.
+        // SubA = {A2, A3}. EXCEPT [A3] means s[A2] = 14. s[A3] = 13 from the
+        // override. The equations define SubA's elements and no others, so s
+        // is over SubA: over DimA its default would define A1 too, which no
+        // equation of the file does.
         let mdl = "DimA: A1, A2, A3
 ~ ~|
 SubA: A2, A3
@@ -3413,7 +3337,7 @@ s[SubA] :EXCEPT: [A3] = 14
         if let Some(Variable::Aux(a)) = s {
             match &a.equation {
                 Equation::Arrayed(dims, elements, default_eq, _) => {
-                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(dims, &["SubA"]);
                     assert_eq!(default_eq.as_deref(), Some("14"));
 
                     let find_eq = |key: &str| -> String {
@@ -3425,8 +3349,8 @@ s[SubA] :EXCEPT: [A3] = 14
                     };
 
                     // s[A3] = 13 (explicit override), s[A2] = 14 (from EXCEPT default)
-                    assert_eq!(find_eq("A3"), "13");
-                    assert_eq!(find_eq("A2"), "14");
+                    assert_eq!(find_eq("a3"), "13");
+                    assert_eq!(find_eq("a2"), "14");
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }

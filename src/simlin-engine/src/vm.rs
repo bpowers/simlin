@@ -3420,6 +3420,17 @@ impl Vm {
     }
 }
 
+/// Vensim's `QUANTUM(x, q)`: the multiple of `q` nearest zero that `x`
+/// reaches, and `x` itself for a quantum at or below zero ("If B is less than
+/// or equal to zero, then A is returned",
+/// vensim.com/documentation/fn_quantum.html; ground truth
+/// `test/test-models/tests/subscripted_round/output.tab`, whose
+/// `QUANTUM(var, -3)` is `var`). A NaN quantum is NaN.
+#[inline(always)]
+fn quantum(x: f64, q: f64) -> f64 {
+    if q <= 0.0 { x } else { (x / q).trunc() * q }
+}
+
 #[inline(always)]
 fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
     match func {
@@ -3446,11 +3457,10 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
                 b
             }
         }
-        BuiltinId::Quantum => {
-            let x = a;
-            let q = b;
-            if q == 0.0 { x } else { (x / q).trunc() * q }
-        }
+        BuiltinId::Quantum => quantum(a, b),
+        // What a truncated division leaves: `a - QUANTUM(a, b)`.
+        BuiltinId::Rem => a - quantum(a, b),
+        BuiltinId::Trunc => a.trunc(),
         BuiltinId::Pulse => {
             let volume = a;
             let first_pulse = b;

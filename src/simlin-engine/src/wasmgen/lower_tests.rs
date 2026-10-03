@@ -1832,10 +1832,38 @@ fn apply_sign() {
     assert_apply_exact(BuiltinId::Sign, -0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
 }
 
+/// `Trunc` and `Rem` compute what the VM's `apply` does, bit for bit, over
+/// the cases that tell truncation from flooring (a negative operand) and the
+/// zero divisor.
+#[test]
+fn apply_trunc_and_rem() {
+    for x in [5.4f64, -5.4, -0.9, 0.0, -9.9, 1e300] {
+        assert_apply_exact(BuiltinId::Trunc, x, 0.0, 0.0, 0.0, 1.0, x.trunc());
+    }
+    for (a, b) in [
+        (9.0f64, 5.0f64),
+        (76.5, 70.0),
+        (-9.9, 3.0),
+        (9.9, -3.0),
+        (-10.0, 3.0),
+        (8.3, 7.3),
+    ] {
+        let expected = if b <= 0.0 {
+            0.0
+        } else {
+            a - (a / b).trunc() * b
+        };
+        assert_apply_exact(BuiltinId::Rem, a, b, 0.0, 0.0, 1.0, expected);
+    }
+    assert_apply_exact(BuiltinId::Rem, 3.7, 0.0, 0.0, 0.0, 1.0, 0.0);
+}
+
 #[test]
 fn apply_quantum() {
-    // q == 0 -> x (exact ==, returns a unchanged).
+    // q <= 0 -> x, unchanged.
     assert_apply_exact(BuiltinId::Quantum, 3.7, 0.0, 0.0, 0.0, 1.0, 3.7);
+    assert_apply_exact(BuiltinId::Quantum, 3.7, -3.0, 0.0, 0.0, 1.0, 3.7);
+    assert_apply_exact(BuiltinId::Quantum, -7.0, -2.0, 0.0, 0.0, 1.0, -7.0);
     // q != 0 -> (x/q).trunc() * q.
     assert_apply_exact(
         BuiltinId::Quantum,

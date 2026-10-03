@@ -138,6 +138,7 @@ impl<'input> ConversionContext<'input> {
         );
 
         ctx.collect_symbols();
+        ctx.set_formatter_scope();
         ctx.mark_variable_types();
         ctx.scan_for_extrapolate_lookups();
         ctx.link_stocks_and_flows();

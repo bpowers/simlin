@@ -4,70 +4,49 @@
 
 //! Stock and flow linking methods for MDL to datamodel conversion.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::datamodel::{Equation, GraphicalFunction};
 
 use super::ConversionContext;
+use super::control::Control;
 use super::helpers::{
-    canonical_name, cartesian_product, equation_is_stock, extract_constant_value,
-    extract_first_units, get_lhs,
+    canonical_name, cartesian_product, equation_is_stock, extract_first_units, get_lhs,
 };
 use super::types::{SyntheticFlow, VariableType};
-use crate::mdl::ast::{BinaryOp, CallKind, Equation as MdlEquation, Expr, FullEquation, Subscript};
+use crate::mdl::ast::{
+    BinaryOp, CallKind, Equation as MdlEquation, Expr, FullEquation, Subscript, UnaryOp,
+};
 use crate::mdl::builtins::eq_lower_space;
 
 impl<'input> ConversionContext<'input> {
     /// Pass 3: Mark variable types based on equation content.
     pub(super) fn mark_variable_types(&mut self) {
-        // Identify control variables and extract their values
-        let control_vars = [
-            ("initial time", "STARTTIME"),
-            ("final time", "STOPTIME"),
-            ("time step", "DT"),
-            ("saveper", "SAVEPER"),
-        ];
-
-        // First pass: extract values from control vars (read-only)
-        for (name, _alt_name) in &control_vars {
-            if let Some(info) = self.symbols.get(*name)
-                && let Some(eq) = self.select_equation(&info.equations)
-                && let Some(value) = extract_constant_value(&eq.equation)
-            {
-                match *name {
-                    "initial time" => self.sim_specs.start = Some(value),
-                    "final time" => self.sim_specs.stop = Some(value),
-                    "time step" => self.sim_specs.dt = Some(value),
-                    "saveper" => self.sim_specs.save_step = Some(value),
-                    _ => {}
-                }
-            }
-        }
+        self.read_controls();
 
         // Extract time_units using xmutil's priority chain:
         // TIME STEP > FINAL TIME > INITIAL TIME > "Months"
         let time_units = self
             .symbols
-            .get("time step")
+            .get(Control::TimeStep.key())
             .and_then(|info| extract_first_units(&info.equations))
             .or_else(|| {
                 self.symbols
-                    .get("final time")
+                    .get(Control::FinalTime.key())
                     .and_then(|info| extract_first_units(&info.equations))
             })
             .or_else(|| {
                 self.symbols
-                    .get("initial time")
+                    .get(Control::InitialTime.key())
                     .and_then(|info| extract_first_units(&info.equations))
             })
             .unwrap_or_else(|| "Months".to_string());
         self.sim_specs.time_units = Some(time_units);
 
-        // Second pass: mark control vars as unwanted (mutably)
-        for (name, alt_name) in control_vars {
-            if let Some(info) = self.symbols.get_mut(name) {
+        // The control variables are the sim specs, not variables.
+        for control in Control::ALL {
+            if let Some(info) = self.symbols.get_mut(control.key()) {
                 info.unwanted = true;
-                info.alternate_name = Some(alt_name.to_string());
             }
         }
 
@@ -408,6 +387,8 @@ impl<'input> ConversionContext<'input> {
         // Expand LHS subscripts to get dimensions and element keys
         let mut all_dims: Option<Vec<String>> = None;
         let mut element_rates: HashMap<String, String> = HashMap::new();
+        let mut all_lhs_subscripts: Vec<Vec<String>> = Vec::new();
+        let mut unsettled_axes: BTreeSet<usize> = BTreeSet::new();
 
         for eq in stock_equations {
             let lhs = match get_lhs(&eq.equation) {
@@ -452,48 +433,38 @@ impl<'input> ConversionContext<'input> {
                 }
             }
 
-            // Check dimensions consistency
+            // The same agreement the stock's own equations are held to
+            // (`build_variable_with_elements`): one number of dimensions,
+            // subranges of one parent taking the parent (#908), and an axis
+            // the left-hand sides otherwise disagree on settled with the
+            // stock's by the elements defined on it.
             if let Some(ref mut existing_dims) = all_dims {
-                // Normalize for comparison
-                let normalized_existing: Vec<_> = existing_dims
-                    .iter()
-                    .map(|d| self.normalize_dimension(d))
-                    .collect();
-                let normalized_new: Vec<_> =
-                    dims.iter().map(|d| self.normalize_dimension(d)).collect();
-                if normalized_existing != normalized_new {
-                    // Inconsistent dimensions - skip
+                if existing_dims.len() != dims.len() {
                     continue;
                 }
-                // If the raw dimension names differ but normalized names match,
-                // the equations span different subranges of the same parent.
-                // Promote to the parent dimensions (but not through
-                // equivalences -- alias dimensions should keep their own name)
-                // so the declared dims cover EVERY arm's per-element entries
-                // (#908). `dims` holds FORMATTED names (e.g. `Lower_Levels`)
-                // while `resolve_subrange_to_parent` is keyed on canonical
-                // names (`lower levels`), so canonicalize first -- exactly as
-                // the stock's own dims promotion in `variables.rs` does.
-                if *existing_dims != dims {
-                    *existing_dims = existing_dims
-                        .iter()
-                        .map(|d| self.resolve_subrange_to_parent(&canonical_name(d)))
-                        .collect();
+                for (axis, (existing, new)) in existing_dims.iter_mut().zip(&dims).enumerate() {
+                    if existing == new {
+                        continue;
+                    }
+                    if self.normalize_dimension(existing) == self.normalize_dimension(new) {
+                        *existing = self.resolve_subrange_to_parent(&canonical_name(existing));
+                    } else {
+                        unsettled_axes.insert(axis);
+                    }
                 }
             } else {
                 all_dims = Some(dims);
             }
+            all_lhs_subscripts.push(lhs_sub_names.clone());
 
-            // Resolve the rate PER ELEMENT through the shared per-element
-            // context (subrange shift-mapping included), mirroring the
-            // regular arrayed-equation conversion path. This replaces the
-            // prior raw `format_expr(rate)` cloned into every key, which
-            // assigned a subrange-sliced expression (e.g.
-            // `dflux[scenario, upper] - dflux[scenario, lower]`) to each
-            // scalar element -> MismatchedDimensions on `<stock>_net_flow`
-            // (#559; e.g. C-LEARN's `c_in_deep_ocean_net_flow` /
-            // `heat_in_deep_ocean_net_flow`).
-            let element_keys = cartesian_product(&expanded_elements);
+            // The rate is resolved PER ELEMENT through the shared per-element
+            // context (subrange shift-mapping included), as the regular
+            // arrayed-equation conversion resolves an equation: the rate's
+            // text names subranges (`dflux[scenario, upper] - dflux[scenario,
+            // lower]`), and one element's equation holds that element's
+            // slice of it, else `<stock>_net_flow` is MismatchedDimensions
+            // (#559; C-LEARN's `c_in_deep_ocean_net_flow`).
+            let element_keys = cartesian_product(&expanded_elements).ok()?;
             for key in element_keys {
                 let element_parts: Vec<&str> = key.split(',').collect();
                 let ctx = self.build_element_context(&lhs_sub_names, &element_parts);
@@ -502,13 +473,19 @@ impl<'input> ConversionContext<'input> {
             }
         }
 
-        let dims = all_dims?;
+        let mut dims = all_dims?;
         if dims.is_empty() {
             return None;
         }
-
-        // Format dimension names -- dims are already normalized to
-        // parent dimensions when equations span different subranges
+        let lhs_subscripts: Vec<&[String]> = all_lhs_subscripts.iter().map(Vec::as_slice).collect();
+        if !self.settle_dimensions(
+            &mut dims,
+            element_rates.keys(),
+            &lhs_subscripts,
+            &unsettled_axes,
+        ) {
+            return None;
+        }
         let formatted_dims: Vec<String> = dims
             .iter()
             .map(|d| self.get_formatted_dimension_name(d))
@@ -518,7 +495,14 @@ impl<'input> ConversionContext<'input> {
         let mut elements: Vec<(String, String, Option<String>, Option<GraphicalFunction>)> =
             element_rates
                 .into_iter()
-                .map(|(key, rate)| (key, rate, None, None))
+                .map(|(key, rate)| {
+                    (
+                        super::variables::canonical_element_key(&key),
+                        rate,
+                        None,
+                        None,
+                    )
+                })
                 .collect();
         elements.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -605,6 +589,12 @@ impl<'input> ConversionContext<'input> {
         let mut inflows = Vec::new();
         let mut outflows = Vec::new();
 
+        // A rate of the number zero is a stock with no flows (how the writer
+        // writes one), not a flow to make up.
+        if is_zero(rate) {
+            return Some((inflows, outflows));
+        }
+
         if self.collect_flows(rate, true, &mut inflows, &mut outflows, stock_lhs_subs) {
             Some((inflows, outflows))
         } else {
@@ -617,22 +607,11 @@ impl<'input> ConversionContext<'input> {
     /// Returns false if the expression is too complex (contains mul/div/functions),
     /// or if validity checks fail (duplicates, stock-as-flow, unknown symbols).
     ///
-    /// A subscripted flow reference is accepted as a bare named flow ONLY
-    /// when its subscripts equal the stock equation's own LHS subscripts
-    /// (`stock_lhs_subs`, canonicalized). A reference pinned/sliced to a
-    /// different shape -- e.g. `flux2d[scenario, L1]` (a single-`layers`
-    /// slice of a 2-D `[scenario, layers]` flow) feeding a 1-D
-    /// `stock1d[scenario]` -- would, if accepted by bare name, wire the
-    /// full higher-rank variable to a lower-rank stock and the dimension
-    /// checker then reports `MismatchedDimensions` (issue #559; e.g.
-    /// C-LEARN's `c_in_mixed_layer`, `heat_in_atmosphere_and_upper_ocean`).
-    /// Rejecting it fails the simple decomposition so the caller falls
-    /// through to the synthetic net-flow path, which preserves the exact,
-    /// correctly-ranked sliced rate expression. A reference with NO
-    /// subscripts is unchanged (the implicit same-shape case; genuine
-    /// mismatches are still caught downstream by the dimension checker).
-    /// This replaces the prior xmutil-parity behavior, which deliberately
-    /// matched a documented xmutil bug (subscripts not compared).
+    /// A subscripted flow reference is a flow of the stock only when its
+    /// subscripts are the stock equation's own left-hand subscripts
+    /// (`stock_lhs_subs`, canonicalized); see the `Var` arm below. A
+    /// reference with no subscripts is the flow over the stock's subscripts,
+    /// and a genuine mismatch is the dimension checker's to report.
     fn collect_flows(
         &self,
         expr: &Expr<'_>,
@@ -645,19 +624,17 @@ impl<'input> ConversionContext<'input> {
             Expr::Var(name, subscripts, _) => {
                 let canonical = canonical_name(name);
 
-                // #559: a subscripted flow reference whose subscripts
-                // differ from the stock equation's own LHS subscripts is
-                // pinning/slicing the flow to a shape other than the stock
-                // element it feeds (e.g. `flux2d[scenario, L1]` feeding
-                // `stock1d[scenario]`). Accepting it by bare name would wire
-                // the full higher-rank variable into the lower-rank stock ->
-                // `MismatchedDimensions`. Fail the simple decomposition so
-                // the caller falls through to the synthetic net-flow path,
-                // which preserves the exact (correctly-ranked) sliced rate.
-                // A reference with NO subscripts keeps the prior behavior
-                // (implicit same-shape flow). General: no dimension-name
-                // special-casing -- replaces the old xmutil-parity-with-a-
-                // known-bug behavior (subscripts were not compared).
+                // A flow is listed on a stock by its name alone, which
+                // means the flow over the stock's own subscripts. So a
+                // reference whose subscripts are not the stock equation's
+                // left-hand subscripts -- one that pins or slices the flow
+                // to another shape (`flux2d[scenario, L1]` feeding
+                // `stock1d[scenario]`) -- is not a flow of the stock: listing
+                // it by name would wire the whole higher-rank variable into
+                // the lower-rank stock, `MismatchedDimensions` (#559). The
+                // decomposition fails, and the caller makes the stock a net
+                // flow, which keeps the sliced rate exactly. A reference with
+                // no subscripts is the flow over the stock's subscripts.
                 if !subscripts.is_empty() {
                     let ref_subs: Vec<String> = subscripts
                         .iter()
@@ -751,6 +728,16 @@ impl<'input> ConversionContext<'input> {
             Expr::Paren(inner, _) => self.is_afo_expr(inner),
             _ => false,
         }
+    }
+}
+
+/// True for the number zero, written with any sign or parentheses.
+fn is_zero(expr: &Expr<'_>) -> bool {
+    match expr {
+        Expr::Const(value, _) => *value == 0.0,
+        Expr::Paren(inner, _) => is_zero(inner),
+        Expr::Op1(UnaryOp::Negative | UnaryOp::Positive, inner, _) => is_zero(inner),
+        _ => false,
     }
 }
 
@@ -862,10 +849,7 @@ a = 1
             .variables
             .iter()
             .find(|v| v.get_ident() == "aux");
-        // IMPORTANT: current code DOES detect INTEG in binary ops as stock.
-        // But per the plan, this should NOT be a stock - only top-level INTEG should be.
-        // For now we're documenting current behavior. The plan P0-C says to fix this.
-        // Let's assert what SHOULD happen according to the plan:
+        // Only a top-level INTEG makes a stock.
         assert!(
             matches!(aux, Some(Variable::Aux(_))),
             "INTEG in binary op should NOT make this a Stock, got: {:?}",
@@ -1480,11 +1464,11 @@ stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
                 );
             }
         }
-        // The three `upper`-subrange elements (s1,L1/L2/L3) were identical
-        // clones pre-fix; per-element resolution makes them distinct.
+        // Per-element resolution makes the three `upper`-subrange elements
+        // (s1,L1/L2/L3, keyed canonically) distinct.
         let upper_rates: Vec<&String> = elements
             .iter()
-            .filter(|(k, _, _, _)| matches!(k.as_str(), "s1,L1" | "s1,L2" | "s1,L3"))
+            .filter(|(k, _, _, _)| matches!(k.as_str(), "s1,l1" | "s1,l2" | "s1,l3"))
             .map(|(_, r, _, _)| r)
             .collect();
         assert_eq!(upper_rates.len(), 3, "expected 3 s1 upper-subrange slots");
@@ -1555,9 +1539,9 @@ stock[Factory] = INTEG(20, 0)
             );
         };
 
-        // Pre-fix: dims == ["Lower_Levels"] (the first arm's subrange),
-        // while `elements` carries a `Factory` entry that names no element
-        // of it -- silently dropped downstream (implicit 0 net flow).
+        // The arms span two subranges, so the dims are their parent:
+        // `Lower_Levels` alone would leave the `Factory` entry naming no
+        // element of the variable's dimension (an implicit 0 net flow).
         assert_eq!(
             dims,
             &["Level"],
@@ -1565,7 +1549,7 @@ stock[Factory] = INTEG(20, 0)
              every arm's entries"
         );
         assert_eq!(elements.len(), 3, "one entry per parent element");
-        for (elem, rate) in [("Retailer", "10"), ("Wholesaler", "10"), ("Factory", "20")] {
+        for (elem, rate) in [("retailer", "10"), ("wholesaler", "10"), ("factory", "20")] {
             let entry = elements
                 .iter()
                 .find(|(k, _, _, _)| k == elem)

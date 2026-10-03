@@ -901,31 +901,23 @@ fn test_serialize_mdl_null_safety() {
 
 // ── simlin_project_check_save ──────────────────────────────────────────
 
-/// Open `mdl` through the FFI.
-unsafe fn open_mdl(mdl: &str) -> *mut SimlinProject {
-    let mut err: *mut SimlinError = ptr::null_mut();
-    let proj = simlin_project_open_vensim(mdl.as_ptr(), mdl.len(), &mut err);
-    expect_no_error(err, "open_vensim");
-    assert!(!proj.is_null());
-    proj
+/// A variable over `dim` that defines only two of its three elements, the two
+/// `sub` holds. MDL has no spelling for the third, undefined element, so the
+/// save reads back over `sub` and has no series for `c`.
+fn some_elements_defined() -> *mut SimlinProject {
+    let datamodel = TestProject::new("check_some_elements")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("dim", &["a", "b", "c"])
+        .named_dimension("sub", &["a", "b"])
+        .array_with_ranges("demands[dim]", vec![("a", "10"), ("b", "6")])
+        .build_datamodel();
+    open_project_from_datamodel(&datamodel)
 }
-
-/// A variable over a subrange of `dim2`: an MDL save writes it one element
-/// equation each, which reads back over `dim2`.
-const OVER_A_SUBRANGE: &str = "dim: A, B, C ~~|
-dim2: A, B, C, D, E ~~|
-demands[dim] = 10, 6, 3 ~~|
-total = SUM(demands[dim!]) ~~|
-INITIAL TIME = 0 ~~|
-FINAL TIME = 4 ~~|
-TIME STEP = 1 ~~|
-SAVEPER = TIME STEP ~~|
-";
 
 #[test]
 fn test_check_save_names_each_change_as_an_error_detail() {
     unsafe {
-        let proj = open_mdl(OVER_A_SUBRANGE);
+        let proj = some_elements_defined();
         let mut changes: *mut SimlinError = ptr::null_mut();
         let mut err: *mut SimlinError = ptr::null_mut();
         simlin_project_check_save(
@@ -944,12 +936,12 @@ fn test_check_save_names_each_change_as_an_error_detail() {
         );
         assert_eq!(simlin_error_get_detail_count(changes), 1);
         let detail = &*simlin_error_get_detail(changes, 0);
-        // The save simulates series for D and E: its results change.
+        // The save has no series for c: its results change.
         assert_eq!(detail.severity, SimlinErrorSeverity::Error);
         assert_eq!(detail.kind, SimlinErrorKind::Variable);
         assert_eq!(detail.code, SimlinErrorCode::Generic);
         let reason = CStr::from_ptr(detail.details).to_str().unwrap();
-        assert_eq!(reason, "'demands' is defined over dim2, not dim");
+        assert_eq!(reason, "'demands' is defined over sub, not dim");
         assert_eq!(
             CStr::from_ptr(detail.message).to_str().unwrap(),
             format!("Vensim MDL save: {reason}")
@@ -958,7 +950,7 @@ fn test_check_save_names_each_change_as_an_error_detail() {
         assert_eq!(CStr::from_ptr(detail.model_name).to_str(), Ok("main"));
         simlin_error_free(changes);
 
-        // XMILE and JSON name the dimension, so they keep the model.
+        // XMILE, JSON and protobuf name the dimension, so they keep the model.
         for format in [
             SimlinSaveFormat::Xmile,
             SimlinSaveFormat::Json,
@@ -1160,7 +1152,7 @@ fn test_check_save_reads_an_mdl_save_back_with_the_data_dir() {
 #[test]
 fn test_check_save_refuses_a_data_dir_that_is_not_utf8() {
     unsafe {
-        let proj = open_mdl(OVER_A_SUBRANGE);
+        let proj = some_elements_defined();
         let bad = [0xffu8, 0xfe];
         let mut changes: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1185,7 +1177,7 @@ fn test_check_save_refuses_a_data_dir_that_is_not_utf8() {
 #[test]
 fn test_check_save_null_safety_and_bad_format() {
     unsafe {
-        let proj = open_mdl(OVER_A_SUBRANGE);
+        let proj = some_elements_defined();
 
         let mut err: *mut SimlinError = ptr::null_mut();
         simlin_project_check_save(

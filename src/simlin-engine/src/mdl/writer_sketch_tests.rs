@@ -28,6 +28,63 @@ fn sketch_aux_element() {
     assert_eq!(buf, "10,1,Growth Rate,100,200,40,20,8,3,0,0,-1,0,0,0");
 }
 
+/// `flow` written as its segment writes it, beside stocks (uid, center)
+/// and clouds of the flow (uid, center) the segment draws.
+fn write_flow_beside(
+    flow: &view_element::Flow,
+    stocks: &[(i32, f64, f64)],
+    clouds: &[(i32, f64, f64)],
+) -> String {
+    let mut elements: Vec<ViewElement> = stocks
+        .iter()
+        .map(|&(uid, x, y)| {
+            ViewElement::Stock(view_element::Stock {
+                name: format!("stock {uid}"),
+                uid,
+                x,
+                y,
+                label_side: view_element::LabelSide::Bottom,
+                compat: None,
+            })
+        })
+        .collect();
+    elements.push(ViewElement::Flow(flow.clone()));
+    let flow_clouds: Vec<view_element::Cloud> = clouds
+        .iter()
+        .map(|&(uid, x, y)| view_element::Cloud {
+            uid,
+            flow_uid: flow.uid,
+            x,
+            y,
+            compat: None,
+        })
+        .collect();
+    let segment: Vec<&ViewElement> = elements.iter().collect();
+    let remap = SketchUidRemap::dense_for_segment(
+        &segment,
+        &HashMap::from([(flow.uid, flow_clouds.iter().collect())]),
+    );
+    let cloud_elements: Vec<ViewElement> = flow_clouds
+        .iter()
+        .cloned()
+        .map(ViewElement::Cloud)
+        .collect();
+    let drawn: Vec<&ViewElement> = elements.iter().chain(&cloud_elements).collect();
+    let stock_uids: HashSet<i32> = stocks.iter().map(|&(uid, _, _)| uid).collect();
+    let positions =
+        build_element_positions_with_transform(&drawn, SketchTransform::identity(), &stock_uids);
+    let mut buf = String::new();
+    write_flow_element_with_context(
+        &mut buf,
+        flow,
+        SketchTransform::identity(),
+        &positions,
+        &stock_uids,
+        &remap,
+    );
+    buf
+}
+
 #[test]
 fn sketch_stock_element() {
     let stock = view_element::Stock {
@@ -40,7 +97,8 @@ fn sketch_stock_element() {
     };
     let mut buf = String::new();
     write_stock_element(&mut buf, &stock);
-    assert_eq!(buf, "10,2,Population,300,150,40,20,3,3,0,0,0,0,0,0");
+    // The segment's records are numbered from 1 in the order they are written.
+    assert_eq!(buf, "10,1,Population,300,150,40,20,3,3,0,0,0,0,0,0");
 }
 
 #[test]
@@ -56,20 +114,13 @@ fn sketch_flow_element_produces_valve_and_variable() {
         label_compat: None,
     };
     let mut buf = String::new();
-    let valve_uids = HashMap::from([(6, 100)]);
-    let mut next_connector_uid = 200;
-    write_flow_element(
-        &mut buf,
-        &flow,
-        &valve_uids,
-        &HashSet::new(),
-        &mut next_connector_uid,
-    );
-    // No flow points, so no pipe connectors; valve and label follow
-    assert!(buf.contains("11,100,0,295,191,6,8,34,3,0,0,1,0,0,0"));
+    write_flow_element(&mut buf, &flow);
+    // No flow points, so no pipe connectors; valve and label follow, numbered
+    // in that order.
+    assert!(buf.contains("11,1,0,295,191,6,8,34,3,0,0,1,0,0,0"));
     // Label sits 20px below the valve (y 191 -> 211); its box is sized to the
     // text ("Infection Rate" -> 14 chars * 6px = 84 wide, single-line height 11).
-    assert!(buf.contains("10,6,Infection Rate,295,211,84,11,40,3,0,0,-1,0,0,0"));
+    assert!(buf.contains("10,2,Infection Rate,295,211,84,11,40,3,0,0,-1,0,0,0"));
 }
 
 #[test]
@@ -95,16 +146,7 @@ fn sketch_flow_element_emits_pipe_connectors_from_flow_points() {
         compat: None,
         label_compat: None,
     };
-    let mut buf = String::new();
-    let valve_uids = HashMap::from([(6, 100)]);
-    let mut next_connector_uid = 200;
-    write_flow_element(
-        &mut buf,
-        &flow,
-        &valve_uids,
-        &HashSet::new(),
-        &mut next_connector_uid,
-    );
+    let buf = write_flow_beside(&flow, &[(1, 100.0, 100.0), (2, 200.0, 100.0)], &[]);
 
     let connector_lines: Vec<&str> = buf.lines().filter(|line| line.starts_with("1,")).collect();
     assert_eq!(
@@ -113,14 +155,15 @@ fn sketch_flow_element_emits_pipe_connectors_from_flow_points() {
         "Expected two type-1 connector lines for flow endpoints: {}",
         buf
     );
+    // The stocks are 1 and 2, the pipes 3 and 4, the valve 5.
     assert!(
-        connector_lines.iter().any(|line| line.contains(",100,1,")),
-        "Expected connector from valve uid 100 to endpoint uid 1: {}",
+        connector_lines.iter().any(|line| line.contains(",5,1,")),
+        "Expected connector from valve uid 5 to endpoint uid 1: {}",
         buf
     );
     assert!(
-        connector_lines.iter().any(|line| line.contains(",100,2,")),
-        "Expected connector from valve uid 100 to endpoint uid 2: {}",
+        connector_lines.iter().any(|line| line.contains(",5,2,")),
+        "Expected connector from valve uid 5 to endpoint uid 2: {}",
         buf
     );
 }
@@ -148,31 +191,17 @@ fn sketch_flow_element_derives_stock_connector_points_from_takeoffs() {
         compat: None,
         label_compat: None,
     };
-    let mut buf = String::new();
-    let valve_uids = HashMap::from([(6, 100)]);
-    let elem_positions = HashMap::from([(1, (100, 100)), (2, (200, 100))]);
-    let stock_uids = HashSet::from([1, 2]);
-    let mut next_connector_uid = 200;
-    write_flow_element_with_context(
-        &mut buf,
-        &flow,
-        &valve_uids,
-        &HashSet::new(),
-        &mut next_connector_uid,
-        SketchTransform::identity(),
-        &elem_positions,
-        &stock_uids,
-        None,
-    );
+    let buf = write_flow_beside(&flow, &[(1, 100.0, 100.0), (2, 200.0, 100.0)], &[]);
 
     // Sink pipe (last point) carries direction 4; source pipe (first point)
-    // carries direction 100 -- the endpoint *role*, not stock-vs-cloud.
+    // carries direction 100 -- the endpoint *role*, not stock-vs-cloud. The
+    // stocks are 1 and 2, the pipes 3 and 4, the valve 5.
     assert!(
-        buf.contains("1,200,100,2,4,0,0,22,0,0,0,-1--1--1,,1|(200,100)|"),
+        buf.contains("1,3,5,2,4,0,0,22,0,0,0,-1--1--1,,1|(200,100)|"),
         "sink pipe connector should be reconstructed from the stock center: {buf}"
     );
     assert!(
-        buf.contains("1,201,100,1,100,0,0,22,0,0,0,-1--1--1,,1|(100,100)|"),
+        buf.contains("1,4,5,1,100,0,0,22,0,0,0,-1--1--1,,1|(100,100)|"),
         "source pipe connector should be reconstructed from the stock center: {buf}"
     );
     // Canonical bottom-label fallback: 20px below the valve (y 100 -> 120),
@@ -212,62 +241,76 @@ fn sketch_flow_outflow_to_cloud_uses_role_based_direction_flags() {
         compat: None,
         label_compat: None,
     };
-    let mut buf = String::new();
-    let valve_uids = HashMap::from([(6, 100)]);
-    let elem_positions = HashMap::from([(1, (100, 100)), (2, (200, 100))]);
-    let stock_uids = HashSet::from([1]); // only uid 1 is a stock; uid 2 is the cloud
-    let mut next_connector_uid = 200;
-    write_flow_element_with_context(
-        &mut buf,
-        &flow,
-        &valve_uids,
-        &HashSet::new(),
-        &mut next_connector_uid,
-        SketchTransform::identity(),
-        &elem_positions,
-        &stock_uids,
-        None,
-    );
+    // Only uid 1 is a stock; uid 2 is the flow's cloud, numbered with it.
+    let buf = write_flow_beside(&flow, &[(1, 100.0, 100.0)], &[(2, 200.0, 100.0)]);
 
     assert!(
-        buf.contains("1,200,100,2,4,0,0,22,0,0,0,-1--1--1,,1|(200,100)|"),
+        buf.contains("1,3,5,2,4,0,0,22,0,0,0,-1--1--1,,1|(200,100)|"),
         "sink cloud pipe should carry direction 4: {buf}"
     );
     assert!(
-        buf.contains("1,201,100,1,100,0,0,22,0,0,0,-1--1--1,,1|(100,100)|"),
+        buf.contains("1,4,5,1,100,0,0,22,0,0,0,-1--1--1,,1|(100,100)|"),
         "source stock pipe should carry direction 100: {buf}"
     );
 }
 
 #[test]
-fn valve_uids_do_not_collide_with_existing_elements() {
-    // stock uid=1, flow uid=2 -> valve must NOT get uid=1
-    let elements = vec![
-        ViewElement::Stock(view_element::Stock {
-            name: "Population".to_string(),
-            uid: 1,
-            x: 100.0,
-            y: 100.0,
-            label_side: view_element::LabelSide::Bottom,
-            compat: None,
-        }),
-        ViewElement::Flow(view_element::Flow {
-            name: "Birth_Rate".to_string(),
-            uid: 2,
-            x: 200.0,
-            y: 100.0,
-            label_side: view_element::LabelSide::Bottom,
-            points: vec![],
-            compat: None,
-            label_compat: None,
-        }),
+fn every_record_of_a_segment_has_its_own_uid() {
+    // A stock, a flow from it into a cloud, and the flow's valve, label and
+    // pipes: each record is numbered once.
+    let flow = view_element::Flow {
+        name: "Birth_Rate".to_string(),
+        uid: 2,
+        x: 200.0,
+        y: 100.0,
+        label_side: view_element::LabelSide::Bottom,
+        points: vec![
+            view_element::FlowPoint {
+                x: 122.5,
+                y: 100.0,
+                attached_to_uid: Some(1),
+            },
+            view_element::FlowPoint {
+                x: 300.0,
+                y: 100.0,
+                attached_to_uid: Some(3),
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    };
+    let stock = ViewElement::Stock(view_element::Stock {
+        name: "Population".to_string(),
+        uid: 1,
+        x: 100.0,
+        y: 100.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    });
+    let cloud = view_element::Cloud {
+        uid: 3,
+        flow_uid: 2,
+        x: 300.0,
+        y: 100.0,
+        compat: None,
+    };
+    let flow_element = ViewElement::Flow(flow);
+    let remap = SketchUidRemap::dense_for_segment(
+        &[&stock, &flow_element],
+        &HashMap::from([(2, vec![&cloud])]),
+    );
+    let pipes = remap.pipe_start_uid(2).expect("the flow's pipes");
+    let mut uids = vec![
+        remap.element_uid(1),
+        remap.element_uid(3),
+        pipes,
+        pipes + 1,
+        remap.valve_uid(2).expect("the flow's valve"),
+        remap.element_uid(2),
     ];
-
-    let valve_uids = allocate_valve_uids(&elements);
-    // The valve for flow uid=2 must not equal 1 (stock's uid)
-    let valve_uid = valve_uids[&2];
-    assert_ne!(valve_uid, 1, "Valve UID collides with stock UID");
-    assert_ne!(valve_uid, 2, "Valve UID collides with flow UID");
+    assert_eq!(uids, [1, 2, 3, 4, 5, 6]);
+    uids.dedup();
+    assert_eq!(uids.len(), 6);
 }
 
 #[test]
@@ -298,7 +341,7 @@ fn sketch_alias_element() {
     name_map.insert(1, "Growth_Rate");
     let mut buf = String::new();
     write_alias_element(&mut buf, &alias, &name_map);
-    assert!(buf.starts_with("10,10,Growth Rate,200,300,40,20,8,2,0,3,-1,0,0,0,"));
+    assert!(buf.starts_with("10,1,Growth Rate,200,300,40,20,8,2,0,3,-1,0,0,0,"));
     assert!(buf.contains("128-128-128"));
 }
 
@@ -315,16 +358,17 @@ fn sketch_alias_element_offsets_stock_ghost_coordinates() {
     let mut name_map = HashMap::new();
     name_map.insert(1, "Population");
     let mut buf = String::new();
+    let element = ViewElement::Alias(alias.clone());
     write_alias_element_with_context(
         &mut buf,
         &alias,
         &name_map,
         &HashSet::from([1]),
         SketchTransform::identity(),
-        None,
+        &SketchUidRemap::dense_for_segment(&[&element], &HashMap::new()),
     );
     assert!(
-        buf.starts_with("10,10,Population,222,317,40,20,8,2,0,3,-1,0,0,0,"),
+        buf.starts_with("10,1,Population,222,317,40,20,8,2,0,3,-1,0,0,0,"),
         "stock ghosts should serialize using Vensim's stock-alias offset: {buf}"
     );
 }
@@ -345,8 +389,9 @@ fn sketch_link_straight() {
     positions.insert(2, (200, 200));
     let mut buf = String::new();
     write_link_element(&mut buf, &link, &positions, false);
-    // Straight => control point (0,0), field 9 = 64 (influence connector)
-    assert_eq!(buf, "1,3,1,2,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|");
+    // Straight => control point (0,0), field 9 = 64 (influence connector);
+    // the link is its segment's first record.
+    assert_eq!(buf, "1,1,1,2,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|");
 }
 
 #[test]
@@ -426,9 +471,9 @@ fn sketch_link_with_field_hints_preserves_nonsemantic_flags() {
         false,
         Some(&compat),
         SketchTransform::identity(),
-        None,
+        &SketchUidRemap::dense_for_segment(&[&ViewElement::Link(link.clone())], &HashMap::new()),
     );
-    assert_eq!(buf, "1,3,1,2,1,0,0,0,0,64,7,-1--1--1,,1|(0,0)|");
+    assert_eq!(buf, "1,1,1,2,1,0,0,0,0,64,7,-1--1--1,,1|(0,0)|");
 }
 
 #[test]
@@ -457,12 +502,12 @@ fn sketch_link_with_field_hints_still_uses_link_geometry() {
         false,
         Some(&compat),
         SketchTransform::identity(),
-        None,
+        &SketchUidRemap::dense_for_segment(&[&ViewElement::Link(link.clone())], &HashMap::new()),
     );
     let (ctrl_x, ctrl_y) = compute_control_point((110, 100), (210, 100), 45.0);
     assert_eq!(
         buf,
-        format!("1,3,1,2,0,0,0,0,0,64,0,-1--1--1,,1|({ctrl_x},{ctrl_y})|")
+        format!("1,1,1,2,0,0,0,0,0,64,0,-1--1--1,,1|({ctrl_x},{ctrl_y})|")
     );
 }
 

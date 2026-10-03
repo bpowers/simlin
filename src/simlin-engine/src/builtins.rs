@@ -106,6 +106,16 @@ pub enum BuiltinFn<Expr> {
     Pulse(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Quantum(Box<Expr>, Box<Expr>),
     Ramp(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    // REM(a, b): the remainder of a truncated division, `a - QUANTUM(a, b)`,
+    // which takes the sign of `a`. It is Vensim's MODULO, whose page says
+    // both that it is "A-QUANTUM(A,B)" and that it "follows the C standard
+    // obeying (a/b)b + a%b = a" (vensim.com/documentation/fn_modulo.html);
+    // ground truth `test/test-models/tests/rounding/output.tab`:
+    // MODULO(-9.9, 3) = -0.9. It is not the `MOD` operator, which XMILE 1.0
+    // section 3.3.1 defines as the floored modulus (the sign of the divisor).
+    // For a divisor at or below zero the engine follows the first (the
+    // remainder is 0); that is its rule, unverified against Vensim.
+    Rem(Box<Expr>, Box<Expr>),
     // ROUND(x): nearest integer, exact .5 ties to the EVEN neighbor
     // (Python round() / IEEE roundTiesToEven). The XMILE v1.0 spec defines no
     // ROUND builtin (its function catalog stops at INT, which footnote 7
@@ -128,6 +138,12 @@ pub enum BuiltinFn<Expr> {
     Sqrt(Box<Expr>),
     Step(Box<Expr>, Box<Expr>),
     Tan(Box<Expr>),
+    // TRUNC(x): the integer part of x, toward zero. It is Vensim's INTEGER
+    // ("Truncates X to the integer nearest zero",
+    // vensim.com/documentation/fn_integer.html; ground truth
+    // `test/test-models/tests/rounding/output.tab`: INTEGER(-9.9) = -9), and
+    // is not `INT`, which XMILE 1.0 footnote 7 requires to be the floor.
+    Trunc(Box<Expr>),
     Time,
     TimeStep,
     StartTime,
@@ -462,6 +478,14 @@ static RAMP: BuiltinSig = sig(
     ResultKind::Elementwise,
     Invariance::TimeDependent,
 );
+static REM: BuiltinSig = sig(
+    "rem",
+    2,
+    Some(2),
+    &[SCALAR, SCALAR],
+    ResultKind::Elementwise,
+    Invariance::Pure,
+);
 static ROUND: BuiltinSig = unary_math("round");
 static SAFEDIV: BuiltinSig = sig(
     "safediv",
@@ -491,6 +515,7 @@ static STEP: BuiltinSig = sig(
     Invariance::TimeDependent,
 );
 static TAN: BuiltinSig = unary_math("tan");
+static TRUNC: BuiltinSig = unary_math("trunc");
 static TIME: BuiltinSig = sig(
     "time",
     0,
@@ -584,7 +609,7 @@ static INIT: BuiltinSig = sig(
 
 impl BuiltinSig {
     /// Every signature, one per [`BuiltinFn`] variant, in declaration order.
-    pub const ALL: [&'static BuiltinSig; 45] = [
+    pub const ALL: [&'static BuiltinSig; 47] = [
         &LOOKUP,
         &LOOKUP_FORWARD,
         &LOOKUP_BACKWARD,
@@ -607,6 +632,7 @@ impl BuiltinSig {
         &PULSE,
         &QUANTUM,
         &RAMP,
+        &REM,
         &ROUND,
         &SAFEDIV,
         &SIGN,
@@ -615,6 +641,7 @@ impl BuiltinSig {
         &SQRT,
         &STEP,
         &TAN,
+        &TRUNC,
         &TIME,
         &TIME_STEP,
         &INITIAL_TIME,
@@ -719,8 +746,8 @@ macro_rules! builtin_args {
                 out.push(&$($m)? **b);
             }
             Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
-            | Log10(a) | Round(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) | Size(a) | Stddev(a)
-            | Sum(a) | Init(a) => out.push(&$($m)? **a),
+            | Log10(a) | Round(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) | Trunc(a) | Size(a)
+            | Stddev(a) | Sum(a) | Init(a) => out.push(&$($m)? **a),
             Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}
             Max(a, b) | Min(a, b) => {
                 out.push(&$($m)? **a);
@@ -740,8 +767,8 @@ macro_rules! builtin_args {
                     out.push(&$($m)? **c);
                 }
             }
-            Quantum(a, b) | Step(a, b) | Rank(a, b) | VectorElmMap(a, b) | VectorSortOrder(a, b)
-            | Previous(a, b) => {
+            Quantum(a, b) | Rem(a, b) | Step(a, b) | Rank(a, b) | VectorElmMap(a, b)
+            | VectorSortOrder(a, b) | Previous(a, b) => {
                 out.push(&$($m)? **a);
                 out.push(&$($m)? **b);
             }
@@ -795,6 +822,7 @@ macro_rules! builtin_rebuild {
             Pulse(a, b, c) => Pulse($arg!($f, a), $arg!($f, b), $opt!($f, c)),
             Quantum(a, b) => Quantum($arg!($f, a), $arg!($f, b)),
             Ramp(a, b, c) => Ramp($arg!($f, a), $arg!($f, b), $opt!($f, c)),
+            Rem(a, b) => Rem($arg!($f, a), $arg!($f, b)),
             Round(a) => Round($arg!($f, a)),
             SafeDiv(a, b, c) => SafeDiv($arg!($f, a), $arg!($f, b), $opt!($f, c)),
             Sign(a) => Sign($arg!($f, a)),
@@ -803,6 +831,7 @@ macro_rules! builtin_rebuild {
             Sqrt(a) => Sqrt($arg!($f, a)),
             Step(a, b) => Step($arg!($f, a), $arg!($f, b)),
             Tan(a) => Tan($arg!($f, a)),
+            Trunc(a) => Trunc($arg!($f, a)),
             Time => Time,
             TimeStep => TimeStep,
             StartTime => StartTime,
@@ -925,6 +954,7 @@ impl<Expr> BuiltinFn<Expr> {
             Pulse(_, _, _) => &PULSE,
             Quantum(_, _) => &QUANTUM,
             Ramp(_, _, _) => &RAMP,
+            Rem(_, _) => &REM,
             Round(_) => &ROUND,
             SafeDiv(_, _, _) => &SAFEDIV,
             Sign(_) => &SIGN,
@@ -933,6 +963,7 @@ impl<Expr> BuiltinFn<Expr> {
             Sqrt(_) => &SQRT,
             Step(_, _) => &STEP,
             Tan(_) => &TAN,
+            Trunc(_) => &TRUNC,
             Time => &TIME,
             TimeStep => &TIME_STEP,
             StartTime => &INITIAL_TIME,
@@ -1145,6 +1176,7 @@ impl<Expr> BuiltinFn<Expr> {
             | Pulse(_, _, _)
             | Quantum(_, _)
             | Ramp(_, _, _)
+            | Rem(_, _)
             | Round(_)
             | SafeDiv(_, _, _)
             | Sign(_)
@@ -1153,6 +1185,7 @@ impl<Expr> BuiltinFn<Expr> {
             | Sqrt(_)
             | Step(_, _)
             | Tan(_)
+            | Trunc(_)
             | Time
             | TimeStep
             | StartTime
@@ -1305,6 +1338,7 @@ mod tests {
             Builtin::Pulse(b(1), b(2), None),
             Builtin::Quantum(b(1), b(2)),
             Builtin::Ramp(b(1), b(2), None),
+            Builtin::Rem(b(1), b(2)),
             Builtin::Round(b(1)),
             Builtin::SafeDiv(b(1), b(2), None),
             Builtin::Sign(b(1)),
@@ -1313,6 +1347,7 @@ mod tests {
             Builtin::Sqrt(b(1)),
             Builtin::Step(b(1), b(2)),
             Builtin::Tan(b(1)),
+            Builtin::Trunc(b(1)),
             Builtin::Time,
             Builtin::TimeStep,
             Builtin::StartTime,
@@ -1353,6 +1388,7 @@ mod tests {
                 | Builtin::Pulse(..)
                 | Builtin::Quantum(..)
                 | Builtin::Ramp(..)
+                | Builtin::Rem(..)
                 | Builtin::Round(..)
                 | Builtin::SafeDiv(..)
                 | Builtin::Sign(..)
@@ -1361,6 +1397,7 @@ mod tests {
                 | Builtin::Sqrt(..)
                 | Builtin::Step(..)
                 | Builtin::Tan(..)
+                | Builtin::Trunc(..)
                 | Builtin::Time
                 | Builtin::TimeStep
                 | Builtin::StartTime

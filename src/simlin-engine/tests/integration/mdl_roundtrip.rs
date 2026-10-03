@@ -93,6 +93,12 @@ static TEST_MDL_MODELS: &[&str] = &[
     "test/sdeverywhere/models/quantum/quantum.mdl",
     "test/sdeverywhere/models/npv/npv.mdl",
     "test/sdeverywhere/models/comments/comments.mdl",
+    // arrayed variables: a number list over three dimensions, a subrange,
+    // and :EXCEPT: defaults over dimensions and over a subrange; the rest
+    // are in `ARRAYED_GATE_MODELS`
+    "test/test-models/tests/except/test_except.mdl",
+    "test/test-models/tests/except_subranges/test_except_subranges.mdl",
+    "test/test-models/tests/subscript_3d_arrays/test_subscript_3d_arrays.mdl",
 ];
 
 // XMILE/STMX files for cross-format testing (XMILE -> MDL -> re-parse).
@@ -135,20 +141,12 @@ fn resolve_path(relative: &str) -> String {
     format!("../../{relative}")
 }
 
-/// Get the equation text from a Variable regardless of its type.
-fn var_equation_text(var: &Variable) -> &str {
-    match var.get_equation() {
-        Some(datamodel::Equation::Scalar(s)) => s.as_str(),
-        Some(datamodel::Equation::ApplyToAll(_, s)) => s.as_str(),
-        Some(datamodel::Equation::Arrayed(_, _, _, _)) => "<arrayed>",
-        None => "",
-    }
-}
-
 /// Compare two Projects for semantic equivalence: same variable names and
-/// equation text, same sim specs, same dimensions. Ignores view layout and
-/// variable type (Stock vs Aux vs Flow) since the sketch roundtrip does not
-/// yet preserve element types. Also ignores `source`.
+/// equations (every element's equation, initial and table, and an
+/// `:EXCEPT:` default, of an arrayed one), same sim specs, same dimensions.
+/// Ignores view layout and variable type (Stock vs Aux vs Flow) since the
+/// sketch roundtrip does not yet preserve element types. Also ignores
+/// `source`.
 fn assert_semantic_equivalence(a: &Project, b: &Project, path: &str) -> Option<String> {
     if a.sim_specs != b.sim_specs {
         return Some(format!("{path}: sim_specs differ"));
@@ -233,8 +231,8 @@ fn assert_model_equivalence(
             ));
         }
 
-        let eq_a = var_equation_text(va);
-        let eq_b = var_equation_text(vb);
+        let eq_a = applied(va.get_equation());
+        let eq_b = applied(vb.get_equation());
         if eq_a != eq_b {
             return Some(format!(
                 "{path}: model[{i}] var {:?} equation differs: {:?} vs {:?}",
@@ -246,6 +244,36 @@ fn assert_model_equivalence(
     }
 
     None
+}
+
+/// `equation` without an `:EXCEPT:` default it does not apply, and with its
+/// text lowercased. The reader keeps the default of an `:EXCEPT:` equation
+/// that is its variable's only equation, and nothing reads it; and the engine
+/// reads names without regard to case, while a save spells a reference as
+/// its variable's definition does, whatever case the file wrote it in.
+fn applied(equation: Option<&datamodel::Equation>) -> Option<datamodel::Equation> {
+    let lower = |text: &String| text.to_lowercase();
+    equation.map(|equation| match equation {
+        datamodel::Equation::Scalar(text) => datamodel::Equation::Scalar(lower(text)),
+        datamodel::Equation::ApplyToAll(dims, text) => {
+            datamodel::Equation::ApplyToAll(dims.clone(), lower(text))
+        }
+        datamodel::Equation::Arrayed(dims, slots, default, applies) => {
+            let slots = slots
+                .iter()
+                .map(|(key, text, initial, gf)| {
+                    (
+                        key.clone(),
+                        lower(text),
+                        initial.as_ref().map(lower),
+                        gf.clone(),
+                    )
+                })
+                .collect();
+            let default = default.as_ref().filter(|_| *applies).map(lower);
+            datamodel::Equation::Arrayed(dims.clone(), slots, default, *applies)
+        }
+    })
 }
 
 /// Compare sim specs loosely: XMILE stores save_step as explicit Option<Dt>
@@ -277,11 +305,43 @@ fn sim_specs_equivalent(a: &datamodel::SimSpecs, b: &datamodel::SimSpecs) -> boo
 // Task 1: MDL -> MDL roundtrip
 // ---------------------------------------------------------------------------
 
+/// More arrayed models, in the gates: number lists, subranges, element
+/// equations, :EXCEPT: defaults, transposition, and names that need quoting.
+const ARRAYED_GATE_MODELS: &[&str] = &[
+    "test/sdeverywhere/models/arrays_cname/arrays_cname.mdl",
+    "test/sdeverywhere/models/arrays_varname/arrays_varname.mdl",
+    "test/sdeverywhere/models/except/except.mdl",
+    "test/sdeverywhere/models/except2/except2.mdl",
+    "test/sdeverywhere/models/subalias/subalias.mdl",
+    "test/sdeverywhere/models/sum/sum.mdl",
+    "test/test-models/tests/except_multiple/test_except_multiple.mdl",
+    "test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.mdl",
+    "test/test-models/tests/subscript_copy/test_subscript_copy.mdl",
+    "test/test-models/tests/subscript_subranges_equal/test_subscript_subrange_equal.mdl",
+    "test/test-models/tests/subscript_transposition/test_subscript_transposition.mdl",
+    "test/test-models/tests/subscripted_ramp_step/test_subscripted_ramp_step.mdl",
+    "test/test-models/tests/subset_duplicated_coord/test_subset_duplicated_coord.mdl",
+    "test/test-models/tests/invert_matrix/test_invert_matrix.mdl",
+    "test/test-models/tests/special_characters/test_special_variable_names.mdl",
+];
+
 #[test]
 fn mdl_to_mdl_roundtrip() {
+    roundtrip(TEST_MDL_MODELS);
+}
+
+#[test]
+#[ignore = "saves more arrayed models and reads them back; run under the gates profile"]
+fn mdl_to_mdl_roundtrip_of_arrayed_models() {
+    roundtrip(ARRAYED_GATE_MODELS);
+}
+
+/// Each of `models` read, saved and read again is the model it was
+/// (`assert_semantic_equivalence`).
+fn roundtrip(models: &[&str]) {
     let mut failures: Vec<String> = Vec::new();
 
-    for &path in TEST_MDL_MODELS {
+    for &path in models {
         let file_path = resolve_path(path);
         let source = match fs::read_to_string(&file_path) {
             Ok(s) => s,

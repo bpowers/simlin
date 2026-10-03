@@ -644,9 +644,10 @@ fn variables_pair_by_their_canonical_ident() {
 }
 
 /// MDL has no conveyor (Vensim has no such stock; what the MDL writer warns
-/// of), so the belt reads back as a plain stock. The compiler's helpers for
-/// the belt and its leaks are not the model's variables: the change is named
-/// on the belt and on the series it feeds.
+/// of), so the belt reads back as a plain stock and its outflow, which the
+/// belt computes, with no equation. The compiler's helpers for the belt and
+/// its leaks are not the model's variables: the changes are named on the
+/// belt, its leaks and the outflow.
 #[test]
 fn a_change_is_named_on_the_models_variables_not_the_compilers_helpers() {
     let project = corpus_file("test/conveyors/leaky_conveyor.xmile");
@@ -657,9 +658,11 @@ fn a_change_is_named_on_the_models_variables_not_the_compilers_helpers() {
         "{changes:?}"
     );
     assert!(
-        changes
-            .iter()
-            .any(|c| c.reason.contains("simulates differently")),
+        reasons.contains(&"'seepage' is no longer a conveyor leak"),
+        "{changes:?}"
+    );
+    assert!(
+        changes.iter().any(|c| c.kind == ChangeKind::Results),
         "{changes:?}"
     );
     for change in &changes {

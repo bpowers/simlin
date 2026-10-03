@@ -193,6 +193,17 @@ const BUILTINS_NOT_SAVED: &[(&str, &str)] = &[
     ),
 ];
 
+/// Builtins the writer writes under another spelling, and that spelling.
+const WRITTEN_AS: &[(&str, &str)] = &[
+    // The reader keeps only the initial value REINITIAL has in common with
+    // INITIAL.
+    ("reinitial", "INITIAL(x)"),
+    // The placeholder for a variable with no equation.
+    ("a function of", "NaN"),
+    // A list of numbers over a dimension: tabs are one way to write it.
+    ("tabbed array", "y[d]= 1, 2, 3"),
+];
+
 #[test]
 fn every_builtin_the_reader_knows_is_saved_as_it_reads() {
     let mut named: Vec<&str> = BUILTIN_CALLS
@@ -219,6 +230,23 @@ fn every_builtin_the_reader_knows_is_saved_as_it_reads() {
             }
         };
         let save = project_to_mdl(&first).expect("the model writes");
+        // The save calls the function the file called, by the name the file
+        // gave it or the one `WRITTEN_AS` gives: what the reader expands (a
+        // PULSE into a comparison) the writer has to find again.
+        let written = WRITTEN_AS
+            .iter()
+            .find(|(builtin, _)| builtin == name)
+            .map_or_else(|| name.to_uppercase(), |(_, written)| written.to_string());
+        let line = save
+            .replace("\r\n", "\n")
+            .replace("\n\t", " ")
+            .lines()
+            .find(|line| line.starts_with("y"))
+            .unwrap_or("<no y line>")
+            .to_string();
+        if !line.contains(&written) {
+            failures.push(format!("{name}: saved without {written}: {line}"));
+        }
         let second = match parse_mdl(&save) {
             Ok(project) => project,
             Err(err) => {
@@ -480,20 +508,34 @@ fn a_save_step_is_written_as_it_was_read() {
 }
 
 #[test]
-fn a_display_newline_collapses_with_the_space_around_it() {
+fn a_step_reads_back_as_the_step_it_was_written_from() {
+    // A step is a number or a count per time unit (`1/4`), for the time step
+    // and the save step alike, and the reader takes each back as it was.
+    use datamodel::Dt;
+    let steps = [Dt::Dt(0.25), Dt::Reciprocal(4.0), Dt::Dt(2.0)];
+    let mut project = parse_mdl(&format!("x = 1 ~~|\n{CONTROL}")).expect("parses");
+    for dt in &steps {
+        for save_step in steps.iter().map(Some).chain([None]) {
+            project.sim_specs.dt = dt.clone();
+            project.sim_specs.save_step = save_step.cloned();
+            let save = project_to_mdl(&project).expect("writes");
+            let read = parse_mdl(&save).expect("the save reads back");
+            assert_eq!(read.sim_specs, project.sim_specs, "{save}");
+        }
+    }
+}
+
+#[test]
+fn a_display_newline_is_written_as_the_escape_vensim_writes() {
+    // Vensim spells a name holding a line break with the `\n` escape inside
+    // quotes, in the equation and the sketch record alike
+    // (`test/test-models/tests/special_characters`), and the reader keeps
+    // the escape, so the variable keeps its name and its sketch element.
     assert_eq!(
-        collapse_display_newlines(r"Stock with \n Newline"),
-        "Stock with Newline"
+        format_mdl_ident(r"Stock_with_\n_Newline"),
+        r#""Stock with \n Newline""#
     );
-    assert_eq!(
-        collapse_display_newlines(r"Stock_with_\n_Newline"),
-        "Stock_with Newline"
-    );
-    assert_eq!(collapse_display_newlines("Two\nlines"), "Two lines");
-    // A name's own leading and trailing space stays.
-    assert_eq!(collapse_display_newlines(" padded "), " padded ");
-    // The equation and the sketch element name one variable, so the element
-    // survives the save.
+    assert_eq!(format_mdl_ident("Two\nlines"), r#""Two\nlines""#);
     let source = format!(
         "\"Stock with \\n Newline\" = INTEG(0, 1) ~~|\n{CONTROL}\\\\\\---/// Sketch information - do not modify anything except names
 V300  Do not put anything below this section - it will be ignored
@@ -505,6 +547,20 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
     );
     let (first, save1, second, save2) = two_saves(&source);
     assert_eq!(save1, save2);
+    assert!(save1.contains(r#""Stock with \n Newline"="#), "{save1}");
+    assert!(
+        save1.contains(r#"10,1,"Stock with \n Newline","#),
+        "{save1}"
+    );
+    let idents = |project: &datamodel::Project| -> Vec<String> {
+        project.models[0]
+            .variables
+            .iter()
+            .map(|v| v.get_ident().to_owned())
+            .collect()
+    };
+    assert_eq!(idents(&first), [r"stock_with_\n_newline"]);
+    assert_eq!(idents(&second), idents(&first));
     let stocks = |project: &datamodel::Project| {
         let datamodel::View::StockFlow(sf) = &project.models[0].views[0];
         sf.elements
@@ -513,6 +569,56 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
             .count()
     };
     assert_eq!((stocks(&first), stocks(&second)), (1, 1));
+}
+
+#[test]
+fn a_name_with_an_apostrophe_is_written_bare_as_vensim_writes_it() {
+    // `DimC'` is a name to the MDL lexer, which reads `'` after a name's
+    // first character as part of it, and Vensim writes it bare
+    // (`test/sdeverywhere/models/arrays_cname`). Quoted, it would read back
+    // as a name holding the quotes.
+    assert_eq!(format_mdl_ident("DimC'"), "DimC'");
+    assert_eq!(format_mdl_ident("'quoted"), "\"'quoted\"");
+    let source = format!(
+        "DimC: C1, C2 ~~|\nDimC': DimC ~~|\nsc[DimC, DimC'] = 1 ~~|\nx'y = sc[C1, C2] ~~|\n{CONTROL}"
+    );
+    let (first, save1, second, save2) = two_saves(&source);
+    assert_eq!(save1, save2);
+    assert_eq!(second.dimensions, first.dimensions, "{save1}");
+    assert_eq!(
+        second.models[0]
+            .variables
+            .iter()
+            .map(|v| v.get_ident())
+            .collect::<Vec<_>>(),
+        first.models[0]
+            .variables
+            .iter()
+            .map(|v| v.get_ident())
+            .collect::<Vec<_>>(),
+        "{save1}"
+    );
+}
+
+#[test]
+fn a_variable_named_for_a_builtin_is_never_defined_by_itself() {
+    // `dt = TIME STEP` is ordinary Vensim (`test/metasd/theil-statistics`).
+    // The variable's own equation reads the builtin, so it is written as the
+    // builtin; another equation's `dt` is written as the name it is, which
+    // the reader reads as it read the source.
+    let source = format!("dt = TIME STEP ~~|\nx = dt * 2 ~~|\n{CONTROL}");
+    let (first, save1, second, save2) = two_saves(&source);
+    assert!(save1.contains("dt = TIME STEP"), "{save1}");
+    assert!(save1.contains("x = dt * 2"), "{save1}");
+    assert_eq!(save1, save2);
+    let equations = |project: &datamodel::Project| {
+        project.models[0]
+            .variables
+            .iter()
+            .map(|v| (v.get_ident().to_owned(), v.get_equation().cloned()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(equations(&second), equations(&first), "{save1}");
 }
 
 #[test]
@@ -725,4 +831,347 @@ fn a_cloud_placed_after_the_views_merge_is_written_with_its_flow() {
         views[1].1
     );
     assert_eq!(save1, save2);
+}
+
+// ---- Groups ----
+
+/// A group marker as Vensim writes one.
+fn group_marker(name: &str) -> String {
+    format!(
+        "********************************************************\n\t.{name}\n********************************************************~\n\t|\n"
+    )
+}
+
+/// Each group's name, parent and members, in the model's order.
+fn groups_of(project: &datamodel::Project) -> Vec<(String, Option<String>, Vec<String>)> {
+    project.models[0]
+        .groups
+        .iter()
+        .map(|g| (g.name.clone(), g.parent.clone(), g.members.clone()))
+        .collect()
+}
+
+#[test]
+fn a_save_keeps_every_variable_in_its_group() {
+    // A variable before any group, a Control group in the middle that holds
+    // a variable of the model's own, and groups on either side of it. Where a
+    // variable is written is the group the reader gives it, and where a group
+    // is written is what its parent is read from.
+    let source = format!(
+        "loose = 1 ~~|\n{first}a = 2 ~~|\n{control}horizon = 10 ~~|\n{CONTROL}{second}b = 3 ~~|\nc = 4 ~~|\n",
+        first = group_marker("First"),
+        control = group_marker("Control"),
+        second = group_marker("Second"),
+    );
+    let (first, save1, second, save2) = two_saves(&source);
+    let some = |s: &str| Some(s.to_string());
+    let names = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        groups_of(&first),
+        [
+            ("First".to_string(), None, names(&["a"])),
+            ("Control".to_string(), some("First"), names(&["horizon"])),
+            ("Second".to_string(), some("Control"), names(&["b", "c"])),
+        ]
+    );
+    assert_eq!(groups_of(&second), groups_of(&first), "{save1}");
+    assert_eq!(save1, save2);
+}
+
+#[test]
+fn a_grouped_multi_output_macro_call_stays_in_its_group() {
+    // The call is written as the `:`-list invocation it was read from, in
+    // the group its left-hand side is in.
+    let source = format!(
+        ":MACRO: ADD3(a, b, c : minval, maxval)\nADD3 = a + b + c ~~|\n\
+         minval = MIN(a, MIN(b, c)) ~~|\nmaxval = MAX(a, MAX(b, c)) ~~|\n:END OF MACRO:\n\
+         in1 = 7 ~~|\n{only}total = ADD3(in1, in1, in1 : the min, the max) ~~|\n{CONTROL}",
+        only = group_marker("Only")
+    );
+    let (first, save1, second, save2) = two_saves(&source);
+    let main = |project: &datamodel::Project| {
+        project
+            .models
+            .iter()
+            .find(|m| m.macro_spec.is_none())
+            .map(|m| {
+                m.groups
+                    .iter()
+                    .map(|g| (g.name.clone(), g.members.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .expect("a main model")
+    };
+    assert!(
+        main(&first)[0].1.contains(&"total".to_owned()),
+        "{:?}",
+        main(&first)
+    );
+    assert_eq!(main(&second), main(&first), "{save1}");
+    assert_eq!(save1, save2);
+}
+
+#[test]
+fn a_save_adds_no_group() {
+    // Without a Control group the control variables are written with the
+    // variables no group holds, so the save reads back with the groups the
+    // model had: none, or its own.
+    for source in [
+        format!("x = 1 ~~|\n{CONTROL}"),
+        format!(
+            "x = 1 ~~|\n{CONTROL}{only}y = 2 ~~|\n",
+            only = group_marker("Only")
+        ),
+    ] {
+        let (first, save1, second, save2) = two_saves(&source);
+        assert_eq!(groups_of(&second), groups_of(&first), "{save1}");
+        assert_eq!(second.sim_specs, first.sim_specs);
+        assert_eq!(save1, save2);
+    }
+}
+
+#[test]
+fn the_group_holding_the_control_variables_is_written_as_the_model_names_it() {
+    // The control variables are written in the model's own Control group,
+    // whatever its case, and the group keeps its name.
+    let source = format!("x = 1 ~~|\n{}{CONTROL}", group_marker("control"));
+    let (first, save1, second, save2) = two_saves(&source);
+    assert!(
+        save1.replace("\r\n", "\n").contains("\t.control\n"),
+        "{save1}"
+    );
+    assert_eq!(groups_of(&second), groups_of(&first), "{save1}");
+    assert_eq!(save1, save2);
+}
+
+// ---- Time units ----
+
+#[test]
+fn the_time_unit_is_written_as_a_units_field() {
+    // A `~` ends the units field and a `|` the equation, so either written
+    // raw would cut the control variable short and leave the rest of the
+    // unit to be read as something else.
+    for (units, read_back) in [
+        (Some("Months"), "Months"),
+        // The separator becomes a space, and the reader joins the words of a
+        // unit's name as it does for any variable's units.
+        (Some("person~years"), "person_years"),
+        (Some("a|b"), "a/b"),
+        // No time unit is the engine's `time`, by name.
+        (None, "time"),
+        (Some(""), "time"),
+        (Some("  "), "time"),
+    ] {
+        let mut project = parse_mdl(&format!("x = 1 ~~|\n{CONTROL}")).expect("the source parses");
+        project.sim_specs.time_units = units.map(str::to_owned);
+        let save1 = project_to_mdl(&project).expect("the first save writes");
+        let second = parse_mdl(&save1)
+            .unwrap_or_else(|err| panic!("the save of {units:?} reads back: {err}\n{save1}"));
+        assert_eq!(
+            second.sim_specs.time_units.as_deref(),
+            Some(read_back),
+            "{units:?}"
+        );
+        assert_eq!(
+            idents_of(&second),
+            idents_of(&project),
+            "{units:?} changed the variables: {save1}"
+        );
+        let save2 = project_to_mdl(&second).expect("the second save writes");
+        let third = parse_mdl(&save2).expect("the second save reads back");
+        let save3 = project_to_mdl(&third).expect("the third save writes");
+        assert_eq!(save2, save3, "{units:?}");
+        if !read_back.contains('_') {
+            assert_eq!(save1, save2, "{units:?}");
+        }
+    }
+}
+
+/// The names of a project's variables, sorted.
+fn idents_of(project: &datamodel::Project) -> Vec<String> {
+    let mut idents: Vec<String> = project.models[0]
+        .variables
+        .iter()
+        .map(|v| v.get_ident().to_owned())
+        .collect();
+    idents.sort();
+    idents
+}
+
+#[test]
+fn a_model_with_no_time_unit_keeps_its_unit_check() {
+    // Without a time unit the engine checks a flow against its stock per
+    // `time`. The save names that unit, so the model it reads back as passes
+    // the check the model passed.
+    let unit_errors = |project: &datamodel::Project| {
+        let mut db = crate::db::SimlinDb::default();
+        let source = db.sync(project);
+        crate::db::collect_all_diagnostics(&db, source, crate::db::LtmOverlay::Off)
+            .iter()
+            .map(|d| format!("{:?}: {:?}", d.variable, d.reason()))
+            .collect::<Vec<_>>()
+    };
+    let mut project = parse_mdl(&format!(
+        "level = INTEG(rate, 0) ~ widgets ~|\nrate = 2 ~ widgets/time ~|\n{CONTROL}"
+    ))
+    .expect("the source parses");
+    project.sim_specs.time_units = None;
+    assert_eq!(unit_errors(&project), Vec::<String>::new());
+
+    let save = project_to_mdl(&project).expect("the save writes");
+    let read_back = parse_mdl(&save).expect("the save reads back");
+    assert_eq!(unit_errors(&read_back), Vec::<String>::new(), "{save}");
+}
+
+#[test]
+fn the_settings_follow_the_main_models_specs() {
+    // A macro is a model of the project, listed first here, and the run the
+    // file defines is the main model's.
+    let source = format!(
+        ":MACRO: DOUBLE(x)\nDOUBLE = 2 * x ~~|\n:END OF MACRO:\ny = DOUBLE(3) ~~|\n{CONTROL}"
+    );
+    let mut project = parse_mdl(&source).expect("the source parses");
+    let at = project
+        .models
+        .iter()
+        .position(|m| m.macro_spec.is_some())
+        .expect("the macro is a model");
+    project.models.swap(0, at);
+    let mut rk4 = project.sim_specs.clone();
+    rk4.sim_method = datamodel::SimMethod::RungeKutta4;
+    project.models[0].sim_specs = Some(rk4);
+    let save = project_to_mdl(&project).expect("the model writes");
+    assert!(save.contains("15:0,0,0,0,0,0"), "{save}");
+    assert_eq!(
+        parse_mdl(&save)
+            .expect("the save reads back")
+            .sim_specs
+            .sim_method,
+        datamodel::SimMethod::Euler
+    );
+}
+
+// ---- Numbers ----
+
+/// Numbers a shortest spelling finds awkward: subnormal, the smallest
+/// normal, not representable in decimal, past where f64 counts integers, and
+/// the largest.
+const AWKWARD_NUMBERS: &[f64] = &[
+    5e-324,
+    1e-320,
+    2.2250738585072014e-308,
+    0.1 + 0.2,
+    1.0 / 3.0,
+    4.35,
+    1e15,
+    1e15 + 1.0,
+    9007199254740993.0,
+    1e21,
+    1e22,
+    123456789012345680000.0,
+    1.7976931348623157e308,
+    1e-7,
+    0.000001,
+    2.5e-5,
+    1e100,
+    1.5e300,
+];
+
+/// The values a number spelled `literal` holds after an import and after a
+/// save of it: as a constant, a number-list element and a lookup point.
+/// Err with the first that is not `value`, bit for bit.
+fn a_number_survives(value: f64, literal: &str) -> std::result::Result<(), String> {
+    let source = format!(
+        "D: d1, d2 ~~|\nx = {literal} ~~|\narr[D] = {literal}, 1 ~~|\n\
+         t([(0,0)-(10,10)],(0,{literal}),(1,2)) ~~|\ny = t(0) ~~|\n{CONTROL}"
+    );
+    let first = parse_mdl(&source).map_err(|e| format!("{literal}: {e}"))?;
+    let save = project_to_mdl(&first).map_err(|e| format!("{literal}: {e}"))?;
+    let second = parse_mdl(&save).map_err(|e| format!("{literal}: the save: {e}"))?;
+    for (which, project) in [("import", &first), ("save", &second)] {
+        let var = |name: &str| {
+            project.models[0]
+                .variables
+                .iter()
+                .find(|v| v.get_ident() == name)
+                .cloned()
+                .ok_or_else(|| format!("{literal}: no {name} after {which}"))
+        };
+        let number = |text: &str| text.trim().parse::<f64>().unwrap_or(f64::NAN);
+        let x = match var("x")?.get_equation() {
+            Some(datamodel::Equation::Scalar(text)) => number(text),
+            other => return Err(format!("{literal}: x after {which} is {other:?}")),
+        };
+        let element = match var("arr")?.get_equation() {
+            Some(datamodel::Equation::Arrayed(_, slots, _, _)) => slots
+                .iter()
+                .find(|(key, _, _, _)| key == "d1")
+                .map_or(f64::NAN, |(_, text, _, _)| number(text)),
+            other => return Err(format!("{literal}: arr after {which} is {other:?}")),
+        };
+        let point = match var("t")? {
+            datamodel::Variable::Aux(aux) => aux.gf.map_or(f64::NAN, |gf| gf.y_points[0]),
+            other => return Err(format!("{literal}: t after {which} is {other:?}")),
+        };
+        for (what, got) in [("x", x), ("arr[d1]", element), ("t's point", point)] {
+            if got.to_bits() != value.to_bits() {
+                return Err(format!("{literal}: {what} after {which} is {got:e}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The numbers to try, `extra` random finite ones after the awkward ones,
+/// each in Rust's shortest spelling, plain and in exponent form.
+fn numbers(extra: usize) -> Vec<(f64, String)> {
+    let mut values: Vec<f64> = AWKWARD_NUMBERS.to_vec();
+    // A fixed xorshift sequence of bit patterns.
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    while values.len() < AWKWARD_NUMBERS.len() + extra {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let v = f64::from_bits(state);
+        if v.is_finite() && v != 0.0 {
+            values.push(v.abs());
+        }
+    }
+    values
+        .into_iter()
+        .flat_map(|v| [(v, format!("{v}")), (v, format!("{v:e}"))])
+        .collect()
+}
+
+#[test]
+fn a_number_reads_back_bit_for_bit() {
+    let failures: Vec<String> = numbers(0)
+        .into_iter()
+        .filter_map(|(v, literal)| a_number_survives(v, &literal).err())
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+#[ignore = "3000 random numbers through an import and a save; run under the gates profile"]
+fn any_number_reads_back_bit_for_bit() {
+    use rayon::prelude::*;
+    let failures: Vec<String> = numbers(3000)
+        .into_par_iter()
+        .filter_map(|(v, literal)| a_number_survives(v, &literal).err())
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_reference_is_spelled_as_its_definition() {
+    // Rows: a name holding an apostrophe, inside and at the end, which the
+    // reader stores quoted in a referring equation and Vensim writes bare.
+    let source =
+        format!("it's ok = 1 ~~|\nw = it's ok + 2 ~~|\nx' = 3 ~~|\ny = x' + 1 ~~|\n{CONTROL}");
+    let project = parse_mdl(&source).expect("the source reads");
+    let save = project_to_mdl(&project).expect("the model writes");
+    for written in ["it's ok = 1", "w = it's ok + 2", "x' = 3", "y = x' + 1"] {
+        assert!(save.contains(written), "{written}\n{save}");
+    }
 }

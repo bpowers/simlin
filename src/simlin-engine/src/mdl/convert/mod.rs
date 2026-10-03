@@ -9,18 +9,26 @@
 
 #[cfg(test)]
 mod apply_to_all_tests;
+#[cfg(test)]
+mod axis_dimension_tests;
+mod control;
 mod dimensions;
+#[cfg(test)]
+mod element_value_tests;
 mod external_data;
 mod helpers;
 #[cfg(test)]
 mod macro_tests;
 mod macros;
 mod multi_output;
+#[cfg(test)]
+mod number_list_tests;
 mod stocks;
 mod types;
 mod variables;
 
-use crate::mdl::builtins::eq_lower_space;
+pub(in crate::mdl) use dimensions::{element_owners, smallest_dimension_holding};
+pub(in crate::mdl) use external_data::is_external_data_placeholder;
 use helpers::{canonical_name, get_equation_name};
 pub use types::ConvertError;
 use types::{SimSpecsBuilder, SyntheticFlow};
@@ -109,6 +117,9 @@ pub struct ConversionContext<'input> {
     /// Whether to find what the file holds that the project does not keep.
     /// Only a caller that asks for the losses pays to find them.
     report_losses: bool,
+    /// The control variables whose equations are not constants, so the sim
+    /// specs hold their defaults (`control::read_controls`).
+    unread_controls: Vec<control::Control>,
 }
 
 impl<'input> ConversionContext<'input> {
@@ -203,6 +214,7 @@ impl<'input> ConversionContext<'input> {
             file_aliases,
             post_equations: "",
             report_losses: false,
+            unread_controls: Vec::new(),
         }
     }
 
@@ -268,6 +280,7 @@ impl<'input> ConversionContext<'input> {
         }
 
         self.formatter.set_subranges(subrange_dims);
+        self.set_formatter_scope();
 
         // Pass 3: Mark variable types (stock/flow/aux) and extract control vars
         self.mark_variable_types();
@@ -304,6 +317,38 @@ impl<'input> ConversionContext<'input> {
         let (mut project, losses) = self.build_project(&materialization)?;
         project.models.extend(macro_models);
         Ok((project, losses))
+    }
+
+    /// Tell the formatter what this model's names denote: its symbols, and
+    /// the elements of the project's dimensions.
+    pub(in crate::mdl::convert) fn set_formatter_scope(&mut self) {
+        let owners = element_owners(&self.dimensions);
+        let mut elements = HashMap::new();
+        for dim in &self.dimensions {
+            let crate::datamodel::DimensionElements::Named(names) = &dim.elements else {
+                continue;
+            };
+            for element in names {
+                let key = canonical_name(element);
+                if owners.get(&key) == Some(&canonical_name(&dim.name)) {
+                    elements.insert(key, (dim.name.clone(), element.clone()));
+                }
+            }
+        }
+        // A macro body is converted in a context of its own, which holds no
+        // macro definitions; it calls the file's macros by the names its
+        // parent's scope already has.
+        let mut macros = self.formatter.macro_names();
+        macros.extend(self.items.iter().filter_map(|item| match item {
+            MdlItem::Macro(def) => Some(canonical_name(&def.name)),
+            _ => None,
+        }));
+        self.formatter
+            .set_scope(crate::mdl::xmile_compat::NameScope {
+                variables: self.symbols.keys().cloned().collect(),
+                elements,
+                macros,
+            });
     }
 
     /// Pass 1: Collect all symbols from the parsed items.
@@ -374,17 +419,8 @@ impl<'input> ConversionContext<'input> {
             return false;
         }
 
-        // Skip control variables
-        if let Some(name) = get_equation_name(eq)
-            && (eq_lower_space(&name, "initial time")
-                || eq_lower_space(&name, "final time")
-                || eq_lower_space(&name, "time step")
-                || eq_lower_space(&name, "saveper"))
-        {
-            return false;
-        }
-
-        true
+        // The control variables are the sim specs, not variables.
+        get_equation_name(eq).is_none_or(|name| control::Control::named(&name).is_none())
     }
 
     /// Determine the parent index for a new group using xmutil's algorithm.

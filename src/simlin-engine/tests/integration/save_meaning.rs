@@ -99,114 +99,56 @@ const fn row(
 const NON_NEGATIVE: Cause = Format("MDL has no non-negative marking");
 const ONE_MODEL: Cause = Format("MDL holds one model");
 const SPECIAL_STOCK: Cause = Format("MDL has no conveyor or queue");
-const ELEMENT_FAMILY: Cause = Defect(
-    "an arrayed variable written one element equation each reads back over the elements' whole family",
-);
-const EXCEPT_DEFAULT: Cause = Defect(
-    "the writer drops an :EXCEPT: default (it warns where the default names the variable's own dimensions)",
-);
 const RECIPROCAL_DT: Cause =
     Defect("a reciprocal time step is written as `1/n`, which the reader cannot evaluate");
 const UNREADABLE: Cause = Defect("the writer writes text the reader refuses");
-const RESPELLED_CALL: Cause =
-    Defect("a call is written under a name the reader takes for a lookup or another function");
 const SHARED_FLOW: Cause =
     Defect("a flow two stocks share reads back as an auxiliary beside a net flow of each stock");
 const MACRO_INPUT: Cause = Defect("a macro input with no equation is written back as `0`");
-const QUANTUM: Cause =
-    Defect("`q * INT(x / q)` is written as QUANTUM, which truncates toward zero where INT floors");
-const REPEATING_PULSE: Cause = Defect("a repeating PULSE is written as a single pulse");
 const UNPARSED_EQUATION: Cause =
     Defect("an equation that does not parse is written as another equation");
-const NAME_NEWLINE: Cause = Defect("a newline in a name is written as a space");
-const NET_FLOW: Cause =
-    Defect("a stock whose INTEG is not a plain sum of flows reads back with a net flow");
+const TABLE_INPUT: Cause = Format(
+    "an :EXCEPT: equation defines no element whose own equation is a table, so the default is written as each element's input",
+);
+const PULSE_SPELLED: Cause = Format(
+    "Vensim's PULSE is another function, so an XMILE PULSE is written as the comparison it makes",
+);
+const FUNCTION_AS_TABLE: Cause = Defect(
+    "the XMILE reader takes a call of a function the engine lacks (VMAX, COSH) for a table, and the save writes the call",
+);
 
 /// Every save that does not keep its model, by file. One row a line, so a
 /// fix removes exactly the rows it repairs.
 #[rustfmt::skip]
 const EXPECTED: &[Expected] = &[
     row("test/ai-information/GeneratedByAIThenEdited.stmx", Xmile, Mdl, ResultsChange, NON_NEGATIVE),
-    row("test/ai-information/PureHumanModel.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
     row("test/ai-information/WithModulesAndArrays.stmx", Xmile, Mdl, Refused, ONE_MODEL),
     row("test/alias1/alias1.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/array_broadcast/array_broadcast.xmile", Xmile, Mdl, ResultsChange, RESPELLED_CALL),
-    row("test/array_multi_source/array_multi_source.xmile", Xmile, Mdl, ResultsChange, RESPELLED_CALL),
-    row("test/array_sum_simple/array_sum_simple.xmile", Xmile, Mdl, ResultsChange, RESPELLED_CALL),
     row("test/arrays1/arrays.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/builtin_init/builtin_init.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
     row("test/conveyors/arrayed_conveyor.xmile", Xmile, Mdl, ResultsChange, SPECIAL_STOCK),
     row("test/conveyors/conveyor_containers.xmile", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/conveyors/covid19_severity.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
+    row("test/conveyors/covid19_severity.stmx", Xmile, Mdl, Definition, NON_NEGATIVE),
     row("test/conveyors/discrete_conveyor.xmile", Xmile, Mdl, ResultsChange, SPECIAL_STOCK),
     row("test/conveyors/leaky_conveyor.xmile", Xmile, Mdl, ResultsChange, SPECIAL_STOCK),
     row("test/conveyors/minimal_conveyor.xmile", Xmile, Mdl, ResultsChange, SPECIAL_STOCK),
     row("test/conveyors/queue_coupled_conveyor.xmile", Xmile, Mdl, ResultsChange, SPECIAL_STOCK),
     row("test/conveyors/sir_social_distancing_mixnot.stmx", Xmile, Mdl, Refused, ONE_MODEL),
-    row("test/delays/model.xmile", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
     row("test/ltm_dynamic_range_unsupported/model.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/metasd/FREE/FREE6/FREE6-corrected/conversion.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/metasd/FREE/FREE6/FREE6-corrected/conversion2.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/metasd/FREE/FREE6/FREE6-original/conversion.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/metasd/FREE/FREE6/FREE6-original/conversion2.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/metasd/FREE/FREE6/FREE6-original/free 6.mdl", Mdl, Mdl, Definition, ELEMENT_FAMILY),
-    row("test/metasd/beer-game/RealBeer4-Sterman13.mdl", Mdl, Mdl, Definition, ELEMENT_FAMILY),
     row("test/modules2/modules2.xmile", Xmile, Mdl, Refused, ONE_MODEL),
     row("test/modules_hares_and_foxes/modules_hares_and_foxes.stmx", Xmile, Mdl, Refused, ONE_MODEL),
     row("test/modules_with_complex_idents/modules_with_complex_idents.stmx", Xmile, Mdl, Refused, ONE_MODEL),
-    row("test/previous/model.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
     row("test/queues/minimal_queue.xmile", Xmile, Mdl, ResultsChange, SPECIAL_STOCK),
     row("test/queues/queue_drain.xmile", Xmile, Mdl, ResultsChange, SPECIAL_STOCK),
-    row("test/sdeverywhere/models/arrays_cname/arrays_cname.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/arrays_cname/arrays_cname.xmile", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/sdeverywhere/models/arrays_varname/arrays_varname.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/arrays_varname/arrays_varname.xmile", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/sdeverywhere/models/delay/delay.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/delay/delay.xmile", Xmile, Mdl, ResultsChange, ELEMENT_FAMILY),
     row("test/sdeverywhere/models/directsubs/directsubs.xmile", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/sdeverywhere/models/except/except.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/except/except.xmile", Xmile, Mdl, Definition, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/except2/except2.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/except2/except2.xmile", Xmile, Mdl, Definition, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/extdata/extdata.xmile", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/sdeverywhere/models/longeqns/longeqns.xmile", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/sdeverywhere/models/prune/prune.xmile", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/sdeverywhere/models/quantum/quantum.xmile", Xmile, Mdl, ResultsChange, QUANTUM),
-    row("test/sdeverywhere/models/smooth/smooth.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/subalias/subalias.mdl", Mdl, Mdl, Definition, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/sum/sum.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/sum/sum.xmile", Xmile, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/sdeverywhere/models/sumif/sumif.xmile", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/step_into_smth1/model.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/subscript_index_name_values/model.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/test-models/samples/SIR/SIR_reciprocal-dt.xmile", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/test-models/samples/arrays/a2a/a2a.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/test-models/samples/arrays/non-a2a/non-a2a-gf.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/test-models/samples/arrays/non-a2a/non-a2a.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
+    row("test/test-models/samples/arrays/non-a2a/non-a2a-gf.stmx", Xmile, Mdl, Definition, TABLE_INPUT),
     row("test/test-models/samples/bpowers-hares_and_lynxes_modules/model.stmx", Xmile, Mdl, Refused, ONE_MODEL),
     row("test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile", Xmile, Mdl, Refused, ONE_MODEL),
     row("test/test-models/samples/bpowers-hares_and_lynxes_modules/model_legacy.stmx", Xmile, Mdl, Refused, ONE_MODEL),
-    row("test/test-models/samples/display/1style.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/test-models/samples/display/multipoint-connection.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
+    row("test/test-models/samples/display/1style.stmx", Xmile, Mdl, Definition, NON_NEGATIVE),
     row("test/test-models/samples/teacup/teacup.stmx", Xmile, Mdl, ResultsChange, NON_NEGATIVE),
-    row("test/test-models/tests/allocate_by_priority/test_allocate_by_priority.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/test-models/tests/builtin_int/builtin_int.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/test-models/tests/builtin_int/builtin_int.xmile", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/test-models/tests/builtin_mean/builtin_mean.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/test-models/tests/builtin_mean/builtin_mean.xmile", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/test-models/tests/data_from_other_model/test_data_from_other_model.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
     row("test/test-models/tests/delay_xmile/test_delay_xmile.xmile", Xmile, Mdl, Definition, NON_NEGATIVE),
-    row("test/test-models/tests/delays2/delays.xmile", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
-    row("test/test-models/tests/except/test_except.mdl", Mdl, Mdl, Definition, EXCEPT_DEFAULT),
-    row("test/test-models/tests/except_multiple/test_except_multiple.mdl", Mdl, Mdl, Definition, EXCEPT_DEFAULT),
-    row("test/test-models/tests/except_subranges/test_except_subranges.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/test-models/tests/input_functions/test_inputs.xmile", Xmile, Mdl, ResultsChange, REPEATING_PULSE),
-    row("test/test-models/tests/invert_matrix/test_invert_matrix.mdl", Mdl, Mdl, Definition, ELEMENT_FAMILY),
+    row("test/test-models/tests/input_functions/test_inputs.xmile", Xmile, Mdl, Definition, PULSE_SPELLED),
     row("test/test-models/tests/logicals/test_logicals.stmx", Xmile, Mdl, Definition, UNPARSED_EQUATION),
-    row("test/test-models/tests/lookups/test_lookups.xmile", Xmile, Mdl, Definition, RESPELLED_CALL),
-    row("test/test-models/tests/lookups/test_lookups_xpts_sep.xmile", Xmile, Mdl, Definition, RESPELLED_CALL),
-    row("test/test-models/tests/lookups/test_lookups_xscale.xmile", Xmile, Mdl, Definition, RESPELLED_CALL),
-    row("test/test-models/tests/lookups/test_lookups_ypts_sep.xmile", Xmile, Mdl, Definition, RESPELLED_CALL),
     row("test/test-models/tests/lookups_funcnames/test_lookups_funcnames.xmile", Xmile, Mdl, ResultsChange, UNPARSED_EQUATION),
     row("test/test-models/tests/macro_expression/test_macro_expression.stmx", Xmile, Mdl, Definition, UNPARSED_EQUATION),
     row("test/test-models/tests/macro_multi_expression/test_macro_multi_expression.stmx", Xmile, Mdl, Definition, UNPARSED_EQUATION),
@@ -221,25 +163,15 @@ const EXPECTED: &[Expected] = &[
     row("test/test-models/tests/non_negative_flows/test_non_negative_flows_behavior.xmile", Xmile, Mdl, ResultsChange, NON_NEGATIVE),
     row("test/test-models/tests/non_negative_stocks/test_non_negative_stocks.xmile", Xmile, Mdl, ResultsChange, SHARED_FLOW),
     row("test/test-models/tests/non_negative_stocks/test_non_negative_stocks_behavior.xmile", Xmile, Mdl, ResultsChange, SHARED_FLOW),
-    row("test/test-models/tests/special_characters/test_special_variable_names.mdl", Mdl, Mdl, Definition, NAME_NEWLINE),
-    row("test/test-models/tests/subscript_aggregation/test_subscript_aggregation.xmile", Xmile, Mdl, ResultsChange, UNREADABLE),
+    row("test/test-models/tests/subscript_aggregation/test_subscript_aggregation.xmile", Xmile, Mdl, Definition, FUNCTION_AS_TABLE),
     row("test/test-models/tests/subscript_constant_call/test_subscript_constant_call.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/test-models/tests/subscript_copy/test_subscript_copy.mdl", Mdl, Mdl, Definition, ELEMENT_FAMILY),
-    row("test/test-models/tests/subscript_copy/test_subscript_copy2.mdl", Mdl, Mdl, Definition, ELEMENT_FAMILY),
     row("test/test-models/tests/subscript_mixed_assembly/test_subscript_mixed_assembly.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
     row("test/test-models/tests/subscript_multiples/test_multiple_subscripts.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
     row("test/test-models/tests/subscript_subranges/test_subscript_subrange.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/test-models/tests/subscript_subranges_equal/test_subscript_subrange_equal.mdl", Mdl, Mdl, Definition, ELEMENT_FAMILY),
     row("test/test-models/tests/subscript_subranges_equal/test_subscript_subrange_equal.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/test-models/tests/subscript_switching/subscript_switching.mdl", Mdl, Mdl, Definition, ELEMENT_FAMILY),
-    row("test/test-models/tests/subscript_switching/subscript_switching.xmile", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/test-models/tests/subscript_transposition/test_subscript_transposition.mdl", Mdl, Mdl, Definition, ELEMENT_FAMILY),
     row("test/test-models/tests/subscript_updimensioning/test_subscript_updimensioning.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
     row("test/test-models/tests/subscripted_flows/test_subscripted_flows.stmx", Xmile, Mdl, ResultsChange, UNREADABLE),
-    row("test/test-models/tests/subscripted_ramp_step/test_subscripted_ramp_step.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/test-models/tests/subset_duplicated_coord/test_subset_duplicated_coord.mdl", Mdl, Mdl, Definition, ELEMENT_FAMILY),
-    row("test/test-models/tests/zeroled_decimals/test_zeroled_decimals.xmile", Xmile, Mdl, ResultsChange, NET_FLOW),
-    row("test/vector_snapshot_operand/vector_snapshot_operand.xmile", Xmile, Mdl, ResultsChange, RESPELLED_CALL),
+    row("test/test-models/tests/subscripted_trig/test_subscripted_trig.xmile", Xmile, Mdl, Definition, FUNCTION_AS_TABLE),
     row("test/xmutil_test_models/C-LEARN v77 for Vensim.xmile", Xmile, Mdl, Refused, ONE_MODEL),
 ];
 

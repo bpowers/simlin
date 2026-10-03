@@ -26,9 +26,11 @@ fn assert_mdl(xmile_eqn: &str, expected_mdl: &str) {
 
 #[test]
 fn constants() {
+    // A number is written as the reader stores it.
     assert_mdl("5", "5");
     assert_mdl("3.14", "3.14");
-    assert_mdl("1e3", "1e3");
+    assert_mdl("1e3", "1000");
+    assert_mdl("0.0000001", "1e-07");
 }
 
 #[test]
@@ -96,15 +98,16 @@ fn quoted_identifiers_handle_newlines() {
         escape_mdl_quoted_ident(r"Maximum\nfishery size"),
         r"Maximum\nfishery size"
     );
-    // An identifier the writer prints collapses its display newline, as the
-    // sketch does, so a reference and its definition spell one name.
+    // An identifier the writer prints keeps its display newline as the
+    // quoted escape, as the sketch does, so a reference and its definition
+    // spell one name.
     assert_eq!(
         format_mdl_ident("Maximum\nfishery_size"),
-        "Maximum fishery size"
+        r#""Maximum\nfishery size""#
     );
     assert_eq!(
         format_mdl_ident(r#""Maximum \n fishery size""#),
-        r#""Maximum fishery size""#
+        r#""Maximum \n fishery size""#
     );
 }
 
@@ -229,8 +232,16 @@ fn function_rename_init() {
 }
 
 #[test]
-fn function_rename_int() {
-    assert_mdl("int(x)", "INTEGER(x)");
+fn the_truncating_functions_are_vensims_and_the_flooring_ones_keep_their_names() {
+    // Vensim's INTEGER and MODULO truncate, as the engine's TRUNC and REM do;
+    // INT floors and MOD is a floored modulus, which Vensim does not have.
+    assert_mdl("trunc(x)", "INTEGER(x)");
+    assert_mdl("rem(x, 3)", "MODULO(x, 3)");
+    assert_mdl("int(x)", "INT(x)");
+    assert_mdl("a mod b", "MOD(a, b)");
+    assert_mdl("(time) mod (5)", "MOD(Time, 5)");
+    // The engine's MODULO call is its MOD operator.
+    assert_mdl("modulo(a, b)", "MOD(a, b)");
 }
 
 #[test]
@@ -337,24 +348,76 @@ fn pattern_log_2arg() {
 }
 
 #[test]
-fn pattern_quantum() {
-    // XMILE: q * int(x / q)  ->  MDL: QUANTUM(x, q)
-    assert_mdl("q * int(x / q)", "QUANTUM(x, q)");
+fn a_floored_quantum_is_not_vensims() {
+    // `q * int(x / q)` floors where QUANTUM truncates, so it is written as
+    // the product it is. The reader keeps a QUANTUM call as one.
+    assert_mdl("q * int(x / q)", "q * INT(x / q)");
+    assert_mdl("quantum(x, q)", "QUANTUM(x, q)");
 }
 
 #[test]
-fn pattern_quantum_not_matched_different_q() {
-    // q1 * int(x / q2) should NOT match QUANTUM when q1 != q2
-    assert_mdl("q1 * int(x / q2)", "q1 * INTEGER(x / q2)");
+fn what_is_written_as_a_call_is_not_grouped() {
+    // An IF, the MOD operator and a recognized expansion are written as calls,
+    // which bind as tightly as anything around them.
+    assert_mdl("a * (ln(x) / ln(2))", "a * LOG(x, 2)");
+    assert_mdl("1 + (if a then b else c)", "1 + IF THEN ELSE(a, b, c)");
+    assert_mdl("a * (b mod c)", "a * MOD(b, c)");
+    assert_mdl("-(if a then b else c)", "-IF THEN ELSE(a, b, c)");
+    // What is written as an operator still groups by precedence.
+    assert_mdl("a * (b + c)", "a * (b + c)");
 }
 
 #[test]
 fn pattern_pulse() {
-    // XMILE expansion of PULSE(start, width):
-    // IF TIME >= start AND TIME < (start + MAX(DT, width)) THEN 1 ELSE 0
+    // The reader's expansions of PULSE(start, width), which compare half a
+    // step ahead as Vensim does, one per way the width is decided.
+    for (expansion, call) in [
+        (
+            "if time + dt / 2 > start and time + dt / 2 < (start + (if (width) = 0 then dt else (width))) then 1 else 0",
+            "PULSE(start, width)",
+        ),
+        (
+            "if time + dt / 2 > start and time + dt / 2 < (start + dt) then 1 else 0",
+            "PULSE(start, 0)",
+        ),
+        (
+            "if time + dt / 2 > start and time + dt / 2 < (start + (2.5)) then 1 else 0",
+            "PULSE(start, 2.5)",
+        ),
+        (
+            "if time + dt / 2 > start and time + dt / 2 < (start + (-1)) then 1 else 0",
+            "PULSE(start, -1)",
+        ),
+    ] {
+        assert_mdl(expansion, call);
+    }
+}
+
+#[test]
+fn a_window_written_by_hand_is_not_a_pulse() {
+    // Vensim's PULSE compares half a step ahead; a comparison of the time
+    // itself is another function of a start that is off the time grid.
     assert_mdl(
         "if time >= start and time < (start + max(dt, width)) then 1 else 0",
-        "PULSE(start, width)",
+        "IF THEN ELSE(Time >= start :AND: Time < start + MAX(TIME STEP, width), 1, 0)",
+    );
+    // A width that is not a number is the reader's only where it says what a
+    // width of 0 is.
+    assert_mdl(
+        "if time + dt / 2 > start and time + dt / 2 < (start + width) then 1 else 0",
+        "IF THEN ELSE(Time + TIME STEP / 2 > start :AND: Time + TIME STEP / 2 < start + width, 1, 0)",
+    );
+}
+
+#[test]
+fn a_recognizer_matches_numbers_exactly() {
+    // Numbers a rounding error apart are different numbers: `uniform(1e-17,
+    // 1)` is not RANDOM 0 1.
+    assert_mdl("uniform(0, 1)", "RANDOM 0 1()");
+    assert_mdl("uniform(1e-17, 1)", "RANDOM UNIFORM(1e-17, 1)");
+    assert_mdl(
+        "if time + dt / 2 > 1e-20 and time + dt / 2 < (2e-20 + 1) then 1 else 0",
+        "IF THEN ELSE(Time + TIME STEP / 2 > 1e-20 :AND: Time + TIME STEP / 2 < 2e-20 + 1, 1, 0)",
     );
 }
 
@@ -369,18 +432,11 @@ fn pattern_pulse_not_matched_missing_lt() {
 
 #[test]
 fn pattern_pulse_train() {
-    // XMILE expansion of PULSE TRAIN(start, width, interval, end_val):
-    // IF TIME >= start AND TIME <= end_val AND (TIME - start) MOD interval < width THEN 1 ELSE 0
+    // The reader's expansion of PULSE TRAIN(start, width, interval, end_val).
     assert_mdl(
-        "if time >= start and time <= end_val and (time - start) mod interval < width then 1 else 0",
+        "if time + dt / 2 > start and time <= end_val and (time + dt / 2 - start) mod interval < max(dt, width) then 1 else 0",
         "PULSE TRAIN(start, width, interval, end val)",
     );
-}
-
-#[test]
-fn mod_emits_modulo() {
-    assert_mdl("a mod b", "MODULO(a, b)");
-    assert_mdl("(time) mod (5)", "MODULO(Time, 5)");
 }
 
 #[test]
@@ -1146,7 +1202,20 @@ fn dimension_def_indexed() {
     let dim = datamodel::Dimension::indexed("dim_b".to_owned(), 5);
     let mut buf = String::new();
     write_dimension_def(&mut buf, &dim, &[]);
-    assert_eq!(buf, "dim b:\n\t(1-5)\n\t~~|\n");
+    // A range of names, which is what Vensim's subscript elements are.
+    assert_eq!(buf, "dim b:\n\t(dim b1-dim b5)\n\t~~|\n");
+    let read = crate::mdl::parse_mdl(&format!("{buf}x[dim b] = 1 ~~|\n")).expect("reads");
+    assert_eq!(
+        read.dimensions[0].elements,
+        datamodel::DimensionElements::Named(
+            (1..=5).map(|n| format!("dim_b{n}")).collect::<Vec<_>>()
+        )
+    );
+
+    let one = datamodel::Dimension::indexed("solo".to_owned(), 1);
+    let mut buf = String::new();
+    write_dimension_def(&mut buf, &one, &[]);
+    assert_eq!(buf, "solo:\n\tsolo1\n\t~~|\n");
 }
 
 #[test]
@@ -1186,24 +1255,36 @@ fn non_data_equation_uses_equals() {
 }
 
 #[test]
-fn is_data_equation_detection() {
+fn is_external_data_placeholder_detection() {
     // Underscore-separated form (as might appear in some equation strings)
-    assert!(is_data_equation("{GET_DIRECT_DATA('f',',','A','B')}"));
-    assert!(is_data_equation("{GET_XLS_DATA('f','s','A','B')}"));
-    assert!(is_data_equation("{GET_VDF_DATA('f','v')}"));
-    assert!(is_data_equation("{GET_DATA_AT_TIME('v', 5)}"));
-    assert!(is_data_equation("{GET_123_DATA('f','s','A','B')}"));
+    assert!(is_external_data_placeholder(
+        "{GET_DIRECT_DATA('f',',','A','B')}"
+    ));
+    assert!(is_external_data_placeholder(
+        "{GET_XLS_DATA('f','s','A','B')}"
+    ));
+    assert!(is_external_data_placeholder("{GET_VDF_DATA('f','v')}"));
+    assert!(is_external_data_placeholder("{GET_DATA_AT_TIME('v', 5)}"));
+    assert!(is_external_data_placeholder(
+        "{GET_123_DATA('f','s','A','B')}"
+    ));
 
     // Space-separated form (as produced by the normalizer's SymbolClass::GetXls)
-    assert!(is_data_equation("{GET DIRECT DATA('f',',','A','B')}"));
-    assert!(is_data_equation("{GET XLS DATA('f','s','A','B')}"));
-    assert!(is_data_equation("{GET VDF DATA('f','v')}"));
-    assert!(is_data_equation("{GET DATA AT TIME('v', 5)}"));
-    assert!(is_data_equation("{GET 123 DATA('f','s','A','B')}"));
+    assert!(is_external_data_placeholder(
+        "{GET DIRECT DATA('f',',','A','B')}"
+    ));
+    assert!(is_external_data_placeholder(
+        "{GET XLS DATA('f','s','A','B')}"
+    ));
+    assert!(is_external_data_placeholder("{GET VDF DATA('f','v')}"));
+    assert!(is_external_data_placeholder("{GET DATA AT TIME('v', 5)}"));
+    assert!(is_external_data_placeholder(
+        "{GET 123 DATA('f','s','A','B')}"
+    ));
 
-    assert!(!is_data_equation("100"));
-    assert!(!is_data_equation("integ(a, b)"));
-    assert!(!is_data_equation(""));
+    assert!(!is_external_data_placeholder("100"));
+    assert!(!is_external_data_placeholder("integ(a, b)"));
+    assert!(!is_external_data_placeholder(""));
 }
 
 #[test]
@@ -1439,7 +1520,7 @@ fn project_to_mdl_succeeds_single_model() {
 #[test]
 fn macro_block_emitted_before_main_model_and_control() {
     // The :MACRO: block must appear after {UTF-8} and before the main
-    // model's variables and the .Control section (matching the on-disk
+    // model's variables and its control variables (matching the on-disk
     // fixtures, which place :MACRO: blocks immediately after {UTF-8}).
     let main = make_model(vec![make_aux(
         "macro_output",
@@ -1460,7 +1541,7 @@ fn macro_block_emitted_before_main_model_and_control() {
         .find(":MACRO: expression macro(input, parameter)")
         .expect("has :MACRO: header");
     let macro_end = mdl.find(":END OF MACRO:").expect("has :END OF MACRO:");
-    let control = mdl.find(".Control").expect("has .Control");
+    let control = mdl.find("INITIAL TIME").expect("has the control variables");
     let main_var = mdl
         .find("macro output = EXPRESSION MACRO")
         .expect("has main model var");
@@ -1474,7 +1555,10 @@ fn macro_block_emitted_before_main_model_and_control() {
         macro_end < main_var,
         ":END OF MACRO: before main model variables"
     );
-    assert!(macro_end < control, ":END OF MACRO: before .Control");
+    assert!(
+        macro_end < control,
+        ":END OF MACRO: before the control variables"
+    );
     // The body equation is inside the block.
     let body = mdl
         .find("expression macro = input * parameter")
@@ -2255,12 +2339,14 @@ fn equations_section_with_groups() {
         "should contain group documentation"
     );
 
-    // Grouped variables come before ungrouped
+    // A variable no group holds comes before every group marker: the reader
+    // puts a variable in the group whose marker last came before it.
+    let marker_pos = mdl.find(".my group").unwrap();
     let rate_a_pos = mdl.find("rate a = ").unwrap();
     let ungrouped_pos = mdl.find("ungrouped var = ").unwrap();
     assert!(
-        rate_a_pos < ungrouped_pos,
-        "grouped variables should come before ungrouped"
+        ungrouped_pos < marker_pos && marker_pos < rate_a_pos,
+        "ungrouped variables come before the first group: {mdl}"
     );
 }
 
@@ -2836,26 +2922,27 @@ fn sketch_roundtrip_preserves_causal_links_to_flows_without_sketch_compat() {
 }
 
 #[test]
-fn sketch_name_collapses_display_newlines_and_quotes_specials() {
+fn sketch_name_keeps_display_newlines_and_quotes_specials() {
     // A literal `\n` (backslash + 'n') -- the form XMILE name attributes use --
-    // and a real newline both collapse to a space, matching the equation
+    // and a real newline are both the quoted escape, matching the equation
     // section. Names with characters that would break a comma-delimited record
     // get quoted, the way Vensim writes them.
     assert_eq!(
         format_sketch_name("Maximum\\nfishery size"),
-        "Maximum fishery size"
+        r#""Maximum\nfishery size""#
     );
     assert_eq!(
         format_sketch_name("Effect of fish\non catch"),
-        "Effect of fish on catch"
+        r#""Effect of fish\non catch""#
     );
     assert_eq!(format_sketch_name("max_fishery_size"), "max fishery size");
     assert_eq!(
         format_sketch_name("Aux with $peC!@| characters"),
         "\"Aux with $peC!@| characters\""
     );
-    // ...and the equation section uses the same collapsed spelling, so the
-    // sketch record and the variable definition agree.
+    // ...and the equation section uses the same spelling, so the sketch
+    // record and the variable definition agree. The display names are keyed
+    // by canonical name, as `build_display_name_map` keys them.
     let mut display_names = HashMap::new();
     display_names.insert(
         "maximum_fishery_size".to_string(),
@@ -2863,16 +2950,15 @@ fn sketch_name_collapses_display_newlines_and_quotes_specials() {
     );
     assert_eq!(
         display_name_for_ident("maximum_fishery_size", &display_names),
-        "Maximum fishery size",
+        r#""Maximum\nfishery size""#,
     );
 }
 
 #[test]
 fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
-    // Regression: a view element whose name contains a display newline used to
-    // be written verbatim (`Maximum\nfishery size`), which did not match the
-    // equation-section spelling (`Maximum fishery size`), so the re-parser --
-    // and Vensim -- dropped the orphaned sketch element.
+    // A view element whose name breaks a variable's name over two lines is
+    // written under the variable's name, as its equation is, so the
+    // re-parser -- and Vensim -- links the sketch element to its variable.
     let maximum = Variable::Aux(Aux {
         ident: "maximum_fishery_size".to_owned(),
         equation: Equation::Scalar("4000".to_owned()),
@@ -2940,10 +3026,11 @@ fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
     let project = make_project(vec![model]);
 
     let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
-    // The sketch record must use the collapsed name, matching the equation LHS.
+    // The variable's name has no break, so the sketch record drops the one
+    // its element's name has and spells the name as the equation does.
     assert!(
         mdl.contains("10,1,Maximum fishery size,"),
-        "sketch record should use the newline-collapsed name; got:\n{mdl}"
+        "sketch record should use the variable's name; got:\n{mdl}"
     );
 
     let reparsed = crate::mdl::parse_mdl(&mdl).expect("written MDL should parse");
@@ -2958,7 +3045,7 @@ fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
         .collect();
     assert!(
         aux_idents.iter().any(|i| i == "maximum_fishery_size"),
-        "view element for maximum_fishery_size should survive the roundtrip; got {aux_idents:?}"
+        "view element for the multi-line name should survive the roundtrip; got {aux_idents:?}"
     );
     assert!(
         aux_idents.iter().any(|i| i == "fish_density"),
@@ -2994,7 +3081,7 @@ fn compute_control_point_arc_off_center() {
 fn settings_section_starts_with_marker() {
     let project = make_project(vec![make_model(vec![])]);
     let mut writer = MdlWriter::new();
-    writer.write_settings_section(&project);
+    writer.write_settings_section(&project, &project.models[0]);
     let output = writer.buf;
     assert!(
         output.starts_with(":L\x7F<%^E!@\n"),
@@ -3007,7 +3094,7 @@ fn settings_section_starts_with_marker() {
 fn settings_section_contains_type_15_euler() {
     let project = make_project(vec![make_model(vec![])]);
     let mut writer = MdlWriter::new();
-    writer.write_settings_section(&project);
+    writer.write_settings_section(&project, &project.models[0]);
     let output = writer.buf;
     assert!(
         output.contains("15:0,0,0,0,0,0\n"),
@@ -3021,7 +3108,7 @@ fn settings_section_contains_type_15_rk4() {
     let mut project = make_project(vec![make_model(vec![])]);
     project.sim_specs.sim_method = SimMethod::RungeKutta4;
     let mut writer = MdlWriter::new();
-    writer.write_settings_section(&project);
+    writer.write_settings_section(&project, &project.models[0]);
     let output = writer.buf;
     assert!(
         output.contains("15:0,0,0,1,0,0\n"),
@@ -3035,7 +3122,7 @@ fn settings_section_contains_type_15_rk2() {
     let mut project = make_project(vec![make_model(vec![])]);
     project.sim_specs.sim_method = SimMethod::RungeKutta2;
     let mut writer = MdlWriter::new();
-    writer.write_settings_section(&project);
+    writer.write_settings_section(&project, &project.models[0]);
     let output = writer.buf;
     assert!(
         output.contains("15:0,0,0,3,0,0\n"),
@@ -3062,7 +3149,7 @@ fn settings_section_contains_type_22_units() {
         },
     ];
     let mut writer = MdlWriter::new();
-    writer.write_settings_section(&project);
+    writer.write_settings_section(&project, &project.models[0]);
     let output = writer.buf;
     assert!(
         output.contains("22:$,Dollar,Dollars,$s\n"),
@@ -3086,7 +3173,7 @@ fn settings_section_skips_disabled_units() {
         aliases: vec![],
     }];
     let mut writer = MdlWriter::new();
-    writer.write_settings_section(&project);
+    writer.write_settings_section(&project, &project.models[0]);
     let output = writer.buf;
     assert!(
         !output.contains("22:Disabled"),
@@ -3098,7 +3185,7 @@ fn settings_section_skips_disabled_units() {
 fn settings_section_contains_common_defaults() {
     let project = make_project(vec![make_model(vec![])]);
     let mut writer = MdlWriter::new();
-    writer.write_settings_section(&project);
+    writer.write_settings_section(&project, &project.models[0]);
     let output = writer.buf;
     // Type 4 (Time), Type 19 (display), Type 24/25/26 (time bounds)
     assert!(output.contains("\n4:Time\n"), "should have Type 4 (Time)");
@@ -3125,7 +3212,7 @@ fn settings_roundtrip_integration_method() {
         let mut project = make_project(vec![make_model(vec![])]);
         project.sim_specs.sim_method = method;
         let mut writer = MdlWriter::new();
-        writer.write_settings_section(&project);
+        writer.write_settings_section(&project, &project.models[0]);
         // Prepend the separator that write_sketch_section normally emits
         let output = format!("///---\\\\\\\n{}", writer.buf);
 
@@ -3157,7 +3244,7 @@ fn settings_roundtrip_unit_equivalences() {
         },
     ];
     let mut writer = MdlWriter::new();
-    writer.write_settings_section(&project);
+    writer.write_settings_section(&project, &project.models[0]);
     // Prepend the separator that write_sketch_section normally emits
     let output = format!("///---\\\\\\\n{}", writer.buf);
 
@@ -3512,6 +3599,34 @@ fn an_element_mapped_to_several_no_dimension_names_falls_back_and_warns() {
         "with no dimension to name a1 and a2, the mapping falls back to the dimension, got: {buf}"
     );
     assert_eq!(warnings.len(), 1, "{warnings:?}");
+}
+
+/// The production arrayed writer over an auxiliary's fields.
+#[allow(clippy::too_many_arguments)]
+fn write_arrayed_entries(
+    buf: &mut String,
+    name: &str,
+    dims: &[String],
+    slots: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    default: &Option<String>,
+    has_except_default: bool,
+    compat: &Compat,
+    units: &Option<String>,
+    doc: &str,
+    ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
+) {
+    let var = arrayed::Arrayed {
+        name,
+        dims,
+        slots,
+        default,
+        has_except_default,
+        rhs: arrayed::Rhs::Value { compat },
+        units,
+        doc,
+    };
+    arrayed::write_arrayed(buf, &var, ctx, warnings);
 }
 
 #[test]
@@ -4354,10 +4469,9 @@ fn default_aux_size_sizes_multiline_names_to_their_lines() {
 
 #[test]
 fn aux_without_compat_sizes_multiline_name() {
-    // The aux name still renders collapsed in the record ("Maximum fishery
-    // size"); only the box dimensions grow to fit the modeler's two lines
-    // (widest line "fishery size" = 12 chars * 4px = 48 wide, two 11px lines
-    // = 22 tall).
+    // The aux name keeps its break in the record; the box grows to fit the
+    // modeler's two lines (widest line "fishery size" = 12 chars * 4px = 48
+    // wide, two 11px lines = 22 tall).
     let aux = view_element::Aux {
         name: "Maximum\\nfishery size".to_string(),
         uid: 1,
@@ -4369,7 +4483,7 @@ fn aux_without_compat_sizes_multiline_name() {
     let mut buf = String::new();
     write_aux_element(&mut buf, &aux);
     assert_eq!(
-        buf, "10,1,Maximum fishery size,100,200,48,22,8,3,0,0,-1,0,0,0",
+        buf, "10,1,\"Maximum\\nfishery size\",100,200,48,22,8,3,0,0,-1,0,0,0",
         "multi-line aux name should size the box to its lines: {buf}"
     );
 }
@@ -4429,15 +4543,7 @@ fn flow_valve_compat_dimensions_emitted() {
         }),
     };
     let mut buf = String::new();
-    let valve_uids = HashMap::from([(6, 100)]);
-    let mut next_connector_uid = 200;
-    write_flow_element(
-        &mut buf,
-        &flow,
-        &valve_uids,
-        &HashSet::new(),
-        &mut next_connector_uid,
-    );
+    write_flow_element(&mut buf, &flow);
     // Valve line should use flow.compat dimensions
     assert!(
         buf.contains(",12,18,34,131,"),
@@ -4463,15 +4569,7 @@ fn flow_default_dimensions_without_compat() {
         label_compat: None,
     };
     let mut buf = String::new();
-    let valve_uids = HashMap::from([(6, 100)]);
-    let mut next_connector_uid = 200;
-    write_flow_element(
-        &mut buf,
-        &flow,
-        &valve_uids,
-        &HashSet::new(),
-        &mut next_connector_uid,
-    );
+    write_flow_element(&mut buf, &flow);
     // Valve line should use default dimensions
     assert!(
         buf.contains(",6,8,34,3,"),
@@ -4504,18 +4602,10 @@ fn flow_without_compat_sizes_multiline_label_to_its_lines() {
         label_compat: None,
     };
     let mut buf = String::new();
-    let valve_uids = HashMap::from([(6, 100)]);
-    let mut next_connector_uid = 200;
-    write_flow_element(
-        &mut buf,
-        &flow,
-        &valve_uids,
-        &HashSet::new(),
-        &mut next_connector_uid,
-    );
+    write_flow_element(&mut buf, &flow);
     assert!(
-        buf.contains("Purchase of new ships this year,"),
-        "multi-line flow label should still render the collapsed name: {buf}"
+        buf.contains("\"Purchase of new\\nships this year\","),
+        "multi-line flow label keeps its break: {buf}"
     );
     assert!(
         buf.contains(",60,22,40,3,"),
@@ -4628,7 +4718,7 @@ fn alias_without_compat_sizes_multiline_ghosted_name() {
     let mut buf = String::new();
     write_alias_element(&mut buf, &alias, &name_map);
     assert!(
-        buf.starts_with("10,10,Maximum fishery size,200,300,48,22,8,2,"),
+        buf.starts_with("10,1,\"Maximum\\nfishery size\",200,300,48,22,8,2,"),
         "multi-line ghosted name should size the alias box to its lines (48x22): {buf}"
     );
 }
@@ -4896,13 +4986,14 @@ fn grouped_variables_retain_group_order() {
         "grouped variables should retain group order: z={pos_z}, m={pos_m}, a={pos_a}"
     );
 
-    // Ungrouped variables should come after grouped section
+    // A variable no group holds is written before the first group marker,
+    // where the reader gives it no group.
     let pos_ungrouped = mdl
         .find("ungrouped x = ")
         .expect("should contain ungrouped x");
     assert!(
-        pos_a < pos_ungrouped,
-        "ungrouped variables should come after grouped: a={pos_a}, ungrouped={pos_ungrouped}"
+        pos_ungrouped < pos_z,
+        "ungrouped variables should come before the groups: z={pos_z}, ungrouped={pos_ungrouped}"
     );
 }
 
@@ -5247,16 +5338,7 @@ fn wildcard_reduce_over_apply_to_all_survives_re_rendering() {
         "third render fell back to raw text: {warnings3:?}"
     );
 
-    // Duplicated from `writer_proptest.rs`'s `equations_section` rather than
-    // shared: the two test modules are siblings mounted from `writer.rs` purely
-    // to stay under the per-file line cap, and reaching across would make the
-    // curated unit tests depend on the proptest module's internals.
-    let equations = |mdl: &str| mdl.split("\t.Control").next().unwrap_or(mdl).to_owned();
-    assert_eq!(
-        equations(&mdl2),
-        equations(&mdl3),
-        "the equations section must be a re-write fixpoint"
-    );
+    assert_eq!(mdl2, mdl3, "a save must be a re-write fixpoint");
 }
 
 // ---- #850 / #853 builtin-vs-variable shadowing ----
@@ -5268,11 +5350,16 @@ fn ctx_with_scalar_var(ident: &str) -> WriterContext {
 
 #[test]
 fn pi_variable_shadows_builtin() {
-    // A model that declares a variable named PI: a `PI` reference is that
-    // variable, not the numeric literal (#850 overlap with #853).
-    let ast = Expr0::new("2 * PI", LexerType::Equation).unwrap().unwrap();
+    // A model that declares a variable named PI: a reference to it, quoted
+    // in the equation, is that variable; a bare `PI` is the builtin, written
+    // as its value (#850 overlap with #853).
     let ctx = ctx_with_scalar_var("pi");
-    assert_eq!(expr0_to_mdl_ctx(&ast, &ctx), "2 * pi");
+    let quoted = Expr0::new("2 * \"pi\"", LexerType::Equation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(expr0_to_mdl_ctx(&quoted, &ctx), "2 * pi");
+    let bare = Expr0::new("2 * PI", LexerType::Equation).unwrap().unwrap();
+    assert_eq!(expr0_to_mdl_ctx(&bare, &ctx), format!("2 * {PI_LITERAL}"));
 }
 
 #[test]
@@ -5287,13 +5374,18 @@ fn reserved_name_not_shadowed_stays_keyword() {
 
 #[test]
 fn reserved_name_shadowed_by_variable_emits_identifier() {
-    // A user aux named "Time Step" referenced by another var must stay the
-    // identifier, not silently rebind to the simulation dt (#853).
-    let ast = Expr0::new("time_step * 2", LexerType::Equation)
+    // A reference to a user aux named "Time Step", quoted in the equation,
+    // stays the identifier, not the simulation dt (#853); a bare one is the
+    // builtin whatever the model declares.
+    let ctx = ctx_with_scalar_var("time_step");
+    let quoted = Expr0::new("\"time_step\" * 2", LexerType::Equation)
         .unwrap()
         .unwrap();
-    let ctx = ctx_with_scalar_var("time_step");
-    assert_eq!(expr0_to_mdl_ctx(&ast, &ctx), "time step * 2");
+    assert_eq!(expr0_to_mdl_ctx(&quoted, &ctx), "time step * 2");
+    let bare = Expr0::new("time_step * 2", LexerType::Equation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(expr0_to_mdl_ctx(&bare, &ctx), "TIME STEP * 2");
 }
 
 #[test]
@@ -5303,7 +5395,7 @@ fn shadowed_reserved_name_roundtrips_via_write_variable_entry() {
     // builtin keyword for the reference.
     let model = make_model(vec![
         make_aux("time_step", "0.5", None, ""),
-        make_aux("flow", "time_step * 2", None, ""),
+        make_aux("flow", "\"time_step\" * 2", None, ""),
     ]);
     let ctx = WriterContext::from_model(&model, &[]);
     let mut buf = String::new();

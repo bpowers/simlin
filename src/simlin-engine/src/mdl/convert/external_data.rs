@@ -477,9 +477,9 @@ pub(super) fn is_get_direct_ref(expr_str: &str) -> bool {
 /// `v[DimA] := GET XLS DATA(...)` with no provider configured: clean import
 /// before, two errors after.
 ///
-/// The family list mirrors `mdl::writer::is_data_equation`, which makes the same
-/// opaque-placeholder distinction on the way out.
-pub(super) fn is_external_data_placeholder(expr_str: &str) -> bool {
+/// The writer asks it too: a placeholder is written as the data call it holds,
+/// with `:=`.
+pub(in crate::mdl) fn is_external_data_placeholder(expr_str: &str) -> bool {
     let s = expr_str.trim().trim_start_matches('{');
     [
         "GET DIRECT",

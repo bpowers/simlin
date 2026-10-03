@@ -39,6 +39,29 @@ pub struct SubrangeMapping {
     pub own_elements: Vec<String>,
 }
 
+/// What the names of a file denote, for the spellings that depend on it.
+/// Names are in `to_lower_space` form.
+#[derive(Default)]
+pub struct NameScope {
+    /// Every name the model defines with an equation.
+    pub variables: HashSet<String>,
+    /// Each named element, with the dimension that owns it and the element,
+    /// both as the file declares them.
+    pub elements: HashMap<String, (String, String)>,
+    /// The names of the file's macros.
+    pub macros: HashSet<String>,
+}
+
+/// The number `expr` is written as, with any sign and parentheses.
+fn number_literal(expr: &Expr<'_>) -> Option<f64> {
+    match expr {
+        Expr::Const(value, _) => Some(*value),
+        Expr::Paren(inner, _) | Expr::Op1(UnaryOp::Positive, inner, _) => number_literal(inner),
+        Expr::Op1(UnaryOp::Negative, inner, _) => number_literal(inner).map(|v| -v),
+        _ => None,
+    }
+}
+
 /// Formats MDL AST expressions as XMILE-compatible equation strings.
 #[derive(Clone)]
 pub struct XmileFormatter {
@@ -47,6 +70,10 @@ pub struct XmileFormatter {
     /// Canonical names of dimensions that are subranges (have maps_to set).
     /// Bang subscripts on these dimensions output "Dim.*" instead of just "*".
     subrange_dims: HashSet<String>,
+    /// What the model's names denote, once its symbols and dimensions are
+    /// known. Without it a name is formatted as a variable, and a one-argument
+    /// call of a name as a call of a table.
+    scope: Option<std::sync::Arc<NameScope>>,
 }
 
 impl Default for XmileFormatter {
@@ -60,6 +87,7 @@ impl XmileFormatter {
         XmileFormatter {
             use_xmile_time_names: true,
             subrange_dims: HashSet::new(),
+            scope: None,
         }
     }
 
@@ -68,6 +96,7 @@ impl XmileFormatter {
         XmileFormatter {
             use_xmile_time_names: true,
             subrange_dims,
+            scope: None,
         }
     }
 
@@ -75,6 +104,90 @@ impl XmileFormatter {
     /// Called after dimensions are built to enable proper bang-subscript formatting.
     pub fn set_subranges(&mut self, subrange_dims: HashSet<String>) {
         self.subrange_dims = subrange_dims;
+    }
+
+    /// Say what the model's names denote. Called once a model's symbols and
+    /// dimensions are collected; a macro body is a model of its own.
+    pub fn set_scope(&mut self, scope: NameScope) {
+        self.scope = Some(std::sync::Arc::new(scope));
+    }
+
+    /// The names of the macros the scope knows, empty before it is set.
+    pub fn macro_names(&self) -> HashSet<String> {
+        self.scope
+            .as_ref()
+            .map(|scope| scope.macros.clone())
+            .unwrap_or_default()
+    }
+
+    /// A bare name that is an element and no variable, as the element's
+    /// position in its dimension, `Dimension.Element`.
+    ///
+    /// Vensim reads an element's name in an expression as a number
+    /// (`IF THEN ELSE(DimA = B, 1, 0)`, whose output is checked in at
+    /// `test/test-models/tests/conditional_subscripts`). Which dimension's
+    /// position it is for an element several dimensions hold is unverified;
+    /// it is taken in the dimension that owns the element
+    /// (`convert::element_owners`), the largest.
+    fn element_value(&self, name: &str) -> Option<String> {
+        let scope = self.scope.as_ref()?;
+        let canonical = to_lower_space(name);
+        if scope.variables.contains(&canonical) {
+            return None;
+        }
+        let (dimension, element) = scope.elements.get(&canonical)?;
+        let dimension = space_to_underbar(dimension);
+        let element = space_to_underbar(element);
+        // A part that needs quoting has no qualified spelling; it stays the
+        // name it was.
+        if crate::ast::needs_quoting(&dimension) || crate::ast::needs_quoting(&element) {
+            return None;
+        }
+        Some(format!("{dimension}.{element}"))
+    }
+
+    /// True when a one-argument call of `name` is a call of a table: `name`
+    /// is something the model defines. A call of any other name is a call of
+    /// a function, one this reader does not know: it is written by name, so
+    /// one the engine has (`MEAN`, `PREVIOUS`, which Simlin's own saves call)
+    /// is that function, and any other is reported as an unknown function
+    /// rather than as a missing variable.
+    fn calls_a_table(&self, name: &str) -> bool {
+        self.scope
+            .as_ref()
+            .is_none_or(|scope| scope.variables.contains(&to_lower_space(name)))
+    }
+
+    /// True when the model declares a variable named `name`; false when what
+    /// the model declares is not yet known.
+    fn declares(&self, name: &str) -> bool {
+        self.scope
+            .as_ref()
+            .is_some_and(|scope| scope.variables.contains(&to_lower_space(name)))
+    }
+
+    /// True when the model defines nothing named `name`, neither a variable
+    /// nor a macro, so a call of it is a call of the function of that name.
+    /// False when what the model defines is not yet known.
+    fn defines_nothing_named(&self, name: &str) -> bool {
+        self.scope.as_ref().is_some_and(|scope| {
+            let name = to_lower_space(name);
+            !scope.variables.contains(&name) && !scope.macros.contains(&name)
+        })
+    }
+
+    /// PULSE's width as the length of its window: TIME STEP for a width
+    /// passed as 0 (`pulse` arm). A number is decided here; any other width
+    /// is decided as the run goes.
+    fn pulse_width(&self, width: &Expr<'_>, ctx: Option<&ElementContext>) -> String {
+        match number_literal(width) {
+            Some(0.0) => "DT".to_owned(),
+            Some(_) => format!("({})", self.format_expr_ctx(width, ctx)),
+            None => {
+                let width = self.format_expr_ctx(width, ctx);
+                format!("(IF ({width}) = 0 THEN DT ELSE ({width}))")
+            }
+        }
     }
 
     /// Format an expression to an XMILE-compatible string.
@@ -155,6 +268,11 @@ impl XmileFormatter {
         // depends on it). The scalar `x = PREVIOUS(x, 0)` control instead
         // resolves via the ordinary `LoadPrev` path (real name, no
         // `self` token).
+        if subscripts.is_empty()
+            && let Some(element) = self.element_value(name)
+        {
+            return element;
+        }
         let formatted_name = self.format_name(name);
         if subscripts.is_empty() {
             formatted_name
@@ -285,10 +403,15 @@ impl XmileFormatter {
     /// Fixing it properly means changing how the importer represents "no
     /// equation" -- a distinct piece of work.
     fn quote_reference(&self, name: &str) -> String {
-        let result = name.replace(' ', "_");
-        if result.starts_with('"') {
-            // Already quoted (#846): re-quoting would grow a second layer.
-            return result;
+        // Spaced as the definition is (`collapse_space`, the normalization
+        // `to_lower_space` makes of a definition's name), so a reference
+        // names the variable its definition does whatever run of spaces the
+        // file writes.
+        let result = crate::mdl::builtins::collapse_space(name).replace(' ', "_");
+        if name.starts_with('"') && name.ends_with('"') && name.len() > 1 {
+            // Already quoted (#846): `collapse_space` stripped the quotes, and
+            // the name keeps them.
+            return format!("\"{result}\"");
         }
         // `nan` is pure ASCII letters, so the keyword clause is the only reason
         // `needs_quoting` could be rejecting it -- excluding it here cannot
@@ -296,17 +419,11 @@ impl XmileFormatter {
         if result.eq_ignore_ascii_case("nan") {
             return result;
         }
-        // A second disclosed residual: a name the equation language reads as
-        // a zero-argument builtin's call (`dt`, `pi`: names Vensim models
-        // declare as variables, as `test/metasd/theil-statistics` and
-        // `test/metasd/thyroid-dynamics` do) stays bare, so a reference to a
-        // Vensim variable of that name reads
-        // the builtin, not the variable. Quoting it reads the variable, and
-        // the writer (`mdl::writer`'s zero-argument call arm) then has to
-        // tell the two apart by the tree rather than by the variable set: it
-        // writes `dt = TIME STEP` back as `dt = dt`, which only this bare
-        // spelling reads back as the builtin it stands for.
-        if crate::builtins::is_0_arity_builtin_fn_ci(&result) {
+        // A declared variable named like a zero-argument builtin (`dt = TIME
+        // STEP` in Theil_2011.mdl) is quoted so it reads the variable; an
+        // undeclared one stays the builtin. The engine's reading, unverified
+        // against Vensim.
+        if crate::builtins::is_0_arity_builtin_fn_ci(&result) && !self.declares(name) {
             return result;
         }
         if crate::ast::needs_quoting(&result) {
@@ -335,7 +452,7 @@ impl XmileFormatter {
         // Macro-shadowing audit (clearn-residual.AC2.5).
         //
         // Some arms below *restructure* a builtin-named call into a different
-        // expression at import time (e.g. `MODULO(x, y)` -> `(x) MOD (y)`,
+        // expression at import time (e.g. `PULSE(s, w)` -> a comparison,
         // `SAMPLE IF TRUE(...)` -> a nested form). That rewrite happens BEFORE
         // compile-time macro resolution, so if a model defines a `:MACRO:` with
         // the same name, the rewrite silently pre-empts it: the macro body and
@@ -348,7 +465,7 @@ impl XmileFormatter {
         // C-LEARN tripped; it has been removed so a `RAMP FROM TO(...)` call
         // survives import as `RAMP_FROM_TO(...)` and resolves through the macro
         // path. The other restructuring arms here (notably the multi-word
-        // `sample if true`, plus `pulse`/`pulse train`/`modulo`/`zidz`/`xidz`/
+        // `sample if true`, plus `pulse`/`pulse train`/`zidz`/`xidz`/
         // `get data between times`/etc.) carry the SAME latent hazard but are
         // not currently shadowed by any in-repo model. If a future model
         // defines a macro with one of those names, that arm must be guarded the
@@ -439,28 +556,47 @@ impl XmileFormatter {
                 }
             }
             "pulse" => {
-                // PULSE(start, width) -> IF TIME >= (start) AND TIME < ((start) + MAX(DT,width)) THEN 1 ELSE 0
+                // Vensim's PULSE is on while `time plus` is strictly
+                // between start and start + width: "IF THEN ELSE (time plus
+                // > start :AND: time plus < (start + width)),1.0,0.0 )" with
+                // "time plus = Time + ( TIME STEP / 2.0 )", which Vensim uses
+                // "to avoid rounding errors in comparing Time with
+                // start+width"; and "if width is passed as 0 it will be
+                // treated as though it were the current value of TIME STEP"
+                // (vensim.com/documentation/fn_pulse.html). Any other width is
+                // the width, so one of half a step or less never fires (the
+                // page's equation; unverified in a Vensim run).
                 if args.len() >= 2 {
                     let start = self.format_expr_ctx(&args[0], ctx);
-                    let width = self.format_expr_ctx(&args[1], ctx);
+                    let end = format!("({start}) + {}", self.pulse_width(&args[1], ctx));
                     return format!(
-                        "( IF TIME >= ({}) AND TIME < (({}) + MAX(DT,{})) THEN 1 ELSE 0 )",
-                        start, start, width
+                        "( IF TIME + DT / 2 > ({start}) AND TIME + DT / 2 < ({end}) THEN 1 ELSE 0 )"
                     );
                 }
             }
             "pulse train" => {
-                // PULSE TRAIN(start, width, interval, end) ->
-                // IF TIME >= start AND TIME <= end AND (TIME - start) MOD interval < width THEN 1 ELSE 0
-                // Note: Unlike PULSE which uses MAX(DT, width), PULSE TRAIN uses width directly (per xmutil)
+                // PULSE TRAIN(start, width, tbetween, end) "returns 1.0,
+                // starting at time start, and lasting for interval width and
+                // then repeats this pattern every tbetween time ... If the
+                // value of tbetween is smaller than width then 1 will be
+                // returned between start and end. If width is less than or
+                // equal to TIME STEP the pulses will only last one TIME
+                // STEP", and Vensim compares `time plus` as for PULSE
+                // (vensim.com/documentation/fn_pulse_train.html). The page
+                // gives no equation; this one is PULSE's comparison repeated
+                // every tbetween with a width of at least TIME STEP. A pulse
+                // that starts at end is on at end and no later, as in
+                // Vensim's own run of `test/sdeverywhere/models/pulsetrain`
+                // (`pulsetrain.dat`); whether `end` is compared with Time or
+                // with time plus off the time grid is unverified.
                 if args.len() >= 4 {
                     let start = self.format_expr_ctx(&args[0], ctx);
                     let width = self.format_expr_ctx(&args[1], ctx);
                     let interval = self.format_expr_ctx(&args[2], ctx);
                     let end = self.format_expr_ctx(&args[3], ctx);
                     return format!(
-                        "( IF TIME >= ({}) AND TIME <= ({}) AND (TIME - ({})) MOD ({}) < ({}) THEN 1 ELSE 0 )",
-                        start, end, start, interval, width
+                        "( IF TIME + DT / 2 > ({start}) AND TIME <= ({end}) AND \
+                         (TIME + DT / 2 - ({start})) MOD ({interval}) < MAX(DT, {width}) THEN 1 ELSE 0 )"
                     );
                 }
             }
@@ -520,16 +656,6 @@ impl XmileFormatter {
                     );
                 }
             }
-            "modulo" => {
-                // MODULO(x, y) -> (x) MOD (y)
-                if args.len() >= 2 {
-                    return format!(
-                        "({}) MOD ({})",
-                        self.format_expr_ctx(&args[0], ctx),
-                        self.format_expr_ctx(&args[1], ctx)
-                    );
-                }
-            }
             "get data between times" => {
                 // GET DATA BETWEEN TIMES(var, time, mode) -> lookup variant based on mode
                 // mode: 0=interpolate (LOOKUP), -1=backward (LOOKUP_BACKWARD), 1=forward (LOOKUP_FORWARD)
@@ -586,12 +712,23 @@ impl XmileFormatter {
         }
 
         // Check for lookup invocation (Symbol call with 1 arg)
-        if kind == CallKind::Symbol && args.len() == 1 {
+        if kind == CallKind::Symbol && args.len() == 1 && self.calls_a_table(name) {
             let table_name = self.format_var_ctx(name, subscripts, ctx);
             return format!(
                 "LOOKUP({}, {})",
                 table_name,
                 self.format_expr_ctx(&args[0], ctx)
+            );
+        }
+
+        // `MOD(a, b)` is not Vensim's (its MODULO truncates); it is how
+        // Simlin's MDL writer spells the floored modulus, XMILE's `MOD`
+        // operator, which has no Vensim spelling (`mdl::writer`).
+        if canonical == "mod" && args.len() == 2 && self.defines_nothing_named(name) {
+            return format!(
+                "({}) MOD ({})",
+                self.format_expr_ctx(&args[0], ctx),
+                self.format_expr_ctx(&args[1], ctx)
             );
         }
 
@@ -633,7 +770,14 @@ impl XmileFormatter {
             "active initial" => "INIT".to_string(),
             "initial" => "INIT".to_string(),
             "reinitial" => "INIT".to_string(),
-            "integer" => "INT".to_string(),
+            // Vensim's INTEGER and MODULO truncate toward zero
+            // (vensim.com/documentation/fn_integer.html, fn_modulo.html;
+            // `test/test-models/tests/rounding/output.tab` has
+            // INTEGER(-9.9) = -9 and MODULO(-9.9, 3) = -0.9), which the
+            // engine's TRUNC and REM do. `INT` and the `MOD` operator are
+            // XMILE's, which floor (XMILE 1.0 section 3.3.1 and footnote 7).
+            "integer" => "TRUNC".to_string(),
+            "modulo" => "REM".to_string(),
             "lookup invert" => "LOOKUPINV".to_string(),
             "random uniform" => "UNIFORM".to_string(),
             "zidz" => "SAFEDIV".to_string(),
@@ -1326,28 +1470,74 @@ mod tests {
     }
 
     #[test]
+    fn a_call_of_mod_the_model_does_not_define_is_the_floored_modulus() {
+        let call = || {
+            Expr::App(
+                Cow::Borrowed("MOD"),
+                vec![],
+                vec![
+                    Expr::Var(Cow::Borrowed("a"), vec![], loc()),
+                    Expr::Const(3.0, loc()),
+                ],
+                CallKind::Symbol,
+                vec![],
+                loc(),
+            )
+        };
+        let scoped = |variables: &[&str], macros: &[&str]| {
+            let mut formatter = XmileFormatter::new();
+            formatter.set_scope(NameScope {
+                variables: variables.iter().map(|v| v.to_string()).collect(),
+                elements: HashMap::new(),
+                macros: macros.iter().map(|m| m.to_string()).collect(),
+            });
+            formatter.format_expr(&call())
+        };
+        assert_eq!(scoped(&["a"], &[]), "(a) MOD (3)");
+        // A variable or a macro of the name is what the call calls.
+        assert_eq!(scoped(&["a", "mod"], &[]), "MOD(a, 3)");
+        assert_eq!(scoped(&["a"], &["mod"]), "MOD(a, 3)");
+        // Before the model's names are known, nothing is assumed of them.
+        assert_eq!(XmileFormatter::new().format_expr(&call()), "MOD(a, 3)");
+    }
+
+    #[test]
     fn test_format_pulse() {
-        // PULSE(start, width) -> IF TIME >= (start) AND TIME < ((start) + MAX(DT,width)) THEN 1 ELSE 0
+        // The window is the width, TIME STEP for a width of 0, decided as the
+        // run goes for a width that is not a number.
         let formatter = XmileFormatter::new();
-        let expr = Expr::App(
-            Cow::Borrowed("PULSE"),
-            vec![],
-            vec![Expr::Const(5.0, loc()), Expr::Const(2.0, loc())],
-            CallKind::Builtin,
-            vec![],
-            loc(),
-        );
-        assert_eq!(
-            formatter.format_expr(&expr),
-            "( IF TIME >= (5) AND TIME < ((5) + MAX(DT,2)) THEN 1 ELSE 0 )"
-        );
+        let pulse = |width: Expr<'static>| {
+            Expr::App(
+                Cow::Borrowed("PULSE"),
+                vec![],
+                vec![Expr::Const(5.0, loc()), width],
+                CallKind::Builtin,
+                vec![],
+                loc(),
+            )
+        };
+        let rows = [
+            (Expr::Const(2.0, loc()), "((5) + (2))"),
+            (Expr::Const(0.0, loc()), "((5) + DT)"),
+            (
+                Expr::Op1(UnaryOp::Negative, Box::new(Expr::Const(0.0, loc())), loc()),
+                "((5) + DT)",
+            ),
+            (
+                Expr::Var(Cow::Borrowed("w"), vec![], loc()),
+                "((5) + (IF (w) = 0 THEN DT ELSE (w)))",
+            ),
+        ];
+        for (width, window) in rows {
+            assert_eq!(
+                formatter.format_expr(&pulse(width)),
+                format!("( IF TIME + DT / 2 > (5) AND TIME + DT / 2 < {window} THEN 1 ELSE 0 )")
+            );
+        }
     }
 
     #[test]
     fn test_format_pulse_train() {
-        // PULSE TRAIN(start, width, interval, end) ->
-        // IF TIME >= (start) AND TIME <= (end) AND (TIME - (start)) MOD (interval) < (width) THEN 1 ELSE 0
-        // Note: Unlike PULSE, PULSE TRAIN uses width directly (not MAX(DT, width)) per xmutil
         let formatter = XmileFormatter::new();
         let expr = Expr::App(
             Cow::Borrowed("PULSE TRAIN"),
@@ -1364,7 +1554,7 @@ mod tests {
         );
         assert_eq!(
             formatter.format_expr(&expr),
-            "( IF TIME >= (1) AND TIME <= (20) AND (TIME - (1)) MOD (5) < (0.5) THEN 1 ELSE 0 )"
+            "( IF TIME + DT / 2 > (1) AND TIME <= (20) AND (TIME + DT / 2 - (1)) MOD (5) < MAX(DT, 0.5) THEN 1 ELSE 0 )"
         );
     }
 
@@ -1477,18 +1667,28 @@ mod tests {
     }
 
     #[test]
-    fn test_format_integer() {
-        // INTEGER(x) -> INT(x)
+    fn vensims_truncating_functions_are_not_the_flooring_ones() {
+        // INTEGER and MODULO truncate toward zero; `INT` and `MOD` floor.
         let formatter = XmileFormatter::new();
-        let expr = Expr::App(
-            Cow::Borrowed("INTEGER"),
-            vec![],
-            vec![Expr::Var(Cow::Borrowed("x"), vec![], loc())],
-            CallKind::Builtin,
-            vec![],
-            loc(),
+        let call = |name: &'static str, args: Vec<Expr<'static>>| {
+            Expr::App(
+                Cow::Borrowed(name),
+                vec![],
+                args,
+                CallKind::Builtin,
+                vec![],
+                loc(),
+            )
+        };
+        let x = || Expr::Var(Cow::Borrowed("x"), vec![], loc());
+        assert_eq!(
+            formatter.format_expr(&call("INTEGER", vec![x()])),
+            "TRUNC(x)"
         );
-        assert_eq!(formatter.format_expr(&expr), "INT(x)");
+        assert_eq!(
+            formatter.format_expr(&call("MODULO", vec![x(), Expr::Const(3.0, loc())])),
+            "REM(x, 3)"
+        );
     }
 
     #[test]

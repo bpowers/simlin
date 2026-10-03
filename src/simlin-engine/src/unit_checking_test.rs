@@ -1652,4 +1652,53 @@ mod tests {
             "saturated powers still mismatch 'meter': {details:?}"
         );
     }
+
+    #[test]
+    fn a_remainder_and_a_quantum_take_the_units_both_arguments_share() {
+        // "QUANTUM(unit,unit) --> unit (both arguments have the same units)"
+        // (vensim.com/documentation/fn_quantum.html); MODULO, the engine's
+        // REM, likewise (fn_modulo.html). Rows: each function, its units
+        // checked against a declared unit, inferred through a variable with
+        // none, and taken from the dividend where the divisor is a literal;
+        // and a divisor in other units, which is an error.
+        for function in ["REM", "QUANTUM"] {
+            TestProject::new("shared_units")
+                .unit("widgets", None)
+                .aux_with_units("x", "7", Some("widgets"))
+                .aux_with_units("q", "3", Some("widgets"))
+                .aux_with_units("declared", &format!("{function}(x, q)"), Some("widgets"))
+                .aux_with_units("inferred", &format!("{function}(x, q)"), None)
+                .aux_with_units("sum", "inferred + x", Some("widgets"))
+                .aux_with_units("by_literal", &format!("{function}(x, 3)"), Some("widgets"))
+                .assert_compiles_incremental()
+                .assert_no_unit_diagnostics();
+            let mismatched = TestProject::new("mismatched_units")
+                .unit("widgets", None)
+                .unit("gadgets", None)
+                .aux_with_units("x", "7", Some("widgets"))
+                .aux_with_units("q", "3", Some("gadgets"))
+                .aux_with_units("declared", &format!("{function}(x, q)"), Some("widgets"))
+                .unit_diagnostic_details();
+            assert!(
+                mismatched
+                    .iter()
+                    .any(|(var, why)| var.as_deref() == Some("declared") && why.contains("match")),
+                "{function}: {mismatched:?}"
+            );
+            // A divisor with no declared units is inferred to have the
+            // dividend's, so one that is gadgets elsewhere conflicts.
+            let inferred = TestProject::new("inferred_divisor")
+                .unit("widgets", None)
+                .unit("gadgets", None)
+                .aux_with_units("x", "7", Some("widgets"))
+                .aux_with_units("q", "3", None)
+                .aux_with_units("r", &format!("{function}(x, q)"), None)
+                .aux_with_units("g", "q", Some("gadgets"))
+                .unit_diagnostic_details();
+            assert!(
+                !inferred.is_empty(),
+                "{function}: the divisor's units conflict"
+            );
+        }
+    }
 }

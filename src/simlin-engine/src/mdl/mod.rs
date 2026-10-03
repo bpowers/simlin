@@ -14,12 +14,20 @@ pub mod ast;
 mod builtins;
 mod convert;
 #[cfg(test)]
+mod import_determinism_tests;
+#[cfg(test)]
 mod import_loss_tests;
 mod lexer;
 mod normalizer;
 mod parser;
+#[cfg(test)]
+mod pulse_tests;
 mod reader;
+#[cfg(test)]
+mod save_roundtrip_tests;
 mod settings;
+#[cfg(test)]
+mod subscript_rule;
 pub mod view;
 pub mod writer;
 mod xmile_compat;
@@ -73,9 +81,11 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
 ///   construct was degraded to the closest representable form. The arms are
 ///   the `ExportWarning::new` sites in `writer.rs`; by construct:
 ///   - equations: one that could not be parsed (written as raw text, builtin
-///     renames not applied), one using the transpose operator, one calling
-///     ROUND (a Simlin extension Vensim does not define) -- each written
-///     through as-is with a warning that it will not re-import as meant;
+///     renames not applied), one using the transpose operator, one calling a
+///     function Vensim does not have (ROUND, INT, MOD, ...) -- each written
+///     through as-is with a warning that Vensim will not read it as meant --
+///     and a floored modulus written as Vensim's truncating MODULO because the
+///     model names a variable MOD;
 ///   - stocks/flows: a dropped `compat.non_negative` flag (changes Vensim sim
 ///     semantics); a conveyor or queue stock, a conveyor leakage flow, a
 ///     conveyor inflow placement (spreadflow), a queue overflow outflow (no
@@ -84,10 +94,12 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
 ///     Extrapolate table on an inline `WITH LOOKUP`, one with no `LOOKUP` call
 ///     site to rewrite as `TABXL`, or one on a per-element arrayed GF (each
 ///     emitted clamped);
-///   - arrays: a one-to-many dimension element mapping (MDL positional
-///     notation cannot express it -- emitted as a plain name mapping); an
-///     EXCEPT default that could not be reconstructed (dimension membership
-///     unavailable, or the default references its own dimensions);
+///   - arrays: a one-to-many dimension element mapping no declared dimension
+///     names (emitted as a plain name mapping); a variable that defines only
+///     some elements of its dimensions (read back over the dimensions of
+///     exactly the elements it defines); an `:EXCEPT:` default that could not
+///     be written (its dimensions' elements unknown, external data, an
+///     equation that does not parse, or one that defines every element);
 ///   - groups: a multi-word group name (the reader truncates the banner at the
 ///     first whitespace) and a group's documentation (dropped on re-import);
 ///   - `loop_metadata`: every entry (named loop, described unnamed loop,

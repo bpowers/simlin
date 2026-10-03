@@ -455,6 +455,10 @@ impl<'input> TokenNormalizer<'input> {
                 if self.section == Section::Units && self.in_units_mode {
                     // In units mode, symbols become UnitsSymbol
                     Token::UnitsSymbol(name)
+                } else if self.section == Section::Equation && name.starts_with('"') {
+                    // A quoted name is a name, whatever it spells: quoting is
+                    // how a variable called `ABS` or `Initial` is written.
+                    Token::Symbol(name)
                 } else if self.section == Section::Equation {
                     // Classify the symbol with a single canonicalization
                     match classify_symbol(&name) {

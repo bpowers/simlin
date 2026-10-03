@@ -93,6 +93,10 @@ corpus_tests! {
     // "test/test-models/tests/arguments/test_arguments.xmile",
     // "test/test-models/tests/delay_parentheses/test_delay_parentheses.xmile",
     // "test/test-models/tests/delay_pipeline/test_pipeline_delays.xmile",
+    // xmutil writes Vensim's INTEGER, which truncates toward zero, as INT,
+    // which XMILE 1.0 footnote 7 requires to be the floor, so this twin
+    // cannot match Vensim's output for negative values. The model is tested
+    // through the MDL reader (`simulates_rounding_mdl`).
     // "test/test-models/tests/rounding/test_rounding.xmile",
     // "test/test-models/tests/special_characters/test_special_variable_names.xmile",
     // "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
@@ -3100,6 +3104,15 @@ fn simulates_multimap_mdl() {
 #[test]
 fn simulates_npv_mdl() {
     simulate_mdl_path("../../test/sdeverywhere/models/npv/npv.mdl");
+}
+
+/// Vensim's INTEGER and MODULO truncate toward zero: over the negative values
+/// this model takes them of, `output.tab` has INTEGER(-9.9) = -9 and
+/// MODULO(-9.9, 3) = -0.9, where a floor and a floored modulus give -10 and
+/// 2.1.
+#[test]
+fn simulates_rounding_mdl() {
+    simulate_mdl_path("../../test/test-models/tests/rounding/test_rounding.mdl");
 }
 
 /// The model at `path`, with every variable `delayed` names refused for its

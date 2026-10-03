@@ -47,6 +47,7 @@ mod ltm_snapshot_inputs;
 #[cfg(feature = "xmutil")]
 mod mdl_equivalence;
 mod mdl_roundtrip;
+mod mdl_vensim_truth;
 mod metasd_macros;
 mod roundtrip;
 mod save_meaning;
