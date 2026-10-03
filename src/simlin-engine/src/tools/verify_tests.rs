@@ -375,22 +375,27 @@ fn a_battery_check_is_cited_by_its_id_and_checked_again_after_an_edit() {
     let mut host = Host::from_test_project(&project);
     let mut session = Session::new("main");
     host.call(&mut session, "read_model", json!({}));
+    // A tenure of zero, the call's own extreme, divides by it.
     let tests = host.call(
         &mut session,
         "run_tests",
-        json!({"tests": ["extreme_conditions"]}),
+        json!({
+            "tests": ["extreme_conditions"],
+            "extremes": [{"variable": "tenure", "low": 0}]
+        }),
     );
     let failed = tests["results"][0]["id"].clone();
     assert_eq!(tests["results"][0]["outcome"], "failed");
     let citation = json!({"cites": "test", "id": failed, "outcome": "failed"});
     assert_eq!(cite(&mut host, &mut session, citation.clone()), Ok(()));
 
-    // Guard the division, and the check passes when run again.
+    // Guard the division, and the check passes when run again, at the
+    // extreme the call gave.
     host.edit(|p| {
         p.models[0]
-            .get_variable_mut("per_head")
+            .get_variable_mut("leaving")
             .unwrap()
-            .set_scalar_equation("budget / MAX(head_count, 1)")
+            .set_scalar_equation("people / MAX(tenure, 1)")
     });
     let reason = cite(&mut host, &mut session, citation).unwrap_err();
     assert!(reason.contains("comes out passed"), "{reason}");

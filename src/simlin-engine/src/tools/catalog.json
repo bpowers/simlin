@@ -3190,7 +3190,7 @@
     },
     {
       "name": "run_tests",
-      "description": "Runs the validation battery, the model tests of system dynamics practice: the engine's unit check; extreme conditions (each constant at zero, or a time constant at DT, and at ten times its value, or a share at the whole: values that become NaN or infinite, stocks that go negative); integration error (the run at half the DT and under RK4); sensitivity (each constant at half and double: a change of behavior); loop knockouts (a named variable held at its initial value: the loops that cuts); disturbances (a step in a constant: the response, and the loops that lead after it). Unit conversions are left out unless named. Each check that did not pass comes with an id (T1, T2, ...) that claims can cite. Run it before judging a model.",
+      "description": "Runs the validation battery, the model tests of system dynamics practice: the engine's unit check; extreme conditions (each constant at its low and its high extreme, chosen by what the constant is and said with each check, or the ones the call gives: values that become NaN or infinite, stocks that go below a zero they should not pass, in the model's own run too); integration error (the run at half and a quarter of the DT: the error at the model's DT, or that the model is discrete or chaotic); sensitivity (each constant at half and double: a change of behavior); loop knockouts (a named variable held at its initial value: the loops that cuts); disturbances (a step in a constant: the response, and the loops that lead after it). Unit conversions are left out unless named. Each check that did not pass comes with an id (T1, T2, ...) that claims can cite. Run it before judging a model.",
       "effect": "read",
       "inputSchema": {
         "$defs": {
@@ -3204,6 +3204,37 @@
               "sensitivity",
               "loop_knockout",
               "disturbance"
+            ]
+          },
+          "ExtremeInput": {
+            "description": "The extremes a call gives one constant; the one it leaves out is the\nbattery's.",
+            "type": "object",
+            "properties": {
+              "variable": {
+                "type": "string"
+              },
+              "low": {
+                "description": "The low extreme (for an arrayed constant, every element's).",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "default": null
+              },
+              "high": {
+                "description": "The high extreme (for an arrayed constant, every element's).",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "default": null
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "variable"
             ]
           }
         },
@@ -3235,6 +3266,14 @@
             },
             "maxItems": 12,
             "default": []
+          },
+          "extremes": {
+            "description": "Extremes for the extreme conditions test to give a constant in place\nof the ones its rules choose, for a constant whose meaningful range\nthe model's author knows. A constant named here is a target of that\ntest whether or not `targets` names it. At most 12.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ExtremeInput"
+            },
+            "maxItems": 12
           }
         },
         "additionalProperties": false
@@ -3285,7 +3324,7 @@
                 ]
               },
               "note": {
-                "description": "What the test left out and why: the unit conversions its defaults\nleave out, and series that are not a number in the model's own run.",
+                "description": "What the test's outcomes rest on that its checks do not say: the\nchecks that found something only at the model's DT, or that were not\nrun again at a finer one.",
                 "type": [
                   "string",
                   "null"
@@ -3340,11 +3379,33 @@
                   }
                 ]
               },
+              "extreme": {
+                "description": "The rule that chose an extreme conditions check's value: if the rule\ndoes not fit the constant, the check tested the wrong extreme, and the\ncall can give its own.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExtremeRule"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "timeConstant": {
-                "description": "Why a check at DT took its constant for a time constant: if that is\nwrong, the check tested the wrong extreme.",
+                "description": "Why a check at a short time took its constant for a time constant.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/TimeConstantEvidence"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "heldAt": {
+                "description": "The extreme a sensitivity check's half or double would have passed,\nand was held at: the value tried is not half or double the\nconstant's.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExtremeRule"
                   },
                   {
                     "type": "null"
@@ -3382,17 +3443,38 @@
                 }
               },
               "differences": {
-                "description": "The stocks (or elements) that differed most from the model's run\n(integration error).",
+                "description": "The stocks (or elements) whose values depend most on DT (integration\nerror).",
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/Difference"
                 }
               },
+              "order": {
+                "description": "The order the runs at finer DTs converge at (integration error): about\n1 for Euler and 4 for RK4 on a smooth model, and near or below 0 where\nrefining DT does not converge.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
               "responses": {
-                "description": "How recorded variables responded, the largest changes and every\nmaterial change of behavior (sensitivity, knockout, disturbance).",
+                "description": "How recorded variables responded (sensitivity, knockout,\ndisturbance): those the check made undefined, then those whose\nbehavior changed materially, then the largest changes; at most three.",
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/Response"
+                }
+              },
+              "moreChanges": {
+                "description": "How many more recorded series the check made undefined or changed\nthe behavior of materially than `responses` lists: `record` names the\nones to read.",
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              },
+              "sameChange": {
+                "description": "The other sensitivity checks that flag the same change of the same\nseries, folded into this one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SameChange"
                 }
               },
               "cutLinks": {
@@ -3417,7 +3499,7 @@
                 ]
               },
               "note": {
-                "description": "What the outcome rests on that the run cannot show: a non-negative\nmarking this engine does not enforce.",
+                "description": "What the outcome rests on that its numbers do not show: a\nnon-negative marking this engine does not enforce, why runs at finer\nDTs do not converge, the time constant DT is too large for.",
                 "type": [
                   "string",
                   "null"
@@ -3465,44 +3547,34 @@
             "description": "What a check changed.",
             "oneOf": [
               {
-                "description": "A constant at zero.",
+                "description": "A constant at its low extreme; the check's `extreme` says which.",
                 "type": "string",
-                "const": "zero"
+                "const": "low"
               },
               {
-                "description": "A time constant at its low extreme: DT, or three DTs for a\nthird-order delay's or smooth's time, whose stages each take a third\nof it.",
+                "description": "A constant at its high extreme; the check's `extreme` says which.",
                 "type": "string",
-                "const": "dt"
+                "const": "high"
               },
               {
-                "description": "A constant at ten times its value.",
+                "description": "The model's own run, with nothing changed.",
                 "type": "string",
-                "const": "ten_times"
+                "const": "own_run"
               },
               {
-                "description": "A share or fraction at its high extreme, the whole: 1, or 100 for one\nin percent.",
-                "type": "string",
-                "const": "whole"
-              },
-              {
-                "description": "A constant at half its value.",
+                "description": "A constant at half its value (a time constant no lower than its low\nextreme).",
                 "type": "string",
                 "const": "half"
               },
               {
-                "description": "A constant at double its value (a share at most the whole).",
+                "description": "A constant at double its value (a share or a fractional rate no\nhigher than its high extreme).",
                 "type": "string",
                 "const": "double"
               },
               {
-                "description": "The run at half its DT.",
+                "description": "The run at half and at a quarter of its DT.",
                 "type": "string",
-                "const": "half_dt"
-              },
-              {
-                "description": "The run under fourth-order Runge-Kutta.",
-                "type": "string",
-                "const": "rk4"
+                "const": "finer_dt"
               },
               {
                 "description": "A variable held at its initial value, each element of an arrayed one\nat its own.",
@@ -3516,8 +3588,58 @@
               }
             ]
           },
+          "ExtremeRule": {
+            "description": "The rule that chose an extreme conditions check's value.",
+            "oneOf": [
+              {
+                "description": "Low: zero, for a constant no equation divides by.",
+                "type": "string",
+                "const": "zero"
+              },
+              {
+                "description": "Low: a tenth of its value, for a constant some equation divides\nby, whose domain zero is outside.",
+                "type": "string",
+                "const": "tenth"
+              },
+              {
+                "description": "Low: a tenth of a time constant's value, and at least four DTs for\neach of its stages (in its own unit of time).",
+                "type": "string",
+                "const": "short_time"
+              },
+              {
+                "description": "Low: the run's start, for a date.",
+                "type": "string",
+                "const": "run_start"
+              },
+              {
+                "description": "High: ten times its value.",
+                "type": "string",
+                "const": "ten_times"
+              },
+              {
+                "description": "High: the whole, for a share or fraction: 1, or 100 in percent.",
+                "type": "string",
+                "const": "whole"
+              },
+              {
+                "description": "High: ten times a fractional rate's value, and at most one over two\nDTs (in its own unit of time).",
+                "type": "string",
+                "const": "fastest_rate"
+              },
+              {
+                "description": "High: past the run's stop, for a date.",
+                "type": "string",
+                "const": "past_stop"
+              },
+              {
+                "description": "The value the call gave.",
+                "type": "string",
+                "const": "given"
+              }
+            ]
+          },
           "TimeConstantEvidence": {
-            "description": "Why the battery took a constant for a time constant, and so tested it at\nDT rather than zero.",
+            "description": "Why the battery took a constant for a time constant, whose low extreme is\na short time rather than zero.",
             "oneOf": [
               {
                 "description": "Its units are a unit of time.",
@@ -3596,7 +3718,7 @@
                 "type": "string"
               },
               "difference": {
-                "description": "Its largest difference from the model's run, as a fraction of its\nscale (the larger of its range and its largest magnitude).",
+                "description": "Its estimated error at the model's DT, as a fraction of its scale (the\nlarger of its range and its largest magnitude): its largest\ndifference from the run at half the DT, extrapolated by the order the\nruns converge at; where they do not converge, that difference itself.",
                 "type": "number",
                 "format": "double"
               }
@@ -3613,7 +3735,7 @@
                 "type": "string"
               },
               "change": {
-                "description": "How far its final value moved from the model's run, as a fraction of\nits scale there: positive up, negative down. Left out when either run\nof the series is not a number somewhere, which its mode says.",
+                "description": "How far its final value moved from the model's run, as a fraction of\nits scale there (of what it is computed from, for a series the\nmodel's run holds at zero): positive up, negative down. Left out when either run\nof the series is not a number somewhere, which its mode says.",
                 "type": [
                   "number",
                   "null"
@@ -3637,6 +3759,50 @@
                 "anyOf": [
                   {
                     "$ref": "#/$defs/ModeKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "damping": {
+                "description": "Whether its swings die out, hold or grow in the check's run, when it\noscillates there: a loss of stability shows here.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Damping"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "wasDamping": {
+                "description": "The same in the model's run, when the check changed it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Damping"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "family": {
+                "description": "The family of its behavior in the check's run, when the check changed\nit materially: its mode with pace set aside, so a label can change\nwhile the family stays (exponential growth that reads as linear over\na shorter horizon, a goal seeker a few percent past its goal).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BehaviorFamily"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "wasFamily": {
+                "description": "The family of its behavior in the model's run, when the check\nchanged it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BehaviorFamily"
                   },
                   {
                     "type": "null"
@@ -3708,6 +3874,81 @@
               }
             ]
           },
+          "Damping": {
+            "oneOf": [
+              {
+                "description": "Each swing smaller than the last.",
+                "type": "string",
+                "const": "damped"
+              },
+              {
+                "description": "Swings of about the same size.",
+                "type": "string",
+                "const": "sustained"
+              },
+              {
+                "description": "Each swing larger than the last.",
+                "type": "string",
+                "const": "growing"
+              },
+              {
+                "description": "Too few swings in the run to tell.",
+                "type": "string",
+                "const": "undetermined"
+              }
+            ]
+          },
+          "BehaviorFamily": {
+            "description": "A behavior's family: what a change of behavior means, as the classifier's\nlabel does not. Which of linear, exponential, goal seeking or S-shaped\ngrowth a series reads as depends on the horizon as much as on the\nstructure: they are one family, which a change of pace does not leave.",
+            "oneOf": [
+              {
+                "description": "It does not move.",
+                "type": "string",
+                "const": "still"
+              },
+              {
+                "description": "It rises, without a material turn.",
+                "type": "string",
+                "const": "rising"
+              },
+              {
+                "description": "It falls, without a material turn.",
+                "type": "string",
+                "const": "falling"
+              },
+              {
+                "description": "It rises, turns once, and falls.",
+                "type": "string",
+                "const": "rises_then_falls"
+              },
+              {
+                "description": "It falls, turns once, and rises.",
+                "type": "string",
+                "const": "falls_then_rises"
+              },
+              {
+                "description": "It turns twice or more.",
+                "type": "string",
+                "const": "oscillating"
+              }
+            ]
+          },
+          "SameChange": {
+            "description": "A sensitivity check folded into another that flags the same change.",
+            "type": "object",
+            "properties": {
+              "variable": {
+                "type": "string"
+              },
+              "condition": {
+                "$ref": "#/$defs/Condition"
+              }
+            },
+            "required": [
+              "variable",
+              "condition"
+            ]
+          },
           "CutLink": {
             "type": "object",
             "properties": {
@@ -3768,6 +4009,20 @@
             "type": "integer",
             "format": "uint",
             "minimum": 0
+          },
+          "runFails": {
+            "description": "Why the model's own run fails, when it does: every test that runs the\nmodel is skipped.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "leftOut": {
+            "description": "What the default targets of the tests leave out, and why: the unit\nconversions, and the dates sensitivity and disturbance do not scale.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "notFound": {
             "type": "array",
@@ -4769,7 +5024,7 @@
                 ]
               },
               {
-                "description": "The variable (an element of it, for an arrayed one) goes below zero\nin the run.",
+                "description": "The variable (an element of it, for an arrayed one) goes below zero\nin the run: exactly when its summary says when it went negative.",
                 "type": "object",
                 "properties": {
                   "variable": {

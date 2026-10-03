@@ -56,8 +56,9 @@ mod variables;
 mod verify;
 
 pub use battery::{
-    Condition, Difference, Outcome, Problem, ProblemKind, Response, RunTestsInput, RunTestsOutput,
-    TestName, TestResult, TestSummary, TimeConstantEvidence,
+    BehaviorFamily, Condition, Difference, ExtremeInput, ExtremeRule, Outcome, Problem,
+    ProblemKind, Response, RunTestsInput, RunTestsOutput, SameChange, TestName, TestResult,
+    TestSummary, TimeConstantEvidence,
 };
 pub use behavior::{BehaviorMode, Damping, Direction, ModeKind, classify};
 #[cfg(feature = "schema")]

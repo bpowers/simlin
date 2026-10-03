@@ -27,7 +27,7 @@ use schemars::JsonSchema;
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
-use super::behavior::{BehaviorMode, shape_at};
+use super::behavior::{BehaviorMode, magnitude, shape_at};
 use super::evidence::display_name;
 use super::runs::{CURRENT, Run};
 use super::variables::NotFound;
@@ -163,9 +163,8 @@ pub(crate) fn scale_in_run(
         as_run = replaced;
         &as_run
     };
-    let (base, element) = match key.split_once('[') {
-        Some((base, rest)) => (base, Some(rest.trim_end_matches(']'))),
-        None => (key, None),
+    let Some((base, element)) = column_of(model, key) else {
+        return 0.0;
     };
     let Some(var) = model.get_variable(base) else {
         return 0.0;
@@ -235,6 +234,56 @@ pub(crate) fn scale_in_run(
         datamodel::Variable::Flow(_) | datamodel::Variable::Aux(_) => as_a_sum(var),
         datamodel::Variable::Module(_) => 0.0,
     }
+}
+
+/// The canonical idents of `model`'s variables: what a results column is
+/// read as belonging to ([`crate::save_check::column_variable`]).
+pub(crate) fn declared(model: &datamodel::Model) -> std::collections::BTreeSet<String> {
+    model
+        .variables
+        .iter()
+        .map(|var| crate::canonicalize(var.get_ident()).into_owned())
+        .collect()
+}
+
+/// The variable a results column `key` belongs to among `model`'s, and the
+/// element key it names (`a1,b2` of `x[a1,b2]`), if any.
+pub(crate) fn column_of<'k>(
+    model: &datamodel::Model,
+    key: &'k str,
+) -> Option<(&'k str, Option<&'k str>)> {
+    let base = crate::save_check::column_variable(key, &declared(model))?;
+    let element = key[base.len()..]
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'));
+    Some((base, element))
+}
+
+/// The scales the series under results key `key` is read at in two runs that
+/// are compared, `this` and `that` (each a run and the series' values there):
+/// each run's own [`scale_in_run`], with the larger of the two series'
+/// magnitudes shared between them. Residue in one run beside a movement in
+/// the other is at rest, not a movement of its own, and a change of scale
+/// between the runs is not read as a change of behavior. What a series is
+/// computed from is its own run's: a replacement that ends a cancellation of
+/// large terms leaves no trace of them in the run it made. A series that is
+/// not a number somewhere has no magnitude to share: its last numbers before
+/// it stopped being one would make the other run's residue beside them.
+pub(crate) fn compared_scales(
+    model: &datamodel::Model,
+    key: &str,
+    this: (&Run, &[f64]),
+    that: Option<(&Run, &[f64])>,
+) -> (f64, Option<f64>) {
+    let shared = std::iter::once(this)
+        .chain(that)
+        .map(|(_, values)| values)
+        .filter(|values| values.iter().all(|v| v.is_finite()))
+        .map(magnitude)
+        .fold(0.0, f64::max);
+    let own =
+        |(run, _): (&Run, &[f64])| scale_in_run(&run.results, model, &run.plan, key).max(shared);
+    (own(this), that.map(own))
 }
 
 /// The scale of an equation that is a sum or a difference at its top level:

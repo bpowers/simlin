@@ -136,10 +136,12 @@ impl ToolName {
             }
             ToolName::RunTests => {
                 "Runs the validation battery, the model tests of system dynamics practice: the \
-                 engine's unit check; extreme conditions (each constant at zero, or a time \
-                 constant at DT, and at ten times its value, or a share at the whole: values that \
-                 become NaN or infinite, stocks that go negative); integration error (the run at \
-                 half the DT and under RK4); sensitivity (each constant at half and double: a \
+                 engine's unit check; extreme conditions (each constant at its low and its high \
+                 extreme, chosen by what the constant is and said with each check, or the ones \
+                 the call gives: values that become NaN or infinite, stocks that go below a zero \
+                 they should not pass, in the model's own run too); integration error (the run \
+                 at half and a quarter of the DT: the error at the model's DT, or that the model \
+                 is discrete or chaotic); sensitivity (each constant at half and double: a \
                  change of behavior); loop knockouts (a named variable held at its initial value: \
                  the loops that cuts); disturbances (a step in a constant: the response, and the \
                  loops that lead after it). Unit conversions are left out unless named. Each \
