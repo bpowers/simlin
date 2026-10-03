@@ -990,7 +990,7 @@ impl Vm {
     /// it: [`Vm::run_until`] for a caller that counts in steps. Where the
     /// clock's last place is coarser than a DT, two steps can have one time,
     /// and only a count tells them apart.
-    pub(crate) fn run_until_step(&mut self, step: f64) -> Result<()> {
+    pub fn run_until_step(&mut self, step: f64) -> Result<()> {
         self.run_steps(step)
     }
 
