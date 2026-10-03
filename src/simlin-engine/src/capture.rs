@@ -89,6 +89,19 @@ pub(crate) fn synthetic_ident(parent: &str, n: usize, part: &str, suffix: Option
     }
 }
 
+/// The variable a helper named by [`synthetic_ident`] was made for, and the
+/// part of its equation the helper is (a call's name, `smth1`, or a hoisted
+/// argument, `arg0`); `None` for any other name. What the agent tools say
+/// in place of a helper's name.
+#[cfg(feature = "agent_tools")]
+pub(crate) fn synthetic_parent(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix(crate::ltm::SYNTHETIC_NODE_PREFIX)?;
+    let mut parts = rest.split('⁚');
+    let (parent, n, part) = (parts.next()?, parts.next()?, parts.next()?);
+    n.parse::<usize>().ok()?;
+    (!parent.is_empty() && !part.is_empty()).then_some((parent, part))
+}
+
 /// The element suffix of a per-element helper's name: the active element's
 /// coordinates joined by `,`, lowercased -- the one spelling of an element
 /// tuple the helper names carry.

@@ -82,6 +82,44 @@ fn a_name_that_does_not_resolve_suggests_the_variable_it_most_likely_meant() {
     }
 }
 
+/// A phrase is part of a name when its words start the name's, in order:
+/// letters that happen to sit inside a longer word are no part of the name.
+#[test]
+fn a_phrase_is_part_of_a_name_by_the_starts_of_its_words() {
+    let name = |text: &str| words(text);
+    let part = |query: &str, of: &str| similarity(&query_words(query), &name(of));
+    for (query, of) in [
+        ("life", "average_life_of_land"),
+        ("life of land", "average_life_of_land"),
+        ("average life", "average_life_of_land"),
+        ("usage rate", "resource_usage_rate"),
+        ("pop", "population"),
+        ("res usage", "resource_usage_rate"),
+    ] {
+        assert!(
+            part(query, of) >= 0.75,
+            "{query} in {of}: {}",
+            part(query, of)
+        );
+    }
+    for (query, of) in [
+        ("age", "average_life_of_land"),
+        ("age", "resource_usage_rate"),
+        ("in", "fraction_of_output_in_industry_index"),
+    ] {
+        let score = part(query, of);
+        let whole_word = name(of).iter().any(|word| word == query);
+        assert!(
+            whole_word || score < SUGGESTION_THRESHOLD,
+            "{query} is no part of {of}: {score}"
+        );
+    }
+    assert!(
+        part("age", "average_age") > part("age", "average_life_of_land") + 0.2,
+        "a name with the word outranks a name with its letters"
+    );
+}
+
 #[test]
 fn a_name_like_nothing_in_the_model_suggests_nothing() {
     let model = model();
@@ -114,4 +152,18 @@ fn ranking_scores_every_variable_closest_first_with_ties_broken_by_name() {
     assert_eq!(names, ["rate_a", "rate_b", "stock level"]);
     assert_eq!(ranked[0].0, ranked[1].0, "the two rates tie");
     assert!(ranked[1].0 > ranked[2].0);
+}
+
+/// An indexed dimension's elements are 1 through its size: every one of
+/// them names an element, and 0 and one past the size name none.
+#[test]
+fn an_indexed_element_is_one_through_the_dimensions_size() {
+    let project = crate::test_common::TestProject::new("indexed")
+        .indexed_dimension("slot", 3)
+        .build_datamodel();
+    let dims = ["slot".to_string()];
+    for (subscript, found) in [("0", None), ("1", Some("1")), ("3", Some("3")), ("4", None)] {
+        let element = resolve_element(&project, &dims, &[subscript]).ok();
+        assert_eq!(element.as_deref(), found, "{subscript}");
+    }
 }

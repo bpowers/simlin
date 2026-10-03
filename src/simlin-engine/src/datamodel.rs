@@ -741,7 +741,59 @@ pub enum ExpressionRole {
     Initial,
     /// A stock or flow option the engine evaluates: a conveyor's parameter, a
     /// leak's fraction or zone bound.
-    Option,
+    Option(StockOption),
+}
+
+/// Which option of a stock or a flow an option text is
+/// ([`ExpressionRole::Option`]).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StockOption {
+    /// A conveyor's transit time (XMILE `<len>`).
+    TransitTime,
+    /// A conveyor's capacity (`<capacity>`).
+    Capacity,
+    /// A conveyor's inflow limit (`<in_limit>`).
+    InflowLimit,
+    /// A conveyor's sample condition (`<sample>`).
+    Sample,
+    /// A conveyor's arrest condition (`<arrest>`).
+    Arrest,
+    /// A leak flow's fraction (`<leak>`'s fraction).
+    LeakFraction,
+    /// Where a leak's zone starts (`<leak_start>`).
+    LeakZoneStart,
+    /// Where a leak's zone ends (`<leak_end>`).
+    LeakZoneEnd,
+}
+
+impl StockOption {
+    /// Every option, in the order a variable's texts list them.
+    pub const ALL: [StockOption; 8] = [
+        StockOption::TransitTime,
+        StockOption::Capacity,
+        StockOption::InflowLimit,
+        StockOption::Sample,
+        StockOption::Arrest,
+        StockOption::LeakFraction,
+        StockOption::LeakZoneStart,
+        StockOption::LeakZoneEnd,
+    ];
+
+    /// The option as a sentence names it: "transit time" in "the conveyor
+    /// 'belt''s transit time".
+    pub fn describe(self) -> &'static str {
+        match self {
+            StockOption::TransitTime => "transit time",
+            StockOption::Capacity => "capacity",
+            StockOption::InflowLimit => "inflow limit",
+            StockOption::Sample => "sample condition",
+            StockOption::Arrest => "arrest condition",
+            StockOption::LeakFraction => "leak fraction",
+            StockOption::LeakZoneStart => "leak zone start",
+            StockOption::LeakZoneEnd => "leak zone end",
+        }
+    }
 }
 
 /// Visits every expression text of an `Equation` reference, shared or
@@ -765,6 +817,78 @@ macro_rules! visit_equation_texts {
             }
         }
     };
+}
+
+/// Visits every expression text of a `Compat` reference, shared or mutable:
+/// the `ACTIVE INITIAL` and the conveyor and leak options, each with the
+/// option it is. Destructured without `..`, so a field added to `Compat` or to
+/// an option fails to compile until it is listed here.
+macro_rules! visit_compat_texts {
+    ($compat:expr, $out:ident $(, . $as_text:ident)?) => {{
+        let compat = $compat;
+        let Compat {
+            active_initial,
+            conveyor,
+            leakage,
+            // A spread flow's distribution is a variable's name or a list of
+            // numbers, never an expression (`NameRole::Distribution`).
+            spreadflow: _,
+            non_negative: _,
+            can_be_module_input: _,
+            visibility: _,
+            data_source: _,
+            queue: _,
+            overflow: _,
+        } = compat;
+        if let Some(text) = active_initial {
+            $out.push((ExpressionRole::Initial, text $(.$as_text())?));
+        }
+        if let Some(Conveyor {
+            transit_time,
+            capacity,
+            inflow_limit,
+            sample,
+            arrest,
+            discrete: _,
+            batch_integrity: _,
+            one_at_a_time: _,
+            exponential_leak: _,
+            ignore_earlier_zone_losses: _,
+        }) = conveyor
+        {
+            $out.push((
+                ExpressionRole::Option(StockOption::TransitTime),
+                transit_time $(.$as_text())?,
+            ));
+            for (option, text) in [
+                (StockOption::Capacity, capacity),
+                (StockOption::InflowLimit, inflow_limit),
+                (StockOption::Sample, sample),
+                (StockOption::Arrest, arrest),
+            ] {
+                if let Some(text) = text {
+                    $out.push((ExpressionRole::Option(option), text $(.$as_text())?));
+                }
+            }
+        }
+        if let Some(Leakage {
+            fraction,
+            zone_start,
+            zone_end,
+            integers: _,
+        }) = leakage
+        {
+            for (option, text) in [
+                (StockOption::LeakFraction, fraction),
+                (StockOption::LeakZoneStart, zone_start),
+                (StockOption::LeakZoneEnd, zone_end),
+            ] {
+                if let Some(text) = text {
+                    $out.push((ExpressionRole::Option(option), text $(.$as_text())?));
+                }
+            }
+        }
+    }};
 }
 
 /// Visits every expression text of a `Variable` reference, shared or mutable:
@@ -823,52 +947,7 @@ macro_rules! visit_variable_texts {
                 uid: _,
             }) => compat,
         };
-        let Compat {
-            active_initial,
-            conveyor,
-            leakage,
-            // A spread flow's distribution is a variable's name or a list of
-            // numbers, never an expression (`NameRole::Distribution`).
-            spreadflow: _,
-            non_negative: _,
-            can_be_module_input: _,
-            visibility: _,
-            data_source: _,
-            queue: _,
-            overflow: _,
-        } = compat;
-        if let Some(text) = active_initial {
-            $out.push((ExpressionRole::Initial, text $(.$as_text())?));
-        }
-        if let Some(Conveyor {
-            transit_time,
-            capacity,
-            inflow_limit,
-            sample,
-            arrest,
-            discrete: _,
-            batch_integrity: _,
-            one_at_a_time: _,
-            exponential_leak: _,
-            ignore_earlier_zone_losses: _,
-        }) = conveyor
-        {
-            $out.push((ExpressionRole::Option, transit_time $(.$as_text())?));
-            for text in [capacity, inflow_limit, sample, arrest].into_iter().flatten() {
-                $out.push((ExpressionRole::Option, text $(.$as_text())?));
-            }
-        }
-        if let Some(Leakage {
-            fraction,
-            zone_start,
-            zone_end,
-            integers: _,
-        }) = leakage
-        {
-            for text in [fraction, zone_start, zone_end].into_iter().flatten() {
-                $out.push((ExpressionRole::Option, text $(.$as_text())?));
-            }
-        }
+        visit_compat_texts!(compat, $out $(, . $as_text)?);
     }};
 }
 
@@ -1106,6 +1185,18 @@ impl Equation {
     pub fn expression_texts(&self) -> Vec<(ExpressionRole, &str)> {
         let mut texts = Vec::new();
         visit_equation_texts!(self, texts, .as_str);
+        texts
+    }
+}
+
+impl Compat {
+    /// Every text of the variable's options the engine parses as an
+    /// expression ([`Variable::expression_texts`] holds these after the
+    /// equation's): the `ACTIVE INITIAL`, and the conveyor and leak options,
+    /// each with the option it is.
+    pub fn expression_texts(&self) -> Vec<(ExpressionRole, &str)> {
+        let mut texts = Vec::new();
+        visit_compat_texts!(self, texts, .as_str);
         texts
     }
 }

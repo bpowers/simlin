@@ -87,3 +87,41 @@ fn every_schema_compiles_and_every_input_is_an_object_that_refuses_unknown_field
         );
     }
 }
+
+/// Every tagged variant lists its tag first: what an object is comes before
+/// its fields, for a reader and for a model writing a call.
+#[test]
+fn every_tagged_variant_lists_its_tag_first() {
+    fn check(value: &serde_json::Value, tagged: &mut usize) {
+        match value {
+            serde_json::Value::Object(object) => {
+                let tag = object
+                    .get("required")
+                    .and_then(|required| required.get(0))
+                    .and_then(serde_json::Value::as_str);
+                if let (Some(tag), Some(properties)) = (
+                    tag,
+                    object
+                        .get("properties")
+                        .and_then(serde_json::Value::as_object),
+                ) && properties
+                    .get(tag)
+                    .is_some_and(|p| p.get("const").is_some())
+                {
+                    *tagged += 1;
+                    assert_eq!(properties.keys().next().map(String::as_str), Some(tag));
+                }
+                object.values().for_each(|v| check(v, tagged));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| check(v, tagged)),
+            _ => {}
+        }
+    }
+    let catalog: serde_json::Value = serde_json::from_str(catalog_json()).unwrap();
+    let mut tagged = 0;
+    check(&catalog, &mut tagged);
+    assert!(
+        tagged > 20,
+        "the operations and citations are tagged: {tagged}"
+    );
+}

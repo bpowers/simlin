@@ -1726,29 +1726,30 @@ fn test_stdlib_models_present_after_json_open() {
     }
 }
 
-// ── simlin_project_open_{vensim,xmile}_with_warnings ───────────────────
+// ── simlin_import_losses ───────────────────────────────────────────────
 
-/// The signature both reporting opens share.
-type ReportingOpen = unsafe extern "C" fn(
-    *const u8,
-    usize,
-    *mut *mut SimlinError,
-    *mut *mut SimlinError,
-) -> *mut SimlinProject;
-
-/// Open `data` through a reporting open, asserting it succeeds, and return
-/// the project with the (possibly NULL) warnings handle for the caller to
-/// inspect and free.
-unsafe fn open_reporting(
-    open: ReportingOpen,
-    data: &[u8],
-) -> (*mut SimlinProject, *mut SimlinError) {
-    let mut collected: *mut SimlinError = ptr::null_mut();
+/// What `simlin_import_losses` reports of `data` read as `format`: the
+/// (possibly NULL) warnings handle for the caller to inspect and free, or the
+/// error's code.
+unsafe fn import_losses(format: u32, data: &[u8]) -> Result<*mut SimlinError, SimlinErrorCode> {
+    let mut collected: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
     let mut err: *mut SimlinError = ptr::null_mut();
-    let proj = open(data.as_ptr(), data.len(), &mut collected, &mut err);
-    expect_no_error(err, "reporting open");
-    assert!(!proj.is_null());
-    (proj, collected)
+    simlin_import_losses(
+        format,
+        data.as_ptr(),
+        data.len(),
+        ptr::null(),
+        0,
+        &mut collected,
+        &mut err,
+    );
+    if err.is_null() {
+        return Ok(collected);
+    }
+    assert!(collected.is_null(), "a failed report holds no warnings");
+    let code = simlin_error_get_code(err);
+    simlin_error_free(err);
+    Err(code)
 }
 
 /// The bare reasons of a warnings handle, each checked to be a warning in
@@ -1783,10 +1784,9 @@ unsafe fn warning_reasons(collected: *mut SimlinError, source: &str) -> Vec<Stri
     reasons
 }
 
-/// A Vensim file's sketch comments are reported as the engine words them,
-/// and the project is the one the plain open gives.
+/// A Vensim file's sketch comments are reported as the engine words them.
 #[test]
-fn test_open_vensim_with_warnings_reports_what_the_file_does_not_keep() {
+fn import_losses_reports_what_a_vensim_file_holds_that_a_project_does_not_keep() {
     let data = std::fs::read("testdata/SIR.mdl").expect("SIR.mdl fixture must exist");
     let text = std::str::from_utf8(&data).unwrap();
     let (_, expected) = engine::open_vensim_with_warnings(text).unwrap();
@@ -1796,7 +1796,7 @@ fn test_open_vensim_with_warnings_reports_what_the_file_does_not_keep() {
     );
 
     unsafe {
-        let (proj, collected) = open_reporting(simlin_project_open_vensim_with_warnings, &data);
+        let collected = import_losses(SimlinSaveFormat::Mdl as u32, &data).expect("the report");
         let summary = engine::ImportWarning::summary(&expected).unwrap();
         assert_eq!(
             CStr::from_ptr(simlin_error_get_message(collected)).to_str(),
@@ -1804,30 +1804,19 @@ fn test_open_vensim_with_warnings_reports_what_the_file_does_not_keep() {
         );
         let expected: Vec<String> = expected.into_iter().map(|w| w.message).collect();
         assert_eq!(warning_reasons(collected, "MDL import"), expected);
-
-        let mut err: *mut SimlinError = ptr::null_mut();
-        let plain = simlin_project_open_vensim(data.as_ptr(), data.len(), &mut err);
-        expect_no_error(err, "open_vensim");
-        assert!(
-            **(*proj).datamodel.lock().unwrap() == **(*plain).datamodel.lock().unwrap(),
-            "the reporting open reads the project the plain open reads"
-        );
-        simlin_project_unref(plain);
-        simlin_project_unref(proj);
     }
 }
 
-/// An XMILE file's standalone graphical function is reported, a file that
-/// loses nothing reports NULL, and a caller may pass NULL to discard the
-/// warnings.
+/// An XMILE file's standalone graphical function is reported, and a file
+/// that loses nothing reports NULL.
 #[test]
-fn test_open_xmile_with_warnings_reports_what_the_file_does_not_keep() {
+fn import_losses_reports_what_an_xmile_file_holds_that_a_project_does_not_keep() {
     let lossy = include_str!("../../../../test/test-models/tests/lookups/test_lookups.xmile");
     let whole = std::fs::read("testdata/SIR.stmx").expect("SIR.stmx fixture must exist");
 
     unsafe {
-        let (proj, collected) =
-            open_reporting(simlin_project_open_xmile_with_warnings, lossy.as_bytes());
+        let collected =
+            import_losses(SimlinSaveFormat::Xmile as u32, lossy.as_bytes()).expect("the report");
         assert_eq!(
             CStr::from_ptr(simlin_error_get_message(collected)).to_str(),
             Ok("1 graphical function in this file is not kept")
@@ -1836,53 +1825,163 @@ fn test_open_xmile_with_warnings_reports_what_the_file_does_not_keep() {
             warning_reasons(collected, "XMILE import"),
             ["1 graphical function in the model is not kept: 'lookup function table'"]
         );
-        simlin_project_unref(proj);
 
-        let (proj, collected) = open_reporting(simlin_project_open_xmile_with_warnings, &whole);
+        let collected = import_losses(SimlinSaveFormat::Xmile as u32, &whole).expect("the report");
         assert!(
             collected.is_null(),
             "SIR.stmx holds nothing the reader drops"
         );
-        simlin_project_unref(proj);
-
-        let mut err: *mut SimlinError = ptr::null_mut();
-        let proj = simlin_project_open_xmile_with_warnings(
-            lossy.as_ptr(),
-            lossy.len(),
-            ptr::null_mut(),
-            &mut err,
-        );
-        expect_no_error(err, "open_xmile_with_warnings, warnings discarded");
-        assert!(!proj.is_null());
-        simlin_project_unref(proj);
     }
 }
 
-/// A file that fails to open fails as the plain open does, and leaves the
-/// warnings channel NULL rather than whatever it held.
+/// A Vensim file whose data references `simlin_project_open_vensim_with_data`
+/// resolves against a directory is reported on with that directory, and
+/// fails without it as the plain open of it does.
+#[cfg(feature = "file_io")]
 #[test]
-fn test_open_with_warnings_failures_leave_no_warnings() {
-    let cases: [(ReportingOpen, &[u8]); 2] = [
+fn import_losses_of_a_file_with_data_references_reads_its_data() {
+    let dir = "../../test/test-models/tests/get_data";
+    let data =
+        std::fs::read(format!("{dir}/test_get_data.mdl")).expect("the get_data fixture must exist");
+    let text = std::str::from_utf8(&data).unwrap();
+    let provider = engine::FilesystemDataProvider::new(dir);
+    let (_, expected) = engine::open_vensim_with_data_and_warnings(text, Some(&provider))
+        .expect("the file opens with its data");
+
+    unsafe {
+        let mut collected: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_import_losses(
+            SimlinSaveFormat::Mdl as u32,
+            data.as_ptr(),
+            data.len(),
+            dir.as_ptr(),
+            dir.len(),
+            &mut collected,
+            &mut err,
+        );
+        expect_no_error(err, "the report, with the file's data");
+        // The engine's own report of the file read with its data, whatever
+        // it holds: a NULL handle is a report of nothing.
+        let expected: Vec<String> = expected.into_iter().map(|w| w.message).collect();
+        let reported = if collected.is_null() {
+            Vec::new()
+        } else {
+            warning_reasons(collected, "MDL import")
+        };
+        assert_eq!(reported, expected);
+
+        assert!(
+            import_losses(SimlinSaveFormat::Mdl as u32, &data).is_err(),
+            "without its data the file does not read"
+        );
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let plain = simlin_project_open_vensim(data.as_ptr(), data.len(), &mut err);
+        assert!(plain.is_null() && !err.is_null(), "nor does it open");
+        simlin_error_free(err);
+
+        let bad_dir = [0xffu8, 0xfe];
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_import_losses(
+            SimlinSaveFormat::Mdl as u32,
+            data.as_ptr(),
+            data.len(),
+            bad_dir.as_ptr(),
+            bad_dir.len(),
+            &mut collected,
+            &mut err,
+        );
+        expect_error_code(
+            err,
+            SimlinErrorCode::Generic,
+            "a data_dir that is not UTF-8",
+        );
+        assert!(collected.is_null());
+    }
+}
+
+/// Whether the engine reports what an import of `format` does not keep: the
+/// two formats whose readers say. A new format has to be placed here.
+fn reports_import_losses(format: SimlinSaveFormat) -> bool {
+    match format {
+        SimlinSaveFormat::Mdl | SimlinSaveFormat::Xmile => true,
+        SimlinSaveFormat::Json | SimlinSaveFormat::JsonSdai | SimlinSaveFormat::Protobuf => false,
+    }
+}
+
+/// A format the engine has no report for is refused, never answered as if
+/// the file lost nothing; a format that is none is refused too.
+#[test]
+fn import_losses_refuses_a_format_it_has_no_report_for() {
+    let whole = std::fs::read("testdata/SIR.stmx").expect("SIR.stmx fixture must exist");
+    let mdl = std::fs::read("testdata/SIR.mdl").expect("SIR.mdl fixture must exist");
+    unsafe {
+        for discriminant in 0..8u32 {
+            let reported =
+                SimlinSaveFormat::try_from(discriminant).is_ok_and(reports_import_losses);
+            let data = if discriminant == SimlinSaveFormat::Mdl as u32 {
+                &mdl
+            } else {
+                &whole
+            };
+            match import_losses(discriminant, data) {
+                Ok(collected) => {
+                    assert!(reported, "format {discriminant} was answered");
+                    if !collected.is_null() {
+                        simlin_error_free(collected);
+                    }
+                }
+                Err(code) => {
+                    assert!(!reported, "format {discriminant} was refused");
+                    assert_eq!(code, SimlinErrorCode::Generic);
+                }
+            }
+        }
+    }
+}
+
+/// A file that does not read fails as the open of it does, and the host's
+/// misuse is refused, each leaving the warnings channel NULL rather than
+/// whatever it held.
+#[test]
+fn import_losses_failures_leave_no_warnings() {
+    let cases: [(SimlinSaveFormat, &[u8]); 2] = [
         (
-            simlin_project_open_xmile_with_warnings,
+            SimlinSaveFormat::Xmile,
             b"<xmile><model><variables><aux name=",
         ),
-        (
-            simlin_project_open_vensim_with_warnings,
-            b"\xff\xfe not UTF-8",
-        ),
+        (SimlinSaveFormat::Mdl, b"\xff\xfe not UTF-8"),
     ];
     unsafe {
-        for (open, bad) in cases {
+        for (format, bad) in cases {
             for data in [bad.as_ptr(), ptr::null()] {
                 let mut collected: *mut SimlinError = ptr::NonNull::dangling().as_ptr();
                 let mut err: *mut SimlinError = ptr::null_mut();
-                let proj = open(data, bad.len(), &mut collected, &mut err);
-                assert!(proj.is_null());
-                assert!(collected.is_null(), "a failed open reports no warnings");
-                assert!(!err.is_null(), "a failed open says why");
+                simlin_import_losses(
+                    format as u32,
+                    data,
+                    bad.len(),
+                    ptr::null(),
+                    0,
+                    &mut collected,
+                    &mut err,
+                );
+                assert!(collected.is_null(), "a failed report holds no warnings");
+                assert!(!err.is_null(), "a failed report says why");
                 simlin_error_free(err);
             }
+            // The report is the function's one output.
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_import_losses(
+                format as u32,
+                bad.as_ptr(),
+                bad.len(),
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+                &mut err,
+            );
+            expect_error_code(err, SimlinErrorCode::Generic, "a NULL warnings pointer");
         }
     }
 }

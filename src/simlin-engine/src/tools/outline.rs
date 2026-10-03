@@ -9,13 +9,15 @@
 //! the modules -- one entry each, with its equation and units -- and the
 //! diagnostics under their ids, errors first, each variable carrying the ids of
 //! its own. An outline whose JSON exceeds the session's budget keeps every
-//! variable's entry and lists as many diagnostics as fit, when the entries fit
-//! alone; otherwise the model is outlined by sector: the stocks with their
-//! flows, counts by kind, the model's sectors, the diagnostics, and the other
-//! variables' names, as many of each as fit in that order, with the rest
-//! counted -- so an agent reading a large model gets its stocks and a map of
-//! names to read or search. A diagnostic left out is still named by the ids
-//! on its variable's entry, and `read_variables` gives it in full.
+//! variable's entry and lists as many diagnostics as fit, when the entries and
+//! every error fit; otherwise the model is outlined by sector: counts by kind,
+//! then the errors, the stocks with their flows, the sectors that hold
+//! anything, the warnings, and the other variables' names, each list filled
+//! only once every list before it is whole, with the rest counted -- so an agent reading a large model learns
+//! first why it does not simulate, then gets its stocks and a map of names to
+//! read or search. A diagnostic left out is still named by the ids on its
+//! variable's entry, and `read_variables` gives it in full. No outline is over
+//! its budget: one that cannot fit with every list empty is refused.
 
 use std::collections::BTreeMap;
 
@@ -71,15 +73,16 @@ pub struct ReadModelOutput {
     /// What changed since this session last read the model, when anything did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changes: Option<Changes>,
-    /// Present when the model is outlined by sector: its sectors, each with
-    /// how many variables it holds and which stocks.
+    /// Present when the model is outlined by sector: its sectors that hold a
+    /// variable, each with how many it holds and which stocks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sectors: Option<Vec<SectorOutline>>,
     /// In a sector outline, the names of the variables that are not stocks,
     /// in model order, as many as fit beside the stocks.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub other_names: Vec<String>,
-    /// How many stocks, diagnostics and other names a sector outline left out.
+    /// How many stocks, diagnostics, sectors and other names an outline left
+    /// out to keep to its budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub omitted: Option<Omitted>,
     /// What an outline by sector leaves to `read_variables`.
@@ -254,13 +257,16 @@ pub struct SectorOutline {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Omitted {
     pub stocks: usize,
     pub diagnostics: usize,
     pub other_names: usize,
+    /// The sectors left out; a sector with no variable is never listed and
+    /// is not counted.
+    pub sectors: usize,
 }
 
 /// Answer `read_model`, and remember what was read.
@@ -271,36 +277,50 @@ pub(crate) fn read_model(
 ) -> Result<ReadModelOutput, ToolError> {
     let resolved = resolve_model(ws.project, ws.db, &session.model_name)?;
     let diagnostics = session.evidence.report_diagnostics(ws, &resolved);
-    let changes = session.changes_since_read(ws.project, ws.revision);
-    session.last_read = Some(ReadSnapshot::new(ws.revision, ws.project, resolved.model));
+    // The model resolved above, so the report is never refused here; it is
+    // fitted to a quarter of the budget, so it never refuses the read.
+    let changes = session
+        .changes_since_read(ws.project, ws.revision)
+        .unwrap_or_default()
+        .map(|changes| changes.fitted(session.outline_budget / 4));
 
     let full = full_outline(ws, resolved.model, diagnostics, changes);
     let budget = session.outline_budget;
-    if serialized_len(&full) <= budget {
-        return Ok(full);
-    }
-    if let Some(fitted) = with_fitted_diagnostics(&full, budget) {
-        return Ok(fitted);
-    }
-    Ok(sector_outline(full, resolved.model, budget))
+    let outline = if serialized_len(&full) <= budget {
+        full
+    } else if let Some(fitted) = with_fitted_diagnostics(&full, budget) {
+        fitted
+    } else {
+        sector_outline(full, resolved.model, budget)?
+    };
+    // A refused read is no read: only an outline that was answered is what
+    // the session last read.
+    session.last_read = Some(ReadSnapshot::new(ws.revision, ws.project, resolved.model));
+    Ok(outline)
 }
 
 /// The whole outline with as many of its diagnostics as fit the budget, in
-/// order (errors first), or `None` when its entries alone do not fit.
+/// order (errors first), or `None` when its entries and every error do not
+/// fit: an outline never lists an entry while it leaves an error out, so
+/// one that cannot keep every error is outlined by sector, errors first.
 fn with_fitted_diagnostics(full: &ReadModelOutput, budget: usize) -> Option<ReadModelOutput> {
     let total = full.diagnostics.len();
+    let errors = full
+        .diagnostics
+        .iter()
+        .take_while(|d| d.severity == super::Severity::Error)
+        .count();
     let with = |listed: usize| ReadModelOutput {
         diagnostics: full.diagnostics[..listed].to_vec(),
         omitted: Some(Omitted {
-            stocks: 0,
             diagnostics: total - listed,
-            other_names: 0,
+            ..Omitted::default()
         }),
         note: Some(DIAGNOSTICS_LEFT_OUT.to_string()),
         ..full.clone()
     };
     let fits = |listed: usize| serialized_len(&with(listed)) <= budget;
-    if !fits(0) {
+    if !fits(errors) {
         return None;
     }
     Some(with(most(total, &fits)))
@@ -389,6 +409,14 @@ fn full_outline(
         note: None,
     };
 
+    // Flows as the model names them, the spelling every other name in the
+    // outline has, whatever spelling the stock's own list holds.
+    let named = |flows: Vec<String>| -> Vec<String> {
+        flows
+            .iter()
+            .map(|flow| super::evidence::display_name(model, flow))
+            .collect()
+    };
     for var in &model.variables {
         match var {
             Variable::Stock(stock) => {
@@ -397,8 +425,8 @@ fn full_outline(
                     name: stock.ident.clone(),
                     units: stock.units.clone(),
                     initial: Some(initial),
-                    inflows: datamodel::distinct_stock_flows(&stock.inflows).flows,
-                    outflows: datamodel::distinct_stock_flows(&stock.outflows).flows,
+                    inflows: named(datamodel::distinct_stock_flows(&stock.inflows).flows),
+                    outflows: named(datamodel::distinct_stock_flows(&stock.outflows).flows),
                     dimensions: dimensions(&stock.equation),
                     non_negative: stock.compat.non_negative,
                     diagnostics: ids_of(var),
@@ -461,16 +489,22 @@ fn full_outline(
     outline
 }
 
-/// The outline by sector: the stocks with their flows but not their initial
-/// values, the model's sectors, the diagnostics, and the other variables'
-/// names -- as many stocks as the budget holds, then, once every stock is
-/// listed, as many diagnostics (errors first), then, once every diagnostic is
-/// listed, as many names, each in model order.
+/// The outline by sector, in the order an agent needs it when not everything
+/// fits: the errors, which say why a model does not simulate; the stocks with
+/// their flows but not their initial values; the sectors that hold anything;
+/// the warnings; and the other variables' names. Each list is filled, in its
+/// own order, only once every list before it is whole, so a partial list is
+/// never read beside a later one as if it were whole (names beside half the
+/// stocks would read as a map of the model with stocks missing from it).
+///
+/// An outline with every list empty that is still over the budget -- a model
+/// name, time units or change report too long for one answer -- is refused:
+/// an answer over its budget is never given.
 fn sector_outline(
     full: ReadModelOutput,
     model: &datamodel::Model,
     budget: usize,
-) -> ReadModelOutput {
+) -> Result<ReadModelOutput, ToolError> {
     let stocks: Vec<StockOutline> = full
         .stocks
         .iter()
@@ -486,9 +520,11 @@ fn sector_outline(
         .filter(|var| !matches!(var, Variable::Stock(_)))
         .map(|var| var.get_ident().to_string())
         .collect();
+    // A sector with no variable says nothing about the model.
     let sectors: Vec<SectorOutline> = model
         .groups
         .iter()
+        .filter(|group| !group.members.is_empty())
         .map(|group| SectorOutline {
             name: group.name.clone(),
             variables: group.members.len(),
@@ -502,55 +538,124 @@ fn sector_outline(
                 .collect(),
         })
         .collect();
-    let all_diagnostics = full.diagnostics.clone();
+    // The full outline lists errors first.
+    let (errors, warnings) = full.diagnostics.split_at(full.counts.errors);
+    let totals = Listed {
+        errors: errors.len(),
+        stocks: stocks.len(),
+        sectors: sectors.len(),
+        warnings: warnings.len(),
+        names: other_names.len(),
+    };
 
-    let with = |stock_count: usize, diagnostic_count: usize, name_count: usize| {
+    let with = |listed: Listed| {
         let omitted = Omitted {
-            stocks: stocks.len() - stock_count,
-            diagnostics: all_diagnostics.len() - diagnostic_count,
-            other_names: other_names.len() - name_count,
+            stocks: totals.stocks - listed.stocks,
+            diagnostics: (totals.errors - listed.errors) + (totals.warnings - listed.warnings),
+            other_names: totals.names - listed.names,
+            sectors: totals.sectors - listed.sectors,
         };
         ReadModelOutput {
-            stocks: stocks[..stock_count].to_vec(),
+            stocks: stocks[..listed.stocks].to_vec(),
             flows: vec![],
             variables: vec![],
             constants: vec![],
             lookups: vec![],
             modules: vec![],
-            diagnostics: all_diagnostics[..diagnostic_count].to_vec(),
-            sectors: (!sectors.is_empty()).then(|| sectors.clone()),
-            other_names: other_names[..name_count].to_vec(),
-            omitted: (omitted.stocks + omitted.diagnostics + omitted.other_names > 0)
-                .then_some(omitted),
+            diagnostics: errors[..listed.errors]
+                .iter()
+                .chain(&warnings[..listed.warnings])
+                .cloned()
+                .collect(),
+            sectors: (listed.sectors > 0).then(|| sectors[..listed.sectors].to_vec()),
+            other_names: other_names[..listed.names].to_vec(),
+            omitted: (omitted != Omitted::default()).then_some(omitted),
             note: Some(
                 "The model is too large to outline whole, so its stocks are listed with their \
                  flows and every other variable by name; read_variables reads any variable's \
                  equation and diagnostics, and find_variables finds one by name or description."
                     .to_string(),
             ),
-            ..full.clone()
+            revision: full.revision,
+            model: full.model.clone(),
+            specs: full.specs.clone(),
+            counts: full.counts,
+            changes: full.changes.clone(),
         }
     };
 
-    // The most stocks that fit alone, then, once every stock fits, the most
-    // diagnostics beside them, then the most names: each a bisection over a
-    // count. Names never share the budget with a partial stock list, which
-    // would read as a map of the model with stocks missing from it.
-    let fits = |outline: ReadModelOutput| serialized_len(&outline) <= budget;
-    let stock_count = most(stocks.len(), &|n| fits(with(n, 0, 0)));
-    let diagnostic_count = if stock_count == stocks.len() {
-        most(all_diagnostics.len(), &|n| fits(with(stock_count, n, 0)))
-    } else {
-        0
-    };
-    let name_count = if diagnostic_count == all_diagnostics.len() && stock_count == stocks.len() {
-        most(other_names.len(), &|n| {
-            fits(with(stock_count, diagnostic_count, n))
-        })
-    } else {
-        0
-    };
-    with(stock_count, diagnostic_count, name_count)
+    let fits = |listed: Listed| serialized_len(&with(listed)) <= budget;
+    let mut listed = Listed::default();
+    if !fits(listed) {
+        return Err(ToolError::new(format!(
+            "the model's outline does not fit one answer even with every list left out ({} \
+             bytes, and an answer holds {budget}): the model's name, its time units or the \
+             report of what changed is too long. read_variables and find_variables still answer.",
+            serialized_len(&with(listed))
+        )));
+    }
+    // One list at a time, in order of need; the first that does not fit whole
+    // ends the filling.
+    for part in Part::ALL {
+        let total = part.of(&totals);
+        let most = most(total, &|n| fits(part.set(listed, n)));
+        listed = part.set(listed, most);
+        if most < total {
+            break;
+        }
+    }
+    Ok(with(listed))
+}
+
+/// How many of each of a sector outline's lists are listed.
+#[derive(Clone, Copy, Default)]
+struct Listed {
+    errors: usize,
+    stocks: usize,
+    sectors: usize,
+    warnings: usize,
+    names: usize,
+}
+
+/// A sector outline's lists, in the order they are filled.
+#[derive(Clone, Copy)]
+enum Part {
+    Errors,
+    Stocks,
+    Sectors,
+    Warnings,
+    Names,
+}
+
+impl Part {
+    const ALL: [Part; 5] = [
+        Part::Errors,
+        Part::Stocks,
+        Part::Sectors,
+        Part::Warnings,
+        Part::Names,
+    ];
+
+    fn of(self, listed: &Listed) -> usize {
+        match self {
+            Part::Errors => listed.errors,
+            Part::Stocks => listed.stocks,
+            Part::Sectors => listed.sectors,
+            Part::Warnings => listed.warnings,
+            Part::Names => listed.names,
+        }
+    }
+
+    fn set(self, mut listed: Listed, count: usize) -> Listed {
+        match self {
+            Part::Errors => listed.errors = count,
+            Part::Stocks => listed.stocks = count,
+            Part::Sectors => listed.sectors = count,
+            Part::Warnings => listed.warnings = count,
+            Part::Names => listed.names = count,
+        }
+        listed
+    }
 }
 
 fn specs_outline(specs: &datamodel::SimSpecs) -> SpecsOutline {
@@ -570,7 +675,12 @@ fn specs_outline(specs: &datamodel::SimSpecs) -> SpecsOutline {
             datamodel::SimMethod::RungeKutta2 => IntegrationMethod::Rk2,
             datamodel::SimMethod::RungeKutta4 => IntegrationMethod::Rk4,
         },
-        time_units: specs.time_units.clone().filter(|u| !u.is_empty()),
+        // Read, never passed back: a long string is cut as a quote is.
+        time_units: specs
+            .time_units
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .map(|u| super::evidence::window(u, 0, 0, super::evidence::QUOTE_CHARS)),
     }
 }
 

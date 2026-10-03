@@ -13,6 +13,7 @@ use simlin_engine::{self as engine, serde as engine_serde};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
+use std::sync::Arc;
 
 use crate::ffi;
 use crate::ffi_error::{ErrorDetail, SimlinError};
@@ -20,7 +21,7 @@ use crate::ffi_try;
 use crate::memory::simlin_malloc;
 use crate::{
     build_simlin_error, clear_out_error, require_project, store_anyhow_error, store_error,
-    store_warnings, write_bytes_to_ffi_output, ProjectContents, SimlinErrorCode, SimlinErrorKind,
+    store_warnings, write_bytes_to_ffi_output, SimlinErrorCode, SimlinErrorKind,
     SimlinErrorSeverity, SimlinProject,
 };
 
@@ -623,54 +624,61 @@ pub unsafe extern "C" fn simlin_project_serialize_systems(
     }
 }
 
-/// When the named model has no stock-and-flow view (or only an empty one),
-/// return a clone of the datamodel carrying an automatically generated
-/// layout for it, so a programmatically built model renders without the
-/// caller first creating a view. Returns `Ok(None)` when the existing view
-/// is usable (or the model does not exist -- the renderer reports that
-/// case itself, distinguishing "not found" from layout failures).
+/// Whether a rendering of `model_name` draws `datamodel` as it is: the model
+/// has a stock-and-flow view with something in it, or does not exist (the
+/// renderer reports that case itself, distinguishing "not found" from layout
+/// failures).
+fn renders_as_it_is(datamodel: &engine::datamodel::Project, model_name: &str) -> bool {
+    datamodel.get_model(model_name).is_none_or(|model| {
+        model
+            .views
+            .first()
+            .is_some_and(|engine::datamodel::View::StockFlow(sf)| !sf.elements.is_empty())
+    })
+}
+
+/// The datamodel a rendering of `model_name` draws: the project's own,
+/// shared, or -- when the model has no stock-and-flow view (or only an empty
+/// one) -- a copy carrying an automatically generated layout for it, so a
+/// programmatically built model renders without the caller first creating a
+/// view.
 ///
 /// The layout is deliberately transient: rendering is a read, so the
 /// generated view is never written back to the project. Callers that want
 /// a persisted view use `simlin_project_diagram_sync`.
 ///
-/// Locking: the caller holds the datamodel lock and passes the contents it
-/// locked; this takes the db lock, matching the datamodel-then-db order used
-/// project-wide.
-fn datamodel_with_generated_layout(
+/// Locking: a model with a view takes the datamodel lock only to share the
+/// contents, and is drawn with no lock held. Laying a model out reads the db,
+/// taken with the contents it is synced to (`lock_contents_and_db`), which
+/// are looked at again: an edit may have drawn the model meanwhile.
+fn datamodel_to_render(
     proj: &SimlinProject,
-    contents: &ProjectContents,
     model_name: &str,
-) -> Result<Option<engine::datamodel::Project>, String> {
-    let datamodel: &engine::datamodel::Project = contents;
-    let Some(model) = datamodel.get_model(model_name) else {
-        return Ok(None);
-    };
-    let has_view = model
-        .views
-        .first()
-        .map(|engine::datamodel::View::StockFlow(sf)| !sf.elements.is_empty())
-        .unwrap_or(false);
-    if has_view {
-        return Ok(None);
+) -> Result<Arc<engine::datamodel::Project>, String> {
+    let datamodel = proj.datamodel.lock().unwrap().shared();
+    if renders_as_it_is(&datamodel, model_name) {
+        return Ok(datamodel);
     }
 
-    let db_locked = proj.lock_db_with(contents);
+    let (datamodel, db_locked) = proj.lock_contents_and_db();
+    if renders_as_it_is(&datamodel, model_name) {
+        return Ok(datamodel);
+    }
     let db_state = db_locked
         .current_source_project()
         .map(|sp| (&*db_locked, sp));
-    let layout = engine::layout::generate_best_layout(datamodel, model_name, db_state)?;
+    let layout = engine::layout::generate_best_layout(&datamodel, model_name, db_state)?;
 
-    let mut with_layout = datamodel.clone();
-    // get_model above succeeded, so get_model_mut cannot fail here.
-    with_layout.get_model_mut(model_name).unwrap().views =
-        vec![engine::datamodel::View::StockFlow(layout)];
-    Ok(Some(with_layout))
+    let mut with_layout = (*datamodel).clone();
+    if let Some(model) = with_layout.get_model_mut(model_name) {
+        model.views = vec![engine::datamodel::View::StockFlow(layout)];
+    }
+    Ok(Arc::new(with_layout))
 }
 
 /// The body every `simlin_project_render_*` entry point shares: validate the
 /// output pointers, the project and the model name; lay out a model with no
-/// stock-and-flow view (transiently, `datamodel_with_generated_layout`); run
+/// stock-and-flow view (transiently, `datamodel_to_render`); run
 /// `render` over the datamodel and the model name; and return its bytes in a
 /// `simlin_malloc` buffer. `what` names the output in error messages. One
 /// body, so the renderings cannot disagree about which inputs they refuse or
@@ -733,9 +741,8 @@ unsafe fn render_model_to_buffer(
         }
     };
 
-    let datamodel_locked = proj.datamodel.lock().unwrap();
-    let laid_out = match datamodel_with_generated_layout(proj, &datamodel_locked, model_name_str) {
-        Ok(l) => l,
+    let render_target = match datamodel_to_render(proj, model_name_str) {
+        Ok(datamodel) => datamodel,
         Err(msg) => {
             store_error(
                 out_error,
@@ -745,8 +752,7 @@ unsafe fn render_model_to_buffer(
             return;
         }
     };
-    let render_target = laid_out.as_ref().unwrap_or(&datamodel_locked);
-    match render(render_target, model_name_str) {
+    match render(&render_target, model_name_str) {
         Ok(bytes) => {
             let len = bytes.len();
 

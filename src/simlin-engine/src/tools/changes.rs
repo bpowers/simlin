@@ -12,7 +12,7 @@
 //! reshaped pipe) changes nothing an agent read, so it is no change here,
 //! though it advances the project's revision.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 
@@ -76,8 +76,10 @@ pub struct ChangedVariable {
     pub fields: Vec<ChangedField>,
 }
 
-/// What changed since a read. Each list is capped at 30 names, with the total
-/// counted beside it when the cap binds.
+/// What changed since a read. Each list of variables is capped at 30 names,
+/// and an outline cuts the lists further to fit its budget
+/// ([`Changes::fitted`]), with the total counted beside a list when either
+/// binds.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Default, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
@@ -112,9 +114,61 @@ pub struct Changes {
     /// models a module instantiates among them), and those added or removed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models_changed: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models_changed_count: Option<usize>,
 }
 
 impl Changes {
+    /// The report within `budget` bytes of JSON, as an outline carries it:
+    /// each name cut as an answer cuts text it repeats
+    /// (`evidence::window`), then the longest of its lists halved, its total
+    /// counted beside it, until it fits. Never refused: a read is answered
+    /// whatever the person changed, and what it leaves out is counted.
+    pub(crate) fn fitted(mut self, budget: usize) -> Changes {
+        let cut = |name: &mut String| {
+            *name = super::evidence::window(name, 0, 0, super::evidence::ECHO_CHARS);
+        };
+        self.added.iter_mut().for_each(cut);
+        self.removed.iter_mut().for_each(cut);
+        self.changed
+            .iter_mut()
+            .for_each(|changed| cut(&mut changed.name));
+        self.models_changed.iter_mut().for_each(cut);
+        super::fit(&mut self, budget, |changes| {
+            let lengths = [
+                changes.added.len(),
+                changes.removed.len(),
+                changes.changed.len(),
+                changes.models_changed.len(),
+            ];
+            let longest = (0..4).max_by_key(|&i| lengths[i]).unwrap_or(0);
+            let keep = lengths[longest] / 2;
+            match longest {
+                _ if lengths[longest] == 0 => return false,
+                0 => {
+                    changes.added_count.get_or_insert(changes.added.len());
+                    changes.added.truncate(keep);
+                }
+                1 => {
+                    changes.removed_count.get_or_insert(changes.removed.len());
+                    changes.removed.truncate(keep);
+                }
+                2 => {
+                    changes.changed_count.get_or_insert(changes.changed.len());
+                    changes.changed.truncate(keep);
+                }
+                _ => {
+                    changes
+                        .models_changed_count
+                        .get_or_insert(changes.models_changed.len());
+                    changes.models_changed.truncate(keep);
+                }
+            }
+            true
+        });
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.added.is_empty()
             && self.removed.is_empty()
@@ -172,38 +226,16 @@ pub(crate) fn without_provenance(var: &Variable) -> Variable {
     var
 }
 
-/// Whether two records (none: absent) are the same variable, provenance
-/// aside.
+/// Whether two records (none: absent) are the same variable: no field a
+/// change report names differs ([`changed_fields`]). Who made a variable
+/// (`ai_state`) and its uid are not the variable: an edit of either changes
+/// nothing an agent read or a simulation reads.
 pub(crate) fn same_record(a: Option<&Variable>, b: Option<&Variable>) -> bool {
     match (a, b) {
-        (Some(a), Some(b)) => without_provenance(a) == without_provenance(b),
+        (Some(a), Some(b)) => changed_fields(a, b).is_empty(),
         (None, None) => true,
         _ => false,
     }
-}
-
-/// The loop name of `loops` for the loop through the variables `names`
-/// (canonical), whose uids `variables` give.
-pub(crate) fn loop_entry<'a>(
-    variables: impl IntoIterator<Item = &'a Variable>,
-    loops: &'a [datamodel::LoopMetadata],
-    names: &BTreeSet<String>,
-) -> Option<&'a datamodel::LoopMetadata> {
-    let by_uid: BTreeMap<i32, String> = variables
-        .into_iter()
-        .filter_map(|v| {
-            crate::patch::variable_uid(v)
-                .map(|uid| (uid, crate::canonicalize(v.get_ident()).into_owned()))
-        })
-        .collect();
-    loops.iter().find(|entry| {
-        let through: Option<BTreeSet<String>> = entry
-            .uids
-            .iter()
-            .map(|uid| by_uid.get(uid).cloned())
-            .collect();
-        through.as_ref() == Some(names)
-    })
 }
 
 /// The project's models other than `model`, by name.
@@ -253,10 +285,74 @@ impl ReadSnapshot {
         &self.specs
     }
 
-    /// The name the read gave the loop through the variables `names`
-    /// (canonical), if it had one.
-    pub(crate) fn loop_name(&self, names: &BTreeSet<String>) -> Option<&datamodel::LoopMetadata> {
-        loop_entry(self.variables.values(), &self.loops, names)
+    /// The name the read gave the loop whose variables have the uids `uids`
+    /// (sorted), if it had one.
+    pub(crate) fn loop_named(&self, uids: &[i32]) -> Option<&datamodel::LoopMetadata> {
+        self.loops.iter().find(|entry| {
+            let mut entry_uids = entry.uids.clone();
+            entry_uids.sort_unstable();
+            entry_uids == uids
+        })
+    }
+
+    /// The record the read gave the variable named `name` (canonically) of
+    /// the project's other model `model`, if that model had it then.
+    pub(crate) fn record_in(&self, model: &str, name: &str) -> Option<&Variable> {
+        self.other_models
+            .get(model)?
+            .variables
+            .iter()
+            .find(|v| crate::canonicalize(v.get_ident()).as_ref() == name)
+    }
+
+    /// Hold the variable named `name` (canonically) as `record` (none:
+    /// absent), as though the read had given it: what the session's own edit
+    /// left of it. `model` names another model of the project; none is the
+    /// session's own.
+    pub(crate) fn absorb_variable(
+        &mut self,
+        model: Option<&str>,
+        name: &str,
+        record: Option<&Variable>,
+    ) {
+        let Some(model) = model else {
+            match record {
+                Some(record) => self.variables.insert(name.to_string(), record.clone()),
+                None => self.variables.remove(name),
+            };
+            return;
+        };
+        let Some(contents) = self.other_models.get_mut(model) else {
+            return;
+        };
+        let at = contents
+            .variables
+            .iter()
+            .position(|v| crate::canonicalize(v.get_ident()).as_ref() == name);
+        match (at, record.map(without_provenance)) {
+            (Some(at), Some(record)) => contents.variables.replace(at, record),
+            (Some(at), None) => {
+                contents.variables.remove(at);
+            }
+            (None, Some(record)) => contents.variables.push(record),
+            (None, None) => {}
+        }
+    }
+
+    /// Hold `specs` as the sim specs the read gave.
+    pub(crate) fn absorb_specs(&mut self, specs: &datamodel::SimSpecs) {
+        self.specs = specs.clone();
+    }
+
+    /// Hold `entry` (none: unnamed) as the name the read gave the loop whose
+    /// variables have the uids `uids` (sorted).
+    pub(crate) fn absorb_loop(&mut self, uids: &[i32], entry: Option<&datamodel::LoopMetadata>) {
+        self.loops.retain(|held| {
+            let mut held_uids = held.uids.clone();
+            held_uids.sort_unstable();
+            held_uids != uids
+        });
+        self.loops.extend(entry.cloned());
     }
 }
 
@@ -268,14 +364,13 @@ pub(crate) fn effective_specs<'a>(
     model.sim_specs.as_ref().unwrap_or(&project.sim_specs)
 }
 
-/// What changed between `snapshot` and `model` as it is in `project`,
-/// leaving out what `explained` accounts for: a variable whose record (none:
-/// removed) it says someone else's work left, and the sim specs likewise.
+/// What changed between `snapshot` and `model` as it is in `project`. A
+/// session's own edit is no change: the snapshot holds what it left as read
+/// (`absorb_variable`).
 pub(crate) fn diff(
     snapshot: &ReadSnapshot,
     project: &datamodel::Project,
     model: &datamodel::Model,
-    explained: &dyn Explains,
 ) -> Changes {
     let now: BTreeMap<String, &Variable> = model
         .variables
@@ -285,9 +380,6 @@ pub(crate) fn diff(
     let mut added = Vec::new();
     let mut changed = Vec::new();
     for (canonical, var) in &now {
-        if explained.variable(canonical, Some(var)) {
-            continue;
-        }
         match snapshot.variables.get(canonical) {
             None => added.push(var.get_ident().to_string()),
             Some(before) => {
@@ -304,9 +396,7 @@ pub(crate) fn diff(
     let removed: Vec<String> = snapshot
         .variables
         .iter()
-        .filter(|(canonical, _)| {
-            !now.contains_key(*canonical) && !explained.variable(canonical, None)
-        })
+        .filter(|(canonical, _)| !now.contains_key(*canonical))
         .map(|(_, var)| var.get_ident().to_string())
         .collect();
     let specs = effective_specs(project, model);
@@ -327,7 +417,7 @@ pub(crate) fn diff(
         )
         .collect();
     models_changed.sort();
-    let (models_changed, _) = cap(models_changed);
+    let (models_changed, models_changed_count) = cap(models_changed);
     Changes {
         since_revision: snapshot.revision,
         added,
@@ -336,20 +426,12 @@ pub(crate) fn diff(
         removed_count,
         changed,
         changed_count,
-        specs_changed: &snapshot.specs != specs && !explained.specs(specs),
+        specs_changed: &snapshot.specs != specs,
         dimensions_changed: snapshot.dimensions != project.dimensions,
         unit_definitions_changed: snapshot.units != project.units,
         models_changed,
+        models_changed_count,
     }
-}
-
-/// Changes a diff leaves out, because the reader knows of them already.
-pub(crate) trait Explains {
-    /// Whether the variable named `name` (canonically) being as `record` is
-    /// (none: removed) is accounted for.
-    fn variable(&self, name: &str, record: Option<&Variable>) -> bool;
-    /// Whether the sim specs being `specs` is accounted for.
-    fn specs(&self, specs: &datamodel::SimSpecs) -> bool;
 }
 
 /// A list capped at [`MAX_CHANGED_NAMES`], and its length when the cap bound.

@@ -951,3 +951,59 @@ fn the_loop_analysis_reads_stocks_at_rest_as_every_tool_does() {
         assert_eq!(loops["found"], 1, "{loops}");
     }
 }
+
+/// A variable's columns are the ones `save_check::column_variable` gives it,
+/// so another variable whose name begins with it and a `[` is no element of
+/// it: `cost_` has its one column, `cost [usd]` (canonically `cost_[usd]`)
+/// has its own, and an arrayed variable has one per element.
+#[test]
+fn a_variables_columns_are_its_own_whatever_another_name_holds() {
+    let project = TestProject::new("names")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .aux("cost_", "1", None)
+        .aux("cost [usd]", "time", None)
+        .array_aux("pop[region]", "2")
+        .build_datamodel();
+    let mut host = Host::new(project);
+    let mut session = Session::new("main");
+    let run = session
+        .run_results(host.workspace(), "current")
+        .unwrap_or_else(|unavailable| panic!("{}", unavailable.reason));
+    let model = &host.project.models[0];
+    let subscripts = |canonical: &str| -> Vec<String> {
+        variable_columns(&run.results, model, canonical)
+            .into_iter()
+            .map(|column| column.subscript.to_string())
+            .collect()
+    };
+    assert_eq!(subscripts("cost_"), [""]);
+    assert_eq!(subscripts("cost_[usd]"), [""]);
+    assert_eq!(subscripts("pop"), ["[north]", "[south]"]);
+}
+
+/// A module instance has no series of its own: the columns of the model it
+/// instantiates (`hares·births`) are its variables', not its.
+#[test]
+fn a_module_instance_has_no_columns_of_its_own() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx"
+    );
+    let file = std::fs::File::open(path).expect("the hares and foxes model is in the corpus");
+    let project = crate::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap();
+    let mut host = Host::new(project);
+    let mut session = Session::new("main");
+    let run = session
+        .run_results(host.workspace(), "current")
+        .unwrap_or_else(|unavailable| panic!("{}", unavailable.reason));
+    let model = &host.project.models[0];
+    assert!(
+        run.results
+            .offsets
+            .keys()
+            .any(|key| key.as_str().starts_with("hares\u{00B7}")),
+        "the instance's model has columns"
+    );
+    assert!(variable_columns(&run.results, model, "hares").is_empty());
+}

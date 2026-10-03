@@ -11,7 +11,7 @@ use crate::datamodel::{self, Project};
 use crate::db::SimlinDb;
 use crate::test_common::TestProject;
 
-use super::{Landing, Session, ToolOutput, Workspace};
+use super::{Session, ToolOutput, Workspace};
 
 /// A project as a host holds one for tool calls: the datamodel, a db synced to
 /// it with `SimlinDb::sync` (what libsimlin's open functions do), and the
@@ -45,17 +45,22 @@ impl Host {
         self.revision += 1;
     }
 
+    /// Call a tool as a host does: with the project's contents held for the
+    /// call, and an edit the call made (`ToolOutput::edited`) made the
+    /// project's contents in one edit, the db synced to it.
     pub fn call_raw(&mut self, session: &mut Session, tool: &str, input: &str) -> ToolOutput {
-        let ws = Workspace {
-            project: &self.project,
-            db: &mut self.db,
-            revision: self.revision,
-            waiting: None,
-            cancelled: None,
-        };
-        session
-            .call(ws, tool, input)
-            .expect("the catalog lists the tool")
+        let output = session
+            .call(self.workspace(), tool, input)
+            .expect("the catalog lists the tool");
+        self.commit(&output);
+        output
+    }
+
+    /// Make the edit a call made, if it made one, the project's contents.
+    pub fn commit(&mut self, output: &ToolOutput) {
+        if let Some(edited) = &output.edited {
+            self.edit(|p| *p = edited.clone());
+        }
     }
 
     /// Call a tool that must succeed, and parse its output.
@@ -89,9 +94,11 @@ impl Host {
             waiting: Some(waiting),
             cancelled: None,
         };
-        session
+        let output = session
             .call(ws, tool, &input.to_string())
-            .expect("the catalog lists the tool")
+            .expect("the catalog lists the tool");
+        self.commit(&output);
+        output
     }
 
     /// Call a tool with `cancelled` as the host's report that it cancelled
@@ -110,9 +117,11 @@ impl Host {
             waiting: Some(waiting),
             ..self.workspace()
         };
-        session
+        let output = session
             .call(ws, tool, &input.to_string())
-            .expect("the catalog lists the tool")
+            .expect("the catalog lists the tool");
+        self.commit(&output);
+        output
     }
 
     /// A report of other work that begins to wait once the call has asked
@@ -127,20 +136,6 @@ impl Host {
         let output = self.call_raw(session, tool, &input.to_string());
         assert!(output.is_error, "{tool} answered {input}: {}", output.json);
         serde_json::from_str(&output.json).expect("refusals are JSON")
-    }
-
-    /// Land the plan `id` as a host does: `Session::land_plan` on the
-    /// project as it is, its result made the project's contents in one
-    /// edit. The reason, when it does not land.
-    pub fn land(&mut self, session: &mut Session, id: &str) -> Result<(), String> {
-        match session.land_plan(self.workspace(), id) {
-            None => Err(format!("the session has no plan '{id}'")),
-            Some(Landing::Refused(reason)) => Err(reason),
-            Some(Landing::Landed(project)) => {
-                self.edit(|p| *p = *project);
-                Ok(())
-            }
-        }
     }
 
     pub fn workspace(&mut self) -> Workspace<'_> {
@@ -211,4 +206,16 @@ pub(crate) fn inventory() -> TestProject {
             gf.clone(),
         )
         .aux_with_gf("pressure_table", "", gf)
+}
+
+/// A model whose constants are read only as it starts: `s0` by the stock's
+/// initial value, `base_rate` inside `INIT`.
+pub(crate) fn initial_reads() -> TestProject {
+    TestProject::new("initial_reads")
+        .with_sim_time(0.0, 10.0, 0.5)
+        .stock("level", "s0", &["growth"], &[], None)
+        .flow("growth", "level * rate", None)
+        .aux("rate", "INIT(base_rate * 2)", None)
+        .aux("base_rate", "0.05", None)
+        .aux("s0", "100", None)
 }

@@ -99,6 +99,43 @@ fn a_stock_that_lists_a_flow_twice_is_outlined_with_it_once() {
     assert_eq!(outline["stocks"][0]["inflows"], json!(["in"]));
 }
 
+/// A stock's flows are spelled as the flows' own entries are, whatever
+/// spelling the stock's lists hold.
+#[test]
+fn a_stocks_flows_are_spelled_as_the_flows_are_named() {
+    let mut project = TestProject::new("teacup")
+        .stock(
+            "Teacup Temperature",
+            "180",
+            &[],
+            &["heat_loss_to_room"],
+            None,
+        )
+        .flow("Heat Loss to Room", "Teacup_Temperature / 10", None);
+    // Enough besides, that the outline by sector is the shorter one.
+    for i in 0..12 {
+        project = project.aux(
+            &format!("reading_{i}"),
+            "Teacup_Temperature * 2 + Teacup_Temperature * 3",
+            None,
+        );
+    }
+    let project = project.build_datamodel();
+    let whole = outline_of(project.clone());
+    assert_eq!(whole["stocks"][0]["outflows"], json!(["Heat Loss to Room"]));
+    assert_eq!(whole["flows"][0]["name"], "Heat Loss to Room");
+
+    let mut host = Host::new(project);
+    let by_sector = read_with_budget(&mut host, whole.to_string().len() - 1);
+    assert!(!by_sector.is_error, "{}", by_sector.json);
+    let by_sector: Value = serde_json::from_str(&by_sector.json).unwrap();
+    assert!(by_sector.get("flows").is_none(), "{by_sector}");
+    assert_eq!(
+        by_sector["stocks"][0]["outflows"],
+        json!(["Heat Loss to Room"])
+    );
+}
+
 #[test]
 fn arrayed_equations_are_outlined_with_their_dimensions() {
     let project = TestProject::new("p")
@@ -314,21 +351,201 @@ fn a_model_over_the_budget_is_outlined_by_sector_with_every_count_whole() {
     assert!(outline.get("omitted").is_none());
 }
 
+/// A new session's answer to `read_model` under `budget`, refusal or
+/// outline. The host is shared between budgets, so its database compiles the
+/// model once.
+fn read_with_budget(host: &mut Host, budget: usize) -> crate::tools::ToolOutput {
+    let mut session = Session::new("main");
+    session.outline_budget = budget;
+    host.call_raw(&mut session, "read_model", "{}")
+}
+
+/// The least budget under which the host's model is outlined rather than
+/// refused.
+fn least_budget(host: &mut Host) -> usize {
+    let (mut refused, mut answered) = (0, crate::tools::OUTLINE_BUDGET);
+    assert!(!read_with_budget(host, answered).is_error);
+    while answered - refused > 1 {
+        let mid = refused + (answered - refused) / 2;
+        if read_with_budget(host, mid).is_error {
+            refused = mid;
+        } else {
+            answered = mid;
+        }
+    }
+    answered
+}
+
+/// A model with something for every list of a sector outline: two errors,
+/// six stocks with a flow each, four sectors of which one is empty, a unit
+/// warning, and a dozen other names.
+fn with_every_part() -> datamodel::Project {
+    let mut project = TestProject::new("parts");
+    for i in 0..6 {
+        project = project
+            .stock(
+                &format!("stock_{i}"),
+                "1",
+                &[&format!("flow_{i}")],
+                &[],
+                None,
+            )
+            .flow(&format!("flow_{i}"), &format!("stock_{i} * 0.1"), None);
+    }
+    let mut project = project
+        .aux("broken_a", "no_such_variable + 1", None)
+        .aux("broken_b", "another_missing_one * 2", None)
+        .aux("months", "5", Some("month"))
+        .aux("mislabeled", "months", Some("widget"))
+        .aux("plain_a", "1", None)
+        .aux("plain_b", "2", None)
+        .build_datamodel();
+    let sector = |name: &str, members: &[&str]| datamodel::ModelGroup {
+        name: name.to_string(),
+        members: members.iter().map(|m| m.to_string()).collect(),
+        ..Default::default()
+    };
+    project.models[0].groups = vec![
+        sector("first", &["stock_0", "flow_0", "stock_1", "flow_1"]),
+        sector("empty", &[]),
+        sector("second", &["stock_2", "flow_2"]),
+        sector("third", &["broken_a", "broken_b"]),
+    ];
+    project
+}
+
+/// How many of a part's entries an outline lists: a row per part, so a part
+/// added to the outline does not compile here until it is counted.
+fn listed_of(part: Part, outline: &Value) -> usize {
+    let diagnostics = |severity: &str| {
+        outline["diagnostics"].as_array().map_or(0, |d| {
+            d.iter().filter(|d| d["severity"] == severity).count()
+        })
+    };
+    let len = |key: &str| outline[key].as_array().map_or(0, Vec::len);
+    match part {
+        Part::Errors => diagnostics("error"),
+        Part::Stocks => len("stocks"),
+        Part::Sectors => len("sectors"),
+        Part::Warnings => diagnostics("warning"),
+        Part::Names => len("otherNames"),
+    }
+}
+
+/// Under every budget a sector outline is given, it keeps to it, and its
+/// lists fill in one order -- errors, stocks, sectors, warnings, names --
+/// each only once every list before it is whole, with the rest counted.
+#[test]
+fn a_sector_outline_fills_its_lists_in_order_of_need_within_its_budget() {
+    let mut host = Host::new(with_every_part());
+    let whole = read_with_budget(&mut host, usize::MAX);
+    let whole_outline: Value = serde_json::from_str(&whole.json).unwrap();
+    let counts = &whole_outline["counts"];
+    let total_of = |part: Part| -> usize {
+        let count = |key: &str| counts[key].as_u64().unwrap() as usize;
+        match part {
+            Part::Errors => count("errors"),
+            Part::Stocks => count("stocks"),
+            // The empty sector is never listed.
+            Part::Sectors => 3,
+            Part::Warnings => count("warnings"),
+            Part::Names => {
+                count("flows") + count("variables") + count("constants") + count("lookups")
+            }
+        }
+    };
+    for part in Part::ALL {
+        assert!(total_of(part) > 0, "the fixture has every part");
+    }
+
+    let least = least_budget(&mut host);
+    let mut partial = [false; Part::ALL.len()];
+    let mut errors_ahead_of_stocks = false;
+    for budget in (least..whole.json.len()).step_by(23) {
+        let output = read_with_budget(&mut host, budget);
+        assert!(!output.is_error, "budget {budget}: {}", output.json);
+        assert!(output.json.len() <= budget, "budget {budget}");
+        let outline: Value = serde_json::from_str(&output.json).unwrap();
+        if outline.get("flows").is_some() {
+            // Every entry fits; only diagnostics are left out.
+            continue;
+        }
+        let mut whole_so_far = true;
+        let mut left_out = [0usize; Part::ALL.len()];
+        for (i, part) in Part::ALL.into_iter().enumerate() {
+            let (listed, total) = (listed_of(part, &outline), total_of(part));
+            assert!(
+                whole_so_far || listed == 0,
+                "budget {budget}: a list is filled only once every list before it is whole: {outline}"
+            );
+            whole_so_far &= listed == total;
+            partial[i] |= listed < total;
+            left_out[i] = total - listed;
+        }
+        errors_ahead_of_stocks |= listed_of(Part::Errors, &outline) == total_of(Part::Errors)
+            && listed_of(Part::Stocks, &outline) < total_of(Part::Stocks);
+        let omitted = |key: &str| outline["omitted"][key].as_u64().unwrap_or(0) as usize;
+        let [errors, stocks, sectors, warnings, names] = left_out;
+        assert_eq!(omitted("diagnostics"), errors + warnings, "budget {budget}");
+        assert_eq!(omitted("stocks"), stocks, "budget {budget}");
+        assert_eq!(omitted("sectors"), sectors, "budget {budget}");
+        assert_eq!(omitted("otherNames"), names, "budget {budget}");
+        assert_eq!(outline["counts"], *counts, "counts stay whole");
+        assert!(
+            outline["sectors"]
+                .as_array()
+                .is_none_or(|sectors| sectors.iter().all(|s| s["name"] != "empty")),
+            "a sector with no variable is not listed"
+        );
+    }
+    assert!(
+        partial.iter().all(|&seen| seen),
+        "the budgets tried cut every list somewhere: {partial:?}"
+    );
+    assert!(
+        errors_ahead_of_stocks,
+        "some budget lists every error and not every stock"
+    );
+}
+
+/// An outline that is over its budget with every list empty is refused, and a
+/// refused read is no read: an edit still waits for one.
+#[test]
+fn an_outline_that_cannot_fit_is_refused_and_is_no_read() {
+    let mut host = Host::new(with_every_part());
+    let least = least_budget(&mut host);
+    let mut session = Session::new("main");
+    session.outline_budget = least - 1;
+    let refusal = host.refuse(&mut session, "read_model", json!({}));
+    let message = refusal["error"].as_str().unwrap();
+    assert!(
+        message.contains("does not fit") && message.contains(&(least - 1).to_string()),
+        "{message}"
+    );
+    assert!(message.len() < 400, "a refusal is short: {message}");
+    let edit = host.refuse(
+        &mut session,
+        "edit_model",
+        json!({"summary": "x", "operations": [
+            {"op": "set_equation", "variable": "plain_a", "equation": "3"}]}),
+    );
+    assert!(
+        edit["error"].as_str().unwrap().contains("read_model first"),
+        "{edit}"
+    );
+    session.outline_budget = least;
+    host.call(&mut session, "read_model", json!({}));
+}
+
+/// A sector outline lists the model's first stocks, in order.
 #[test]
 fn a_sector_outline_over_the_budget_lists_the_stocks_that_fit_and_counts_the_rest() {
-    let (full_sectors, full_len) = outline_with_budget(sectored(40), 1);
-    // A budget below every outline still answers, with nothing listed.
-    assert_eq!(
-        full_sectors["omitted"],
-        json!({"stocks": 40, "diagnostics": 0, "otherNames": 40})
-    );
-    assert!(full_sectors.get("stocks").is_none() && full_sectors.get("otherNames").is_none());
-    assert!(full_len > 1);
-
-    let (roomy, _) = outline_with_budget(sectored(40), usize::MAX);
+    let project = sectored(40);
+    let least = least_budget(&mut Host::new(project.clone()));
+    let (roomy, _) = outline_with_budget(project.clone(), usize::MAX);
     let roomy_len = serde_json::to_string(&roomy).unwrap().len();
-    for budget in [full_len + 200, full_len + 800, roomy_len / 2] {
-        let (outline, len) = outline_with_budget(sectored(40), budget);
+    for budget in [least + 200, least + 800, roomy_len / 2] {
+        let (outline, len) = outline_with_budget(project.clone(), budget);
         let listed = names(&outline["stocks"]).len();
         let omitted = outline["omitted"]["stocks"].as_u64().unwrap_or(0) as usize;
         assert_eq!(listed + omitted, 40, "budget {budget}");
@@ -440,6 +657,32 @@ fn an_unfilled_equation_is_no_constant() {
     assert_eq!(names(&outline["variables"]), ["unfilled", "infinite"]);
 }
 
+/// Diagnostics are listed errors first, whatever order the engine reports
+/// them in: a stock that lists a flow twice is reported, as a warning, ahead
+/// of every equation's error, and the outline still opens with the error.
+#[test]
+fn diagnostics_are_listed_errors_first_whatever_order_the_engine_reports_them_in() {
+    let project = TestProject::new("order")
+        .stock("level", "1", &["inflow", "inflow"], &[], None)
+        .flow("inflow", "level * 0.1", None)
+        .aux("broken", "no_such_variable + 1", None)
+        .build_datamodel();
+    let outline = outline_of(project);
+    let listed: Vec<(&str, &str)> = outline["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["severity"].as_str().unwrap(), d["id"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        listed,
+        [("error", "D2"), ("warning", "D1")],
+        "ids number the engine's order, the list is errors first: {outline}"
+    );
+    assert_eq!(outline["counts"]["errors"], 1);
+    assert_eq!(outline["counts"]["warnings"], 1);
+}
+
 /// A model whose entries fit but whose diagnostics do not keeps every entry
 /// and lists as many diagnostics as fit, errors first; each entry still names
 /// its own diagnostics' ids.
@@ -488,4 +731,72 @@ fn an_outline_over_its_budget_for_its_diagnostics_keeps_its_entries() {
         whole["flows"][1]["diagnostics"]
     );
     assert!(outline["note"].as_str().unwrap().contains("read_variables"));
+}
+
+/// What changed since the read never refuses a read: the report is cut to
+/// a share of the budget, each list it cuts counted, so a person's large
+/// edit is reported and the model still outlined.
+#[test]
+fn a_large_change_report_is_cut_and_never_refuses_the_read() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    session.outline_budget = 3_000;
+    host.call(&mut session, "read_model", json!({}));
+    host.edit(|p| {
+        for i in 0..200 {
+            let name = format!("{}_{i}", "added_by_the_person".repeat(4));
+            let var = TestProject::new("v")
+                .aux(&name, "1", None)
+                .build_datamodel()
+                .models
+                .remove(0)
+                .variables
+                .remove(0);
+            p.models[0].variables.push(var);
+        }
+    });
+    let output = host.call_raw(&mut session, "read_model", "{}");
+    assert!(!output.is_error, "{}", output.json);
+    assert!(output.json.len() <= 3_000, "{}", output.json.len());
+    let outline: Value = serde_json::from_str(&output.json).unwrap();
+    let changes = &outline["changes"];
+    let listed = changes["added"].as_array().map_or(0, Vec::len);
+    assert!(listed < 200, "{changes}");
+    assert_eq!(changes["addedCount"], 200, "{changes}");
+}
+
+/// An outline that lists every entry lists every error: when the entries
+/// fit and the errors do not all fit beside them, the model is outlined by
+/// sector, errors first.
+#[test]
+fn an_outline_never_lists_its_entries_and_leaves_an_error_out() {
+    let mut project = TestProject::new("broken").stock("level", "1", &[], &[], None);
+    for i in 0..45 {
+        project = project.aux(&format!("broken_{i}"), "no_such_input + 1", None);
+    }
+    let mut host = Host::from_test_project(&project);
+    let whole = host.call(&mut Session::new("main"), "read_model", json!({}));
+    let size = whole.to_string().len();
+    let mut tried = 0;
+    for budget in (500..size).step_by(250) {
+        let mut session = Session::new("main");
+        session.outline_budget = budget;
+        let output = host.call_raw(&mut session, "read_model", "{}");
+        if output.is_error {
+            continue;
+        }
+        tried += 1;
+        let outline: Value = serde_json::from_str(&output.json).unwrap();
+        let errors = outline["diagnostics"]
+            .as_array()
+            .map_or(0, |d| d.iter().filter(|d| d["severity"] == "error").count());
+        let entries = outline["variables"].as_array().map_or(0, Vec::len)
+            + outline["constants"].as_array().map_or(0, Vec::len)
+            + outline["stocks"].as_array().map_or(0, Vec::len);
+        assert!(
+            entries == 0 || errors == 45,
+            "budget {budget}: {entries} entries and {errors} of 45 errors"
+        );
+    }
+    assert!(tried > 4, "budgets that answer: {tried}");
 }

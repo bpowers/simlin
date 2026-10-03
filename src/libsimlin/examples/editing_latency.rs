@@ -24,14 +24,15 @@
 //!   repeat of a held arrow key plans;
 //! - `render-scene`: the scene a host redraws after every edit;
 //! - `apply-equation` and `sim-new`: an equation edit, which validates through a
-//!   compile, and the simulation a host creates after it. Both hold the
-//!   datamodel lock throughout, so they are how long a hit test or a press from
-//!   another thread waits meanwhile;
+//!   compile, and the simulation a host creates after it. The edit holds the
+//!   datamodel lock throughout, so it is how long a hit test or a press from
+//!   another thread waits meanwhile; the simulation holds it only until it has
+//!   the database, and compiles with it released;
 //! - `hover-landing`: hit tests one display frame apart while another thread
 //!   lands an equation edit every `LANDING_PERIOD` the way a host lands an edit
-//!   (apply, then simulate, then fetch diagnostics, each holding the datamodel
-//!   lock). A hit test takes that lock too, so a hover arriving during a landing
-//!   waits for the hold in progress.
+//!   (apply, then simulate, then fetch diagnostics; the apply holds the
+//!   datamodel lock for its compile). A hit test takes that lock too, so a hover
+//!   arriving during the apply waits for it.
 //!
 //! A scenario the view gives nothing to call on (no positioned element to press,
 //! no aux to move, no constant to edit) reports no samples.
@@ -477,8 +478,9 @@ fn main() {
         report("render-scene", scenes);
 
         // An equation edit applies through validation, which compiles, and the
-        // host then simulates. Both hold the datamodel lock for their compile, so
-        // these are how long a hit test or a press on another thread waits.
+        // host then simulates. The edit holds the datamodel lock for its compile,
+        // so it is how long a hit test or a press on another thread waits; the
+        // simulation compiles with the datamodel released.
         let constant = json["models"]
             .as_array()
             .into_iter()

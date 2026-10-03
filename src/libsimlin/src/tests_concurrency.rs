@@ -707,110 +707,6 @@ fn test_concurrent_patches_no_lost_update() {
     }
 }
 
-/// `simlin_project_replace_contents` must take `dst`'s datamodel lock BEFORE
-/// its db lock -- the order every other project entry point uses. This test
-/// pins that order: two projects replace each other in tight loops while
-/// other threads compile (with LTM), run, and collect diagnostics on both.
-/// Every one of those readers holds datamodel-then-db, so a replace that
-/// acquired them the other way round deadlocks against them within a few
-/// iterations, and the positive-wait join below fails the test instead of
-/// hanging it. Inverting the two `lock()` lines in `replace_contents` makes
-/// this test time out.
-#[test]
-fn test_replace_contents_lock_order_matches_readers() {
-    use std::sync::mpsc;
-    use std::sync::Arc;
-    use std::thread;
-
-    let base = TestProject::new("lock_order")
-        .with_sim_time(0.0, 10.0, 1.0)
-        .stock("population", "100", &["births"], &["deaths"], None)
-        .flow("births", "population * 0.02", None)
-        .flow("deaths", "population * 0.01", None)
-        .build_datamodel();
-    let a = open_project_from_datamodel(&base);
-    let b = open_project_from_datamodel(&base);
-
-    // Two replacers (a <- b, b <- a) + two reader threads per project.
-    let thread_count = 6;
-    unsafe {
-        for _ in 0..thread_count {
-            simlin_project_ref(a);
-            simlin_project_ref(b);
-        }
-    }
-    let (a_addr, b_addr) = (a as usize, b as usize);
-    let barrier = Arc::new(std::sync::Barrier::new(thread_count));
-    let (done_tx, done_rx) = mpsc::channel::<()>();
-    let iterations = 100;
-
-    let mut handles = Vec::new();
-    for (dst_addr, src_addr) in [(a_addr, b_addr), (b_addr, a_addr)] {
-        let barrier = Arc::clone(&barrier);
-        let done_tx = done_tx.clone();
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            unsafe {
-                let dst = dst_addr as *mut SimlinProject;
-                let src = src_addr as *const SimlinProject;
-                for _ in 0..iterations {
-                    let mut err: *mut SimlinError = std::ptr::null_mut();
-                    simlin_project_replace_contents(dst, src, &mut err);
-                    assert!(err.is_null(), "replace_contents must not fail");
-                }
-                simlin_project_unref(dst);
-                simlin_project_unref(src as *mut SimlinProject);
-            }
-            let _ = done_tx.send(());
-        }));
-    }
-    for proj_addr in [a_addr, a_addr, b_addr, b_addr] {
-        let barrier = Arc::clone(&barrier);
-        let done_tx = done_tx.clone();
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            unsafe {
-                let proj = proj_addr as *mut SimlinProject;
-                for _ in 0..iterations {
-                    let mut err: *mut SimlinError = std::ptr::null_mut();
-                    let model = simlin_project_get_model(proj, std::ptr::null(), &mut err);
-                    assert!(err.is_null() && !model.is_null(), "get_model must succeed");
-                    err = std::ptr::null_mut();
-                    let sim = simlin_sim_new(model, true, &mut err);
-                    assert!(err.is_null() && !sim.is_null(), "sim_new must succeed");
-                    err = std::ptr::null_mut();
-                    simlin_sim_run_to_end(sim, &mut err);
-                    assert!(err.is_null(), "run_to_end must succeed");
-                    simlin_sim_unref(sim);
-                    simlin_model_unref(model);
-                    err = std::ptr::null_mut();
-                    let errors = simlin_project_get_errors(proj, &mut err);
-                    assert!(err.is_null());
-                    if !errors.is_null() {
-                        simlin_error_free(errors);
-                    }
-                }
-                simlin_project_unref(proj);
-            }
-            let _ = done_tx.send(());
-        }));
-    }
-    drop(done_tx);
-
-    for _ in 0..thread_count {
-        done_rx
-            .recv_timeout(POSITIVE_WAIT)
-            .expect("a thread did not finish: replace_contents deadlocked against a reader");
-    }
-    for handle in handles {
-        handle.join().expect("thread panicked");
-    }
-    unsafe {
-        simlin_project_unref(a);
-        simlin_project_unref(b);
-    }
-}
-
 /// A tool call holds the datamodel only while it takes the contents it
 /// answers from: a host's hit test and revision read, which lock only the
 /// datamodel, answer while a call is under way, as hover must while an agent
@@ -818,7 +714,7 @@ fn test_replace_contents_lock_order_matches_readers() {
 #[cfg(feature = "agent_tools")]
 #[test]
 fn a_tool_call_holds_the_datamodel_only_while_it_takes_the_contents() {
-    use crate::tools::install_tool_test_hook;
+    use crate::install_db_section_test_hook;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
@@ -834,7 +730,7 @@ fn a_tool_call_holds_the_datamodel_only_while_it_takes_the_contents() {
     let (entered_tx, entered_rx) = mpsc::channel::<()>();
     let release = Arc::new(AtomicBool::new(false));
     let release_for_hook = Arc::clone(&release);
-    let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+    let _hook = install_db_section_test_hook(Arc::new(move |project: &SimlinProject| {
         if project as *const SimlinProject as usize == proj_addr {
             let _ = entered_tx.send(());
             while !release_for_hook.load(Ordering::Acquire) {
@@ -920,7 +816,7 @@ fn a_tool_call_holds_the_datamodel_only_while_it_takes_the_contents() {
 #[cfg(feature = "agent_tools")]
 #[test]
 fn a_tool_call_waiting_for_the_database_leaves_the_datamodel_to_others() {
-    use crate::tools::install_tool_test_hook;
+    use crate::install_db_section_test_hook;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
@@ -938,7 +834,7 @@ fn a_tool_call_waiting_for_the_database_leaves_the_datamodel_to_others() {
     let hold = Arc::new(AtomicBool::new(true));
     let release = Arc::new(AtomicBool::new(false));
     let (hold_in_hook, release_in_hook) = (Arc::clone(&hold), Arc::clone(&release));
-    let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+    let _hook = install_db_section_test_hook(Arc::new(move |project: &SimlinProject| {
         if project as *const SimlinProject as usize == proj_addr
             && hold_in_hook.swap(false, Ordering::SeqCst)
         {
@@ -1027,47 +923,6 @@ fn a_tool_call_waiting_for_the_database_leaves_the_datamodel_to_others() {
     }
 }
 
-/// A tool call that finds the database's lock poisoned panics, as every lock
-/// site does, rather than locking it again under the poisoned guard and
-/// waiting on itself.
-#[cfg(feature = "agent_tools")]
-#[test]
-fn a_tool_call_on_a_poisoned_database_panics_rather_than_waits() {
-    use std::sync::mpsc;
-    use std::thread;
-
-    let datamodel = TestProject::new("tool_poisoned")
-        .stock("population", "100", &["births"], &[], None)
-        .flow("births", "population * rate", None)
-        .aux("rate", "0.02", None)
-        .build_datamodel();
-    let proj = open_project_from_datamodel(&datamodel);
-    let proj_addr = proj as usize;
-    // A panic while the database is held poisons its lock.
-    let poisoner = thread::spawn(move || {
-        let project = unsafe { &*(proj_addr as *const SimlinProject) };
-        let _db = project.lock_db();
-        panic!("a panic that poisons the database's lock");
-    });
-    assert!(poisoner.join().is_err(), "the thread panicked");
-
-    let (done_tx, done_rx) = mpsc::channel::<bool>();
-    thread::spawn(move || {
-        let project = unsafe { &*(proj_addr as *const SimlinProject) };
-        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let datamodel = project.datamodel.lock().unwrap();
-            let _db = project.try_lock_db_for_call(&datamodel);
-        }))
-        .is_err();
-        let _ = done_tx.send(panicked);
-    });
-    let panicked = done_rx
-        .recv_timeout(POSITIVE_WAIT)
-        .expect("a call on a poisoned database answers rather than waits on itself");
-    assert!(panicked, "a poisoned database's lock panics");
-    unsafe { simlin_project_unref(proj) };
-}
-
 /// A host's read of a run that has to simulate stops, as a call does, for
 /// work that waits for the project, and says so with a code of its own: the
 /// host tells a read that stopped from a run the session lacks, and reads it
@@ -1122,20 +977,21 @@ fn an_interrupted_read_of_a_run_is_told_from_a_missing_one() {
     }
 }
 
-/// A landing the person approved, made while a call on the same session runs,
-/// counts itself as waiting from before it waits for the session, which the
-/// call holds for its whole length: the call stops at its next checkpoint and
-/// keeps nothing, and the landing lands, rather than waiting the call out.
-/// With one session per document, this is a host's own setup.
+/// A call of a tool that edits, made while a reading call on the same session
+/// runs, counts itself as waiting from before it waits for the session, which
+/// the reading call holds for its whole length: the reading call stops at its
+/// next checkpoint and keeps nothing, and the edit is made, rather than
+/// waiting the reading call out. With one session per document, and an agent
+/// that makes its calls in parallel, this is a host's own setup.
 #[cfg(feature = "agent_tools")]
 #[test]
-fn a_landing_stops_a_call_on_its_own_session() {
-    use crate::tools::install_tool_test_hook;
+fn an_edit_stops_a_reading_call_on_its_own_session() {
+    use crate::install_db_section_test_hook;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
 
-    let datamodel = TestProject::new("tool_land_own_session")
+    let datamodel = TestProject::new("tool_edit_own_session")
         .stock("population", "100", &["births"], &[], None)
         .flow("births", "population * rate", None)
         .aux("rate", "0.02", None)
@@ -1172,22 +1028,15 @@ fn a_landing_stops_a_call_on_its_own_session() {
         let session = crate::tools::simlin_tool_session_new(model, &mut err);
         assert!(err.is_null());
         let session_addr = session as usize;
+        // An edit is of a model the session has read.
         call(session_addr, "read_model", "");
-        let (is_error, plan) = call(
-            session_addr,
-            "edit_model",
-            r#"{"summary": "a faster rate", "operations": [
-                {"op": "set_equation", "variable": "rate", "equation": "0.03"}]}"#,
-        );
-        assert!(!is_error, "{plan}");
-        let id = plan["plan"].as_str().unwrap().to_string();
 
         // The next call waits inside its database section until work waits
         // for the project, or the positive wait runs out.
         let (entered_tx, entered_rx) = mpsc::channel::<()>();
         let hold = Arc::new(AtomicBool::new(true));
         let hold_in_hook = Arc::clone(&hold);
-        let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+        let _hook = install_db_section_test_hook(Arc::new(move |project: &SimlinProject| {
             if project as *const SimlinProject as usize == proj_addr
                 && hold_in_hook.swap(false, Ordering::SeqCst)
             {
@@ -1198,41 +1047,34 @@ fn a_landing_stops_a_call_on_its_own_session() {
                 }
             }
         }));
-        let caller = thread::spawn(move || call(session_addr, "read_model", ""));
+        let reader = thread::spawn(move || call(session_addr, "read_variables", r#"{"names": ["rate"]}"#));
         entered_rx
             .recv_timeout(POSITIVE_WAIT)
-            .expect("the call holds the session in its database section");
-        let lander = thread::spawn(move || {
-            let id = CString::new(id).unwrap();
-            let (mut buf, mut len, mut err) = (ptr::null_mut(), 0usize, ptr::null_mut());
+            .expect("the reading call holds the session in its database section");
+        let editor = thread::spawn(move || {
             let started = std::time::Instant::now();
-            crate::tools::simlin_tool_session_land_plan(
-                session_addr as *mut crate::tools::SimlinToolSession,
-                id.as_ptr(),
-                &mut buf,
-                &mut len,
-                &mut err,
+            let (is_error, output) = call(
+                session_addr,
+                "edit_model",
+                r#"{"summary": "a faster rate", "operations": [
+                    {"op": "set_equation", "variable": "rate", "equation": "0.03"}]}"#,
             );
-            assert!(err.is_null());
-            let answer: serde_json::Value =
-                serde_json::from_slice(std::slice::from_raw_parts(buf, len)).unwrap();
-            simlin_free(buf);
-            (answer, started.elapsed())
+            (is_error, output, started.elapsed())
         });
-        let (is_error, output) = caller.join().expect("the call finished");
+        let (is_error, output) = reader.join().expect("the reading call finished");
         assert!(is_error, "{output}");
-        assert_eq!(output["interrupted"], true, "the call stopped: {output}");
-        let (answer, waited) = lander.join().expect("the landing finished");
-        assert_eq!(answer, serde_json::json!({"landed": true}));
+        assert_eq!(output["interrupted"], true, "the reading call stopped: {output}");
+        let (is_error, output, waited) = editor.join().expect("the edit finished");
+        assert!(!is_error, "the edit is made: {output}");
         assert!(
             waited < POSITIVE_WAIT / 2,
-            "the landing waited {waited:?}, not the call's whole length"
+            "the edit waited {waited:?}, not the reading call's whole length"
         );
         let mut revision = 0;
         simlin_project_get_revision(proj, &mut revision, &mut err);
         assert!(err.is_null());
-        assert_eq!(revision, 1, "the plan landed");
-        assert!(!(*proj).is_waited_on(), "nothing waits once the landing is in");
+        assert_eq!(revision, 1, "the edit was made");
+        assert!(!(*proj).is_waited_on(), "nothing waits once the edit is in");
 
         crate::tools::simlin_tool_session_unref(session);
         simlin_model_unref(model);
@@ -1247,7 +1089,7 @@ fn a_landing_stops_a_call_on_its_own_session() {
 #[cfg(feature = "agent_tools")]
 #[test]
 fn a_tool_call_stops_for_an_edit_that_waits_for_it() {
-    use crate::tools::install_tool_test_hook;
+    use crate::install_db_section_test_hook;
     use std::sync::mpsc;
     use std::thread;
 
@@ -1262,7 +1104,7 @@ fn a_tool_call_stops_for_an_edit_that_waits_for_it() {
     // Inside the call, with the database held, wait until the edit is
     // waiting for it.
     let (entered_tx, entered_rx) = mpsc::channel::<()>();
-    let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+    let _hook = install_db_section_test_hook(Arc::new(move |project: &SimlinProject| {
         if project as *const SimlinProject as usize == proj_addr {
             let _ = entered_tx.send(());
             let deadline = std::time::Instant::now() + POSITIVE_WAIT;
@@ -1363,13 +1205,172 @@ unsafe fn read_model_on(session_addr: usize) -> (bool, serde_json::Value) {
     (is_error, output)
 }
 
+/// A tool call stops for a query that takes the database alone -- an
+/// equation's rendering, the model's links -- as it does for an edit: the
+/// query is the person's, and holds no datamodel lock only because it reads
+/// none. Uncounted, it would wait the call's whole length.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn a_tool_call_stops_for_a_query_that_waits_for_the_database_alone() {
+    use crate::install_db_section_test_hook;
+    use std::sync::mpsc;
+    use std::thread;
+
+    let datamodel = TestProject::new("tool_yield_to_query")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    let proj_addr = proj as usize;
+    unsafe {
+        // Built, so the query takes the database alone.
+        drop((*proj).lock_db());
+    }
+
+    // Inside the call, with the database held, wait until the query is
+    // waiting for it.
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let _hook = install_db_section_test_hook(Arc::new(move |project: &SimlinProject| {
+        if project as *const SimlinProject as usize == proj_addr {
+            let _ = entered_tx.send(());
+            let deadline = std::time::Instant::now() + POSITIVE_WAIT;
+            while !project.is_waited_on() && std::time::Instant::now() < deadline {
+                thread::yield_now();
+            }
+        }
+    }));
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let session = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let session_addr = session as usize;
+        let caller = thread::spawn(move || read_model_on(session_addr));
+        entered_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("the tool call reached its database-only section");
+
+        let model_addr = model as usize;
+        let query = thread::spawn(move || {
+            let births = CString::new("births").unwrap();
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let latex = simlin_model_get_latex_equation(
+                model_addr as *mut SimlinModel,
+                births.as_ptr(),
+                &mut err,
+            );
+            assert!(err.is_null() && !latex.is_null(), "the query answers");
+            simlin_free_string(latex);
+        });
+
+        let (is_error, output) = caller.join().expect("the tool call finished");
+        assert!(is_error, "{output}");
+        assert_eq!(output["interrupted"], true, "{output}");
+        query.join().expect("the query finished");
+        assert!(!(*proj).is_waited_on(), "nothing waits once the query has answered");
+
+        crate::tools::simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// An edit of the diagram alone (a drag's commit) takes the datamodel and no
+/// database: it lands while a tool call holds the database, and the call
+/// runs on, answering at the revision it began at. A diagram edit that also
+/// took the database would wait every call out, or stop it.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn a_diagram_edit_lands_during_a_tool_call_without_stopping_it() {
+    use crate::install_db_section_test_hook;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+
+    let bytes = crate::entry_point_tests::project_json(true, 100.0, 100.0, "0.1");
+    let proj = unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_json(bytes.as_ptr(), bytes.len(), 0, &mut err);
+        assert!(err.is_null());
+        proj
+    };
+    let proj_addr = proj as usize;
+
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let release = Arc::new(AtomicBool::new(false));
+    let release_for_hook = Arc::clone(&release);
+    let _hook = install_db_section_test_hook(Arc::new(move |project: &SimlinProject| {
+        if project as *const SimlinProject as usize == proj_addr {
+            let _ = entered_tx.send(());
+            while !release_for_hook.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        }
+    }));
+    // Released however the test ends, so no thread is left spinning.
+    struct Release(Arc<AtomicBool>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let release_guard = Release(Arc::clone(&release));
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let session = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let session_addr = session as usize;
+        let caller = thread::spawn(move || read_model_on(session_addr));
+        entered_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("the tool call reached its database-only section");
+
+        let (landed_tx, landed_rx) = mpsc::channel::<u64>();
+        let editor = thread::spawn(move || {
+            let proj = proj_addr as *mut SimlinProject;
+            let err = crate::entry_point_tests::apply_patch(
+                proj,
+                &crate::entry_point_tests::move_stock(),
+                false,
+                false,
+            );
+            assert!(err.is_null(), "the diagram edit lands");
+            let _ = landed_tx.send(crate::entry_point_tests::revision(proj));
+        });
+        let landed_at = landed_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("a diagram edit lands while a tool call holds the database");
+        assert_eq!(landed_at, 1);
+        assert!(
+            !(*proj).is_waited_on(),
+            "the diagram edit did not wait for the database"
+        );
+
+        drop(release_guard);
+        let (is_error, output) = caller.join().expect("the tool call finished");
+        assert!(!is_error, "the call ran on: {output}");
+        assert_eq!(output["revision"], 0, "at the revision it began at");
+        editor.join().expect("the edit finished");
+
+        crate::tools::simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// A call its host cancels while it runs -- here from inside the call, as any
 /// thread may -- stops and answers that it was cancelled, not interrupted,
 /// and a call made after the cancel answers as usual.
 #[cfg(feature = "agent_tools")]
 #[test]
 fn a_cancelled_tool_call_stops_and_a_later_call_answers() {
-    use crate::tools::install_tool_test_hook;
+    use crate::install_db_section_test_hook;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let datamodel = TestProject::new("tool_cancel")
@@ -1388,7 +1389,7 @@ fn a_cancelled_tool_call_stops_and_a_later_call_answers() {
         let proj_addr = proj as usize;
         let cancel_once = Arc::new(AtomicBool::new(true));
         let cancel_in_hook = Arc::clone(&cancel_once);
-        let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+        let _hook = install_db_section_test_hook(Arc::new(move |project: &SimlinProject| {
             if project as *const SimlinProject as usize == proj_addr
                 && cancel_in_hook.swap(false, Ordering::SeqCst)
             {
@@ -1422,7 +1423,7 @@ fn a_cancelled_tool_call_stops_and_a_later_call_answers() {
 #[cfg(feature = "agent_tools")]
 #[test]
 fn a_cancel_covers_a_call_waiting_for_the_session() {
-    use crate::tools::install_tool_test_hook;
+    use crate::install_db_section_test_hook;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
@@ -1443,7 +1444,7 @@ fn a_cancel_covers_a_call_waiting_for_the_session() {
     let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (hold_in_hook, release_in_hook) = (Arc::clone(&hold), Arc::clone(&release));
     let entered_in_hook = Arc::clone(&entered);
-    let _hook = install_tool_test_hook(Arc::new(move |project: &SimlinProject| {
+    let _hook = install_db_section_test_hook(Arc::new(move |project: &SimlinProject| {
         if project as *const SimlinProject as usize != proj_addr {
             return;
         }
@@ -1497,6 +1498,178 @@ fn a_cancel_covers_a_call_waiting_for_the_session() {
 
         let (is_error, output) = read_model_on(session_addr);
         assert!(!is_error, "a call after the cancel answers: {output}");
+
+        crate::tools::simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A call of a tool that edits, cancelled while it waits for the session, is
+/// not made: it answers as soon as it has the session, having taken no lock
+/// of the project's, whose database another session's call may hold, and
+/// leaves no one counted as waiting.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn an_edit_cancelled_while_it_waits_for_the_session_is_not_made() {
+    use crate::install_db_section_test_hook;
+    use crate::lock_order::{trace, Event, Rank};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+
+    let datamodel = TestProject::new("tool_cancel_edit")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    let proj_addr = proj as usize;
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let session = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let session_addr = session as usize;
+        // An edit is of a model the session has read.
+        let (is_error, output) = read_model_on(session_addr);
+        assert!(!is_error, "{output}");
+
+        // The next call holds the session inside the hook until released.
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let hold = Arc::new(AtomicBool::new(true));
+        let release = Arc::new(AtomicBool::new(false));
+        let (hold_in_hook, release_in_hook) = (Arc::clone(&hold), Arc::clone(&release));
+        let _hook = install_db_section_test_hook(Arc::new(move |project: &SimlinProject| {
+            if project as *const SimlinProject as usize == proj_addr
+                && hold_in_hook.swap(false, Ordering::SeqCst)
+            {
+                let _ = entered_tx.send(());
+                while !release_in_hook.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            }
+        }));
+        struct Release(Arc<AtomicBool>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let release_guard = Release(Arc::clone(&release));
+
+        let answering = thread::spawn(move || read_model_on(session_addr));
+        entered_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("the reading call holds the session");
+        let editing = thread::spawn(move || {
+            trace::of(|| {
+                let name = CString::new("edit_model").unwrap();
+                let input = r#"{"summary": "a faster rate", "operations": [
+                    {"op": "set_equation", "variable": "rate", "equation": "0.03"}]}"#;
+                let (mut buf, mut len, mut is_error) = (ptr::null_mut(), 0usize, false);
+                let mut err: *mut SimlinError = ptr::null_mut();
+                crate::tools::simlin_tool_session_call(
+                    session_addr as *mut crate::tools::SimlinToolSession,
+                    name.as_ptr(),
+                    input.as_ptr(),
+                    input.len(),
+                    &mut buf,
+                    &mut len,
+                    &mut is_error,
+                    &mut err,
+                );
+                assert!(err.is_null());
+                let output: serde_json::Value =
+                    serde_json::from_slice(std::slice::from_raw_parts(buf, len)).unwrap();
+                simlin_free(buf);
+                (is_error, output)
+            })
+        });
+        let deadline = std::time::Instant::now() + POSITIVE_WAIT;
+        while (*session).calls_begun() < 3 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!((*session).calls_begun(), 3, "the edit has begun");
+
+        crate::tools::simlin_tool_session_cancel(session);
+        drop(release_guard);
+        let _ = answering.join().expect("the reading call finished");
+        let ((is_error, output), events) = editing.join().expect("the edit's call finished");
+        assert!(is_error, "{output}");
+        assert_eq!(output["cancelled"], true, "{output}");
+        assert_eq!(
+            events,
+            [Event::Acquire(Rank::Session), Event::Release(Rank::Session)],
+            "it took the session and nothing of the project's"
+        );
+        let mut revision = u64::MAX;
+        simlin_project_get_revision(proj, &mut revision, &mut err);
+        assert!(err.is_null());
+        assert_eq!(revision, 0, "the edit was not made");
+        assert!(!(*proj).is_waited_on(), "no one is left counted as waiting");
+
+        crate::tools::simlin_tool_session_unref(session);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// An edit is the work other calls stop for, so it stops for none: one whose
+/// gate runs while a person's query waits for the database is made, not
+/// refused as interrupted. The waiter is the production count a waiting
+/// accessor holds (`SimlinProject::count_waiting`, what `lock_counted` takes
+/// while it waits), held for the length of the call; that a reading call
+/// stops for it is checked first.
+#[cfg(feature = "agent_tools")]
+#[test]
+fn an_edit_is_made_while_a_persons_query_waits_for_the_database() {
+    let datamodel = TestProject::new("edit_with_waiter")
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        let session = crate::tools::simlin_tool_session_new(model, &mut err);
+        assert!(err.is_null());
+        let session_addr = session as usize;
+        let (refused, outline) = read_model_on(session_addr);
+        assert!(!refused, "{outline}");
+
+        let waiter = (*proj).count_waiting();
+        let (refused, outline) = read_model_on(session_addr);
+        assert!(refused, "a reading call stops for the waiter: {outline}");
+        assert_eq!(outline["interrupted"], true, "{outline}");
+
+        let name = CString::new("edit_model").unwrap();
+        let input = serde_json::json!({"summary": "a faster rate", "operations": [
+            {"op": "set_equation", "variable": "rate", "equation": "0.03"}
+        ]})
+        .to_string();
+        let (mut buf, mut len, mut is_error) = (ptr::null_mut(), 0usize, false);
+        crate::tools::simlin_tool_session_call(
+            session,
+            name.as_ptr(),
+            input.as_ptr(),
+            input.len(),
+            &mut buf,
+            &mut len,
+            &mut is_error,
+            &mut err,
+        );
+        assert!(err.is_null());
+        let output: serde_json::Value =
+            serde_json::from_slice(std::slice::from_raw_parts(buf, len)).unwrap();
+        simlin_free(buf);
+        assert!(!is_error, "the edit is made: {output}");
+        assert_eq!((*proj).datamodel.lock().unwrap().revision(), 1);
+        drop(waiter);
 
         crate::tools::simlin_tool_session_unref(session);
         simlin_model_unref(model);

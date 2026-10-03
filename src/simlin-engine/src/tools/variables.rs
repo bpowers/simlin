@@ -7,17 +7,22 @@
 //!
 //! A record carries everything a variable's definition holds -- its equation
 //! or initial value, per-element equations, lookup points, flows, module
-//! wiring -- and where it sits in the causal structure: the variables it reads
-//! and the variables that read it, each link with its polarity
-//! ([`crate::analysis::model_links`], macro and module internals collapsed
-//! into the links between the variables a modeler wrote).
+//! wiring -- and where it sits in the model's structure: the variables it reads
+//! and the variables that read it ([`crate::analysis::model_reads`], macro and
+//! module internals collapsed into the reads between the variables a modeler
+//! wrote), each with the polarity of its causal link, and marked when it is
+//! made only as the model starts.
 //!
 //! An answer keeps to the session's byte budget. A record lists at most 24
 //! per-element equations (each cut at 240 characters, 2,400 in all), 24
 //! inputs, 24 readers and 64 lookup points, with how many more there are, and
 //! cuts its documentation at 480 characters; an element's own equation is
 //! read whole by naming it (`population[north]`). Records that do not fit are
-//! named for another call.
+//! named for another call. A record that does not fit even alone is cut
+//! ([`Cut`]) -- its readers, then its inputs, diagnostics, per-element
+//! equations, lookup points and documentation, each counted, and last its
+//! equation, which then says it was cut -- and an answer that still does not
+//! fit is refused: an answer over its budget is never given.
 
 use std::collections::BTreeSet;
 
@@ -90,8 +95,13 @@ pub struct ReadVariablesOutput {
 #[serde(rename_all = "camelCase")]
 pub struct NotFound {
     pub name: String,
+    /// The closest names of variables, when no variable has the name.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<String>,
+    /// Why not, when the variable exists and what was asked of it does not:
+    /// an element it does not have, or a subscript on a variable with none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// What a variable is, as a modeler would say it.
@@ -161,14 +171,70 @@ impl From<LinkPolarity> for LinkPolarityName {
     }
 }
 
-/// One end of a causal link, from the variable a record describes.
+/// One end of a read, from the variable a record describes.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LinkRef {
     pub name: String,
+    /// The sign of the causal link; `?` for a read that is no causal link (a
+    /// table looked up, a read made only at the start).
     pub polarity: LinkPolarityName,
+    /// Set when the read is made only as the model starts (a stock's initial
+    /// value, an `INIT` argument): it sets where the reader starts and does
+    /// not move it afterwards, so it is on no feedback loop.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub start_only: bool,
+    /// The stock's or flow's option the read is made in, when it is one: the
+    /// engine reads it there, outside the reader's equation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub option: Option<StockOptionName>,
+    /// Set when the read is written in an equation the engine cannot compile
+    /// (an unknown function, a wrong argument count): the reader reads it
+    /// once that equation compiles.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unchecked: bool,
+}
+
+/// A stock's or a flow's option, as a read record names it.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum StockOptionName {
+    /// A conveyor's transit time.
+    TransitTime,
+    /// A conveyor's capacity.
+    Capacity,
+    /// A conveyor's inflow limit.
+    InflowLimit,
+    /// A conveyor's sample condition.
+    Sample,
+    /// A conveyor's arrest condition.
+    Arrest,
+    /// A leak flow's fraction.
+    LeakFraction,
+    /// Where a leak's zone starts.
+    LeakZoneStart,
+    /// Where a leak's zone ends.
+    LeakZoneEnd,
+}
+
+impl From<crate::datamodel::StockOption> for StockOptionName {
+    fn from(option: crate::datamodel::StockOption) -> StockOptionName {
+        use crate::datamodel::StockOption;
+        match option {
+            StockOption::TransitTime => StockOptionName::TransitTime,
+            StockOption::Capacity => StockOptionName::Capacity,
+            StockOption::InflowLimit => StockOptionName::InflowLimit,
+            StockOption::Sample => StockOptionName::Sample,
+            StockOption::Arrest => StockOptionName::Arrest,
+            StockOption::LeakFraction => StockOptionName::LeakFraction,
+            StockOption::LeakZoneStart => StockOptionName::LeakZoneStart,
+            StockOption::LeakZoneEnd => StockOptionName::LeakZoneEnd,
+        }
+    }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -202,7 +268,7 @@ pub struct Lookup {
     pub kind: LookupKind,
     pub x: Vec<f64>,
     pub y: Vec<f64>,
-    /// How many more points the table has than the 64 listed.
+    /// How many more points the table has than are listed (at most 64).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub more_points: Option<usize>,
 }
@@ -240,6 +306,11 @@ pub struct VariableRecord {
     /// which `elements` lists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub equation: Option<String>,
+    /// Set when the equation, the initial value or `otherElements` was cut
+    /// (it then ends in an ellipsis) because the record did not fit one
+    /// answer whole.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
     /// A stock's initial value; absent for per-element initial values.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial: Option<String>,
@@ -274,12 +345,12 @@ pub struct VariableRecord {
     pub drains: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<ModuleRecord>,
-    /// The variables this one reads, each link with its polarity, at most 24.
+    /// The variables this one reads, each with its link's polarity, at most 24.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<LinkRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub more_inputs: Option<usize>,
-    /// The variables that read this one, each link with its polarity, at
+    /// The variables that read this one, each with its link's polarity, at
     /// most 24.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub readers: Vec<LinkRef>,
@@ -288,6 +359,9 @@ pub struct VariableRecord {
     /// This variable's diagnostics, each under the id `read_model` gives it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<DiagnosticReport>,
+    /// How many more diagnostics it has than `diagnostics` lists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub more_diagnostics: Option<usize>,
     /// What it did in the current run: a scalar variable's start and end,
     /// extremes and behavior mode (`read_behavior` has an arrayed one's, and
     /// more).
@@ -300,7 +374,11 @@ pub struct VariableRecord {
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FindVariablesInput {
-    /// A name, part of one, a misspelling, or a few words of description.
+    /// A name, part of one (the starts of its words: "pop gr" finds
+    /// "population growth"), a misspelling, or a few words of description;
+    /// at most 256 characters. The name itself ranks first, then names whose
+    /// words the phrase starts, then names and descriptions like it; a
+    /// phrase under four characters finds only the first two.
     pub phrase: String,
 }
 
@@ -312,6 +390,10 @@ pub struct FindVariablesOutput {
     pub revision: u64,
     /// Up to 10 variables, closest first.
     pub matches: Vec<VariableMatch>,
+    /// Matches left out, the least close, to keep the answer within its
+    /// budget: names too long to list them all.
+    #[serde(skip_serializing_if = "super::is_zero")]
+    pub omitted: usize,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -349,7 +431,7 @@ pub(crate) fn read_variables(
     let mut not_found = Vec::new();
     let mut read: BTreeSet<(String, Option<String>)> = BTreeSet::new();
     for name in &input.names {
-        match resolve_read(ws.project, model, name) {
+        match names::resolve_reference(ws.project, model, name) {
             Ok((var, element)) => {
                 let key = (
                     crate::canonicalize(var.get_ident()).into_owned(),
@@ -359,9 +441,10 @@ pub(crate) fn read_variables(
                     records.push((var, element));
                 }
             }
-            Err(suggestions) => not_found.push(NotFound {
-                name: name.clone(),
-                suggestions,
+            Err(unresolved) => not_found.push(NotFound {
+                name: super::evidence::echo(name),
+                suggestions: unresolved.suggestions,
+                reason: unresolved.reason,
             }),
         }
     }
@@ -374,35 +457,33 @@ pub(crate) fn read_variables(
         Err(refusal) if refusal.is_interrupted() => return Err(refusal),
         Err(refusal) => (None, Some(refusal.error)),
     };
-    let links = crate::analysis::model_links(
-        &*ws.db,
-        resolved.source_model,
-        resolved.source_project,
-        None,
-        false,
-    );
+    let reads =
+        crate::analysis::model_reads(&*ws.db, resolved.source_model, resolved.source_project);
 
     let variables: Vec<VariableRecord> = records
         .into_iter()
         .map(|(var, element)| {
             let canonical = crate::canonicalize(var.get_ident()).into_owned();
-            let neighbor = |name: &str, polarity: LinkPolarity| LinkRef {
+            let neighbor = |name: &str, read: &crate::analysis::ModelRead| LinkRef {
                 name: display_name(model, name),
-                polarity: polarity.into(),
+                polarity: read.polarity.into(),
+                start_only: read.start_only,
+                option: read.option.map(StockOptionName::from),
+                unchecked: read.unchecked,
             };
             let mut record = definition(model, var);
             if let Some(element) = &element {
                 narrow_to_element(&mut record, var, element);
             }
-            let mut inputs: Vec<LinkRef> = links
+            let mut inputs: Vec<LinkRef> = reads
                 .iter()
-                .filter(|l| l.to == canonical)
-                .map(|l| neighbor(&l.from, l.polarity))
+                .filter(|r| r.to == canonical)
+                .map(|r| neighbor(&r.from, r))
                 .collect();
-            let mut readers: Vec<LinkRef> = links
+            let mut readers: Vec<LinkRef> = reads
                 .iter()
-                .filter(|l| l.from == canonical)
-                .map(|l| neighbor(&l.to, l.polarity))
+                .filter(|r| r.from == canonical)
+                .map(|r| neighbor(&r.to, r))
                 .collect();
             inputs.sort_by(|a, b| a.name.cmp(&b.name));
             readers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -420,8 +501,10 @@ pub(crate) fn read_variables(
                     ..d.clone()
                 })
                 .collect();
-            // A scalar's behavior, or a named element's.
-            record.behavior = current.as_ref().and_then(|run| {
+            // A scalar's behavior, or a named element's. A constant has
+            // none worth the words: it is its value throughout.
+            let behaves = record.kind != VariableKind::Constant;
+            record.behavior = current.as_ref().filter(|_| behaves).and_then(|run| {
                 let (series, omitted) =
                     keyed_series_upto(run, model, var.get_ident(), element.as_deref(), 1);
                 let scalar_or_element = record.dimensions.is_empty() || element.is_some();
@@ -444,28 +527,8 @@ pub(crate) fn read_variables(
         omitted: vec![],
         behavior_unavailable,
     };
-    fit(&mut output, session.outline_budget);
+    fit(&mut output, session.outline_budget)?;
     Ok(output)
-}
-
-/// What `name` reads: a variable, or with a subscript one element of an
-/// arrayed variable; the closest names when it names neither.
-fn resolve_read<'a>(
-    project: &datamodel::Project,
-    model: &'a datamodel::Model,
-    name: &str,
-) -> Result<(&'a Variable, Option<String>), Vec<String>> {
-    if let Some(var) = model.get_variable(name) {
-        return Ok((var, None));
-    }
-    let Some((base, subscripts)) = names::split_subscript(name) else {
-        return names::resolve(model, name).map(|var| (var, None));
-    };
-    let var = names::resolve(model, base)?;
-    let dims = var.get_equation().map(dimensions).unwrap_or_default();
-    names::resolve_element(project, &dims, &subscripts)
-        .map(|element| (var, Some(element)))
-        .map_err(|reason| vec![format!("{}: {reason}", var.get_ident())])
 }
 
 /// Narrow a record of an arrayed variable to one element: its equation (a
@@ -522,21 +585,126 @@ fn capped<T>(mut items: Vec<T>, limit: usize) -> (Vec<T>, Option<usize>) {
 }
 
 /// Keep an answer within `budget` bytes: the records that fit, in order, with
-/// the rest named in `omitted`. The first record is always kept, since its
-/// own caps bound it.
-fn fit(output: &mut ReadVariablesOutput, budget: usize) {
-    let len = |output: &ReadVariablesOutput| {
-        serde_json::to_string(output)
-            .expect("records serialize")
-            .len()
-    };
-    while output.variables.len() > 1 && len(output) > budget {
-        let record = output.variables.pop().expect("more than one record");
-        let name = match &record.element {
-            Some(element) => format!("{}[{element}]", record.name),
-            None => record.name,
-        };
-        output.omitted.insert(0, name);
+/// the rest named in `omitted`; then, when the first record does not fit
+/// alone, that record cut ([`VariableRecord::shed`]) until it does. An answer
+/// that is over the budget with nothing left to cut -- names, units or wiring
+/// too long for one answer -- is refused rather than given.
+fn fit(output: &mut ReadVariablesOutput, budget: usize) -> Result<(), ToolError> {
+    let fits = super::fit(output, budget, |output| {
+        if output.variables.len() > 1 {
+            let record = output.variables.pop().expect("more than one record");
+            let name = match &record.element {
+                Some(element) => format!("{}[{element}]", record.name),
+                None => record.name,
+            };
+            output.omitted.insert(0, name);
+            true
+        } else {
+            output
+                .variables
+                .first_mut()
+                .is_some_and(VariableRecord::shed)
+        }
+    });
+    if fits {
+        Ok(())
+    } else {
+        Err(ToolError::new(format!(
+            "the answer does not fit one answer even with its lists and long text cut ({} \
+             bytes, and an answer holds {budget}): the names, units, flows or module wiring \
+             it must carry are too long. Read fewer variables in a call.",
+            super::json_len(output)
+        )))
+    }
+}
+
+/// The fewest characters a cut equation keeps.
+pub(crate) const MIN_CUT_CHARS: usize = super::evidence::QUOTE_CHARS;
+
+/// What a record that does not fit an answer alone leaves out, least
+/// important first: who reads it and what it reads are a call away
+/// (`find_variables`, the readers' own records), its definition is what the
+/// call was for, so its equation goes last.
+#[derive(Clone, Copy)]
+pub(crate) enum Cut {
+    Readers,
+    Inputs,
+    Diagnostics,
+    Elements,
+    LookupPoints,
+    Documentation,
+    /// The equation, the initial value and the other elements' equation.
+    Text,
+}
+
+impl Cut {
+    pub(crate) const ALL: [Cut; 7] = [
+        Cut::Readers,
+        Cut::Inputs,
+        Cut::Diagnostics,
+        Cut::Elements,
+        Cut::LookupPoints,
+        Cut::Documentation,
+        Cut::Text,
+    ];
+}
+
+impl VariableRecord {
+    /// Leave out the least important thing the record still carries
+    /// ([`Cut::ALL`], in order); false when nothing is left to leave out.
+    fn shed(&mut self) -> bool {
+        Cut::ALL.into_iter().any(|cut| self.cut(cut))
+    }
+
+    /// Leave out part of what `cut` names, and whether there was any: half
+    /// of a list (all of a list of one), counted beside it; the
+    /// documentation; half of each long text, no shorter than
+    /// [`MIN_CUT_CHARS`], which marks the record `truncated`.
+    fn cut(&mut self, cut: Cut) -> bool {
+        fn halve<T>(list: &mut Vec<T>, more: &mut Option<usize>) -> bool {
+            if list.is_empty() {
+                return false;
+            }
+            let keep = list.len() / 2;
+            *more = Some(more.unwrap_or(0) + list.len() - keep);
+            list.truncate(keep);
+            true
+        }
+        fn shorten(text: &mut Option<String>) -> bool {
+            let Some(text) = text else { return false };
+            let chars = text.chars().count();
+            // A cut text ends in an ellipsis, so it is one character longer
+            // than what it keeps: a text at the floor, cut already, is left.
+            let keep = (chars / 2).max(MIN_CUT_CHARS);
+            if keep + 1 >= chars {
+                return false;
+            }
+            *text = window(text, 0, 0, keep);
+            true
+        }
+        match cut {
+            Cut::Readers => halve(&mut self.readers, &mut self.more_readers),
+            Cut::Inputs => halve(&mut self.inputs, &mut self.more_inputs),
+            Cut::Diagnostics => halve(&mut self.diagnostics, &mut self.more_diagnostics),
+            Cut::Elements => halve(&mut self.elements, &mut self.more_elements),
+            Cut::LookupPoints => self.lookup.as_mut().is_some_and(|lookup| {
+                let cut = halve(&mut lookup.x, &mut lookup.more_points);
+                lookup.y.truncate(lookup.x.len());
+                cut
+            }),
+            Cut::Documentation => self.documentation.take().is_some(),
+            Cut::Text => {
+                // Every text is cut in one step, not the first alone.
+                let cut = [
+                    shorten(&mut self.equation),
+                    shorten(&mut self.initial),
+                    shorten(&mut self.other_elements),
+                ]
+                .contains(&true);
+                self.truncated |= cut;
+                cut
+            }
+        }
     }
 }
 
@@ -550,6 +718,7 @@ fn definition(model: &datamodel::Model, var: &Variable) -> VariableRecord {
         units: var.get_units().cloned().filter(|u| !u.is_empty()),
         documentation: None,
         equation: None,
+        truncated: false,
         initial: None,
         dimensions: vec![],
         elements: vec![],
@@ -567,10 +736,16 @@ fn definition(model: &datamodel::Model, var: &Variable) -> VariableRecord {
         readers: vec![],
         more_readers: None,
         diagnostics: vec![],
+        more_diagnostics: None,
         behavior: None,
     };
     let documentation = |text: &str| {
-        Some(window(text.trim(), 0, 0, MAX_DOCUMENTATION_CHARS)).filter(|t| !t.is_empty())
+        Some(window(&tidy(text), 0, 0, MAX_DOCUMENTATION_CHARS)).filter(|t| !t.is_empty())
+    };
+    // Flows as the model names them, the spelling every other name in the
+    // answer has, whatever spelling the stock's own list holds.
+    let named = |flows: Vec<String>| -> Vec<String> {
+        flows.iter().map(|flow| display_name(model, flow)).collect()
     };
     match var {
         Variable::Stock(stock) => {
@@ -581,8 +756,8 @@ fn definition(model: &datamodel::Model, var: &Variable) -> VariableRecord {
             record.other_elements = others;
             record.dimensions = dimensions(&stock.equation);
             record.non_negative = stock.compat.non_negative;
-            record.inflows = datamodel::distinct_stock_flows(&stock.inflows).flows;
-            record.outflows = datamodel::distinct_stock_flows(&stock.outflows).flows;
+            record.inflows = named(datamodel::distinct_stock_flows(&stock.inflows).flows);
+            record.outflows = named(datamodel::distinct_stock_flows(&stock.outflows).flows);
         }
         Variable::Flow(flow) => {
             record.documentation = documentation(&flow.documentation);
@@ -640,6 +815,28 @@ fn definition(model: &datamodel::Model, var: &Variable) -> VariableRecord {
         }
     }
     record
+}
+
+/// Documentation as one run of prose: a line an importer left broken in the
+/// middle of a sentence is joined, and runs of spaces, tabs and line breaks
+/// are one space, except that a blank line between paragraphs is one line
+/// break.
+///
+/// A Vensim model file wraps a long comment with a backslash at the end of
+/// each line and indents the next (every wrapped comment of
+/// `test/xmutil_test_models/C-LEARN v77 for Vensim.mdl`, a file Vensim
+/// wrote, is so); the MDL reader keeps the comment as written, so the
+/// backslash and the indentation reach here. That the backslash is a
+/// continuation and no part of the comment is the file's evidence, unverified
+/// against Vensim's documentation.
+pub(crate) fn tidy(text: &str) -> String {
+    let joined = text.replace("\r\n", "\n").replace("\\\n", " ");
+    joined
+        .split("\n\n")
+        .map(|paragraph| paragraph.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|paragraph| !paragraph.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// An equation as a record holds it: the one text of a scalar or
@@ -701,11 +898,20 @@ pub(crate) fn find_variables(
     ws: &Workspace<'_>,
     model_name: &str,
     input: FindVariablesInput,
+    budget: usize,
 ) -> Result<FindVariablesOutput, ToolError> {
     if input.phrase.trim().is_empty() {
         return Err(ToolError::new(
             "give a phrase to search for: a name, part of one, or a few words of description",
         ));
+    }
+    let length = input.phrase.chars().count();
+    if length > names::MAX_QUERY_CHARS {
+        return Err(ToolError::new(format!(
+            "a phrase to search for is at most {} characters (this one has {length}): give a \
+             name, part of one, or a few words of description",
+            names::MAX_QUERY_CHARS
+        )));
     }
     let resolved = resolve_model(ws.project, ws.db, model_name)?;
     let matches = names::rank(resolved.model, &input.phrase)
@@ -715,14 +921,30 @@ pub(crate) fn find_variables(
         .map(|(score, var)| VariableMatch {
             name: var.get_ident().to_string(),
             kind: VariableKind::of(var),
-            units: var.get_units().cloned().filter(|u| !u.is_empty()),
+            // Units are read, never passed back: a long string is cut.
+            units: var
+                .get_units()
+                .filter(|u| !u.is_empty())
+                .map(|units| super::evidence::window(units, 0, 0, super::evidence::QUOTE_CHARS)),
             score: (score * 100.0).round() / 100.0,
         })
         .collect();
-    Ok(FindVariablesOutput {
+    let mut output = FindVariablesOutput {
         revision: ws.revision,
         matches,
-    })
+        omitted: 0,
+    };
+    // A name is what the agent passes back, so it is never cut: the least
+    // close matches are left out, counted, until the answer fits.
+    super::fit(&mut output, budget, |output| {
+        if output.matches.len() <= 1 {
+            return false;
+        }
+        output.matches.pop();
+        output.omitted += 1;
+        true
+    });
+    Ok(output)
 }
 
 #[cfg(test)]

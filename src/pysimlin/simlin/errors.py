@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Any
 
 
 class ErrorCode(IntEnum):
@@ -170,13 +171,18 @@ class SimlinWriteError(SimlinRuntimeError):
     error.  ``write_failed`` says whether that step was the autosave write
     -- the project is then ``dirty`` and ``save()`` retries -- as opposed to
     a later one (notifying subscribers) after the file was written, where
-    there is nothing to retry.
+    there is nothing to retry.  Raised by a tool call that made an edit too
+    (:meth:`simlin.ToolSession.call`), whose ``answer`` is then the tool's
+    answer, which the failure would otherwise lose.
     """
 
-    def __init__(self, message: str, revision: int, *, write_failed: bool = True):
+    def __init__(
+        self, message: str, revision: int, *, write_failed: bool = True, answer: Any = None
+    ):
         super().__init__(message)
         self.revision = revision
         self.write_failed = write_failed
+        self.answer = answer
 
 
 class SimlinDependencyError(SimlinError, ImportError):

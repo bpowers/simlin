@@ -10,19 +10,6 @@ use crate::test_common::TestProject;
 use crate::tools::Session;
 use crate::tools::test_support::{Host, inventory};
 
-/// Accounts for nothing: every change is reported.
-struct Nothing;
-
-impl Explains for Nothing {
-    fn variable(&self, _name: &str, _record: Option<&Variable>) -> bool {
-        false
-    }
-
-    fn specs(&self, _specs: &datamodel::SimSpecs) -> bool {
-        false
-    }
-}
-
 fn aux(name: &str, equation: &str) -> Variable {
     TestProject::new("p")
         .aux(name, equation, Some("widget"))
@@ -188,7 +175,7 @@ fn the_diff_names_added_removed_and_changed_variables_as_the_model_spells_them()
         .set_scalar_equation("6");
     model.variables.push(aux("Backlog Level", "0"));
 
-    let changes = diff(&snapshot, &edited, &edited.models[0], &Nothing);
+    let changes = diff(&snapshot, &edited, &edited.models[0]);
     assert_eq!(changes.since_revision, 3);
     assert_eq!(changes.added, ["Backlog Level"]);
     assert_eq!(changes.removed, ["shipments"]);
@@ -224,11 +211,11 @@ fn a_view_edit_changes_nothing_an_agent_read_and_a_specs_edit_does() {
             font: None,
             sketch_compat: None,
         }));
-    assert!(diff(&snapshot, &moved, &moved.models[0], &Nothing).is_empty());
+    assert!(diff(&snapshot, &moved, &moved.models[0]).is_empty());
 
     let mut respecified = project.clone();
     respecified.sim_specs.stop = 40.0;
-    let changes = diff(&snapshot, &respecified, &respecified.models[0], &Nothing);
+    let changes = diff(&snapshot, &respecified, &respecified.models[0]);
     assert!(changes.specs_changed && changes.added.is_empty() && changes.changed.is_empty());
 
     // A model's own specs override the project's, so they are what count.
@@ -236,7 +223,7 @@ fn a_view_edit_changes_nothing_an_agent_read_and_a_specs_edit_does() {
     let mut specs = own.sim_specs.clone();
     specs.dt = datamodel::Dt::Reciprocal(8.0);
     own.models[0].sim_specs = Some(specs);
-    assert!(diff(&snapshot, &own, &own.models[0], &Nothing).specs_changed);
+    assert!(diff(&snapshot, &own, &own.models[0]).specs_changed);
 }
 
 #[test]
@@ -249,7 +236,7 @@ fn a_change_list_is_capped_and_counted() {
             .variables
             .push(aux(&format!("added_{i:02}"), "1"));
     }
-    let changes = diff(&snapshot, &grown, &grown.models[0], &Nothing);
+    let changes = diff(&snapshot, &grown, &grown.models[0]);
     assert_eq!(changes.added.len(), MAX_CHANGED_NAMES);
     assert_eq!(changes.added_count, Some(MAX_CHANGED_NAMES + 5));
     assert_eq!(changes.removed_count, None);
@@ -262,6 +249,7 @@ fn a_session_reports_the_changes_since_its_last_read_once_the_revision_moves() {
     assert!(
         session
             .changes_since_read(&host.project, host.revision)
+            .unwrap()
             .is_none(),
         "nothing was read yet"
     );
@@ -269,6 +257,7 @@ fn a_session_reports_the_changes_since_its_last_read_once_the_revision_moves() {
     assert!(
         session
             .changes_since_read(&host.project, host.revision)
+            .unwrap()
             .is_none()
     );
 
@@ -277,6 +266,7 @@ fn a_session_reports_the_changes_since_its_last_read_once_the_revision_moves() {
     assert!(
         session
             .changes_since_read(&host.project, host.revision)
+            .unwrap()
             .is_none()
     );
 
@@ -288,6 +278,7 @@ fn a_session_reports_the_changes_since_its_last_read_once_the_revision_moves() {
     });
     let changes = session
         .changes_since_read(&host.project, host.revision)
+        .unwrap()
         .expect("an equation edit is a change");
     assert_eq!(changes.since_revision, 0);
     assert_eq!(changes.changed[0].name, "adjustment_time");
@@ -301,10 +292,21 @@ fn a_session_reports_the_changes_since_its_last_read_once_the_revision_moves() {
     assert!(
         session
             .changes_since_read(&host.project, host.revision)
+            .unwrap()
             .is_none()
     );
     let outline = host.call(&mut session, "read_model", json!({}));
     assert!(outline.get("changes").is_none(), "{outline}");
+
+    // A project that no longer has the session's model is refused, as a tool
+    // refuses it, rather than reported as unchanged.
+    // ("main" names the first model when none is called that, so the
+    // project has none.)
+    host.edit(|p| p.models.clear());
+    let refused = session
+        .changes_since_read(&host.project, host.revision)
+        .expect_err("the session's model is gone");
+    assert_eq!(refused, "the project has no model named 'main'");
 }
 
 /// What a model's variables rest on changes too: its dimensions, the
@@ -323,14 +325,14 @@ fn the_diff_names_what_the_models_variables_rest_on() {
     sub.variables.retain(|v| v.get_ident() == "x");
     project.models.push(sub);
     let snapshot = ReadSnapshot::new(0, &project, &project.models[0]);
-    assert!(diff(&snapshot, &project, &project.models[0], &Nothing).is_empty());
+    assert!(diff(&snapshot, &project, &project.models[0]).is_empty());
 
     let mut dims = project.clone();
     dims.dimensions[0] = datamodel::Dimension::named(
         "region".to_string(),
         vec!["north".to_string(), "south".to_string(), "east".to_string()],
     );
-    let changes = diff(&snapshot, &dims, &dims.models[0], &Nothing);
+    let changes = diff(&snapshot, &dims, &dims.models[0]);
     assert!(changes.dimensions_changed, "an element added");
     assert!(!changes.is_empty());
 
@@ -341,25 +343,25 @@ fn the_diff_names_what_the_models_variables_rest_on() {
         disabled: false,
         aliases: vec![],
     });
-    assert!(diff(&snapshot, &units, &units.models[0], &Nothing).unit_definitions_changed);
+    assert!(diff(&snapshot, &units, &units.models[0]).unit_definitions_changed);
 
     let mut other = project.clone();
     other.models[1]
         .get_variable_mut("x")
         .unwrap()
         .set_scalar_equation("2");
-    let changes = diff(&snapshot, &other, &other.models[0], &Nothing);
+    let changes = diff(&snapshot, &other, &other.models[0]);
     assert_eq!(changes.models_changed, ["sub"]);
 
     // The other model's diagram is no change.
     let mut moved = project.clone();
     moved.models[1].views.clear();
-    assert!(diff(&snapshot, &moved, &moved.models[0], &Nothing).is_empty());
+    assert!(diff(&snapshot, &moved, &moved.models[0]).is_empty());
 
     let mut gone = project.clone();
     gone.models.pop();
     assert_eq!(
-        diff(&snapshot, &gone, &gone.models[0], &Nothing).models_changed,
+        diff(&snapshot, &gone, &gone.models[0]).models_changed,
         ["sub"]
     );
 }
@@ -372,7 +374,7 @@ fn a_change_of_case_is_a_change_of_name() {
     if let Variable::Aux(aux) = edited.models[0].get_variable_mut("coverage").unwrap() {
         aux.ident = "Coverage".to_string();
     }
-    let changes = diff(&snapshot, &edited, &edited.models[0], &Nothing);
+    let changes = diff(&snapshot, &edited, &edited.models[0]);
     assert!(
         changes.added.is_empty() && changes.removed.is_empty(),
         "{changes:?}"
@@ -380,4 +382,101 @@ fn a_change_of_case_is_a_change_of_name() {
     assert_eq!(changes.changed.len(), 1);
     assert_eq!(changes.changed[0].name, "Coverage");
     assert_eq!(changes.changed[0].fields, [ChangedField::Name]);
+}
+
+/// What a session's own edit leaves of another model is held as the read
+/// would have given it: no provenance (which every edit marks, and a read
+/// does not compare) and no variable the edit removed. The model the edit
+/// left is then no change since the read.
+#[test]
+fn another_models_variable_as_the_edit_left_it_is_no_change() {
+    let mut project = TestProject::new("main")
+        .aux("x", "1", None)
+        .build_datamodel();
+    let mut sub = project.models[0].clone();
+    sub.name = "sub".to_string();
+    sub.variables.push(aux("y", "2"));
+    project.models.push(sub);
+    let main = project.models[0].clone();
+
+    // The edit marks who made `x` in `sub`.
+    let mut marked = project.clone();
+    let made_by_agent = |var: &mut Variable| match var {
+        Variable::Aux(aux) => aux.ai_state = Some(datamodel::AiState::A),
+        _ => unreachable!("an auxiliary"),
+    };
+    made_by_agent(marked.models[1].get_variable_mut("x").unwrap());
+    let mut snapshot = ReadSnapshot::new(0, &project, &main);
+    snapshot.absorb_variable(Some("sub"), "x", marked.models[1].get_variable("x"));
+    assert!(diff(&snapshot, &marked, &marked.models[0]).is_empty());
+
+    // The edit removes `y` from `sub`.
+    let mut removed = project.clone();
+    removed.models[1].variables.retain(|v| v.get_ident() != "y");
+    let mut snapshot = ReadSnapshot::new(0, &project, &main);
+    snapshot.absorb_variable(Some("sub"), "y", None);
+    assert!(diff(&snapshot, &removed, &removed.models[0]).is_empty());
+    // Absorbed or not, a change the edit did not make is still one.
+    removed.models[1]
+        .get_variable_mut("x")
+        .unwrap()
+        .set_scalar_equation("3");
+    assert_eq!(
+        diff(&snapshot, &removed, &removed.models[0]).models_changed,
+        ["sub"]
+    );
+}
+
+/// The revision is what a read is of: at the revision it was made at, a
+/// session has nothing to report, whatever project a host passes with it.
+#[test]
+fn at_the_revision_of_the_read_nothing_changed_since_it() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    host.call(&mut session, "read_model", json!({}));
+    let mut other = host.project.clone();
+    other.models[0]
+        .get_variable_mut("adjustment_time")
+        .unwrap()
+        .set_scalar_equation("3");
+    assert!(
+        session
+            .changes_since_read(&other, host.revision)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        session
+            .changes_since_read(&other, host.revision + 1)
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// More other models changed than the list holds: the list is cut and the
+/// count says how many changed.
+#[test]
+fn more_changed_models_than_the_list_holds_are_counted() {
+    let mut project = TestProject::new("main")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("a", "1", None)
+        .build_datamodel();
+    let template = project.models[0].clone();
+    let others = MAX_CHANGED_NAMES + 3;
+    for i in 0..others {
+        let mut other = template.clone();
+        other.name = format!("other {i:02}");
+        project.models.push(other);
+    }
+    let snapshot = ReadSnapshot::new(0, &project, &project.models[0]);
+    let mut edited = project.clone();
+    for model in &mut edited.models[1..] {
+        model
+            .get_variable_mut("a")
+            .unwrap()
+            .set_scalar_equation("2");
+    }
+    let changes = diff(&snapshot, &edited, &edited.models[0]);
+    assert_eq!(changes.models_changed.len(), MAX_CHANGED_NAMES);
+    assert_eq!(changes.models_changed_count, Some(others));
 }

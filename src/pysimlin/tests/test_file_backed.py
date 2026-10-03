@@ -8,7 +8,9 @@ Test names follow the design's acceptance criteria
 
 from __future__ import annotations
 
+import ast
 import gc
+import inspect
 import json
 import re
 import shutil
@@ -35,6 +37,7 @@ from simlin import (
     Stock,
 )
 from simlin._disk import _UNKNOWN, content_hash
+from simlin.tools import ToolSession
 
 from .conftest import get_repo_root
 
@@ -47,6 +50,19 @@ SDAI_FIXTURE = get_repo_root() / "test" / "sd-ai-simple.sd.json"
 # A watch interval long enough that the poll thread never fires on its own
 # during a test; the tests drive polls deterministically via poll_once().
 IDLE = 3600.0
+
+# The methods of Project that notify subscribers, each an arm of
+# test_m9_notify_runs_with_no_project_lock_held; test_every_notify_call_site_has_an_arm
+# holds the set equal to the methods that call _notify.
+_NOTIFY_CALL_SITES = {
+    "_apply_patch_json",
+    "_apply_snapshot",
+    "_commit_tool_edit",
+    "_ensure_view",
+    "_ingest_disk_bytes",
+    "auto_layout",
+    "reload",
+}
 
 
 def _copy(src: Path, tmp_path: Path, name: str | None = None) -> Path:
@@ -1569,11 +1585,18 @@ class TestSnapshotEdgeCases:
         finally:
             model.project.watch(False)  # type: ignore[union-attr]
 
-    @pytest.mark.parametrize("arm", ["edit", "auto_layout", "widget", "disk", "reload"])
+    @pytest.mark.parametrize("arm", sorted(_NOTIFY_CALL_SITES))
     def test_m9_notify_runs_with_no_project_lock_held(self, tmp_path: Path, arm: str) -> None:
         # Every _notify call site: a listener that touches the project (or
         # is marshalled onto another thread that does) must not deadlock.
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        if arm == "_ensure_view":
+            # A model with no diagram, which a display lays out.
+            doc = json.loads(Project.open(path, watch=False).serialize_json())
+            for each in doc["models"]:
+                each["views"] = []
+            path = tmp_path / "viewless.json"
+            path.write_text(json.dumps(doc))
         model = simlin.open(path, watch=False)
         _watch_idle(model)
         project = model.project
@@ -1597,16 +1620,33 @@ class TestSnapshotEdgeCases:
         project.on_change(probe)
         try:
             match arm:
-                case "edit":
+                case "_apply_patch_json":
                     _add_aux(model)
                     expected = "edit"
                 case "auto_layout":
                     project.auto_layout("main")
                     expected = "edit"
-                case "widget":
+                case "_ensure_view":
+                    assert project._ensure_view("main") is True
+                    expected = "edit"
+                case "_commit_tool_edit":
+                    session = ToolSession(model)
+                    session.call("read_model")
+                    edit = session.call(
+                        "edit_model",
+                        {
+                            "summary": "Add a constant.",
+                            "operations": [
+                                {"op": "add_variable", "name": "spare", "equation": "3"}
+                            ],
+                        },
+                    )
+                    assert not edit.is_error, edit.data
+                    expected = "edit"
+                case "_apply_snapshot":
                     project._apply_snapshot(project.serialize_json(), base_revision=0)
                     expected = "widget"
-                case "disk":
+                case "_ingest_disk_bytes":
                     _add_aux(simlin.open(path, watch=False), "ext")
                     _poll(model)
                     expected = "disk"
@@ -1619,6 +1659,21 @@ class TestSnapshotEdgeCases:
         finally:
             project.watch(False)
         assert results == [(expected, True)]
+
+    def test_every_notify_call_site_has_an_arm(self) -> None:
+        # The arms above are the methods of Project that call _notify, read
+        # from its source, so a new call site fails here until it has one.
+        tree = ast.parse(inspect.getsource(Project))
+        callers = {
+            function.name
+            for function in ast.walk(tree)
+            if isinstance(function, ast.FunctionDef)
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "_notify"
+        }
+        assert callers == _NOTIFY_CALL_SITES
 
 
 class TestOpenOnDirectory:

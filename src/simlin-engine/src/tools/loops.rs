@@ -539,7 +539,11 @@ pub(crate) fn through_of(
     name: &str,
 ) -> Result<String, ToolError> {
     let not_found = |suggestions: Vec<String>| {
-        ToolError::new(format!("the model has no variable '{name}'")).with_suggestions(suggestions)
+        ToolError::new(format!(
+            "the model has no variable '{}'",
+            super::evidence::echo(name)
+        ))
+        .with_suggestions(suggestions)
     };
     if let Some(var) = model.get_variable(name) {
         return Ok(var.get_ident().to_string());
@@ -1126,14 +1130,11 @@ fn stocks_at_rest(model: &datamodel::Model, plan: &RunPlan, results: &Results) -
             continue;
         };
         let canonical = crate::canonicalize(&stock.ident).into_owned();
-        let prefix = format!("{canonical}[");
-        for (key, &offset) in &results.offsets {
-            if key.as_str() != canonical && !key.as_str().starts_with(&prefix) {
-                continue;
-            }
+        for column in super::series::variable_columns(results, model, &canonical) {
             any = true;
-            let series: Vec<f64> = results.iter().map(|row| row[offset]).collect();
-            let scale = super::series::scale_in_run(results, model, plan, key.as_str());
+            let series: Vec<f64> = results.iter().map(|row| row[column.offset]).collect();
+            let key = format!("{canonical}{}", column.subscript);
+            let scale = super::series::scale_in_run(results, model, plan, &key);
             if super::behavior::classify_at(&times, &series, scale).kind
                 != super::behavior::ModeKind::AtRest
             {

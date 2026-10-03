@@ -891,6 +891,49 @@ fn apply_rename_variable(
     Ok(())
 }
 
+/// The variables whose expression texts name the variable `name` (canonical)
+/// of the model `model_name`: in that model, and through module instances in
+/// every model that reaches it, found as a rename finds what it respells
+/// (`Rename`, over `Variable::expression_texts`), each as `(model, variable)`
+/// by its display spelling. A text that names it where a rename could not
+/// tell whether it is a reference counts as naming it. The variable itself,
+/// when the model has it, is left out. What a delete or a rename leaves
+/// dangling is what this finds after it: the one owner of "who still names a
+/// variable", so a reference the compiler's report does not show (an
+/// equation that failed already, a cycle hidden behind another) is found as
+/// the rename would find it.
+#[cfg(feature = "agent_tools")]
+pub(crate) fn variables_naming(
+    project: &datamodel::Project,
+    model_name: &str,
+    name: &str,
+) -> Vec<(String, String)> {
+    let Some(model_index) = project.model_index(model_name) else {
+        return Vec::new();
+    };
+    let old = Ident::<Canonical>::new(name);
+    let rename = Rename::new(project, model_index, &old, &old);
+    let reaches = rename.models_reaching();
+    let mut naming = Vec::new();
+    for (index, model) in project.models.iter().enumerate() {
+        if !reaches[index] {
+            continue;
+        }
+        for var in model.variables.iter() {
+            if index == model_index && canonicalize(var.get_ident()) == old.as_str() {
+                continue;
+            }
+            // Renaming the variable to its own name respells every reference
+            // to it, so a text it gives a respelling, or finds ambiguous,
+            // names it.
+            if !matches!(rename.renamed_texts(index, var), Ok(None)) {
+                naming.push((model.name.clone(), var.get_ident().to_string()));
+            }
+        }
+    }
+    naming
+}
+
 /// What a module instance instantiates.
 enum Instantiates {
     /// A model of the project, by its index in `project.models`.
@@ -935,7 +978,7 @@ enum ReadAs {
 /// Where in an expression a reference is written, which decides what the
 /// compiler can read it as.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Site {
+pub(crate) enum Site {
     /// An identifier anywhere but alone in a subscript's brackets: an
     /// operand, a call's argument, a part of an index expression.
     Value,
@@ -1401,6 +1444,30 @@ fn renamed_text(
         text.replace_range(splice.start..splice.start + splice.old_len, &splice.new);
     }
     Ok(Some(text))
+}
+
+/// Every reference `text` writes, in the order written, with the [`Site`] it
+/// is written at: the walk a rename makes of a text (`renamed_text`), asked
+/// to respell nothing. `None` for a text that does not parse, whose
+/// references no reader can know; an empty text writes none.
+pub(crate) fn text_references(text: &str) -> Option<Vec<(Site, Ident<Canonical>)>> {
+    let expr = match Expr0::new(text, LexerType::Equation) {
+        Ok(Some(expr)) => expr,
+        Ok(None) => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let found = std::cell::RefCell::new(Vec::new());
+    let record = |site: Site, reference: &Ident<Canonical>| -> Respelled {
+        found.borrow_mut().push((site, reference.clone()));
+        Ok(None)
+    };
+    let mut walk = Walk {
+        renamed: &record,
+        splices: Vec::new(),
+        ambiguity: None,
+    };
+    walk.expr(&expr);
+    Some(found.into_inner())
 }
 
 /// One reference a rename respells: where it starts in the text, how long it

@@ -947,7 +947,7 @@ fn runs_past_the_store_budget_are_run_again_from_their_plans() {
             json!({"name": name, "set": [{"variable": "coverage", "value": value}]}),
         );
     }
-    let listing = session.runs(&host.workspace());
+    let listing = session.runs(&host.project, host.revision);
     assert_eq!(listing.len(), 3);
     let a = samples(&mut host, &mut session, "Inventory", "a");
     let mut fresh = Session::new("main");
@@ -968,7 +968,7 @@ fn runs_past_the_store_budget_are_run_again_from_their_plans() {
             .unwrap()
             .set_scalar_equation("12")
     });
-    let listing = session.runs(&host.workspace());
+    let listing = session.runs(&host.project, host.revision);
     assert!(listing.iter().all(|run| run.stale), "{listing:?}");
     let gone: Vec<&str> = listing
         .iter()
@@ -1017,7 +1017,7 @@ fn a_change_is_exactly_one_of_value_multiply_and_equation() {
 }
 
 fn listing(host: &mut Host, session: &mut Session) -> Value {
-    serde_json::to_value(session.runs(&host.workspace())).unwrap()
+    serde_json::to_value(session.runs(&host.project, host.revision)).unwrap()
 }
 
 /// A run's listing is what it changed from the model, exactly as it ran --
@@ -1088,7 +1088,7 @@ fn runs_are_listed_oldest_first_those_kept_only_as_plans_included() {
     }
     let names = |host: &mut Host, session: &mut Session| -> Vec<String> {
         session
-            .runs(&host.workspace())
+            .runs(&host.project, host.revision)
             .into_iter()
             .map(|run| run.name)
             .collect()
@@ -1167,7 +1167,7 @@ fn an_experiment_that_would_cost_more_than_a_run_may_is_refused_with_what_fits()
         "{reason}"
     );
     assert!(
-        session.runs(&host.workspace()).is_empty(),
+        session.runs(&host.project, host.revision).is_empty(),
         "nothing is kept"
     );
     // The DT it names fits.
@@ -1261,7 +1261,10 @@ fn a_call_stops_before_its_next_simulation_when_other_work_waits() {
         "{}",
         output.json
     );
-    assert!(session.runs(&host.workspace()).is_empty(), "no run is kept");
+    assert!(
+        session.runs(&host.project, host.revision).is_empty(),
+        "no run is kept"
+    );
     // With the model's own run already made, the experiment's own run is the
     // one it stops before.
     samples(&mut host, &mut session, "Inventory", "current");
@@ -1276,7 +1279,10 @@ fn a_call_stops_before_its_next_simulation_when_other_work_waits() {
         "{}",
         output.json
     );
-    assert!(session.runs(&host.workspace()).is_empty(), "no run is kept");
+    assert!(
+        session.runs(&host.project, host.revision).is_empty(),
+        "no run is kept"
+    );
 
     session.runs.byte_budget = Some(1);
     for name in ["a", "b"] {
@@ -1340,4 +1346,57 @@ fn a_forgotten_run_is_gone_for_every_tool_and_what_was_made_from_it_stays() {
     assert_eq!(session.forget_run("base"), Ok(false));
     assert_eq!(session.forget_run("never made"), Ok(false));
     assert!(session.forget_run("current").is_err());
+}
+
+/// An experiment's comparisons that do not fit the budget are left out,
+/// the last recorded first, and counted: the run is kept whole, and
+/// read_behavior reads any of them.
+#[test]
+fn comparisons_that_do_not_fit_are_counted() {
+    let mut project = TestProject::new("wide").aux("k", "1", None);
+    let names: Vec<String> = (0..12)
+        .map(|i| format!("a_long_recorded_variable_name_number_{i}"))
+        .collect();
+    for name in &names {
+        project = project.aux(name, "k * TIME", None);
+    }
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    session.outline_budget = 1_200;
+    let answer = host.call(
+        &mut session,
+        "run_experiment",
+        json!({"name": "e", "set": [{"variable": "k", "value": 2}], "record": names}),
+    );
+    assert!(answer.to_string().len() <= 1_200, "{answer}");
+    let listed = answer["behavior"].as_array().unwrap().len();
+    assert!((1..12).contains(&listed), "{answer}");
+    assert_eq!(answer["omitted"], 12 - listed);
+}
+
+/// A replacement equation too long for the budget is quoted around its
+/// start once nothing else can be left out, so the answer still fits.
+#[test]
+fn a_long_replacement_equation_is_quoted_so_the_answer_fits() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    session.outline_budget = 1_500;
+    // Long and shallow: an equation nested deeply is refused before it runs.
+    let long = format!("orders * 1.{}", "0".repeat(3_000));
+    let output = host.call_raw(
+        &mut session,
+        "run_experiment",
+        &json!({"name": "long", "set": [{"variable": "production", "equation": long}],
+                "record": ["Inventory"]})
+        .to_string(),
+    );
+    assert!(!output.is_error, "{}", output.json);
+    assert!(output.json.len() <= 1_500, "{} bytes", output.json.len());
+    let answer: Value = serde_json::from_str(&output.json).unwrap();
+    let quoted = answer["applied"][0]["equation"].as_str().unwrap();
+    assert!(quoted.starts_with("orders * 1.000"), "{quoted}");
+    assert!(
+        quoted.ends_with(&format!("({} characters)", long.len())),
+        "{quoted}"
+    );
 }

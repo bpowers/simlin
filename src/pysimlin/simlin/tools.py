@@ -4,27 +4,43 @@ A :class:`ToolSession` is one agent's work on one model: call a tool of the
 engine's catalog by name with JSON-shaped input and read its JSON-shaped
 output back, exactly as a native host's agent does. What each tool answers is
 the engine's decision (``simlin_engine::tools``); this module only carries the
-calls. A refusal -- an unknown variable, input the tool's schema does not
-allow -- is output the agent reads (``ToolOutput.is_error``), never an
-exception; an exception is the caller's misuse, such as a tool the catalog
-does not list.
+calls. A refusal -- input the tool's schema does not allow, an edit the
+engine's gate refuses -- is output the agent reads (``ToolOutput.is_error``,
+set exactly when the call did not do what was asked), never an exception;
+an exception is the caller's misuse, such as a tool the catalog does not
+list.
 
-``edit_model`` plans an edit and applies nothing. :meth:`ToolSession.land`
-lands a plan, as a host does once the person approves it: the engine lands it
-on the project as it is (planned again when the project changed since, and
-refused, with the reason, when what it writes changed or it no longer passes
-the gate), and the project commits the edit as it commits any other.
+A tool whose catalog entry says its effect is ``edit`` (``edit_model``) edits
+the project inside the call when the engine's gate passes it. The project then
+commits the edit as it commits any other: its revision moves, its models'
+caches are dropped, a file-backed project writes back to its file, and its
+subscribers are told. A refused, interrupted or cancelled edit changes
+nothing, and nothing is committed.
 
-Thread-safety: a session serializes its calls with a per-instance lock, and
-the engine locks the session, the project's contents, and its database for
-each call. :meth:`ToolSession.cancel` takes no lock, so another thread can
-stop a call under way.
+Thread-safety: a session holds no lock of its own. The engine serializes a
+session's calls (its session is a mutex), and it is the engine that knows
+which calls wait: a call takes its cancel ticket as it enters the engine,
+before it waits for the session, and an edit counts itself among the work a
+read call stops for before it waits. A lock here would make a second call
+wait in Python where the engine cannot see it, so :meth:`ToolSession.cancel`
+would miss the call, and a read call under way would never stop for an edit.
+The handle is set once and released when the session is collected, so nothing
+here needs guarding.
+
+An edit tool's call holds the project's locks as any edit does
+(``Project._file_lock``, then ``Project._lock``), and waits for them in Python,
+before it reaches the engine's ticket. So the session keeps a ticket of its
+own, which no lock guards: :meth:`ToolSession.cancel` advances it, an edit
+reads it before it waits for the project's locks, and once it holds them an
+edit cancelled meanwhile answers the engine's cancelled refusal without
+entering the engine.
 """
 
 from __future__ import annotations
 
+import functools
+import itertools
 import json
-import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -65,15 +81,6 @@ class ToolOutput:
 
 
 @dataclass(frozen=True)
-class Landing:
-    """What landing a plan came to: whether it landed, and why not, for the
-    agent to plan the edit again."""
-
-    landed: bool
-    reason: str | None = None
-
-
-@dataclass(frozen=True)
 class RunListing:
     """One of a session's named runs: the revision it was made at, whether
     the model has changed since (its diagrams aside), whether it is gone
@@ -109,46 +116,98 @@ def catalog() -> dict[str, Any]:
         lib.simlin_free(out_buf[0])
 
 
+def _cancelled() -> ToolOutput:
+    """The engine's answer to a call its host cancelled before it began its
+    work (``simlin_engine::tools::ToolOutput::cancelled``), for an edit
+    cancelled while it waited for the project's locks: the same refusal, so
+    a host tells the two apart by nothing. ``tests/test_tools.py`` holds it
+    equal to the engine's."""
+    return ToolOutput(
+        data={
+            "error": "the host cancelled the call, which stopped before it finished "
+            "and kept nothing",
+            "cancelled": True,
+        },
+        is_error=True,
+    )
+
+
+@functools.cache
+def _tool_effects() -> dict[str, str]:
+    """Each tool's effect, as the catalog states it: the one place the binding
+    learns which tools edit the project."""
+    return {tool["name"]: tool["effect"] for tool in catalog()["tools"]}
+
+
 class ToolSession:
     """One agent's work on one model through the engine's tools.
 
     The session's evidence ids (diagnostics ``D1``, loops ``L1``, checks
-    ``T1``, plans ``P1``, findings ``F1``), its last read and its runs are its
-    own, and mean nothing to another session.
+    ``T1``, findings ``F1``), its last read and its runs are its own, and
+    mean nothing to another session.
     """
 
     def __init__(self, model: Model) -> None:
-        self._lock = threading.Lock()
         self._model = model
         err_ptr = ffi.new("SimlinError **")
         ptr = lib.simlin_tool_session_new(model._ptr, err_ptr)
         check_out_error(err_ptr, "Make a tool session")
         self._ptr = ptr
         _register_finalizer(self, lib.simlin_tool_session_unref, ptr)
+        # The session's own cancel ticket (see the module docstring): the
+        # number of the latest cancel. ``next`` on an ``itertools.count`` is
+        # one step under the GIL, so concurrent cancels each get a number.
+        self._cancels = itertools.count(1)
+        self._cancelled = 0
 
     @property
     def model(self) -> Model:
         return self._model
 
     def call(self, tool: str, input: Mapping[str, Any] | None = None) -> ToolOutput:
-        """Call ``tool`` with ``input`` (``{}`` when absent)."""
+        """Call ``tool`` with ``input`` (``{}`` when absent).
+
+        A tool whose effect is ``edit`` changes the project when its gate
+        passes; the project commits that edit before this returns (see
+        ``Project._commit_tool_edit``), so the model reads as edited, a
+        file-backed project is written, and subscribers are told.
+
+        Raises:
+            SimlinRuntimeError: For a tool the catalog does not list.
+            SimlinWriteError: When an edit was made and committed in memory
+                but a file-backed project's autosave failed; its ``answer``
+                is the tool's answer, and ``__cause__`` the failure.
+        """
         payload = json.dumps(dict(input or {})).encode("utf-8")
+        if _tool_effects().get(tool) == "edit":
+            project = self._model._require_project()
+            ticket = self._cancelled
+
+            def edit() -> ToolOutput:
+                if self._cancelled != ticket:
+                    return _cancelled()
+                return self._call(tool, payload)
+
+            return project._commit_tool_edit(edit)
+        return self._call(tool, payload)
+
+    def _call(self, tool: str, payload: bytes) -> ToolOutput:
+        """The engine's answer to ``tool`` with the JSON ``payload``."""
         c_input = ffi.new("uint8_t[]", payload)
         out_buf = ffi.new("uint8_t **")
         out_len = ffi.new("uintptr_t *")
         out_is_error = ffi.new("bool *")
         err_ptr = ffi.new("SimlinError **")
-        with self._lock:
-            lib.simlin_tool_session_call(
-                self._ptr,
-                string_to_c(tool),
-                c_input,
-                len(payload),
-                out_buf,
-                out_len,
-                out_is_error,
-                err_ptr,
-            )
+        lib.simlin_tool_session_call(
+            self._ptr,
+            string_to_c(tool),
+            c_input,
+            len(payload),
+            out_buf,
+            out_len,
+            out_is_error,
+            err_ptr,
+        )
         check_out_error(err_ptr, f"Call {tool}")
         try:
             data = json.loads(bytes(ffi.buffer(out_buf[0], out_len[0])))
@@ -163,8 +222,7 @@ class ToolSession:
         out_buf = ffi.new("uint8_t **")
         out_len = ffi.new("uintptr_t *")
         err_ptr = ffi.new("SimlinError **")
-        with self._lock:
-            lib.simlin_tool_session_get_changes(self._ptr, out_buf, out_len, err_ptr)
+        lib.simlin_tool_session_get_changes(self._ptr, out_buf, out_len, err_ptr)
         check_out_error(err_ptr, "Read the changes")
         try:
             result: dict[str, Any] | None = json.loads(bytes(ffi.buffer(out_buf[0], out_len[0])))
@@ -184,10 +242,9 @@ class ToolSession:
                 it again once that work is done.
         """
         err_ptr = ffi.new("SimlinError **")
-        with self._lock:
-            results = lib.simlin_tool_session_get_run(
-                self._ptr, string_to_c(name), ffi.NULL, ffi.NULL, err_ptr
-            )
+        results = lib.simlin_tool_session_get_run(
+            self._ptr, string_to_c(name), ffi.NULL, ffi.NULL, err_ptr
+        )
         check_out_error(err_ptr, f"Read run '{name}'")
         try:
             return _results_to_dataframe(results)
@@ -200,8 +257,7 @@ class ToolSession:
         out_buf = ffi.new("uint8_t **")
         out_len = ffi.new("uintptr_t *")
         err_ptr = ffi.new("SimlinError **")
-        with self._lock:
-            lib.simlin_tool_session_list_runs(self._ptr, out_buf, out_len, err_ptr)
+        lib.simlin_tool_session_list_runs(self._ptr, out_buf, out_len, err_ptr)
         check_out_error(err_ptr, "List the runs")
         try:
             listed = json.loads(bytes(ffi.buffer(out_buf[0], out_len[0])))
@@ -223,10 +279,14 @@ class ToolSession:
     def cancel(self) -> None:
         """Cancel the session's calls under way, the one answering and any
         waiting for the session, as a host does when what they were for is
-        gone: each stops at its next checkpoint and answers a refusal whose
-        :attr:`ToolOutput.cancelled` is set. A call made after this runs as
-        usual. Returns at once, and takes no lock, so any thread may call it.
+        gone: each stops at its next checkpoint (one still waiting for the
+        session, as soon as it has it) and answers a refusal whose
+        :attr:`ToolOutput.cancelled` is set. An edit still waiting for the
+        project's locks in Python is cancelled too, and answers as one the
+        engine cancelled. A call made after this runs as usual. Returns at
+        once, and takes no lock, so any thread may call it.
         """
+        self._cancelled = next(self._cancels)
         lib.simlin_tool_session_cancel(self._ptr)
 
     def forget(self, name: str) -> bool:
@@ -239,22 +299,6 @@ class ToolSession:
         """
         forgotten = ffi.new("bool *")
         err_ptr = ffi.new("SimlinError **")
-        with self._lock:
-            lib.simlin_tool_session_forget_run(self._ptr, string_to_c(name), forgotten, err_ptr)
+        lib.simlin_tool_session_forget_run(self._ptr, string_to_c(name), forgotten, err_ptr)
         check_out_error(err_ptr, f"Forget run '{name}'")
         return bool(forgotten[0])
-
-    def land(self, id: str) -> Landing:
-        """Land the plan ``id`` in the model's project, as a host does once
-        the person approves it. The engine lands it on the project as it is:
-        at the revision it was planned at, as planned; at another, planned
-        again, and only when what it writes is as it was, the gate passes
-        again, and it would make the changes the person approved. A plan
-        that cannot land says why, for the agent to plan the edit again.
-
-        Raises:
-            SimlinRuntimeError: If the session has no plan ``id``.
-        """
-        project = self._model._require_project()
-        answer = project._land_tool_plan(self, id)
-        return Landing(landed=bool(answer["landed"]), reason=answer.get("reason"))

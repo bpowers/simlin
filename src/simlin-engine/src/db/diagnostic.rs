@@ -338,15 +338,36 @@ pub(crate) fn model_cycle_diagnostics(db: &dyn Db, model: SourceModel, project: 
     use crate::common::{ErrorCode, ErrorKind};
 
     let dep_graph = model_dependency_graph(db, model, project, ModuleInputSet::empty(db));
+    // A cycle's members: its path closes on its first, which it repeats.
+    let members = |c: &crate::db::DependencyCycle| -> std::collections::BTreeSet<String> {
+        c.path.iter().skip(1).cloned().collect()
+    };
     for cycle in &dep_graph.cycles {
-        // A loop no stock breaks closes in both phases' walks, found at the
-        // same variable; the time step's report covers it.
-        let reported = |c: &crate::db::DependencyCycle| !c.initial && c.variable == cycle.variable;
+        // A loop no stock breaks closes in both phases' walks; the time
+        // step's report covers it. Each walk reads a node's dependencies in
+        // hash order, so the two may meet the loop at different members:
+        // the loop is the same one when its members are.
+        let reported = |c: &crate::db::DependencyCycle| !c.initial && members(c) == members(cycle);
         if cycle.initial && dep_graph.cycles.iter().any(reported) {
             continue;
         }
-        let var = &cycle.variable;
-        let path = cycle.path.join(" → ");
+        // Filed under its least member, the path read from there: where a
+        // walk met the loop is hash order, and a report that moves between
+        // members reads as a new problem each time it moves.
+        let ring = &cycle.path[1..];
+        let start = ring
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.cmp(b))
+            .map_or(0, |(at, _)| at);
+        let path: Vec<&str> = ring[start..]
+            .iter()
+            .chain(&ring[..start])
+            .chain(ring.get(start))
+            .map(String::as_str)
+            .collect();
+        let var = path.first().copied().unwrap_or(cycle.variable.as_str());
+        let path = path.join(" → ");
         let reason = if cycle.initial {
             format!("the initial value of '{var}' depends on itself: {path}")
         } else {
@@ -354,7 +375,7 @@ pub(crate) fn model_cycle_diagnostics(db: &dyn Db, model: SourceModel, project: 
         };
         Diagnostic {
             model: model.name(db).clone(),
-            variable: Some(var.clone()),
+            variable: Some(var.to_string()),
             owner: None,
             severity: DiagnosticSeverity::Error,
             error: DiagnosticError::Model(Error::new(

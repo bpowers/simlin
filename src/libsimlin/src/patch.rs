@@ -309,6 +309,12 @@ fn collect_models_with_unit_warnings(
 
 // ── patch application ──────────────────────────────────────────────────
 
+/// Whether `patch` holds any operation: one with none, however it is spelled
+/// (no models, or models with no operations), applies as no change.
+fn has_operations(patch: &engine::ProjectPatch) -> bool {
+    !patch.project_ops.is_empty() || patch.models.iter().any(|model| !model.ops.is_empty())
+}
+
 /// Internal helper that applies a ProjectPatch to a project.
 ///
 /// This is the core patch application logic. It handles staging a copy of
@@ -338,6 +344,12 @@ pub(crate) unsafe fn apply_project_patch_internal(
     let view_only = engine::is_view_only_patch(&datamodel_locked, &patch);
 
     if view_only && !dry_run {
+        // A patch with no operation changes nothing, so it is no change: a
+        // mutable borrow would advance the revision and copy a datamodel a
+        // copy of the project shares.
+        if !has_operations(&patch) {
+            return;
+        }
         if let Err(err) = engine::apply_patch(&mut datamodel_locked, patch) {
             store_error(
                 out_error,

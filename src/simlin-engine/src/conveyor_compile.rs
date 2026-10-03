@@ -446,11 +446,70 @@ pub fn project_has_conveyor(project: &datamodel::Project, main_model: &str) -> b
     main_model_has_stock(project, main_model, |s| s.compat.conveyor.is_some())
 }
 
+/// The name segment of the hidden aux a conveyor parameter is computed in
+/// (`$conv$<stock>$<segment>`), by the option it is; `None` for a leak's
+/// options, whose fraction is computed in an aux named for the leak flow
+/// ([`leak_frac_name`]) and whose zone bounds are numbers. The one statement
+/// of the names, which [`describe_helper`] reads back.
+fn param_segment(option: datamodel::StockOption) -> Option<&'static str> {
+    use datamodel::StockOption;
+    match option {
+        StockOption::TransitTime => Some("len"),
+        StockOption::Capacity => Some("cap"),
+        StockOption::InflowLimit => Some("inlim"),
+        StockOption::Sample => Some("sample"),
+        StockOption::Arrest => Some("arrest"),
+        StockOption::LeakFraction | StockOption::LeakZoneStart | StockOption::LeakZoneEnd => None,
+    }
+}
+
 /// Synthesized hidden-aux name for one of a conveyor's parameter expressions.
 /// The `$conv$` prefix and `$`-separators keep the name canonical (no `.`, no
 /// module `·`) and collision-free against ordinary model variables.
-fn param_aux_name(stock: &str, param: &str) -> String {
-    format!("$conv${}${param}", canon(stock))
+fn param_aux_name(stock: &str, option: datamodel::StockOption) -> String {
+    let segment = param_segment(option).expect("a conveyor's own option");
+    format!("$conv${}${segment}", canon(stock))
+}
+
+/// What a hidden variable the special-stock build adds stands for, as an
+/// answer says it: the conveyor parameter, leak fraction or container access
+/// of the stock or flow it serves, named as the model names that stock or
+/// flow (canonically). `None` for a name the build gives no helper. A build
+/// error names its helpers, which no modeler wrote; this is how a tool
+/// names them instead.
+#[cfg(feature = "agent_tools")]
+pub(crate) fn describe_helper(name: &str) -> Option<String> {
+    if let Some(flow) = name
+        .strip_prefix("$conv$leak$")
+        .and_then(|rest| rest.strip_suffix("$frac"))
+    {
+        return Some(format!("the leak fraction of '{flow}'"));
+    }
+    for (prefix, noun) in [("$conv$", "conveyor"), ("$queue$", "queue")] {
+        let Some(rest) = name.strip_prefix(prefix) else {
+            continue;
+        };
+        if noun == "conveyor"
+            && let Some((stock, segment)) = rest.rsplit_once('$')
+            && let Some(option) = datamodel::StockOption::ALL
+                .into_iter()
+                .find(|option| param_segment(*option) == Some(segment))
+        {
+            return Some(format!(
+                "the {} of the conveyor '{stock}'",
+                option.describe()
+            ));
+        }
+        let (kind, stock) = rest.split_once('$')?;
+        let stock = match kind {
+            // `$<prefix>$slat$<stock>$<j>`: one slat's contents.
+            "slat" => stock.rsplit_once('$').map_or(stock, |(stock, _)| stock),
+            "sum" | "mean" | "size" | "min" | "max" | "stddev" => stock,
+            _ => return None,
+        };
+        return Some(format!("the contents of the {noun} '{stock}'"));
+    }
+    None
 }
 
 fn leak_frac_name(flow: &str) -> String {
@@ -1352,14 +1411,14 @@ pub fn expand_conveyors(
         // Synthesize the parameter auxes, arrayed over the stock's dimensions
         // for an arrayed conveyor so each element gets its own len/cap/... slot
         // (§10); scalar for a scalar conveyor.
-        let len_aux = param_aux_name(&stock_name, "len");
+        let len_aux = param_aux_name(&stock_name, datamodel::StockOption::TransitTime);
         new_auxes.push(make_aux_eqn(
             &len_aux,
             param_equation(&conv.transit_time, &stock_dims),
         ));
         param_origins.insert(len_aux.clone(), (stock.ident.clone(), "<len>".to_string()));
         let mk = |field: &Option<String>,
-                  param: &str,
+                  param: datamodel::StockOption,
                   out: &mut Vec<datamodel::Aux>|
          -> Option<String> {
             field.as_ref().map(|expr| {
@@ -1368,10 +1427,18 @@ pub fn expand_conveyors(
                 name
             })
         };
-        let cap_aux = mk(&conv.capacity, "cap", &mut new_auxes);
-        let inlim_aux = mk(&conv.inflow_limit, "inlim", &mut new_auxes);
-        let sample_aux = mk(&conv.sample, "sample", &mut new_auxes);
-        let arrest_aux = mk(&conv.arrest, "arrest", &mut new_auxes);
+        let cap_aux = mk(
+            &conv.capacity,
+            datamodel::StockOption::Capacity,
+            &mut new_auxes,
+        );
+        let inlim_aux = mk(
+            &conv.inflow_limit,
+            datamodel::StockOption::InflowLimit,
+            &mut new_auxes,
+        );
+        let sample_aux = mk(&conv.sample, datamodel::StockOption::Sample, &mut new_auxes);
+        let arrest_aux = mk(&conv.arrest, datamodel::StockOption::Arrest, &mut new_auxes);
         for (aux, label) in [
             (&cap_aux, "<capacity>"),
             (&inlim_aux, "<in_limit>"),

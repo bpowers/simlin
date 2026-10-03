@@ -1323,7 +1323,8 @@ fn a_cycles_row_follows_its_members_rows() {
     };
     // `a` fails at the fragment constructor and `b` is sound on its own; the
     // two are a cycle. The member's own failure is the first row (the code
-    // libsimlin's `SimlinError` reports), the cycle row the last.
+    // libsimlin's `SimlinError` reports), the cycle row, filed under the
+    // cycle's least member, the last.
     let mixed = TestProject::new("m")
         .aux("a", "b + bogus", None)
         .aux("b", "a", None)
@@ -1333,7 +1334,7 @@ fn a_cycles_row_follows_its_members_rows() {
         rows(&mixed),
         vec![
             (Some("a".to_string()), ErrorCode::UnknownDependency),
-            (Some("b".to_string()), ErrorCode::CircularDependency),
+            (Some("a".to_string()), ErrorCode::CircularDependency),
         ]
     );
     // Every member fatal: the cycle is a fact of the dependency graph, not of

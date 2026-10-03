@@ -749,14 +749,11 @@ fn test_ac2_7_assembly_errors_accumulated() {
     let Some(circular) = circular else {
         panic!("accumulator should contain CircularDependency diagnostic; got: {diags:?}");
     };
-    // The reason names the loop, starting from the variable it is filed
-    // under, so the modeller knows which equations form it.
-    let reason = match circular.variable.as_deref() {
-        Some("a") => "'a' depends on itself: a → b → a",
-        Some("b") => "'b' depends on itself: b → a → b",
-        other => panic!("filed under a variable of the loop, not {other:?}"),
-    };
-    assert_eq!(circular.reason(), Some(reason));
+    // The reason names the loop from its least member, which it is filed
+    // under, so the modeller knows which equations form it and a report does
+    // not move between members with the order a walk met the loop in.
+    assert_eq!(circular.variable.as_deref(), Some("a"));
+    assert_eq!(circular.reason(), Some("'a' depends on itself: a → b → a"));
 }
 
 // ---- compile_var_fragment per-site diagnostic behavior pins ----
@@ -3828,5 +3825,44 @@ fn models_with_distinct_names_and_one_named_for_a_stdlib_model_are_not_duplicate
                 .filter(|d| d.is(DiagnosticCategory::Model, ErrorCode::DuplicateVariable))
                 .collect();
         assert!(rows.is_empty(), "{rows:?}");
+    }
+}
+
+/// A loop no stock breaks closes in both phases' walks, and the walks may
+/// meet it at different members (each walks a node's reads in hash order):
+/// the loop is reported once, under its least member, whatever member either
+/// walk found it at. Each fresh database hashes anew, so many are tried.
+#[test]
+fn a_loop_both_phases_close_is_reported_once_wherever_the_walks_meet_it() {
+    let project = crate::test_common::TestProject::new("main")
+        .with_sim_time(0.0, 6.0, 0.5)
+        .stock("s0", "10", &["in0"], &["out0"], None)
+        .flow("in0", "s0 * k0", None)
+        .flow("out0", "0/0", None)
+        .stock("s1", "10", &["in1"], &["out1"], None)
+        .flow("in1", "s1 * k0", None)
+        .flow("out1", "s1 / 20", None)
+        .aux("k0", "0.1", None)
+        .aux("k1", "k0 + s0", None)
+        .aux("k2", "k1 + s0", None)
+        .aux("loop_a", "loop_b + k0", None)
+        .aux("loop_b", "loop_a + 1", None)
+        .stock("new_var_3", "k2 + loop_a", &["out1"], &[], None)
+        .build_datamodel();
+    for _ in 0..40 {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let cycles = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
+            .into_iter()
+            .filter(|d| d.code() == crate::common::ErrorCode::CircularDependency)
+            .map(|d| (d.variable.clone(), d.reason().map(str::to_string)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cycles,
+            [(
+                Some("loop_a".to_string()),
+                Some("'loop_a' depends on itself: loop_a → loop_b → loop_a".to_string())
+            )]
+        );
     }
 }

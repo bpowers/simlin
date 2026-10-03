@@ -20,6 +20,7 @@
 //! | `analysis`      | Feedback-loop / causal-link analysis, LTM scores    |
 //! | `patch`         | JSON patch application and error collection          |
 //! | `tools`         | The agent tool catalog and tool sessions             |
+//! | `lock_order`    | The crate's lock order, checked where a lock is taken |
 //!
 //! Shared types (enums, structs, helpers) live here in `lib.rs` and are
 //! imported by the modules via `crate::`.
@@ -70,7 +71,7 @@ use std::ops::{Deref, DerefMut};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
 use simlin_engine::buffa::Message;
@@ -88,6 +89,7 @@ mod contents;
 mod editing;
 mod error_api;
 mod layout;
+pub mod lock_order;
 mod memory;
 mod model;
 mod panic_hook;
@@ -126,6 +128,7 @@ pub use ffi::{
     SimlinLtmMode, SimlinSaveFormat,
 };
 pub use ffi_error::{ErrorDetail as ErrorDetailData, FfiError, SimlinError};
+use lock_order::{OrderedGuard, OrderedMutex, Rank};
 
 // ── shared types ───────────────────────────────────────────────────────
 
@@ -448,7 +451,7 @@ pub struct SimlinProject {
     /// The datamodel, with the indexes derived from it, which any mutable
     /// borrow of the datamodel drops (`ProjectContents`). Locked before `db`
     /// when both are needed.
-    pub datamodel: Mutex<ProjectContents>,
+    pub datamodel: OrderedMutex<ProjectContents>,
     /// The salsa database, built from the datamodel the first time an entry
     /// point runs a query (`SimlinProject::lock_db`): a project that is only
     /// read, written or copied, such as a host's undo snapshot or a file read
@@ -466,7 +469,7 @@ pub struct SimlinProject {
     /// lock would run queries whose garbage no entry point sweeps until an
     /// unrelated one happens to. The `OnceLock` is also the set-once flag that
     /// lets a query skip the datamodel lock once the database exists.
-    db: OnceLock<Mutex<engine::db::SimlinDb>>,
+    db: OnceLock<OrderedMutex<engine::db::SimlinDb>>,
     /// Latches true the first time any simulation is created on this project
     /// with `enable_ltm = true`. `simlin_project_get_errors` reads it to
     /// decide whether to collect diagnostics under the LTM overlay, so the
@@ -479,18 +482,21 @@ pub struct SimlinProject {
     /// toggle or restore is involved. An `AtomicBool` (not a mutex) because
     /// the value is set-once-and-monotone.
     pub(crate) ltm_requested: AtomicBool,
-    /// How many entry points hold the datamodel lock while they wait for the
-    /// database, each through `lock_db_with`, `built_db` or `count_waiting`:
-    /// an edit (`simlin_project_apply_patch`, `simlin_project_add_model`,
+    /// How many entry points wait for the database that a reading tool call
+    /// stops for: every one that takes it but a reading tool call itself. An
+    /// edit (`simlin_project_apply_patch`, `simlin_project_add_model`,
     /// `simlin_project_diagram_sync`, an undo's
-    /// `simlin_project_replace_contents`, and a tool session's landing, from
-    /// before it waits for its session), a simulation (`simlin_sim_new`), a
-    /// read of the diagnostics (`simlin_project_get_errors`,
-    /// `simlin_project_is_simulatable`), loop discovery, a wasm compile, and a
-    /// render that lays out a model with no view. Each one keeps
-    /// every datamodel reader (a hit test, a revision read) waiting with it,
-    /// so a tool call, which holds the database for its answer, checks this
-    /// between units of its work and stops while it is not zero
+    /// `simlin_project_replace_contents`, and a tool session's call of a tool
+    /// that edits, from before it waits for its session), a simulation
+    /// (`simlin_sim_new`), a read of the diagnostics
+    /// (`simlin_project_get_errors`, `simlin_project_is_simulatable`), loop
+    /// discovery, a wasm compile and a render that lays out a model with no
+    /// view hold the datamodel lock while they wait, which keeps every
+    /// datamodel reader (a hit test, a revision read) waiting with them; a
+    /// query that takes the database alone (an equation's rendering, the
+    /// model's links, its structural loops) is the person's wait itself. So a
+    /// reading tool call, which holds the database for its answer, checks
+    /// this between units of its work and stops while it is not zero
     /// (`simlin_engine::tools::Workspace::waiting`).
     waiting_for_db: AtomicUsize,
     pub ref_count: AtomicUsize,
@@ -509,13 +515,13 @@ impl Drop for Waiting<'_> {
 
 /// The project's salsa database, locked.
 ///
-/// Every entry point that runs queries locks the database through
-/// [`SimlinProject::lock_db`] or [`SimlinProject::lock_db_with`] -- the field
-/// is private and these are its only guards -- and dropping the lock releases
-/// the memos those queries superseded (`SimlinDb::release_replaced_memos`,
-/// whose rustdoc holds the salsa mechanics), so the policy has one owner and
-/// no entry point can forget it. Lock the datamodel FIRST when both are
-/// needed: the project-wide order is datamodel-then-db.
+/// Every entry point that runs queries locks the database through one of
+/// [`SimlinProject`]'s accessors -- the field is private and these are its
+/// only guards -- and dropping the lock releases the memos those queries
+/// superseded (`SimlinDb::release_replaced_memos`, whose rustdoc holds the
+/// salsa mechanics), so the policy has one owner and no entry point can
+/// forget it. Lock the datamodel FIRST when both are needed: the
+/// project-wide order is datamodel-then-db (`lock_order`).
 ///
 /// The release runs on every drop, read-only entry points included. When
 /// nothing was superseded it costs one exclusive salsa access -- a
@@ -547,17 +553,21 @@ impl Drop for Waiting<'_> {
 /// every memo fetch (salsa's `zalsa.rs` `unwind_if_revision_cancelled`,
 /// `function/fetch.rs`, `event.rs` `Event::new`): a cost on every hit to save
 /// a bounded walk.
-pub struct DbLock<'a>(MutexGuard<'a, engine::db::SimlinDb>);
+pub struct DbLock<'a>(OrderedGuard<'a, engine::db::SimlinDb>);
 
 impl Deref for DbLock<'_> {
     type Target = engine::db::SimlinDb;
     fn deref(&self) -> &Self::Target {
+        #[cfg(test)]
+        lock_order::trace::record(lock_order::Event::UseDatabase);
         &self.0
     }
 }
 
 impl DerefMut for DbLock<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        #[cfg(test)]
+        lock_order::trace::record(lock_order::Event::UseDatabase);
         &mut self.0
     }
 }
@@ -568,12 +578,64 @@ impl Drop for DbLock<'_> {
     }
 }
 
+#[cfg(test)]
+type DbSectionTestHook = Arc<dyn Fn(&SimlinProject) + Send + Sync + 'static>;
+
+#[cfg(test)]
+static DB_SECTION_TEST_HOOK: std::sync::Mutex<Option<DbSectionTestHook>> =
+    std::sync::Mutex::new(None);
+
+/// Held by each installed hook's guard, so tests that install one run one at
+/// a time: there is one hook for every project.
+#[cfg(test)]
+static DB_SECTION_TEST_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs `hook` wherever an entry point holds the database with the datamodel
+/// released -- a reader after [`SimlinProject::lock_contents_and_db`], a tool
+/// call after it takes its contents -- while the guard lives: what a test of
+/// those locks waits at.
+#[cfg(test)]
+pub(crate) fn install_db_section_test_hook(hook: DbSectionTestHook) -> DbSectionTestHookGuard {
+    let lock = DB_SECTION_TEST_HOOK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *DB_SECTION_TEST_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    DbSectionTestHookGuard { _lock: lock }
+}
+
+#[cfg(test)]
+pub(crate) struct DbSectionTestHookGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for DbSectionTestHookGuard {
+    fn drop(&mut self) {
+        *DB_SECTION_TEST_HOOK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn invoke_db_section_test_hook(project: &SimlinProject) {
+    let hook = DB_SECTION_TEST_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook(project);
+    }
+}
+
 impl SimlinProject {
     /// A project holding `datamodel`, with no database and no derived index
     /// yet: the one constructor every open function shares.
     pub(crate) fn new(datamodel: engine::datamodel::Project) -> SimlinProject {
         SimlinProject {
-            datamodel: Mutex::new(ProjectContents::new(datamodel)),
+            datamodel: OrderedMutex::new(Rank::Contents, ProjectContents::new(datamodel)),
             db: OnceLock::new(),
             ltm_requested: AtomicBool::new(false),
             waiting_for_db: AtomicUsize::new(0),
@@ -581,23 +643,49 @@ impl SimlinProject {
         }
     }
 
-    /// Lock the salsa database for a run of queries, from an entry point
-    /// that holds no datamodel lock; see [`DbLock`].
+    /// Lock the salsa database for a run of queries that read nothing of the
+    /// datamodel, from an entry point that holds no datamodel lock; see
+    /// [`DbLock`].
     ///
     /// Once the database exists this takes its lock alone, so a query never
     /// waits on the datamodel lock. The first call builds the database from
     /// the datamodel, which it locks first, as the project-wide order
-    /// requires, and releases once the database is built. An entry point
-    /// that holds the datamodel lock calls [`SimlinProject::lock_db_with`]
-    /// instead: this would wait on the lock it holds. `pub` so the
-    /// integration-test crate reads the database through the same guard as
-    /// every entry point.
+    /// requires, and releases once the database is built. While it waits, it
+    /// counts among the waiters a tool call stops for (`waiting_for_db`): the
+    /// query is the person's, and uncounted it would wait a call's whole
+    /// length. An entry point that holds the datamodel lock calls
+    /// [`SimlinProject::lock_db_with`] instead: this would wait on the lock
+    /// it holds. `pub` so the integration-test crate reads the database
+    /// through the same guard as every entry point.
     pub fn lock_db(&self) -> DbLock<'_> {
         if let Some(db) = self.db.get() {
-            return DbLock(db.lock().unwrap());
+            return DbLock(self.lock_counted(db));
         }
         let contents = self.datamodel.lock().unwrap();
         self.lock_db_with(&contents)
+    }
+
+    /// The contents and the database synced to them, for an entry point that
+    /// reads both and changes neither (a simulation's compile, a read of the
+    /// diagnostics, loop discovery): the contents shared, not copied, and the
+    /// datamodel lock released before the entry point does its work, so the
+    /// datamodel's readers (a hit test, a revision read) wait for the entry
+    /// point's own wait for the database and never for its compile.
+    ///
+    /// The pair stays consistent for as long as the database is held. It is
+    /// taken under the datamodel lock, where no edit is in flight, and every
+    /// edit that changes what the database holds needs the database's lock to
+    /// land. An edit of the diagrams alone can land meanwhile; the database
+    /// holds no diagram, and the contents returned are the ones the caller
+    /// answers from.
+    pub(crate) fn lock_contents_and_db(&self) -> (Arc<engine::datamodel::Project>, DbLock<'_>) {
+        let contents = self.datamodel.lock().unwrap();
+        let db = self.lock_db_with(&contents);
+        let shared = contents.shared();
+        drop(contents);
+        #[cfg(test)]
+        invoke_db_section_test_hook(self);
+        (shared, db)
     }
 
     /// Lock the salsa database for a run of queries, from an entry point
@@ -606,7 +694,7 @@ impl SimlinProject {
     /// While it waits, it counts among the entry points a tool call stops for
     /// (`waiting_for_db`).
     pub(crate) fn lock_db_with(&self, contents: &ProjectContents) -> DbLock<'_> {
-        let db = self.db.get_or_init(|| Mutex::new(new_synced_db(contents)));
+        let db = self.db_built_from(contents);
         DbLock(self.lock_counted(db))
     }
 
@@ -619,8 +707,10 @@ impl SimlinProject {
         self.db.get().map(|db| DbLock(self.lock_counted(db)))
     }
 
-    /// Lock the salsa database for a tool call, which holds the datamodel
-    /// lock while it takes the contents it answers from, when no one else
+    /// Lock the salsa database for a call of a tool that reads, which holds
+    /// the datamodel lock while it takes the contents it answers from (a tool
+    /// that edits is a writer, and takes [`SimlinProject::lock_db_with`]), when
+    /// no one else
     /// holds it: as [`SimlinProject::lock_db_with`], but never counted among
     /// the waiters a call stops for, since two calls that stopped for each
     /// other would never finish. `None` when someone holds it, since a call
@@ -630,54 +720,60 @@ impl SimlinProject {
     /// ([`SimlinProject::wait_for_db`]) and takes its contents again.
     #[cfg(feature = "agent_tools")]
     pub(crate) fn try_lock_db_for_call(&self, contents: &ProjectContents) -> Option<DbLock<'_>> {
-        let db = self.db.get_or_init(|| Mutex::new(new_synced_db(contents)));
-        match db.try_lock() {
+        match self.db_built_from(contents).try_lock() {
             Ok(db) => Some(DbLock(db)),
             Err(std::sync::TryLockError::WouldBlock) => None,
-            // The panic every other lock site gives. The error holds the
-            // guard, so locking again here would wait on itself.
+            // What `lock().unwrap()` does at every other lock site.
             Err(std::sync::TryLockError::Poisoned(poisoned)) => panic!("{poisoned}"),
         }
     }
 
-    /// Wait until no one holds the database, holding no lock: how a tool call
-    /// waits for another holder ([`SimlinProject::try_lock_db_for_call`]).
+    /// Wait until no one holds the database, holding no project lock: how a
+    /// tool call waits for another holder
+    /// ([`SimlinProject::try_lock_db_for_call`]).
     #[cfg(feature = "agent_tools")]
     pub(crate) fn wait_for_db(&self) {
         if let Some(db) = self.db.get() {
-            // Taken and released at once; a poisoned lock is the next lock
-            // site's panic.
             drop(db.lock());
         }
     }
 
-    /// Whether an entry point holding the datamodel lock waits for the
-    /// database: what a tool call stops for.
-    #[cfg(feature = "agent_tools")]
+    /// Whether one of the person's entry points waits for the database: what
+    /// a tool call stops for.
+    #[cfg(any(test, feature = "agent_tools"))]
     pub(crate) fn is_waited_on(&self) -> bool {
         self.waiting_for_db
             .load(std::sync::atomic::Ordering::SeqCst)
             > 0
     }
 
-    /// `db` locked, counted in `waiting_for_db` for as long as the lock is
-    /// held by someone else.
+    /// The database, built from `contents` the first time. The caller holds
+    /// the datamodel lock `contents` came from, so every build happens under
+    /// it.
+    fn db_built_from(&self, contents: &ProjectContents) -> &OrderedMutex<engine::db::SimlinDb> {
+        self.db
+            .get_or_init(|| OrderedMutex::new(Rank::Database, new_synced_db(contents)))
+    }
+
+    /// `db` locked, counted in `waiting_for_db` until it is.
+    ///
+    /// Never try the lock uncounted first: a call asks whether anyone waits
+    /// only while it holds the database, when every other acquisition is a
+    /// wait, so an uncounted attempt saves nothing and opens a window in which
+    /// a waiter is not seen.
     fn lock_counted<'a>(
         &self,
-        db: &'a Mutex<engine::db::SimlinDb>,
-    ) -> MutexGuard<'a, engine::db::SimlinDb> {
-        if let Ok(guard) = db.try_lock() {
-            return guard;
-        }
+        db: &'a OrderedMutex<engine::db::SimlinDb>,
+    ) -> OrderedGuard<'a, engine::db::SimlinDb> {
         let _waiting = self.count_waiting();
         db.lock().unwrap()
     }
 
-    /// Count the caller among the waiters a tool call stops for
-    /// (`waiting_for_db`) until the guard drops: what `lock_db_with` and
-    /// `built_db` do while they wait for the database, and what a landing of
-    /// a tool session's plan does from before it waits for its session, which
-    /// a call on that session holds for the whole call.
+    /// Count the caller among the waiters a reading tool call stops for
+    /// (`waiting_for_db`) until the guard drops: what every accessor but a
+    /// reading tool call's does while it waits for the database, and what a
+    /// call of a tool that edits does from before it waits for its session,
+    /// which a reading call on that session holds for the whole call.
     pub(crate) fn count_waiting(&self) -> Waiting<'_> {
         self.waiting_for_db
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -797,7 +893,7 @@ impl SimState {
 pub struct SimlinSim {
     pub(crate) model: *const SimlinModel,
     pub(crate) enable_ltm: bool,
-    pub(crate) state: Mutex<SimState>,
+    pub(crate) state: OrderedMutex<SimState>,
     pub ref_count: AtomicUsize,
 }
 
@@ -1201,6 +1297,10 @@ pub(crate) unsafe fn sim_unref(sim: *mut SimlinSim) {
 }
 
 // ── tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "entry_point_tests.rs"]
+mod entry_point_tests;
 
 #[cfg(test)]
 #[path = "database_tests.rs"]

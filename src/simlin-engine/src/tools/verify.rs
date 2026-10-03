@@ -17,6 +17,10 @@
 //! ...) keyed by its claim, for the host to show it under; one that does not
 //! is the agent's to repair or withdraw.
 //!
+//! A number is judged against the number itself ([`near`]): within 5% of the
+//! larger of the two, and a cited zero against the series' largest magnitude. A peak is a largest value the series comes down from on
+//! both sides ([`peak`]): where a run ends is not where a series peaks.
+//!
 //! Whether the claim follows from its citations is a judgment this does not
 //! make: "the reinforcing loop drives the growth", citing only that the loop
 //! exists, holds here. A run made before the model changed is not evidence
@@ -27,15 +31,17 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
+use crate::common::CanonicalElementName;
 use crate::datamodel;
 
 use super::battery::{Outcome, recheck};
-use super::behavior::{ModeKind, classify_at};
+use super::behavior::{ModeKind, NOISE_FRACTION, classify_at};
 use super::loops::{
     LoopPolarityName, analysis_of, leadership, loops_through, polarity_of, through_of,
 };
+use super::outline::dimensions;
 use super::runs::{CURRENT, Run};
-use super::series::{KeyedSeries, SeriesCore, round, scale_in_run};
+use super::series::{KeyedSeries, SeriesCore, keyed_series_upto, round, scale_in_run};
 use super::variables::LinkPolarityName;
 use super::{DiagnosticCategoryName, Session, ToolError, Workspace, names, resolve_model};
 
@@ -50,18 +56,17 @@ pub(crate) const PEAK_TOLERANCE: f64 = 0.05;
 /// fraction of the larger of the two.
 pub(crate) const VALUE_TOLERANCE: f64 = 0.05;
 
-/// The least difference a value may have from the cited one, as a fraction
-/// of the series' largest magnitude: the precision of a summary, five
-/// significant digits, so a value that reads as zero beside the series is
-/// zero, and "it ends at zero" holds for a series that decays to 1e-12. It is
-/// for values near zero: once either value is past 0.02% of the magnitude, 5%
-/// of it is more, so the floor never lets one small value stand for another
-/// on a series that spans orders of magnitude ("starts at 40" where exponential
-/// growth to 136,420 starts at 1).
+/// How small a value is zero, as a fraction of the series' largest magnitude:
+/// the precision of a summary, five significant digits, so "it ends at zero"
+/// holds for a series that decays from 100 to 1e-12. It decides a cited zero
+/// and whether two runs end apart, and nothing else: a cited value that is
+/// not zero is judged by [`VALUE_TOLERANCE`] of itself however small it is
+/// beside the series, since a summary shows it to five digits of its own
+/// ("starts at 50,000" where growth to 3.4e10 starts at 2 is no claim about
+/// zero).
 pub(crate) const VALUE_FLOOR: f64 = 1e-5;
 
-/// The most readers a failed readers citation names.
-const MAX_NAMED: usize = 12;
+use super::MAX_NAMED;
 
 /// The most characters of an equation a failure quotes.
 const MAX_QUOTE_CHARS: usize = 240;
@@ -127,15 +132,17 @@ pub enum Citation {
     Variable { variable: String },
     /// The variable's equation (a stock's: its initial value) is `equation`,
     /// written any way that parses the same: spacing, case and the spelling
-    /// of names aside. For an arrayed variable, name an element
+    /// of names aside. For an arrayed variable, name an element it has
     /// (`Population[north]`) for that element's equation. A variable with a
     /// table is its table at its equation's value: `LOOKUP(effect, input)`,
-    /// not `input`.
+    /// not `input`. A table with no equation of its own, which other
+    /// equations look up, is cited with an empty equation.
     Equation { variable: String, equation: String },
     /// The variable (or one element of it) is within 5% of `value` at `time`
-    /// in the run, or so near zero beside the series that the difference
-    /// reads as none: at the run's start when `time` is absent, which for a
-    /// constant is its value. A time outside the run is refused.
+    /// in the run (of the larger of the two); a `value` of zero holds for a
+    /// value under a hundred-thousandth of the series' largest. At the run's
+    /// start when `time` is absent, which for a constant is its value. A
+    /// time outside the run is refused.
     Value {
         variable: String,
         value: f64,
@@ -144,9 +151,13 @@ pub enum Citation {
         #[serde(default)]
         run: Option<String>,
     },
-    /// The variables `variable` links to -- those whose equations read it,
-    /// and for a flow the stocks it fills and drains -- are exactly
-    /// `readers`: none, when it is empty, for a variable nothing reads.
+    /// The variables that read `variable` -- those whose equations read it in
+    /// any phase, an initial value or `INIT` included, those that look it up
+    /// as a table, a stock or flow whose option names it (a conveyor's
+    /// transit time), and for a flow the stocks it fills and drains -- are
+    /// exactly `readers`: none, when it is empty, for a variable nothing
+    /// reads. It cannot hold while an equation of the model does not parse,
+    /// since that equation may read it.
     Readers {
         variable: String,
         readers: Vec<String>,
@@ -198,14 +209,17 @@ pub enum Citation {
         #[serde(default)]
         run: Option<String>,
     },
-    /// The variable is at its largest at `time`, within 5% of the run.
+    /// The variable peaks at `time`, within 5% of the run: it is at its
+    /// largest there, and lower at the run's start and at its end. A series
+    /// still rising when the run ends, or falling from its start, has no
+    /// peak in the run.
     PeaksAt {
         variable: String,
         time: f64,
         #[serde(default)]
         run: Option<String>,
     },
-    /// The variable ends within 5% of `value`.
+    /// The variable ends within 5% of `value`, judged as `value` judges one.
     EndsNear {
         variable: String,
         value: f64,
@@ -239,6 +253,11 @@ pub struct VerifyFindingsOutput {
     pub revision: u64,
     /// A verdict per finding, in the order given.
     pub findings: Vec<FindingVerdict>,
+    /// The last findings, left out to keep the answer within its budget:
+    /// they get no id and no verdict here; verify them in a call of their
+    /// own.
+    #[serde(skip_serializing_if = "super::is_zero")]
+    pub omitted: usize,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -255,6 +274,10 @@ pub struct FindingVerdict {
     /// 1), each with what is true instead.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<CitationFailure>,
+    /// Failures left out, the last of the finding's, to keep the answer
+    /// within its budget.
+    #[serde(skip_serializing_if = "super::is_zero")]
+    pub omitted_failures: usize,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -294,7 +317,7 @@ pub(crate) fn verify_findings(
     }
     let resolved = resolve_model(ws.project, ws.db, &session.model_name)?;
     let mut findings = Vec::with_capacity(input.findings.len());
-    for finding in input.findings {
+    for finding in &input.findings {
         let mut failures = Vec::new();
         for (i, citation) in finding.citations.iter().enumerate() {
             let checked = check(session, ws, &resolved, citation);
@@ -304,22 +327,54 @@ pub(crate) fn verify_findings(
             if let Err(reason) = checked {
                 failures.push(CitationFailure {
                     citation: i + 1,
-                    reason,
+                    reason: super::evidence::window(&reason, 0, 0, super::evidence::QUOTE_CHARS),
                 });
             }
         }
         let holds = failures.is_empty();
         findings.push(FindingVerdict {
-            id: holds.then(|| session.evidence.finding_id(finding.kind, &finding.claim)),
+            // An id is given once the answer is fitted, to what it shows.
+            id: holds.then(|| PLACEHOLDER_ID.to_string()),
             holds,
             failures,
+            omitted_failures: 0,
         });
     }
-    Ok(VerifyFindingsOutput {
+    let mut output = VerifyFindingsOutput {
         revision: ws.revision,
         findings,
-    })
+        omitted: 0,
+    };
+    // A finding's last failures first, from the finding with the most; then
+    // the last findings whole.
+    super::fit(&mut output, session.outline_budget, |output| {
+        let most = output
+            .findings
+            .iter_mut()
+            .filter(|verdict| verdict.failures.len() > 1)
+            .max_by_key(|verdict| verdict.failures.len());
+        if let Some(verdict) = most {
+            verdict.failures.pop();
+            verdict.omitted_failures += 1;
+        } else if output.findings.len() > 1 {
+            output.findings.pop();
+            output.omitted += 1;
+        } else {
+            return false;
+        }
+        true
+    });
+    for (verdict, finding) in output.findings.iter_mut().zip(&input.findings) {
+        if verdict.holds {
+            verdict.id = Some(session.evidence.finding_id(finding.kind, &finding.claim));
+        }
+    }
+    Ok(output)
 }
+
+/// What a finding's id is counted as while the answer is fitted, before ids
+/// are given: as long as any id a session gives up to its 9,999th finding.
+const PLACEHOLDER_ID: &str = "F9999";
 
 /// Whether `citation` holds; what is true instead when it does not.
 fn check(
@@ -332,16 +387,32 @@ fn check(
     match citation {
         Citation::Variable { variable } => variable_of(model, variable).map(|_| ()),
         Citation::Equation { variable, equation } => {
-            let (label, actual) = equation_of(model, variable)?;
+            let (label, actual) = equation_of(ws.project, model, variable)?;
+            let Some(actual) = actual else {
+                return if crate::variable::is_empty_or_sentinel(equation) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{label} is a table other equations look up, with no equation of its \
+                         own: cite it with an empty equation"
+                    ))
+                };
+            };
             let parse = |text: &str| {
                 crate::ast::Expr0::new(text, crate::lexer::LexerType::Equation)
                     .ok()
                     .flatten()
                     .map(|expr| normal(&expr))
             };
+            // An equation deep enough overflows the stack of what parses it,
+            // so the cited one's depth is read from its tokens first.
+            if let Some(too_deep) = super::input::equation_too_deep(equation) {
+                return Err(too_deep);
+            }
             let Some(cited) = parse(equation) else {
                 return Err(format!(
-                    "`{equation}` is not an equation the engine can read"
+                    "`{}` is not an equation the engine can read",
+                    super::evidence::echo(equation)
                 ));
             };
             if parse(&actual).as_ref() == Some(&cited) {
@@ -357,7 +428,7 @@ fn check(
             run,
         } => {
             let run = run_of(session, ws, model, run.as_deref())?;
-            let (label, values) = one_series(&run, model, variable)?;
+            let (label, values) = one_series(&run, ws.project, model, variable)?;
             let times = run.times();
             if let Some(time) = time {
                 within_run(&run, &times, *time)?;
@@ -386,17 +457,41 @@ fn check(
                         .map(|v| crate::canonicalize(v.get_ident()).into_owned())
                 })
                 .collect::<Result<_, String>>()?;
-            let actual: std::collections::BTreeSet<String> = crate::analysis::model_links(
+            let actual: std::collections::BTreeSet<String> = crate::analysis::model_reads(
                 &*ws.db,
                 resolved.source_model,
                 resolved.source_project,
-                None,
-                false,
             )
             .into_iter()
             .filter(|l| l.from == ident)
             .map(|l| l.to)
             .collect();
+            // An equation that does not parse may read the variable, so no
+            // set of readers is the whole set while the model has one.
+            let unread = crate::analysis::model_unread_equations(&*ws.db, resolved.source_model);
+            if !unread.is_empty() {
+                let found = if actual.is_empty() {
+                    format!("no reader of {} found", var.get_ident())
+                } else {
+                    format!("{} readers of {} found", actual.len(), var.get_ident())
+                };
+                let named: Vec<String> = unread
+                    .iter()
+                    .take(MAX_NAMED)
+                    .map(|name| super::evidence::display_name(model, name))
+                    .collect();
+                return Err(format!(
+                    "{found}, but {} equations could not be read ({}{}), and any of them may \
+                     read it: repair them, then cite the readers",
+                    unread.len(),
+                    named.join(", "),
+                    if unread.len() > MAX_NAMED {
+                        ", ..."
+                    } else {
+                        ""
+                    }
+                ));
+            }
             if actual == cited {
                 return Ok(());
             }
@@ -432,12 +527,10 @@ fn check(
                 crate::canonicalize(to.get_ident()).into_owned(),
                 crate::canonicalize(from.get_ident()).into_owned(),
             );
-            let links = crate::analysis::model_links(
+            let links = crate::analysis::model_reads(
                 &*ws.db,
                 resolved.source_model,
                 resolved.source_project,
-                None,
-                false,
             );
             let Some(link) = links
                 .iter()
@@ -531,7 +624,7 @@ fn check(
                     run.name
                 ));
             }
-            if lead.led as f64 >= LEAD_MAJORITY * lead.active as f64 {
+            if leads(lead.led, lead.active) {
                 return Ok(());
             }
             let most = lead
@@ -567,7 +660,7 @@ fn check(
         }
         Citation::GoesNegative { variable, run } => {
             let run = run_of(session, ws, model, run.as_deref())?;
-            let series = series_of(&run, model, variable)?;
+            let series = series_of(&run, ws.project, model, variable)?;
             // The summary's own rule, so a citation of what a summary
             // reported holds: a number reported negative went negative.
             let times = run.times();
@@ -594,33 +687,39 @@ fn check(
             run,
         } => {
             let run = run_of(session, ws, model, run.as_deref())?;
-            let KeyedSeries { label, key, values } = one_keyed_series(&run, model, variable)?;
+            let KeyedSeries { label, key, values } =
+                one_keyed_series(&run, ws.project, model, variable)?;
             let times = run.times();
             within_run(&run, &times, *time)?;
             let scale = scale_in_run(&run.results, model, &run.plan, &key);
-            if classify_at(&times, &values, scale).kind == ModeKind::AtRest {
-                return Err(format!(
-                    "{label} holds at {} throughout run '{}', so it has no peak",
-                    round(values.first().copied().unwrap_or(f64::NAN)),
-                    run.name
-                ));
-            }
-            let (i, peak) =
-                values
-                    .iter()
-                    .enumerate()
-                    .fold((0, f64::NEG_INFINITY), |best, (i, &v)| {
-                        if v > best.1 { (i, v) } else { best }
-                    });
+            let (at, value) = peak(&times, &values, scale).map_err(|why| {
+                let name = &run.name;
+                match why {
+                    NoPeak::Still(value) => format!(
+                        "{label} holds at {} throughout run '{name}', so it has no peak",
+                        round(value)
+                    ),
+                    NoPeak::LargestAtTheEnd(value) => format!(
+                        "{label} is at its largest ({}) where run '{name}' ends, so the run \
+                         shows no peak",
+                        round(value)
+                    ),
+                    NoPeak::LargestAtTheStart(value) => format!(
+                        "{label} is at its largest ({}) where run '{name}' starts, so the run \
+                         shows no peak",
+                        round(value)
+                    ),
+                }
+            })?;
             let horizon =
                 times.last().copied().unwrap_or(0.0) - times.first().copied().unwrap_or(0.0);
-            if (times[i] - time).abs() <= PEAK_TOLERANCE * horizon {
+            if (at - time).abs() <= PEAK_TOLERANCE * horizon {
                 Ok(())
             } else {
                 Err(format!(
                     "{label} peaks at {} ({}) in run '{}'",
-                    round(times[i]),
-                    round(peak),
+                    round(at),
+                    round(value),
                     run.name
                 ))
             }
@@ -631,7 +730,7 @@ fn check(
             run,
         } => {
             let run = run_of(session, ws, model, run.as_deref())?;
-            let (label, values) = one_series(&run, model, variable)?;
+            let (label, values) = one_series(&run, ws.project, model, variable)?;
             let last = values.last().copied().unwrap_or(f64::NAN);
             if near(last, *value, &values) {
                 Ok(())
@@ -649,7 +748,8 @@ fn check(
             run,
         } => {
             let run = run_of(session, ws, model, run.as_deref())?;
-            let KeyedSeries { label, key, values } = one_keyed_series(&run, model, variable)?;
+            let KeyedSeries { label, key, values } =
+                one_keyed_series(&run, ws.project, model, variable)?;
             let scale = scale_in_run(&run.results, model, &run.plan, &key);
             let actual = classify_at(&run.times(), &values, scale).kind;
             if actual == *mode {
@@ -670,17 +770,14 @@ fn check(
         } => {
             let this = run_of(session, ws, model, Some(run))?;
             let that = run_of(session, ws, model, Some(than))?;
-            let (label, a_series) = one_series(&this, model, variable)?;
-            let (_, b_series) = one_series(&that, model, variable)?;
+            let (label, a_series) = one_series(&this, ws.project, model, variable)?;
+            let (_, b_series) = one_series(&that, ws.project, model, variable)?;
             let (a, b) = (
                 a_series.last().copied().unwrap_or(f64::NAN),
                 b_series.last().copied().unwrap_or(f64::NAN),
             );
-            // A difference a value citation would call no difference is none
-            // a person would see.
             let both: Vec<f64> = a_series.iter().chain(&b_series).copied().collect();
-            let apart = a.is_finite() && b.is_finite() && !near(a, b, &both);
-            let holds = apart
+            let holds = apart(a, b, &both)
                 && match relation {
                     Relation::Higher => a > b,
                     Relation::Lower => a < b,
@@ -708,16 +805,85 @@ fn check(
     }
 }
 
-/// Whether `actual` is `cited`, as a value citation judges it: within
-/// [`VALUE_TOLERANCE`] of the larger of the two, or, for two values near
-/// zero, within [`VALUE_FLOOR`] of the largest magnitude in `series`.
-fn near(actual: f64, cited: f64, series: &[f64]) -> bool {
-    let magnitude = series
+/// Whether a loop that led `led` of the `active` steps of a span led the
+/// span: at least [`LEAD_MAJORITY`] of them, of which there is at least one.
+fn leads(led: usize, active: usize) -> bool {
+    active > 0 && led as f64 >= LEAD_MAJORITY * active as f64
+}
+
+/// The largest magnitude among the numbers of `series`.
+fn magnitude(series: &[f64]) -> f64 {
+    series
         .iter()
         .filter(|v| v.is_finite())
-        .fold(0.0_f64, |m, v| m.max(v.abs()));
-    let allowed = (VALUE_TOLERANCE * actual.abs().max(cited.abs())).max(VALUE_FLOOR * magnitude);
-    (actual - cited).abs() <= allowed
+        .fold(0.0_f64, |m, v| m.max(v.abs()))
+}
+
+/// Whether `actual` is `cited`, as a value citation judges it: within
+/// [`VALUE_TOLERANCE`] of the larger of the two, which two values of
+/// opposite signs never are; or, for a cited zero, within [`VALUE_FLOOR`] of
+/// the largest magnitude in `series`.
+fn near(actual: f64, cited: f64, series: &[f64]) -> bool {
+    if cited == 0.0 {
+        actual.abs() <= VALUE_FLOOR * magnitude(series)
+    } else {
+        (actual - cited).abs() <= VALUE_TOLERANCE * actual.abs().max(cited.abs())
+    }
+}
+
+/// Whether two runs end apart, at `a` and at `b`: by more than
+/// [`VALUE_TOLERANCE`] of the larger, and by more than [`VALUE_FLOOR`] of
+/// the largest magnitude in `series`, both runs' values. Runs that end a
+/// hair apart, or both at what a summary shows as zero, end alike.
+fn apart(a: f64, b: f64, series: &[f64]) -> bool {
+    let alike = (VALUE_TOLERANCE * a.abs().max(b.abs())).max(VALUE_FLOOR * magnitude(series));
+    a.is_finite() && b.is_finite() && (a - b).abs() > alike
+}
+
+/// Why a series has no peak in its run, with the value it holds or is
+/// largest at.
+enum NoPeak {
+    Still(f64),
+    /// It is still at its largest when the run ends: growth, or a plateau it
+    /// rose to.
+    LargestAtTheEnd(f64),
+    /// It is at its largest when the run starts, and never as large again.
+    LargestAtTheStart(f64),
+}
+
+/// Where `values` peaks, and its value there: its largest value, when the
+/// series is lower at both ends of the run by more than the noise a behavior
+/// mode ignores ([`NOISE_FRACTION`] of its range).
+///
+/// A largest value at an end of the run is where the run stops looking, not
+/// a turn of the series: "peaks at the stop time" of exponential growth
+/// claims a decline no run shows.
+fn peak(times: &[f64], values: &[f64], scale: f64) -> Result<(f64, f64), NoPeak> {
+    let first = values.first().copied().unwrap_or(f64::NAN);
+    if classify_at(times, values, scale).kind == ModeKind::AtRest {
+        return Err(NoPeak::Still(first));
+    }
+    let (at, largest) =
+        times
+            .iter()
+            .zip(values)
+            .fold((f64::NAN, f64::NEG_INFINITY), |best, (&t, &v)| {
+                if v > best.1 { (t, v) } else { best }
+            });
+    let least = values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f64::INFINITY, f64::min);
+    let noise = NOISE_FRACTION * (largest - least);
+    let last = values.last().copied().unwrap_or(f64::NAN);
+    if largest - last <= noise {
+        Err(NoPeak::LargestAtTheEnd(largest))
+    } else if largest - first <= noise {
+        Err(NoPeak::LargestAtTheStart(largest))
+    } else {
+        Ok((at, largest))
+    }
 }
 
 /// A time a citation names, refused with the run's span when the run does
@@ -731,10 +897,11 @@ fn within_run(run: &Run, times: &[f64], time: f64) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "run '{}' goes from {} to {}, so it has no time {time}",
+            "run '{}' goes from {} to {}, so it has no time {}",
             run.name,
             round(start),
-            round(stop)
+            round(stop),
+            crate::results::written(time)
         ))
     }
 }
@@ -745,6 +912,7 @@ fn variable_of<'m>(
     name: &str,
 ) -> Result<&'m datamodel::Variable, String> {
     names::resolve(model, name).map_err(|suggestions| {
+        let name = super::evidence::echo(name);
         if suggestions.is_empty() {
             format!("the model has no variable '{name}'")
         } else {
@@ -756,64 +924,88 @@ fn variable_of<'m>(
     })
 }
 
-/// The equation `variable` names -- a variable's, or one element's of an
-/// arrayed one -- with the label a failure names it by.
-fn equation_of(model: &datamodel::Model, variable: &str) -> Result<(String, String), String> {
-    let (name, subscript) = match variable.split_once('[') {
-        Some((name, rest)) => (name.trim(), Some(rest.trim_end_matches(']'))),
-        None => (variable.trim(), None),
+/// The variable `name` names, and the element of it a subscript names
+/// (`population[north]`), spelled as the project spells it: named as the
+/// read tools name one (`names::split_subscript`, `names::resolve_element`).
+fn named<'m>(
+    project: &datamodel::Project,
+    model: &'m datamodel::Model,
+    name: &str,
+) -> Result<(&'m datamodel::Variable, Option<String>), String> {
+    if let Some(var) = model.get_variable(name) {
+        return Ok((var, None));
+    }
+    let Some((base, subscripts)) = names::split_subscript(name) else {
+        return variable_of(model, name).map(|var| (var, None));
     };
-    let var = variable_of(model, name)?;
+    let var = variable_of(model, base)?;
+    let dims = var.get_equation().map(dimensions).unwrap_or_default();
+    names::resolve_element(project, &dims, &subscripts)
+        .map(|element| (var, Some(element)))
+        .map_err(|why| {
+            format!(
+                "{} has no element [{}]: {why}",
+                var.get_ident(),
+                super::evidence::echo(&subscripts.join(", "))
+            )
+        })
+}
+
+/// The equation `variable` names -- a variable's, or one element's of an
+/// arrayed one -- with the label a failure names it by; no equation for a
+/// table other equations look up, which has none of its own.
+fn equation_of(
+    project: &datamodel::Project,
+    model: &datamodel::Model,
+    variable: &str,
+) -> Result<(String, Option<String>), String> {
+    let (var, element) = named(project, model, variable)?;
     let Some(equation) = var.get_equation() else {
         return Err(format!("{} has no equation", var.get_ident()));
     };
-    // A variable with a table is the table at its equation's value.
-    let canonical = crate::canonicalize(var.get_ident()).into_owned();
     let own_table = match var {
         datamodel::Variable::Aux(aux) => aux.gf.is_some(),
         datamodel::Variable::Flow(flow) => flow.gf.is_some(),
-        _ => false,
+        datamodel::Variable::Stock(_) | datamodel::Variable::Module(_) => false,
     };
-    let at_table = |table: bool, subscript: Option<&str>, text: String| match (table, subscript) {
-        (true, Some(subscript)) => format!("LOOKUP({canonical}[{subscript}], {text})"),
+    let (text, table) = match (equation, &element) {
+        (datamodel::Equation::Scalar(text), _) | (datamodel::Equation::ApplyToAll(_, text), _) => {
+            (text.clone(), own_table)
+        }
+        (datamodel::Equation::Arrayed(_, elements, default, _), Some(element)) => {
+            let key = CanonicalElementName::from_subscript(element);
+            let arm = elements
+                .iter()
+                .find(|(arm, ..)| CanonicalElementName::from_subscript(arm) == key)
+                .map(|(_, text, _, table)| (text.clone(), own_table || table.is_some()));
+            arm.or_else(|| default.clone().map(|text| (text, own_table)))
+                .ok_or_else(|| {
+                    format!("{}[{element}] has no equation of its own", var.get_ident())
+                })?
+        }
+        (datamodel::Equation::Arrayed(..), None) => {
+            return Err(format!(
+                "{} has an equation per element: name one, as {}[...]",
+                var.get_ident(),
+                var.get_ident()
+            ));
+        }
+    };
+    let label = match &element {
+        Some(element) => format!("{}[{element}]", var.get_ident()),
+        None => var.get_ident().to_string(),
+    };
+    if table && crate::variable::is_empty_or_sentinel(&text) {
+        return Ok((label, None));
+    }
+    // A variable with a table is the table at its equation's value.
+    let canonical = crate::canonicalize(var.get_ident()).into_owned();
+    let text = match (table, &element) {
+        (true, Some(element)) => format!("LOOKUP({canonical}[{element}], {text})"),
         (true, None) => format!("LOOKUP({canonical}, {text})"),
         (false, _) => text,
     };
-    match (equation, subscript) {
-        (datamodel::Equation::Scalar(text), None) => Ok((
-            var.get_ident().to_string(),
-            at_table(own_table, None, text.clone()),
-        )),
-        (datamodel::Equation::ApplyToAll(_, text), _) => Ok((
-            variable.trim().to_string(),
-            at_table(own_table, subscript, text.clone()),
-        )),
-        (datamodel::Equation::Arrayed(_, elements, default, _), Some(subscript)) => {
-            let wanted = super::series::element_key(subscript);
-            elements
-                .iter()
-                .find(|(element, ..)| super::series::element_key(element) == wanted)
-                .map(|(_, text, _, gf)| {
-                    at_table(own_table || gf.is_some(), Some(subscript), text.clone())
-                })
-                .or_else(|| {
-                    default
-                        .clone()
-                        .map(|text| at_table(own_table, Some(subscript), text))
-                })
-                .map(|text| (format!("{}[{subscript}]", var.get_ident()), text))
-                .ok_or_else(|| format!("{} has no element [{subscript}]", var.get_ident()))
-        }
-        (datamodel::Equation::Arrayed(..), None) => Err(format!(
-            "{} has an equation per element: name one, as {}[...]",
-            var.get_ident(),
-            var.get_ident()
-        )),
-        (datamodel::Equation::Scalar(_), Some(subscript)) => Err(format!(
-            "{} is not arrayed, so it has no element [{subscript}]",
-            var.get_ident()
-        )),
-    }
+    Ok((label, Some(text)))
 }
 
 /// An equation as it reads whatever its spacing, the case of its builtins
@@ -935,72 +1127,49 @@ fn run_of(
 /// element's for an arrayed one, or the one element a subscript names.
 fn series_of(
     run: &Run,
+    project: &datamodel::Project,
     model: &datamodel::Model,
     variable: &str,
 ) -> Result<Vec<KeyedSeries>, String> {
-    let (name, subscript) = match variable.split_once('[') {
-        Some((name, rest)) => (name.trim(), Some(rest.trim_end_matches(']'))),
-        None => (variable.trim(), None),
-    };
-    let var = variable_of(model, name)?;
-    let ident = crate::canonicalize(var.get_ident()).into_owned();
-    let offsets = &run.results.offsets;
-    let mut keys: Vec<(&str, usize)> = offsets
-        .iter()
-        .filter(|(key, _)| {
-            super::series::column_of(model, key.as_str()).map(|(owner, _)| owner)
-                == Some(ident.as_str())
-        })
-        .map(|(key, &offset)| (key.as_str(), offset))
-        .collect();
-    keys.sort_by_key(|(_, offset)| *offset);
-    if let Some(subscript) = subscript {
-        let wanted = format!("{ident}[{}]", super::series::element_key(subscript));
-        keys.retain(|(key, _)| *key == wanted);
-        if keys.is_empty() {
-            return Err(format!("{} has no element [{subscript}]", var.get_ident()));
-        }
-    }
-    if keys.is_empty() {
+    let (var, element) = named(project, model, variable)?;
+    let (series, _) =
+        keyed_series_upto(run, model, var.get_ident(), element.as_deref(), usize::MAX);
+    if series.is_empty() {
         return Err(format!(
             "{} has no series in run '{}'",
             var.get_ident(),
             run.name
         ));
     }
-    Ok(keys
-        .into_iter()
-        .map(|(key, offset)| KeyedSeries {
-            label: format!("{}{}", var.get_ident(), &key[ident.len()..]),
-            key: key.to_string(),
-            values: run.series(offset),
-        })
-        .collect())
+    Ok(series)
 }
 
 /// The one series `variable` names in `run`: a scalar's, or an element's.
 fn one_series(
     run: &Run,
+    project: &datamodel::Project,
     model: &datamodel::Model,
     variable: &str,
 ) -> Result<(String, Vec<f64>), String> {
-    one_keyed_series(run, model, variable).map(|series| (series.label, series.values))
+    one_keyed_series(run, project, model, variable).map(|series| (series.label, series.values))
 }
 
 /// [`one_series`], with its results key.
 fn one_keyed_series(
     run: &Run,
+    project: &datamodel::Project,
     model: &datamodel::Model,
     variable: &str,
 ) -> Result<KeyedSeries, String> {
-    let mut series = series_of(run, model, variable)?;
-    if series.len() > 1 {
-        return Err(format!(
+    let mut series = series_of(run, project, model, variable)?.into_iter();
+    match (series.next(), series.next()) {
+        (Some(one), None) => Ok(one),
+        (Some(first), Some(_)) => Err(format!(
             "{variable} is arrayed: name one of its elements, as {}",
-            series[0].label
-        ));
+            first.label
+        )),
+        (None, _) => Err(format!("{variable} has no series in run '{}'", run.name)),
     }
-    Ok(series.remove(0))
 }
 
 /// Whether a loop of `actual` polarity is of the `cited` one: a mostly
