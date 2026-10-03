@@ -274,6 +274,12 @@ fn format_diagnostic_inner(diag: &db::Diagnostic, var: Option<&Variable>) -> For
     let summary = match &diag.error {
         // A model-level error's summary names no variable, and an assembly
         // refusal's message is its whole payload, which is also its reason.
+        // One filed under no model is a fact about the project (its sim
+        // specs, its macro registry).
+        DiagnosticError::Model(_) if model.is_empty() => format!(
+            "{word} in the project: {}",
+            code_and_reason(code, diag.reason())
+        ),
         DiagnosticError::Model(_) => format!(
             "{word} in model '{model}': {}",
             code_and_reason(code, diag.reason())

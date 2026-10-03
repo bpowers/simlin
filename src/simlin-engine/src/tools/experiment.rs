@@ -30,6 +30,7 @@ use schemars::JsonSchema;
 use crate::common::{Canonical, Ident};
 use crate::datamodel::{self, Variable};
 
+use super::behavior::magnitude;
 use super::outline::{
     AuxKind, IntegrationMethod, SpecsOutline, aux_kind, constant_value, equation_text,
 };
@@ -37,7 +38,9 @@ use super::runs::{
     CURRENT, ElementValues, EquationChange, Replacement, Run, RunPlan, SpecsChange, ValueChange,
     execute, has_table,
 };
-use super::series::{SeriesCore, element_series, round};
+use super::series::{
+    KeyedSeries, MAX_ELEMENTS, SeriesCore, element_series, keyed_series_upto, round, scale_in_run,
+};
 use super::{Session, ToolError, Workspace, names, resolve_model};
 
 /// The most variables an experiment summarizes.
@@ -337,6 +340,24 @@ pub(crate) fn run_experiment(
             )));
         }
         seen.push(canonical.clone());
+        // A value from a time is set on the variable as the starting run has
+        // it: where that run replaced its equation with one that is not a
+        // number, the variable is computed there and has no value to set.
+        if let (Some(time), None, Some(base)) = (from_time, &change.equation, &base)
+            && let Some(replaced) = base
+                .plan
+                .equations
+                .iter()
+                .find(|c| c.variable == canonical && !c.replacement.is_constant())
+        {
+            return Err(ToolError::new(format!(
+                "run '{from}' gave '{name}' the equation '{eqn}', so it is computed there and has \
+                 no value to set from time {time}; give it an equation with the time in it \
+                 instead (IF TIME >= {time} THEN new ELSE {eqn})",
+                name = var.get_ident(),
+                eqn = replaced.replacement.text(),
+            )));
+        }
         match (change.value, change.multiply, &change.equation) {
             (Some(value), None, None) => {
                 let base = base
@@ -527,7 +548,11 @@ pub(crate) fn value_change(
         )));
     }
     keys.sort_by_key(|(_, offset)| *offset);
-    let data = base.results.iter().nth(row).expect("the row is in the run");
+    // A run the store keeps is a whole run, and every run saves row zero,
+    // its first step; `row_at` is at most the last row.
+    let Some(data) = base.results.iter().nth(row) else {
+        unreachable!("run '{}' has a row zero", base.name)
+    };
     let values: Vec<(Ident<Canonical>, f64, f64)> = keys
         .into_iter()
         .map(|(key, offset)| {
@@ -644,21 +669,35 @@ fn compare(
     let run_times = run.times();
     let base_times = base.map(Run::times);
     for var in record {
-        let (this, this_omitted) = element_series(run, model, var.get_ident());
+        let (this, this_omitted) =
+            keyed_series_upto(run, model, var.get_ident(), None, MAX_ELEMENTS);
         let that = base.map(|base| element_series(base, model, var.get_ident()).0);
         omitted += this_omitted;
-        for (i, (label, values)) in this.into_iter().enumerate() {
+        for (i, KeyedSeries { label, key, values }) in this.into_iter().enumerate() {
             if comparisons.len() == MAX_RECORD {
                 omitted += 1;
                 continue;
             }
-            let base_core = match (&that, &base_times) {
-                (Some(that), Some(times)) => that.get(i).map(|(_, v)| SeriesCore::of(times, v)),
+            let base_values = that.as_ref().and_then(|that| that.get(i)).map(|(_, v)| v);
+            // The two runs' series share the larger of their magnitudes:
+            // residue in one run beside a movement in the other is at rest,
+            // not a movement of its own. Each is also read at the scale of
+            // what it is computed from in its own run, its own equations: a
+            // replacement that ends a cancellation of large terms leaves no
+            // trace of them in the run it made.
+            let shared = magnitude(&values).max(base_values.map_or(0.0, |v| magnitude(v)));
+            let this_scale = scale_in_run(&run.results, model, &run.plan, &key).max(shared);
+            let base_core = match (base, base_values, &base_times) {
+                (Some(base), Some(v), Some(times)) => {
+                    let base_scale =
+                        scale_in_run(&base.results, model, &base.plan, &key).max(shared);
+                    Some(SeriesCore::at(times, v, base_scale))
+                }
                 _ => None,
             };
             comparisons.push(Comparison {
                 variable: label,
-                this: SeriesCore::of(&run_times, &values),
+                this: SeriesCore::at(&run_times, &values, this_scale),
                 base: base_core,
             });
         }

@@ -24,11 +24,12 @@
 //! globals, calls the *root* instance's initials, and drives the integration
 //! loop. `run` lays the slab out as: a `curr` working chunk, a `next` working
 //! chunk, then a results region of `n_chunks` step-major snapshots. It records a
-//! snapshot of `curr` on the same cadence the bytecode VM uses (`vm.rs::run_to`):
-//! the t=start sample is forced, then every `save_every = round(save_step/dt)`
-//! steps, up to `n_chunks` samples.
+//! snapshot of `curr` at the steps the bytecode VM saves (`results::Specs`: row
+//! `m` is the first step at or after its save time, `m` save steps from the
+//! start), `n_chunks` rows in all.
 //!
-//! Unlike the VM's chunk-ring buffer, this uses a single `curr` chunk plus a
+//! Unlike the VM's buffer, whose two working rows follow its saved rows and
+//! move along them, this uses a single `curr` chunk plus a
 //! `next` chunk that holds only the freshly integrated stock values (including
 //! nested-module stocks, collected by recursing through `EvalModule`): after
 //! recording a snapshot, the updated stocks are copied back into `curr` and time
@@ -86,12 +87,13 @@ const TIME_ADDR: u64 = TIME_OFF as u64 * SLOT_SIZE as u64;
 // Global indices. The three self-describing geometry globals come first (so the
 // exported indices 0/1/2 stay stable for hosts), all immutable. The mutable
 // globals follow: `use_prev_fallback` at index 3, then the persistent step
-// cursor (`saved`/`step_accum`/`did_initials`) at 4/5/6. The cursor globals make
+// cursor (`saved`/`step`/`did_initials`) at 4/5/6. The cursor globals make
 // a run resumable: they survive across separate exported calls so `run_initials`
 // can run once and each `run_to(target)` resumes from where the prior one
-// stopped (the blob analogue of the VM's `curr_chunk`/`step_accum`/`did_initials`
-// fields). They are internal -- not exported -- since a host drives the run only
-// through `run`/`run_to`/`run_initials`/`reset`.
+// stopped (the blob analogue of the VM's `curr_chunk`/`step`/`did_initials`
+// fields). A host drives the run only through `run`/`run_to`/`run_initials`/
+// `reset`; of the cursor it reads `saved` alone (the `saved_steps` export, the
+// rows a run stopped part-way has saved).
 //
 // `use_prev_fallback` gates `LoadPrev`: init 1 (return the fallback) until the
 // first `prev_values` snapshot clears it (`vm.rs:668`); it is the inverse of the
@@ -101,8 +103,11 @@ const G_N_CHUNKS: u32 = 1;
 const G_RESULTS_OFFSET: u32 = 2;
 const G_USE_PREV_FALLBACK: u32 = 3;
 // The persistent step cursor (mutable, internal):
-const G_SAVED: u32 = 4; // saved-row counter (was the run-local `L_SAVED`)
-const G_STEP_ACCUM: u32 = 5; // save-cadence accumulator (was `L_STEP_ACCUM`)
+const G_SAVED: u32 = 4; // saved-row counter
+// The index of the step the clock stands at (cf. `Vm::step`): the clock is
+// `start + step * dt`, counted rather than accumulated, and a step is saved
+// when its index is the next row's (`Specs::saved_row_step`).
+const G_STEP: u32 = 5;
 const G_DID_INITIALS: u32 = 6; // 0 until initials have run (cf. `Vm::did_initials`)
 // `errors::G_ERR_CODE`/`G_ERR_BELT` (indices 7/8) are the runtime error channel,
 // emitted for EVERY module so `get_error` is an unconditional export (GH #921).
@@ -114,8 +119,8 @@ const G_DID_INITIALS: u32 = 6; // 0 until initials have run (cf. `Vm::did_initia
 // index the per-step emitters (`emit_save_advance`/`emit_rk*_step`) use, which
 // lets those helpers stay shared between the (now removed) function-local cursor
 // and the global cursor. Index 1 is an unused i32 filler that keeps `L_DST` at 2.
-// The saved-row/step-accum cursor lives in `G_SAVED`/`G_STEP_ACCUM` (globals),
-// not locals, so it survives across `run_to` calls.
+// The saved-row/step cursor lives in `G_SAVED`/`G_STEP` (globals), not locals,
+// so it survives across `run_to` calls.
 const L_DST: u32 = 2;
 
 // The special-stock passes' `run_to` locals, appended AFTER the RK f64 pair so
@@ -642,6 +647,11 @@ fn compile_with_passes(
     fault: Option<errors::FaultInjection>,
     target_body_bytes: usize,
 ) -> Result<WasmArtifact, WasmGenError> {
+    // Specs no run can be made under are refused for the VM's reason, before
+    // anything is sized from them (a DT of zero counts more rows than fit).
+    if let Some(reason) = sim.specs.refusal() {
+        return Err(WasmGenError::Unsupported(format!("wasmgen: {reason}")));
+    }
     belt::reject_unsupported(conveyor_plans)?;
     // Decides three things, all no-ops for a model whose passes are total: the
     // driver guards (`errors::emit_return_if_error`), the `curr` save area the
@@ -957,9 +967,18 @@ fn compile_with_passes(
 
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
 
-    // save_every mirrors vm.rs::run_to: max(1, round(save_step / dt)).
-    let save_every = ((specs.save_step / specs.dt).round() as i64).max(1);
-    let save_every = i32::try_from(save_every).map_err(|_| too_large())?;
+    // The step grid is the VM's (`results::Specs`): the same saved steps and
+    // the same last step. The step counter is an i32 global, so a run of more
+    // steps than it counts is refused rather than wrapped.
+    i32::try_from(specs.final_step())
+        .ok()
+        .and_then(|last| last.checked_add(1))
+        .ok_or_else(|| {
+            WasmGenError::Unsupported(format!(
+                "wasmgen: a run of {} steps is more than the step counter holds",
+                specs.final_step()
+            ))
+        })?;
 
     // Emitted helper functions occupy the module's first function slots; the
     // per-instance function-triples follow (at `n_helpers + i*FUNCS_PER_INSTANCE`
@@ -1213,7 +1232,6 @@ fn compile_with_passes(
     let run_to_fn = emit_run_to(
         specs,
         regions,
-        save_every,
         &stock_offsets,
         root_fn_base,
         run_initials_fn_index,
@@ -1583,8 +1601,10 @@ struct RunRegions {
 const L_SAVED_TIME: u32 = 3;
 const L_RK_S: u32 = 4;
 
-/// `run_to`'s f64 param: the run target (the strict upper bound on `curr[TIME]`),
-/// at local 0. The loop steps until `curr[TIME] > target`.
+/// `run_to`'s f64 param, at local 0: the run target. A time on entry; the
+/// function replaces it with the index of the last step at or before that
+/// time (`Specs::step_at_or_before`), and the loop steps while the step
+/// counter is at most that.
 const RT_TARGET: u32 = 0;
 
 /// The function indices `run`'s delegating body calls: `run` is re-expressed as
@@ -2046,13 +2066,13 @@ fn emit_run_initials(
         }
     }
 
-    // Arm the cursor: nothing saved yet, accumulator cleared, initials done. The
-    // first save happens in `run_to`'s loop (the forced t=start row), matching the
-    // VM (`run_initials` does not save chunk 0).
+    // Arm the cursor: nothing saved yet, the clock at step zero, initials done.
+    // The first save happens in `run_to`'s loop (step zero is on every save
+    // cadence), matching the VM (`run_initials` does not save chunk 0).
     f.instruction(&I::I32Const(0));
     f.instruction(&I::GlobalSet(G_SAVED));
     f.instruction(&I::I32Const(0));
-    f.instruction(&I::GlobalSet(G_STEP_ACCUM));
+    f.instruction(&I::GlobalSet(G_STEP));
     f.instruction(&I::I32Const(1));
     f.instruction(&I::GlobalSet(G_DID_INITIALS));
 
@@ -2060,18 +2080,19 @@ fn emit_run_initials(
     f
 }
 
-/// Emit `run_to(target: f64) -> ()`: advance the simulation until `curr[TIME] >
-/// target` (strict `>`, matching `vm.rs:644`), starting from wherever the
-/// persistent cursor left off. Calls `run_initials` first (idempotent), then runs
-/// the per-method stepping loop -- the single shared stepping-loop implementation
-/// both `run` and `run_to` use. The loop reads/writes the saved-row cursor from
-/// `G_SAVED`/`G_STEP_ACCUM` (globals), so it resumes correctly across calls; the
-/// saved-row exhaustion break (`if saved >= n_chunks`) clamps a target past
-/// FINAL_TIME to the slab end, exactly like the VM's chunk-ring exhaustion.
+/// Emit `run_to(target: f64) -> ()`: evaluate every step at or before `target`
+/// (`Vm::run_to`'s contract, on the same step grid: `Specs::step_at_or_before`
+/// is computed here with the same three f64 operations, so both backends stop
+/// at the same step for any target), starting from wherever the persistent
+/// cursor left off. Calls `run_initials` first (idempotent), then runs the
+/// per-method stepping loop -- the single shared stepping-loop implementation
+/// both `run` and `run_to` use. The loop reads/writes the cursor from
+/// `G_SAVED`/`G_STEP` (globals), so it resumes correctly across calls; the
+/// saved-row break (`if saved >= n_chunks`) ends the run with its last saved
+/// row, so a target past FINAL_TIME runs to the end and no further.
 fn emit_run_to(
     specs: &Specs,
     regions: RunRegions,
-    save_every: i32,
     stock_offsets: &[usize],
     root_fn_base: u32,
     run_initials_idx: u32,
@@ -2118,6 +2139,20 @@ fn emit_run_to(
         errors::emit_return_if_error(&mut f);
     }
 
+    // target := the index of the last step at or before it, as an f64:
+    // floor((target - start) / dt + STEP_TOLERANCE). The parameter's local is
+    // reused, since the time itself is not read again. A NaN target compares
+    // false with every step below, which runs to the end, as the VM does.
+    f.instruction(&I::LocalGet(RT_TARGET));
+    f.instruction(&f64_const(specs.start));
+    f.instruction(&I::F64Sub);
+    f.instruction(&f64_const(specs.dt));
+    f.instruction(&I::F64Div);
+    f.instruction(&f64_const(crate::results::STEP_TOLERANCE));
+    f.instruction(&I::F64Add);
+    f.instruction(&I::F64Floor);
+    f.instruction(&I::LocalSet(RT_TARGET));
+
     f.instruction(&I::Block(BlockType::Empty)); // $break
     f.instruction(&I::Loop(BlockType::Empty)); // $continue
 
@@ -2126,18 +2161,19 @@ fn emit_run_to(
     // scrubbing that stays at the end) must be a no-op: the results region is
     // exactly `n_chunks` rows, so saving one more would write past it and corrupt
     // the snapshot/GF regions that sit immediately after. This is the resumable
-    // analogue of the post-save exhaustion break below, moved to the loop *entry*
+    // analogue of the break after the last row's save below, at the loop *entry*
     // so re-entry on a full slab steps and saves nothing. (A fresh run never trips
     // it -- `saved` only reaches `n_chunks` via that post-save break, which exits
-    // before this guard is re-checked.)
+    // before this guard is re-checked.) The VM likewise takes no step once its
+    // run is over (`Vm::run_steps`).
     f.instruction(&I::GlobalGet(G_SAVED));
     f.instruction(&I::I32Const(regions.n_chunks as i32));
     f.instruction(&I::I32GeS);
     f.instruction(&I::BrIf(1));
 
-    // if curr[TIME] > target: break
-    f.instruction(&I::I32Const(0));
-    f.instruction(&I::F64Load(memarg(TIME_ADDR)));
+    // if step > target's step: break
+    f.instruction(&I::GlobalGet(G_STEP));
+    f.instruction(&I::F64ConvertI32S);
     f.instruction(&I::LocalGet(RT_TARGET));
     f.instruction(&I::F64Gt);
     f.instruction(&I::BrIf(1));
@@ -2158,9 +2194,9 @@ fn emit_run_to(
     // The save + advance tail is method-agnostic: every method leaves `next[off]`
     // holding the new stock values and `curr` holding the time-`t` state, so the
     // save row records `curr`, the advance copies the new stocks `next -> curr`,
-    // and `curr[TIME] += dt`. The saved-row counter is the `G_SAVED` global, so
-    // the cursor survives across `run_to` calls.
-    emit_save_advance(&mut f, specs, save_every, stock_offsets, &regions);
+    // and the clock moves to the next step. The cursor is the `G_SAVED`/`G_STEP`
+    // globals, so it survives across `run_to` calls.
+    emit_save_advance(&mut f, specs, stock_offsets, &regions);
 
     f.instruction(&I::Br(0)); // continue
     f.instruction(&I::End); // end loop
@@ -2169,7 +2205,7 @@ fn emit_run_to(
     // After a mid-interval stop, refresh `curr`'s flow/aux/constant slots at the
     // resting state -- but ONLY when `curr` was advanced (`saved < n_chunks`).
     //
-    // The `curr[TIME] > target` break fires *after* the save+advance tail, which
+    // The target break fires *after* the save+advance tail, which
     // copies only the stock offsets `next -> curr` and steps the time, leaving the
     // non-stock slots holding the previous step's values (a one-step lag versus the
     // advanced time + stocks). A mid-run `getValue` of a flow/aux would otherwise
@@ -2180,16 +2216,24 @@ fn emit_run_to(
     // reads `x(t-dt)`.
     //
     // The guard skips the re-eval when the slab is full (`saved >= n_chunks`),
-    // which is exactly the break paths that do NOT advance `curr`: the post-save
-    // exhaustion break and the top-of-loop full-slab guard. There `curr` is already
-    // the just-saved, fully-evaluated `t=stop` row, so the re-eval is unnecessary
+    // which is exactly the break paths that do NOT advance `curr`: the break after
+    // the last row's save and the top-of-loop full-slab guard. There `curr` is already
+    // the just-saved, fully-evaluated last row, so the re-eval is unnecessary
     // for flows/auxes -- and actively WRONG for a `PREVIOUS` aux: `prev_values` was
-    // snapshotted to that same `t=stop` row (the per-step snapshot runs after
-    // flows), so a re-eval would resolve `PREVIOUS(x)` to `x(stop)` instead of
-    // `x(stop-dt)`, corrupting the live curr a host reads via `getValue` and
-    // diverging from the committed series + the VM. Skipping also keeps a resumed
-    // `run_to` on a full slab a strict no-op. This mirrors the VM's
-    // `curr_chunk != next_chunk` guard ("re-eval only when curr was advanced").
+    // snapshotted to that same row (the per-step snapshot runs after flows), so a
+    // re-eval would resolve `PREVIOUS(x)` to `x` at that row instead of the step
+    // before, corrupting the live curr a host reads via `getValue` and diverging
+    // from the committed series. Skipping also keeps a resumed `run_to` on a full
+    // slab a strict no-op.
+    //
+    // The blob therefore rests where the VM does (bit for bit) only while the
+    // target is before its last saved row. From that row on it rests AT that
+    // row, evaluated, and takes no step past it -- with a save step over DT, not
+    // even the steps between that row and the stop -- where the VM evaluates
+    // every step to the target and rests at the next, unevaluated (after the
+    // final step, one past the stop). `module_tests::where_a_run_rests_on_each_backend`
+    // tables both. Making the blob rest where the VM does would change what its
+    // exports mean to a host, which is not settled here.
     // The re-eval touches only `curr` (the saved rows were already committed) and
     // does NOT snapshot `prev_values`, so a resume's `PREVIOUS` still sees the last
     // completed step. Unlike the VM there is no chunk aliasing: `curr` is always
@@ -2230,7 +2274,7 @@ fn emit_run_to(
 ///
 /// Invariant (the linchpin): `run()` must produce a full from-t0 simulation on
 /// every call to a reused instance. The delegation satisfies this for free --
-/// `reset` clears `G_DID_INITIALS`/`G_SAVED`/`G_STEP_ACCUM` and re-arms
+/// `reset` clears `G_DID_INITIALS`/`G_SAVED`/`G_STEP` and re-arms
 /// `G_USE_PREV_FALLBACK = 1`, so the subsequent `run_to` -> `run_initials` (no
 /// longer short-circuited, since `reset` cleared `G_DID_INITIALS`) re-seeds the
 /// reserved time slots and re-runs initials from scratch.
@@ -2304,40 +2348,36 @@ fn emit_prev_snapshot(f: &mut Function, regions: &RunRegions) {
 
 /// The method-agnostic save + advance tail (the wasm analogue of the VM's
 /// `save_advance!` plus its per-step advance). Records a results row from `curr`
-/// on the VM's cadence, breaks when the chunk budget is exhausted, then advances
-/// by copying the new stock values `next -> curr` and stepping `curr[TIME] += dt`.
+/// at the steps the VM saves (`Specs::saved_row_step`: the step is the next
+/// row's when its index is that row's step, computed here in the same f64
+/// operations), breaks once the run's last row is saved, then advances by copying the new
+/// stock values `next -> curr` and moving the clock to the next step,
+/// `start + step * dt`: counted, as the VM's is, never accumulated.
 fn emit_save_advance(
     f: &mut Function,
     specs: &Specs,
-    save_every: i32,
     stock_offsets: &[usize],
     regions: &RunRegions,
 ) {
     let n_slots = regions.n_slots;
 
-    // The saved-row counter (`G_SAVED`) and the save-cadence accumulator
-    // (`G_STEP_ACCUM`) are mutable globals, not function locals, so the cursor
-    // persists across the separate `run_to` calls a resumable run makes. `L_DST`
-    // is a per-step transient and stays a function local.
+    // The saved-row counter (`G_SAVED`) and the step counter (`G_STEP`) are
+    // mutable globals, not function locals, so the cursor persists across the
+    // separate `run_to` calls a resumable run makes. `L_DST` is a per-step
+    // transient and stays a function local.
 
-    // step_accum += 1
-    f.instruction(&I::GlobalGet(G_STEP_ACCUM));
-    f.instruction(&I::I32Const(1));
-    f.instruction(&I::I32Add);
-    f.instruction(&I::GlobalSet(G_STEP_ACCUM));
-
-    // save_cond = (step_accum == save_every) | (saved == 0 & time == start)
-    f.instruction(&I::GlobalGet(G_STEP_ACCUM));
-    f.instruction(&I::I32Const(save_every));
-    f.instruction(&I::I32Eq);
+    // save_cond = step == ceil(saved * save_step_in_steps - STEP_TOLERANCE):
+    // the step is the one the next row is saved at.
+    f.instruction(&I::GlobalGet(G_STEP));
+    f.instruction(&I::F64ConvertI32S);
     f.instruction(&I::GlobalGet(G_SAVED));
-    f.instruction(&I::I32Eqz);
-    f.instruction(&I::I32Const(0));
-    f.instruction(&I::F64Load(memarg(TIME_ADDR)));
-    f.instruction(&f64_const(specs.start));
+    f.instruction(&I::F64ConvertI32S);
+    f.instruction(&f64_const(specs.save_step_in_steps()));
+    f.instruction(&I::F64Mul);
+    f.instruction(&f64_const(crate::results::STEP_TOLERANCE));
+    f.instruction(&I::F64Sub);
+    f.instruction(&I::F64Ceil);
     f.instruction(&I::F64Eq);
-    f.instruction(&I::I32And);
-    f.instruction(&I::I32Or);
     f.instruction(&I::If(BlockType::Empty));
 
     // dst = results_base + saved * stride
@@ -2356,13 +2396,11 @@ fn emit_save_advance(
         f.instruction(&I::F64Store(memarg(u64::from(slot) * u64::from(SLOT_SIZE))));
     }
 
-    // saved += 1; step_accum = 0
+    // saved += 1
     f.instruction(&I::GlobalGet(G_SAVED));
     f.instruction(&I::I32Const(1));
     f.instruction(&I::I32Add);
     f.instruction(&I::GlobalSet(G_SAVED));
-    f.instruction(&I::I32Const(0));
-    f.instruction(&I::GlobalSet(G_STEP_ACCUM));
 
     // if saved >= n_chunks: break (depth 2: if -> loop -> block)
     f.instruction(&I::GlobalGet(G_SAVED));
@@ -2385,11 +2423,17 @@ fn emit_save_advance(
         f.instruction(&I::F64Store(memarg(off as u64 * u64::from(SLOT_SIZE))));
     }
 
-    // time += dt
+    // step += 1; time = start + step * dt
+    f.instruction(&I::GlobalGet(G_STEP));
+    f.instruction(&I::I32Const(1));
+    f.instruction(&I::I32Add);
+    f.instruction(&I::GlobalSet(G_STEP));
     f.instruction(&I::I32Const(0));
-    f.instruction(&I::I32Const(0));
-    f.instruction(&I::F64Load(memarg(TIME_ADDR)));
+    f.instruction(&f64_const(specs.start));
+    f.instruction(&I::GlobalGet(G_STEP));
+    f.instruction(&I::F64ConvertI32S);
     f.instruction(&f64_const(specs.dt));
+    f.instruction(&I::F64Mul);
     f.instruction(&I::F64Add);
     f.instruction(&I::F64Store(memarg(TIME_ADDR)));
 }
@@ -2514,7 +2558,7 @@ fn emit_set_value(
 ///    `emit_copy_chunk`; `run_initials` overwrites curr wholesale on the next run,
 ///    so this matters only for a read taken between `reset` and the next run.
 ///
-/// 2. **Run cursor + PREVIOUS fallback** globals: `G_SAVED`/`G_STEP_ACCUM` to 0
+/// 2. **Run cursor + PREVIOUS fallback** globals: `G_SAVED`/`G_STEP` to 0
 ///    (no rows saved, accumulator empty), `G_DID_INITIALS` to 0 (so `run_initials`
 ///    no longer short-circuits and re-seeds the time slots + re-runs initials), and
 ///    `G_USE_PREV_FALLBACK` back to 1 (the analogue of the VM's `reset` clearing
@@ -2569,7 +2613,7 @@ fn emit_reset(
     f.instruction(&I::I32Const(0));
     f.instruction(&I::GlobalSet(G_SAVED));
     f.instruction(&I::I32Const(0));
-    f.instruction(&I::GlobalSet(G_STEP_ACCUM));
+    f.instruction(&I::GlobalSet(G_STEP));
     f.instruction(&I::I32Const(0));
     f.instruction(&I::GlobalSet(G_DID_INITIALS));
     f.instruction(&I::I32Const(1));
@@ -2825,8 +2869,8 @@ fn emit_rk4_step(
         emit_store_slot_value(f, CURR_BASE, off);
     }
 
-    // curr[TIME] = saved_time ; next[TIME] = saved_time + dt
-    emit_restore_and_advance_time(f, dt, regions);
+    // curr[TIME] = saved_time
+    emit_restore_time(f);
 
     // Final flows-only re-eval with the restored curr, so curr's aux/flow slots
     // hold time-`t` values (stages 2-4 clobbered them). Load-bearing for both
@@ -2906,8 +2950,8 @@ fn emit_rk2_step(
         emit_store_slot_value(f, CURR_BASE, off);
     }
 
-    // curr[TIME] = saved_time ; next[TIME] = saved_time + dt
-    emit_restore_and_advance_time(f, dt, regions);
+    // curr[TIME] = saved_time
+    emit_restore_time(f);
 
     // Final flows-only re-eval with restored curr (see the RK4 comment).
     f.instruction(&I::I32Const(0));
@@ -2926,22 +2970,13 @@ fn emit_store_time_offset(f: &mut Function, offset: f64) {
     f.instruction(&I::F64Store(memarg(TIME_ADDR)));
 }
 
-/// Restore `curr[TIME] = saved_time` and set `next[TIME] = saved_time + dt`
-/// (`vm.rs:759-760` / `818-819`), so the final flows re-eval runs at time `t`.
-/// `next[TIME]` is set for faithfulness with the VM even though the wasm
-/// save/advance tail advances via `curr[TIME] += dt` rather than reading it.
-fn emit_restore_and_advance_time(f: &mut Function, dt: f64, regions: &RunRegions) {
-    let next_time_addr = u64::from(regions.n_slots) * u64::from(SLOT_SIZE) + TIME_ADDR;
-    // curr[TIME] = saved_time
+/// Restore `curr[TIME] = saved_time`, so the final flows re-eval runs at the
+/// step's own time (the stages moved the clock to their trial points). The
+/// save/advance tail then sets the next step's time from the step counter.
+fn emit_restore_time(f: &mut Function) {
     f.instruction(&I::I32Const(0));
     f.instruction(&I::LocalGet(L_SAVED_TIME));
     f.instruction(&I::F64Store(memarg(TIME_ADDR)));
-    // next[TIME] = saved_time + dt
-    f.instruction(&I::I32Const(0));
-    f.instruction(&I::LocalGet(L_SAVED_TIME));
-    f.instruction(&f64_const(dt));
-    f.instruction(&I::F64Add);
-    f.instruction(&I::F64Store(memarg(next_time_addr)));
 }
 
 /// Emit an unrolled `dst[0..n_slots] := src[0..n_slots]` f64 copy between two
@@ -3167,12 +3202,12 @@ fn assemble_simulation(parts: AssembleParts) -> Result<Vec<u8>, WasmGenError> {
     // The mutable globals (index 3..=6), all internal. `use_prev_fallback` (index
     // 3) inits 1 so `LoadPrev` returns its fallback until the first `prev_values`
     // snapshot clears it (`vm.rs:668`). The persistent step cursor follows:
-    // `G_SAVED`/`G_STEP_ACCUM`/`G_DID_INITIALS` (4/5/6), all init 0 -- the
+    // `G_SAVED`/`G_STEP`/`G_DID_INITIALS` (4/5/6), all init 0 -- the
     // module-init state is "no rows saved, accumulator empty, initials not yet
     // run", which `run_initials` arms and `reset` restores.
     globals.global(mutable_i32_global(), &ConstExpr::i32_const(1)); // G_USE_PREV_FALLBACK
     globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_SAVED
-    globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_STEP_ACCUM
+    globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_STEP
     globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_DID_INITIALS
     // The runtime error channel (indices 7/8), emitted for EVERY module so
     // `get_error` is an unconditional export. Both init 0 -- "no error raised".

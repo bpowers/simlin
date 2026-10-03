@@ -3594,11 +3594,14 @@ fn compute_metadata_parts(
     // partition surface: detected loops carry partition metadata (a None
     // partition is a module-internal loop), the persisted-metadata fallback
     // carries none at all.
-    let (mut feedback_loops, partition_surface) =
+    // Persisted loop metadata carries no importance series, so it has no
+    // rows and no times for them.
+    let (mut feedback_loops, times, partition_surface) =
         match try_detect_ltm_loops(db, source_project, actual_model_name) {
-            Some(loops) => (loops, PartitionSurface::PartitionBearing),
+            Some((loops, times)) => (loops, times, PartitionSurface::PartitionBearing),
             None => (
                 build_feedback_loops_from_metadata(model, &uid_to_ident),
+                Vec::new(),
                 PartitionSurface::NoMetadata,
             ),
         };
@@ -3608,25 +3611,11 @@ fn compute_metadata_parts(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let dominant_periods = {
-        let specs = model.sim_specs.as_ref().unwrap_or(&project.sim_specs);
-        let dt_to_f64 = |dt: &datamodel::Dt| match dt {
-            datamodel::Dt::Dt(v) => *v,
-            datamodel::Dt::Reciprocal(v) => 1.0 / v,
-        };
-        let dt = dt_to_f64(&specs.dt);
-        let raw_save_step = specs.save_step.as_ref().map(dt_to_f64).unwrap_or(dt);
-        // The VM saves at most once per dt step
-        // (save_every = max(1, round(save_step/dt))), so the effective
-        // cadence is never faster than dt.
-        let effective_save_step = raw_save_step.max(dt);
-        crate::ltm_dominance::calculate_dominant_periods(
-            &feedback_loops,
-            specs.start,
-            effective_save_step,
-            partition_surface,
-        )
-    };
+    let dominant_periods = crate::ltm_dominance::calculate_dominant_periods(
+        &feedback_loops,
+        &times,
+        partition_surface,
+    );
 
     Some(ComputedMetadata {
         chains,

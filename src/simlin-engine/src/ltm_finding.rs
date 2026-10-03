@@ -3254,8 +3254,9 @@ pub(crate) fn discover_loops_with_deadlines(
             }
         }
 
-        // Compute signed loop score at each timestep.
-        // Time is derived from specs assuming evenly-spaced results at save_step intervals.
+        // Compute signed loop score at each timestep. A row's time is the
+        // row's own: saved rows are not evenly spaced when the save step is
+        // not a whole number of DTs (`results::Specs`).
         let mut scores: Vec<(f64, f64)> = Vec::new();
         // Running (Welford) mean of |score| over the valid steps -- the same
         // formula retention uses (`enum_gen::mean_abs_over_valid`), so a
@@ -3267,7 +3268,7 @@ pub(crate) fn discover_loops_with_deadlines(
         let mut abs_any_inf = false;
 
         for step in 0..step_count {
-            let time = results.specs.start + results.specs.save_step * (step as f64);
+            let time = results.data[step * results.step_size + crate::results::TIME_OFF];
 
             // Compute signed loop score = product of signed link scores
             let mut loop_score = 1.0;

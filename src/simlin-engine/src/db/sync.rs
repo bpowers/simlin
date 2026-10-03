@@ -9,7 +9,10 @@
 //! the fresh (`sync_from_datamodel`) and incremental
 //! (`sync_from_datamodel_incremental`) sync entry points plus their
 //! per-variable helpers (`source_variable_from_datamodel`,
-//! `update_source_variable`), the macro-declaration extractor
+//! `update_source_variable`), the three extractions of what a datamodel
+//! yields the inputs (`SourceProjectFields`, `SourceModelFields`,
+//! `SourceVariableFields`) with the key of what a simulation reads of them
+//! (`simulation_key`), the macro-declaration extractor
 //! (`macro_declarations_from_datamodel`), and the `maps_to`/`mappings`
 //! reachability closure (`expand_maps_to_chains`) the parser uses to size a
 //! variable's dimension dependency.
@@ -266,16 +269,18 @@ pub(crate) fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
         }
         let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
         variable_names.sort();
+        // A stdlib model is no macro and carries no loop metadata, so its
+        // extraction has neither.
+        let fields = SourceModelFields::from_datamodel(&dm_model);
         let source_model = SourceModel::new(
             db,
             full_name.clone(),
             variable_names,
             source_var_map,
-            declared_variable_idents(&dm_model),
-            dm_model.sim_specs.clone(),
-            None,
-            // Stdlib models carry no diagram loop_metadata.
-            Vec::new(),
+            fields.declared_variable_idents,
+            fields.sim_specs,
+            fields.macro_spec,
+            fields.pinned_loops,
         );
 
         by_canonical.insert(
@@ -324,16 +329,16 @@ pub fn sync_from_datamodel(db: &SimlinDb, project: &datamodel::Project) -> SyncR
         let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
         variable_names.sort();
 
-        let model_sim_specs = dm_model.sim_specs.clone();
+        let fields = SourceModelFields::from_datamodel(dm_model);
         let source_model = SourceModel::new(
             db,
-            dm_model.name.clone(),
+            fields.name,
             variable_names,
             source_var_map,
-            declared_variable_idents(dm_model),
-            model_sim_specs,
-            dm_model.macro_spec.clone(),
-            pinned_loops_from_datamodel(dm_model),
+            fields.declared_variable_idents,
+            fields.sim_specs,
+            fields.macro_spec,
+            fields.pinned_loops,
         );
 
         source_model_map.insert(canonical_model_name.clone(), source_model);
@@ -368,21 +373,71 @@ pub fn sync_from_datamodel(db: &SimlinDb, project: &datamodel::Project) -> SyncR
         model_names.push(full_name.clone());
     }
 
+    let fields = SourceProjectFields::from_datamodel(project);
     let source_project = SourceProject::new(
         db,
-        project.name.clone(),
-        project.sim_specs.clone(),
-        project.dimensions.clone(),
-        project.units.clone(),
+        fields.name,
+        fields.sim_specs,
+        fields.dimensions,
+        fields.units,
         model_names,
         source_model_map,
-        macro_declarations_from_datamodel(project),
+        fields.macro_declarations,
         false,
     );
 
     SyncResult {
         project: source_project,
         models,
+    }
+}
+
+/// The `SourceProject` field values a `datamodel::Project` yields, its models
+/// aside (their handles are built as the sync walks them).
+///
+/// With [`SourceModelFields`] and [`SourceVariableFields`], the one statement
+/// of which datamodel field becomes which salsa input field: the fresh sync,
+/// the incremental sync and [`simulation_key`] all read these, so what the
+/// compiler can read of a datamodel is listed once.
+struct SourceProjectFields {
+    name: String,
+    sim_specs: datamodel::SimSpecs,
+    dimensions: Vec<datamodel::Dimension>,
+    units: Vec<datamodel::Unit>,
+    macro_declarations: Vec<(String, Option<datamodel::MacroSpec>)>,
+}
+
+impl SourceProjectFields {
+    fn from_datamodel(project: &datamodel::Project) -> Self {
+        SourceProjectFields {
+            name: project.name.clone(),
+            sim_specs: project.sim_specs.clone(),
+            dimensions: project.dimensions.clone(),
+            units: project.units.clone(),
+            macro_declarations: macro_declarations_from_datamodel(project),
+        }
+    }
+}
+
+/// The `SourceModel` field values a `datamodel::Model` yields, its variables
+/// aside (their handles are built as the sync walks them).
+struct SourceModelFields {
+    name: String,
+    declared_variable_idents: Vec<String>,
+    sim_specs: Option<datamodel::SimSpecs>,
+    macro_spec: Option<datamodel::MacroSpec>,
+    pinned_loops: Vec<PinnedLoopSpec>,
+}
+
+impl SourceModelFields {
+    fn from_datamodel(model: &datamodel::Model) -> Self {
+        SourceModelFields {
+            name: model.name.clone(),
+            declared_variable_idents: declared_variable_idents(model),
+            sim_specs: model.sim_specs.clone(),
+            macro_spec: model.macro_spec.clone(),
+            pinned_loops: pinned_loops_from_datamodel(model),
+        }
     }
 }
 
@@ -497,6 +552,446 @@ fn source_variable_from_datamodel(
 #[path = "sync_flow_list_tests.rs"]
 mod flow_list_tests;
 
+// ── Simulation key ─────────────────────────────────────────────────────
+
+/// A project as a simulation reads it, as a number: equal for two projects
+/// whose compiled simulations and runs are the same, and (but for a hash
+/// collision) different otherwise.
+///
+/// It is taken from the sync's own extractions, so it covers exactly what the
+/// compiler can read: a field of the datamodel that is no salsa input
+/// (a diagram, a sector, a variable's notes, provenance, the source file)
+/// cannot change a compile and is in no key. Every field of the three
+/// extractions is named below and either hashed or left out with the reason
+/// it changes no run; an extraction that grows a field does not compile here
+/// until the field is put on one side. The types the fields hold are taken
+/// apart the same way, down to their numbers and strings.
+///
+/// Units are checked, never simulated, so a variable's units, the unit
+/// definitions and the time units are left out, and an edit of them leaves a
+/// run of the model fresh.
+///
+/// Text is hashed as written. An equation respelled, or a variable renamed in
+/// case only, simulates the same and has another key: the key never calls two
+/// different simulations the same, and may call the same simulation different.
+/// Telling a respelling from a change takes a parse of every equation, which a
+/// key taken at every revision does not pay for the run it would save.
+#[cfg(feature = "agent_tools")]
+pub(crate) fn simulation_key(project: &datamodel::Project) -> u64 {
+    let mut key = KeyHasher::default();
+
+    let SourceProjectFields {
+        // A label.
+        name: _,
+        sim_specs,
+        dimensions,
+        // Unit definitions are read by the unit check alone.
+        units: _,
+        // Each model's canonical name and macro spec, hashed with the model.
+        macro_declarations: _,
+    } = SourceProjectFields::from_datamodel(project);
+    key.sim_specs(&sim_specs);
+    key.each(&dimensions, KeyHasher::dimension);
+
+    // In declaration order: which model a name falls back to is the first
+    // that is no macro.
+    key.count(project.models.len());
+    for model in &project.models {
+        let canonical_model_name = canonicalize(&model.name).into_owned();
+        let SourceModelFields {
+            name,
+            // The variables' spellings in declaration order, which only the
+            // duplicate-name report reads; each variable's own is hashed below.
+            declared_variable_idents: _,
+            sim_specs,
+            macro_spec,
+            pinned_loops,
+        } = SourceModelFields::from_datamodel(model);
+        key.text(&name);
+        key.optional(sim_specs.as_ref(), KeyHasher::sim_specs);
+        key.optional(macro_spec.as_ref(), KeyHasher::macro_spec);
+        // A pinned loop is scored in every analysis of a run, which the run
+        // keeps.
+        key.each(&pinned_loops, KeyHasher::pinned_loop);
+
+        // By canonical name: the order variables are declared in changes no
+        // layout and no runlist.
+        let mut variables: Vec<(String, SourceVariableFields)> = model
+            .variables
+            .iter()
+            .map(|var| {
+                (
+                    canonicalize(var.get_ident()).into_owned(),
+                    SourceVariableFields::from_datamodel(var, &canonical_model_name),
+                )
+            })
+            .collect();
+        variables.sort_by(|a, b| a.0.cmp(&b.0));
+        key.count(variables.len());
+        for (_, fields) in &variables {
+            let SourceVariableFields {
+                ident,
+                equation,
+                kind,
+                // Checked, never simulated.
+                units: _,
+                gf,
+                inflows,
+                outflows,
+                // What the flow lists repeat, which only the advisory reads;
+                // the sets the engine integrates are `inflows`/`outflows`.
+                repeated_inflows: _,
+                repeated_outflows: _,
+                module_refs,
+                referenced_model_name,
+                // The model's name, hashed above.
+                owner_model: _,
+                non_negative,
+                can_be_module_input,
+                compat,
+            } = fields;
+            key.text(ident);
+            key.equation(equation);
+            key.kind(kind);
+            key.optional(gf.as_ref(), KeyHasher::graphical_function);
+            key.each(inflows, |key, flow| key.text(flow));
+            key.each(outflows, |key, flow| key.text(flow));
+            key.each(module_refs, KeyHasher::module_reference);
+            key.text(referenced_model_name);
+            key.flag(*non_negative);
+            key.flag(*can_be_module_input);
+            key.compat(compat);
+        }
+    }
+    key.finish()
+}
+
+/// The hasher [`simulation_key`] feeds: one method per type it takes apart,
+/// each naming every field of its type, so a field added to one of them does
+/// not compile until it is hashed or left out here.
+#[cfg(feature = "agent_tools")]
+#[derive(Default)]
+struct KeyHasher(std::collections::hash_map::DefaultHasher);
+
+#[cfg(feature = "agent_tools")]
+impl KeyHasher {
+    fn finish(self) -> u64 {
+        std::hash::Hasher::finish(&self.0)
+    }
+
+    fn text(&mut self, text: &str) {
+        std::hash::Hash::hash(text, &mut self.0);
+    }
+
+    /// A number by its bits, so that a NaN is equal to itself.
+    fn number(&mut self, number: f64) {
+        std::hash::Hash::hash(&number.to_bits(), &mut self.0);
+    }
+
+    fn flag(&mut self, flag: bool) {
+        std::hash::Hash::hash(&flag, &mut self.0);
+    }
+
+    fn count(&mut self, count: usize) {
+        std::hash::Hash::hash(&count, &mut self.0);
+    }
+
+    fn optional<T: ?Sized>(&mut self, value: Option<&T>, hash: impl FnOnce(&mut Self, &T)) {
+        match value {
+            None => self.count(0),
+            Some(value) => {
+                self.count(1);
+                hash(self, value);
+            }
+        }
+    }
+
+    fn each<T>(&mut self, items: &[T], hash: impl Fn(&mut Self, &T)) {
+        self.count(items.len());
+        for item in items {
+            hash(self, item);
+        }
+    }
+
+    fn optional_text(&mut self, text: &Option<String>) {
+        self.optional(text.as_deref(), KeyHasher::text);
+    }
+
+    /// A DT or save step by its value: a reciprocal is the same step as the
+    /// number it is the reciprocal of.
+    fn dt(&mut self, dt: &datamodel::Dt) {
+        self.number(match dt {
+            datamodel::Dt::Dt(value) => *value,
+            datamodel::Dt::Reciprocal(value) => 1.0 / *value,
+        });
+    }
+
+    fn sim_specs(&mut self, specs: &datamodel::SimSpecs) {
+        let datamodel::SimSpecs {
+            start,
+            stop,
+            dt,
+            save_step,
+            sim_method,
+            // Read by the unit check alone.
+            time_units: _,
+        } = specs;
+        self.number(*start);
+        self.number(*stop);
+        self.dt(dt);
+        self.optional(save_step.as_ref(), KeyHasher::dt);
+        self.count(match sim_method {
+            datamodel::SimMethod::Euler => 0,
+            datamodel::SimMethod::RungeKutta2 => 1,
+            datamodel::SimMethod::RungeKutta4 => 2,
+        });
+    }
+
+    fn kind(&mut self, kind: &SourceVariableKind) {
+        self.count(match kind {
+            SourceVariableKind::Stock => 0,
+            SourceVariableKind::Flow => 1,
+            SourceVariableKind::Aux => 2,
+            SourceVariableKind::Module => 3,
+        });
+    }
+
+    fn module_reference(&mut self, reference: &datamodel::ModuleReference) {
+        let datamodel::ModuleReference { src, dst } = reference;
+        self.text(src);
+        self.text(dst);
+    }
+
+    fn dimension(&mut self, dimension: &datamodel::Dimension) {
+        let datamodel::Dimension {
+            name,
+            elements,
+            mappings,
+            parent,
+        } = dimension;
+        self.text(name);
+        match elements {
+            datamodel::DimensionElements::Indexed(size) => {
+                self.count(0);
+                self.count(*size as usize);
+            }
+            datamodel::DimensionElements::Named(names) => {
+                self.count(1);
+                self.each(names, |key, name| key.text(name));
+            }
+        }
+        self.each(mappings, KeyHasher::dimension_mapping);
+        self.optional_text(parent);
+    }
+
+    fn dimension_mapping(&mut self, mapping: &datamodel::DimensionMapping) {
+        let datamodel::DimensionMapping {
+            target,
+            element_map,
+        } = mapping;
+        self.text(target);
+        self.each(element_map, |key, (from, to)| {
+            key.text(from);
+            key.text(to);
+        });
+    }
+
+    fn macro_spec(&mut self, spec: &datamodel::MacroSpec) {
+        let datamodel::MacroSpec {
+            parameters,
+            primary_output,
+            additional_outputs,
+        } = spec;
+        self.each(parameters, |key, name| key.text(name));
+        self.text(primary_output);
+        self.each(additional_outputs, |key, name| key.text(name));
+    }
+
+    /// A pinned loop is the variables it runs through, which every loop
+    /// analysis of a run scores, under the name the analysis reports it by.
+    fn pinned_loop(&mut self, pinned: &PinnedLoopSpec) {
+        let PinnedLoopSpec {
+            name,
+            variables,
+            // The uids as written, the ones that name no variable, and
+            // whether any variable carries one: read only to word the
+            // diagnostic for a pin that cannot be scored, which is no part
+            // of a run. What the uids resolve to is `variables`.
+            uids: _,
+            unresolved_uids: _,
+            model_variables_carry_uids: _,
+            // Read by nothing the engine computes.
+            description: _,
+        } = pinned;
+        self.text(name);
+        self.each(variables, |key, name| key.text(name));
+    }
+
+    fn equation(&mut self, equation: &datamodel::Equation) {
+        match equation {
+            datamodel::Equation::Scalar(text) => {
+                self.count(0);
+                self.text(text);
+            }
+            datamodel::Equation::ApplyToAll(dimensions, text) => {
+                self.count(1);
+                self.each(dimensions, |key, name| key.text(name));
+                self.text(text);
+            }
+            datamodel::Equation::Arrayed(dimensions, elements, default, apply_default) => {
+                self.count(2);
+                self.each(dimensions, |key, name| key.text(name));
+                self.each(elements, |key, (element, text, initial, table)| {
+                    key.text(element);
+                    key.text(text);
+                    key.optional_text(initial);
+                    key.optional(table.as_ref(), KeyHasher::graphical_function);
+                });
+                self.optional_text(default);
+                self.flag(*apply_default);
+            }
+        }
+    }
+
+    fn graphical_function(&mut self, table: &datamodel::GraphicalFunction) {
+        let datamodel::GraphicalFunction {
+            kind,
+            x_points,
+            y_points,
+            x_scale,
+            y_scale,
+        } = table;
+        self.count(match kind {
+            datamodel::GraphicalFunctionKind::Continuous => 0,
+            datamodel::GraphicalFunctionKind::Extrapolate => 1,
+            datamodel::GraphicalFunctionKind::Discrete => 2,
+        });
+        self.optional(x_points.as_deref(), |key, points: &[f64]| {
+            key.each(points, |key, x| key.number(*x));
+        });
+        self.each(y_points, |key, y| key.number(*y));
+        // The x scale is where the points are when they are not written out
+        // (`variable::parse_table` spreads them over it); with x points
+        // written, no lookup reads it.
+        if x_points.is_none() {
+            self.scale(x_scale);
+        }
+        // The y scale is how a table is drawn; no lookup reads it.
+        let _ = y_scale;
+    }
+
+    fn scale(&mut self, scale: &datamodel::GraphicalFunctionScale) {
+        let datamodel::GraphicalFunctionScale { min, max } = scale;
+        self.number(*min);
+        self.number(*max);
+    }
+
+    fn compat(&mut self, compat: &datamodel::Compat) {
+        let datamodel::Compat {
+            active_initial,
+            non_negative,
+            can_be_module_input,
+            visibility,
+            data_source,
+            conveyor,
+            leakage,
+            spreadflow,
+            queue,
+            overflow,
+        } = compat;
+        self.optional_text(active_initial);
+        self.flag(*non_negative);
+        self.flag(*can_be_module_input);
+        self.count(match visibility {
+            datamodel::Visibility::Private => 0,
+            datamodel::Visibility::Public => 1,
+        });
+        self.optional(data_source.as_ref(), KeyHasher::data_source);
+        self.optional(conveyor.as_ref(), KeyHasher::conveyor);
+        self.optional(leakage.as_ref(), KeyHasher::leakage);
+        self.optional(spreadflow.as_ref(), KeyHasher::spread_flow);
+        self.optional(queue.as_ref(), |_, queue| {
+            let datamodel::Queue {} = queue;
+        });
+        self.flag(*overflow);
+    }
+
+    fn data_source(&mut self, source: &datamodel::DataSource) {
+        let datamodel::DataSource {
+            kind,
+            file,
+            tab_or_delimiter,
+            row_or_col,
+            cell,
+        } = source;
+        self.count(match kind {
+            datamodel::DataSourceKind::Data => 0,
+            datamodel::DataSourceKind::Constants => 1,
+            datamodel::DataSourceKind::Lookups => 2,
+            datamodel::DataSourceKind::Subscript => 3,
+        });
+        self.text(file);
+        self.text(tab_or_delimiter);
+        self.text(row_or_col);
+        self.text(cell);
+    }
+
+    fn conveyor(&mut self, conveyor: &datamodel::Conveyor) {
+        let datamodel::Conveyor {
+            transit_time,
+            capacity,
+            inflow_limit,
+            sample,
+            arrest,
+            discrete,
+            batch_integrity,
+            one_at_a_time,
+            exponential_leak,
+            ignore_earlier_zone_losses,
+        } = conveyor;
+        self.text(transit_time);
+        self.optional_text(capacity);
+        self.optional_text(inflow_limit);
+        self.optional_text(sample);
+        self.optional_text(arrest);
+        self.flag(*discrete);
+        self.flag(*batch_integrity);
+        self.flag(*one_at_a_time);
+        self.flag(*exponential_leak);
+        self.flag(*ignore_earlier_zone_losses);
+    }
+
+    fn leakage(&mut self, leakage: &datamodel::Leakage) {
+        let datamodel::Leakage {
+            fraction,
+            integers,
+            zone_start,
+            zone_end,
+        } = leakage;
+        self.optional_text(fraction);
+        self.flag(*integers);
+        self.optional_text(zone_start);
+        self.optional_text(zone_end);
+    }
+
+    fn spread_flow(&mut self, spreadflow: &datamodel::SpreadFlow) {
+        match spreadflow {
+            datamodel::SpreadFlow::Beginning => self.count(0),
+            datamodel::SpreadFlow::Even => self.count(1),
+            datamodel::SpreadFlow::Dest => self.count(2),
+            datamodel::SpreadFlow::Dist(equation) => {
+                self.count(3);
+                self.text(equation);
+            }
+            datamodel::SpreadFlow::Source => self.count(4),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "agent_tools"))]
+#[path = "simulation_key_tests.rs"]
+mod simulation_key_tests;
+
 // ── Incremental sync ───────────────────────────────────────────────────
 
 /// Update a single `SourceVariable`'s fields via salsa setters, only
@@ -589,36 +1084,33 @@ pub fn sync_from_datamodel_incremental(
 
     let source_project = prev.project;
 
-    // Update SourceProject fields
-    let new_name = project.name.clone();
-    if *source_project.name(&*db) != new_name {
-        source_project.set_name(db).to(new_name);
+    // Update SourceProject fields. The macro declarations are re-derived from
+    // the datamodel models (duplicates / collisions are invisible once models
+    // collapse into the name-keyed map below); the demand-driven
+    // `project_macro_registry` query reads them to re-derive the build error.
+    let SourceProjectFields {
+        name,
+        sim_specs,
+        dimensions,
+        units,
+        macro_declarations,
+    } = SourceProjectFields::from_datamodel(project);
+    if *source_project.name(&*db) != name {
+        source_project.set_name(db).to(name);
     }
-
-    let new_sim_specs = project.sim_specs.clone();
-    if *source_project.sim_specs(&*db) != new_sim_specs {
-        source_project.set_sim_specs(db).to(new_sim_specs);
+    if *source_project.sim_specs(&*db) != sim_specs {
+        source_project.set_sim_specs(db).to(sim_specs);
     }
-
-    let new_dims: Vec<datamodel::Dimension> = project.dimensions.clone();
-    if *source_project.dimensions(&*db) != new_dims {
-        source_project.set_dimensions(db).to(new_dims);
+    if *source_project.dimensions(&*db) != dimensions {
+        source_project.set_dimensions(db).to(dimensions);
     }
-
-    let new_units: Vec<datamodel::Unit> = project.units.clone();
-    if *source_project.units(&*db) != new_units {
-        source_project.set_units(db).to(new_units);
+    if *source_project.units(&*db) != units {
+        source_project.set_units(db).to(units);
     }
-
-    // Re-derive the ordered, pre-dedup macro-declaration list from the
-    // datamodel models (duplicates / collisions are invisible once models
-    // collapse into the name-keyed map below). The demand-driven
-    // `project_macro_registry` query reads this to re-derive the build error.
-    let new_macro_declarations = macro_declarations_from_datamodel(project);
-    if *source_project.macro_declarations(&*db) != new_macro_declarations {
+    if *source_project.macro_declarations(&*db) != macro_declarations {
         source_project
             .set_macro_declarations(db)
-            .to(new_macro_declarations);
+            .to(macro_declarations);
     }
 
     // model_names updated below after stdlib models are added
@@ -632,25 +1124,25 @@ pub fn sync_from_datamodel_incremental(
         if let Some(prev_model) = prev.models.get(&canonical_model_name) {
             // Existing model: update via setters
             let source_model = prev_model.source_model;
+            let SourceModelFields {
+                name,
+                declared_variable_idents: new_declared,
+                sim_specs,
+                macro_spec,
+                pinned_loops,
+            } = SourceModelFields::from_datamodel(dm_model);
 
-            if *source_model.name(&*db) != dm_model.name {
-                source_model.set_name(db).to(dm_model.name.clone());
+            if *source_model.name(&*db) != name {
+                source_model.set_name(db).to(name);
             }
-
-            let new_model_sim_specs = dm_model.sim_specs.clone();
-            if *source_model.model_sim_specs(&*db) != new_model_sim_specs {
-                source_model.set_model_sim_specs(db).to(new_model_sim_specs);
+            if *source_model.model_sim_specs(&*db) != sim_specs {
+                source_model.set_model_sim_specs(db).to(sim_specs);
             }
-
-            if *source_model.macro_spec(&*db) != dm_model.macro_spec {
-                source_model
-                    .set_macro_spec(db)
-                    .to(dm_model.macro_spec.clone());
+            if *source_model.macro_spec(&*db) != macro_spec {
+                source_model.set_macro_spec(db).to(macro_spec);
             }
-
-            let new_pinned_loops = pinned_loops_from_datamodel(dm_model);
-            if *source_model.pinned_loops(&*db) != new_pinned_loops {
-                source_model.set_pinned_loops(db).to(new_pinned_loops);
+            if *source_model.pinned_loops(&*db) != pinned_loops {
+                source_model.set_pinned_loops(db).to(pinned_loops);
             }
 
             // Process variables
@@ -687,7 +1179,6 @@ pub fn sync_from_datamodel_incremental(
             if *source_model.variables(&*db) != source_var_map {
                 source_model.set_variables(db).to(source_var_map);
             }
-            let new_declared = declared_variable_idents(dm_model);
             if *source_model.declared_variable_idents(&*db) != new_declared {
                 source_model
                     .set_declared_variable_idents(db)
@@ -720,16 +1211,16 @@ pub fn sync_from_datamodel_incremental(
             let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
             variable_names.sort();
 
-            let model_sim_specs = dm_model.sim_specs.clone();
+            let fields = SourceModelFields::from_datamodel(dm_model);
             let source_model = SourceModel::new(
                 &*db,
-                dm_model.name.clone(),
+                fields.name,
                 variable_names,
                 source_var_map,
-                declared_variable_idents(dm_model),
-                model_sim_specs,
-                dm_model.macro_spec.clone(),
-                pinned_loops_from_datamodel(dm_model),
+                fields.declared_variable_idents,
+                fields.sim_specs,
+                fields.macro_spec,
+                fields.pinned_loops,
             );
 
             new_models.insert(

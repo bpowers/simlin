@@ -31,6 +31,30 @@ class TestSimExecution:
         step_count = test_sim.get_step_count()
         assert step_count > 0
 
+    @pytest.mark.parametrize("save_step", [None, 4.0])
+    def test_stepping_to_its_own_clock_reaches_the_end(self, save_step: float | None) -> None:
+        """A host that steps to the simulation's own clock finishes: the
+        simulation rests at the step after the last it ran, and one step past
+        the stop once it is over, so its time never goes back."""
+        from simlin import Project
+        from simlin.types import Aux, Flow, Stock
+
+        project = Project.new(name="p", sim_start=0.0, sim_stop=10.0, dt=1.0, time_units="year")
+        with project.get_model().edit() as (_, patch):
+            patch.upsert(Aux(name="rate", equation="0.1"))
+            patch.upsert(Flow(name="births", equation="pop * rate"))
+            patch.upsert(Stock(name="pop", initial_equation="100", inflows=["births"], outflows=[]))
+        if save_step is not None:
+            project.set_sim_specs(save_step=save_step)
+        with project.get_model().simulate() as sim:
+            times = []
+            while sim.time <= 10.0 and len(times) < 40:
+                sim.run_to(sim.time)
+                times.append(sim.time)
+            assert times == [float(t) for t in range(1, 12)]
+            sim.run_to(25.0)
+            assert sim.time == 11.0
+
     def test_reset(self, test_sim: Sim) -> None:
         """Test resetting the simulation."""
         test_sim.run_to_end()

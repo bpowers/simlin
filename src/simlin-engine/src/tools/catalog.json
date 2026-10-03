@@ -1206,7 +1206,7 @@
             ]
           },
           "SeriesCore": {
-            "description": "What a series did, in brief. A value that is not a number (a division by\nzero, an overflow) is left out, as are a start, an end, a sample or a\nturning point that is not one; the mode says when the series went\nundefined.",
+            "description": "What a series did, in brief. A value that is not a number (a division by\nzero, an overflow) is left out, as are a start, an end, a sample or a\nturning point that is not one; the mode says when the series went\nundefined.\n\nEvery number it reports is the series' own, rounded to five significant\ndigits, so every tool that reports a number of a series reports the same\none. Its parts agree with each other: a series that is not at rest\nreports a least and a greatest value that read differently, and it went\nnegative exactly when a number reported of it is negative. A series that\nis the residue of quantities that cancel (`behavior::classify_at`) is at\nrest, and reports the residue it holds.",
             "type": "object",
             "properties": {
               "start": {
@@ -1356,7 +1356,7 @@
                 "const": "s_shaped"
               },
               {
-                "description": "Passes the level it settles at once, and comes back less than half the\nway it went.",
+                "description": "Passes the level it ends at, and comes back less than half the way it\nwent.",
                 "type": "string",
                 "const": "overshoot"
               },
@@ -1906,7 +1906,7 @@
             ]
           },
           "SeriesCore": {
-            "description": "What a series did, in brief. A value that is not a number (a division by\nzero, an overflow) is left out, as are a start, an end, a sample or a\nturning point that is not one; the mode says when the series went\nundefined.",
+            "description": "What a series did, in brief. A value that is not a number (a division by\nzero, an overflow) is left out, as are a start, an end, a sample or a\nturning point that is not one; the mode says when the series went\nundefined.\n\nEvery number it reports is the series' own, rounded to five significant\ndigits, so every tool that reports a number of a series reports the same\none. Its parts agree with each other: a series that is not at rest\nreports a least and a greatest value that read differently, and it went\nnegative exactly when a number reported of it is negative. A series that\nis the residue of quantities that cancel (`behavior::classify_at`) is at\nrest, and reports the residue it holds.",
             "type": "object",
             "properties": {
               "start": {
@@ -2056,7 +2056,7 @@
                 "const": "s_shaped"
               },
               {
-                "description": "Passes the level it settles at once, and comes back less than half the\nway it went.",
+                "description": "Passes the level it ends at, and comes back less than half the way it\nwent.",
                 "type": "string",
                 "const": "overshoot"
               },
@@ -2398,7 +2398,7 @@
                 "const": "s_shaped"
               },
               {
-                "description": "Passes the level it settles at once, and comes back less than half the\nway it went.",
+                "description": "Passes the level it ends at, and comes back less than half the way it\nwent.",
                 "type": "string",
                 "const": "overshoot"
               },
@@ -3677,7 +3677,7 @@
                 "const": "s_shaped"
               },
               {
-                "description": "Passes the level it settles at once, and comes back less than half the\nway it went.",
+                "description": "Passes the level it ends at, and comes back less than half the way it\nwent.",
                 "type": "string",
                 "const": "overshoot"
               },
@@ -5024,7 +5024,7 @@
                 "const": "s_shaped"
               },
               {
-                "description": "Passes the level it settles at once, and comes back less than half the\nway it went.",
+                "description": "Passes the level it ends at, and comes back less than half the way it\nwent.",
                 "type": "string",
                 "const": "overshoot"
               },

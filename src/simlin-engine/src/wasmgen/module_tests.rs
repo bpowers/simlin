@@ -656,7 +656,7 @@ fn compile_simulation_save_step_cadence_matches_vm() {
     // `save_advance!` (`vm.rs:682`): with save_step = 2*dt, most steps copy
     // `next -> curr` WITHOUT recording a snapshot, and only every other step
     // (plus the forced t=start sample) writes a results row. Every other
-    // wasmgen test uses save_step = None (save_every = 1), so this is the
+    // wasmgen test uses save_step = None (every step saved), so this is the
     // only coverage of the multi-step cadence.
     let mut datamodel = crate::test_common::TestProject::new("cadence")
         .with_sim_time(0.0, 10.0, 1.0)
@@ -2862,7 +2862,7 @@ fn compile_simulation_set_value_override_in_initials_matches_vm() {
 // ── Resumable run ABI (run_initials/run_to) vs the VM oracle ──────────
 //
 // The blob's persistent step cursor lives in mutable globals
-// (`G_SAVED`/`G_STEP_ACCUM`/`G_DID_INITIALS`), so a run can be advanced
+// (`G_SAVED`/`G_STEP`/`G_DID_INITIALS`), so a run can be advanced
 // incrementally: `run_initials()` once, then `run_to(t)` per target. The VM
 // (`Vm::run_initials`/`run_to`/`reset`/`set_value`) is the correctness oracle
 // for every behavior below; the comparator tolerance matches the
@@ -3039,17 +3039,13 @@ fn vm_slab_segmented(
     (results.data.to_vec(), results.step_size, results.step_count)
 }
 
-/// Count the committed (written) rows in a *blob* results slab after a partial
-/// run, via the TIME column. This is sound for the blob specifically because
-/// the blob keeps its working `curr`/`next` chunks SEPARATE from the results
-/// region (see the "Cursor mapping" caveat): an unwritten results row stays at
-/// its zero-initialized state, so its TIME slot reads 0.0 and won't match the
-/// expected save-point time `start + c*save_step` for `c > 0`. Row 0 is always
-/// written (the forced t=start save). The same heuristic is NOT sound for the
-/// VM slab, whose chunk-ring leaks the working chunk into the exported range
-/// (its TIME slot holds a genuine overshoot time) -- hence callers derive the
-/// VM's committed count analytically instead. Used only with the resumable
-/// fixture, where save_step == dt.
+/// Count the rows a *blob* has written to its results slab after a partial
+/// run, by the TIME column. The blob keeps its working `curr`/`next` chunks
+/// apart from the results region, so an unwritten results row is still zero:
+/// its TIME slot is not the row's save time `start + c*save_step` for
+/// `c > 0`, and row 0 is always written (row zero is step zero). The VM says
+/// how many rows it saved itself (`Results::step_count`). Used only with the
+/// resumable fixture, where save_step == dt.
 fn live_saved_rows(slab: &[f64], n_slots: usize, n_chunks: usize, start: f64, dt: f64) -> usize {
     let mut count = 0usize;
     for c in 0..n_chunks {
@@ -3112,18 +3108,11 @@ fn run_to_segmented_matches_single_and_vm() {
 /// Task 2 (AC2.2): the count of saved rows after `run_to(t)` matches the VM's,
 /// for `t` exactly on a save point and `t` between save points.
 ///
-/// Layout note (the phase's "Cursor mapping" caveat): the blob keeps its
-/// working `curr`/`next` chunks SEPARATE from the results region, so a partial
-/// `run_to(t)` writes exactly the committed save-cadence rows (t=0..floor(t),
-/// 5 rows for both t=4 and t=4.5). The VM stores results in a chunk-ring and
-/// advances `curr_chunk` THROUGH it, so its working chunk (the t=floor(t)+dt
-/// overshoot the guard `curr[TIME] > end` leaves behind) leaks into the
-/// exported slab as one extra populated row -- a known chunk-ring artifact, not
-/// a committed save point. We therefore compare the committed-save-point count
-/// (which both backends agree on) and assert the blob's committed rows equal
-/// the VM's on exactly those rows; separately we assert AC2.2 directly: the
-/// blob's live `curr` chunk after `run_to(t)` equals the VM's `get_value_now`
-/// (which reads the VM's current chunk, i.e. the same t=floor(t)+dt overshoot).
+/// A partial `run_to(t)` saves the rows at or before `t` on both backends
+/// (t=0..floor(t): 5 rows for both t=4 and t=4.5), and the saved rows are
+/// equal. The blob's live `curr` chunk after `run_to(t)` equals the VM's
+/// `get_value_now`: both rest at the step they will evaluate next,
+/// t=floor(t)+dt (AC2.2).
 #[test]
 fn run_to_at_save_and_between_save_points() {
     let datamodel = resumable_fixture(10.0);
@@ -3150,8 +3139,10 @@ fn run_to_at_save_and_between_save_points() {
         );
         assert_eq!(committed, 5, "run_to({t}) should commit 5 rows (t=0..4)");
 
-        // The blob's committed rows equal the VM's corresponding rows.
-        let (vm_data, vm_step_size, _) = vm_slab_segmented(compile_sim(&datamodel, "main"), &[t]);
+        // The VM saved as many rows, and the blob's equal them.
+        let (vm_data, vm_step_size, vm_rows) =
+            vm_slab_segmented(compile_sim(&datamodel, "main"), &[t]);
+        assert_eq!(vm_rows, committed, "the VM's saved rows after run_to({t})");
         for (name, wasm_off) in &artifact.layout.var_offsets {
             let wasm_off = *wasm_off;
             let ident = Ident::<Canonical>::from_str_unchecked(name);
@@ -3208,10 +3199,277 @@ fn run_to_at_save_and_between_save_points() {
     }
 }
 
-/// Task 2 (AC2.4): `run_to(stop * 2)` clamps to the end -- it equals both a
+/// Both backends save the same rows, bit for bit, whatever the specs: a save
+/// step on the DT grid, off it (each row the first step at or after its save
+/// time), shorter than a DT, a stop time a fraction of a time unit from a
+/// start in the thousands, and a DT whose steps are not exact in binary --
+/// under every integration method. The model reads the clock (in an equation
+/// and through PULSE and STEP), so a clock that differed by a bit would show.
+#[test]
+fn both_backends_save_the_same_rows_for_any_specs() {
+    use crate::datamodel::SimMethod;
+    for method in [
+        SimMethod::Euler,
+        SimMethod::RungeKutta2,
+        SimMethod::RungeKutta4,
+    ] {
+        for (start, stop, dt, save_step, rows) in [
+            (0.0, 10.0, 1.0, Some(2.5), 5),
+            (0.0, 10.0, 0.25, Some(0.3), 34),
+            (0.0, 10.0, 0.25, Some(0.4), 26),
+            (0.0, 10.0, 1.0 / 128.0, Some(0.1), 101),
+            (0.0, 10.0, 0.03, Some(0.1), 100),
+            // Row 3's save time is a step's, and the product that finds the
+            // step is a unit in the last place over 13.
+            (0.0, 10.0, 0.03, Some(0.13), 77),
+            // A save step whose ratio to DT overflows: the first step alone.
+            (0.0, 10.0, 0.25, Some(1e308), 1),
+            (0.0, 10.0, 2.0, Some(0.5), 6),
+            (0.0, 10.0, 1.0, Some(4.0), 3),
+            (0.0, 0.7, 0.1, None, 8),
+            (1900.0, 1900.3, 0.1, None, 4),
+            (0.0, 10.0, 0.3, None, 34),
+            (0.0, 20.0, 0.1, Some(1.0), 21),
+        ] {
+            let mut project = crate::test_common::TestProject::new("specs")
+                .with_sim_time(start, stop, dt)
+                .with_sim_method(method)
+                .stock("s", "0", &["f"], &[], None)
+                .flow("f", "1 + TIME / 100", None)
+                .aux(
+                    "tested",
+                    &format!(
+                        "PULSE(1, {}) + STEP(2, {})",
+                        start + 3.0 * dt,
+                        start + 2.0 * dt
+                    ),
+                    None,
+                )
+                .build_datamodel();
+            project.sim_specs.save_step = save_step.map(crate::datamodel::Dt::Dt);
+            let what = format!("{method:?} {start}..{stop} by {dt}, save {save_step:?}");
+
+            let sim = compile_sim(&project, "main");
+            let artifact = compile_simulation(&sim).expect("wasm codegen");
+            let slab = run_artifact_results(&artifact);
+            let mut vm = Vm::new(sim.clone()).expect("vm");
+            vm.run_to_end().expect("vm run");
+            let results = vm.into_results();
+
+            assert_eq!(results.step_count, rows, "{what}");
+            assert_eq!(artifact.layout.n_chunks, rows, "{what}");
+            assert_eq!(artifact.layout.n_slots, results.step_size, "{what}");
+            let vm_rows: Vec<u64> = results
+                .iter()
+                .flat_map(|row| row.iter().map(|v| v.to_bits()))
+                .collect();
+            let wasm_rows: Vec<u64> = slab.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(vm_rows, wasm_rows, "{what}");
+            // The last row is a step the run evaluated, at or before the stop.
+            let last = &slab[(rows - 1) * artifact.layout.n_slots..];
+            assert!(
+                last[TIME_OFF] <= stop + dt * 1e-6,
+                "{what}: {}",
+                last[TIME_OFF]
+            );
+            let f = layout_offset(&artifact, "f");
+            assert!(last[f] >= 1.0, "{what}: the last row's flow is {}", last[f]);
+        }
+    }
+}
+
+/// A run of more steps than the blob's i32 step counter counts is refused at
+/// codegen, with the count, and one the counter holds is not: the rows are no
+/// part of it (the save step is longer than the run, so each saves one row).
+#[test]
+fn a_run_of_more_steps_than_the_counter_holds_is_refused() {
+    let project = |stop: f64| {
+        let mut project = crate::test_common::TestProject::new("long")
+            .with_sim_time(0.0, stop, 1.0)
+            .stock("s", "0", &["f"], &[], None)
+            .flow("f", "1", None)
+            .build_datamodel();
+        project.sim_specs.save_step = Some(crate::datamodel::Dt::Dt(1e308));
+        project
+    };
+    let counted = compile_sim(&project(2_147_483_646.0), "main");
+    assert_eq!(counted.specs.n_chunks, 1);
+    assert!(compile_simulation(&counted).is_ok());
+    let uncounted = compile_sim(&project(2_147_483_647.0), "main");
+    assert_eq!(uncounted.specs.n_chunks, 1);
+    let Err(WasmGenError::Unsupported(reason)) = compile_simulation(&uncounted) else {
+        panic!("a run of 2^31 steps is refused");
+    };
+    assert_eq!(
+        reason,
+        "wasmgen: a run of 2147483647 steps is more than the step counter holds"
+    );
+}
+
+/// The blob refuses the specs the VM refuses, for the VM's reason
+/// (`results::Specs::refusal`): a stop before the start, and a DT that is
+/// not a positive number. Specs a run can be made under compile.
+#[test]
+fn the_blob_refuses_the_specs_the_vm_refuses() {
+    let base = compile_sim(
+        &crate::test_common::TestProject::new("specs")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("s", "0", &["f"], &[], None)
+            .flow("f", "1", None)
+            .build_datamodel(),
+        "main",
+    );
+    assert!(compile_simulation(&base).is_ok());
+    for (start, stop, dt, reason) in [
+        (10.0, 0.0, 1.0, "end time has to be after start time"),
+        (0.0, 10.0, 0.0, "dt must be greater than 0"),
+        (0.0, 10.0, -1.0, "dt must be greater than 0"),
+        (0.0, 10.0, f64::NAN, "dt must be greater than 0"),
+    ] {
+        let mut sim = (*base).clone();
+        sim.specs.start = start;
+        sim.specs.stop = stop;
+        sim.specs.dt = dt;
+        let what = format!("{start}..{stop} by {dt}");
+        assert_eq!(sim.specs.refusal(), Some(reason), "{what}");
+        let Err(WasmGenError::Unsupported(refused)) = compile_simulation(&sim) else {
+            panic!("{what} is refused by the blob");
+        };
+        assert_eq!(refused, format!("wasmgen: {reason}"), "{what}");
+        let Err(err) = Vm::with_specs(sim.clone(), sim.specs.clone()) else {
+            panic!("{what} is refused by the VM");
+        };
+        assert_eq!(err.to_string(), reason, "{what}");
+    }
+    // Specs compiled from the project, whose rows are then counted from
+    // them: the refusal is asked before anything is sized.
+    let dt_zero = compile_sim(
+        &crate::test_common::TestProject::new("specs")
+            .with_sim_time(0.0, 10.0, 0.0)
+            .stock("s", "0", &["f"], &[], None)
+            .flow("f", "1", None)
+            .build_datamodel(),
+        "main",
+    );
+    let Err(WasmGenError::Unsupported(refused)) = compile_simulation(&dt_zero) else {
+        panic!("a DT of zero is refused by the blob");
+    };
+    assert_eq!(refused, "wasmgen: dt must be greater than 0");
+}
+
+/// Where each backend rests after `run_to(target)`: the time its resting
+/// `curr` holds. The VM evaluates every step at or before the target and
+/// rests at the next, unevaluated (after the final step, one past the stop);
+/// the blob does the same until it has saved its last row, and from there
+/// rests at that row, evaluated, taking no step past it. Where the two rest
+/// at one time they rest in one state, bit for bit; where the blob rests at
+/// its last saved row, its `curr` is that row. Rows over targets before the
+/// first save, between saves, at a save, at the last save, between it and
+/// the stop, at the stop and past it, for a save step equal to DT and over
+/// it, under every method.
+#[test]
+fn where_a_run_rests_on_each_backend() {
+    use crate::datamodel::SimMethod;
+    // A target, where the VM rests after running to it, and where the blob
+    // does.
+    type Rests = (f64, f64, f64);
+    // (save step, its rows), a run from 0 to 10 by 1.
+    let table: [(Option<f64>, &[Rests]); 2] = [
+        (
+            None,
+            &[
+                (-1.0, 0.0, 0.0),
+                (0.0, 1.0, 1.0),
+                (2.5, 3.0, 3.0),
+                (4.0, 5.0, 5.0),
+                (9.0, 10.0, 10.0),
+                (10.0, 11.0, 10.0),
+                (12.0, 11.0, 10.0),
+            ],
+        ),
+        (
+            // Rows at 0, 4 and 8.
+            Some(4.0),
+            &[
+                (-1.0, 0.0, 0.0),
+                (0.0, 1.0, 1.0),
+                (2.5, 3.0, 3.0),
+                (4.0, 5.0, 5.0),
+                (8.0, 9.0, 8.0),
+                (9.0, 10.0, 8.0),
+                (10.0, 11.0, 8.0),
+                (12.0, 11.0, 8.0),
+            ],
+        ),
+    ];
+    for method in [
+        SimMethod::Euler,
+        SimMethod::RungeKutta2,
+        SimMethod::RungeKutta4,
+    ] {
+        for (save_step, rows) in table {
+            let mut project = crate::test_common::TestProject::new("rest")
+                .with_sim_time(0.0, 10.0, 1.0)
+                .with_sim_method(method)
+                .stock("s", "1", &["f"], &[], None)
+                .flow("f", "s / 4 + TIME / 10", None)
+                .aux("lagged", "PREVIOUS(s, 0)", None)
+                .build_datamodel();
+            project.sim_specs.save_step = save_step.map(crate::datamodel::Dt::Dt);
+            let sim = compile_sim(&project, "main");
+            let artifact = compile_simulation(&sim).expect("wasm codegen");
+            let n_slots = artifact.layout.n_slots;
+            let info = validate(&artifact.wasm).expect("module must validate");
+            for &(target, vm_time, blob_time) in rows {
+                let what = format!("{method:?}, save {save_step:?}, run_to({target})");
+                let mut store = Store::new(());
+                let inst = store
+                    .module_instantiate(&info, Vec::new(), None)
+                    .expect("instantiate")
+                    .module_addr;
+                let run_to = store
+                    .instance_export(inst, "run_to")
+                    .unwrap()
+                    .as_func()
+                    .unwrap();
+                store
+                    .invoke_simple_typed::<(f64,), ()>(run_to, (target,))
+                    .expect("run_to");
+                let mut vm = Vm::new(sim.clone()).expect("vm");
+                vm.run_to(target).expect("vm run_to");
+
+                let blob_rest: Vec<u64> = (0..n_slots)
+                    .map(|off| read_curr_slot(&mut store, inst, off).to_bits())
+                    .collect();
+                let vm_rest: Vec<u64> = (0..n_slots)
+                    .map(|off| vm.get_value_now(off).to_bits())
+                    .collect();
+                assert_eq!(f64::from_bits(vm_rest[TIME_OFF]), vm_time, "{what}: the VM");
+                assert_eq!(
+                    f64::from_bits(blob_rest[TIME_OFF]),
+                    blob_time,
+                    "{what}: the blob"
+                );
+                if vm_time == blob_time {
+                    assert_eq!(blob_rest, vm_rest, "{what}: one state");
+                } else {
+                    let slab = read_slab(&mut store, inst, &artifact.layout);
+                    let last = (artifact.layout.n_chunks - 1) * n_slots;
+                    let last_row: Vec<u64> = slab[last..last + n_slots]
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect();
+                    assert_eq!(blob_rest, last_row, "{what}: the blob's last saved row");
+                }
+            }
+        }
+    }
+}
+
+/// `run_to(stop * 2)` ends at the end of the run -- it equals both a
 /// `run_to(stop)` and `Vm::run_to_end`, and saves exactly `n_chunks` rows. The
-/// blob clamps via the saved-row exhaustion break (`if saved >= n_chunks`),
-/// exactly like the VM's chunk-ring exhaustion: it can never overrun the slab.
+/// blob stops at its last saved row (`if saved >= n_chunks`) and the VM at its
+/// last step: neither can overrun its rows.
 #[test]
 fn run_to_past_final_time_clamps() {
     let datamodel = resumable_fixture(10.0);
@@ -3263,8 +3521,8 @@ fn run_to_past_final_time_clamps() {
 /// constant evaluated for the same time and stocks `curr` holds -- and
 /// identical across the VM and wasm. Previously the integration loop broke
 /// right after an advance, so non-stock slots lagged a step (wasm) or held
-/// stale garbage including 0 for constants (VM); both backends now re-evaluate
-/// root flows once at the resting `curr` after the overshoot break.
+/// stale garbage including 0 for constants (VM); both backends evaluate
+/// root flows once at the resting `curr` when a run stops part-way.
 #[test]
 fn mid_run_curr_is_self_consistent_and_matches_vm() {
     // `doubled = level * 2` is a flow-phase aux that varies every step (it
@@ -3342,17 +3600,17 @@ fn mid_run_curr_is_self_consistent_and_matches_vm() {
 
 /// Regression (#632 review, P2): the post-loop `flows(0)` re-eval must be
 /// SKIPPED after a full / at-stop run, or it corrupts PREVIOUS-using auxes in
-/// the live curr chunk. A full run breaks via the slab-exhaustion path, which
-/// does NOT advance curr: curr is the just-saved `t=stop` row, and
+/// the live curr chunk. A full run breaks after saving its last row, which
+/// does NOT advance curr: curr is the just-saved last row, and
 /// `prev_values` was already snapshotted to that same row (the per-step
 /// snapshot runs after the step's flows). A re-eval would then resolve
 /// `PREVIOUS(x)` against curr's own snapshot -> `x(stop)` instead of
 /// `x(stop-dt)`. Since the wasm host's `getValue` reads the live curr, it would
-/// diverge from the committed series and from the VM (which reads the last
-/// results row). The `saved < n_chunks` guard skips the re-eval exactly when
-/// curr was not advanced (the slab is full), mirroring the VM's
-/// `curr_chunk != next_chunk`. Only flows/auxes built on PREVIOUS expose this,
-/// so the constant-only teacup parity tests miss it.
+/// diverge from the committed series and from the VM's results. The
+/// `saved < n_chunks` guard skips
+/// the re-eval exactly when curr was not advanced (the slab is full). Only
+/// flows/auxes built on PREVIOUS expose this, so the constant-only teacup
+/// parity tests miss it.
 #[test]
 fn full_run_previous_aux_curr_matches_series_and_vm() {
     // level grows 2/step from 0; prev_level(t) = level(t-dt). At t=stop=5 the
@@ -3665,17 +3923,17 @@ fn set_value_writes_curr_and_reset_reapplies_override() {
 /// Regression (PR #628 follow-up, P1): a `run_to` that resumes on an
 /// already-complete slab (`saved == n_chunks`, reachable via a second
 /// `run_to_end` or interactive scrubbing that stays at the end) must be a
-/// complete no-op. Previously the stepping loop re-entered -- its
-/// `curr[TIME] > target` guard is false when `target >= stop` -- and
-/// `emit_save_advance` wrote one results row at `results_base + n_chunks*stride`,
-/// one full row past the `n_chunks`-row results region, silently corrupting the
-/// snapshot/GF regions that sit immediately after it. The loop now breaks at the
-/// top when `saved >= n_chunks`, so a resumed-on-full `run_to` cannot touch
-/// linear memory at all.
+/// complete no-op. A stepping loop that re-entered there -- its target guard
+/// does not stop it when `target >= stop` -- would have `emit_save_advance`
+/// write one results row at `results_base + n_chunks*stride`, one full row past
+/// the `n_chunks`-row results region, silently corrupting the snapshot/GF
+/// regions that sit immediately after it. The loop breaks at the top when
+/// `saved >= n_chunks`, so a resumed-on-full `run_to` cannot touch linear
+/// memory at all.
 #[test]
 fn run_to_on_full_slab_is_a_noop() {
-    // save_step == dt == 1 => save_every == 1, so every step saves and the
-    // overshoot row is written immediately on re-entry (the worst case).
+    // save_step == dt == 1, so every step saves and a re-entry's first step
+    // would write a row at once (the worst case).
     let datamodel = resumable_fixture(10.0);
     let sim = compile_sim(&datamodel, "main");
     let artifact = compile_simulation(&sim).expect("wasm codegen");

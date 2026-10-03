@@ -27,7 +27,7 @@ use schemars::JsonSchema;
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
-use super::behavior::{BehaviorMode, shape};
+use super::behavior::{BehaviorMode, shape_at};
 use super::evidence::display_name;
 use super::runs::{CURRENT, Run};
 use super::variables::NotFound;
@@ -45,16 +45,20 @@ pub(crate) const MAX_BEHAVIOR_RUNS: usize = 4;
 /// The digits a summary's numbers keep.
 pub(crate) const SIGNIFICANT_DIGITS: i32 = 5;
 
-/// `x` rounded to [`SIGNIFICANT_DIGITS`] significant digits.
+/// `x` rounded to [`SIGNIFICANT_DIGITS`] significant digits: the number that
+/// prints with those digits and no more.
+///
+/// It is rounded as a decimal, by writing it with those digits and reading
+/// that back, so the answer is the float nearest the decimal at any
+/// magnitude. Scaling by a power of ten and back is not: `1.6e9` scaled by
+/// `1e-5`, which no float holds exactly, comes back `1599999999.9999998`.
 pub(crate) fn round(x: f64) -> f64 {
-    if x == 0.0 || !x.is_finite() {
+    if !x.is_finite() {
         return x;
     }
-    let scale = 10f64.powi(SIGNIFICANT_DIGITS - 1 - x.abs().log10().floor() as i32);
-    if !scale.is_finite() || scale == 0.0 {
-        return x;
-    }
-    (x * scale).round() / scale
+    let digits = (SIGNIFICANT_DIGITS - 1) as usize;
+    // What Rust writes for a finite float it reads back.
+    format!("{x:.digits$e}").parse().unwrap_or(x)
 }
 
 /// A value at a time.
@@ -67,21 +71,18 @@ pub struct Point {
     pub value: f64,
 }
 
-impl Point {
-    /// The point at `i`; `None` when its value is not a number, which a
-    /// summary leaves out.
-    fn at(times: &[f64], values: &[f64], i: usize) -> Option<Point> {
-        values[i].is_finite().then(|| Point {
-            time: round(times[i]),
-            value: round(values[i]),
-        })
-    }
-}
-
 /// What a series did, in brief. A value that is not a number (a division by
 /// zero, an overflow) is left out, as are a start, an end, a sample or a
 /// turning point that is not one; the mode says when the series went
 /// undefined.
+///
+/// Every number it reports is the series' own, rounded to five significant
+/// digits, so every tool that reports a number of a series reports the same
+/// one. Its parts agree with each other: a series that is not at rest
+/// reports a least and a greatest value that read differently, and it went
+/// negative exactly when a number reported of it is negative. A series that
+/// is the residue of quantities that cancel (`behavior::classify_at`) is at
+/// rest, and reports the residue it holds.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
@@ -103,9 +104,186 @@ pub struct SeriesCore {
 }
 
 impl SeriesCore {
-    pub(crate) fn of(times: &[f64], values: &[f64]) -> SeriesCore {
-        summarize(times, values, false).0
+    /// The core of a series read at `scale` ([`scale_in_run`] is a
+    /// variable's in a run; zero is the series' own).
+    pub(crate) fn at(times: &[f64], values: &[f64], scale: f64) -> SeriesCore {
+        summarize(times, values, scale, false).0
     }
+}
+
+/// The scale the series under results key `key` (a variable, or one
+/// element of one: `gap[north]`) is read at in a run
+/// (`behavior::classify_at`): the magnitude of the quantities its values are
+/// sums and differences of, which is the scale their arithmetic residue is
+/// small beside. Zero where nothing says: the series is then read at its own.
+///
+/// The equations are the run's: `model`'s with the run's `plan` applied
+/// (`runs::apply_equations`), so a replaced equation's terms are the
+/// replacement's, and a table it drops is gone.
+///
+/// - A stock is its flows added up over the run, so its scale is the largest
+///   scale any of its flows has times the run's horizon: what the flow
+///   reaches, or its own scale as a sum where that is larger, so a stock
+///   that integrates residue (`error = target - measurement`) is at the
+///   scale of the terms that cancelled. That is one level: a flow's scale
+///   goes no further back than its own equation.
+/// - A flow or an auxiliary whose equation is, at its top level, a sum or a
+///   difference (`orders - fulfilled`) is at the scale of its terms: the
+///   magnitude each term that is a variable or a number reaches. A term that
+///   is anything else is left out, which can only make the scale smaller and
+///   the series read as moving.
+///
+/// An element's scale is its own: what a term reaches at the same element,
+/// at the element a subscript names, or as a scalar; a term of another shape
+/// is left out. The magnitude one element's flows reach says nothing of
+/// another element's residue.
+///
+/// What a variable is a product or a quotient of says nothing of its scale
+/// (a fraction of two large numbers is small on purpose), so nothing else
+/// has one. Residue that reaches a series through anything but a sum -- a
+/// quotient (`gap / 4` feeding a stock), a function (`SMTH1(gap, 2)`,
+/// `MAX(0, gap)`) -- is therefore read as the movement its numbers show, and
+/// `analyze_loops` can then report a share for a loop whose stocks move only
+/// by rounding.
+pub(crate) fn scale_in_run(
+    results: &crate::results::Results,
+    model: &datamodel::Model,
+    plan: &super::runs::RunPlan,
+    key: &str,
+) -> f64 {
+    let as_run;
+    let model = if plan.equations.is_empty() {
+        model
+    } else {
+        let mut replaced = model.clone();
+        // A plan that ran had every variable it replaces.
+        if super::runs::apply_equations(&mut replaced, plan).is_err() {
+            unreachable!("a run's plan replaces variables of its model");
+        }
+        as_run = replaced;
+        &as_run
+    };
+    let (base, element) = match key.split_once('[') {
+        Some((base, rest)) => (base, Some(rest.trim_end_matches(']'))),
+        None => (key, None),
+    };
+    let Some(var) = model.get_variable(base) else {
+        return 0.0;
+    };
+    // The largest magnitude a series of the run reaches.
+    let series = |key: &str| -> Option<f64> {
+        let &offset = results.offsets.get(&Ident::<Canonical>::new(key))?;
+        Some(
+            results
+                .iter()
+                .map(|row| row[offset])
+                .filter(|v| v.is_finite())
+                .fold(0.0, |m: f64, v| m.max(v.abs())),
+        )
+    };
+    // What a term naming `name` reaches where this series is read: at the
+    // element `pinned` names, else at this series' element, else as a
+    // scalar.
+    let reaches = |name: &str, pinned: Option<&str>| -> f64 {
+        let canonical = crate::canonicalize(name).into_owned();
+        pinned
+            .and_then(|pinned| series(&format!("{canonical}[{pinned}]")))
+            .or_else(|| element.and_then(|element| series(&format!("{canonical}[{element}]"))))
+            .or_else(|| series(&canonical))
+            .unwrap_or(0.0)
+    };
+    // A flow's or an auxiliary's scale as a sum, at this series' element.
+    let as_a_sum = |var: &datamodel::Variable| -> f64 {
+        if !matches!(
+            var,
+            datamodel::Variable::Flow(_) | datamodel::Variable::Aux(_)
+        ) {
+            return 0.0;
+        }
+        let text = match var.get_equation() {
+            Some(datamodel::Equation::Scalar(text))
+            | Some(datamodel::Equation::ApplyToAll(_, text)) => Some(text.as_str()),
+            // The element's own equation, else the default the others
+            // take.
+            Some(datamodel::Equation::Arrayed(_, elements, default, _)) => elements
+                .iter()
+                .find(|(name, ..)| Some(element_key(name).as_str()) == element)
+                .map(|(_, text, ..)| text.as_str())
+                .or(default.as_deref()),
+            None => None,
+        };
+        text.and_then(|text| {
+            crate::ast::Expr0::new(text, crate::lexer::LexerType::Equation)
+                .ok()
+                .flatten()
+        })
+        .map_or(0.0, |equation| scale_of_a_sum(&equation, &reaches))
+    };
+    match var {
+        datamodel::Variable::Stock(stock) => {
+            let horizon = results.specs.stop - results.specs.start;
+            stock
+                .inflows
+                .iter()
+                .chain(&stock.outflows)
+                .map(|flow| {
+                    let own = model.get_variable(flow).map_or(0.0, as_a_sum);
+                    reaches(flow, None).max(own) * horizon
+                })
+                .fold(0.0, f64::max)
+        }
+        datamodel::Variable::Flow(_) | datamodel::Variable::Aux(_) => as_a_sum(var),
+        datamodel::Variable::Module(_) => 0.0,
+    }
+}
+
+/// The scale of an equation that is a sum or a difference at its top level:
+/// the largest magnitude among its terms that are variables or numbers. Zero
+/// for any other equation. `reaches` is what a variable reaches, at the
+/// element a subscript of plain names pins when it has one.
+fn scale_of_a_sum(
+    equation: &crate::ast::Expr0,
+    reaches: &impl Fn(&str, Option<&str>) -> f64,
+) -> f64 {
+    use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
+    fn terms<'a>(expr: &'a Expr0, into: &mut Vec<&'a Expr0>) {
+        match expr {
+            Expr0::Op2(BinaryOp::Add | BinaryOp::Sub, left, right, _) => {
+                terms(left, into);
+                terms(right, into);
+            }
+            Expr0::Op1(UnaryOp::Negative | UnaryOp::Positive, inner, _) => terms(inner, into),
+            term => into.push(term),
+        }
+    }
+    let mut found = Vec::new();
+    terms(equation, &mut found);
+    if found.len() < 2 {
+        return 0.0;
+    }
+    found
+        .into_iter()
+        .map(|term| match term {
+            Expr0::Var(name, _) => reaches(name.as_str(), None),
+            Expr0::Subscript(name, indices, _) => {
+                // Plain names may be elements (`stock[north]`) or the
+                // dimensions the equation ranges over (`stock[region]`);
+                // `reaches` tries the element they spell first.
+                let names: Option<Vec<String>> = indices
+                    .iter()
+                    .map(|index| match index {
+                        IndexExpr0::Expr(Expr0::Var(index, _)) => {
+                            Some(crate::canonicalize(index.as_str()).into_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                reaches(name.as_str(), names.map(|names| names.join(",")).as_deref())
+            }
+            Expr0::Const(_, number, _) => number.value().abs(),
+            _ => 0.0,
+        })
+        .fold(0.0, f64::max)
 }
 
 /// A variable's (or one element's) behavior in a run.
@@ -129,8 +307,14 @@ pub struct SeriesSummary {
     pub samples: Vec<Point>,
 }
 
-/// The core, and the turning points and samples when asked for.
-fn summarize(times: &[f64], values: &[f64], full: bool) -> (SeriesCore, Vec<Point>, Vec<Point>) {
+/// The core, and the turning points and samples when asked for, of a series
+/// read at `scale`.
+fn summarize(
+    times: &[f64],
+    values: &[f64],
+    scale: f64,
+    full: bool,
+) -> (SeriesCore, Vec<Point>, Vec<Point>) {
     let n = values.len();
     if n == 0 {
         return (
@@ -140,7 +324,7 @@ fn summarize(times: &[f64], values: &[f64], full: bool) -> (SeriesCore, Vec<Poin
                 min: None,
                 max: None,
                 negative_from: None,
-                mode: super::behavior::classify(times, values),
+                mode: super::behavior::classify_at(times, values, scale),
             },
             vec![],
             vec![],
@@ -153,23 +337,26 @@ fn summarize(times: &[f64], values: &[f64], full: bool) -> (SeriesCore, Vec<Poin
     let argmax = (0..n)
         .filter(finite)
         .max_by(|&a, &b| values[a].total_cmp(&values[b]).then(b.cmp(&a)));
-    let magnitude = values
-        .iter()
-        .filter(|v| v.is_finite())
-        .fold(1.0f64, |m, v| m.max(v.abs()));
-    // Below zero by more than rounding: a stock that ends an equilibrium at
-    // -1e-15 has not gone negative.
+    // Rounding keeps a number's sign, so a series went negative exactly
+    // when a number reported of it is negative.
+    let reported = round;
+    let point = |i: usize| {
+        values[i].is_finite().then(|| Point {
+            time: round(times[i]),
+            value: reported(values[i]),
+        })
+    };
     let negative_from = values
         .iter()
-        .position(|&v| v < -1e-9 * magnitude)
+        .position(|&v| reported(v) < 0.0)
         .map(|i| round(times[i]));
-    let shape = shape(times, values);
-    let number = |v: f64| v.is_finite().then(|| round(v));
+    let shape = shape_at(times, values, scale);
+    let number = |v: f64| v.is_finite().then(|| reported(v));
     let core = SeriesCore {
         start: number(values[0]),
         end: number(values[n - 1]),
-        min: argmin.and_then(|i| Point::at(times, values, i)),
-        max: argmax.and_then(|i| Point::at(times, values, i)),
+        min: argmin.and_then(point),
+        max: argmax.and_then(point),
         negative_from,
         mode: rounded(shape.mode),
     };
@@ -180,7 +367,7 @@ fn summarize(times: &[f64], values: &[f64], full: bool) -> (SeriesCore, Vec<Poin
         .turns
         .iter()
         .take(MAX_TURNS)
-        .filter_map(|&i| Point::at(times, values, i))
+        .filter_map(|&i| point(i))
         .collect();
     let count = SAMPLES.min(n);
     let samples = (0..count)
@@ -190,7 +377,7 @@ fn summarize(times: &[f64], values: &[f64], full: bool) -> (SeriesCore, Vec<Poin
             } else {
                 k * (n - 1) / (count - 1)
             };
-            Point::at(times, values, i)
+            point(i)
         })
         .collect();
     (core, turns, samples)
@@ -202,6 +389,14 @@ fn rounded(mode: BehaviorMode) -> BehaviorMode {
         settles_at: mode.settles_at.map(round),
         ..mode
     }
+}
+
+/// One series of a run: what a summary names it, its results key, and its
+/// values.
+pub(crate) struct KeyedSeries {
+    pub label: String,
+    pub key: String,
+    pub values: Vec<f64>,
 }
 
 /// A variable's series in a run: one for a scalar, one per element for an
@@ -224,6 +419,24 @@ pub(crate) fn element_series_upto(
     element: Option<&str>,
     limit: usize,
 ) -> (Vec<(String, Vec<f64>)>, usize) {
+    let (series, omitted) = keyed_series_upto(run, model, variable, element, limit);
+    (
+        series
+            .into_iter()
+            .map(|series| (series.label, series.values))
+            .collect(),
+        omitted,
+    )
+}
+
+/// [`element_series_upto`], with each series' results key.
+pub(crate) fn keyed_series_upto(
+    run: &Run,
+    model: &datamodel::Model,
+    variable: &str,
+    element: Option<&str>,
+    limit: usize,
+) -> (Vec<KeyedSeries>, usize) {
     let canonical = crate::canonicalize(variable).into_owned();
     let display = display_name(model, &canonical);
     let offsets = &run.results.offsets;
@@ -231,14 +444,25 @@ pub(crate) fn element_series_upto(
         let key = format!("{canonical}[{}]", element_key(element));
         return match offsets.get(&Ident::<Canonical>::new(&key)) {
             Some(&offset) => (
-                vec![(format!("{display}[{element}]"), run.series(offset))],
+                vec![KeyedSeries {
+                    label: format!("{display}[{element}]"),
+                    values: run.series(offset),
+                    key,
+                }],
                 0,
             ),
             None => (vec![], 0),
         };
     }
     if let Some(&offset) = offsets.get(&Ident::<Canonical>::new(&canonical)) {
-        return (vec![(display, run.series(offset))], 0);
+        return (
+            vec![KeyedSeries {
+                label: display,
+                key: canonical,
+                values: run.series(offset),
+            }],
+            0,
+        );
     }
     let prefix = format!("{canonical}[");
     let mut elements: Vec<(&Ident<Canonical>, usize)> = offsets
@@ -251,9 +475,10 @@ pub(crate) fn element_series_upto(
     let series = elements
         .into_iter()
         .take(limit)
-        .map(|(key, offset)| {
-            let label = format!("{display}{}", &key.as_str()[canonical.len()..]);
-            (label, run.series(offset))
+        .map(|(key, offset)| KeyedSeries {
+            label: format!("{display}{}", &key.as_str()[canonical.len()..]),
+            key: key.as_str().to_string(),
+            values: run.series(offset),
         })
         .collect();
     (series, omitted)
@@ -407,7 +632,7 @@ pub(crate) fn read_behavior(
         let mut omitted_elements = Vec::new();
         for (var, element) in &variables[..count] {
             for run in &runs {
-                let (elements, omitted) = element_series_upto(
+                let (elements, omitted) = keyed_series_upto(
                     run,
                     model,
                     var.get_ident(),
@@ -421,8 +646,9 @@ pub(crate) fn read_behavior(
                     });
                 }
                 let times = run.times();
-                for (label, values) in elements {
-                    let (core, turns, samples) = summarize(&times, &values, true);
+                for KeyedSeries { label, key, values } in elements {
+                    let scale = scale_in_run(&run.results, model, &run.plan, &key);
+                    let (core, turns, samples) = summarize(&times, &values, scale, true);
                     series.push(SeriesSummary {
                         variable: label,
                         run: run.name.clone(),

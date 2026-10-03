@@ -88,10 +88,21 @@ class Sim:
             return 0.0
 
     def run_to(self, time: float) -> None:
-        """Run the simulation to the specified time.
+        """Run the simulation through the specified time.
+
+        Every step at or before ``time`` is evaluated, and the simulation
+        rests at the step after it. A value set next (``set_value``) holds
+        from that following step on: the step at ``time`` has already been
+        computed with the old value. To have a value hold from ``time``
+        itself, run to the step before it (``run_to(time - dt)``) and set
+        it then. Once it has run through its stop time the simulation rests
+        one step past it, so ``time`` never goes back from one call to the
+        next, and a further ``run_to`` takes no step. After ``run_to_end()``
+        the simulation holds only its results: ``run_to`` raises until
+        ``reset()``.
 
         Args:
-            time: The simulation time to run to
+            time: The simulation time to run through
 
         Raises:
             SimlinRuntimeError: If the simulation fails
@@ -207,7 +218,8 @@ class Sim:
 
         The behavior depends on the simulation state:
         - Before first run_to: Sets initial value
-        - During simulation: Sets value for next iteration
+        - During simulation: Sets value for the next step to be evaluated,
+          the one after the time last run to (see ``run_to``)
         - After run_to_end: Raises error
 
         Args:

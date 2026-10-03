@@ -30,12 +30,12 @@ use schemars::JsonSchema;
 use crate::datamodel;
 
 use super::battery::{Outcome, goes_negative, recheck};
-use super::behavior::{ModeKind, classify};
+use super::behavior::{ModeKind, classify_at};
 use super::loops::{
     LoopPolarityName, analysis_of, leadership, loops_through, polarity_of, through_of,
 };
 use super::runs::{CURRENT, Run};
-use super::series::round;
+use super::series::{KeyedSeries, round, scale_in_run};
 use super::variables::LinkPolarityName;
 use super::{DiagnosticCategoryName, Session, ToolError, Workspace, names, resolve_model};
 
@@ -570,13 +570,13 @@ fn check(
             let series = series_of(&run, model, variable)?;
             if series
                 .iter()
-                .any(|(_, values)| goes_negative(values).is_some())
+                .any(|series| goes_negative(&series.values).is_some())
             {
                 return Ok(());
             }
             let least = series
                 .iter()
-                .flat_map(|(_, values)| values.iter().copied())
+                .flat_map(|series| series.values.iter().copied())
                 .fold(f64::INFINITY, f64::min);
             Err(format!(
                 "{variable} never goes below zero in run '{}'; its least value is {}",
@@ -590,10 +590,11 @@ fn check(
             run,
         } => {
             let run = run_of(session, ws, model, run.as_deref())?;
-            let (label, values) = one_series(&run, model, variable)?;
+            let KeyedSeries { label, key, values } = one_keyed_series(&run, model, variable)?;
             let times = run.times();
             within_run(&run, &times, *time)?;
-            if classify(&times, &values).kind == ModeKind::AtRest {
+            let scale = scale_in_run(&run.results, model, &run.plan, &key);
+            if classify_at(&times, &values, scale).kind == ModeKind::AtRest {
                 return Err(format!(
                     "{label} holds at {} throughout run '{}', so it has no peak",
                     round(values.first().copied().unwrap_or(f64::NAN)),
@@ -644,8 +645,9 @@ fn check(
             run,
         } => {
             let run = run_of(session, ws, model, run.as_deref())?;
-            let (label, values) = one_series(&run, model, variable)?;
-            let actual = classify(&run.times(), &values).kind;
+            let KeyedSeries { label, key, values } = one_keyed_series(&run, model, variable)?;
+            let scale = scale_in_run(&run.results, model, &run.plan, &key);
+            let actual = classify_at(&run.times(), &values, scale).kind;
             if actual == *mode {
                 Ok(())
             } else {
@@ -931,7 +933,7 @@ fn series_of(
     run: &Run,
     model: &datamodel::Model,
     variable: &str,
-) -> Result<Vec<(String, Vec<f64>)>, String> {
+) -> Result<Vec<KeyedSeries>, String> {
     let (name, subscript) = match variable.split_once('[') {
         Some((name, rest)) => (name.trim(), Some(rest.trim_end_matches(']'))),
         None => (variable.trim(), None),
@@ -961,9 +963,10 @@ fn series_of(
     }
     Ok(keys
         .into_iter()
-        .map(|(key, offset)| {
-            let label = format!("{}{}", var.get_ident(), &key[ident.len()..]);
-            (label, run.series(offset))
+        .map(|(key, offset)| KeyedSeries {
+            label: format!("{}{}", var.get_ident(), &key[ident.len()..]),
+            key: key.to_string(),
+            values: run.series(offset),
         })
         .collect())
 }
@@ -974,11 +977,20 @@ fn one_series(
     model: &datamodel::Model,
     variable: &str,
 ) -> Result<(String, Vec<f64>), String> {
+    one_keyed_series(run, model, variable).map(|series| (series.label, series.values))
+}
+
+/// [`one_series`], with its results key.
+fn one_keyed_series(
+    run: &Run,
+    model: &datamodel::Model,
+    variable: &str,
+) -> Result<KeyedSeries, String> {
     let mut series = series_of(run, model, variable)?;
     if series.len() > 1 {
         return Err(format!(
             "{variable} is arrayed: name one of its elements, as {}",
-            series[0].0
+            series[0].label
         ));
     }
     Ok(series.remove(0))

@@ -6,9 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
-use crate::common::{
-    Canonical, EquationError, ErrorCode, Ident, UnitError, UnitResult, canonicalize,
-};
+use crate::common::{Canonical, EquationError, ErrorCode, Ident, UnitError, UnitResult};
 use crate::datamodel::UnitMap;
 use crate::units::{Context, UnitOp, Units, combine};
 use crate::variable::{LoweredVariableMap, VarKind, Variable};
@@ -462,8 +460,7 @@ impl UnitEvaluator<'_> {
 /// conveyor unit checking (docs/design/conveyors.md §9.8), which needs `t`,
 /// `S/t`, and `1/t` to check a conveyor block's parameters.
 pub fn model_time_units(ctx: &Context) -> UnitMap {
-    let time_units_name =
-        canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
+    let time_units_name = ctx.time_units_name();
     // `resolve_name` is the SAME resolution a variable's `<units>` string
     // gets (aliases, the dimensionless spellings, unknown-name fallback), so
     // a dimensionless clock (`time_units="Unitless"`) yields the empty map

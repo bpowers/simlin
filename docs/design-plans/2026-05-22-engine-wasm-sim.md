@@ -188,7 +188,7 @@ model either on the bytecode VM (today's behavior) or on a JIT-compiled wasm blo
   design adds, mirroring `vm.rs`, so a run can be advanced incrementally from a persistent
   step cursor — enabling `Sim.runTo(time)` with true mid-run-edit semantics on the wasm
   engine.
-- **Step cursor**: The VM's resumable run state (`curr_chunk` / `next_chunk` / `step_accum`
+- **Step cursor**: The VM's resumable run state (`curr_chunk` / `next_chunk` / `step`
   / current time / `did_initials`), replicated in the blob as mutable wasm globals so
   `run_to` resumes where it left off.
 - **`use_prev_fallback`**: The single mutable wasm global the blob already carries (it gates
@@ -289,7 +289,7 @@ reset()              // clear the step cursor + did_initials + prev-values flag;
 // unchanged: run(), set_value(off,val)->i32, clear_values(), memory, the geometry globals
 ```
 
-The step cursor (`curr_chunk` / `next_chunk` / `step_accum` / current time / `did_initials`
+The step cursor (`curr_chunk` / `next_chunk` / `step` / current time / `did_initials`
 / `prev_values_valid`) persists across calls as mutable wasm globals (the module already
 carries one mutable global, `use_prev_fallback`). `set_value` between `run_to` calls
 mutates the live override region, so a constant changed mid-run affects only subsequent

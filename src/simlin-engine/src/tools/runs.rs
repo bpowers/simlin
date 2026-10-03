@@ -8,16 +8,20 @@
 //! A run is its [`RunPlan`] -- what it changed from the model -- and the
 //! results that plan produced at a revision. A plan is data: values set on
 //! constants (each from a time on, or from the start), replacement equations,
-//! and run specs. Values are VM overrides, applied without recompiling; a
-//! replacement equation or a spec change stages a copy of the datamodel on the
-//! host's database (`SimlinDb::sync_staged`), compiles and runs it, and
-//! restores (`SimlinDb::restore`) exactly as a dry-run patch does, so the
-//! project is never changed and unchanged variables keep their compiled
-//! fragments.
+//! and run specs. Values are VM overrides, applied without recompiling, and
+//! so are run specs: the compiled program does not depend on them, so the
+//! model's own program runs under the plan's (`Vm::with_specs`). A
+//! replacement equation stages a copy of the datamodel on the host's database
+//! (`SimlinDb::sync_staged`), compiles and runs it, and restores
+//! (`SimlinDb::restore`) exactly as a dry-run patch does, so the project is
+//! never changed and unchanged variables keep their compiled fragments. (A
+//! model with a conveyor or a queue stages a spec change too: its expansion
+//! reads the specs.)
 //!
 //! A run is fresh while the model has what the run simulated: the project as
 //! a simulation reads it, without its diagrams, notes and units
-//! ([`simulation_key`]). The revision alone cannot say, since a layout edit
+//! (`db::simulation_key`, taken from the salsa sync's own extraction of what
+//! the compiler reads). The revision alone cannot say, since a layout edit
 //! advances it and changes no run. The current run is cached for its key, and
 //! a named run keeps the key and revision it was made at, so a reader can tell
 //! a run of the model as it was from one of the model as it is.
@@ -35,10 +39,8 @@
 //! replaying its plan under the overlay ([`execute_then`], `loops`), and the
 //! analysis is kept with the run.
 
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-use buffa::Message;
 use indexmap::IndexMap;
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
@@ -46,8 +48,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{Canonical, Ident};
 use crate::datamodel::{self, Equation, Variable};
-use crate::db::{DiagnosticSeverity, LtmOverlay, SimlinDb, SourceProject, collect_all_diagnostics};
-use crate::results::Results;
+use crate::db::{
+    DiagnosticSeverity, LtmOverlay, SimlinDb, SourceProject, collect_all_diagnostics,
+    simulation_key,
+};
+use crate::results::{Results, written, written_count, written_rows};
 
 use super::evidence::{QUOTE_CHARS, window};
 use super::loops::LoopAnalysis;
@@ -139,6 +144,31 @@ pub(crate) enum Replacement {
     Elements(Vec<(String, String)>),
 }
 
+impl Replacement {
+    /// Whether the replacement is a number (each element's, for an arrayed
+    /// variable): the variable is then a constant in the run, which a value
+    /// can be set on from a time.
+    pub(crate) fn is_constant(&self) -> bool {
+        let number = |text: &str| text.trim().parse::<f64>().is_ok_and(f64::is_finite);
+        match self {
+            Replacement::Equation(text) => number(text),
+            Replacement::Elements(elements) => elements.iter().all(|(_, text)| number(text)),
+        }
+    }
+
+    /// The replacement as one line, as an equation is quoted.
+    pub(crate) fn text(&self) -> String {
+        match self {
+            Replacement::Equation(text) => text.trim().to_string(),
+            Replacement::Elements(elements) => elements
+                .iter()
+                .map(|(element, text)| format!("{element}: {}", text.trim()))
+                .collect::<Vec<_>>()
+                .join("; "),
+        }
+    }
+}
+
 /// Run specs a plan changes; `None` keeps the model's.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Default, Serialize)]
@@ -166,6 +196,32 @@ impl SpecsChange {
         self == &SpecsChange::default()
     }
 
+    /// `specs` with these changes: the one statement of what a plan's specs
+    /// do to a model's, for the staged copy and for the VM alike.
+    fn applied_to(&self, specs: &datamodel::SimSpecs) -> datamodel::SimSpecs {
+        let mut specs = specs.clone();
+        if let Some(start) = self.start {
+            specs.start = start;
+        }
+        if let Some(stop) = self.stop {
+            specs.stop = stop;
+        }
+        if let Some(dt) = self.dt {
+            specs.dt = datamodel::Dt::Dt(dt);
+        }
+        if let Some(save) = self.save_step {
+            specs.save_step = Some(datamodel::Dt::Dt(save));
+        }
+        if let Some(method) = self.method {
+            specs.sim_method = match method {
+                IntegrationMethod::Euler => datamodel::SimMethod::Euler,
+                IntegrationMethod::Rk2 => datamodel::SimMethod::RungeKutta2,
+                IntegrationMethod::Rk4 => datamodel::SimMethod::RungeKutta4,
+            };
+        }
+        specs
+    }
+
     /// `self`'s changes over `base`'s.
     pub(crate) fn over(&self, base: &SpecsChange) -> SpecsChange {
         SpecsChange {
@@ -191,31 +247,59 @@ pub(crate) struct RunPlan {
 }
 
 impl RunPlan {
-    /// Whether the plan compiles a staged copy of the model: it replaces an
-    /// equation or changes the run specs.
-    pub(crate) fn stages(&self) -> bool {
-        !self.equations.is_empty() || !self.specs.is_empty()
+    /// Whether the plan changes values only, so that it runs on the model's
+    /// own compile under the model's own specs.
+    pub(crate) fn only_sets_values(&self) -> bool {
+        self.equations.is_empty() && self.specs.is_empty()
     }
 
-    /// `base`'s plan with `self`'s changes after it: a change of a variable
-    /// `self` also changes is replaced, not compounded, and `self`'s specs
-    /// override `base`'s.
+    /// Whether the plan compiles a staged copy of `model_name` in `project`:
+    /// it replaces an equation, or it changes the run specs of a model whose
+    /// compile reads them (one with a conveyor or a queue, whose expansion
+    /// does; `Vm::with_specs`).
+    fn stages(&self, project: &datamodel::Project, model_name: &str) -> bool {
+        !self.equations.is_empty()
+            || (!self.specs.is_empty()
+                && (crate::conveyor_compile::project_has_conveyor(project, model_name)
+                    || crate::queue_compile::project_has_queue(project, model_name)))
+    }
+
+    /// `base`'s plan with `self`'s changes after it, and `self`'s specs over
+    /// `base`'s.
+    ///
+    /// A variable's changes are a timeline. A change of this plan's that
+    /// holds from the start -- a replacement equation, or a value with no
+    /// time -- replaces every change `base` made to that variable. A value
+    /// from a time on replaces only the changes `base` made from that time or
+    /// later: what `base` set before it still holds until then, so the run is
+    /// `base`'s up to that time, as its answer's `was` says.
     pub(crate) fn over(&self, base: &RunPlan) -> RunPlan {
-        let changed = |variable: &str| {
-            self.values.iter().any(|c| c.variable == variable)
-                || self.equations.iter().any(|c| c.variable == variable)
+        // When this plan first changes `variable`: `None` when it does not,
+        // negative infinity for a change from the start.
+        let changed_from = |variable: &str| -> Option<f64> {
+            let from_start = self.equations.iter().any(|c| c.variable == variable);
+            self.values
+                .iter()
+                .filter(|c| c.variable == variable)
+                .map(|c| c.from_time.unwrap_or(f64::NEG_INFINITY))
+                .chain(from_start.then_some(f64::NEG_INFINITY))
+                .min_by(f64::total_cmp)
+        };
+        let survives = |variable: &str, from_time: Option<f64>| match changed_from(variable) {
+            None => true,
+            Some(changed) => from_time.unwrap_or(f64::NEG_INFINITY) < changed,
         };
         let mut values: Vec<ValueChange> = base
             .values
             .iter()
-            .filter(|c| !changed(&c.variable))
+            .filter(|c| survives(&c.variable, c.from_time))
             .cloned()
             .collect();
         values.extend(self.values.iter().cloned());
         let mut equations: Vec<EquationChange> = base
             .equations
             .iter()
-            .filter(|c| !changed(&c.variable))
+            .filter(|c| survives(&c.variable, None))
             .cloned()
             .collect();
         equations.extend(self.equations.iter().cloned());
@@ -265,16 +349,7 @@ impl Run {
 
     /// The series at a results offset, over the rows the run saved.
     pub(crate) fn series(&self, offset: usize) -> Vec<f64> {
-        self.results
-            .iter()
-            .take(self.saved_rows())
-            .map(|row| row[offset])
-            .collect()
-    }
-
-    /// How many rows the run saved ([`saved_rows`]).
-    pub(crate) fn saved_rows(&self) -> usize {
-        saved_rows(&self.results)
+        self.results.iter().map(|row| row[offset]).collect()
     }
 
     /// The row saved at `time`, or the last one before it: the row before the
@@ -288,26 +363,12 @@ impl Run {
             .saturating_sub(1)
     }
 
-    /// The bytes its results hold.
+    /// The bytes the run holds: its results, and its loop analysis once it
+    /// has one.
     fn bytes(&self) -> usize {
         self.results.data.len() * std::mem::size_of::<f64>()
+            + self.loops.get().map_or(0, |analysis| analysis.bytes())
     }
-}
-
-/// How many rows `results` saved: the rows up to the first whose time goes
-/// back. A save step that is not a multiple of DT leaves the results' last
-/// rows unwritten, at time zero, and they are no part of the run.
-pub(crate) fn saved_rows(results: &Results) -> usize {
-    let mut previous = f64::NEG_INFINITY;
-    results
-        .iter()
-        .position(|row| {
-            let time = row[crate::results::TIME_OFF];
-            let back = time < previous;
-            previous = time;
-            back
-        })
-        .unwrap_or(results.step_count)
 }
 
 /// A named run as the store keeps it: with its results, or, past the store's
@@ -526,59 +587,6 @@ pub(crate) fn list_runs(
     Ok(output)
 }
 
-/// The project as a simulation reads it, as a number: equal for two projects
-/// that differ only in their diagrams, sectors, provenance, source file, or
-/// their variables' documentation and units, and (but for a hash collision)
-/// different otherwise.
-///
-/// Units are checked, never simulated, so a fix of a variable's units, like
-/// an edit of its notes, stales no run: nothing a run is kept fresh for reads
-/// either.
-pub(crate) fn simulation_key(project: &datamodel::Project) -> u64 {
-    let mut stripped = project.clone();
-    stripped.source = None;
-    stripped.ai_information = None;
-    for model in &mut stripped.models {
-        model.views.clear();
-        model.groups.clear();
-        // Only a variable with something to strip is copied out of the
-        // sharing.
-        model.variables.edit_where(
-            |var| {
-                var.get_units().is_some()
-                    || var.get_ai_state().is_some()
-                    || !documentation(var).is_empty()
-            },
-            |var| {
-                var.set_units("");
-                var.set_documentation("");
-                match var {
-                    Variable::Stock(v) => v.ai_state = None,
-                    Variable::Flow(v) => v.ai_state = None,
-                    Variable::Aux(v) => v.ai_state = None,
-                    Variable::Module(v) => v.ai_state = None,
-                }
-            },
-        );
-    }
-    let bytes = crate::serde::serialize(&stripped)
-        .map(|p| p.encode_to_vec())
-        .unwrap_or_default();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// A variable's documentation, its notes.
-fn documentation(var: &Variable) -> &str {
-    match var {
-        Variable::Stock(v) => &v.documentation,
-        Variable::Flow(v) => &v.documentation,
-        Variable::Aux(v) => &v.documentation,
-        Variable::Module(v) => &v.documentation,
-    }
-}
-
 /// The runs a session keeps.
 #[derive(Default)]
 pub(crate) struct RunStore {
@@ -782,7 +790,7 @@ pub(crate) fn execute(
 /// holds that project: for a plan that stages, the staged copy, which an
 /// analysis of the run reads the structure of.
 ///
-/// A plan with equation or spec changes stages a copy of the datamodel,
+/// A plan that stages ([`RunPlan::stages`]) stages a copy of the datamodel,
 /// compiles it, and restores the database to the project before returning,
 /// whatever the outcome (a panic included, from [`Staging`]'s drop); `after`
 /// may change the database's inputs other than the project's contents (a
@@ -796,7 +804,7 @@ pub(crate) fn execute_then<T>(
 ) -> Result<(Results, T), RunFailure> {
     let specs = super::changes::effective_specs(ws.project, model).clone();
     let waiting = ws.waiting;
-    if plan.stages() {
+    if plan.stages(ws.project, &model.name) {
         let staged = staged_project(ws.project, &model.name, plan)?;
         let staging = Staging::new(ws.db, ws.project, &staged);
         let source_project = staging.source_project;
@@ -807,6 +815,7 @@ pub(crate) fn execute_then<T>(
             model,
             &specs,
             plan,
+            true,
             overlay,
             waiting,
         )?;
@@ -824,6 +833,7 @@ pub(crate) fn execute_then<T>(
         model,
         &specs,
         plan,
+        false,
         overlay,
         waiting,
     )?;
@@ -831,10 +841,11 @@ pub(crate) fn execute_then<T>(
     Ok((results, analysis))
 }
 
-/// Compile `model` in `project` (the one `source_project` holds) under
-/// `overlay`, and run it under `plan`'s values, a slice at a time. `specs`
-/// are the model's own, which `plan`'s override, and what a run's cost is
-/// held against.
+/// Compile `model` in `project` (the one `source_project` holds, `staged`
+/// when it is a staged copy with `plan`'s equations and specs) under
+/// `overlay`, and run it under `plan`'s specs and values, a slice at a time.
+/// `specs` are the model's own, which `plan`'s override, and what a run's
+/// cost is held against.
 #[allow(clippy::too_many_arguments)]
 fn simulate(
     db: &mut SimlinDb,
@@ -843,21 +854,27 @@ fn simulate(
     model: &datamodel::Model,
     specs: &datamodel::SimSpecs,
     plan: &RunPlan,
+    staged: bool,
     overlay: LtmOverlay,
     waiting: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> Result<Results, RunFailure> {
     let own = crate::results::Specs::from(specs);
-    let vm =
-        build_vm(db, source_project, project, &model.name, overlay, &own).map_err(
-            |err| match err {
-                Unbuilt::Compile(err) if plan.stages() => {
-                    refusal_reason(db, source_project, &model.name, &err)
-                }
-                Unbuilt::Compile(err) => describe(&err),
-                Unbuilt::Cost(reason) => reason,
-            },
-        )?;
-    run_values(vm, specs, plan, waiting)
+    let run = crate::results::Specs::from(&plan.specs.applied_to(specs));
+    let vm = build_vm_under(
+        db,
+        source_project,
+        project,
+        &model.name,
+        overlay,
+        &own,
+        Some(run),
+    )
+    .map_err(|err| match err {
+        Unbuilt::Compile(err) if staged => refusal_reason(db, source_project, &model.name, &err),
+        Unbuilt::Compile(err) => describe(&err),
+        Unbuilt::Cost(reason) => reason,
+    })?;
+    run_values(vm, plan, waiting)
 }
 
 /// Run each of `plans`, which change values only, on one compile of `model`,
@@ -875,7 +892,7 @@ pub(crate) fn execute_values<T: Send>(
     plans: &[RunPlan],
     summarize: impl Fn(&RunPlan, Results) -> T + Sync,
 ) -> Result<Vec<Result<T, String>>, ToolError> {
-    debug_assert!(plans.iter().all(|plan| !plan.stages()));
+    debug_assert!(plans.iter().all(RunPlan::only_sets_values));
     ws.yield_point()?;
     let Some(source_project) = ws.db.current_source_project() else {
         return Ok(plans
@@ -893,7 +910,6 @@ pub(crate) fn execute_values<T: Send>(
         Ok(build) => build,
         Err(err) => return Ok(plans.iter().map(|_| Err(describe(&err))).collect()),
     };
-    let specs = super::changes::effective_specs(ws.project, model);
     let waiting = ws.waiting;
     let stopped = std::sync::atomic::AtomicBool::new(false);
     let run = |plan: &RunPlan| {
@@ -906,7 +922,7 @@ pub(crate) fn execute_values<T: Send>(
             vm.set_conveyor_plans(build.conveyor_plans.clone());
             vm.set_queue_plans(build.queue_plans.clone());
         }
-        match run_values(vm, specs, plan, waiting) {
+        match run_values(vm, plan, waiting) {
             Ok(results) => Ok(summarize(plan, results)),
             Err(RunFailure::Failed(reason)) => Err(reason),
             Err(RunFailure::Stopped) => {
@@ -929,36 +945,30 @@ pub(crate) fn execute_values<T: Send>(
 }
 
 /// Run `vm` to its end under `plan`'s values, a slice at a time, stopping
-/// between two when `waiting` says other work waits for the project; `specs`
-/// are the model's own, which `plan`'s override.
+/// between two when `waiting` says other work waits for the project. The
+/// VM's specs are the run's.
 fn run_values(
     mut vm: crate::vm::Vm,
-    specs: &datamodel::SimSpecs,
     plan: &RunPlan,
     waiting: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> Result<Results, RunFailure> {
     // Values from the start go in before the run, so initial values read
     // them; the others at their times, in order. A value from `t` holds from
-    // the first step at or after `t`, the step `IF TIME >= t` turns on at.
-    // `run_to(t)` evaluates the step at `t` before it stops, so the value is
-    // set after running to half a step before that step: the clock then
-    // stands at it, and its flows read the new value.
-    let start = plan.specs.start.unwrap_or(specs.start);
-    let stop = plan.specs.stop.unwrap_or(specs.stop);
-    let dt = plan
-        .specs
-        .dt
-        .unwrap_or_else(|| super::outline::dt_value(&specs.dt));
+    // the first step at or after `t` (`Vm::run_until` stops at it, before it
+    // is evaluated): the step an equation's `TIME >= t` first holds at under
+    // Euler integration. A time at or before the first step is the start.
+    let specs = vm.specs().clone();
     let mut slices = Slices {
-        at: start,
-        slice: (stop - start) / RUN_SLICES,
+        at: 0.0,
+        // The run's steps in `RUN_SLICES` parts, and at least a step.
+        slice: (specs.final_step() as f64 / RUN_SLICES).max(1.0),
         waiting,
     };
     let takes_effect = |change: &ValueChange| {
         change
             .from_time
-            .filter(|&time| time > start)
-            .map(|time| first_step_at_or_after(start, dt, time))
+            .map(|time| specs.step_at_or_after(time))
+            .filter(|&step| step > 0.0)
     };
     let mut timed: Vec<&ValueChange> = plan.values.iter().collect();
     timed.sort_by(|a, b| {
@@ -967,19 +977,25 @@ fn run_values(
             .total_cmp(&takes_effect(b).unwrap_or(f64::NEG_INFINITY))
     });
     for change in timed {
-        if let Some(time) = takes_effect(change) {
-            slices.run_to(&mut vm, time - dt / 2.0)?;
+        if takes_effect(change).is_some()
+            && let Some(time) = change.from_time
+        {
+            slices.run_until(&mut vm, time)?;
         }
         for (key, value) in &change.values {
             vm.set_value(key, *value).map_err(|err| describe(&err))?;
         }
     }
-    slices.run_to(&mut vm, stop)?;
+    slices.run_until(&mut vm, specs.stop)?;
     vm.run_to_end().map_err(|err| describe(&err))?;
     Ok(vm.into_results())
 }
 
-/// A run taken a slice at a time, from where it stands (`at`).
+/// A run taken a slice at a time, counted in steps as the VM counts them:
+/// the step count it stands at (`at`), and the steps of a slice (`slice`, at
+/// least one). A slice's end is a step count, never a time: where the clock's
+/// last place is coarser than a DT, a time names no one step, and a clock
+/// that adds a slice's length to a time can stop advancing.
 struct Slices<'w> {
     at: f64,
     slice: f64,
@@ -987,18 +1003,24 @@ struct Slices<'w> {
 }
 
 impl Slices<'_> {
-    /// Run `vm` to `time` a slice at a time, stopping between two slices
-    /// when other work waits for the project.
-    fn run_to(&mut self, vm: &mut crate::vm::Vm, time: f64) -> Result<(), RunFailure> {
-        while self.slice > 0.0 && self.at + self.slice < time {
+    /// Run `vm` until `time` (`Vm::run_until`) a slice at a time, stopping
+    /// between two slices when other work waits for the project. A run is at
+    /// most `RUN_SLICES` slices, whatever its specs.
+    fn run_until(&mut self, vm: &mut crate::vm::Vm, time: f64) -> Result<(), RunFailure> {
+        // No step past the run's last is taken, however late `time` is.
+        let target = vm
+            .specs()
+            .step_at_or_after(time)
+            .min(vm.specs().final_step() as f64 + 1.0);
+        while self.at + self.slice < target {
             self.at += self.slice;
-            vm.run_to(self.at).map_err(|err| describe(&err))?;
+            vm.run_until_step(self.at).map_err(|err| describe(&err))?;
             if self.waiting.is_some_and(|waiting| waiting()) {
                 return Err(RunFailure::Stopped);
             }
         }
-        vm.run_to(time).map_err(|err| describe(&err))?;
-        self.at = self.at.max(time);
+        vm.run_until(time).map_err(|err| describe(&err))?;
+        self.at = self.at.max(target);
         Ok(())
     }
 }
@@ -1022,12 +1044,32 @@ pub(crate) fn build_vm(
     overlay: LtmOverlay,
     own: &crate::results::Specs,
 ) -> Result<crate::vm::Vm, Unbuilt> {
+    build_vm_under(db, source_project, project, model_name, overlay, own, None)
+}
+
+/// [`build_vm`], to run under `run` when given in place of the specs the
+/// model compiles with: a plan's specs, on a model whose program does not
+/// depend on them ([`RunPlan::stages`] says which).
+fn build_vm_under(
+    db: &mut SimlinDb,
+    source_project: SourceProject,
+    project: &datamodel::Project,
+    model_name: &str,
+    overlay: LtmOverlay,
+    own: &crate::results::Specs,
+    run: Option<crate::results::Specs>,
+) -> Result<crate::vm::Vm, Unbuilt> {
     let build = crate::queue_compile::compile_sim(db, source_project, project, model_name, overlay)
         .map_err(Unbuilt::Compile)?;
-    if let Some(reason) = over_budget(&build.compiled.specs, build.compiled.n_slots(), own) {
+    // A model with a conveyor or a queue runs under the specs its expansion
+    // read; a plan that changes them staged a copy that has them.
+    let run = run
+        .filter(|_| !build.special)
+        .unwrap_or_else(|| build.compiled.specs.clone());
+    if let Some(reason) = over_budget(&run, build.compiled.n_slots(), own) {
         return Err(Unbuilt::Cost(reason));
     }
-    let mut vm = crate::vm::Vm::new(build.compiled).map_err(Unbuilt::Compile)?;
+    let mut vm = crate::vm::Vm::with_specs(build.compiled, run).map_err(Unbuilt::Compile)?;
     if build.special {
         vm.set_conveyor_plans(build.conveyor_plans);
         vm.set_queue_plans(build.queue_plans);
@@ -1049,42 +1091,63 @@ pub(crate) fn over_budget(
     own: &crate::results::Specs,
 ) -> Option<String> {
     let slots = slots.max(1);
-    let steps = |specs: &crate::results::Specs| ((specs.stop - specs.start) / specs.dt).ceil();
+    let steps = |specs: &crate::results::Specs| specs.final_step() as f64;
     let span = specs.stop - specs.start;
     let slots_f = slots as f64;
     let save = specs.save_step.max(specs.dt);
     let values = specs.n_chunks as f64 * slots_f;
     let values_limit = (MAX_RUN_VALUES as f64).max(own.n_chunks as f64 * slots_f);
+    // A stop time to suggest: one after the start, which three digits can
+    // round down to the start itself (a run from 1e18), and then none.
+    let stop_at_most = |stop: f64| {
+        let stop = rounded_down(stop);
+        (stop > specs.start).then(|| format!("a stop time of at most {}", written(stop)))
+    };
     if values > values_limit {
         let rows = (values_limit / slots_f).floor().max(2.0);
-        let stop = specs.start + (rows - 1.0) * save;
-        let alternatives = if save <= specs.dt {
-            format!(
-                "a DT of at least {} (the run saves every step), or a stop time of at most {}",
-                rounded_up(span / (rows - 1.0)),
-                rounded_down(stop)
-            )
+        let longer = written(rounded_up(span / (rows - 1.0)));
+        let stop = stop_at_most(specs.start + (rows - 1.0) * save);
+        let alternatives = match (save <= specs.dt, stop) {
+            (true, Some(stop)) => {
+                format!("a DT of at least {longer} (the run saves every step), or {stop}")
+            }
+            (true, None) => format!("a DT of at least {longer} (the run saves every step)"),
+            (false, Some(stop)) => stop,
+            // A DT that long saves every step and computes no more than it
+            // saves, so it fits where a longer save step alone would not.
+            (false, None) => format!("a DT of at least {longer}"),
+        };
+        // A count past counting has no product to give.
+        let saved = if specs.n_chunks == usize::MAX {
+            format!("{}, each of {slots} values", written_rows(specs.n_chunks))
         } else {
-            format!("a stop time of at most {}", rounded_down(stop))
+            format!(
+                "{} of {slots} values, {} numbers",
+                written_rows(specs.n_chunks),
+                written_count(values)
+            )
         };
         return Some(format!(
-            "the run would save {} rows of {slots} values, {} numbers, more than the {} a run \
-             may hold; {alternatives} would fit",
-            specs.n_chunks, values as u64, values_limit as u64
+            "the run would save {saved}, more than the {} a run may hold; {alternatives} \
+             would fit",
+            written_count(values_limit)
         ));
     }
     let computed = steps(specs) * slots_f;
     let steps_limit = (MAX_RUN_STEPS as f64).max(steps(own) * slots_f);
     if computed > steps_limit {
         let fit = (steps_limit / slots_f).floor().max(1.0);
+        let dt = format!("a DT of at least {}", written(rounded_up(span / fit)));
+        let alternatives = match stop_at_most(specs.start + fit * specs.dt) {
+            Some(stop) => format!("{dt}, or {stop},"),
+            None => dt,
+        };
         return Some(format!(
             "the run would take {} steps of {slots} values, {} in all, more than the {} a run \
-             may compute; a DT of at least {}, or a stop time of at most {}, would fit",
-            steps(specs) as u64,
-            computed as u64,
-            steps_limit as u64,
-            rounded_up(span / fit),
-            rounded_down(specs.start + fit * specs.dt)
+             may compute; {alternatives} would fit",
+            written_count(steps(specs)),
+            written_count(computed),
+            written_count(steps_limit),
         ));
     }
     None
@@ -1093,28 +1156,33 @@ pub(crate) fn over_budget(
 /// `x` rounded up to three significant digits, for a bound a suggestion must
 /// meet.
 fn rounded_up(x: f64) -> f64 {
-    if x == 0.0 {
-        return x;
-    }
-    let scale = 10f64.powi(2 - x.abs().log10().floor() as i32);
-    (x * scale).ceil() / scale
+    three_digits(x, f64::ceil)
 }
 
 /// `x` rounded down to three significant digits.
 fn rounded_down(x: f64) -> f64 {
-    if x == 0.0 {
-        return x;
-    }
-    let scale = 10f64.powi(2 - x.abs().log10().floor() as i32);
-    (x * scale).floor() / scale
+    three_digits(x, f64::floor)
 }
 
-/// The first step of a run from `start` in steps of `dt` at or after `time`.
-/// A time within a millionth of a step of one is that step, so a time written
-/// as a step's (5.1 with a DT of 0.1) is not moved past it by rounding.
-pub(crate) fn first_step_at_or_after(start: f64, dt: f64, time: f64) -> f64 {
-    let steps = ((time - start) / dt - 1e-6).ceil().max(0.0);
-    start + steps * dt
+/// `x` to three significant digits, its fourth and later taken off by
+/// `whole`, so the answer prints with three digits. The digits are found by
+/// scaling by a power of ten (multiplied or divided as its sign needs: `114 /
+/// 1e-5` is `11399999.999999998`, and `114 * 1e5` is `11400000`), and the
+/// answer is read back from the decimal they spell, which makes it the float
+/// nearest that decimal at any magnitude: past `1e22` a power of ten is no
+/// float, and scaling back by one would leave digits past the third.
+fn three_digits(x: f64, whole: fn(f64) -> f64) -> f64 {
+    if x == 0.0 || !x.is_finite() {
+        return x;
+    }
+    let last = x.abs().log10().floor() as i32 - 2;
+    let unit = 10f64.powi(last.abs());
+    let digits = if last >= 0 {
+        whole(x / unit)
+    } else {
+        whole(x * unit)
+    };
+    format!("{digits}e{last}").parse().unwrap_or(x)
 }
 
 /// The host's database staged on a copy of its project, for a run that
@@ -1163,44 +1231,28 @@ fn staged_project(
         .iter_mut()
         .find(|m| m.name == model_name)
         .ok_or_else(|| format!("the project has no model named '{model_name}'"))?;
+    apply_equations(model, plan)?;
+    if !plan.specs.is_empty() {
+        let specs = match &mut model.sim_specs {
+            Some(specs) => specs,
+            None => &mut staged.sim_specs,
+        };
+        *specs = plan.specs.applied_to(specs);
+    }
+    Ok(staged)
+}
+
+/// `plan`'s replacement equations applied to `model`: the model as a run of
+/// the plan compiles it, and so as every reader of that run's structure
+/// must read it (`series::scale_in_run`).
+pub(crate) fn apply_equations(model: &mut datamodel::Model, plan: &RunPlan) -> Result<(), String> {
     for change in &plan.equations {
         let var = model
             .get_variable_mut(&change.variable)
             .ok_or_else(|| format!("the model has no variable '{}'", change.variable))?;
         replace_equation(var, &change.replacement);
     }
-    if !plan.specs.is_empty() {
-        let specs = match &mut model.sim_specs {
-            Some(specs) => specs,
-            None => &mut staged.sim_specs,
-        };
-        if let Some(start) = plan.specs.start {
-            specs.start = start;
-        }
-        if let Some(stop) = plan.specs.stop {
-            specs.stop = stop;
-        }
-        if let Some(dt) = plan.specs.dt {
-            specs.dt = datamodel::Dt::Dt(dt);
-            // A save step finer than the new DT is one the run cannot keep.
-            if let Some(save) = &specs.save_step
-                && super::outline::dt_value(save) < dt
-            {
-                specs.save_step = None;
-            }
-        }
-        if let Some(save) = plan.specs.save_step {
-            specs.save_step = Some(datamodel::Dt::Dt(save));
-        }
-        if let Some(method) = plan.specs.method {
-            specs.sim_method = match method {
-                IntegrationMethod::Euler => datamodel::SimMethod::Euler,
-                IntegrationMethod::Rk2 => datamodel::SimMethod::RungeKutta2,
-                IntegrationMethod::Rk4 => datamodel::SimMethod::RungeKutta4,
-            };
-        }
-    }
-    Ok(staged)
+    Ok(())
 }
 
 /// Replace a variable's value, keeping its dimensions: one equation applies

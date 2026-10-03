@@ -362,6 +362,9 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             // A declared element with no equation likewise collapses to the
             // wire Generic code; the message names the variable and elements.
             engine::ErrorCode::MissingElementEquation => SimlinErrorCode::Generic,
+            // A save step off the step grid likewise collapses to the wire
+            // Generic code; the message says what the saved rows are.
+            engine::ErrorCode::SaveStepOffTheStepGrid => SimlinErrorCode::Generic,
         }
     }
 }

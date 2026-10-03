@@ -119,8 +119,10 @@ impl FeedbackLoop {
 /// detected-loop path derives its indices from the id-sorted detected list
 /// instead, where index 0 carries no competitiveness meaning.
 ///
-/// `dt` is the time between consecutive entries in each loop's importance_series.
-/// `start_time` is the simulation start time.
+/// `times[i]` is the time of entry `i` of each loop's importance series: the
+/// time of the run's saved row `i`, read from the run, never counted from a
+/// cadence (a save step off the DT grid saves rows that are not evenly
+/// spaced). Entries past the last time are not read.
 ///
 /// A reported set must reach 50% of the mass its importance series were
 /// normalized against (LTM's dominance definition, reference section 2.1).
@@ -130,8 +132,7 @@ impl FeedbackLoop {
 /// sample-normalized scores, dominance describes that sample only.
 pub fn calculate_dominant_periods(
     loops: &[FeedbackLoop],
-    start_time: f64,
-    dt: f64,
+    times: &[f64],
     surface: PartitionSurface,
 ) -> Vec<DominantPeriod> {
     // Group the Some-partition loops by partition, preserving each group's
@@ -159,7 +160,7 @@ pub fn calculate_dominant_periods(
         .chain(none_groups)
         .flat_map(|group| {
             let partition = group[0].partition;
-            calculate_dominant_periods_for_group(&group, partition, start_time, dt)
+            calculate_dominant_periods_for_group(&group, partition, times)
         })
         .collect()
 }
@@ -193,20 +194,21 @@ pub enum PartitionSurface {
 fn calculate_dominant_periods_for_group(
     loops: &[&FeedbackLoop],
     partition: Option<usize>,
-    start_time: f64,
-    dt: f64,
+    times: &[f64],
 ) -> Vec<DominantPeriod> {
     if loops.is_empty() {
         return Vec::new();
     }
 
-    // Find the length of the shortest importance series
+    // The length of the shortest importance series, and no more steps than
+    // there are times.
     let n_steps = loops
         .iter()
         .filter(|l| !l.importance_series.is_empty())
         .map(|l| l.importance_series.len())
         .min()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(times.len());
 
     if n_steps == 0 {
         return Vec::new();
@@ -216,9 +218,7 @@ fn calculate_dominant_periods_for_group(
     let mut score_sum: f64 = 0.0;
     let mut score_count: usize = 0;
 
-    for step in 0..n_steps {
-        let time = start_time + (step as f64) * dt;
-
+    for (step, &time) in times.iter().enumerate().take(n_steps) {
         // Collect (loop_name, score) for this timestep
         let mut scored: Vec<(&str, f64)> = loops
             .iter()
@@ -338,6 +338,12 @@ fn calculate_dominant_periods_for_group(
 mod tests {
     use super::*;
 
+    /// The times of rows saved every `dt` from `start`: more than any series
+    /// here holds.
+    fn every(start: f64, dt: f64) -> Vec<f64> {
+        (0..4096).map(|i| start + i as f64 * dt).collect()
+    }
+
     #[test]
     fn test_average_importance() {
         let fl = FeedbackLoop {
@@ -368,7 +374,8 @@ mod tests {
 
     #[test]
     fn test_dominant_periods_empty_loops() {
-        let periods = calculate_dominant_periods(&[], 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&[], &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert!(periods.is_empty());
     }
 
@@ -383,7 +390,8 @@ mod tests {
             dominant_period: None,
             partition: None,
         }];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         assert!((periods[0].start - 0.0).abs() < f64::EPSILON);
         assert!((periods[0].end - 2.0).abs() < f64::EPSILON);
@@ -419,7 +427,8 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 2);
         assert_eq!(periods[0].dominant_loops, vec!["R1"]);
         assert_eq!(periods[1].dominant_loops, vec!["B1"]);
@@ -447,7 +456,8 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 2);
 
         let r1_avg = (0.6 + 0.8) / 2.0;
@@ -488,7 +498,8 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert_eq!(
             periods.len(),
             1,
@@ -518,7 +529,8 @@ mod tests {
             dominant_period: None,
             partition: None,
         }];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert_eq!(
             periods.len(),
             2,
@@ -553,7 +565,8 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         // B1 has the higher score so should come first despite being
         // alphabetically after A1.
@@ -570,7 +583,8 @@ mod tests {
             dominant_period: None,
             partition: None,
         }];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert!(periods.is_empty());
     }
 
@@ -606,7 +620,8 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         // R1 should NOT be in the dominant set
         assert!(
@@ -650,7 +665,8 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert!(periods.is_empty());
     }
 
@@ -670,7 +686,7 @@ mod tests {
                     series.into_iter().map(|v| sign * v).collect(),
                     None,
                 )];
-                let periods = calculate_dominant_periods(&loops, 10.0, 0.25, surface);
+                let periods = calculate_dominant_periods(&loops, &every(10.0, 0.25), surface);
                 let intervals: Vec<_> = periods.iter().map(|p| (p.start, p.end)).collect();
                 assert_eq!(
                     intervals,
@@ -695,8 +711,11 @@ mod tests {
             partitioned_loop("balancing", vec![-0.5], Some(0)),
             partitioned_loop("reinforcing", vec![0.5], Some(0)),
         ];
-        let periods =
-            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
+        let periods = calculate_dominant_periods(
+            &loops,
+            &every(0.0, 1.0),
+            PartitionSurface::PartitionBearing,
+        );
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].dominant_loops, vec!["reinforcing"]);
         assert_eq!(periods[0].combined_score, 0.5);
@@ -733,7 +752,8 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         // Balancing total (0.9) > reinforcing total (0.6), so balancing
         // should win even though reinforcing also exceeds 0.5.
@@ -772,8 +792,11 @@ mod tests {
                 partition: None,
             },
         ];
-        let periods =
-            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
+        let periods = calculate_dominant_periods(
+            &loops,
+            &every(0.0, 1.0),
+            PartitionSurface::PartitionBearing,
+        );
         assert_eq!(periods.len(), 1);
         assert_eq!(
             periods[0].dominant_loops,
@@ -809,8 +832,11 @@ mod tests {
             // The lone-partition loop: share identically 1.0 while active.
             partitioned_loop("B_lone", vec![-1.0, -1.0, -1.0, -1.0], Some(1)),
         ];
-        let periods =
-            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
+        let periods = calculate_dominant_periods(
+            &loops,
+            &every(0.0, 1.0),
+            PartitionSurface::PartitionBearing,
+        );
 
         let p0: Vec<_> = periods.iter().filter(|p| p.partition == Some(0)).collect();
         let p1: Vec<_> = periods.iter().filter(|p| p.partition == Some(1)).collect();
@@ -846,8 +872,11 @@ mod tests {
             partitioned_loop("R_p1", vec![0.8, 0.8], Some(1)),
             partitioned_loop("R_p0", vec![0.7, 0.7], Some(0)),
         ];
-        let periods =
-            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
+        let periods = calculate_dominant_periods(
+            &loops,
+            &every(0.0, 1.0),
+            PartitionSurface::PartitionBearing,
+        );
         let order: Vec<Option<usize>> = periods.iter().map(|p| p.partition).collect();
         assert_eq!(
             order,
@@ -876,8 +905,11 @@ mod tests {
             partitioned_loop("R_mod", vec![1.0, 1.0], None),
             partitioned_loop("B_mod", vec![-1.0, -1.0], None),
         ];
-        let periods =
-            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
+        let periods = calculate_dominant_periods(
+            &loops,
+            &every(0.0, 1.0),
+            PartitionSurface::PartitionBearing,
+        );
 
         let none_periods: Vec<_> = periods.iter().filter(|p| p.partition.is_none()).collect();
         assert_eq!(
@@ -913,8 +945,11 @@ mod tests {
             partitioned_loop("R_mod", vec![1.0, 1.0], None),
             partitioned_loop("B_mod", vec![-1.0, -1.0], None),
         ];
-        let periods =
-            calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::PartitionBearing);
+        let periods = calculate_dominant_periods(
+            &loops,
+            &every(0.0, 1.0),
+            PartitionSurface::PartitionBearing,
+        );
         assert_eq!(
             periods.len(),
             2,
@@ -940,7 +975,8 @@ mod tests {
             partitioned_loop("R1", vec![0.35], None),
             partitioned_loop("R2", vec![0.20], None),
         ];
-        let periods = calculate_dominant_periods(&loops, 0.0, 1.0, PartitionSurface::NoMetadata);
+        let periods =
+            calculate_dominant_periods(&loops, &every(0.0, 1.0), PartitionSurface::NoMetadata);
         assert_eq!(periods.len(), 1);
         let mut names = periods[0].dominant_loops.clone();
         names.sort();

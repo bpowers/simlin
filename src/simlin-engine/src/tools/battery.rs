@@ -2105,7 +2105,7 @@ impl Watched {
     /// that became NaN or infinite, and stocks and non-negative flows that
     /// went negative; non-finite values first, then by time.
     fn problems(&self, results: &Results) -> Vec<Problem> {
-        let rows: Vec<&[f64]> = results.iter().take(runs::saved_rows(results)).collect();
+        let rows: Vec<&[f64]> = results.iter().collect();
         let time = |row: usize| round(rows[row][crate::results::TIME_OFF]);
         let mut problems = Vec::new();
         for watched in &self.series {

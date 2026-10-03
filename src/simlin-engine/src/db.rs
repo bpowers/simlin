@@ -90,6 +90,8 @@ pub(crate) use query::{
 };
 
 mod sync;
+#[cfg(feature = "agent_tools")]
+pub(crate) use sync::simulation_key;
 pub use sync::{
     PersistentModelState, PersistentSyncState, PersistentVariableState, SyncResult, SyncedModel,
     SyncedVariable, sync_from_datamodel, sync_from_datamodel_incremental,

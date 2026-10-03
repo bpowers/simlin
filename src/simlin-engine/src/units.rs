@@ -192,12 +192,23 @@ pub(crate) fn combine(op: UnitOp, l: UnitMap, r: UnitMap) -> UnitMap {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Default, PartialEq)]
 pub struct Context {
-    pub sim_specs: SimSpecs,
+    /// The time units the sim specs declare. It is the one thing of the sim
+    /// specs a unit check reads, and the only one kept: a context that held
+    /// the specs whole would differ after any edit of them (a stop time), and
+    /// every parse reads the context, so each such edit would run every
+    /// parse in the project again.
+    time_units: Option<String>,
     aliases: HashMap<String, String>,
     units: HashMap<String, UnitMap>,
 }
 
 impl Context {
+    /// The canonical name of the model's time unit: the sim specs' time
+    /// units, `time` when they declare none.
+    pub fn time_units_name(&self) -> String {
+        canonicalize(self.time_units.as_deref().unwrap_or("time")).into_owned()
+    }
+
     pub fn new_with_builtins(
         units: &[Unit],
         sim_specs: &SimSpecs,
@@ -397,7 +408,7 @@ impl Context {
         }
 
         let mut ctx = Context {
-            sim_specs: sim_specs.clone(),
+            time_units: sim_specs.time_units.clone(),
             aliases,
             units: parsed_units,
         };
@@ -1028,7 +1039,7 @@ fn test_context_creation() {
     ];
 
     let expected = Context {
-        sim_specs: Default::default(),
+        time_units: None,
         aliases: [
             ("person".to_owned(), "people".to_owned()),
             ("persons".to_owned(), "people".to_owned()),
@@ -1069,7 +1080,7 @@ fn test_context_creation() {
     ];
 
     let expected2 = Context {
-        sim_specs: Default::default(),
+        time_units: None,
         aliases: [("itime".to_owned(), "invtime".to_owned())]
             .iter()
             .cloned()
@@ -1440,4 +1451,61 @@ fn test_conflicting_unit_declarations_are_still_errors() {
         !errors.is_empty(),
         "conflicting alias declarations must still produce an error"
     );
+}
+
+/// An edit of the run specs leaves the unit context as it was unless it
+/// changes the time units, so it parses no variable again: every parse reads
+/// the context, and a context that changed with the stop time would run each
+/// of them on such an edit.
+#[test]
+fn a_run_spec_edit_parses_no_variable_again() {
+    use crate::datamodel::{Dt, SimMethod};
+    use crate::db::exec_probe::ProbedDb;
+    use crate::db::{LtmOverlay, collect_all_diagnostics, compile_project_incremental};
+
+    let mut project = crate::test_common::TestProject::new("specs")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .with_time_units("month")
+        .stock("level", "10", &["filling"], &[], Some("widget"))
+        .flow("filling", "level / lifetime", Some("widget/month"))
+        .aux("lifetime", "4", Some("month"))
+        .build_datamodel();
+    let mut probed = ProbedDb::new();
+    let parses_after = |project: &crate::datamodel::Project, probed: &mut ProbedDb| {
+        let source = probed.db_mut().sync(project);
+        probed.reset();
+        collect_all_diagnostics(probed.db(), source, LtmOverlay::Off);
+        compile_project_incremental(probed.db(), source, "main", LtmOverlay::Off)
+            .expect("the model compiles");
+        probed
+            .counts()
+            .get("parse_source_variable")
+            .map_or(0, |(runs, _)| *runs)
+    };
+    assert!(
+        parses_after(&project, &mut probed) >= 3,
+        "the first compile parses"
+    );
+
+    type Edit = fn(&mut crate::datamodel::SimSpecs);
+    let edits: [(&str, Edit); 5] = [
+        ("stop", |specs| specs.stop = 40.0),
+        ("start", |specs| specs.start = 1.0),
+        ("dt", |specs| specs.dt = Dt::Dt(0.125)),
+        ("save step", |specs| specs.save_step = Some(Dt::Dt(1.0))),
+        ("method", |specs| specs.sim_method = SimMethod::RungeKutta4),
+    ];
+    for (what, edit) in edits {
+        edit(&mut project.sim_specs);
+        assert_eq!(
+            parses_after(&project, &mut probed),
+            0,
+            "an edit of the {what}"
+        );
+    }
+
+    // The time units are the context's, so an edit of them does parse again:
+    // the zero above is a count of parses that would have been counted.
+    project.sim_specs.time_units = Some("year".to_string());
+    assert!(parses_after(&project, &mut probed) >= 3);
 }
