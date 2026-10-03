@@ -770,6 +770,13 @@ pub struct ModelLink {
     /// unscored link. A group of ONE reads `±1` at every step by construction,
     /// so this is what lets callers detect that degeneracy when ranking links.
     pub scored_input_count: usize,
+    /// The sign the run gave the link
+    /// ([`crate::ltm::LinkPolarity::from_runtime_scores`] over
+    /// `relative_score`): `Unknown` when its sign changed over the run, `None`
+    /// when the run never scored it. Beside `polarity`, the sign its equation
+    /// has, which is `Unknown` wherever the equation cannot say (a
+    /// non-monotone table) and is all there is for a link no run scored.
+    pub runtime_polarity: Option<crate::ltm::LinkPolarity>,
 }
 
 /// A model's unique causal links with their static polarities and, when
@@ -842,6 +849,7 @@ pub fn model_links(
                 score,
                 relative_score: None,
                 scored_input_count: 0,
+                runtime_polarity: None,
             }
         })
         .collect();
@@ -870,6 +878,7 @@ pub fn model_links(
             score: l.score,
             relative_score: None,
             scored_input_count: 0,
+            runtime_polarity: None,
         })
         .collect();
     // Normalize relative scores over the *collapsed* set: a collapsed
@@ -879,7 +888,8 @@ pub fn model_links(
 }
 
 /// Fill in each link's `relative_score` from its raw `score`, normalizing per
-/// `to` target via the shared core (`ltm_post::compute_rel_link_scores`).
+/// `to` target via the shared core (`ltm_post::compute_rel_link_scores`), and
+/// its `runtime_polarity` from that relative series.
 ///
 /// Runs on the *final* link set (post synthetic-collapse for the user-facing
 /// view, or the raw graph for `include_internal`) so the per-target
@@ -908,6 +918,9 @@ fn attach_relative_scores(links: Vec<ModelLink>) -> Vec<ModelLink> {
         .zip(rel)
         .zip(group_sizes)
         .map(|((mut link, relative_score), scored_input_count)| {
+            link.runtime_polarity = relative_score
+                .as_deref()
+                .and_then(crate::ltm::LinkPolarity::from_runtime_scores);
             link.relative_score = relative_score;
             link.scored_input_count = scored_input_count;
             link
@@ -999,7 +1012,9 @@ pub(crate) fn read_at_start(phase: crate::db::DepPhase, lag: crate::variable::De
 ///   compile without it.
 ///
 /// A pair is `start_only` when every read of it is made at the start
-/// ([`read_at_start`], or through an `INIT`-only capture). Sorted by reader,
+/// ([`read_at_start`], through an `INIT`-only capture, or as a module
+/// instance's input source that only the sub-model's start reads, which the
+/// causal edges leave out for that reason). Sorted by reader,
 /// then by what is read.
 pub fn model_reads(
     db: &dyn crate::db::Db,
@@ -1095,21 +1110,30 @@ pub fn model_reads(
             }
         }
 
-        /// Every read of `deps` as a read by `reader`, descending into the
-        /// reader's own helpers, each once (`visited`). `at_start` says the
-        /// reads are reached only through one made at the start; a helper an
-        /// `INIT` captures is read through `INIT`, whose lag already says so.
+        /// Every read of `deps`, the reads of the node `node` (`reader`
+        /// itself or one of its helpers), as a read by `reader`, descending
+        /// into the reader's own helpers, each once (`visited`). `at_start`
+        /// says the reads are reached only through one made at the start; a
+        /// helper an `INIT` captures is read through `INIT`, whose lag
+        /// already says so, and a module instance's input source that only
+        /// its sub-model's start reads is in `start_only` (the causal edges'
+        /// `start_only_inputs`).
+        #[allow(clippy::too_many_arguments)]
         fn record<'h>(
             &mut self,
             helpers: &HashMap<&'h str, &'h ImplicitVarDeps>,
             visited: &mut HashSet<&'h str>,
+            start_only: &BTreeSet<(String, String)>,
             reader: &str,
+            node: &str,
             deps: &DepRefs,
             at_start: bool,
         ) {
             for dep in deps.iter() {
-                let at_start = at_start || read_at_start(dep.phase, dep.lag);
                 let head = dep.target.head().as_str();
+                let at_start = at_start
+                    || read_at_start(dep.phase, dep.lag)
+                    || start_only.contains(&(head.to_string(), node.to_string()));
                 // A module instance's read of its own output binds nothing (a
                 // Stella import wires those as inputs), as in the causal
                 // graph.
@@ -1122,7 +1146,15 @@ pub fn model_reads(
                 };
                 if visited.insert(name) {
                     self.tables(reader, &helper.referenced_tables, at_start);
-                    self.record(helpers, visited, reader, &helper.deps, at_start);
+                    self.record(
+                        helpers,
+                        visited,
+                        start_only,
+                        reader,
+                        name,
+                        &helper.deps,
+                        at_start,
+                    );
                 }
             }
         }
@@ -1130,6 +1162,7 @@ pub fn model_reads(
 
     let empty_inputs = crate::db::ModuleInputSet::empty(db);
     let dimensions = crate::db::project_dimensions_context(db, project);
+    let start_only = &crate::db::model_causal_edges(db, model, project).start_only_inputs;
     let mut reads = Reads {
         pairs: BTreeMap::new(),
         declared: model.variables(db),
@@ -1184,7 +1217,15 @@ pub fn model_reads(
         }
         let mut visited = HashSet::new();
         reads.tables(name, &deps.referenced_tables, is_stock);
-        reads.record(&helpers, &mut visited, name, &deps.deps, is_stock);
+        reads.record(
+            &helpers,
+            &mut visited,
+            start_only,
+            name,
+            name,
+            &deps.deps,
+            is_stock,
+        );
     }
 
     let polarities: HashMap<(String, String), crate::ltm::LinkPolarity> =
@@ -2765,5 +2806,90 @@ mod tests {
                 "a module loop must stay within one element, got {vars:?}"
             );
         }
+    }
+
+    /// The links of `project`'s main model, scored by a run under the overlay
+    /// with every edge instrumented.
+    fn scored_links(project: &datamodel::Project) -> Vec<ModelLink> {
+        let (mut db, sp) = synced_db(project);
+        crate::db::set_project_ltm_discovery_mode(&mut db, sp, true);
+        let mut vm = crate::build_sim(&mut db, sp, project, "main", crate::db::LtmOverlay::On)
+            .expect("the model compiles under the overlay");
+        vm.run_to_end().expect("the model runs");
+        let results = vm.into_results();
+        let model = *sp.models(&db).get("main").unwrap();
+        model_links(&db, model, sp, Some(&results), false)
+    }
+
+    /// A link's `runtime_polarity` is the sign the run gave it, read off its
+    /// relative score: a sign where it held one, `Unknown` where it changed,
+    /// and nothing for a link no run scored.
+    #[test]
+    fn a_links_runtime_polarity_is_read_off_its_relative_score() {
+        use crate::ltm::LinkPolarity;
+
+        let logistic = crate::test_common::TestProject::new("logistic")
+            .with_sim_time(0.0, 40.0, 0.125)
+            .stock("population", "1", &["births"], &[], None)
+            .flow("births", "population * fractional_birth_rate", None)
+            .aux(
+                "fractional_birth_rate",
+                "0.5 * (1 - population / capacity)",
+                None,
+            )
+            .aux("capacity", "100", None)
+            .build_datamodel();
+        let links = scored_links(&logistic);
+        let sign = |links: &[ModelLink], from: &str, to: &str| {
+            links
+                .iter()
+                .find(|l| l.from == from && l.to == to)
+                .unwrap_or_else(|| panic!("no link {from} -> {to}"))
+                .runtime_polarity
+        };
+        assert_eq!(
+            sign(&links, "population", "births"),
+            Some(LinkPolarity::Positive)
+        );
+        assert_eq!(
+            sign(&links, "population", "fractional_birth_rate"),
+            Some(LinkPolarity::Negative)
+        );
+        assert_eq!(
+            sign(&links, "capacity", "fractional_birth_rate"),
+            None,
+            "a constant never moves its reader"
+        );
+
+        // No run, no runtime sign.
+        let (db, sp) = synced_db(&logistic);
+        let model = *sp.models(&db).get("main").unwrap();
+        assert!(
+            model_links(&db, model, sp, None, false)
+                .iter()
+                .all(|l| l.runtime_polarity.is_none())
+        );
+
+        // Positive while the level grows toward the hump's peak and negative
+        // past it. Past it the target's two inputs nearly cancel, so the
+        // link's raw score there is hundreds of times its score before: the
+        // raw scores net to one sign, the relative ones do not.
+        let hump = crate::test_common::TestProject::new("hump with drift")
+            .with_sim_time(0.0, 10.0, 0.0625)
+            .stock("level", "0.1", &["growth"], &[], None)
+            .flow("growth", "level * (2 - level) + drift", None)
+            .aux("drift", "-0.02 * TIME", None)
+            .build_datamodel();
+        let links = scored_links(&hump);
+        let link = links
+            .iter()
+            .find(|l| l.from == "level" && l.to == "growth")
+            .unwrap();
+        assert_eq!(link.runtime_polarity, Some(LinkPolarity::Unknown));
+        assert_eq!(
+            LinkPolarity::from_runtime_scores(link.score.as_deref().unwrap()),
+            Some(LinkPolarity::Negative),
+            "the premise: the raw scores are dominated by the steps after the peak"
+        );
     }
 }

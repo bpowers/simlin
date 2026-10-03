@@ -40,6 +40,33 @@ impl LinkPolarity {
             (Positive, Negative) | (Negative, Positive) => Negative,
         }
     }
+
+    /// The sign a run gave a link, from its **relative** link-score series
+    /// (`ltm_post::compute_rel_link_scores`: the link's share of its target's
+    /// change at each step, signed, in `[-1, 1]`); `None` when the run never
+    /// scored the link (no valid, nonzero entry), so nothing says which way it
+    /// pushed.
+    ///
+    /// The rule is a loop's ([`LoopPolarity::from_runtime_scores`]): one sign
+    /// throughout, or mixed signs netting to at least
+    /// [`POLARITY_CONFIDENCE_THRESHOLD`] of their magnitude, is that sign, and
+    /// anything less is `Unknown` -- the link's sign changed over the run.
+    ///
+    /// Never the raw link score, for the reason a loop's raw score is the
+    /// wrong base: it is unbounded. A raw link score divides by the target's
+    /// change, so where a target's inputs nearly cancel a few steps weigh
+    /// hundreds of times what the rest of the run does, and the sign read off
+    /// their sum is the sign of those steps. The relative score at a step is
+    /// at most one, so the tally is weighted by time and by how much of the
+    /// target's change the link carried.
+    pub fn from_runtime_scores(relative_scores: &[f64]) -> Option<LinkPolarity> {
+        let (polarity, _) = LoopPolarity::from_runtime_scores(relative_scores)?;
+        Some(match polarity {
+            LoopPolarity::Reinforcing | LoopPolarity::MostlyReinforcing => LinkPolarity::Positive,
+            LoopPolarity::Balancing | LoopPolarity::MostlyBalancing => LinkPolarity::Negative,
+            LoopPolarity::Undetermined => LinkPolarity::Unknown,
+        })
+    }
 }
 
 /// Represents a causal link between two variables.
@@ -178,8 +205,12 @@ impl Loop {
 ///   above [`POLARITY_CONFIDENCE_THRESHOLD`], the loop is classified
 ///   `MostlyReinforcing` or `MostlyBalancing` ("Rux"/"Bux" in the paper).
 /// - Otherwise the loop is `Undetermined`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+///
+/// One vocabulary for a loop's polarity wherever it is read: the structural
+/// surface (`db::DetectedLoop`), the runtime reclassification and the loops
+/// discovery finds all hold this type, so no conversion between them can
+/// drop or mislabel a variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LoopPolarity {
     /// R loop - amplifies changes (positive loop score)
     /// Structurally: even number of negative links
@@ -392,4 +423,69 @@ pub(crate) const SYNTHETIC_NODE_PREFIX: &str = "$\u{205A}";
 /// the leading-prefix test still classifies it as synthetic.
 pub(crate) fn is_synthetic_node_name(name: &str) -> bool {
     name.starts_with(SYNTHETIC_NODE_PREFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A link's runtime sign is the loop rule over its relative series: a row
+    /// for each classification that rule gives, and for a link never scored.
+    #[test]
+    fn a_links_runtime_sign_follows_each_classification_of_its_relative_scores() {
+        let mostly = |sign: f64| {
+            let mut series = vec![sign; 199];
+            series.push(-sign);
+            series
+        };
+        let rows: Vec<(Vec<f64>, Option<LinkPolarity>)> = vec![
+            (vec![0.4, 1.0, 0.0], Some(LinkPolarity::Positive)),
+            (vec![-0.2, f64::NAN], Some(LinkPolarity::Negative)),
+            (mostly(1.0), Some(LinkPolarity::Positive)),
+            (mostly(-1.0), Some(LinkPolarity::Negative)),
+            (vec![1.0, -1.0, 1.0], Some(LinkPolarity::Unknown)),
+            (vec![0.0, f64::NAN, f64::INFINITY], None),
+            (vec![], None),
+        ];
+        // Every loop classification is among the rows, so the mapping of each
+        // to a link sign is exercised.
+        let row_of = |polarity: &LoopPolarity| -> usize {
+            match polarity {
+                LoopPolarity::Reinforcing => 0,
+                LoopPolarity::Balancing => 1,
+                LoopPolarity::MostlyReinforcing => 2,
+                LoopPolarity::MostlyBalancing => 3,
+                LoopPolarity::Undetermined => 4,
+            }
+        };
+        for (i, (series, expected)) in rows.iter().enumerate() {
+            assert_eq!(
+                LinkPolarity::from_runtime_scores(series),
+                *expected,
+                "{series:?}"
+            );
+            match LoopPolarity::from_runtime_scores(series) {
+                Some((polarity, _)) => assert_eq!(row_of(&polarity), i),
+                None => assert!(expected.is_none()),
+            }
+        }
+    }
+
+    /// The tally is of relative scores, each at most one, so a sign held for
+    /// most of a run is not outvoted by a few steps: twenty steps at a
+    /// twentieth of the target's change weigh what one step at all of it does.
+    #[test]
+    fn a_links_runtime_sign_weighs_steps_by_their_share_of_the_targets_change() {
+        let mut series = vec![0.05; 20];
+        series.push(-1.0);
+        assert_eq!(
+            LinkPolarity::from_runtime_scores(&series),
+            Some(LinkPolarity::Unknown)
+        );
+        series.extend(vec![1.0; 400]);
+        assert_eq!(
+            LinkPolarity::from_runtime_scores(&series),
+            Some(LinkPolarity::Positive)
+        );
+    }
 }

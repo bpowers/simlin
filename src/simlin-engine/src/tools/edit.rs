@@ -1839,7 +1839,8 @@ impl<'a> Builder<'a> {
     }
 
     /// The variables of the loop this session calls `id`, as the model
-    /// names them.
+    /// names them. A loop's key holds the engine's nodes, a builtin's
+    /// instance among them, which is no variable of the model.
     fn loop_variables(&self, id: &str) -> Result<Vec<String>, ToolError> {
         let key = self.evidence.loop_key(id.trim()).ok_or_else(|| {
             ToolError::new(format!(
@@ -1849,6 +1850,7 @@ impl<'a> Builder<'a> {
         let model = self.model()?;
         let mut seen = BTreeSet::new();
         key.iter()
+            .filter(|node| !crate::ltm::is_synthetic_node_name(node))
             .map(|node| crate::ltm::strip_subscript(node))
             .filter(|name| seen.insert(name.to_string()))
             .map(|name| {

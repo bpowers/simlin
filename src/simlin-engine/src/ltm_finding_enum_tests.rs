@@ -2233,6 +2233,7 @@ fn hub_fan_out_discovery_inputs(
         stocks: ["hub".to_string()].into_iter().collect(),
         dynamic_modules: HashMap::new(),
         module_outputs_read: Default::default(),
+        start_only_inputs: Default::default(),
     });
     (results, causal, stock_list(&["hub"]))
 }
@@ -2279,6 +2280,7 @@ fn no_recorded_link_scores_is_unknown_unless_the_graph_has_no_edges() {
         stocks: ["hub".to_string()].into_iter().collect(),
         dynamic_modules: HashMap::new(),
         module_outputs_read: Default::default(),
+        start_only_inputs: Default::default(),
     });
     let found = discover(&edgeless, CandidateGen::Auto);
     assert!(

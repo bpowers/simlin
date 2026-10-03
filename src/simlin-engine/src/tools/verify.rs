@@ -37,7 +37,8 @@ use crate::datamodel;
 use super::battery::{Outcome, recheck};
 use super::behavior::{ModeKind, NOISE_FRACTION, classify_at};
 use super::loops::{
-    LoopPolarityName, analysis_of, leadership, loops_through, polarity_of, through_of,
+    LoopAnalysis, LoopPolarityName, analysis_of, leadership, loops_through, polarity_of,
+    rounded_share, through_of, unreported,
 };
 use super::outline::dimensions;
 use super::runs::{CURRENT, Run};
@@ -70,9 +71,6 @@ use super::MAX_NAMED;
 
 /// The most characters of an equation a failure quotes.
 const MAX_QUOTE_CHARS: usize = 240;
-
-/// The share of a span's active steps a loop leads to lead the span.
-pub(crate) const LEAD_MAJORITY: f64 = 0.5;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Deserialize)]
@@ -591,7 +589,7 @@ fn check(
             let analysis = analysis_of(&mut session.runs, ws, model, resolved.source_model, &run)
                 .map_err(|err| err.error)?;
             let Some(actual) = polarity_of(&analysis, &key) else {
-                return Err(format!("{id} is not a loop of run '{}'", run.name));
+                return Err(not_active(&analysis, &key, id, &run.name));
             };
             match polarity {
                 Some(cited) if !polarity_matches(*cited, actual) => Err(format!(
@@ -608,15 +606,15 @@ fn check(
             to,
             run,
         } => {
-            if !from.is_finite() || !to.is_finite() || from >= to {
-                return Err("a span's from comes before its to".to_string());
+            if !from.is_finite() || !to.is_finite() || from > to {
+                return Err("a span's from is a time no later than its to".to_string());
             }
             let key = loop_key(session, loop_id)?;
             let run = run_of(session, ws, model, run.as_deref())?;
             let analysis = analysis_of(&mut session.runs, ws, model, resolved.source_model, &run)
                 .map_err(|err| err.error)?;
             let Some(lead) = leadership(&analysis, &key, *from, *to) else {
-                return Err(format!("{loop_id} is not a loop of run '{}'", run.name));
+                return Err(not_active(&analysis, &key, loop_id, &run.name));
             };
             if lead.active == 0 {
                 return Err(format!(
@@ -624,17 +622,19 @@ fn check(
                     run.name
                 ));
             }
-            if leads(lead.led, lead.active) {
+            if lead.leads() {
                 return Ok(());
             }
-            let most = lead
-                .most
+            let strongest = lead
+                .strongest
                 .map(|key| session.evidence.loop_id(&key))
                 .unwrap_or_default();
             Err(format!(
-                "{loop_id} led {} of the {} steps a loop was active between {from} and {to}; {most} \
-                 led the most",
-                lead.led, lead.active
+                "{loop_id} held {} of its partition's loop activity between {from} and {to} in \
+                 run '{}'; {strongest} held the most, {}",
+                rounded_share(lead.share),
+                run.name,
+                rounded_share(lead.largest)
             ))
         }
         Citation::NoLoopThrough { variable, run } => {
@@ -644,7 +644,8 @@ fn check(
                 .map_err(|err| err.error)?;
             let through = loops_through(&analysis, &ident).ok_or_else(|| {
                 format!(
-                    "run '{}' has too many loops to list them all, so no absence can be shown",
+                    "the analysis of run '{}' does not have every loop of the model, so no \
+                     absence can be shown",
                     run.name
                 )
             })?;
@@ -653,7 +654,13 @@ fn check(
             } else {
                 let ids: Vec<String> = through
                     .iter()
-                    .map(|key| session.evidence.loop_id(key))
+                    .map(|(key, inactive)| {
+                        let id = session.evidence.loop_id(key);
+                        match unreported(&analysis, key, &run.name).filter(|_| *inactive) {
+                            Some(why) => format!("{id} ({why})"),
+                            None => id,
+                        }
+                    })
                     .collect();
                 Err(format!("{} goes through {variable}", ids.join(", ")))
             }
@@ -805,10 +812,13 @@ fn check(
     }
 }
 
-/// Whether a loop that led `led` of the `active` steps of a span led the
-/// span: at least [`LEAD_MAJORITY`] of them, of which there is at least one.
-fn leads(led: usize, active: usize) -> bool {
-    active > 0 && led as f64 >= LEAD_MAJORITY * active as f64
+/// Why the loop `id`, whose cycle is `key`, is not one of `analysis`'s run
+/// `run`: inactive in it, or no loop of it.
+fn not_active(analysis: &LoopAnalysis, key: &[String], id: &str, run: &str) -> String {
+    match unreported(analysis, key, run) {
+        Some(why) => format!("{id} is {why}"),
+        None => format!("{id} is not a loop of run '{run}'"),
+    }
 }
 
 /// The largest magnitude among the numbers of `series`.

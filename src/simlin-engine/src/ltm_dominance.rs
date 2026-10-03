@@ -334,6 +334,269 @@ fn calculate_dominant_periods_for_group(
     periods
 }
 
+/// How close to the strongest loop's share another's must be, as a fraction of
+/// it, to tie with it at a step. Loops that are equal by construction (the
+/// element loops of a symmetric arrayed model) differ in their last bits, and
+/// a lead that changed hands on those bits would be a change of lead no model
+/// made.
+pub const LEAD_TIE: f64 = 1e-9;
+
+/// The share of a group's activity `score` is: its magnitude, nothing where it
+/// is not a number.
+fn share(score: f64) -> f64 {
+    if score.is_finite() { score.abs() } else { 0.0 }
+}
+
+/// Which member of a group leads, given each member's share (at a step, or
+/// its mean share over a span): the one with the largest, a share within
+/// [`LEAD_TIE`] of the largest tying with it and a tie going to the first of
+/// the tied in the group's order; `None` when the largest is under `floor`.
+/// The one statement of who leads, at a step and over a span alike, so a
+/// lead never changes hands between loops that are equal.
+pub fn strongest(shares: &[f64], floor: f64) -> Option<usize> {
+    let largest = shares.iter().copied().fold(0.0_f64, f64::max);
+    if largest < floor || largest <= 0.0 {
+        return None;
+    }
+    shares.iter().position(|&s| s >= largest * (1.0 - LEAD_TIE))
+}
+
+/// The loop that leads a group at each of `steps` saved steps
+/// ([`strongest`] over the members' shares there; each member of `series` is
+/// a loop's partition-relative score series). A series shorter than `steps`
+/// holds nothing past its end.
+pub fn leader_by_step(series: &[&[f64]], steps: usize, floor: f64) -> Vec<Option<usize>> {
+    (0..steps)
+        .map(|step| {
+            let shares: Vec<f64> = series
+                .iter()
+                .map(|s| s.get(step).copied().map_or(0.0, share))
+                .collect();
+            strongest(&shares, floor)
+        })
+        .collect()
+}
+
+/// The mean shares of a group's loops over spans of a run's saved steps:
+/// running totals of each loop's share and of the steps at which some loop of
+/// the group is active, so a span's mean costs one subtraction per loop
+/// whatever its length (a timeline that joins thousands of spans asks for
+/// thousands of means). A share is averaged over the span's active steps
+/// alone, so the mean shares of a group's loops sum to one, as their shares do
+/// at each step; over a span with no active step each is zero. A series
+/// shorter than the run holds nothing past its end.
+pub struct MeanShares {
+    /// `totals[i][k]`: loop `i`'s share summed over the steps before `k`.
+    totals: Vec<Vec<f64>>,
+    /// `active[k]`: how many of the steps before `k` the group is active at.
+    active: Vec<usize>,
+}
+
+impl MeanShares {
+    pub fn new(series: &[&[f64]], steps: usize) -> MeanShares {
+        let mut totals: Vec<Vec<f64>> = series
+            .iter()
+            .map(|_| {
+                let mut total = Vec::with_capacity(steps + 1);
+                total.push(0.0);
+                total
+            })
+            .collect();
+        let mut active = Vec::with_capacity(steps + 1);
+        active.push(0);
+        for step in 0..steps {
+            let mut any = false;
+            for (total, s) in totals.iter_mut().zip(series) {
+                let at = s.get(step).copied().map_or(0.0, share);
+                any |= at > 0.0;
+                let before = total[step];
+                total.push(before + at);
+            }
+            active.push(active[step] + usize::from(any));
+        }
+        MeanShares { totals, active }
+    }
+
+    /// `start..end` within the run.
+    fn clamped(&self, start: usize, end: usize) -> (usize, usize) {
+        let steps = self.active.len() - 1;
+        (start.min(steps), end.clamp(start.min(steps), steps))
+    }
+
+    /// How many of the steps `start..end` the group is active at.
+    pub fn active(&self, start: usize, end: usize) -> usize {
+        let (start, end) = self.clamped(start, end);
+        self.active[end] - self.active[start]
+    }
+
+    /// Loop `i`'s mean share over the steps `start..end` at which the group
+    /// is active.
+    pub fn mean(&self, i: usize, start: usize, end: usize) -> f64 {
+        let (start, end) = self.clamped(start, end);
+        match self.active[end] - self.active[start] {
+            0 => 0.0,
+            n => (self.totals[i][end] - self.totals[i][start]) / n as f64,
+        }
+    }
+
+    /// Every loop's mean share over the steps `start..end`, in the group's
+    /// order.
+    pub fn means(&self, start: usize, end: usize) -> Vec<f64> {
+        (0..self.totals.len())
+            .map(|i| self.mean(i, start, end))
+            .collect()
+    }
+}
+
+/// A span of a run's saved steps, `start..end`, and the loop that led it
+/// (`None` where no loop did).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaderSpan {
+    pub start: usize,
+    pub end: usize,
+    pub leader: Option<usize>,
+}
+
+/// A run's dominance timeline: its steps cut where the lead changes
+/// (`leaders`, from [`leader_by_step`]), in at most `max_spans` spans.
+///
+/// The spans are the run-length encoding of `leaders`, so every boundary is a
+/// step at which the lead changes. Where that is more than `max_spans` runs,
+/// the shortest span (the earliest of equals) joins its longer neighbour (the
+/// earlier of equals) until it is not; a span made of several runs is led by
+/// `lead(start, end)` (the caller's rule over the span's steps: the loop with
+/// the largest mean share, [`strongest`]), and neighbours with one leader are
+/// one span. A boundary that survives is still a change of lead: joining
+/// only removes boundaries.
+///
+/// The first step joins the span after it: a score is a change over the step
+/// before, so the first saved step has none, which is no span without a
+/// leader.
+pub fn leader_timeline(
+    leaders: &[Option<usize>],
+    max_spans: usize,
+    lead: impl Fn(usize, usize) -> Option<usize>,
+) -> Vec<LeaderSpan> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    /// A span while spans are being joined: a node of a list in step order.
+    struct Node {
+        start: usize,
+        end: usize,
+        leader: Option<usize>,
+        prev: Option<usize>,
+        next: Option<usize>,
+        /// Bumped whenever the span changes, so a heap entry made before is
+        /// known to be stale; `None` once the span has joined another.
+        version: Option<u32>,
+    }
+
+    let mut nodes: Vec<Node> = Vec::new();
+    for (step, &leader) in leaders.iter().enumerate() {
+        // The first step has no score of its own.
+        let leader = if step == 0 && leaders.len() > 1 {
+            leaders[1]
+        } else {
+            leader
+        };
+        match nodes.last_mut() {
+            Some(last) if last.leader == leader => last.end = step + 1,
+            _ => {
+                let prev = nodes.len().checked_sub(1);
+                if let Some(prev) = prev {
+                    nodes[prev].next = Some(nodes.len());
+                }
+                nodes.push(Node {
+                    start: step,
+                    end: step + 1,
+                    leader,
+                    prev,
+                    next: None,
+                    version: Some(0),
+                });
+            }
+        }
+    }
+
+    let mut live = nodes.len();
+    let entry = |nodes: &[Node], i: usize| {
+        Reverse((
+            nodes[i].end - nodes[i].start,
+            nodes[i].start,
+            i,
+            nodes[i].version.unwrap_or(0),
+        ))
+    };
+    let mut shortest: BinaryHeap<Reverse<(usize, usize, usize, u32)>> =
+        (0..nodes.len()).map(|i| entry(&nodes, i)).collect();
+
+    // Join `gone` into its neighbour `kept`: the steps of both, led by
+    // `lead` over them.
+    let join = |nodes: &mut Vec<Node>, kept: usize, gone: usize| {
+        nodes[kept].start = nodes[kept].start.min(nodes[gone].start);
+        nodes[kept].end = nodes[kept].end.max(nodes[gone].end);
+        nodes[kept].leader = lead(nodes[kept].start, nodes[kept].end);
+        let (prev, next) = (nodes[gone].prev, nodes[gone].next);
+        if prev == Some(kept) {
+            nodes[kept].next = next;
+            if let Some(next) = next {
+                nodes[next].prev = Some(kept);
+            }
+        } else {
+            nodes[kept].prev = prev;
+            if let Some(prev) = prev {
+                nodes[prev].next = Some(kept);
+            }
+        }
+        nodes[gone].version = None;
+        nodes[kept].version = nodes[kept].version.map(|v| v + 1);
+    };
+
+    while live > max_spans.max(1) {
+        let Some(Reverse((_, _, i, version))) = shortest.pop() else {
+            break;
+        };
+        if nodes[i].version != Some(version) {
+            continue;
+        }
+        let length = |j: usize| nodes[j].end - nodes[j].start;
+        let kept = match (nodes[i].prev, nodes[i].next) {
+            (Some(prev), Some(next)) if length(next) > length(prev) => next,
+            (Some(prev), _) => prev,
+            (None, Some(next)) => next,
+            (None, None) => break,
+        };
+        join(&mut nodes, kept, i);
+        live -= 1;
+        // Neighbours the join left with one leader are one span.
+        loop {
+            let same = [nodes[kept].prev, nodes[kept].next]
+                .into_iter()
+                .flatten()
+                .find(|&j| nodes[j].leader == nodes[kept].leader);
+            let Some(neighbour) = same else { break };
+            join(&mut nodes, kept, neighbour);
+            live -= 1;
+        }
+        shortest.push(entry(&nodes, kept));
+    }
+
+    let mut spans = Vec::with_capacity(live);
+    let mut at = nodes
+        .iter()
+        .position(|n| n.version.is_some() && n.prev.is_none());
+    while let Some(i) = at {
+        spans.push(LeaderSpan {
+            start: nodes[i].start,
+            end: nodes[i].end,
+            leader: nodes[i].leader,
+        });
+        at = nodes[i].next;
+    }
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,5 +1249,263 @@ mod tests {
             "None-partition loops must accumulate in one shared group"
         );
         assert_eq!(periods[0].partition, None);
+    }
+
+    #[test]
+    fn the_leader_at_a_step_is_the_loop_with_the_largest_share_there() {
+        let a = [0.0, 0.7, -0.2, 0.0005, f64::NAN];
+        let b = [0.0, -0.3, 0.8, 0.0, 0.4];
+        assert_eq!(
+            leader_by_step(&[&a, &b], 5, 0.001),
+            [None, Some(0), Some(1), None, Some(1)],
+            "by magnitude; none under the floor; a score that is no number holds nothing"
+        );
+        // A series shorter than the run holds nothing past its end.
+        assert_eq!(
+            leader_by_step(&[&a[..2], &b], 3, 0.001),
+            [None, Some(0), Some(1)]
+        );
+        assert_eq!(leader_by_step(&[], 2, 0.001), [None, None]);
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_first_of_the_tied() {
+        // Equal to the last bit or two, as the element loops of a symmetric
+        // model are: the lead does not change hands on them.
+        let third: f64 = 1.0 / 3.0;
+        let nudged = f64::from_bits(third.to_bits() + 1);
+        let a = [third, nudged, third, 0.2, third];
+        let b = [third, third, nudged, 0.6, nudged];
+        assert_eq!(
+            leader_by_step(&[&a, &b], 5, 0.001),
+            [Some(0), Some(0), Some(0), Some(1), Some(0)],
+            "the first of the tied, whoever led the step before"
+        );
+        assert_eq!(strongest(&[0.2, third, nudged], 0.001), Some(1));
+        assert_eq!(strongest(&[0.0005, 0.0], 0.001), None, "under the floor");
+        assert_eq!(strongest(&[], 0.001), None);
+        // A real difference, however small beside the tolerance, is a lead.
+        let ahead = third * (1.0 + 1e-6);
+        assert_eq!(
+            leader_by_step(&[&[third, third], &[third, ahead]], 2, 0.001),
+            [Some(0), Some(1)]
+        );
+    }
+
+    /// The loop that led the most of the steps `start..end` of `leaders`
+    /// ([`strongest`] over the fractions of the steps each led): the lead
+    /// rule these tests join spans by, where a share is whether a loop led.
+    fn most_led(leaders: &[Option<usize>], start: usize, end: usize) -> Option<usize> {
+        let loops = leaders.iter().flatten().max().map_or(0, |&m| m + 1);
+        let led: Vec<f64> = (0..loops)
+            .map(|i| {
+                leaders[start..end]
+                    .iter()
+                    .filter(|&&l| l == Some(i))
+                    .count() as f64
+            })
+            .collect();
+        strongest(&led, 0.5)
+    }
+
+    fn spans(leaders: &[Option<usize>], max: usize) -> Vec<(usize, usize, Option<usize>)> {
+        leader_timeline(leaders, max, |start, end| most_led(leaders, start, end))
+            .into_iter()
+            .map(|s| (s.start, s.end, s.leader))
+            .collect()
+    }
+
+    /// `n` steps led by `leader`.
+    fn led(leader: usize, n: usize) -> Vec<Option<usize>> {
+        vec![Some(leader); n]
+    }
+
+    #[test]
+    fn a_timeline_is_cut_where_the_lead_changes() {
+        let leaders = [led(0, 3), vec![None; 2], led(1, 4)].concat();
+        assert_eq!(
+            spans(&leaders, 12),
+            [(0, 3, Some(0)), (3, 5, None), (5, 9, Some(1))]
+        );
+        assert_eq!(spans(&[], 12), []);
+        assert_eq!(spans(&[None], 12), [(0, 1, None)]);
+    }
+
+    #[test]
+    fn the_first_step_joins_the_span_after_it() {
+        // A score is a change over the step before, so the first step has
+        // none: that is not a span no loop led.
+        let leaders = [vec![None], led(0, 3), led(1, 2)].concat();
+        assert_eq!(spans(&leaders, 12), [(0, 4, Some(0)), (4, 6, Some(1))]);
+        // A run no loop leads for longer than its first step is such a span.
+        let leaders = [vec![None; 2], led(0, 3)].concat();
+        assert_eq!(spans(&leaders, 12), [(0, 2, None), (2, 5, Some(0))]);
+    }
+
+    #[test]
+    fn the_shortest_spans_join_their_longer_neighbours_past_the_most_a_timeline_has() {
+        // Runs of 5, 1, 4, 2, 6 steps.
+        let leaders = [led(0, 5), led(1, 1), led(2, 4), led(1, 2), led(0, 6)].concat();
+        assert_eq!(spans(&leaders, 5).len(), 5);
+        assert_eq!(
+            spans(&leaders, 4),
+            [
+                (0, 6, Some(0)),
+                (6, 10, Some(2)),
+                (10, 12, Some(1)),
+                (12, 18, Some(0))
+            ],
+            "the one step joins the longer of its neighbours"
+        );
+        assert_eq!(
+            spans(&leaders, 3),
+            [(0, 6, Some(0)), (6, 10, Some(2)), (10, 18, Some(0))]
+        );
+        assert_eq!(spans(&leaders, 1), [(0, 18, Some(0))]);
+        assert_eq!(spans(&leaders, 0), [(0, 18, Some(0))], "at least one span");
+    }
+
+    #[test]
+    fn a_joined_span_is_led_by_the_loop_its_lead_rule_names() {
+        // 5 steps of loop 0, then loop 1 for 4, 2 for 4, 1 for 4: joined into
+        // one span, loop 1 leads 8 of its 17 steps.
+        let leaders = [led(0, 5), led(1, 4), led(2, 4), led(1, 4)].concat();
+        assert_eq!(spans(&leaders, 1), [(0, 17, Some(1))]);
+        // Spans that come to have one leader are one span.
+        let leaders = [led(0, 4), led(1, 1), led(0, 4), led(2, 3)].concat();
+        assert_eq!(spans(&leaders, 3), [(0, 9, Some(0)), (9, 12, Some(2))]);
+    }
+
+    /// The timeline's rule stated the slow way, to hold the joining against.
+    fn timeline_by_rule(leaders: &[Option<usize>], max: usize) -> Vec<LeaderSpan> {
+        let mut spans: Vec<LeaderSpan> = Vec::new();
+        for step in 0..leaders.len() {
+            let leader = if step == 0 && leaders.len() > 1 {
+                leaders[1]
+            } else {
+                leaders[step]
+            };
+            match spans.last_mut() {
+                Some(last) if last.leader == leader => last.end = step + 1,
+                _ => spans.push(LeaderSpan {
+                    start: step,
+                    end: step + 1,
+                    leader,
+                }),
+            }
+        }
+        while spans.len() > max.max(1) {
+            let i = (0..spans.len())
+                .min_by_key(|&i| (spans[i].end - spans[i].start, spans[i].start))
+                .unwrap();
+            let len = |s: &LeaderSpan| s.end - s.start;
+            let into_next = match (i.checked_sub(1), spans.get(i + 1)) {
+                (Some(prev), Some(next)) => len(next) > len(&spans[prev]),
+                (None, Some(_)) => true,
+                (Some(_), None) => false,
+                (None, None) => unreachable!("more than one span"),
+            };
+            let mut kept = if into_next { i } else { i - 1 };
+            let gone = spans.remove(kept + 1);
+            spans[kept].end = gone.end;
+            spans[kept].leader = most_led(leaders, spans[kept].start, spans[kept].end);
+            loop {
+                let leader = spans[kept].leader;
+                if kept > 0 && spans[kept - 1].leader == leader {
+                    let gone = spans.remove(kept);
+                    kept -= 1;
+                    spans[kept].end = gone.end;
+                } else if spans.get(kept + 1).is_some_and(|s| s.leader == leader) {
+                    let gone = spans.remove(kept + 1);
+                    spans[kept].end = gone.end;
+                } else {
+                    break;
+                }
+                spans[kept].leader = most_led(leaders, spans[kept].start, spans[kept].end);
+            }
+        }
+        spans
+    }
+
+    #[test]
+    fn a_timeline_keeps_its_rules_whatever_the_leaders() {
+        // A fixed stream of leader sequences: runs of random length and
+        // leader, some led by no loop.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        for case in 0..400 {
+            let mut leaders: Vec<Option<usize>> = Vec::new();
+            for _ in 0..next(30) {
+                let leader = match next(5) {
+                    4 => None,
+                    i => Some(i as usize),
+                };
+                let length = 1 + next(if case % 2 == 0 { 3 } else { 12 }) as usize;
+                leaders.extend(std::iter::repeat_n(leader, length));
+            }
+            let max = 1 + next(12) as usize;
+            let timeline =
+                leader_timeline(&leaders, max, |start, end| most_led(&leaders, start, end));
+            assert_eq!(
+                timeline,
+                timeline_by_rule(&leaders, max),
+                "{leaders:?} in {max}"
+            );
+            if leaders.is_empty() {
+                assert!(timeline.is_empty());
+                continue;
+            }
+            assert!(timeline.len() <= max, "{leaders:?} in {max}");
+            assert_eq!(timeline[0].start, 0);
+            assert_eq!(timeline.last().unwrap().end, leaders.len());
+            for pair in timeline.windows(2) {
+                assert_eq!(pair[0].end, pair[1].start, "spans tile the run");
+                assert_ne!(pair[0].leader, pair[1].leader, "{leaders:?} in {max}");
+                let at = pair[1].start;
+                assert!(
+                    at == 1 || leaders[at] != leaders[at - 1],
+                    "a boundary is a step the lead changes at: {at} of {leaders:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_mean_share_is_over_the_steps_its_group_is_active_at() {
+        let a = [0.0, 0.75, -0.25, 0.0, f64::NAN];
+        let b = [0.0, 0.25, 0.75, 0.0, 1.0];
+        let shares = MeanShares::new(&[&a, &b], 5);
+        assert_eq!(shares.active(0, 5), 3, "steps 1, 2 and 4");
+        let (of_a, of_b) = (shares.mean(0, 0, 5), shares.mean(1, 0, 5));
+        assert!((of_a - 1.0 / 3.0).abs() < 1e-12, "{of_a}");
+        assert!((of_b - 2.0 / 3.0).abs() < 1e-12, "{of_b}");
+        assert!((shares.mean(0, 1, 3) - 0.5).abs() < 1e-12);
+        assert_eq!(shares.mean(0, 3, 4), 0.0, "no active step");
+        assert_eq!(shares.mean(0, 4, 9), 0.0, "past the run, a share no number");
+        assert_eq!(shares.means(9, 12), [0.0, 0.0], "wholly past the run");
+    }
+
+    /// A timeline joined by mean shares costs in proportion to the run: a
+    /// lead that changes hands at every one of a long run's steps leaves tens
+    /// of thousands of spans to join, each asking a span's means, which
+    /// recounting the span's steps would take minutes over.
+    #[test]
+    fn a_long_run_that_changes_its_lead_every_step_is_cut_in_proportion_to_its_length() {
+        let steps = 100_000;
+        let a: Vec<f64> = (0..steps).map(|k| [0.6, 0.4][k % 2]).collect();
+        let b: Vec<f64> = (0..steps).map(|k| [0.4, 0.6][k % 2]).collect();
+        let series: [&[f64]; 2] = [&a, &b];
+        let shares = MeanShares::new(&series, steps);
+        let leaders = leader_by_step(&series, steps, 0.001);
+        let timeline = leader_timeline(&leaders, 12, |start, end| {
+            strongest(&shares.means(start, end), 0.001)
+        });
+        assert_eq!(timeline.len(), 12);
+        assert_eq!((timeline[0].start, timeline[11].end), (0, steps));
     }
 }

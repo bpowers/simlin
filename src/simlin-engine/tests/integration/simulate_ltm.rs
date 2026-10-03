@@ -10909,14 +10909,6 @@ fn discovery_classification_matches_exhaustive_on_the_relative_base() {
             .find(|fl| fl.loop_info.links.iter().any(|l| l.from.as_str() == flow))
             .expect("discovery finds the loop through the flow")
     };
-    let to_ltm = |p: DetectedLoopPolarity| match p {
-        DetectedLoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
-        DetectedLoopPolarity::Balancing => LoopPolarity::Balancing,
-        DetectedLoopPolarity::MostlyReinforcing => LoopPolarity::MostlyReinforcing,
-        DetectedLoopPolarity::MostlyBalancing => LoopPolarity::MostlyBalancing,
-        DetectedLoopPolarity::Undetermined => LoopPolarity::Undetermined,
-    };
-
     for (project, flow, expected) in [
         (
             mixed_sign_dominant_loop_project(),
@@ -10931,7 +10923,7 @@ fn discovery_classification_matches_exhaustive_on_the_relative_base() {
     ] {
         let e = exhaustive(&project, flow);
         let d = discovered(&project, flow);
-        assert_eq!(to_ltm(e.polarity), expected, "exhaustive label on {flow}");
+        assert_eq!(e.polarity, expected, "exhaustive label on {flow}");
         assert_eq!(d.loop_info.polarity, expected, "discovery label on {flow}");
         // Both modes classify the same per-step product of the same link-score
         // series over the same partition total, so the confidences agree to
@@ -11672,9 +11664,9 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 /// cannot see the omission at all.
 ///
 /// Two emission changes moved the pin, measured one commit apart so each
-/// carries its own numbers (this gate is `#[ignore]`d and release-only, so
-/// neither the hook nor `cargo test` runs it; the first change landed without
-/// re-pinning it and the second re-derived both):
+/// carries its own numbers (this is a gate, so neither the hook nor `cargo
+/// test` runs it; the first change landed without re-pinning it and the
+/// second re-derived both):
 ///
 /// * the flow-to-stock score's net-flow aux: slots 20,221 -> 20,337 (+116:
 ///   the 24 `$⁚ltm⁚net⁚{stock}` auxes of `main`, one slot per stock element,
@@ -11691,9 +11683,19 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 ///   no retained loop: the 153 loops, their relative-score series and the 565
 ///   dominant periods `analyze()` reports are identical before and after.
 ///
-/// Run with:
-///   cargo test -p simlin-engine --release --test integration -- --ignored \
-///     clearn_ltm_slot_maxima_digest
+/// The pin also holds the rule that a module instance's input source binding
+/// only a port read by initial values is no causal edge
+/// (`db::model_causal_edges`), and so has no score. In C-LEARN those are the
+/// 28 scores of the `SAMPLE UNTIL` macro's `initval` argument (four call sites
+/// over the seven COP regions,
+/// `$⁚{var}⁚0⁚arg2⁚{region}→$⁚{var}⁚0⁚sample_until⁚{region}`). With them
+/// scored the slots are 20,338 and `nonzero_slots` 2,876; without, 20,310 and
+/// 2,862: 14 of the 28 were the black-box unit transfer at magnitude one and
+/// 14 were zero throughout. No other slot's maximum differs, every slot is
+/// finite, and the loops `analyze_model` reports and their relative-score
+/// series are the same either way.
+///
+/// Run with: scripts/gates.sh clearn_ltm_slot_maxima_digest
 #[test]
 #[ignore = "C-LEARN compiled and run under LTM, every LTM slot read; run under the gates profile"]
 fn clearn_ltm_slot_maxima_digest() {
@@ -12005,10 +12007,10 @@ fn the_digest_sees_both_a_value_swap_and_a_rebinding() {
 }
 
 /// Pinned by `clearn_ltm_slot_maxima_digest`; see its rustdoc before changing.
-const CLEARN_LTM_SLOTS: usize = 20_338;
+const CLEARN_LTM_SLOTS: usize = 20_310;
 const CLEARN_LTM_UNKNOWN_EXTENT: usize = 0;
-const CLEARN_LTM_NONZERO_SLOTS: usize = 2_876;
-const CLEARN_LTM_FINITE_SLOTS: usize = 20_338;
-const CLEARN_LTM_MANTISSA_DIGEST: i64 = 763_629_105_850;
-const CLEARN_LTM_EXPONENT_DIGEST: i64 = 2_449;
-const CLEARN_LTM_IDENTITY_DIGEST: u64 = 10_121_477_288_851_905_900;
+const CLEARN_LTM_NONZERO_SLOTS: usize = 2_862;
+const CLEARN_LTM_FINITE_SLOTS: usize = 20_310;
+const CLEARN_LTM_MANTISSA_DIGEST: i64 = 757_862_836_767;
+const CLEARN_LTM_EXPONENT_DIGEST: i64 = 3_138;
+const CLEARN_LTM_IDENTITY_DIGEST: u64 = 6_804_063_096_130_575_168;

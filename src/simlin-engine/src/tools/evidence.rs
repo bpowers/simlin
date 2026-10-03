@@ -20,10 +20,13 @@
 //! A battery check's id (`T1`, ...) is keyed by its test, the variable it
 //! changes and how, so a check run again after an edit keeps its id.
 //!
-//! A loop's id (`L1`, `L2`, ...) is keyed by its cycle: its node sequence
-//! rotated to start at its least node, so the same loop read from any run, at
-//! any revision, from a run's scores or from structure, has one id, and the
-//! same nodes in the other direction are another loop.
+//! A loop's id (`L1`, `L2`, ...) is keyed by its cycle: its node sequence as
+//! the engine has it -- each element of an arrayed variable a node, a builtin's
+//! or a macro's instance a node -- rotated to start at its least node. So the
+//! same loop read from any run, at any revision, from a run's scores or from
+//! structure, has one id; the same nodes in the other direction are another
+//! loop; and so are two loops between the same variables of which one passes
+//! through a builtin (`level - SMTH1(level, 3)`).
 
 use std::collections::HashMap;
 
@@ -187,6 +190,15 @@ impl Evidence {
         format!("L{number}")
     }
 
+    /// The ids loops would be given, without giving any: for fitting an
+    /// answer before naming what it lists, so a loop it leaves out has no id.
+    pub(crate) fn preview_loop_ids(&self) -> LoopIdPreview<'_> {
+        LoopIdPreview {
+            evidence: self,
+            unnamed: Vec::new(),
+        }
+    }
+
     fn diagnostic_id(&mut self, key: DiagnosticKey) -> String {
         let next = &mut self.next_diagnostic;
         let number = *self.diagnostics.entry(key).or_insert_with(|| {
@@ -248,6 +260,31 @@ impl Evidence {
             .zip(ids)
             .map(|(described, id)| described.report(id, resolved.model))
             .collect()
+    }
+}
+
+/// The ids [`Evidence::loop_id`] would give a sequence of loops, asked in the
+/// same order: a loop the session has named keeps its id, and the others
+/// number on from the last id given out.
+pub(crate) struct LoopIdPreview<'a> {
+    evidence: &'a Evidence,
+    /// The loops asked for that the session has not named, in the order asked.
+    unnamed: Vec<Vec<String>>,
+}
+
+impl LoopIdPreview<'_> {
+    pub(crate) fn loop_id(&mut self, key: &[String]) -> String {
+        if let Some(number) = self.evidence.loops.get(key) {
+            return format!("L{number}");
+        }
+        let position = match self.unnamed.iter().position(|k| k == key) {
+            Some(position) => position,
+            None => {
+                self.unnamed.push(key.to_vec());
+                self.unnamed.len() - 1
+            }
+        };
+        format!("L{}", self.evidence.next_loop as usize + position + 1)
     }
 }
 

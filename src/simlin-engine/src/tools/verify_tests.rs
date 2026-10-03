@@ -217,12 +217,12 @@ fn every_kind_of_citation_holds_when_true_and_says_what_is_true_when_not() {
         ),
         (
             json!({"cites": "leads", "loop": growth, "from": 20, "to": 40}),
-            Some("led the most"),
+            Some("held the most"),
         ),
         // Growth leads the first quarter of the run, which is not the run.
         (
             json!({"cites": "leads", "loop": growth, "from": 0, "to": 40}),
-            Some("led the most"),
+            Some("held the most"),
         ),
         (
             json!({"cites": "leads", "loop": crowding, "from": 0, "to": 40}),
@@ -230,7 +230,7 @@ fn every_kind_of_citation_holds_when_true_and_says_what_is_true_when_not() {
         ),
         (
             json!({"cites": "leads", "loop": growth, "from": 8, "to": 0}),
-            Some("a span's from comes before its to"),
+            Some("a span's from is a time no later than its to"),
         ),
         // A span no loop was active in is led by none: here one between two
         // saved steps, which holds no step at all.
@@ -985,20 +985,28 @@ fn a_peak_is_a_turn_inside_the_run_within_five_percent_of_the_cited_time() {
     }
 }
 
-/// A loop leads a span it led at least half the active steps of, and a loop
-/// is of a cited polarity when the run shows that polarity, or mostly that
-/// polarity: a row per pair of polarities.
+/// A loop leads a span where its mean share is the largest there, or ties
+/// with it, and the largest holds a thousandth of the activity (the rule a
+/// timeline names a span's leader by); a loop is of a cited polarity when the
+/// run shows that polarity, or mostly that polarity: a row per pair of
+/// polarities.
 #[test]
-fn a_lead_is_half_the_active_steps_and_a_polarity_is_its_own_or_mostly_it() {
-    for (led, active, holds) in [
-        (1, 2, true),
-        (2, 3, true),
-        (1, 3, false),
-        (0, 1, false),
-        (0, 0, false),
-        (3, 3, true),
+fn a_lead_is_the_largest_share_and_a_polarity_is_its_own_or_mostly_it() {
+    let third: f64 = 1.0 / 3.0;
+    for (share, largest, holds) in [
+        (0.6, 0.6, true),
+        (third, f64::from_bits(third.to_bits() + 1), true),
+        (0.3, 0.4, false),
+        (0.0005, 0.0005, false),
+        (0.0, 0.0, false),
     ] {
-        assert_eq!(leads(led, active), holds, "{led} of {active}");
+        let lead = super::super::loops::Leadership {
+            share,
+            largest,
+            strongest: None,
+            active: 1,
+        };
+        assert_eq!(lead.leads(), holds, "{share} of {largest}");
     }
     use LoopPolarityName::{
         Balancing, MostlyBalancing, MostlyReinforcing, Reinforcing, Undetermined,

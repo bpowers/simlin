@@ -84,6 +84,11 @@ pub struct CausalEdgesResult {
     /// built; shared with every `CausalGraph` built from this result, so
     /// exhaustive and discovery mode select a loop's exit port from one map.
     pub module_outputs_read: Arc<ModuleOutputsRead>,
+    /// `(source, instance)` for each module instance's input source that is
+    /// no edge into it because it binds only ports the sub-model reads at its
+    /// start ([`init_only_sources`]): a read `analysis::model_reads` counts
+    /// as made at the start, so the two agree on what moves the instance.
+    pub start_only_inputs: BTreeSet<(String, String)>,
 }
 
 impl CausalEdgesResult {
@@ -1354,26 +1359,17 @@ pub struct DetectedLoop {
     pub partition: Option<usize>,
 }
 
-/// Loop polarity as determined by structural analysis of link signs (and,
-/// where available, by the runtime loop-score series).
+/// A detected loop's polarity: [`crate::ltm::LoopPolarity`], under the name
+/// the structural surface's consumers import. The structural
+/// `model_detected_loops` pipeline never produces `MostlyReinforcing` or
+/// `MostlyBalancing` -- it has no runtime data -- but downstream consumers
+/// must handle them when the detected loops are enriched with simulated
+/// scores (`reclassify_loops_from_results`).
 ///
-/// `MostlyReinforcing` / `MostlyBalancing` correspond to the LTM
-/// literature's "Rux" / "Bux" labels: the loop has expressed both
-/// polarities at runtime but one polarity dominates with confidence at or
-/// above [`crate::ltm::POLARITY_CONFIDENCE_THRESHOLD`]. The structural
-/// `model_detected_loops` pipeline never produces these variants -- it has
-/// no runtime data -- but downstream consumers must handle them when the
-/// detected loops are enriched with simulated scores.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DetectedLoopPolarity {
-    Reinforcing,
-    Balancing,
-    /// "Rux" -- mixed-sign runtime scores, predominantly reinforcing.
-    MostlyReinforcing,
-    /// "Bux" -- mixed-sign runtime scores, predominantly balancing.
-    MostlyBalancing,
-    Undetermined,
-}
+/// Never replace this alias with an enum of its own: a second five-variant
+/// vocabulary needs a conversion at every boundary between the two, and each
+/// conversion is a place a variant can be mislabeled.
+pub type DetectedLoopPolarity = crate::ltm::LoopPolarity;
 
 /// Result of full loop detection with polarity and IDs.
 ///
@@ -1557,6 +1553,12 @@ pub fn causal_graph_from_element_edges_with_modules(
 /// initials -- the slot the results map hides for that reason
 /// (`db::layout::flattened_offsets`). A `PREVIOUS` capture, or one shared by
 /// both consumers, is refreshed every step and stays a node.
+///
+/// A module instance's input source is an edge into it only where a port it
+/// binds is read per step inside the sub-model ([`init_only_sources`]): the
+/// initial-value argument of a `SMTH1` or a `DELAY3` sets a stock's initial
+/// value and nothing after, so it is no more a causal input of the instance
+/// than a stock's initial-value equation is of the stock.
 #[salsa::tracked(returns(ref))]
 pub fn model_causal_edges(
     db: &dyn Db,
@@ -1579,20 +1581,34 @@ pub fn model_causal_edges(
     let mut stocks = BTreeSet::new();
     let mut dynamic_modules = HashMap::new();
     let mut module_outputs_read: ModuleOutputsRead = HashMap::new();
+    let mut start_only_inputs: BTreeSet<(String, String)> = BTreeSet::new();
+    // Which ports a sub-model reads per step is read off its own causal
+    // edges, a query that reaches this one under a module cycle; under one,
+    // every input source stays an edge.
+    let follows_ports = super::project_module_graph(db, project)
+        .cycle_error_from(model.name(db))
+        .is_none();
+    let every_source: HashSet<String> = HashSet::new();
 
-    // The dt-phase reads of one node, as edges into it. A read of an INIT-only
-    // capture is a read of a snapshot: no edge. A module instance's read of
-    // its own output (a Stella import wires those as inputs) is no edge
-    // either; a local self-read stays, as every read of a local name does.
+    // The dt-phase reads of one node, as edges into it, less `not_read`: the
+    // input sources of a module instance that bind only ports nothing reads
+    // per step. A read of an INIT-only capture is a read of a snapshot: no
+    // edge. A module instance's read of its own output (a Stella import wires
+    // those as inputs) is no edge either; a local self-read stays, as every
+    // read of a local name does.
     fn record_reads(
         edges: &mut BTreeMap<String, BTreeSet<String>>,
         module_outputs_read: &mut ModuleOutputsRead,
         init_captures: &HashSet<String>,
+        not_read: &HashSet<String>,
         reader: &str,
         deps: &DepRefs,
     ) {
         for dep in deps.phase(DepPhase::Dt) {
             let node = dep.target.head();
+            if not_read.contains(node.as_str()) {
+                continue;
+            }
             if dep.target.is_local() {
                 if init_captures.contains(node.as_str()) {
                     continue;
@@ -1633,14 +1649,29 @@ pub fn model_causal_edges(
             SourceVariableKind::Module => {
                 // A module instance's dependencies are the sources feeding
                 // its input ports.
+                let model_name = source_var.model_name(db);
+                let not_read = if follows_ports {
+                    init_only_sources(
+                        db,
+                        model,
+                        project,
+                        name,
+                        model_name,
+                        source_var.module_refs(db),
+                    )
+                } else {
+                    HashSet::new()
+                };
+                start_only_inputs
+                    .extend(not_read.iter().map(|source| (source.clone(), name.clone())));
                 record_reads(
                     &mut edges,
                     &mut module_outputs_read,
                     &init_captures,
+                    &not_read,
                     name,
                     &deps.deps,
                 );
-                let model_name = source_var.model_name(db);
                 if !model_name.is_empty() {
                     dynamic_modules.insert(name.clone(), model_name.clone());
                 }
@@ -1649,6 +1680,7 @@ pub fn model_causal_edges(
                 &mut edges,
                 &mut module_outputs_read,
                 &init_captures,
+                &every_source,
                 name,
                 &deps.deps,
             ),
@@ -1659,9 +1691,32 @@ pub fn model_causal_edges(
         // a hoisted call argument is an aux, unless it is an INIT-only capture,
         // which is no causal node.
         for implicit in &deps.implicit_vars {
+            let mut not_read = HashSet::new();
             if implicit.is_module {
                 if let Some(model_name) = &implicit.model_name {
                     dynamic_modules.insert(implicit.name.clone(), model_name.clone());
+                    if follows_ports {
+                        let references = super::parse_source_variable(db, *source_var, project)
+                            .implicit_vars
+                            .iter()
+                            .find(|helper| canonicalize(helper.ident()) == implicit.name)
+                            .and_then(|helper| helper.module())
+                            .map(|instance| instance.references.as_slice())
+                            .unwrap_or_default();
+                        not_read = init_only_sources(
+                            db,
+                            model,
+                            project,
+                            &implicit.name,
+                            model_name,
+                            references,
+                        );
+                        start_only_inputs.extend(
+                            not_read
+                                .iter()
+                                .map(|source| (source.clone(), implicit.name.clone())),
+                        );
+                    }
                 }
             } else if init_captures.contains(&implicit.name) {
                 continue;
@@ -1670,6 +1725,7 @@ pub fn model_causal_edges(
                 &mut edges,
                 &mut module_outputs_read,
                 &init_captures,
+                &not_read,
                 &implicit.name,
                 &implicit.deps,
             );
@@ -1681,7 +1737,76 @@ pub fn model_causal_edges(
         stocks,
         dynamic_modules,
         module_outputs_read: Arc::new(module_outputs_read),
+        start_only_inputs,
     }
+}
+
+/// The input sources of the module instance `instance` of `model`, each by the
+/// node it would be an edge from, that bind only ports no variable of the
+/// sub-model `target_model` reads as the run goes: ports with no reader in the
+/// sub-model's own causal edges. Whatever reads such a port reads it at the
+/// start (a stock's initial value, which is no causal edge), so its source
+/// moves nothing in the instance after the first step. An edge from it would be a
+/// link that transmits no change, which loop discovery finds loops through:
+/// the port has no pathway to an output, so the link's score is the black-box
+/// unit transfer of `db::module_link_score_equation`, of magnitude one
+/// whenever the source and the instance's output both move.
+///
+/// A source that also binds a port read per step, or whose reference binds no
+/// port, keeps its edge. The port a reference binds is
+/// `assemble::module_input_set`'s, the rule the instance is compiled and wired
+/// by. A sub-model the project does not have yields none.
+///
+/// Reads the sub-model's `model_causal_edges`, so the caller rules out a
+/// module cycle through `model` first.
+fn init_only_sources(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    instance: &str,
+    target_model: &str,
+    references: &[datamodel::ModuleReference],
+) -> HashSet<String> {
+    let Some(sub_model) = project
+        .models(db)
+        .get(canonicalize(target_model).as_ref())
+        .copied()
+    else {
+        return HashSet::new();
+    };
+    let sub_edges = model_causal_edges(db, sub_model, project);
+    let scope = super::DepScope {
+        db,
+        model: Some(model),
+        project,
+        own_helpers: &[],
+    };
+    let prefix = super::assemble::module_input_prefix(instance);
+    let (mut read, mut init_only) = (HashSet::new(), HashSet::new());
+    for reference in references {
+        let source = scope
+            .resolve(&Ident::new(&reference.src))
+            .head()
+            .as_str()
+            .to_string();
+        let port = super::assemble::module_input_set(
+            &prefix,
+            std::iter::once((&reference.src, &reference.dst)),
+        );
+        let read_per_step = port.iter().next().is_none_or(|port| {
+            sub_edges
+                .edges
+                .get(port.as_str())
+                .is_some_and(|readers| !readers.is_empty())
+        });
+        if read_per_step {
+            read.insert(source);
+        } else {
+            init_only.insert(source);
+        }
+    }
+    init_only.retain(|source| !read.contains(source));
+    init_only
 }
 
 /// Per-edge classification: the set of `RefShape`s observed at any AST
@@ -2713,7 +2838,7 @@ pub fn model_detected_loops(
         // those variants are reserved for callers that classify on
         // top of a simulated loop-score series via
         // [`LoopPolarity::from_runtime_scores`].
-        let polarity = detected_polarity_from_ltm(&l.polarity);
+        let polarity = l.polarity;
         // Structural confidence is binary: 0.0 for the Undetermined
         // fallback (an unknown link), 1.0 otherwise. Runtime
         // reclassification (`reclassify_loops_from_results`) replaces
@@ -2805,7 +2930,7 @@ pub(crate) fn loop_node_sequence(l: &crate::ltm::Loop) -> Vec<String> {
 /// loop, 0.0 when any link is Unknown).
 fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop {
     let vars = loop_node_sequence(l);
-    let polarity = detected_polarity_from_ltm(&l.polarity);
+    let polarity = l.polarity;
     let polarity_confidence = match polarity {
         DetectedLoopPolarity::Undetermined => 0.0,
         _ => 1.0,
@@ -2918,23 +3043,9 @@ pub fn reclassify_loops_from_results(
         };
         if let Some((polarity, confidence)) = crate::ltm::LoopPolarity::from_runtime_scores(series)
         {
-            loop_item.polarity = detected_polarity_from_ltm(&polarity);
+            loop_item.polarity = polarity;
             loop_item.polarity_confidence = confidence;
         }
-    }
-}
-
-/// Map a `crate::ltm::LoopPolarity` (the runtime classification vocabulary)
-/// onto the FFI-facing [`DetectedLoopPolarity`]. The two enums carry the same
-/// five variants; this is the single conversion point shared by the
-/// structural and runtime-reclassified paths.
-fn detected_polarity_from_ltm(polarity: &crate::ltm::LoopPolarity) -> DetectedLoopPolarity {
-    match polarity {
-        crate::ltm::LoopPolarity::Reinforcing => DetectedLoopPolarity::Reinforcing,
-        crate::ltm::LoopPolarity::Balancing => DetectedLoopPolarity::Balancing,
-        crate::ltm::LoopPolarity::MostlyReinforcing => DetectedLoopPolarity::MostlyReinforcing,
-        crate::ltm::LoopPolarity::MostlyBalancing => DetectedLoopPolarity::MostlyBalancing,
-        crate::ltm::LoopPolarity::Undetermined => DetectedLoopPolarity::Undetermined,
     }
 }
 
