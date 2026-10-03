@@ -10,7 +10,8 @@
 //! change, compared with the model's current run:
 //!
 //! - `units`: the engine's unit diagnostics, by id; skipped, saying so, for a
-//!   model that declares no units, where nothing is checked.
+//!   model that declares no units and has no unit diagnostic, where nothing
+//!   is checked.
 //! - `extreme_conditions`: each targeted constant at its low extreme and at
 //!   its high one, each check saying which rule chose its value
 //!   ([`ExtremeRule`]). An extreme is a condition of the system, never a
@@ -964,7 +965,8 @@ fn nothing_read(model: &datamodel::Model) -> String {
 
 /// Whether the model declares units on any variable. Unit checking is opt-in
 /// by declaring them (`db::units::check_model_units`), so a model that
-/// declares none has no unit diagnostics whatever its equations are.
+/// declares none has no unit diagnostics from its equations, whatever they
+/// are; a broken unit definition is the project's and is reported anyway.
 fn declares_units(model: &datamodel::Model) -> bool {
     model.variables.iter().any(|var| {
         var.get_units()
@@ -1082,13 +1084,19 @@ pub(crate) fn run_tests(
     let mut left_out = LeftOut::default();
     for test in tests {
         let made: Result<Made, String> = match (test, &current) {
-            (TestName::Units, _) if !declares_units(model) => Err(
-                "the model declares no units, so there is nothing to check: units are checked \
-                 once variables declare them"
-                    .to_string(),
-            ),
+            // A unit definition is the project's: one that is broken is
+            // an error whether or not a variable declares units.
             (TestName::Units, _) => {
-                Ok(vec![units_check(&mut session.evidence, ws, &resolved)].into())
+                let check = units_check(&mut session.evidence, ws, &resolved);
+                if check.result.diagnostics.is_empty() && !declares_units(model) {
+                    Err(
+                        "the model declares no units, so there is nothing to check: units are \
+                         checked once variables declare them"
+                            .to_string(),
+                    )
+                } else {
+                    Ok(vec![check].into())
+                }
             }
             // Said once, as the answer's `runFails`.
             (_, Err(_)) => Err("the model does not simulate (runFails says why)".to_string()),
@@ -3616,7 +3624,9 @@ fn integration_error(
             difference: round(first * factor),
         })
         .collect();
-    if worst <= INTEGRATION_TOLERANCE {
+    // Runs that do not converge bound no error, however small the first
+    // difference: they are said before the tolerance is.
+    if converges && worst <= INTEGRATION_TOLERANCE {
         return Ok(vec![check]);
     }
 

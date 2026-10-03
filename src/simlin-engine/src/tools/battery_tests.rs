@@ -1084,6 +1084,32 @@ fn a_model_whose_finer_runs_do_not_converge_is_flagged_saying_why() {
         "{note}"
     );
 
+    // An equation that reads DT moves the run 0.5% at half the DT and 5%
+    // at a quarter: the first refinement is under the tolerance, and the
+    // runs still do not converge.
+    let stepped = TestProject::new("stepped")
+        .with_sim_time(0.0, 10.0, 0.5)
+        .stock("level", "0", &["filling"], &[], None)
+        .flow(
+            "filling",
+            "IF DT < 0.2 THEN 1.055 ELSE IF DT < 0.3 THEN 1.005 ELSE 1",
+            None,
+        );
+    let mut host = Host::from_test_project(&stepped);
+    let output = run(
+        &mut host,
+        &mut Session::new("main"),
+        json!({"tests": ["integration_error"]}),
+    );
+    let check = integration(&output);
+    assert_eq!(check["outcome"], "flagged", "{output}");
+    assert!(
+        check["note"]
+            .as_str()
+            .is_some_and(|note| note.starts_with("The runs at finer DTs do not converge")),
+        "{check}"
+    );
+
     // The Lorenz system: the runs part ways whatever the DT.
     let lorenz = TestProject::new("lorenz")
         .with_sim_time(0.0, 30.0, 0.01)
@@ -3746,6 +3772,27 @@ fn the_units_check_is_skipped_where_the_model_declares_no_units() {
             );
         }
     }
+}
+
+/// A unit definition that does not parse is an error of the project whether
+/// or not a variable uses it: a model that declares no units still has it
+/// checked, and fails.
+#[test]
+fn a_broken_unit_definition_is_checked_where_no_variable_declares_units() {
+    let project = TestProject::new("bare")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .unit("widget", Some("1 /"))
+        .stock("level", "1", &["filling"], &[], None)
+        .flow("filling", "2", None);
+    let mut host = Host::from_test_project(&project);
+    let output = run(
+        &mut host,
+        &mut Session::new("main"),
+        json!({"tests": ["units"]}),
+    );
+    let tested = summary(&output, "units");
+    assert_eq!(tested.get("skipped"), None, "{output}");
+    assert_eq!(tested["failed"], 1, "{output}");
 }
 
 /// A call gives a constant its own extremes: either or both, tried in place
