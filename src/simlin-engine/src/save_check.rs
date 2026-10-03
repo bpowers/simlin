@@ -237,8 +237,10 @@ fn read(
             .map(Into::into)
             .map_err(|e| e.to_string()),
         SaveFormat::Protobuf => crate::project_io::Project::decode_from_slice(bytes)
-            .map(crate::serde::deserialize)
-            .map_err(|e| e.to_string()),
+            .map_err(|e| e.to_string())
+            .and_then(|stored| {
+                crate::serde::deserialize(stored).map_err(|e| e.reason().to_string())
+            }),
     }
 }
 
@@ -525,7 +527,7 @@ impl Table {
             let GraphicalFunctionScale { min, max } = scale;
             (*min, *max)
         };
-        // A table the compiler refuses (an x that is not a number) is
+        // A table the compiler refuses (`parse_table`'s `BadTable`) is
         // compared as it is stored; the refusal shows in the errors.
         let x = match crate::variable::parse_table(Some(gf)) {
             Ok(Some(table)) => table.x,

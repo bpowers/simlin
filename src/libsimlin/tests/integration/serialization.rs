@@ -575,6 +575,7 @@ fn test_project_serialize_null_safety() {
                 loop_metadata: vec![],
                 groups: vec![],
                 macro_spec: MessageField::none(),
+                sim_specs: MessageField::none(),
             }],
             dimensions: vec![],
             units: vec![],

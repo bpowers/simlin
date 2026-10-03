@@ -865,16 +865,14 @@ fn test_per_element_gf_link_polarity_bare_var_reference() {
 }
 
 #[test]
-fn test_lookup_forward_backward_arm_polarity() {
-    // LOOKUP / LOOKUP_FORWARD / LOOKUP_BACKWARD share the
-    // `(table_expr, index_expr, loc)` shape and the same monotonicity story,
-    // so the Lookup polarity arm covers all three via one `|` pattern. The
-    // per-element-GF tests above exercise the `LOOKUP` spelling; this one
-    // exercises `lookup_forward` and `lookup_backward` so the merged arm has
-    // direct coverage. With both regions' `curve` tables monotone increasing,
-    // `dose` enters the lookup-index position as Positive and each table is
-    // Positive, so the `dose -> effect` link is Positive (not Unknown).
-    for builtin in ["lookup_forward", "lookup_backward"] {
+fn every_lookup_builtin_composes_the_tables_polarity() {
+    // Every builtin that reads a table has one monotonicity story, however it
+    // reads between and beyond the table's points, so the rows are the
+    // family as the builtin table states it. With both regions' `curve`
+    // tables monotone increasing, `dose` enters the lookup-index position as
+    // Positive and each table is Positive, so the `dose -> effect` link is
+    // Positive (not Unknown).
+    for builtin in crate::builtins::BuiltinSig::table_readers() {
         let curve = per_element_gf_aux(
             "curve",
             "region",
@@ -1097,7 +1095,7 @@ fn test_fishbanks_loops() {
         fs::read("../../test/fishbanks.protobin").expect("Failed to read fishbanks.protobin file");
     let project_io = crate::project_io::Project::decode_from_slice(&proto_bytes)
         .expect("Failed to decode fishbanks.protobin");
-    let datamodel_project = crate::serde::deserialize(project_io);
+    let datamodel_project = crate::serde::deserialize(project_io).unwrap();
 
     let db = SimlinDb::default();
     let result = sync_from_datamodel(&db, &datamodel_project);
@@ -1174,7 +1172,7 @@ fn test_logistic_growth_loops() {
         .expect("Failed to read logistic-growth.protobin file");
     let project_io = crate::project_io::Project::decode_from_slice(&proto_bytes)
         .expect("Failed to decode logistic-growth.protobin");
-    let datamodel_project = crate::serde::deserialize(project_io);
+    let datamodel_project = crate::serde::deserialize(project_io).unwrap();
 
     let db = SimlinDb::default();
     let result = sync_from_datamodel(&db, &datamodel_project);

@@ -315,3 +315,327 @@ fn a_file_of_many_pages_and_many_kinds_reports_each_once() {
         format!("1 text box on interface page {MANY} is not kept: 't'")
     );
 }
+
+/// An auxiliary `name` whose graphical function carries `attributes`.
+fn table(name: &str, attributes: &str) -> String {
+    format!(
+        "<aux name=\"{name}\"><eqn>0.5</eqn>\
+         <gf {attributes}><xpts>0,1,2</xpts><ypts>0,10,10</ypts></gf></aux>"
+    )
+}
+
+/// The kind the reader gave `variable`'s graphical function.
+fn kind_of(file: &str, variable: &str) -> crate::datamodel::GraphicalFunctionKind {
+    let project = project_from_reader(&mut file.as_bytes()).expect("the file opens");
+    match project.models[0]
+        .variables
+        .iter()
+        .find(|v| v.get_ident() == variable)
+        .expect("the variable is read")
+    {
+        crate::datamodel::Variable::Aux(aux) => aux.gf.as_ref().expect("its table is read").kind,
+        _ => unreachable!("the fixtures are auxiliaries"),
+    }
+}
+
+const NO_WARNINGS: [&str; 0] = [];
+
+#[test]
+fn a_graphical_functions_type_is_read_whatever_its_case_or_padding() {
+    use crate::datamodel::GraphicalFunctionKind::*;
+    // Every kind, in XMILE's own spelling (1.0 section 3.1.4) and in the
+    // spellings a hand or another tool gives it.
+    let rows = [
+        ("continuous", Continuous),
+        ("extrapolate", Extrapolate),
+        ("discrete", Discrete),
+        ("Continuous", Continuous),
+        ("EXTRAPOLATE", Extrapolate),
+        ("Discrete", Discrete),
+        ("DISCRETE", Discrete),
+        (" discrete ", Discrete),
+        ("continuous ", Continuous),
+    ];
+    for (spelled, kind) in rows {
+        let file = file_with(&table("t", &format!("type=\"{spelled}\"")), "", "");
+        assert!(kind_of(&file, "t") == kind, "type=\"{spelled}\"");
+        assert_eq!(report(&file), NO_WARNINGS, "type=\"{spelled}\"");
+    }
+    // No type at all is the default kind.
+    let file = file_with(&table("t", ""), "", "");
+    assert!(kind_of(&file, "t") == Continuous);
+    assert_eq!(report(&file), NO_WARNINGS);
+}
+
+#[test]
+fn a_graphical_function_type_the_reader_does_not_know_opens_as_continuous_and_is_reported() {
+    use crate::datamodel::GraphicalFunctionKind::Continuous;
+    for unknown in ["stepwise", "", "discrete,", "disc rete"] {
+        let attribute = format!("type=\"{unknown}\"");
+        let file = file_with(&table("effect", &attribute), "", "");
+        assert!(kind_of(&file, "effect") == Continuous, "{attribute}");
+        assert_eq!(
+            report(&file),
+            [format!(
+                "1 graphical function type in the model is not one the reader knows, so its \
+                 function is read as continuous: '{attribute} on effect'"
+            )],
+            "{attribute}"
+        );
+    }
+
+    // Several, a flow's and a per-element one among them, are one warning.
+    let per_element = "<aux name=\"by place\"><dimensions><dim name=\"D\"/></dimensions>\
+                       <element subscript=\"a\"><eqn>1</eqn>\
+                       <gf type=\"spline\"><xpts>0,1</xpts><ypts>0,1</ypts></gf></element></aux>";
+    let flow = "<flow name=\"f\"><eqn>1</eqn>\
+                <gf type=\"bogus\"><xpts>0,1</xpts><ypts>0,1</ypts></gf></flow>";
+    let variables = format!(
+        "{}{per_element}{flow}",
+        table("effect", "type=\"stepwise\"")
+    );
+    let file = file_with(&variables, "", "").replace(
+        "<model>",
+        "<dimensions><dim name=\"D\"><elem name=\"a\"/></dim></dimensions><model>",
+    );
+    assert_eq!(
+        report(&file),
+        [
+            "3 graphical function types in the model are not ones the reader knows, so their \
+             functions are read as continuous: 'type=\"stepwise\" on effect', \
+             'type=\"spline\" on by place', and 'type=\"bogus\" on f'"
+        ]
+    );
+}
+
+/// `<gf discrete="...">` is a draft-format spelling (the corpus's
+/// `test_lookups_no-indirect.xmile`, written by go-xmile, has
+/// `discrete="false"`), not XMILE 1.0's. What `discrete="true"` asks for is
+/// unverified, so the reader does not act on it and reports it, and
+/// `discrete="false"` asks for nothing the default is not. The table is read
+/// by its `type`, the default kind when the type names none, and the warning
+/// says which: a row for every combination of a `type` (none, each kind the
+/// reader knows, one it does not) and a `discrete` (none, false, true).
+#[test]
+fn a_graphical_functions_warning_says_the_kind_it_is_read_as() {
+    use crate::datamodel::GraphicalFunctionKind::{self, *};
+    let default = |attributes: &[&str]| -> Vec<String> {
+        let listed: Vec<String> = attributes
+            .iter()
+            .map(|a| format!("'{a} on effect'"))
+            .collect();
+        match listed.as_slice() {
+            [one] => vec![format!(
+                "1 graphical function type in the model is not one the reader knows, so its \
+                 function is read as continuous: {one}"
+            )],
+            [one, two] => vec![format!(
+                "2 graphical function types in the model are not ones the reader knows, so \
+                 their functions are read as continuous: {one} and {two}"
+            )],
+            _ => unreachable!("a row reports at most two attributes"),
+        }
+    };
+    let by_type = |kind: &str| {
+        vec![format!(
+            "1 graphical function type in the model is not one the reader acts on; its \
+             function is read as {kind}, as its type says: 'discrete=\"true\" on effect'"
+        )]
+    };
+    let none: Vec<String> = Vec::new();
+    let rows: [(&str, GraphicalFunctionKind, Vec<String>); 15] = [
+        ("", Continuous, none.clone()),
+        ("discrete=\"false\"", Continuous, none.clone()),
+        (
+            "discrete=\"true\"",
+            Continuous,
+            default(&["discrete=\"true\""]),
+        ),
+        ("type=\"continuous\"", Continuous, none.clone()),
+        (
+            "type=\"continuous\" discrete=\"false\"",
+            Continuous,
+            none.clone(),
+        ),
+        (
+            "type=\"continuous\" discrete=\"true\"",
+            Continuous,
+            by_type("continuous"),
+        ),
+        ("type=\"extrapolate\"", Extrapolate, none.clone()),
+        (
+            "type=\"extrapolate\" discrete=\"false\"",
+            Extrapolate,
+            none.clone(),
+        ),
+        (
+            "type=\"extrapolate\" discrete=\"true\"",
+            Extrapolate,
+            by_type("extrapolate"),
+        ),
+        ("type=\"discrete\"", Discrete, none.clone()),
+        (
+            "type=\"discrete\" discrete=\"false\"",
+            Discrete,
+            none.clone(),
+        ),
+        (
+            "type=\"discrete\" discrete=\"true\"",
+            Discrete,
+            by_type("discrete"),
+        ),
+        (
+            "type=\"stepwise\"",
+            Continuous,
+            default(&["type=\"stepwise\""]),
+        ),
+        (
+            "type=\"stepwise\" discrete=\"false\"",
+            Continuous,
+            default(&["type=\"stepwise\""]),
+        ),
+        (
+            "type=\"stepwise\" discrete=\"true\"",
+            Continuous,
+            default(&["type=\"stepwise\"", "discrete=\"true\""]),
+        ),
+    ];
+    // Every kind the reader knows has its rows.
+    for kind in [Continuous, Extrapolate, Discrete] {
+        let named = match kind {
+            Continuous => "continuous",
+            Extrapolate => "extrapolate",
+            Discrete => "discrete",
+        };
+        assert!(
+            rows.iter()
+                .any(|(attributes, _, _)| attributes.contains(&format!("type=\"{named}\""))),
+            "{named} has rows"
+        );
+    }
+    for (attributes, read_as, warned) in rows {
+        let file = file_with(&table("effect", attributes), "", "");
+        assert!(kind_of(&file, "effect") == read_as, "<gf {attributes}>");
+        assert_eq!(report(&file), warned, "<gf {attributes}>");
+    }
+}
+
+/// Where a variable can hold a `<gf>`.
+#[derive(Clone, Copy, Debug)]
+enum TablePlace {
+    /// Directly under the variable.
+    Own,
+    /// Under one of its `<element>`s.
+    Element,
+}
+
+/// What holds a variable.
+#[derive(Clone, Copy, Debug)]
+enum Owner {
+    Model,
+    Macro,
+}
+
+/// A variable `<{tag} name="v">` holding a table of an unknown type at
+/// `place`, in a file where `owner` holds it.
+fn file_with_a_table_at(owner: Owner, tag: &str, place: TablePlace) -> String {
+    let gf = "<gf type=\"stepwise\"><xpts>0,1</xpts><ypts>0,1</ypts></gf>";
+    let body = match place {
+        TablePlace::Own => format!("<eqn>1</eqn>{gf}"),
+        TablePlace::Element => format!(
+            "<dimensions><dim name=\"D\"/></dimensions>\
+             <element subscript=\"a\"><eqn>1</eqn>{gf}</element>"
+        ),
+    };
+    let variable = format!("<{tag} name=\"v\">{body}</{tag}>");
+    let (model_variables, macros) = match owner {
+        Owner::Model => (variable, String::new()),
+        Owner::Macro => (
+            String::new(),
+            format!(
+                "<macro name=\"m\"><parm>x</parm><eqn>v</eqn>\
+                 <variables>{variable}</variables></macro>"
+            ),
+        ),
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+<header><name>t</name><vendor>test</vendor><product version="1">test</product></header>
+<sim_specs><start>0</start><stop>10</stop><dt>1</dt></sim_specs>
+<dimensions><dim name="D"><elem name="a"/></dim></dimensions>
+<model><variables><aux name="a"><eqn>1</eqn></aux>{model_variables}</variables></model>
+{macros}</xmile>"#
+    )
+}
+
+/// How many tables the reader gave the variable `v`, wherever it is: its own
+/// and each element's.
+fn tables_read_on_v(project: &crate::datamodel::Project) -> usize {
+    use crate::datamodel::{Equation, Variable};
+    let per_element = |equation: &Equation| match equation {
+        Equation::Arrayed(_, elements, _, _) => {
+            elements.iter().filter(|(_, _, _, gf)| gf.is_some()).count()
+        }
+        Equation::Scalar(_) | Equation::ApplyToAll(..) => 0,
+    };
+    project
+        .models
+        .iter()
+        .flat_map(|model| model.variables.iter())
+        .filter(|variable| variable.get_ident() == "v")
+        .map(|variable| match variable {
+            Variable::Stock(stock) => per_element(&stock.equation),
+            Variable::Flow(flow) => usize::from(flow.gf.is_some()) + per_element(&flow.equation),
+            Variable::Aux(aux) => usize::from(aux.gf.is_some()) + per_element(&aux.equation),
+            Variable::Module(_) => 0,
+        })
+        .sum()
+}
+
+/// Wherever the reader reads a graphical function -- a variable's own, an
+/// element's, in a model or in a macro's body -- an unknown type on it is
+/// reported, naming the variable; wherever it does not, nothing is. The rows
+/// are every variable tag the reader reads (`VARIABLES`) at every place a
+/// table can sit, under each owner, and what the reader reads decides each
+/// row's expectation, so the report cannot drift from the reader.
+#[test]
+fn an_unknown_graphical_function_type_is_reported_wherever_the_reader_reads_one() {
+    let mut reported = 0;
+    for owner in [Owner::Model, Owner::Macro] {
+        for tag in super::VARIABLES {
+            let tag = std::str::from_utf8(tag).expect("the tags are ASCII");
+            for place in [TablePlace::Own, TablePlace::Element] {
+                let row = format!("{owner:?}, <{tag}>, {place:?}");
+                let file = file_with_a_table_at(owner, tag, place);
+                let Ok(plain) = project_from_reader(&mut file.as_bytes()) else {
+                    // A variable the reader cannot read with a table there
+                    // fails the plain open, and so the reporting one.
+                    assert!(
+                        project_from_reader_with_warnings(&mut file.as_bytes()).is_err(),
+                        "{row}"
+                    );
+                    continue;
+                };
+                let warnings = report(&file);
+                let place = match owner {
+                    Owner::Model => "in the model",
+                    Owner::Macro => "in macro 'm'",
+                };
+                let expected: Vec<String> = if tables_read_on_v(&plain) > 0 {
+                    reported += 1;
+                    vec![format!(
+                        "1 graphical function type {place} is not one the reader knows, so its \
+                         function is read as continuous: 'type=\"stepwise\" on v'"
+                    )]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(warnings, expected, "{row}");
+            }
+        }
+    }
+    // A flow's and an auxiliary's own, and a stock's, a flow's and an
+    // auxiliary's per element, in a model and in a macro.
+    assert_eq!(reported, 10);
+}

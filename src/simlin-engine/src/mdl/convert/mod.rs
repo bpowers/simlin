@@ -88,7 +88,7 @@ pub struct ConversionContext<'input> {
     element_owners: HashMap<String, String>,
     /// Maps dimension names (canonical) to their element lists (expanded).
     dimension_elements: HashMap<String, Vec<String>>,
-    /// Lookup variables that should use extrapolation (from LOOKUP EXTRAPOLATE calls)
+    /// Lookup variables whose tables extrapolate: those a `TABXL` call names.
     extrapolate_lookups: HashSet<String>,
     /// Raw subscript definitions for recursive expansion during dimension building.
     /// Maps canonical dimension name to the raw SubscriptElement list.
@@ -272,7 +272,7 @@ impl<'input> ConversionContext<'input> {
         // Pass 3: Mark variable types (stock/flow/aux) and extract control vars
         self.mark_variable_types();
 
-        // Pass 4: Scan for LOOKUP EXTRAPOLATE usage
+        // Pass 4: Scan for the TABXL calls that mark a table as extrapolating
         self.scan_for_extrapolate_lookups();
 
         // Pass 5: Link stocks and flows

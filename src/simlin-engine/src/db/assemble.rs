@@ -89,14 +89,14 @@ pub(crate) fn variable_tables(
                         present
                             .get(&crate::common::CanonicalElementName::from_raw(subscript))
                             .cloned()
-                            .unwrap_or(crate::compiler::Table { data: vec![] })
+                            .unwrap_or_else(crate::compiler::Table::empty)
                     })
                     .collect();
             }
             return crate::variable::reorder_arrayed_element_tables(
                 dims,
                 &present,
-                || crate::compiler::Table { data: vec![] },
+                crate::compiler::Table::empty,
                 |t: &crate::compiler::Table| t.clone(),
             );
         }

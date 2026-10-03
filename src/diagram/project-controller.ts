@@ -353,6 +353,10 @@ export function convertErrorDetails(
         start: err.startOffset ?? 0,
         end: err.endOffset ?? 0,
         code: err.code as unknown as ErrorCode,
+        // The bare reason only, as for unit errors: the message is
+        // terminal-formatted, and an error without a reason renders its
+        // code's description.
+        details: err.details ?? undefined,
       };
       let existing = varErrors.get(ident);
       if (!existing) {
@@ -377,7 +381,9 @@ function cachedErrorsFor(errors: readonly ErrorDetail[], modelName: string): Cac
     if (err.kind === SimlinErrorKind.Simulation) {
       simError = {
         code: err.code as unknown as ErrorCode,
-        details: err.message ?? undefined,
+        // Prefer the bare reason over the terminal-formatted message, as for
+        // model errors below.
+        details: err.details ?? err.message ?? undefined,
       };
     } else if (!err.variableName) {
       modelErrors.push({

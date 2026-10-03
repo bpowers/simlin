@@ -152,6 +152,9 @@ impl Expr1 {
                     "lookup_backward" => {
                         BuiltinFn::LookupBackward(required(&mut args), required(&mut args), loc)
                     }
+                    "lookup_extrapolate" => {
+                        BuiltinFn::LookupExtrapolate(required(&mut args), required(&mut args), loc)
+                    }
                     "abs" => BuiltinFn::Abs(required(&mut args)),
                     "arccos" => BuiltinFn::Arccos(required(&mut args)),
                     "arcsin" => BuiltinFn::Arcsin(required(&mut args)),

@@ -37,6 +37,7 @@ fn test_project_lifecycle() {
             loop_metadata: vec![],
             groups: vec![],
             macro_spec: MessageField::none(),
+            sim_specs: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
@@ -59,6 +60,38 @@ fn test_project_lifecycle() {
         assert_eq!((*proj).ref_count.load(Ordering::SeqCst), 1);
         simlin_project_unref(proj);
         // Project should be freed now
+    }
+}
+
+/// Bytes that decode are not thereby a project: an empty buffer decodes to a
+/// message with no simulation specs, and a message can hold a variable of no
+/// kind. Opening either is an error the host can show, not a panic.
+#[test]
+fn test_open_protobuf_refuses_a_message_that_is_not_a_project() {
+    let kindless_variable = engine::project_io::Project {
+        sim_specs: MessageField::some(engine::project_io::SimSpecs::default()),
+        models: vec![engine::project_io::Model {
+            name: "main".to_string(),
+            variables: vec![engine::project_io::Variable { v: None }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .encode_to_vec();
+    for (what, buf) in [
+        ("an empty buffer", Vec::new()),
+        ("a variable of no kind", kindless_variable),
+    ] {
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let proj = simlin_project_open_protobuf(
+                buf.as_ptr(),
+                buf.len(),
+                &mut err as *mut *mut SimlinError,
+            );
+            assert!(proj.is_null(), "{what} opens no project");
+            expect_error_code(err, SimlinErrorCode::ProtobufDecode, what);
+        }
     }
 }
 
@@ -191,6 +224,7 @@ fn test_project_add_model() {
             loop_metadata: vec![],
             groups: vec![],
             macro_spec: MessageField::none(),
+            sim_specs: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
@@ -1132,6 +1166,7 @@ fn test_error_api_with_valid_project() {
             loop_metadata: vec![],
             groups: vec![],
             macro_spec: MessageField::none(),
+            sim_specs: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
@@ -1265,6 +1300,7 @@ fn test_error_api_with_compilation_errors() {
             loop_metadata: vec![],
             groups: vec![],
             macro_spec: MessageField::none(),
+            sim_specs: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
@@ -1357,6 +1393,7 @@ fn test_error_api_no_errors() {
             loop_metadata: vec![],
             groups: vec![],
             macro_spec: MessageField::none(),
+            sim_specs: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
@@ -1428,6 +1465,7 @@ fn test_get_errors_repeated_calls_reuse_sync_state() {
             loop_metadata: vec![],
             groups: vec![],
             macro_spec: MessageField::none(),
+            sim_specs: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],
@@ -1515,6 +1553,7 @@ fn test_error_offsets() {
             loop_metadata: vec![],
             groups: vec![],
             macro_spec: MessageField::none(),
+            sim_specs: MessageField::none(),
         }],
         dimensions: vec![],
         units: vec![],

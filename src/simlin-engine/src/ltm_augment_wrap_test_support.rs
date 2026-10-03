@@ -306,10 +306,8 @@ fn walk_wrap_test_occurrences(
         }
         Expr0::App(UntypedBuiltinFn(fname, args), _) => {
             let lname = fname.to_ascii_lowercase();
-            let skip_first = matches!(
-                lname.as_str(),
-                "lookup" | "lookup_forward" | "lookup_backward"
-            ) && !args.is_empty();
+            let skip_first =
+                crate::builtins::BuiltinSig::name_reads_a_table(&lname) && !args.is_empty();
             for (i, a) in args.iter().enumerate() {
                 if skip_first && i == 0 {
                     continue;

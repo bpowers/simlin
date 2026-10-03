@@ -842,6 +842,7 @@ fn test_model_functions() {
                 loop_metadata: vec![],
                 groups: vec![],
                 macro_spec: MessageField::none(),
+                sim_specs: MessageField::none(),
             },
             engine::project_io::Model {
                 name: "model2".to_string(),
@@ -929,6 +930,7 @@ fn test_model_functions() {
                 loop_metadata: vec![],
                 groups: vec![],
                 macro_spec: MessageField::none(),
+                sim_specs: MessageField::none(),
             },
         ],
         dimensions: vec![],

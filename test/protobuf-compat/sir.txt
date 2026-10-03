@@ -1,0 +1,470 @@
+Project {
+    name: "SIR",
+    sim_specs: SimSpecs {
+        start: 0.0,
+        stop: 100.0,
+        dt: Dt(
+            0.03125,
+        ),
+        save_step: None,
+        sim_method: Euler,
+        time_units: Some(
+            "Time",
+        ),
+    },
+    dimensions: [],
+    units: [],
+    models: [
+        Model {
+            name: "main",
+            sim_specs: None,
+            variables: [
+                Aux(
+                    Aux {
+                        ident: "contact_infectivity",
+                        equation: Scalar(
+                            "0.3",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "duration",
+                        equation: Scalar(
+                            "5",
+                        ),
+                        documentation: "",
+                        units: Some(
+                            "days",
+                        ),
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "infectious",
+                        equation: Scalar(
+                            "5",
+                        ),
+                        documentation: "",
+                        units: Some(
+                            "people",
+                        ),
+                        inflows: [
+                            "succumbing",
+                        ],
+                        outflows: [
+                            "recovering",
+                        ],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "recovered",
+                        equation: Scalar(
+                            "0",
+                        ),
+                        documentation: "",
+                        units: Some(
+                            "people",
+                        ),
+                        inflows: [
+                            "recovering",
+                        ],
+                        outflows: [],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "recovering",
+                        equation: Scalar(
+                            "infectious/duration",
+                        ),
+                        documentation: "",
+                        units: Some(
+                            "person/time",
+                        ),
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "succumbing",
+                        equation: Scalar(
+                            "susceptible*infectious/total_population*contact_infectivity",
+                        ),
+                        documentation: "",
+                        units: Some(
+                            "person/time",
+                        ),
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "susceptible",
+                        equation: Scalar(
+                            "total_population",
+                        ),
+                        documentation: "",
+                        units: Some(
+                            "people",
+                        ),
+                        inflows: [],
+                        outflows: [
+                            "succumbing",
+                        ],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "total_population",
+                        equation: Scalar(
+                            "1000",
+                        ),
+                        documentation: "",
+                        units: Some(
+                            "people",
+                        ),
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [
+                StockFlow(
+                    StockFlow {
+                        name: None,
+                        elements: [
+                            Link(
+                                Link {
+                                    uid: 1,
+                                    from_uid: 13,
+                                    to_uid: 11,
+                                    shape: Arc(
+                                        0.0,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 2,
+                                    from_uid: 12,
+                                    to_uid: 10,
+                                    shape: Arc(
+                                        0.0,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 3,
+                                    from_uid: 14,
+                                    to_uid: 10,
+                                    shape: Arc(
+                                        0.0,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 4,
+                                    from_uid: 7,
+                                    to_uid: 10,
+                                    shape: Arc(
+                                        0.0,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 5,
+                                    from_uid: 8,
+                                    to_uid: 10,
+                                    shape: Arc(
+                                        0.0,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Link(
+                                Link {
+                                    uid: 6,
+                                    from_uid: 8,
+                                    to_uid: 11,
+                                    shape: Arc(
+                                        0.0,
+                                    ),
+                                    polarity: None,
+                                },
+                            ),
+                            Stock(
+                                Stock {
+                                    name: "susceptible",
+                                    uid: 7,
+                                    x: 102.0,
+                                    y: 135.0,
+                                    label_side: Top,
+                                    compat: None,
+                                },
+                            ),
+                            Stock(
+                                Stock {
+                                    name: "infectious",
+                                    uid: 8,
+                                    x: 212.0,
+                                    y: 134.0,
+                                    label_side: Top,
+                                    compat: None,
+                                },
+                            ),
+                            Stock(
+                                Stock {
+                                    name: "recovered",
+                                    uid: 9,
+                                    x: 321.0,
+                                    y: 135.0,
+                                    label_side: Top,
+                                    compat: None,
+                                },
+                            ),
+                            Flow(
+                                Flow {
+                                    name: "succumbing",
+                                    uid: 10,
+                                    x: 157.0,
+                                    y: 135.0,
+                                    label_side: Bottom,
+                                    points: [
+                                        FlowPoint {
+                                            x: 124.5,
+                                            y: 135.0,
+                                            attached_to_uid: Some(
+                                                7,
+                                            ),
+                                        },
+                                        FlowPoint {
+                                            x: 189.5,
+                                            y: 135.0,
+                                            attached_to_uid: Some(
+                                                8,
+                                            ),
+                                        },
+                                    ],
+                                    compat: None,
+                                    label_compat: None,
+                                },
+                            ),
+                            Flow(
+                                Flow {
+                                    name: "recovering",
+                                    uid: 11,
+                                    x: 266.0,
+                                    y: 133.0,
+                                    label_side: Bottom,
+                                    points: [
+                                        FlowPoint {
+                                            x: 234.5,
+                                            y: 133.0,
+                                            attached_to_uid: Some(
+                                                8,
+                                            ),
+                                        },
+                                        FlowPoint {
+                                            x: 298.5,
+                                            y: 133.0,
+                                            attached_to_uid: Some(
+                                                9,
+                                            ),
+                                        },
+                                    ],
+                                    compat: None,
+                                    label_compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "total_population",
+                                    uid: 12,
+                                    x: 192.0,
+                                    y: 55.0,
+                                    label_side: Bottom,
+                                    compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "duration",
+                                    uid: 13,
+                                    x: 299.0,
+                                    y: 57.0,
+                                    label_side: Bottom,
+                                    compat: None,
+                                },
+                            ),
+                            Aux(
+                                Aux {
+                                    name: "contact_infectivity",
+                                    uid: 14,
+                                    x: 98.0,
+                                    y: 55.0,
+                                    label_side: Bottom,
+                                    compat: None,
+                                },
+                            ),
+                        ],
+                        view_box: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.0,
+                            height: 0.0,
+                        },
+                        zoom: 200.0,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: None,
+                    },
+                ),
+                StockFlow(
+                    StockFlow {
+                        name: None,
+                        elements: [],
+                        view_box: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 0.0,
+                            height: 0.0,
+                        },
+                        zoom: 1.0,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: None,
+                    },
+                ),
+            ],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+    ],
+    source: None,
+    ai_information: None,
+}

@@ -163,7 +163,8 @@ pub enum Expr<'input> {
 /// - Modern pairs format: `(x1,y1), (x2,y2), ...`
 /// - Legacy XY vector format: `x1, x2, ..., xN, y1, y2, ..., yN` (flat vector split in half)
 ///
-/// The legacy format must be transformed during conversion via `transform_legacy()`.
+/// The parser splits a legacy list into pairs as it reads it (`transform_legacy()`),
+/// so every table it returns is in pairs format.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum TableFormat {
@@ -172,12 +173,10 @@ pub enum TableFormat {
     Pairs,
     /// Legacy XY vector format: `x1, x2, ..., xN, y1, y2, ..., yN`
     ///
-    /// The raw values form a flat vector that must be split in half during
-    /// conversion: the first half becomes X values, the second half becomes
-    /// Y values. This matches xmutil's `TransformLegacy()` behavior.
-    ///
-    /// Note: The raw values are stored in `x_vals` during parsing. During
-    /// conversion, call `transform_legacy()` to split them into x/y pairs.
+    /// The raw values form a flat vector, held in `x_vals` while the parser
+    /// reads it, that `transform_legacy()` splits in half: the first half
+    /// becomes X values, the second half Y values. This matches xmutil's
+    /// `TransformLegacy()` behavior.
     LegacyXY,
 }
 
@@ -191,11 +190,11 @@ pub struct LookupTable {
     pub y_range: Option<(f64, f64)>,
     /// Format of the table data (pairs vs legacy XY vector)
     pub format: TableFormat,
-    /// Whether this table should extrapolate beyond its bounds.
-    ///
-    /// This is set during conversion when `LOOKUP EXTRAPOLATE` or `TABXL`
-    /// functions reference this table. It affects XMILE output (emits
-    /// `type="extrapolate"` on the `<gf>` element).
+    /// Whether the definition itself marks the table as extrapolating. MDL
+    /// has no such marker, so the parser leaves it false: a table extrapolates
+    /// when `TABXL` is called on it (the converter's `extrapolate_lookups`).
+    /// `LOOKUP EXTRAPOLATE` is a call's own reading, the `LOOKUP_EXTRAPOLATE`
+    /// builtin, and marks no table.
     pub extrapolate: bool,
     pub loc: Loc,
 }

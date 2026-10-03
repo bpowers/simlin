@@ -104,7 +104,7 @@ fn test_render_svg_generates_layout_for_viewless_model() {
                 ser_buf, ser_len,
             ))
             .unwrap();
-        let deserialized = simlin_engine::serde::deserialize(roundtripped);
+        let deserialized = simlin_engine::serde::deserialize(roundtripped).unwrap();
         let model = deserialized.get_model("main").unwrap();
         assert!(
             model.views.is_empty(),
@@ -349,7 +349,7 @@ fn test_render_scene_generates_layout_for_viewless_model() {
                 ser_buf, ser_len,
             ))
             .unwrap();
-        let deserialized = simlin_engine::serde::deserialize(roundtripped);
+        let deserialized = simlin_engine::serde::deserialize(roundtripped).unwrap();
         assert!(
             deserialized.get_model("main").unwrap().views.is_empty(),
             "render_scene must not persist a generated view"

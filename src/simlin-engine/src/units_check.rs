@@ -102,7 +102,8 @@ impl UnitEvaluator<'_> {
                     }
                     BuiltinFn::Lookup(table_expr, _, loc)
                     | BuiltinFn::LookupForward(table_expr, _, loc)
-                    | BuiltinFn::LookupBackward(table_expr, _, loc) => {
+                    | BuiltinFn::LookupBackward(table_expr, _, loc)
+                    | BuiltinFn::LookupExtrapolate(table_expr, _, loc) => {
                         // lookups have the units specified on the table
                         let table_name = match table_expr.as_ref() {
                             Expr2::Var(name, _, _) => name.clone(),

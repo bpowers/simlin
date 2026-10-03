@@ -1,0 +1,98 @@
+Project {
+    name: "legacy fields",
+    sim_specs: SimSpecs {
+        start: 0.0,
+        stop: 10.0,
+        dt: Dt(
+            0.5,
+        ),
+        save_step: None,
+        sim_method: Euler,
+        time_units: None,
+    },
+    dimensions: [
+        Dimension {
+            name: "Region",
+            elements: Named(
+                [
+                    "North",
+                    "South",
+                ],
+            ),
+            mappings: [],
+            parent: None,
+        },
+    ],
+    units: [],
+    models: [
+        Model {
+            name: "main",
+            sim_specs: None,
+            variables: [
+                Aux(
+                    Aux {
+                        ident: "by_region",
+                        equation: ApplyToAll(
+                            [
+                                "Region",
+                            ],
+                            "level * 2",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: Some(
+                                "7",
+                            ),
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Aux(
+                    Aux {
+                        ident: "level",
+                        equation: Scalar(
+                            "inflow + 1",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: Some(
+                                "392",
+                            ),
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+    ],
+    source: None,
+    ai_information: None,
+}

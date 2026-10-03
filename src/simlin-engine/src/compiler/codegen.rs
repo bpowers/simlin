@@ -577,7 +577,10 @@ impl<'module> Compiler<'module> {
     /// recognised array base nor a GF-bearing variable yields a precise
     /// `BadTable` (loud-safe: an un-reconstructable arrayed-GF dependency must
     /// never become a silent stub -- GH #580 / AC7.5).
-    fn arrayed_lookup_table_info(&self, table_expr: &Expr) -> Result<(GraphicalFunctionId, u16)> {
+    fn arrayed_lookup_table_info(
+        &self,
+        table_expr: &Expr,
+    ) -> Result<(Ident<Canonical>, GraphicalFunctionId, u16)> {
         let base = match table_expr {
             // Whole-array reference: the view spans the full array, so the
             // reference sits at the variable's base.
@@ -620,7 +623,66 @@ impl<'module> Compiler<'module> {
             .get(&table_ident)
             .map(|tables| tables.len() as u16)
             .unwrap_or(1);
-        Ok((base_gf, table_count))
+        Ok((table_ident, base_gf, table_count))
+    }
+
+    /// The mode a lookup call reads its table in: the one the call names, or,
+    /// for a plain application, the one the table's kind asks for
+    /// ([`LookupMode::of_kind`], which holds the rule and its sources).
+    ///
+    /// `elem` is the table the call reads when the compiler knows it (a scalar
+    /// table, or one element of a per-element graphical function), so each
+    /// element is read by its own kind. A call that picks its table as the
+    /// model runs (a computed subscript, or every element at once under a
+    /// reducer) has one mode for all of them, so it is refused when the tables
+    /// it can reach are of different kinds: reading one of them by another's
+    /// kind would be a wrong number, not an approximation. A table that holds
+    /// no points answers NaN in every mode and is of no kind.
+    fn lookup_mode(
+        &self,
+        builtin: &BuiltinFn,
+        table_ident: &Ident<Canonical>,
+        elem: Option<u8>,
+    ) -> Result<LookupMode> {
+        // Per-variant semantics: which reading a call names. Any other builtin
+        // this is asked about is a plain application.
+        match builtin {
+            BuiltinFn::LookupForward(_, _, _) => return Ok(LookupMode::Forward),
+            BuiltinFn::LookupBackward(_, _, _) => return Ok(LookupMode::Backward),
+            BuiltinFn::LookupExtrapolate(_, _, _) => return Ok(LookupMode::Extrapolate),
+            _ => {}
+        }
+        let tables = self
+            .module
+            .tables
+            .get(table_ident)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Some(elem) = elem {
+            return Ok(tables
+                .get(elem as usize)
+                .map_or(LookupMode::Interpolate, |table| {
+                    LookupMode::of_kind(table.kind)
+                }));
+        }
+        let mut modes = tables
+            .iter()
+            .filter(|table| !table.data.is_empty())
+            .map(|table| LookupMode::of_kind(table.kind));
+        let Some(mode) = modes.next() else {
+            return Ok(LookupMode::Interpolate);
+        };
+        if modes.any(|other| other != mode) {
+            return sim_err!(
+                NotSimulatable,
+                format!(
+                    "the graphical functions of '{table_ident}' are of different kinds \
+                     (continuous, extrapolating, discrete), and this lookup picks the one it \
+                     reads as the model runs; give them one kind, or look each element up by name"
+                )
+            );
+        }
+        Ok(mode)
     }
 
     /// Build the snapshot-region static view for an **array-valued**
@@ -1153,8 +1215,14 @@ impl<'module> Compiler<'module> {
                     }
                 }
 
-                // lookups are special
-                if let BuiltinFn::Lookup(table_expr, index, _loc) = builtin {
+                // lookups are special: one opcode family, read in the mode the
+                // call names or, for a plain application, the mode of the
+                // table's kind (`lookup_mode`).
+                if let BuiltinFn::Lookup(table_expr, index, _loc)
+                | BuiltinFn::LookupForward(table_expr, index, _loc)
+                | BuiltinFn::LookupBackward(table_expr, index, _loc)
+                | BuiltinFn::LookupExtrapolate(table_expr, index, _loc) = builtin
+                {
                     let (table_ident, element_offset_expr) = extract_table_info(table_expr)?;
 
                     // Look up the base_gf for this table variable
@@ -1178,53 +1246,7 @@ impl<'module> Compiler<'module> {
                     // no `LoadConstant` push is emitted for it (every scalar
                     // table takes this path, its offset being a literal 0).
                     if let Some(elem) = const_element_offset(&element_offset_expr, table_count) {
-                        self.walk_expr(index)?.unwrap();
-                        self.push(SymbolicOpcode::LookupDirect {
-                            base_gf,
-                            table_count,
-                            elem,
-                            mode: LookupMode::Interpolate,
-                        });
-                        return Ok(Some(()));
-                    }
-                    // Emit: push element_offset, push lookup_index, Lookup { base_gf, table_count, mode }
-                    self.walk_expr(&element_offset_expr)?.unwrap();
-                    self.walk_expr(index)?.unwrap();
-                    self.push(SymbolicOpcode::Lookup {
-                        base_gf,
-                        table_count,
-                        mode: LookupMode::Interpolate,
-                    });
-                    return Ok(Some(()));
-                };
-
-                // LookupForward and LookupBackward use the same Lookup opcode with different modes
-                if let BuiltinFn::LookupForward(table_expr, index, _loc)
-                | BuiltinFn::LookupBackward(table_expr, index, _loc) = builtin
-                {
-                    let mode = if matches!(builtin, BuiltinFn::LookupForward(_, _, _)) {
-                        LookupMode::Forward
-                    } else {
-                        LookupMode::Backward
-                    };
-                    let (table_ident, element_offset_expr) = extract_table_info(table_expr)?;
-
-                    let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
-                        crate::Error::new(
-                            ErrorKind::Simulation,
-                            ErrorCode::BadTable,
-                            Some(format!("no graphical function found for '{table_ident}'")),
-                        )
-                    })?;
-
-                    let table_count = self
-                        .module
-                        .tables
-                        .get(&table_ident)
-                        .map(|tables| tables.len() as u16)
-                        .unwrap_or(1);
-
-                    if let Some(elem) = const_element_offset(&element_offset_expr, table_count) {
+                        let mode = self.lookup_mode(builtin, &table_ident, Some(elem))?;
                         self.walk_expr(index)?.unwrap();
                         self.push(SymbolicOpcode::LookupDirect {
                             base_gf,
@@ -1234,6 +1256,18 @@ impl<'module> Compiler<'module> {
                         });
                         return Ok(Some(()));
                     }
+                    // Emit: push element_offset, push lookup_index, Lookup { base_gf, table_count, mode }
+                    //
+                    // No model that compiles reaches this arm today. An index
+                    // computed as the model runs is refused at lowering (the
+                    // table argument's index is not among the equation's
+                    // dependencies; `db::ltm_char_tests` records the limit), a
+                    // constant index past the dimension is refused as out of
+                    // bounds, and a variable cannot hold more tables than
+                    // `LookupDirect`'s element operand counts. The mode is
+                    // decided as for any call that picks its table at run time,
+                    // so the arm is right when lowering does admit one.
+                    let mode = self.lookup_mode(builtin, &table_ident, None)?;
                     self.walk_expr(&element_offset_expr)?.unwrap();
                     self.walk_expr(index)?.unwrap();
                     self.push(SymbolicOpcode::Lookup {
@@ -1357,6 +1391,7 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Lookup(_, _, _)
                     | BuiltinFn::LookupForward(_, _, _)
                     | BuiltinFn::LookupBackward(_, _, _)
+                    | BuiltinFn::LookupExtrapolate(_, _, _)
                     | BuiltinFn::IsModuleInput(_, _)
                     | BuiltinFn::Previous(_, _)
                     | BuiltinFn::Init(_) => unreachable!(),
@@ -1677,14 +1712,11 @@ impl<'module> Compiler<'module> {
                         // by the wrapping reducer / vector op.
                         BuiltinFn::Lookup(table_expr, index, _loc)
                         | BuiltinFn::LookupForward(table_expr, index, _loc)
-                        | BuiltinFn::LookupBackward(table_expr, index, _loc) => {
-                            let mode = match builtin {
-                                BuiltinFn::LookupForward(_, _, _) => LookupMode::Forward,
-                                BuiltinFn::LookupBackward(_, _, _) => LookupMode::Backward,
-                                _ => LookupMode::Interpolate,
-                            };
-                            let (base_gf, table_count) =
+                        | BuiltinFn::LookupBackward(table_expr, index, _loc)
+                        | BuiltinFn::LookupExtrapolate(table_expr, index, _loc) => {
+                            let (table_ident, base_gf, table_count) =
                                 self.arrayed_lookup_table_info(table_expr)?;
+                            let mode = self.lookup_mode(builtin, &table_ident, None)?;
                             self.walk_expr_as_view(table_expr)?;
                             self.walk_expr(index)?.unwrap();
                             self.push(SymbolicOpcode::LookupArray {
@@ -1992,7 +2024,8 @@ impl<'module> Compiler<'module> {
 ///   runtime check; an out-of-range constant must keep the general form so the
 ///   VM still yields its documented NaN.
 /// - FITS `u8`, because that is the field width the 8-byte `Opcode` budget
-///   leaves. An arrayed GF with 256+ elements simply keeps the runtime push.
+///   leaves. No variable holds more tables than that: `GraphicalFunctionId`
+///   is a `u8` as well, and resolution refuses a module with more.
 fn const_element_offset(expr: &Expr, table_count: u16) -> Option<u8> {
     let Expr::Const(value, _) = expr else {
         return None;

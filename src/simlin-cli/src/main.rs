@@ -333,17 +333,14 @@ fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
         )
     })?;
 
-    let project = match project_io::Project::decode_from_slice(&contents_buf) {
-        Ok(project) => serde::deserialize(project),
-        Err(err) => {
-            return Err(Error::new(
-                ErrorKind::Import,
-                ErrorCode::VensimConversion,
-                Some(format!("{err}")),
-            ));
-        }
-    };
-    Ok(project)
+    let stored = project_io::Project::decode_from_slice(&contents_buf).map_err(|err| {
+        Error::new(
+            ErrorKind::Import,
+            ErrorCode::VensimConversion,
+            Some(format!("{err}")),
+        )
+    })?;
+    serde::deserialize(stored)
 }
 
 /// Print TSV output filtered to only the visible stocks, in declaration
@@ -935,7 +932,7 @@ mod open_binary_tests {
             .unwrap_or_else(|e| panic!("the encoded project decodes: {e}"));
         assert_eq!(
             decoded,
-            serde::deserialize(serde::serialize(&project).unwrap())
+            serde::deserialize(serde::serialize(&project).unwrap()).unwrap()
         );
     }
 

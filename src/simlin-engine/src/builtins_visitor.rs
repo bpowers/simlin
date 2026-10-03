@@ -182,7 +182,7 @@ fn parse_module_order_arg(expr: &Expr0) -> Option<u32> {
 }
 
 /// Normalize the stdlib aliases to the model each call instantiates:
-/// `DELAY` to `DELAY1`, and `DELAYN`/`SMTHN` with a literal order 1 or 3 to
+/// `DELAYN`/`SMTHN` with a literal order 1 or 3 to
 /// `DELAY1`/`DELAY3`/`SMTH1`/`SMTH3` with the order argument consumed.
 ///
 /// An omitted initial value stays omitted: the call wires only `[input,
@@ -193,11 +193,20 @@ fn parse_module_order_arg(expr: &Expr0) -> Option<u32> {
 /// initial value of input will be used". An explicit fourth argument is an
 /// independent port, as for every other stdlib call.
 ///
-/// `DELAY(x, t)` is XMILE 1.0 section 3.5.3's infinite-order material delay
-/// -- a pipeline delay, Vensim's `DELAY FIXED` as xmutil maps it -- which the
-/// stdlib framework cannot represent (it has no ring-buffer state), so it is
-/// a first-order delay here: known-incorrect where the exact delay matters
-/// (`delay_time >> DT`).
+/// `DELAY(x, t)` is refused. It is XMILE 1.0 section 3.5.3's "infinite-order
+/// material delay of the input for the requested fixed time", which is what
+/// the MDL importer writes Vensim's `DELAY FIXED` as ("Returns the value of
+/// the input delayed by the delay time", vensim.com/documentation/fn_delay_fixed.html):
+/// the output is the input as it was one delay time earlier. The expected
+/// results beside a Stella Architect file agree:
+/// `test/test-models/tests/delay_xmile/output.tab` has `DELAY(Stock_1, 1)`
+/// equal to `Stock_1` one step back, and `DELAY(Flow_2, 5, -20)` at -20 for
+/// five steps and then `Flow_2` five steps back (the fixture's README does not
+/// say which tool wrote that file, so that it is Stella's own output is
+/// unverified). That needs a
+/// record of the input over the whole delay, which no stdlib model holds, and
+/// a first-order delay in its place is a different function with the same
+/// name, so the call is an error on its variable rather than a number.
 ///
 /// Only the first- and third-order forms have a stdlib model; every other
 /// literal order is refused loudly.
@@ -207,7 +216,14 @@ fn rewrite_alias_module_call(
     loc: crate::builtins::Loc,
 ) -> Result<(String, Vec<Expr0>), EquationError> {
     if func == "delay" {
-        return Ok(("delay1".to_string(), args));
+        return eqn_err!(
+            NotSimulatable,
+            loc.start,
+            loc.end,
+            "DELAY (Vensim's DELAY FIXED) delays its input by exactly the delay time, which \
+             is not supported yet; DELAY1 and DELAY3 are first- and third-order delays over \
+             the same average time"
+        );
     }
     if !matches!(func.as_str(), "delayn" | "smthn") {
         return Ok((func, args));
@@ -1539,15 +1555,51 @@ mod tests {
         project.assert_vm_result("result", &[2.0, 2.0]);
     }
 
-    /// Test that DELAY (from DELAY FIXED mapping) works as delay1
+    /// `DELAY` is a fixed (pipeline) delay, which no stdlib model computes, so
+    /// a call is refused on its variable with a reason that says so, in both
+    /// its arities, and files no helper: it is never lowered as the
+    /// first-order delay it shares a name with.
     #[test]
-    fn test_delay_alias() {
-        let project = TestProject::new("delay_alias_test")
-            .aux("input", "10", None)
-            .aux("delay_time", "1", None)
-            .aux("init", "0", None)
-            .aux("result", "DELAY(input, delay_time, init)", None);
+    fn a_fixed_delay_is_refused_on_its_variable() {
+        use crate::db::{
+            DiagnosticSeverity, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
+        };
 
-        project.assert_compiles_incremental();
+        for equation in ["DELAY(input, delay_time, init)", "DELAY(input, delay_time)"] {
+            let project = TestProject::new("fixed_delay")
+                .aux("input", "10", None)
+                .aux("delay_time", "1", None)
+                .aux("init", "0", None)
+                .aux("result", equation, None);
+            assert!(
+                project
+                    .error_diagnostics()
+                    .contains(&("main.result".to_string(), crate::ErrorCode::NotSimulatable)),
+                "{equation}: {:?}",
+                project.error_diagnostics()
+            );
+
+            let datamodel = project.build_datamodel();
+            let db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &datamodel);
+            let diagnostics =
+                collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
+            let reason = diagnostics
+                .iter()
+                .find(|d| {
+                    d.severity == DiagnosticSeverity::Error
+                        && d.variable.as_deref() == Some("result")
+                })
+                .and_then(|d| d.reason())
+                .unwrap_or_default();
+            assert!(
+                reason.contains("DELAY FIXED") && reason.contains("not supported"),
+                "{equation}: {reason}"
+            );
+            assert!(
+                crate::test_common::implicit_vars_of(&db, &sync, "main", "result").is_empty(),
+                "{equation}: a refused call files no helper"
+            );
+        }
     }
 }

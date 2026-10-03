@@ -202,10 +202,15 @@ message ViewElement {
     RIGHT = 4;
   };
 
+  // What a Vensim sketch record holds that an MDL save writes back
+  // (datamodel::view_element::ViewElementCompat).
   message ViewElementCompat {
     optional double width = 1;
     optional double height = 2;
     optional uint32 bits = 3;
+    optional int32 shape = 4;
+    optional string name_field = 5;
+    optional string tail = 6;
   }
 
   message Aux {
@@ -338,6 +343,30 @@ message View {
   string name = 7;
   bool has_name = 8;
   optional string font = 9;
+
+  // Vensim sketch metadata an MDL save needs and the view does not otherwise
+  // hold (datamodel::view_element::StockFlowSketchCompat). Absent on a view
+  // that was not read from a Vensim sketch.
+  message SketchCompat {
+    message Segment {
+      double x_offset = 1;
+      double y_offset = 2;
+    }
+    message Point {
+      int32 x = 1;
+      int32 y = 2;
+    }
+    message Link {
+      int32 uid = 1;
+      int32 field4 = 2;
+      int32 field10 = 3;
+      // Absent for the (0, 0) sentinel of a straight connector.
+      Point control_point = 4;
+    }
+    repeated Segment segments = 1;
+    repeated Link links = 2;
+  }
+  SketchCompat sketch_compat = 10;
 };
 
 message LoopMetadata {
@@ -369,7 +398,7 @@ message ModelGroup {
 message Model {
   string name = 1;
   // namespaces
-  // no 'resource' or sim_specs in our normalized form
+  // no 'resource' in our normalized form
   repeated Variable variables = 3;
   repeated View views = 4;
   repeated LoopMetadata loop_metadata = 5;
@@ -378,6 +407,11 @@ message Model {
   // proto3 message field is presence-tracked, so the generated Rust field is a
   // `buffa::MessageField<MacroSpec>` that distinguishes unset from empty.
   MacroSpec macro_spec = 7;
+  // The model's own simulation specs, which the engine runs it under in place
+  // of the project's (XMILE 1.0 section 4: "The model section can OPTIONALLY
+  // include <sim_specs> ... to override specific settings"). Absent when the
+  // model has none.
+  SimSpecs sim_specs = 8;
 }
 
 enum SimMethod {

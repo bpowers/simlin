@@ -20,7 +20,7 @@
 //! - model_lowered_variables, lowered_variable_by_name (the lowered variables
 //!   the causal and polarity graphs read, as handles to the per-variable memos)
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::canonicalize;
@@ -72,8 +72,10 @@ pub(crate) fn unique_module_output(
 /// and structural info (stock inflows/outflows, module refs).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CausalEdgesResult {
-    /// Adjacency list: from_var -> {to_var1, to_var2, ...}
-    pub edges: HashMap<String, BTreeSet<String>>,
+    /// Adjacency list: from_var -> {to_var1, to_var2, ...}, in name order: a
+    /// reader that walks it (`analysis::model_links`) hands a host the same
+    /// list for the same model every time.
+    pub edges: BTreeMap<String, BTreeSet<String>>,
     /// Stock variables in the model
     pub stocks: BTreeSet<String>,
     /// Module var_name -> model_name for dynamic modules
@@ -1573,7 +1575,7 @@ pub fn model_causal_edges(
                 .map(|iv| iv.name.clone())
         })
         .collect();
-    let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut stocks = BTreeSet::new();
     let mut dynamic_modules = HashMap::new();
     let mut module_outputs_read: ModuleOutputsRead = HashMap::new();
@@ -1583,7 +1585,7 @@ pub fn model_causal_edges(
     // its own output (a Stella import wires those as inputs) is no edge
     // either; a local self-read stays, as every read of a local name does.
     fn record_reads(
-        edges: &mut HashMap<String, BTreeSet<String>>,
+        edges: &mut BTreeMap<String, BTreeSet<String>>,
         module_outputs_read: &mut ModuleOutputsRead,
         init_captures: &HashSet<String>,
         reader: &str,
@@ -2069,7 +2071,7 @@ pub fn model_element_causal_edges(
         .any(|sv| !super::variable_dimensions(db, *sv, project).is_empty());
     if !any_arrayed {
         return ElementCausalEdgesResult {
-            edges: variable_edges.edges.clone(),
+            edges: variable_edges.edges.clone().into_iter().collect(),
             stocks: variable_edges.stocks.clone(),
         };
     }

@@ -619,7 +619,8 @@ impl UnitInferer<'_> {
                 }
                 BuiltinFn::Lookup(table_expr, _, _loc)
                 | BuiltinFn::LookupForward(table_expr, _, _loc)
-                | BuiltinFn::LookupBackward(table_expr, _, _loc) => {
+                | BuiltinFn::LookupBackward(table_expr, _, _loc)
+                | BuiltinFn::LookupExtrapolate(table_expr, _, _loc) => {
                     // lookups have the units specified on the table
                     let table_name = match table_expr.as_ref() {
                         Expr2::Var(name, _, _) => name.as_str(),

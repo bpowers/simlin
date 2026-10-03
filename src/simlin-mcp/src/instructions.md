@@ -50,7 +50,7 @@ Variables use XMILE equation syntax. Key functions and their behavior:
 | `SMTH3(input, delay_time)` | Third-order exponential smooth |
 | `DELAY1(input, delay_time)` | First-order material delay |
 | `DELAY3(input, delay_time)` | Third-order material delay |
-| `DELAY(input, delay_time, initial)` | Fixed delay |
+| `DELAY(input, delay_time, initial)` | Fixed (pipeline) delay: the input exactly `delay_time` earlier. Not simulated: a variable that uses it is refused with a `not_simulatable` error. `DELAY1` and `DELAY3` are first- and third-order delays over the same average time, which smooth the input and are not the same behavior |
 | `INIT(expr)` | Capture value at simulation start |
 | `PREVIOUS(expr, initial)` | Value from previous timestep |
 | `PULSE(volume, first_pulse, interval)` | Pulse input |

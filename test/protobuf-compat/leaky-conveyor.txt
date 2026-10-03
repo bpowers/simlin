@@ -1,0 +1,282 @@
+Project {
+    name: "leaky conveyor",
+    sim_specs: SimSpecs {
+        start: 0.0,
+        stop: 6.0,
+        dt: Dt(
+            0.5,
+        ),
+        save_step: None,
+        sim_method: Euler,
+        time_units: Some(
+            "Months",
+        ),
+    },
+    dimensions: [],
+    units: [],
+    models: [
+        Model {
+            name: "main",
+            sim_specs: None,
+            variables: [
+                Flow(
+                    Flow {
+                        ident: "arriving",
+                        equation: Scalar(
+                            "100 + 10 * TIME",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "belt",
+                        equation: Scalar(
+                            "0",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [
+                            "arriving",
+                        ],
+                        outflows: [
+                            "departing",
+                            "seepage",
+                            "spillage",
+                        ],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: Some(
+                                Conveyor {
+                                    transit_time: "2",
+                                    capacity: None,
+                                    inflow_limit: None,
+                                    sample: None,
+                                    arrest: None,
+                                    discrete: false,
+                                    batch_integrity: false,
+                                    one_at_a_time: true,
+                                    exponential_leak: false,
+                                    ignore_earlier_zone_losses: false,
+                                },
+                            ),
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "departing",
+                        equation: Scalar(
+                            "",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "drained",
+                        equation: Scalar(
+                            "0",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [
+                            "departing",
+                        ],
+                        outflows: [],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "seepage",
+                        equation: Scalar(
+                            "0.05",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: Some(
+                                Leakage {
+                                    fraction: None,
+                                    integers: false,
+                                    zone_start: Some(
+                                        "0",
+                                    ),
+                                    zone_end: Some(
+                                        "1",
+                                    ),
+                                },
+                            ),
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "seeped",
+                        equation: Scalar(
+                            "0",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [
+                            "seepage",
+                        ],
+                        outflows: [],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Flow(
+                    Flow {
+                        ident: "spillage",
+                        equation: Scalar(
+                            "0.1",
+                        ),
+                        documentation: "",
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: Some(
+                                Leakage {
+                                    fraction: None,
+                                    integers: false,
+                                    zone_start: Some(
+                                        "0.5",
+                                    ),
+                                    zone_end: Some(
+                                        "1",
+                                    ),
+                                },
+                            ),
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+                Stock(
+                    Stock {
+                        ident: "spilled",
+                        equation: Scalar(
+                            "0",
+                        ),
+                        documentation: "",
+                        units: None,
+                        inflows: [
+                            "spillage",
+                        ],
+                        outflows: [],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat {
+                            active_initial: None,
+                            non_negative: false,
+                            can_be_module_input: false,
+                            visibility: Private,
+                            data_source: None,
+                            conveyor: None,
+                            leakage: None,
+                            spreadflow: None,
+                            queue: None,
+                            overflow: false,
+                        },
+                    },
+                ),
+            ],
+            views: [],
+            loop_metadata: [],
+            groups: [],
+            macro_spec: None,
+        },
+    ],
+    source: None,
+    ai_information: None,
+}

@@ -407,7 +407,7 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
   // names, `<local>-<hash>`.
   await widget.getByRole('button', { name: 'Variable', exact: true }).click();
   await canvas.locator('g.simlin-aux', { hasText: 'New Variable' }).locator('circle').first().click();
-  await expect(widget.getByText('error: Variable has empty equation')).toBeVisible();
+  await expect(widget.getByText('error: the variable has no equation')).toBeVisible();
   const equationEditor = widget.locator('[data-slate-editor="true"][class*="eqnEditor"]');
   await expect(equationEditor).toBeVisible();
   await equationEditor.click();

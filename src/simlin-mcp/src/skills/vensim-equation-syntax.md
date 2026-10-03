@@ -30,7 +30,7 @@ The complete mapping from Vensim MDL function names to XMILE (Simlin) equivalent
 | `DELAY1I(input, delay, init)` | `DELAY1(input, delay, init)` | With initial value |
 | `DELAY3(input, delay)` | `DELAY3(input, delay)` | Third-order material delay |
 | `DELAY3I(input, delay, init)` | `DELAY3(input, delay, init)` | With initial value |
-| `DELAY FIXED(input, delay, init)` | `DELAY(input, delay, init)` | Fixed (pipeline) delay |
+| `DELAY FIXED(input, delay, init)` | `DELAY(input, delay, init)` | Fixed (pipeline) delay. The name translates, but Simlin does not simulate it: a variable that uses `DELAY` is refused with a `not_simulatable` error. `DELAY1`/`DELAY3` smooth the input over the same average time and are not the same behavior, so say so if you substitute one |
 | `DELAY N(input, dt, init, n)` | `DELAYN(input, dt, n, init)` | Nth-order; arguments reordered |
 | `FORECAST(input, avg_time, horizon)` | `FORCST(input, avg_time, horizon)` | |
 

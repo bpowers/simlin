@@ -721,12 +721,7 @@ impl Materializer<'_> {
 /// rejects with `BadTable`. The `AssignTemp`'s bare `App(Lookup(...))` body is
 /// what codegen's dedicated `LookupArray` opcode consumes.
 fn arrayed_lookup_apply_view(builtin: &BuiltinFn) -> Option<ArrayView> {
-    let table = match builtin {
-        BuiltinFn::Lookup(table, _, _)
-        | BuiltinFn::LookupForward(table, _, _)
-        | BuiltinFn::LookupBackward(table, _, _) => table,
-        _ => return None,
-    };
+    let (table, _index) = builtin.lookup_args()?;
     let view = super::find_expr_array_view(table)?;
     (view.dims.iter().product::<usize>() > 1).then_some(view)
 }

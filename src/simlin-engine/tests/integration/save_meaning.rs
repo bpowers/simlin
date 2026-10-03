@@ -195,7 +195,7 @@ const EXPECTED: &[Expected] = &[
     row("test/test-models/tests/builtin_mean/builtin_mean.stmx", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
     row("test/test-models/tests/builtin_mean/builtin_mean.xmile", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
     row("test/test-models/tests/data_from_other_model/test_data_from_other_model.mdl", Mdl, Mdl, ResultsChange, ELEMENT_FAMILY),
-    row("test/test-models/tests/delay_xmile/test_delay_xmile.xmile", Xmile, Mdl, ResultsChange, NON_NEGATIVE),
+    row("test/test-models/tests/delay_xmile/test_delay_xmile.xmile", Xmile, Mdl, Definition, NON_NEGATIVE),
     row("test/test-models/tests/delays2/delays.xmile", Xmile, Mdl, ResultsChange, RECIPROCAL_DT),
     row("test/test-models/tests/except/test_except.mdl", Mdl, Mdl, Definition, EXCEPT_DEFAULT),
     row("test/test-models/tests/except_multiple/test_except_multiple.mdl", Mdl, Mdl, Definition, EXCEPT_DEFAULT),
@@ -331,7 +331,7 @@ fn saved(project: &Project, format: SaveFormat) -> Option<Project> {
                 .try_encode_to_vec()
                 .ok()?;
             let back = simlin_engine::project_io::Project::decode_from_slice(&bytes).ok()?;
-            Some(simlin_engine::serde::deserialize(back))
+            simlin_engine::serde::deserialize(back).ok()
         }
         SaveFormat::SdaiJson => None,
     }

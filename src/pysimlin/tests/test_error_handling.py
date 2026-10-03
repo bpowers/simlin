@@ -8,6 +8,7 @@ import pytest
 import simlin
 from simlin import SimlinRuntimeError
 from simlin._ffi import _finalizer_refs, ffi, get_error_string, lib
+from simlin.errors import ErrorCode
 
 
 class TestErrorStringHandling:
@@ -20,6 +21,21 @@ class TestErrorStringHandling:
             msg = get_error_string(code)
             assert isinstance(msg, str)
             assert len(msg) > 0
+
+    def test_error_codes_mirror_the_engines(self) -> None:
+        """`ErrorCode` is a hand-written copy of libsimlin's `SimlinErrorCode`.
+
+        The engine names each of its codes (`simlin_error_str`) and answers
+        "unknown_error" past the last, so walking the codes from zero gives the
+        engine's own list to hold the copy to: the same numbers under the same
+        names, none missing and none extra.
+        """
+        names: list[str] = []
+        while (name := get_error_string(len(names))) != "unknown_error":
+            names.append(name)
+            assert len(names) < 1000, "the engine stops naming codes past its last"
+        assert [code.name.lower() for code in ErrorCode] == names
+        assert [code.value for code in ErrorCode] == list(range(len(names)))
 
     def test_error_string_const_static(self) -> None:
         """Verify that simlin_error_str returns static strings that shouldn't be freed."""

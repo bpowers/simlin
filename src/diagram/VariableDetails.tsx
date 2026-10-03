@@ -763,7 +763,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
       // the error list replaces the chart.
       const errorList = detailsView.equationErrors.map((error, i) => (
         <div key={`eqn-${i}`} id={`${fieldIdPrefix}-eqn-error-${i}`} className={styles.errorList}>
-          error: {errorCodeDescription(error.code)}
+          error: {error.details ?? errorCodeDescription(error.code)}
         </div>
       ));
       chartOrErrors = [...errorList, ...unitWarnings, ...connectorWarnings, ...advisories];

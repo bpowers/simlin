@@ -181,17 +181,6 @@ const ROWS: &[ModuleRow] = &[
         ],
     },
     ModuleRow {
-        covers: "DELAY is a rename to DELAY1 and nothing else: its arguments pass through \
-                 untouched",
-        parent: Parent::Scalar,
-        equation: "DELAY(k, 2)",
-        helpers: &[
-            "$⁚out⁚0⁚arg1 = aux 2",
-            "$⁚out⁚0⁚delay1 = module stdlib⁚delay1 [k->$⁚out⁚0⁚delay1.input, \
-             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay1.delay_time]",
-        ],
-    },
-    ModuleRow {
         covers: "a nested call: the inner call is expanded first (args are walked before the \
                  outer expansion), so it takes counter 0 and the outer takes 1, and the outer \
                  reads the inner through its `module·output` name",

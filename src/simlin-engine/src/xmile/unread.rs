@@ -11,7 +11,11 @@
 //! objects any other view (an interface page) holds, since no such view is
 //! read, the stories of story mode, and what a model's variables hold that
 //! is not a variable (a standalone graphical function, a group's member
-//! list). Not reported: a view's style and simulation delay, an empty page,
+//! list). Also reported: a graphical function attribute the reader does not
+//! act on (a type it does not know, a draft-format `discrete="true"`),
+//! wherever the reader reads a graphical function, a macro's body included,
+//! with the kind the function is read as. Not reported: a view's
+//! style and simulation delay, an empty page,
 //! page templates, a tool's preferences, window layout and time formats, and
 //! Stella's record of each variable's dependencies (`UNREPORTED`). The files
 //! a tool writes carry those whatever the model is, so a warning about them
@@ -35,7 +39,8 @@ use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
-use crate::import_losses::{ImportWarning, not_kept};
+use crate::import_losses::{ImportWarning, counted, not_kept};
+use crate::xmile::dimensions::GraphicalFunctionKind;
 
 #[cfg(test)]
 #[path = "unread_tests.rs"]
@@ -43,6 +48,14 @@ mod tests;
 
 /// The tags the reader reads among a model's variables.
 const VARIABLES: &[&[u8]] = &[b"stock", b"flow", b"aux", b"module"];
+
+/// The variables whose own `<gf>` the reader reads (`xmile::Flow::gf`,
+/// `xmile::Aux::gf`).
+const OWN_TABLE: &[&[u8]] = &[b"flow", b"aux"];
+
+/// The variables whose `<element>`s the reader reads, each of which can hold
+/// a `<gf>` (`xmile::VarElement::gf`).
+const ELEMENT_TABLES: &[&[u8]] = &[b"stock", b"flow", b"aux"];
 
 /// The tags the reader reads on a stock-and-flow view.
 const VIEW_OBJECTS: &[&[u8]] = &[
@@ -75,7 +88,7 @@ const DESCRIBING_CHILDREN: &[&[u8]] = &[b"graph", b"plot", b"popup", b"text"];
 /// stories.
 pub(crate) fn unread_content(xml: &[u8]) -> Vec<ImportWarning> {
     let models = scan(xml);
-    let several = models.len() > 1;
+    let several = models.iter().filter(|model| !model.in_macro).count() > 1;
     let mut warnings = Vec::new();
     for model in &models {
         // A place within a model, and which model when the file has several.
@@ -87,12 +100,15 @@ pub(crate) fn unread_content(xml: &[u8]) -> Vec<ImportWarning> {
             }
         };
 
-        let place = if several {
+        let place = if model.in_macro {
+            format!("in macro '{}'", model.name)
+        } else if several {
             format!("in model '{}'", model.name)
         } else {
             "in the model".to_string()
         };
         report_by_tag(&place, &model.variables, true, &mut warnings);
+        report_unread_gf_attributes(&place, &model.unread_gf_attributes, &mut warnings);
 
         // An unnamed view is called by its number among the views of its
         // kind; the only view of its kind has no number.
@@ -155,10 +171,27 @@ struct View {
     unread: Vec<Unread>,
 }
 
-/// What one model holds that the datamodel does not keep, by place.
+/// A `<gf>` attribute the reader does not act on.
+struct UnreadGfAttribute {
+    /// As the file spells it, with the variable it is on:
+    /// `type="stepwise" on effect`.
+    spelled: String,
+    /// The kind the function's `type` names, which the reader reads it as;
+    /// None when the type names none and the function is read as the default
+    /// kind.
+    read_by_type: Option<GraphicalFunctionKind>,
+}
+
+/// What one model, or one macro's body, holds that the datamodel does not
+/// keep, by place.
 struct Model {
     name: String,
+    /// A `<macro>`, whose body the reader reads with a model's content model
+    /// (`xmile::Macro::variables`). Only its graphical functions are looked
+    /// at.
+    in_macro: bool,
     variables: Vec<Unread>,
+    unread_gf_attributes: Vec<UnreadGfAttribute>,
     views: Vec<View>,
     stories: Vec<Unread>,
 }
@@ -169,6 +202,18 @@ enum Scope {
     File,
     Model,
     Variables,
+    /// A macro, and its body's variables, where only graphical functions are
+    /// looked at.
+    Macro,
+    MacroVariables,
+    /// A variable whose own `<gf>` the reader reads (`OWN_TABLE`) or whose
+    /// `<element>`s it reads (`ELEMENT_TABLES`).
+    Variable {
+        own_table: bool,
+        element_tables: bool,
+    },
+    /// One of a variable's `<element>`s, whose `<gf>` the reader reads.
+    Element,
     Views,
     View(ViewKind),
     Stories,
@@ -286,6 +331,8 @@ fn scan(xml: &[u8]) -> Vec<Model> {
     let mut models: Vec<Model> = Vec::new();
     let mut scopes: Vec<Scope> = Vec::new();
     let mut capture: Option<Capture> = None;
+    // The variable the pass is inside, by name.
+    let mut table_of: Option<String> = None;
     loop {
         let event = match reader.read_event() {
             Ok(Event::Eof) | Err(_) => break,
@@ -332,17 +379,21 @@ fn scan(xml: &[u8]) -> Vec<Model> {
                 let scope = match (parent, tag) {
                     // The read does not look at the root's name either.
                     (None, _) => Scope::File,
-                    (Some(Scope::File), b"model") => {
+                    (Some(Scope::File), tag @ (b"model" | b"macro")) => {
+                        let in_macro = tag == b"macro";
                         let name = Label::from_attributes(&element).name;
                         models.push(Model {
                             name: name.unwrap_or_else(|| "main".to_string()),
+                            in_macro,
                             variables: Vec::new(),
+                            unread_gf_attributes: Vec::new(),
                             views: Vec::new(),
                             stories: Vec::new(),
                         });
-                        Scope::Model
+                        if in_macro { Scope::Macro } else { Scope::Model }
                     }
                     (Some(Scope::Model), b"variables") => Scope::Variables,
+                    (Some(Scope::Macro), b"variables") => Scope::MacroVariables,
                     (Some(Scope::Model), b"views") => Scope::Views,
                     (Some(Scope::Views), b"view") => {
                         let kind = view_kind(&element);
@@ -358,6 +409,43 @@ fn scan(xml: &[u8]) -> Vec<Model> {
                     (Some(Scope::Views), b"stories") => Scope::Stories,
                     (Some(Scope::Variables), tag) if !VARIABLES.contains(&tag) => {
                         capture = unread_at(Place::Variables);
+                        Scope::Elsewhere
+                    }
+                    (Some(Scope::Variables | Scope::MacroVariables), tag)
+                        if OWN_TABLE.contains(&tag) || ELEMENT_TABLES.contains(&tag) =>
+                    {
+                        table_of = Label::from_attributes(&element).name;
+                        Scope::Variable {
+                            own_table: OWN_TABLE.contains(&tag),
+                            element_tables: ELEMENT_TABLES.contains(&tag),
+                        }
+                    }
+                    (
+                        Some(Scope::Variable {
+                            element_tables: true,
+                            ..
+                        }),
+                        b"element",
+                    ) => Scope::Element,
+                    (
+                        Some(
+                            Scope::Variable {
+                                own_table: true, ..
+                            }
+                            | Scope::Element,
+                        ),
+                        b"gf",
+                    ) => {
+                        if let Some(model) = models.last_mut() {
+                            let variable = table_of.as_deref().unwrap_or_default();
+                            let (unread, read_by_type) = unread_gf_attributes(&element);
+                            model
+                                .unread_gf_attributes
+                                .extend(unread.into_iter().map(|spelled| UnreadGfAttribute {
+                                    spelled: format!("{spelled} on {variable}"),
+                                    read_by_type,
+                                }));
+                        }
                         Scope::Elsewhere
                     }
                     (Some(Scope::View(ViewKind::StockFlow)), tag)
@@ -387,6 +475,95 @@ fn scan(xml: &[u8]) -> Vec<Model> {
         }
     }
     models
+}
+
+/// The attributes of a `<gf>` the reader does not act on, each as the file
+/// spells it, and the kind its `type` names, which the reader reads it as
+/// (None: the default kind).
+///
+/// `type` is XMILE's (1.0 section 4.1.3), and the reader's own
+/// `GraphicalFunctionKind::from_type_attribute` says which of its values are
+/// known. `discrete="true"` is not XMILE 1.0's for a graphical function: the
+/// corpus holds `<gf discrete="false">` from a writer of the draft format
+/// (`test/test-models/tests/lookups/test_lookups_no-indirect.xmile`, written
+/// by go-xmile). That `discrete="true"` means what `type="discrete"` does is
+/// unverified, so the reader does not act on it and it is reported here;
+/// `discrete="false"` asks for nothing the default kind is not.
+fn unread_gf_attributes(gf: &BytesStart) -> (Vec<String>, Option<GraphicalFunctionKind>) {
+    let mut unread = Vec::new();
+    let mut read_by_type = None;
+    for attribute in gf.attributes().flatten() {
+        let Some(value) = value_of(&attribute) else {
+            continue;
+        };
+        match attribute.key.local_name().as_ref() {
+            b"type" => match GraphicalFunctionKind::from_type_attribute(&value) {
+                Some(kind) => read_by_type = Some(kind),
+                None => unread.push(format!("type=\"{value}\"")),
+            },
+            b"discrete" if value.trim().eq_ignore_ascii_case("true") => {
+                unread.push(format!("discrete=\"{value}\""));
+            }
+            _ => {}
+        }
+    }
+    (unread, read_by_type)
+}
+
+/// One warning per kind the graphical functions holding `attributes` are
+/// read as, in the order each first appears, saying whether that is the
+/// default kind or the kind their `type` names.
+fn report_unread_gf_attributes(
+    place: &str,
+    attributes: &[UnreadGfAttribute],
+    warnings: &mut Vec<ImportWarning>,
+) {
+    // At most one group per kind and one for the default, so a linear search
+    // keeps the pass linear.
+    let mut groups: Vec<(Option<GraphicalFunctionKind>, Vec<String>)> = Vec::new();
+    for attribute in attributes {
+        match groups
+            .iter_mut()
+            .find(|(read_by_type, _)| *read_by_type == attribute.read_by_type)
+        {
+            Some((_, spelled)) => spelled.push(attribute.spelled.clone()),
+            None => groups.push((attribute.read_by_type, vec![attribute.spelled.clone()])),
+        }
+    }
+    for (read_by_type, spelled) in groups {
+        let said = match read_by_type {
+            None => (
+                "is not one the reader knows, so its function is read as continuous".to_string(),
+                "are not ones the reader knows, so their functions are read as continuous"
+                    .to_string(),
+            ),
+            Some(kind) => {
+                let kind = match kind {
+                    GraphicalFunctionKind::Continuous => "continuous",
+                    GraphicalFunctionKind::Extrapolate => "extrapolate",
+                    GraphicalFunctionKind::Discrete => "discrete",
+                };
+                (
+                    format!(
+                        "is not one the reader acts on; its function is read as {kind}, as its \
+                         type says"
+                    ),
+                    format!(
+                        "are not ones the reader acts on; their functions are read as {kind}, \
+                         as their types say"
+                    ),
+                )
+            }
+        };
+        warnings.push(counted(
+            spelled.len(),
+            "graphical function type",
+            "graphical function types",
+            place,
+            (&said.0, &said.1),
+            &spelled,
+        ));
+    }
 }
 
 /// A view's type, from its `type` attribute; a view without one is a

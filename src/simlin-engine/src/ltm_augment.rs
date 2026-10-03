@@ -854,10 +854,8 @@ fn wrap_non_matching_in_previous(
             // `idx`, misattributing its movement to whichever source the partial
             // isolates -- a wrong number with no diagnostic. So the indices go
             // through the wrap's own index pass like any other other-dep.
-            if matches!(
-                name.to_ascii_lowercase().as_str(),
-                "lookup" | "lookup_forward" | "lookup_backward"
-            ) && !args.is_empty()
+            if crate::builtins::BuiltinSig::name_reads_a_table(&name.to_ascii_lowercase())
+                && !args.is_empty()
             {
                 // Child indices match the `Expr2` walk, which counts the skipped
                 // `LookupTable` slot as child 0.

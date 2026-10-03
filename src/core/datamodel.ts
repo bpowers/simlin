@@ -49,10 +49,14 @@ export { ErrorCode };
 
 export type UID = number;
 
+// `details` is the engine's reason: what the code alone does not say (the name
+// that did not resolve, the arity a call missed). A parse error has none --
+// the highlighted span is its reason -- and renders its code's description.
 export interface EquationError {
   readonly code: ErrorCode;
   readonly start: number;
   readonly end: number;
+  readonly details: string | undefined;
 }
 
 // Mirrors the engine's three-valued unit-error kind (SimlinUnitErrorKind).

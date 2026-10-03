@@ -85,7 +85,8 @@ fn scalar_model_produces_identical_element_graph() {
 
     // Edges should be identical (same keys, same value sets)
     assert_eq!(
-        var_edges.edges, elem_edges.edges,
+        var_edges.edges,
+        elem_edges.edges.clone().into_iter().collect(),
         "scalar model: element edges should be identical to variable edges"
     );
 

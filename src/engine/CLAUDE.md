@@ -52,7 +52,7 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 ## Tests
 
 - `tests/api.test.ts` -- Public API tests
-- `tests/integration.test.ts` -- Integration tests
+- `tests/integration.test.ts` -- Integration tests against the raw wasm exports, including the walk of `simlin_error_str` that holds `SimlinErrorCode` and `ErrorCode` to the codes libsimlin names
 - `tests/worker-backend.test.ts`, `tests/worker-server.test.ts`, `tests/direct-backend.test.ts` -- Backend tests
 - `tests/race.test.ts` -- Concurrency tests
 - `tests/cleanup.test.ts` -- Resource cleanup tests

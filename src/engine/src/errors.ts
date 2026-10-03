@@ -7,9 +7,10 @@
 // TypeScript as raw integers from that enum, NOT from the engine's internal
 // `ErrorCode` (which numbers some variants differently). Engine codes that
 // libsimlin collapses (e.g. the `Todo*` family) arrive as `Generic`.
-// An identical copy lives in src/core/errors.ts (the packages don't
-// depend on each other); keep the two in sync. This enum must also stay in
-// step with `SimlinErrorCode` in src/engine/src/internal/types.ts.
+// An identical copy lives in src/core/errors.ts (core imports only types from
+// this package), held to this one by src/core/tests/errors.test.ts. This enum
+// and `SimlinErrorCode` in src/engine/src/internal/types.ts are both held to
+// the codes libsimlin names by tests/integration.test.ts.
 export enum ErrorCode {
   NoError = 0,
   DoesNotExist = 1,

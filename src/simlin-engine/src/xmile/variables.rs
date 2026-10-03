@@ -532,7 +532,8 @@ impl From<datamodel::Stock> for Stock {
                 ),
             },
             access: access_from(stock.compat.visibility, stock.compat.can_be_module_input),
-            ai_state: None, // TODO
+            // Not written: ISEE's AI information is signed, and the engine cannot sign.
+            ai_state: None,
             data_source: stock
                 .compat
                 .data_source
@@ -828,7 +829,8 @@ impl From<datamodel::Flow> for Flow {
                 ),
             },
             access: access_from(flow.compat.visibility, flow.compat.can_be_module_input),
-            ai_state: None, // TODO
+            // Not written: ISEE's AI information is signed, and the engine cannot sign.
+            ai_state: None,
             data_source: flow
                 .compat
                 .data_source
@@ -1005,7 +1007,8 @@ impl From<datamodel::Aux> for Aux {
                 ),
             },
             access: access_from(aux.compat.visibility, aux.compat.can_be_module_input),
-            ai_state: None, // TODO
+            // Not written: ISEE's AI information is signed, and the engine cannot sign.
+            ai_state: None,
             data_source: aux
                 .compat
                 .data_source

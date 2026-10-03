@@ -259,29 +259,25 @@ fn analyze_builtin_polarity(
     current_polarity: LinkPolarity,
     variables: Option<&crate::variable::LoweredVariableMap>,
 ) -> LinkPolarity {
-    match builtin {
-        // All three lookup variants share the `(table_expr, index_expr, loc)`
-        // shape and the same polarity story: the result is non-decreasing in
-        // the index when the table is, so the link polarity is the argument's
-        // monotonicity composed with the table's.
-        BuiltinFn::Lookup(table_expr, index_expr, _)
-        | BuiltinFn::LookupForward(table_expr, index_expr, _)
-        | BuiltinFn::LookupBackward(table_expr, index_expr, _) => {
-            let arg_polarity = analyze_expr_polarity_with_context(
-                index_expr,
-                from_var,
-                LinkPolarity::Positive,
-                variables,
-            );
-
-            if arg_polarity == LinkPolarity::Unknown {
-                return LinkPolarity::Unknown;
-            }
-
-            // Composing argument monotonicity with table monotonicity is plain
-            // sign multiplication; an Unknown on either side absorbs.
-            arg_polarity.compose(lookup_table_polarity(table_expr, variables))
+    // Every lookup, however it reads between and beyond its table's points
+    // (`BuiltinFn::lookup_args` is the family), has one polarity story: the
+    // result is non-decreasing in the index when the table is, so the link
+    // polarity is the argument's monotonicity composed with the table's.
+    if let Some((table_expr, index_expr)) = builtin.lookup_args() {
+        let arg_polarity = analyze_expr_polarity_with_context(
+            index_expr,
+            from_var,
+            LinkPolarity::Positive,
+            variables,
+        );
+        if arg_polarity == LinkPolarity::Unknown {
+            return LinkPolarity::Unknown;
         }
+        // Composing argument monotonicity with table monotonicity is plain
+        // sign multiplication; an Unknown on either side absorbs.
+        return arg_polarity.compose(lookup_table_polarity(table_expr, variables));
+    }
+    match builtin {
         // Non-decreasing single-arg builtins: propagate inner polarity.
         // Int (floor) and Round (nearest, ties to even) are step functions
         // with discontinuities, but are still non-decreasing, which is

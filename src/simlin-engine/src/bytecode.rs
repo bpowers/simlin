@@ -61,16 +61,105 @@ pub type DimListId = u16; // Index into dim_lists table (for [DimId; 4] or [u16;
 /// opt-in.
 pub(crate) const STACK_CAPACITY: usize = 64;
 
-/// Lookup interpolation mode for graphical function tables.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LookupMode {
-    /// Linear interpolation between points (standard LOOKUP behavior)
-    Interpolate = 0,
-    /// Step function: return y at first point where x >= index (LOOKUP_FORWARD)
-    Forward = 1,
-    /// Step function: return y at last point where x <= index (LOOKUP_BACKWARD)
-    Backward = 2,
+/// Declares [`LookupMode`] and `LookupMode::ALL` from one list of variants, so
+/// a mode cannot be added to one and left out of the other.
+macro_rules! lookup_modes {
+    (
+        $(#[$meta:meta])*
+        pub enum LookupMode {
+            $($(#[$doc:meta])* $name:ident = $value:literal),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[repr(u8)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum LookupMode {
+            $($(#[$doc])* $name = $value),+
+        }
+
+        impl LookupMode {
+            /// Every mode, for tests whose rows are the modes.
+            #[cfg(test)]
+            pub(crate) const ALL: [LookupMode; [$(LookupMode::$name),+].len()] =
+                [$(LookupMode::$name),+];
+        }
+    };
+}
+
+lookup_modes! {
+    /// How a lookup reads a graphical function's table between and beyond its
+    /// points. It is an operand of the lookup opcode, not a property of the stored
+    /// table, so two calls can read one table differently and tables that hold the
+    /// same points are stored once whatever their kinds.
+    ///
+    /// A plain application (`LOOKUP(table, x)`, `table(x)`, a `WITH LOOKUP`) reads
+    /// the table as its kind says ([`LookupMode::of_kind`]). `LOOKUP_FORWARD`,
+    /// `LOOKUP_BACKWARD` and `LOOKUP_EXTRAPOLATE` name their own reading and keep
+    /// it whatever the table's kind: Vensim documents `LOOKUP FORWARD` and
+    /// `LOOKUP BACKWARD` each as a function that "allows you to control the
+    /// interpolation mode of a lookup table"
+    /// (vensim.com/documentation/fn_lookup_forward.html, fn_lookup_backward.html),
+    /// and XMILE 1.0 defines none of the three.
+    ///
+    /// Two neighbouring points that share an x are a vertical step, and each mode
+    /// reads it by the rule it reads every knot by, wherever in the table the step
+    /// is: at that x, interpolation and extrapolation answer with the first
+    /// listed point (the step takes effect just past it), stepping forward with
+    /// the first point at or above the index, so the first listed, and stepping
+    /// back with the last point at or below it, so the last listed. That is the
+    /// engine's rule, the same on the VM and in wasm; what Vensim and Stella
+    /// answer at a vertical step is unverified.
+    pub enum LookupMode {
+        /// Linear interpolation between points; outside them, the nearest end
+        /// point's value.
+        Interpolate = 0,
+        /// Step function: the y of the first point with x >= index
+        /// (`LOOKUP_FORWARD`); outside the points, the nearest end point's value.
+        Forward = 1,
+        /// Step function: the y of the last point with x <= index
+        /// (`LOOKUP_BACKWARD`); outside the points, the nearest end point's value.
+        Backward = 2,
+        /// Linear interpolation between points; outside them, the line through the
+        /// two points at that end, extended.
+        Extrapolate = 3,
+    }
+}
+
+impl LookupMode {
+    /// How a plain application reads a table of `kind`.
+    ///
+    /// XMILE 1.0 section 3.1.4 (`docs/reference/xmile-v1.0.html`, "three types
+    /// of graphical functions"):
+    ///
+    /// - continuous: "Intermediate values are calculated with linear
+    ///   interpolation between the intermediate points. Out-of-range values
+    ///   are the same as the closest endpoint (i.e, no extrapolation is
+    ///   performed)."
+    /// - extrapolate: "Out-of-range values are calculated with linear
+    ///   extrapolation from the last two values at either end." Vensim's
+    ///   `LOOKUP EXTRAPOLATE` is the same reading
+    ///   (vensim.com/documentation/fn_lookup_extrapolate.html: for
+    ///   `LOOK((0,1),(1,1),(2,2))`, -1 gives 1.0, 1.5 gives 1.5 and 2.5 gives
+    ///   2.5), but it is a call's reading, not a table's: it imports as the
+    ///   `LOOKUP_EXTRAPOLATE` builtin and leaves the table's kind alone. The
+    ///   MDL importer gives a table this kind only where `TABXL` is called on
+    ///   it (`mdl::convert::stocks`).
+    /// - discrete: "Intermediate values take on the value associated with the
+    ///   next lower x-coordinate (also called a step-wise function). The last
+    ///   two points of a discrete graphical function must have the same y
+    ///   value. Out-of-range values are the same as the closest endpoint",
+    ///   which is what [`LookupMode::Backward`] computes. The engine does not
+    ///   check the last two points: where they differ, the last point's y is
+    ///   what the table answers at its last x and beyond, and the one before
+    ///   it up to there.
+    pub(crate) fn of_kind(kind: crate::datamodel::GraphicalFunctionKind) -> LookupMode {
+        use crate::datamodel::GraphicalFunctionKind;
+        match kind {
+            GraphicalFunctionKind::Continuous => LookupMode::Interpolate,
+            GraphicalFunctionKind::Extrapolate => LookupMode::Extrapolate,
+            GraphicalFunctionKind::Discrete => LookupMode::Backward,
+        }
+    }
 }
 
 // ============================================================================

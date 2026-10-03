@@ -12,10 +12,11 @@
 //! Graphical-function lookup helper functions for the wasm simulation backend.
 //!
 //! The bytecode VM resolves a `Lookup` opcode against a `&[(f64, f64)]` table
-//! through one of three functions (`vm.rs:3055-3186`): `lookup` (linear
-//! interpolation), `lookup_forward` (step up), and `lookup_backward` (step
-//! down). This module emits one wasm helper per mode -- `lookup_interp`,
-//! `lookup_forward`, `lookup_backward` -- each over a flat
+//! through one function per `LookupMode` (`vm::lookup_in_mode`): `lookup`
+//! (linear interpolation), `lookup_forward` (step up), `lookup_backward` (step
+//! down) and `lookup_extrapolate` (linear interpolation, the end segments
+//! extended). This module emits one wasm helper per mode -- `lookup_interp`,
+//! `lookup_forward`, `lookup_backward`, `lookup_extrapolate` -- each over a flat
 //! `(data_off: i32, count: i32, index: f64) -> f64` interface, where the table
 //! lives in linear memory as `count` consecutive f64 LE `(x, y)` knot pairs
 //! starting at byte offset `data_off` (so knot `k` is
@@ -24,12 +25,17 @@
 //! opcode (`lower.rs`) reads `(data_off, count)` from the GF directory and
 //! `call`s the mode's helper.
 //!
-//! ## The three functions are NOT one function
+//! ## The functions are NOT one function
 //!
-//! They differ in three ways, mirrored here exactly so the backend takes the
+//! `extrapolate` is `interp` inside the table and a line beyond it. The other
+//! three differ in three ways, mirrored here exactly so the backend takes the
 //! same branch the VM does:
 //! - **edge clamps**: `lookup_interp` clamps *strictly* (`index < x[0]` /
-//!   `index > x[n-1]`); `forward`/`backward` clamp *inclusively* (`<=` / `>=`).
+//!   `index > x[n-1]`); `forward` clamps `index <= x[0]` and
+//!   `index > x[n-1]`, `backward` `index < x[0]` and `index >= x[n-1]`: each
+//!   is inclusive at the end whose knot is the answer by the mode's own rule,
+//!   and searches at the other, so points sharing an x at an end are read as
+//!   they are anywhere else.
 //! - **search**: `interp`/`forward` use a *lower-bound* search
 //!   (`x[mid] < index`); `backward` uses an *upper-bound* search
 //!   (`x[mid] <= index`).
@@ -204,7 +210,7 @@ fn emit_init_search_bounds(f: &mut Function) {
 }
 
 /// Build the body of `lookup_interp(data_off: i32, count: i32, index: f64)
-/// -> f64`, reproducing the VM's `lookup` (`vm.rs:3055-3102`) exactly:
+/// -> f64`, reproducing the VM's `vm::lookup` exactly:
 /// empty/NaN -> NaN; **strict** edge clamps (`index < x[0]` -> `y[0]`,
 /// `index > x[n-1]` -> `y[n-1]`); lower-bound binary search; then at `i = low`,
 /// `i == 0` or `approx_eq(x[i], index)` -> `y[i]`, else linear interpolation
@@ -287,10 +293,11 @@ pub(crate) fn emit_lookup_interp(approx_eq_idx: u32) -> Function {
 }
 
 /// Build the body of `lookup_forward(data_off, count, index) -> f64`,
-/// reproducing the VM's `lookup_forward` (`vm.rs:3104-3142`): empty/NaN -> NaN;
-/// **inclusive** edge clamps (`index <= x[0]` -> `y[0]`, `index >= x[n-1]` ->
-/// `y[n-1]`); the same lower-bound binary search; return `y[low]`. No
-/// `approx_eq`, no interpolation.
+/// reproducing the VM's `lookup_forward`: empty/NaN -> NaN; `index <= x[0]` ->
+/// `y[0]` (inclusive: the first knot is the first at or above it) and
+/// `index > x[n-1]` -> `y[n-1]` (strict: an index at the last x is searched
+/// for); the same lower-bound binary search; return `y[low]`. No `approx_eq`,
+/// no interpolation.
 pub(crate) fn emit_lookup_forward() -> Function {
     let mut f = Function::new([(3, ValType::I32)]); // LOW/HIGH/MID
 
@@ -305,10 +312,10 @@ pub(crate) fn emit_lookup_forward() -> Function {
     f.instruction(&Ins::Return);
     f.instruction(&Ins::End);
 
-    // if index >= x[count-1] { return y[count-1] }  (inclusive)
+    // if index > x[count-1] { return y[count-1] }  (strict)
     f.instruction(&Ins::LocalGet(INDEX));
     push_last_x(&mut f);
-    f.instruction(&Ins::F64Ge);
+    f.instruction(&Ins::F64Gt);
     f.instruction(&Ins::If(BlockType::Empty));
     push_last_y(&mut f);
     f.instruction(&Ins::Return);
@@ -325,8 +332,10 @@ pub(crate) fn emit_lookup_forward() -> Function {
 }
 
 /// Build the body of `lookup_backward(data_off, count, index) -> f64`,
-/// reproducing the VM's `lookup_backward` (`vm.rs:3144-3186`): empty/NaN ->
-/// NaN; **inclusive** edge clamps; an **upper-bound** binary search
+/// reproducing the VM's `lookup_backward`: empty/NaN -> NaN; `index < x[0]` ->
+/// `y[0]` (strict: an index at the first x is searched for) and
+/// `index >= x[n-1]` -> `y[n-1]` (inclusive: the last knot is the last at or
+/// below it); an **upper-bound** binary search
 /// (`x[mid] <= index`); return `y[low-1]` (the last knot with `x <= index`; for
 /// duplicate x-values, the LAST one), or `y[0]` when `low == 0`. No
 /// `approx_eq`, no interpolation.
@@ -335,10 +344,10 @@ pub(crate) fn emit_lookup_backward() -> Function {
 
     emit_empty_and_nan_guards(&mut f);
 
-    // if index <= x[0] { return y[0] }  (inclusive)
+    // if index < x[0] { return y[0] }  (strict)
     f.instruction(&Ins::LocalGet(INDEX));
     push_x_const0(&mut f);
-    f.instruction(&Ins::F64Le);
+    f.instruction(&Ins::F64Lt);
     f.instruction(&Ins::If(BlockType::Empty));
     push_y_const0(&mut f);
     f.instruction(&Ins::Return);
@@ -375,6 +384,104 @@ pub(crate) fn emit_lookup_backward() -> Function {
     f
 }
 
+/// The f64 working local of [`emit_lookup_extrapolate`]: the x distance
+/// between an end knot and its neighbor.
+const DX: u32 = 6;
+
+/// Build the body of `lookup_extrapolate(data_off, count, index) -> f64`,
+/// reproducing the VM's `lookup_extrapolate`: with two or more knots, an index
+/// strictly below the first x or above the last is answered by the line
+/// through the two knots at that end; anything else (an index inside the
+/// table, a table of fewer than two knots, a NaN index, an empty table) is
+/// `lookup_interp`'s answer, which this `call`s through `interp_idx`.
+pub(crate) fn emit_lookup_extrapolate(interp_idx: u32) -> Function {
+    // LOW/HIGH/MID, then DX. LOW holds the end knot's index and MID its
+    // neighbor's while a line is extended.
+    let mut f = Function::new([(3, ValType::I32), (1, ValType::F64)]);
+
+    // if count >= 2
+    f.instruction(&Ins::LocalGet(COUNT));
+    f.instruction(&Ins::I32Const(2));
+    f.instruction(&Ins::I32GeS);
+    f.instruction(&Ins::If(BlockType::Empty));
+
+    // if index < x[0] { return extend(knot 0, knot 1) }
+    f.instruction(&Ins::LocalGet(INDEX));
+    push_x_const0(&mut f);
+    f.instruction(&Ins::F64Lt);
+    f.instruction(&Ins::If(BlockType::Empty));
+    f.instruction(&Ins::I32Const(0));
+    f.instruction(&Ins::LocalSet(LOW));
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::LocalSet(MID));
+    emit_extend_end_segment(&mut f);
+    f.instruction(&Ins::Return);
+    f.instruction(&Ins::End);
+
+    // if index > x[count-1] { return extend(knot count-1, knot count-2) }
+    f.instruction(&Ins::LocalGet(INDEX));
+    push_last_x(&mut f);
+    f.instruction(&Ins::F64Gt);
+    f.instruction(&Ins::If(BlockType::Empty));
+    f.instruction(&Ins::LocalGet(COUNT));
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32Sub);
+    f.instruction(&Ins::LocalSet(LOW));
+    f.instruction(&Ins::LocalGet(COUNT));
+    f.instruction(&Ins::I32Const(2));
+    f.instruction(&Ins::I32Sub);
+    f.instruction(&Ins::LocalSet(MID));
+    emit_extend_end_segment(&mut f);
+    f.instruction(&Ins::Return);
+    f.instruction(&Ins::End);
+
+    f.instruction(&Ins::End); // count >= 2
+
+    // return lookup_interp(data_off, count, index)
+    f.instruction(&Ins::LocalGet(DATA_OFF));
+    f.instruction(&Ins::LocalGet(COUNT));
+    f.instruction(&Ins::LocalGet(INDEX));
+    f.instruction(&Ins::Call(interp_idx));
+
+    f.instruction(&Ins::End);
+    f
+}
+
+/// Push the VM's `extend_end_segment(end, inner, index)` for the end knot in
+/// `LOW` and its neighbor in `MID`: `y[end]` when the two share an x or a y,
+/// else `y[end] + (index - x[end]) * ((y[end] - y[inner]) / dx)`, the
+/// operations in the VM's order so the two agree bit for bit.
+fn emit_extend_end_segment(f: &mut Function) {
+    // dx = x[end] - x[inner]; dx == 0 || y[end] - y[inner] == 0
+    push_x(f, LOW);
+    push_x(f, MID);
+    f.instruction(&Ins::F64Sub);
+    f.instruction(&Ins::LocalTee(DX));
+    f.instruction(&Ins::F64Const(0.0.into()));
+    f.instruction(&Ins::F64Eq);
+    push_y(f, LOW);
+    push_y(f, MID);
+    f.instruction(&Ins::F64Sub);
+    f.instruction(&Ins::F64Const(0.0.into()));
+    f.instruction(&Ins::F64Eq);
+    f.instruction(&Ins::I32Or);
+    f.instruction(&Ins::If(BlockType::Result(ValType::F64)));
+    push_y(f, LOW);
+    f.instruction(&Ins::Else);
+    push_y(f, LOW);
+    f.instruction(&Ins::LocalGet(INDEX));
+    push_x(f, LOW);
+    f.instruction(&Ins::F64Sub); // index - x[end]
+    push_y(f, LOW);
+    push_y(f, MID);
+    f.instruction(&Ins::F64Sub); // y[end] - y[inner]
+    f.instruction(&Ins::LocalGet(DX));
+    f.instruction(&Ins::F64Div); // slope
+    f.instruction(&Ins::F64Mul);
+    f.instruction(&Ins::F64Add);
+    f.instruction(&Ins::End);
+}
+
 /// Push `x[0]` (`f64.load[data_off + 0]`). The knot-0 address is just
 /// `data_off`, so no index arithmetic is needed.
 fn push_x_const0(f: &mut Function) {
@@ -391,54 +498,37 @@ fn push_y_const0(f: &mut Function) {
 #[cfg(test)]
 mod tests {
     use super::super::lower::build_helpers;
+    use crate::bytecode::LookupMode;
+    use crate::vm::lookup_in_mode;
     use checked::Store;
+    use proptest::prelude::*;
     use wasm::validate;
     use wasm_encoder::{
-        CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, Function, FunctionSection,
-        Instruction, MemorySection, MemoryType, Module, TypeSection, ValType,
+        CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, FunctionSection,
+        MemorySection, MemoryType, Module, TypeSection,
     };
 
-    /// Which lookup helper a test module exports as `f`.
-    #[derive(Clone, Copy, Debug)]
-    enum Mode {
-        Interp,
-        Forward,
-        Backward,
+    /// The byte offset the harness writes the table to. The memory before and
+    /// after the table holds [`POISON`], a value no test table holds, so a
+    /// helper that reads outside its table answers with it (or with arithmetic
+    /// on it) and disagrees with the VM.
+    const TABLE_BASE: u32 = 64;
+    const POISON: f64 = -987654321.25;
+
+    /// Each mode's helper is exported under its index in [`LookupMode::ALL`].
+    fn export_name(mode: LookupMode) -> String {
+        format!("mode{}", mode as u8)
     }
 
-    /// Resolve a [`Mode`] to its helper function index in the assembled table.
-    fn helper_index(mode: Mode) -> u32 {
-        let h = build_helpers().fns;
-        match mode {
-            Mode::Interp => h.lookup_interp,
-            Mode::Forward => h.lookup_forward,
-            Mode::Backward => h.lookup_backward,
-        }
-    }
-
-    /// The byte offset the test harness writes the table to (one f64 in, so a
-    /// non-zero `data_off` is exercised rather than the degenerate 0).
-    const TABLE_BASE: u32 = 8;
-
-    /// Build a module containing *every* helper body (so `lookup_interp`'s
-    /// `call approx_eq` resolves) plus a thin exported wrapper
-    /// `f(data_off: i32, count: i32, index: f64) -> f64` forwarding to the
-    /// helper-under-test, and an exported `memory` seeded with `knots` at
-    /// [`TABLE_BASE`] via an active data segment. Mirrors `lower.rs`'s
-    /// production assembly: helpers occupy function indices `0..N`, the wrapper
-    /// follows at `N`.
-    fn build_lookup_module(mode: Mode, knots: &[(f64, f64)]) -> Vec<u8> {
+    /// A module holding every helper body (so the calls between helpers
+    /// resolve), each mode's lookup helper exported, and a memory seeded with
+    /// `knots` at [`TABLE_BASE`]. Helpers occupy function indices `0..N`, as in
+    /// `lower.rs`'s production assembly.
+    fn build_lookup_module(knots: &[(f64, f64)]) -> Vec<u8> {
         let helpers = build_helpers();
-        let n_helpers = helpers.functions.len() as u32;
-        let target = helper_index(mode);
-
         let mut module = Module::new();
 
-        // Type 0 is the wrapper `(i32, i32, f64) -> f64`; helper types follow.
         let mut types = TypeSection::new();
-        types
-            .ty()
-            .function([ValType::I32, ValType::I32, ValType::F64], [ValType::F64]);
         for hf in &helpers.functions {
             types.ty().function(hf.params.clone(), hf.results.clone());
         }
@@ -446,9 +536,8 @@ mod tests {
 
         let mut functions = FunctionSection::new();
         for (i, _) in helpers.functions.iter().enumerate() {
-            functions.function(1 + i as u32);
+            functions.function(i as u32);
         }
-        functions.function(0);
         module.section(&functions);
 
         let mut memories = MemorySection::new();
@@ -462,92 +551,104 @@ mod tests {
         module.section(&memories);
 
         let mut exports = ExportSection::new();
-        exports.export("f", ExportKind::Func, n_helpers);
-        exports.export("memory", ExportKind::Memory, 0);
+        for mode in LookupMode::ALL {
+            exports.export(
+                &export_name(mode),
+                ExportKind::Func,
+                helpers.fns.lookup(mode),
+            );
+        }
         module.section(&exports);
 
         let mut code = CodeSection::new();
         for hf in &helpers.functions {
             code.function(&hf.body);
         }
-        // wrapper: forward (data_off, count, index) to the helper-under-test.
-        let mut wrapper = Function::new([]);
-        wrapper.instruction(&Instruction::LocalGet(0));
-        wrapper.instruction(&Instruction::LocalGet(1));
-        wrapper.instruction(&Instruction::LocalGet(2));
-        wrapper.instruction(&Instruction::Call(target));
-        wrapper.instruction(&Instruction::End);
-        code.function(&wrapper);
         module.section(&code);
 
-        // Seed the table at TABLE_BASE as interleaved f64 LE x,y pairs.
-        let mut bytes: Vec<u8> = Vec::with_capacity(knots.len() * 16);
+        let mut bytes: Vec<u8> = Vec::new();
+        for _ in 0..(TABLE_BASE / 8) {
+            bytes.extend_from_slice(&POISON.to_le_bytes());
+        }
         for &(x, y) in knots {
             bytes.extend_from_slice(&x.to_le_bytes());
             bytes.extend_from_slice(&y.to_le_bytes());
         }
+        for _ in 0..4 {
+            bytes.extend_from_slice(&POISON.to_le_bytes());
+        }
         let mut data = DataSection::new();
-        data.active(0, &ConstExpr::i32_const(TABLE_BASE as i32), bytes);
+        data.active(0, &ConstExpr::i32_const(0), bytes);
         module.section(&data);
 
         module.finish()
     }
 
-    /// Run the emitted lookup helper for `mode` over `knots` at `index` under
-    /// the DLR-FT interpreter. The module is (re)built per call; the tables are
-    /// tiny (a handful of knots) so this stays well under the per-test budget.
-    fn run_lookup(mode: Mode, knots: &[(f64, f64)], index: f64) -> f64 {
-        let bytes = build_lookup_module(mode, knots);
+    /// Every mode's emitted helper over `knots`, run at each of `indexes`
+    /// under the DLR-FT interpreter: `answers[i][m]` is mode `ALL[m]` at
+    /// `indexes[i]`. One module serves the whole table.
+    fn run_lookups(knots: &[(f64, f64)], indexes: &[f64]) -> Vec<[f64; LookupMode::ALL.len()]> {
+        let bytes = build_lookup_module(knots);
         let info = validate(&bytes).expect("lookup module must validate");
         let mut store = Store::new(());
         let module = store
             .module_instantiate(&info, Vec::new(), None)
             .expect("lookup module must instantiate")
             .module_addr;
-        let f = store
-            .instance_export(module, "f")
-            .unwrap()
-            .as_func()
-            .unwrap();
-        store
-            .invoke_simple_typed::<(i32, i32, f64), f64>(
-                f,
-                (TABLE_BASE as i32, knots.len() as i32, index),
-            )
-            .expect("invocation must succeed")
+        let helpers = LookupMode::ALL.map(|mode| {
+            store
+                .instance_export(module, &export_name(mode))
+                .unwrap()
+                .as_func()
+                .unwrap()
+        });
+        indexes
+            .iter()
+            .map(|&index| {
+                helpers.map(|f| {
+                    store
+                        .invoke_simple_typed::<(i32, i32, f64), f64>(
+                            f,
+                            (TABLE_BASE as i32, knots.len() as i32, index),
+                        )
+                        .expect("invocation must succeed")
+                })
+            })
+            .collect()
     }
 
-    /// The VM oracle for `mode` (the exact function the helper reproduces).
-    fn vm_lookup(mode: Mode, knots: &[(f64, f64)], index: f64) -> f64 {
-        match mode {
-            Mode::Interp => crate::vm::lookup(knots, index),
-            Mode::Forward => crate::vm::lookup_forward(knots, index),
-            Mode::Backward => crate::vm::lookup_backward(knots, index),
+    fn run_lookup(mode: LookupMode, knots: &[(f64, f64)], index: f64) -> f64 {
+        let at = LookupMode::ALL.iter().position(|m| *m == mode).unwrap();
+        run_lookups(knots, &[index])[0][at]
+    }
+
+    /// Every mode's helper agrees bit for bit with the VM's function for that
+    /// mode over `knots` at each index (a NaN is a NaN): none of them does
+    /// transcendental math, and each runs the VM's operations in the VM's
+    /// order, so the agreement is exact and not within a tolerance.
+    fn check_matches_vm(knots: &[(f64, f64)], indexes: &[f64]) -> Result<(), String> {
+        let answers = run_lookups(knots, indexes);
+        for (index, answers) in indexes.iter().zip(answers) {
+            for (mode, got) in LookupMode::ALL.into_iter().zip(answers) {
+                let want = lookup_in_mode(mode, knots, *index);
+                if !(got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan())) {
+                    return Err(format!(
+                        "{mode:?} over {knots:?} at {index}: wasm {got}, vm {want}"
+                    ));
+                }
+            }
         }
+        Ok(())
     }
 
-    /// Assert the emitted helper agrees bit-for-bit with the VM oracle at
-    /// `index` (NaN compares as NaN). The interp helper routes its at-knot test
-    /// through the same `approx_eq` the VM uses, and neither helper does any
-    /// transcendental math, so equality is exact -- not within a tolerance.
-    fn assert_matches_vm(mode: Mode, knots: &[(f64, f64)], index: f64) {
-        let got = run_lookup(mode, knots, index);
-        let want = vm_lookup(mode, knots, index);
-        if want.is_nan() {
-            assert!(
-                got.is_nan(),
-                "{mode:?} lookup at index {index}: expected NaN, got {got}"
-            );
-        } else {
-            assert_eq!(
-                got, want,
-                "{mode:?} lookup at index {index}: got {got}, want {want}"
-            );
+    fn assert_matches_vm(knots: &[(f64, f64)], indexes: &[f64]) {
+        if let Err(why) = check_matches_vm(knots, indexes) {
+            panic!("{why}");
         }
     }
 
     /// A monotonic-x table with non-uniform spacing and a non-monotone y, so
-    /// interpolation, forward, and backward all give distinguishable results.
+    /// every mode gives a distinguishable result.
     const TABLE: &[(f64, f64)] = &[
         (0.0, 10.0),
         (1.0, 20.0),
@@ -556,77 +657,50 @@ mod tests {
         (10.0, 0.0),
     ];
 
-    /// A representative set of probe indices spanning every regime: below
-    /// range, exactly on each knot, strictly between each pair of knots, and
-    /// above range. Shared by all three modes (each mode's oracle defines the
-    /// right answer).
-    fn probe_indices(knots: &[(f64, f64)]) -> Vec<f64> {
+    /// Indexes spanning every regime of `knots`: below range, on each knot,
+    /// strictly between each pair, just past each knot (the `approx_eq` edge),
+    /// and above range.
+    fn sample_indices(knots: &[(f64, f64)]) -> Vec<f64> {
         let mut idx = vec![knots[0].0 - 5.0, knots[knots.len() - 1].0 + 5.0];
         for w in knots.windows(2) {
             let (a, b) = (w[0].0, w[1].0);
-            idx.push(a); // on a knot
-            idx.push((a + b) / 2.0); // strictly between
-            // a point near but not on the knot, to exercise the approx_eq edge
+            idx.push(a);
+            idx.push((a + b) / 2.0);
             idx.push(a + (b - a) * 1e-3);
         }
-        idx.push(knots[knots.len() - 1].0); // the final knot
+        idx.push(knots[knots.len() - 1].0);
         idx
     }
 
     #[test]
-    fn lookup_interp_matches_vm_over_domain() {
-        for &index in &probe_indices(TABLE) {
-            assert_matches_vm(Mode::Interp, TABLE, index);
-        }
+    fn every_mode_matches_the_vm_over_a_tables_domain() {
+        assert_matches_vm(TABLE, &sample_indices(TABLE));
     }
 
     #[test]
-    fn lookup_forward_matches_vm_over_domain() {
-        for &index in &probe_indices(TABLE) {
-            assert_matches_vm(Mode::Forward, TABLE, index);
-        }
+    fn a_one_point_table_matches_the_vm() {
+        assert_matches_vm(&[(3.0, 7.0)], &[-1.0, 3.0, 3.0 - 1e-9, 3.0 + 1e-9, 100.0]);
     }
 
+    /// A NaN first x defeats every comparison against it, so a search can end
+    /// at knot 0. Every mode answers with the first knot rather than reading
+    /// the bytes before the table.
     #[test]
-    fn lookup_backward_matches_vm_over_domain() {
-        for &index in &probe_indices(TABLE) {
-            assert_matches_vm(Mode::Backward, TABLE, index);
-        }
-    }
-
-    #[test]
-    fn lookup_single_point_table() {
-        // A one-knot table: every index clamps to that knot's y for all modes.
-        let single: &[(f64, f64)] = &[(3.0, 7.0)];
-        for mode in [Mode::Interp, Mode::Forward, Mode::Backward] {
-            for &index in &[-1.0, 3.0, 3.0 - 1e-9, 3.0 + 1e-9, 100.0] {
-                assert_matches_vm(mode, single, index);
-            }
-        }
-    }
-
-    #[test]
-    fn lookup_nan_first_x_matches_vm_without_reading_before_the_table() {
-        // A NaN first x defeats every comparison against it, so the search can
-        // end at knot 0. Both backends answer with the first knot rather than
-        // reading the 16 bytes before the table.
+    fn no_mode_reads_before_a_table_whose_first_x_is_not_a_number() {
         let tables: [&[(f64, f64)]; 2] = [&[(f64::NAN, 7.0)], &[(f64::NAN, 7.0), (1.0, 9.0)]];
         for knots in tables {
-            for mode in [Mode::Interp, Mode::Forward, Mode::Backward] {
-                for &index in &[-1.0, 0.0, 0.5] {
-                    assert_matches_vm(mode, knots, index);
-                    assert_eq!(run_lookup(mode, knots, index), 7.0, "{mode:?} at {index}");
-                }
+            let indexes = [-1.0, 0.0, 0.5];
+            assert_matches_vm(knots, &indexes);
+            for answers in run_lookups(knots, &indexes) {
+                assert_eq!(answers, [7.0; LookupMode::ALL.len()], "{knots:?}");
             }
         }
     }
 
+    /// Repeated x values: stepping back answers with the LAST knot of that x
+    /// (the upper-bound search lands past every equal x, then steps back one).
     #[test]
-    fn lookup_backward_duplicate_x_returns_last() {
-        // Duplicate x-values: backward must return the y of the LAST knot with
-        // that x (the upper-bound search lands past every equal x, then steps
-        // back one). The interp/forward modes are also checked for consistency
-        // with their own oracle on the same table.
+    fn a_repeated_x_matches_the_vm() {
         let dup: &[(f64, f64)] = &[
             (0.0, 0.0),
             (2.0, 10.0),
@@ -634,47 +708,179 @@ mod tests {
             (2.0, 30.0),
             (5.0, 50.0),
         ];
-        // Exactly on the duplicated x, and just inside either side of it.
-        for &index in &[2.0, 1.999, 2.001, 0.0, 5.0, 3.5] {
-            assert_matches_vm(Mode::Backward, dup, index);
-            assert_matches_vm(Mode::Forward, dup, index);
-            assert_matches_vm(Mode::Interp, dup, index);
+        assert_matches_vm(dup, &[2.0, 1.999, 2.001, 0.0, 5.0, 3.5]);
+        assert_eq!(run_lookup(LookupMode::Backward, dup, 2.0), 30.0);
+    }
+
+    /// Two points that share an x are a vertical step, and each mode reads it
+    /// by the rule it reads every knot by, wherever the step sits -- inside
+    /// the table or at either end (`LookupMode`'s rustdoc states the rule and
+    /// that it is the engine's own).
+    #[test]
+    fn a_vertical_step_is_read_by_each_modes_rule_wherever_it_sits() {
+        /// What `mode` answers at the x of a step from 2 up to 5.
+        fn at_the_step(mode: LookupMode) -> f64 {
+            match mode {
+                // The first listed point: the step takes effect just past x.
+                LookupMode::Interpolate | LookupMode::Extrapolate => 2.0,
+                // The first point at or above the index.
+                LookupMode::Forward => 2.0,
+                // The last point at or below the index.
+                LookupMode::Backward => 5.0,
+            }
+        }
+        let inside: &[(f64, f64)] = &[(0.0, 1.0), (1.0, 2.0), (1.0, 5.0), (2.0, 6.0)];
+        let at_the_start: &[(f64, f64)] = &[(1.0, 2.0), (1.0, 5.0), (2.0, 6.0)];
+        let at_the_end: &[(f64, f64)] = &[(0.0, 1.0), (1.0, 2.0), (1.0, 5.0)];
+        for knots in [inside, at_the_start, at_the_end] {
+            assert_matches_vm(knots, &[-3.0, 0.5, 1.0, 1.5, 9.0]);
+            for mode in LookupMode::ALL {
+                assert_eq!(
+                    run_lookup(mode, knots, 1.0),
+                    at_the_step(mode),
+                    "{mode:?} at the step of {knots:?}"
+                );
+            }
+        }
+        // Beyond a step at an end, every mode answers with that end's outer
+        // point: there is no line through a vertical step to extend.
+        for mode in LookupMode::ALL {
+            assert_eq!(run_lookup(mode, at_the_start, 0.0), 2.0, "{mode:?}");
+            assert_eq!(run_lookup(mode, at_the_end, 3.0), 5.0, "{mode:?}");
         }
     }
 
     #[test]
-    fn lookup_nan_index_returns_nan_all_modes() {
-        for mode in [Mode::Interp, Mode::Forward, Mode::Backward] {
-            assert!(
-                run_lookup(mode, TABLE, f64::NAN).is_nan(),
-                "{mode:?} lookup of a NaN index must be NaN"
+    fn a_nan_index_and_an_empty_table_are_nan_in_every_mode() {
+        for answers in run_lookups(TABLE, &[f64::NAN]) {
+            assert!(answers.iter().all(|v| v.is_nan()), "{answers:?}");
+        }
+        for answers in run_lookups(&[], &[1.0]) {
+            assert!(answers.iter().all(|v| v.is_nan()), "{answers:?}");
+        }
+    }
+
+    /// Interpolation answers `y[i]` exactly when `approx_eq(x[i], index)`, as
+    /// the VM does: an index one ULP short of a knot is that knot, not a point
+    /// interpolated toward it.
+    #[test]
+    fn interpolation_at_a_knot_uses_approx_eq() {
+        let knot_x = TABLE[2].0;
+        let just_below = f64::from_bits(knot_x.to_bits() - 1);
+        let just_above = f64::from_bits(knot_x.to_bits() + 1);
+        assert_matches_vm(TABLE, &[just_below, knot_x, just_above]);
+        assert_eq!(
+            run_lookup(LookupMode::Interpolate, TABLE, just_below),
+            TABLE[2].1
+        );
+    }
+
+    /// The example on Vensim's reference pages for the three lookup functions
+    /// (vensim.com/documentation/fn_lookup_extrapolate.html,
+    /// fn_lookup_forward.html, fn_lookup_backward.html), each over
+    /// `LOOK((0,1),(1,1),(2,2))` at -1, 1.5 and 2.5.
+    #[test]
+    fn each_mode_answers_vensims_documented_example() {
+        let look: &[(f64, f64)] = &[(0.0, 1.0), (1.0, 1.0), (2.0, 2.0)];
+        let documented = |mode: LookupMode| match mode {
+            // A plain lookup: interpolated inside, the end values outside.
+            LookupMode::Interpolate => [1.0, 1.5, 2.0],
+            LookupMode::Forward => [1.0, 2.0, 2.0],
+            LookupMode::Backward => [1.0, 1.0, 2.0],
+            LookupMode::Extrapolate => [1.0, 1.5, 2.5],
+        };
+        let indexes = [-1.0, 1.5, 2.5];
+        for mode in LookupMode::ALL {
+            for (index, want) in indexes.iter().zip(documented(mode)) {
+                assert_eq!(
+                    lookup_in_mode(mode, look, *index),
+                    want,
+                    "vm {mode:?} at {index}"
+                );
+                assert_eq!(
+                    run_lookup(mode, look, *index),
+                    want,
+                    "wasm {mode:?} at {index}"
+                );
+            }
+        }
+    }
+
+    /// Extrapolation extends the line through the two points at an end, and an
+    /// end with no line to extend (one point, or two points sharing an x)
+    /// answers with its end point. A flat end segment extends as its y to any
+    /// index, an infinite one included.
+    #[test]
+    fn extrapolation_extends_each_end_segment() {
+        let rising: &[(f64, f64)] = &[(0.0, 0.0), (1.0, 10.0), (2.0, 10.0)];
+        let stepped: &[(f64, f64)] = &[(0.0, 5.0), (0.0, 1.0), (1.0, 2.0), (2.0, 3.0), (2.0, 9.0)];
+        let lone: &[(f64, f64)] = &[(3.0, 7.0)];
+        let rows = [
+            (rising, -1.0, -10.0),
+            (rising, 3.0, 10.0),
+            (rising, 0.5, 5.0),
+            (stepped, -4.0, 5.0),
+            (stepped, 7.0, 9.0),
+            (lone, 100.0, 7.0),
+            (rising, f64::INFINITY, 10.0),
+            (rising, f64::NEG_INFINITY, f64::NEG_INFINITY),
+            (stepped, f64::INFINITY, 9.0),
+            (stepped, f64::NEG_INFINITY, 5.0),
+        ];
+        for (knots, index, want) in rows {
+            assert_eq!(
+                lookup_in_mode(LookupMode::Extrapolate, knots, index),
+                want,
+                "vm over {knots:?} at {index}"
+            );
+            assert_eq!(
+                run_lookup(LookupMode::Extrapolate, knots, index),
+                want,
+                "wasm over {knots:?} at {index}"
             );
         }
     }
 
-    #[test]
-    fn lookup_empty_table_returns_nan_all_modes() {
-        // count == 0 -> NaN for every mode (matching the VM's table.is_empty()).
-        // The wrapper passes count = 0; data_off is irrelevant (never read).
-        for mode in [Mode::Interp, Mode::Forward, Mode::Backward] {
-            assert!(
-                run_lookup(mode, &[], 1.0).is_nan(),
-                "{mode:?} lookup of an empty table must be NaN"
-            );
+    /// A number a table or an index can hold: small halves, so knots repeat,
+    /// fall out of order and are hit exactly; one ULP off them; a signed zero;
+    /// the infinities; a NaN.
+    fn number() -> impl Strategy<Value = f64> {
+        prop_oneof![
+            8 => (-4i32..8).prop_map(|n| n as f64 / 2.0),
+            1 => (-4i32..8).prop_map(|n| f64::from_bits((n as f64 / 2.0).to_bits().wrapping_add(1))),
+            1 => Just(-0.0),
+            1 => Just(f64::INFINITY),
+            1 => Just(f64::NEG_INFINITY),
+            1 => Just(f64::NAN),
+        ]
+    }
+
+    fn table_and_indexes() -> impl Strategy<Value = (Vec<(f64, f64)>, Vec<f64>)> {
+        (
+            prop::collection::vec((number(), number()), 0..6),
+            prop::collection::vec(number(), 1..6),
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        /// Any table at all -- empty, one point, x out of order, repeated, not
+        /// a number or infinite -- is read alike by the VM and the wasm
+        /// helpers in every mode, at any index.
+        #[test]
+        fn every_mode_matches_the_vm_on_any_table((knots, indexes) in table_and_indexes()) {
+            prop_assert_eq!(check_matches_vm(&knots, &indexes), Ok(()));
         }
     }
 
-    #[test]
-    fn lookup_interp_exact_knot_uses_approx_eq() {
-        // The interp helper returns y[i] exactly when approx_eq(x[i], index),
-        // matching the VM. A one-ULP-perturbed index at a knot is approx-equal,
-        // so it must return that knot's y exactly (NOT an interpolated value).
-        // The VM oracle encodes the same approx_eq decision.
-        let knot_x = TABLE[2].0; // 2.5
-        let perturbed = f64::from_bits(knot_x.to_bits() + 1);
-        assert_matches_vm(Mode::Interp, TABLE, perturbed);
-        // And the exact knot returns its y exactly.
-        let got = run_lookup(Mode::Interp, TABLE, knot_x);
-        assert_eq!(got, TABLE[2].1, "interp at the exact knot returns y[i]");
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4000))]
+
+        #[test]
+        #[ignore = "4000 generated tables through the wasm interpreter; run under the gates profile"]
+        fn every_mode_matches_the_vm_on_many_tables((knots, indexes) in table_and_indexes()) {
+            prop_assert_eq!(check_matches_vm(&knots, &indexes), Ok(()));
+        }
     }
 }

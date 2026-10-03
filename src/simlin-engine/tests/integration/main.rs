@@ -26,6 +26,7 @@
 
 mod test_helpers;
 
+mod build_determinism;
 mod clearn_unit_errors;
 mod compiler_vector;
 mod element_subscripts;
