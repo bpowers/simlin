@@ -1373,3 +1373,30 @@ fn comparisons_that_do_not_fit_are_counted() {
     assert!((1..12).contains(&listed), "{answer}");
     assert_eq!(answer["omitted"], 12 - listed);
 }
+
+/// A replacement equation too long for the budget is quoted around its
+/// start once nothing else can be left out, so the answer still fits.
+#[test]
+fn a_long_replacement_equation_is_quoted_so_the_answer_fits() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    session.outline_budget = 1_500;
+    // Long and shallow: an equation nested deeply is refused before it runs.
+    let long = format!("orders * 1.{}", "0".repeat(3_000));
+    let output = host.call_raw(
+        &mut session,
+        "run_experiment",
+        &json!({"name": "long", "set": [{"variable": "production", "equation": long}],
+                "record": ["Inventory"]})
+        .to_string(),
+    );
+    assert!(!output.is_error, "{}", output.json);
+    assert!(output.json.len() <= 1_500, "{} bytes", output.json.len());
+    let answer: Value = serde_json::from_str(&output.json).unwrap();
+    let quoted = answer["applied"][0]["equation"].as_str().unwrap();
+    assert!(quoted.starts_with("orders * 1.000"), "{quoted}");
+    assert!(
+        quoted.ends_with(&format!("({} characters)", long.len())),
+        "{quoted}"
+    );
+}

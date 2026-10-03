@@ -500,14 +500,27 @@ pub(crate) fn run_experiment(
         note,
     };
     // The last recorded comparisons are left out, counted, until the answer
-    // fits: the run is kept whole, and read_behavior reads any of them.
+    // fits: the run is kept whole, and read_behavior reads any of them. Then
+    // a long equation the answer repeats is quoted around its start
+    // (`list_runs` and `read_variables` give it whole).
     super::fit(&mut output, session.outline_budget, |output| {
-        if output.behavior.len() <= 1 {
-            return false;
+        if output.behavior.len() > 1 {
+            output.behavior.pop();
+            *output.omitted.get_or_insert(0) += 1;
+            return true;
         }
-        output.behavior.pop();
-        *output.omitted.get_or_insert(0) += 1;
-        true
+        let mut quoted = false;
+        for change in &mut output.applied {
+            for text in [&mut change.equation, &mut change.was_equation]
+                .into_iter()
+                .flatten()
+            {
+                let echo = super::evidence::echo(text);
+                quoted |= echo != *text;
+                *text = echo;
+            }
+        }
+        quoted
     });
     Ok(output)
 }

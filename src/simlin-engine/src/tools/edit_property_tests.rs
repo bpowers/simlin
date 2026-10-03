@@ -99,7 +99,7 @@ fn names(project: &datamodel::Project) -> Vec<String> {
 }
 
 fn equation(rng: &mut Rng, names: &[String]) -> String {
-    let n = |rng: &mut Rng| crate::canonicalize(rng.pick(names)).into_owned();
+    let n = |rng: &mut Rng| crate::canonicalize(rng.pick(names).as_str()).into_owned();
     match rng.below(12) {
         0 => format!("{} * 2", n(rng)),
         1 => format!("{} + {}", n(rng), n(rng)),

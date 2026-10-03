@@ -417,7 +417,7 @@ pub(crate) fn diff(
         )
         .collect();
     models_changed.sort();
-    let (models_changed, _) = cap(models_changed);
+    let (models_changed, models_changed_count) = cap(models_changed);
     Changes {
         since_revision: snapshot.revision,
         added,
@@ -430,7 +430,7 @@ pub(crate) fn diff(
         dimensions_changed: snapshot.dimensions != project.dimensions,
         unit_definitions_changed: snapshot.units != project.units,
         models_changed,
-        models_changed_count: None,
+        models_changed_count,
     }
 }
 

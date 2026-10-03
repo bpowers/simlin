@@ -452,3 +452,31 @@ fn at_the_revision_of_the_read_nothing_changed_since_it() {
             .is_some()
     );
 }
+
+/// More other models changed than the list holds: the list is cut and the
+/// count says how many changed.
+#[test]
+fn more_changed_models_than_the_list_holds_are_counted() {
+    let mut project = TestProject::new("main")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("a", "1", None)
+        .build_datamodel();
+    let template = project.models[0].clone();
+    let others = MAX_CHANGED_NAMES + 3;
+    for i in 0..others {
+        let mut other = template.clone();
+        other.name = format!("other {i:02}");
+        project.models.push(other);
+    }
+    let snapshot = ReadSnapshot::new(0, &project, &project.models[0]);
+    let mut edited = project.clone();
+    for model in &mut edited.models[1..] {
+        model
+            .get_variable_mut("a")
+            .unwrap()
+            .set_scalar_equation("2");
+    }
+    let changes = diff(&snapshot, &edited, &edited.models[0]);
+    assert_eq!(changes.models_changed.len(), MAX_CHANGED_NAMES);
+    assert_eq!(changes.models_changed_count, Some(others));
+}
