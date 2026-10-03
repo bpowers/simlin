@@ -903,7 +903,8 @@ fn analyze(
         plan,
         LtmOverlay::On,
         |db, source_project, results| {
-            let mut analysis = read_loops(db, source_project, model, project, results, waiting)?;
+            let mut analysis =
+                read_loops(db, source_project, model, project, plan, results, waiting)?;
             if let Some(base) = base {
                 let source_model = source_project.models(db).get(&canonical).copied();
                 let read_after = source_model
@@ -972,15 +973,16 @@ fn with_discovery_mode<T>(
     f(&mut mode)
 }
 
-/// The loops of a run of `model` compiled under the LTM overlay in discovery
-/// mode, from its `results`; the model's loops from structure when none was
-/// active. Stops before discovery, and before the loops from structure, when
+/// The loops of a run of `model` under `plan` compiled under the LTM overlay
+/// in discovery mode, from its `results`; the model's loops from structure
+/// when none was active. Stops before discovery, and before the loops from structure, when
 /// `waiting` says other work waits for the project.
 fn read_loops(
     db: &mut SimlinDb,
     source_project: SourceProject,
     model: &datamodel::Model,
     project: &datamodel::Project,
+    plan: &RunPlan,
     results: &Results,
     waiting: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> Result<LoopAnalysis, ToolError> {
@@ -1062,7 +1064,7 @@ fn read_loops(
     // A run whose stocks do not move, to the precision a summary reports
     // them, is at rest however its loop scores round: dominance there is
     // arithmetic noise, so its loops come from structure.
-    let at_rest = stocks_at_rest(model, results);
+    let at_rest = stocks_at_rest(model, plan, results);
     if !loops.is_empty() && !at_rest {
         return Ok(LoopAnalysis {
             basis: LoopBasis::Run,
@@ -1110,10 +1112,10 @@ fn read_loops(
     })
 }
 
-/// Whether every stock of `model` is at rest in `results`, each element of an
-/// arrayed one: what a behavior summary would call it. False for a model with
-/// no stock.
-fn stocks_at_rest(model: &datamodel::Model, results: &Results) -> bool {
+/// Whether every stock of `model` is at rest in `results`, a run under
+/// `plan`, each element of an arrayed one: what a behavior summary would call
+/// it. False for a model with no stock.
+fn stocks_at_rest(model: &datamodel::Model, plan: &RunPlan, results: &Results) -> bool {
     let times: Vec<f64> = results
         .iter()
         .map(|row| row[crate::results::TIME_OFF])
@@ -1131,7 +1133,7 @@ fn stocks_at_rest(model: &datamodel::Model, results: &Results) -> bool {
             }
             any = true;
             let series: Vec<f64> = results.iter().map(|row| row[offset]).collect();
-            let scale = super::series::scale_in_run(results, model, key.as_str());
+            let scale = super::series::scale_in_run(results, model, plan, key.as_str());
             if super::behavior::classify_at(&times, &series, scale).kind
                 != super::behavior::ModeKind::AtRest
             {

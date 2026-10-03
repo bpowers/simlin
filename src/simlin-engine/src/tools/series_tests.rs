@@ -8,6 +8,7 @@ use super::*;
 use crate::test_common::TestProject;
 use crate::tools::Session;
 use crate::tools::behavior::ModeKind;
+use crate::tools::runs::RunPlan;
 use crate::tools::test_support::{Host, inventory};
 
 fn behavior(host: &mut Host, session: &mut Session, input: Value) -> Value {
@@ -574,7 +575,7 @@ fn a_variables_scale_is_what_it_is_a_sum_of() {
         ("no_such_variable", 0.0),
     ] {
         assert_eq!(
-            scale_in_run(&run.results, model, variable),
+            scale_in_run(&run.results, model, &RunPlan::default(), variable),
             scale,
             "{variable}"
         );
@@ -622,7 +623,11 @@ fn a_variables_scale_is_what_it_is_a_sum_of() {
         ("by_element[big]", 1e12),
         ("by_element[small]", 0.0),
     ] {
-        assert_eq!(scale_in_run(&run.results, model, key), scale, "{key}");
+        assert_eq!(
+            scale_in_run(&run.results, model, &RunPlan::default(), key),
+            scale,
+            "{key}"
+        );
     }
 }
 

@@ -427,7 +427,7 @@ pub(crate) fn read_variables(
                 let scalar_or_element = record.dimensions.is_empty() || element.is_some();
                 match series.as_slice() {
                     [series] if omitted == 0 && scalar_or_element => {
-                        let scale = scale_in_run(&run.results, model, &series.key);
+                        let scale = scale_in_run(&run.results, model, &run.plan, &series.key);
                         Some(SeriesCore::at(&run.times(), &series.values, scale))
                     }
                     _ => None,

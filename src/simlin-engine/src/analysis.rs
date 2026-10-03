@@ -435,8 +435,7 @@ fn run_ltm_pipeline(
 
     let dominant_loops_by_period = ltm_dominance::calculate_dominant_periods(
         &feedback_loops,
-        results.specs.start,
-        results.specs.save_step,
+        &time,
         // Discovery loops carry partition metadata: a None partition is a
         // module-internal loop competing only against itself.
         ltm_dominance::PartitionSurface::PartitionBearing,
@@ -968,6 +967,62 @@ mod tests {
             let times: Vec<f64> = found.scores.iter().map(|(time, _)| *time).collect();
             assert_eq!(times, rows);
         }
+    }
+
+    /// Dominant periods begin and end at the rows' own times, in the analysis
+    /// and in the layout's metadata alike. A population whose births loop
+    /// leads until its crowding loop takes over, saved every 0.3 at a DT of
+    /// 0.25: the rows are not evenly spaced, so a boundary counted in save
+    /// steps from the start would be at no row's time.
+    #[test]
+    fn dominant_periods_begin_and_end_at_the_rows_times() {
+        let mut project = crate::test_common::TestProject::new("crowding")
+            .with_sim_time(0.0, 30.0, 0.25)
+            .stock("population", "10", &["births"], &["deaths"], None)
+            .flow("births", "population * 0.3", None)
+            .flow("deaths", "population * population / 1000", None)
+            .build_datamodel();
+        project.sim_specs.save_step = Some(datamodel::Dt::Dt(0.3));
+        let specs = crate::results::Specs::from(&project.sim_specs);
+        let rows: Vec<f64> = (0..specs.n_chunks as u64)
+            .map(|row| specs.time_at(specs.saved_row_step(row) as u64))
+            .collect();
+
+        let (mut db, sp) = synced_db(&project);
+        let analysis = analyze_model(&project, &mut db, sp, "main", None).expect("analysis");
+        let layout = crate::layout::compute_layout_metadata(&project, "main", None)
+            .expect("layout metadata");
+        for (surface, periods) in [
+            ("the analysis", &analysis.dominant_loops_by_period),
+            ("the layout", &layout.dominant_periods),
+        ] {
+            assert!(
+                periods.len() >= 2,
+                "{surface}: dominance changes hands: {periods:?}"
+            );
+            for period in periods.iter() {
+                for time in [period.start, period.end] {
+                    assert!(rows.contains(&time), "{surface}: {time} is no row's time");
+                }
+            }
+            // The handover is at a row a cadence of 0.3 would put elsewhere.
+            let handover = periods[1].start;
+            let row = rows.iter().position(|&t| t == handover).unwrap_or(0);
+            assert_ne!(handover, row as f64 * 0.3, "{surface}");
+        }
+
+        // Saved every 0.5, on the grid, the rows' times are the cadence's
+        // bit for bit, so the periods read from them are what a cadence
+        // gives.
+        project.sim_specs.save_step = Some(datamodel::Dt::Dt(0.5));
+        let (mut db, sp) = synced_db(&project);
+        let analysis = analyze_model(&project, &mut db, sp, "main", None).expect("analysis");
+        let cadence: Vec<u64> = (0..analysis.time.len())
+            .map(|row| (row as f64 * 0.5).to_bits())
+            .collect();
+        let times: Vec<u64> = analysis.time.iter().map(|t| t.to_bits()).collect();
+        assert_eq!(times, cadence);
+        assert!(analysis.dominant_loops_by_period.len() >= 2);
     }
 
     /// F2: `analyze_model` on a conveyor model must NOT report a spurious

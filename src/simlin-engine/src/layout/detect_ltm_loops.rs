@@ -15,13 +15,14 @@ use crate::ltm_dominance::{FeedbackLoop, LoopPolarity};
 /// Try to detect feedback loops using LTM analysis via the incremental
 /// salsa compilation path. Compiles the project, detects loops, augments
 /// with synthetic LTM variables, simulates, and extracts importance time
-/// series. Returns `None` if any step fails, signaling the caller to fall
-/// back to persisted loop_metadata.
+/// series, with the times of the run's saved rows the series are at. Returns
+/// `None` if any step fails, signaling the caller to fall back to persisted
+/// loop_metadata.
 pub(super) fn try_detect_ltm_loops(
     db: &crate::db::SimlinDb,
     source_project: crate::db::SourceProject,
     model_name: &str,
-) -> Option<Vec<FeedbackLoop>> {
+) -> Option<(Vec<FeedbackLoop>, Vec<f64>)> {
     try_detect_ltm_loops_incremental(db, source_project, model_name)
 }
 
@@ -30,7 +31,7 @@ fn try_detect_ltm_loops_incremental(
     db: &crate::db::SimlinDb,
     source_project: crate::db::SourceProject,
     actual_name: &str,
-) -> Option<Vec<FeedbackLoop>> {
+) -> Option<(Vec<FeedbackLoop>, Vec<f64>)> {
     let actual_name_owned = actual_name.to_string();
 
     // Phase 1: Model lookup and loop detection.
@@ -41,8 +42,9 @@ fn try_detect_ltm_loops_incremental(
         (source_model, detected)
     };
 
+    // No loop, no series, and no run to take the times of.
     if detected.loops.is_empty() {
-        return Some(Vec::new());
+        return Some((Vec::new(), Vec::new()));
     }
 
     // Phase 2: LTM compile and simulate.
@@ -144,7 +146,11 @@ fn try_detect_ltm_loops_incremental(
         });
     }
 
-    Some(feedback_loops)
+    let times = results
+        .iter()
+        .map(|row| row[crate::results::TIME_OFF])
+        .collect();
+    Some((feedback_loops, times))
 }
 
 /// The partition a detected loop's AGGREGATED importance series may compete
@@ -222,7 +228,7 @@ mod tests {
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &datamodel, None);
 
-        let loops = try_detect_ltm_loops(&db, sync.project, "main")
+        let (loops, _) = try_detect_ltm_loops(&db, sync.project, "main")
             .expect("LTM loop detection must succeed on this fixture");
 
         let a2a = loops

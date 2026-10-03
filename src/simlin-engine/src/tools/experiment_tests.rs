@@ -420,6 +420,95 @@ fn residue_in_the_experiments_run_beside_a_movement_in_the_models_is_at_rest() {
     assert!(end != 0.0 && end.abs() < 1e-12, "it holds residue: {shown}");
 }
 
+/// A stock with an inflow of `inflow`, drained a millionth of itself a time
+/// unit (a loop, so the loop analysis reads whether its stock moves), and
+/// `x` for the inflow to use.
+fn draining(inflow: &str) -> TestProject {
+    TestProject::new("draining")
+        .with_sim_time(0.0, 100.0, 0.25)
+        .aux("x", "0", None)
+        .flow("in_flow", inflow, None)
+        .flow("out_flow", "balance * 1e-6", None)
+        .stock("balance", "0", &["in_flow"], &["out_flow"], None)
+}
+
+/// What every tool that reads a run's behavior says of `balance` in the run
+/// an experiment made with `set`: its mode in the experiment's record, in
+/// `read_behavior` and in a finding that cites it, and whether the loop
+/// analysis reads the run's stocks as at rest. They agree.
+fn reads_of_balance(project: &TestProject, set: Value) -> (String, bool) {
+    let mut host = Host::from_test_project(project);
+    let mut session = Session::new("main");
+    let output = experiment(
+        &mut host,
+        &mut session,
+        json!({"name": "x", "set": [set], "record": ["balance"]}),
+    );
+    let kind = comparison(&output, "balance")["this"]["mode"]["kind"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let read = host.call(
+        &mut session,
+        "read_behavior",
+        json!({"variables": ["balance"], "runs": ["x"]}),
+    );
+    assert_eq!(read["series"][0]["mode"]["kind"], kind.as_str(), "{read}");
+    let cited = host.call(
+        &mut session,
+        "verify_findings",
+        json!({"findings": [{"kind": "observation", "claim": "c", "citations": [
+            {"cites": "behavior_mode", "variable": "balance", "mode": kind, "run": "x"}]}]}),
+    );
+    assert_eq!(cited["findings"][0]["holds"], true, "{cited}");
+    let loops = host.call(&mut session, "analyze_loops", json!({"run": "x"}));
+    let at_rest = loops["basis"] == "structure";
+    assert_eq!(at_rest, kind == "at_rest", "{loops}");
+    (kind, at_rest)
+}
+
+/// A run is read at the scale of its own equations, the experiment's
+/// replacements applied, by every tool. A stock fed `1e9 + x - 1e9` (zero:
+/// at rest) and, in the experiment, a real inflow of 1e-5 moves 1e-3 there,
+/// which beside the model's terms of 1e9 would be rounding; and the other
+/// way, an inflow of 1e-5 replaced by a difference of terms of 1e9 leaves
+/// only rounding of them. A value set on `x` changes no equation, so its
+/// run is read at the model's terms.
+#[test]
+fn a_run_is_read_at_the_scale_of_its_own_equations() {
+    let cancelling = draining("1e9 + x - 1e9");
+    let (kind, _) = reads_of_balance(
+        &cancelling,
+        json!({"variable": "in_flow", "equation": "1e-5"}),
+    );
+    assert_eq!(kind, "linear");
+    let (kind, _) = reads_of_balance(
+        &draining("1e-5"),
+        json!({
+            "variable": "in_flow", "equation": "1e9 + 1e-5 - 1e9"
+        }),
+    );
+    assert_eq!(kind, "at_rest");
+    let (kind, _) = reads_of_balance(&cancelling, json!({"variable": "x", "value": 1e-5}));
+    assert_eq!(kind, "at_rest");
+    // The model's own runs, as they were: at rest fed zero, and moving fed
+    // 1e-5.
+    let mut host = Host::from_test_project(&cancelling);
+    let read = host.call(
+        &mut Session::new("main"),
+        "read_behavior",
+        json!({"variables": ["balance"]}),
+    );
+    assert_eq!(read["series"][0]["mode"]["kind"], "at_rest", "{read}");
+    let mut host = Host::from_test_project(&draining("1e-5"));
+    let read = host.call(
+        &mut Session::new("main"),
+        "read_behavior",
+        json!({"variables": ["balance"]}),
+    );
+    assert_ne!(read["series"][0]["mode"]["kind"], "at_rest", "{read}");
+}
+
 #[test]
 fn specs_change_the_run_and_the_output_says_what_it_ran_under() {
     let mut host = Host::from_test_project(&inventory());

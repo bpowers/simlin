@@ -679,22 +679,25 @@ fn compare(
                 continue;
             }
             let base_values = that.as_ref().and_then(|that| that.get(i)).map(|(_, v)| v);
-            // What the series is computed from in either run.
-            let computed_from = scale_in_run(&run.results, model, &key)
-                .max(base.map_or(0.0, |base| scale_in_run(&base.results, model, &key)));
-            // The two runs' series are read at one scale, the larger of
-            // theirs: residue in one run beside a movement in the other is
-            // at rest, not a movement of its own.
-            let scale = computed_from
-                .max(magnitude(&values))
-                .max(base_values.map_or(0.0, |v| magnitude(v)));
-            let base_core = match (base_values, &base_times) {
-                (Some(v), Some(times)) => Some(SeriesCore::at(times, v, scale)),
+            // The two runs' series share the larger of their magnitudes:
+            // residue in one run beside a movement in the other is at rest,
+            // not a movement of its own. Each is also read at the scale of
+            // what it is computed from in its own run, its own equations: a
+            // replacement that ends a cancellation of large terms leaves no
+            // trace of them in the run it made.
+            let shared = magnitude(&values).max(base_values.map_or(0.0, |v| magnitude(v)));
+            let this_scale = scale_in_run(&run.results, model, &run.plan, &key).max(shared);
+            let base_core = match (base, base_values, &base_times) {
+                (Some(base), Some(v), Some(times)) => {
+                    let base_scale =
+                        scale_in_run(&base.results, model, &base.plan, &key).max(shared);
+                    Some(SeriesCore::at(times, v, base_scale))
+                }
                 _ => None,
             };
             comparisons.push(Comparison {
                 variable: label,
-                this: SeriesCore::at(&run_times, &values, scale),
+                this: SeriesCore::at(&run_times, &values, this_scale),
                 base: base_core,
             });
         }

@@ -117,6 +117,10 @@ impl SeriesCore {
 /// sums and differences of, which is the scale their arithmetic residue is
 /// small beside. Zero where nothing says: the series is then read at its own.
 ///
+/// The equations are the run's: `model`'s with the run's `plan` applied
+/// (`runs::apply_equations`), so a replaced equation's terms are the
+/// replacement's, and a table it drops is gone.
+///
 /// - A stock is its flows added up over the run, so its scale is the largest
 ///   scale any of its flows has times the run's horizon: what the flow
 ///   reaches, or its own scale as a sum where that is larger, so a stock
@@ -144,8 +148,21 @@ impl SeriesCore {
 pub(crate) fn scale_in_run(
     results: &crate::results::Results,
     model: &datamodel::Model,
+    plan: &super::runs::RunPlan,
     key: &str,
 ) -> f64 {
+    let as_run;
+    let model = if plan.equations.is_empty() {
+        model
+    } else {
+        let mut replaced = model.clone();
+        // A plan that ran had every variable it replaces.
+        if super::runs::apply_equations(&mut replaced, plan).is_err() {
+            unreachable!("a run's plan replaces variables of its model");
+        }
+        as_run = replaced;
+        &as_run
+    };
     let (base, element) = match key.split_once('[') {
         Some((base, rest)) => (base, Some(rest.trim_end_matches(']'))),
         None => (key, None),
@@ -630,7 +647,7 @@ pub(crate) fn read_behavior(
                 }
                 let times = run.times();
                 for KeyedSeries { label, key, values } in elements {
-                    let scale = scale_in_run(&run.results, model, &key);
+                    let scale = scale_in_run(&run.results, model, &run.plan, &key);
                     let (core, turns, samples) = summarize(&times, &values, scale, true);
                     series.push(SeriesSummary {
                         variable: label,

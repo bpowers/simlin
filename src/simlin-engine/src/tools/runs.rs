@@ -1231,12 +1231,7 @@ fn staged_project(
         .iter_mut()
         .find(|m| m.name == model_name)
         .ok_or_else(|| format!("the project has no model named '{model_name}'"))?;
-    for change in &plan.equations {
-        let var = model
-            .get_variable_mut(&change.variable)
-            .ok_or_else(|| format!("the model has no variable '{}'", change.variable))?;
-        replace_equation(var, &change.replacement);
-    }
+    apply_equations(model, plan)?;
     if !plan.specs.is_empty() {
         let specs = match &mut model.sim_specs {
             Some(specs) => specs,
@@ -1245,6 +1240,19 @@ fn staged_project(
         *specs = plan.specs.applied_to(specs);
     }
     Ok(staged)
+}
+
+/// `plan`'s replacement equations applied to `model`: the model as a run of
+/// the plan compiles it, and so as every reader of that run's structure
+/// must read it (`series::scale_in_run`).
+pub(crate) fn apply_equations(model: &mut datamodel::Model, plan: &RunPlan) -> Result<(), String> {
+    for change in &plan.equations {
+        let var = model
+            .get_variable_mut(&change.variable)
+            .ok_or_else(|| format!("the model has no variable '{}'", change.variable))?;
+        replace_equation(var, &change.replacement);
+    }
+    Ok(())
 }
 
 /// Replace a variable's value, keeping its dimensions: one equation applies

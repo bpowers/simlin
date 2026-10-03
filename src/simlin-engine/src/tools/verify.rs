@@ -593,7 +593,7 @@ fn check(
             let KeyedSeries { label, key, values } = one_keyed_series(&run, model, variable)?;
             let times = run.times();
             within_run(&run, &times, *time)?;
-            let scale = scale_in_run(&run.results, model, &key);
+            let scale = scale_in_run(&run.results, model, &run.plan, &key);
             if classify_at(&times, &values, scale).kind == ModeKind::AtRest {
                 return Err(format!(
                     "{label} holds at {} throughout run '{}', so it has no peak",
@@ -646,7 +646,7 @@ fn check(
         } => {
             let run = run_of(session, ws, model, run.as_deref())?;
             let KeyedSeries { label, key, values } = one_keyed_series(&run, model, variable)?;
-            let scale = scale_in_run(&run.results, model, &key);
+            let scale = scale_in_run(&run.results, model, &run.plan, &key);
             let actual = classify_at(&run.times(), &values, scale).kind;
             if actual == *mode {
                 Ok(())
