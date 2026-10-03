@@ -326,30 +326,44 @@ fn views_named_as_defined(model: &datamodel::Model) -> Vec<View> {
         .filter(|var| has_display_newline(var.get_ident()))
         .map(|var| crate::common::canonicalize(var.get_ident()).into_owned())
         .collect();
-    let named_as_defined = |name: &mut String| {
-        let mut written = name.clone();
+    // The name an element is written under, when that is not the name it has.
+    let named_as_defined = |name: &str| {
+        let mut written = name.to_string();
         if has_display_newline(&written)
             && !broken.contains(crate::common::canonicalize(&written).as_ref())
         {
             written = collapse_display_newlines(&written);
         }
         written = single_spaced(&written);
-        let changed = written != *name;
-        *name = written;
-        changed
+        (written != name).then_some(written)
     };
     let mut views = model.views.clone();
     for view in &mut views {
         let View::StockFlow(sf) = view;
-        sf.elements.edit_each(|element| match element {
-            ViewElement::Aux(aux) => named_as_defined(&mut aux.name),
-            ViewElement::Stock(stock) => named_as_defined(&mut stock.name),
-            ViewElement::Flow(flow) => named_as_defined(&mut flow.name),
+        sf.elements.update(|element| match element {
+            ViewElement::Aux(aux) => named_as_defined(&aux.name).map(|name| {
+                ViewElement::Aux(view_element::Aux {
+                    name,
+                    ..aux.clone()
+                })
+            }),
+            ViewElement::Stock(stock) => named_as_defined(&stock.name).map(|name| {
+                ViewElement::Stock(view_element::Stock {
+                    name,
+                    ..stock.clone()
+                })
+            }),
+            ViewElement::Flow(flow) => named_as_defined(&flow.name).map(|name| {
+                ViewElement::Flow(view_element::Flow {
+                    name,
+                    ..flow.clone()
+                })
+            }),
             ViewElement::Link(_)
             | ViewElement::Module(_)
             | ViewElement::Alias(_)
             | ViewElement::Cloud(_)
-            | ViewElement::Group(_) => false,
+            | ViewElement::Group(_) => None,
         });
     }
     views
