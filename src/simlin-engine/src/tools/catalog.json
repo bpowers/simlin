@@ -2639,11 +2639,20 @@
                 "type": "boolean"
               },
               "variables": {
-                "description": "Variables left out whole, to read in another call.",
+                "description": "Variables left out whole, to read in another call: as many of them,\nin the order asked, as the budget has room to name.",
                 "type": "array",
                 "items": {
                   "type": "string"
                 }
+              },
+              "variablesCount": {
+                "description": "How many variables were left out, when `variables` does not name\nthem all.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0
               }
             }
           }
@@ -2664,10 +2673,20 @@
             }
           },
           "notFound": {
+            "description": "The names no variable has: as many of them, in the order asked, as\nthe budget has room for.",
             "type": "array",
             "items": {
               "$ref": "#/$defs/NotFound"
             }
+          },
+          "notFoundCount": {
+            "description": "How many names no variable has, when `not_found` does not list them\nall.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0
           },
           "omittedElements": {
             "description": "Arrayed variables with more elements than a summary lists, and how\nmany were left out.",
