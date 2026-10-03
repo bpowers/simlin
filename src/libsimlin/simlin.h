@@ -1531,7 +1531,14 @@ void simlin_project_get_model_names(SimlinProject *project,
 // # Returns
 // - 0 on success
 // - SimlinErrorCode::Generic if project or modelName is null or empty
-// - SimlinErrorCode::DuplicateVariable if a model with that name already exists
+// - SimlinErrorCode::DuplicateVariable if a model with that name already
+//   exists; names are compared as the engine knows them, so a name differing
+//   from an existing one only by case, spaces or underscores is taken, and
+//   `main` is taken by an unnamed model
+// - SimlinErrorCode::BadModelName if the name begins with the stdlib's
+//   prefix (`stdlib⁚`), which names the stdlib's own models
+//
+// A refused add changes nothing, the revision included.
 void simlin_project_add_model(SimlinProject *project,
                               const char *model_name,
                               SimlinError **out_error);

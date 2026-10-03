@@ -10,6 +10,72 @@ use crate::canonicalize;
 use crate::common::{DimensionName, ElementName};
 pub use crate::shared_vec::SharedVec;
 
+/// Equality of the floats a datamodel type holds, bit for bit.
+///
+/// The datamodel's `==` answers "is this the same model", not "do these
+/// numbers compare equal": it decides whether a salsa input is set again
+/// (`db::sync`), whether an agent's record changed (`tools::changes`), and
+/// whether a view element can share an allocation
+/// (`SharedVec::share_identical`). By value, a NaN is unequal to itself, so a
+/// model holding one would change on every look, and `0.0 == -0.0` although
+/// the two save differently. So every float-bearing type compares its floats
+/// through this, and is `Eq`.
+trait BitEq {
+    fn bit_eq(&self, other: &Self) -> bool;
+}
+
+impl BitEq for f64 {
+    fn bit_eq(&self, other: &Self) -> bool {
+        self.to_bits() == other.to_bits()
+    }
+}
+
+impl<T: BitEq> BitEq for Vec<T> {
+    fn bit_eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().zip(other).all(|(a, b)| a.bit_eq(b))
+    }
+}
+
+impl<T: BitEq> BitEq for Option<T> {
+    fn bit_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Some(a), Some(b)) => a.bit_eq(b),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        }
+    }
+}
+
+/// `a == b` for a field whose type is `Eq`: a float, which is not, fails to
+/// compile here rather than being compared by value.
+fn total_eq<T: Eq>(a: &T, b: &T) -> bool {
+    a == b
+}
+
+/// Implements `PartialEq` and `Eq` for a struct that holds floats, field by
+/// field: a field marked `: float` holds floats and is compared bit for bit
+/// ([`BitEq`]), and every other field is compared with its own `==`, which
+/// must be `Eq`. The struct is destructured without `..`, so a field added to
+/// it fails to compile until it is listed here, and a float listed without
+/// its mark fails to compile too.
+macro_rules! bitwise_eq {
+    ($type:ident { $($field:ident $(: $float:ident)?),* $(,)? }) => {
+        impl PartialEq for $type {
+            fn eq(&self, other: &Self) -> bool {
+                let $type { $($field),* } = self;
+                true $(&& bitwise_eq!(@compare $field, &other.$field $(, $float)?))*
+            }
+        }
+        impl Eq for $type {}
+    };
+    (@compare $a:expr, $b:expr) => {
+        $crate::datamodel::total_eq($a, $b)
+    };
+    (@compare $a:expr, $b:expr, float) => {
+        $crate::datamodel::BitEq::bit_eq($a, $b)
+    };
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Default, Eq, Clone)]
 pub struct UnitMap {
@@ -190,14 +256,18 @@ pub enum GraphicalFunctionKind {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
 }
+bitwise_eq!(GraphicalFunctionScale {
+    min: float,
+    max: float,
+});
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct GraphicalFunction {
     pub kind: GraphicalFunctionKind,
     pub x_points: Option<Vec<f64>>,
@@ -205,9 +275,16 @@ pub struct GraphicalFunction {
     pub x_scale: GraphicalFunctionScale,
     pub y_scale: GraphicalFunctionScale,
 }
+bitwise_eq!(GraphicalFunction {
+    kind,
+    x_points: float,
+    y_points: float,
+    x_scale,
+    y_scale,
+});
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Equation {
     Scalar(String),
     ApplyToAll(Vec<DimensionName>, String),
@@ -412,7 +489,7 @@ pub enum AiState {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Stock {
     pub ident: String,
     pub equation: Equation,
@@ -433,7 +510,7 @@ pub struct Stock {
 /// A stock's inflow or outflow list as the set the engine integrates, and the
 /// flows the list repeats.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct DistinctFlows {
     /// Each flow's first occurrence, judged after canonicalization, in list
     /// order, spelled as written.
@@ -509,7 +586,7 @@ impl Project {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Flow {
     pub ident: String,
     pub equation: Equation,
@@ -522,7 +599,7 @@ pub struct Flow {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Aux {
     pub ident: String,
     pub equation: Equation,
@@ -554,7 +631,7 @@ pub struct Module {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Variable {
     Stock(Stock),
     Flow(Flow),
@@ -677,6 +754,451 @@ impl Variable {
     }
 }
 
+/// What an expression text is to the variable that holds it.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum ExpressionRole {
+    /// The equation itself: a scalar or apply-to-all text, one element's
+    /// text, or an EXCEPT default.
+    Equation,
+    /// An initial value written apart from the equation: an element's own
+    /// initial, or an `ACTIVE INITIAL`.
+    Initial,
+    /// A stock or flow option the engine evaluates: a conveyor's parameter, a
+    /// leak's fraction or zone bound.
+    Option,
+}
+
+/// Visits every expression text of an `Equation` reference, shared or
+/// mutable: the one statement of where an equation's texts are.
+macro_rules! visit_equation_texts {
+    ($equation:expr, $out:ident $(, . $as_text:ident)?) => {
+        match $equation {
+            Equation::Scalar(text) | Equation::ApplyToAll(_, text) => {
+                $out.push((ExpressionRole::Equation, text $(.$as_text())?));
+            }
+            Equation::Arrayed(_, elements, default, _) => {
+                for (_, text, initial, _) in elements {
+                    $out.push((ExpressionRole::Equation, text $(.$as_text())?));
+                    if let Some(initial) = initial {
+                        $out.push((ExpressionRole::Initial, initial $(.$as_text())?));
+                    }
+                }
+                if let Some(default) = default {
+                    $out.push((ExpressionRole::Equation, default $(.$as_text())?));
+                }
+            }
+        }
+    };
+}
+
+/// Visits every expression text of a `Variable` reference, shared or mutable:
+/// the one statement of where a variable holds text the engine parses as an
+/// expression. Every struct is destructured without `..`, so a field added to
+/// a variable, to `Compat` or to a stock or flow option fails to compile until
+/// it is listed here as an expression or as something else.
+macro_rules! visit_variable_texts {
+    ($variable:expr, $out:ident $(, . $as_text:ident)?) => {{
+        let compat = match $variable {
+            Variable::Stock(Stock {
+                equation,
+                compat,
+                ident: _,
+                documentation: _,
+                units: _,
+                inflows: _,
+                outflows: _,
+                ai_state: _,
+                uid: _,
+            }) => {
+                visit_equation_texts!(equation, $out $(, . $as_text)?);
+                compat
+            }
+            Variable::Flow(Flow {
+                equation,
+                compat,
+                ident: _,
+                documentation: _,
+                units: _,
+                gf: _,
+                ai_state: _,
+                uid: _,
+            })
+            | Variable::Aux(Aux {
+                equation,
+                compat,
+                ident: _,
+                documentation: _,
+                units: _,
+                gf: _,
+                ai_state: _,
+                uid: _,
+            }) => {
+                visit_equation_texts!(equation, $out $(, . $as_text)?);
+                compat
+            }
+            Variable::Module(Module {
+                compat,
+                ident: _,
+                model_name: _,
+                documentation: _,
+                units: _,
+                references: _,
+                ai_state: _,
+                uid: _,
+            }) => compat,
+        };
+        let Compat {
+            active_initial,
+            conveyor,
+            leakage,
+            // A spread flow's distribution is a variable's name or a list of
+            // numbers, never an expression (`NameRole::Distribution`).
+            spreadflow: _,
+            non_negative: _,
+            can_be_module_input: _,
+            visibility: _,
+            data_source: _,
+            queue: _,
+            overflow: _,
+        } = compat;
+        if let Some(text) = active_initial {
+            $out.push((ExpressionRole::Initial, text $(.$as_text())?));
+        }
+        if let Some(Conveyor {
+            transit_time,
+            capacity,
+            inflow_limit,
+            sample,
+            arrest,
+            discrete: _,
+            batch_integrity: _,
+            one_at_a_time: _,
+            exponential_leak: _,
+            ignore_earlier_zone_losses: _,
+        }) = conveyor
+        {
+            $out.push((ExpressionRole::Option, transit_time $(.$as_text())?));
+            for text in [capacity, inflow_limit, sample, arrest].into_iter().flatten() {
+                $out.push((ExpressionRole::Option, text $(.$as_text())?));
+            }
+        }
+        if let Some(Leakage {
+            fraction,
+            zone_start,
+            zone_end,
+            integers: _,
+        }) = leakage
+        {
+            for text in [fraction, zone_start, zone_end].into_iter().flatten() {
+                $out.push((ExpressionRole::Option, text $(.$as_text())?));
+            }
+        }
+    }};
+}
+
+/// What a name of a variable is to the place a model holds it in.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum NameRole {
+    /// A variable's own name, as displayed.
+    Ident,
+    /// A flow in a stock's inflow list.
+    Inflow,
+    /// A flow in a stock's outflow list.
+    Outflow,
+    /// The end of a module reference the value is read from: a variable of
+    /// the module's model, or one reached through an instance.
+    ModuleSource,
+    /// The end of a module reference the value is written to: a port of an
+    /// instance.
+    ModuleDestination,
+    /// The variable whose graphical function a spread inflow distributes by
+    /// (`SpreadFlow::Dist`). The text is that variable's name, or else a
+    /// list of numbers (`conveyor_compile::resolve_dist_profile`).
+    Distribution,
+    /// A member of one of the model's groups.
+    GroupMember,
+    /// A formal parameter of a macro: a variable of the macro's body.
+    MacroParameter,
+    /// An output of a macro: a variable of the macro's body.
+    MacroOutput,
+    /// The label of a diagram element: the variable the element draws.
+    ViewLabel,
+}
+
+/// Visits every name of a variable that a `Variable` reference holds outside
+/// its expression texts, shared or mutable: the one statement of where those
+/// are. Every struct is destructured without `..`, so a field added to a
+/// variable or to `Compat` fails to compile until it is listed here as a
+/// name or as something else.
+macro_rules! visit_variable_names {
+    ($variable:expr, $out:ident $(, . $as_text:ident)?) => {{
+        let compat = match $variable {
+            Variable::Stock(Stock {
+                ident,
+                inflows,
+                outflows,
+                compat,
+                equation: _,
+                documentation: _,
+                units: _,
+                ai_state: _,
+                uid: _,
+            }) => {
+                $out.push((NameRole::Ident, ident $(.$as_text())?));
+                for flow in inflows {
+                    $out.push((NameRole::Inflow, flow $(.$as_text())?));
+                }
+                for flow in outflows {
+                    $out.push((NameRole::Outflow, flow $(.$as_text())?));
+                }
+                compat
+            }
+            Variable::Flow(Flow {
+                ident,
+                compat,
+                equation: _,
+                documentation: _,
+                units: _,
+                gf: _,
+                ai_state: _,
+                uid: _,
+            })
+            | Variable::Aux(Aux {
+                ident,
+                compat,
+                equation: _,
+                documentation: _,
+                units: _,
+                gf: _,
+                ai_state: _,
+                uid: _,
+            }) => {
+                $out.push((NameRole::Ident, ident $(.$as_text())?));
+                compat
+            }
+            Variable::Module(Module {
+                ident,
+                references,
+                compat,
+                // The name of a model, not of a variable.
+                model_name: _,
+                documentation: _,
+                units: _,
+                ai_state: _,
+                uid: _,
+            }) => {
+                $out.push((NameRole::Ident, ident $(.$as_text())?));
+                for ModuleReference { src, dst } in references {
+                    $out.push((NameRole::ModuleSource, src $(.$as_text())?));
+                    $out.push((NameRole::ModuleDestination, dst $(.$as_text())?));
+                }
+                compat
+            }
+        };
+        let Compat {
+            spreadflow,
+            // Expression texts (`Variable::expression_texts`).
+            active_initial: _,
+            conveyor: _,
+            leakage: _,
+            non_negative: _,
+            can_be_module_input: _,
+            visibility: _,
+            data_source: _,
+            queue: _,
+            overflow: _,
+        } = compat;
+        match spreadflow {
+            Some(SpreadFlow::Dist(name)) => {
+                $out.push((NameRole::Distribution, name $(.$as_text())?));
+            }
+            Some(
+                SpreadFlow::Beginning | SpreadFlow::Even | SpreadFlow::Dest | SpreadFlow::Source,
+            )
+            | None => {}
+        }
+    }};
+}
+
+/// Visits the name of the variable a `ViewElement` reference draws, shared or
+/// mutable. Every element is destructured without `..`, so a field added to
+/// one fails to compile until it is listed here.
+macro_rules! visit_view_element_names {
+    ($element:expr, $out:ident $(, . $as_text:ident)?) => {
+        match $element {
+            ViewElement::Aux(view_element::Aux {
+                name,
+                uid: _,
+                x: _,
+                y: _,
+                label_side: _,
+                compat: _,
+            })
+            | ViewElement::Stock(view_element::Stock {
+                name,
+                uid: _,
+                x: _,
+                y: _,
+                label_side: _,
+                compat: _,
+            }) => $out.push((NameRole::ViewLabel, name $(.$as_text())?)),
+            ViewElement::Flow(view_element::Flow {
+                name,
+                uid: _,
+                x: _,
+                y: _,
+                label_side: _,
+                points: _,
+                compat: _,
+                label_compat: _,
+            }) => $out.push((NameRole::ViewLabel, name $(.$as_text())?)),
+            ViewElement::Module(view_element::Module {
+                name,
+                uid: _,
+                x: _,
+                y: _,
+                label_side: _,
+            }) => $out.push((NameRole::ViewLabel, name $(.$as_text())?)),
+            // These name what they draw by uid.
+            ViewElement::Link(view_element::Link {
+                uid: _,
+                from_uid: _,
+                to_uid: _,
+                shape: _,
+                polarity: _,
+            }) => {}
+            ViewElement::Alias(view_element::Alias {
+                uid: _,
+                alias_of_uid: _,
+                x: _,
+                y: _,
+                label_side: _,
+                compat: _,
+            }) => {}
+            ViewElement::Cloud(view_element::Cloud {
+                uid: _,
+                flow_uid: _,
+                x: _,
+                y: _,
+                compat: _,
+            }) => {}
+            // A group's name is its own: it draws no variable.
+            ViewElement::Group(view_element::Group {
+                name: _,
+                uid: _,
+                x: _,
+                y: _,
+                width: _,
+                height: _,
+                is_mdl_view_marker: _,
+            }) => {}
+        }
+    };
+}
+
+/// `value` with each text `read` lists replaced by what `replace` returns for
+/// it, or `None` when `replace` returns `None` for every one: the value is as
+/// it was, and nothing was copied. `write` lists the same texts in the same
+/// order, to write.
+fn mapped<T: Clone, R>(
+    value: &T,
+    read: fn(&T) -> Vec<(R, &str)>,
+    write: fn(&mut T) -> Vec<(R, &mut String)>,
+    mut replace: impl FnMut(R, &str) -> Option<String>,
+) -> Option<T> {
+    let replacements: Vec<Option<String>> = read(value)
+        .into_iter()
+        .map(|(role, text)| replace(role, text))
+        .collect();
+    if replacements.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut next = value.clone();
+    for ((_, text), replacement) in write(&mut next).into_iter().zip(replacements) {
+        if let Some(replacement) = replacement {
+            *text = replacement;
+        }
+    }
+    Some(next)
+}
+
+impl Equation {
+    /// Every expression text the equation holds, each with its role, in a
+    /// fixed order: an element's text, then its initial, element by element,
+    /// then the EXCEPT default.
+    pub fn expression_texts(&self) -> Vec<(ExpressionRole, &str)> {
+        let mut texts = Vec::new();
+        visit_equation_texts!(self, texts, .as_str);
+        texts
+    }
+}
+
+impl Variable {
+    /// Every text of the variable the engine parses as an expression, each
+    /// with its role: the equation's texts (`Equation::expression_texts`),
+    /// the `ACTIVE INITIAL`, and the conveyor and leak options. A pass that
+    /// reads or rewrites what a variable references (a rename, the
+    /// special-stock expansions' scans) takes the texts from here, so no
+    /// expression is out of its reach. A name held outside an expression is
+    /// one of [`Variable::names`].
+    pub fn expression_texts(&self) -> Vec<(ExpressionRole, &str)> {
+        let mut texts = Vec::new();
+        visit_variable_texts!(self, texts, .as_str);
+        texts
+    }
+
+    /// The texts of [`Variable::expression_texts`], in the same order, to
+    /// write.
+    pub fn expression_texts_mut(&mut self) -> Vec<(ExpressionRole, &mut String)> {
+        let mut texts = Vec::new();
+        visit_variable_texts!(self, texts);
+        texts
+    }
+
+    /// The variable with each expression text replaced by what `replace`
+    /// returns for it, or `None` when `replace` returns `None` for every
+    /// text: the variable is as it was, and nothing was copied.
+    pub fn map_expression_texts(
+        &self,
+        replace: impl FnMut(ExpressionRole, &str) -> Option<String>,
+    ) -> Option<Variable> {
+        mapped(
+            self,
+            Variable::expression_texts,
+            Variable::expression_texts_mut,
+            replace,
+        )
+    }
+
+    /// Every name of a variable the variable holds outside its expression
+    /// texts, each with its role: its own name, a stock's flows, a module's
+    /// references, and a spread inflow's distribution.
+    pub fn names(&self) -> Vec<(NameRole, &str)> {
+        let mut names = Vec::new();
+        visit_variable_names!(self, names, .as_str);
+        names
+    }
+
+    /// The names of [`Variable::names`], in the same order, to write.
+    pub fn names_mut(&mut self) -> Vec<(NameRole, &mut String)> {
+        let mut names = Vec::new();
+        visit_variable_names!(self, names);
+        names
+    }
+
+    /// The variable with each name replaced by what `replace` returns for it,
+    /// or `None` when `replace` returns `None` for every name: the variable
+    /// is as it was, and nothing was copied.
+    pub fn map_names(
+        &self,
+        replace: impl FnMut(NameRole, &str) -> Option<String>,
+    ) -> Option<Variable> {
+        mapped(self, Variable::names, Variable::names_mut, replace)
+    }
+}
+
 pub mod view_element {
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
     #[derive(Copy, Clone, PartialEq, Eq)]
@@ -692,7 +1214,7 @@ pub mod view_element {
     /// Stores original element dimensions and type bits so the writer can
     /// reproduce the sketch section byte-for-byte.
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct ViewElementCompat {
         pub width: f64,
         pub height: f64,
@@ -705,15 +1227,27 @@ pub mod view_element {
         /// writer can roundtrip MDL-specific flags it does not interpret.
         pub tail: Option<String>,
     }
+    bitwise_eq!(ViewElementCompat {
+        width: float,
+        height: float,
+        shape,
+        bits,
+        name_field,
+        tail,
+    });
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct SketchSegmentCompat {
         /// Translation applied by MDL view composition before the datamodel sees
         /// the view. Serializing a split view subtracts this offset again.
         pub x_offset: f64,
         pub y_offset: f64,
     }
+    bitwise_eq!(SketchSegmentCompat {
+        x_offset: float,
+        y_offset: float,
+    });
 
     /// Connector fields the MDL writer roundtrips but does not derive from the
     /// datamodel `Link`: `field4` (whether the connector carries a meaningful
@@ -733,7 +1267,7 @@ pub mod view_element {
     /// writer computed is recorded when the file is read again, so the save
     /// after it writes that point unchanged.
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone, PartialEq, Eq)]
     pub struct LinkSketchCompat {
         pub uid: i32,
         pub field4: i32,
@@ -751,14 +1285,14 @@ pub mod view_element {
     /// Flow pipe geometry is not stored -- the writer recomputes pipe connectors
     /// from the flow's points and stock edges.
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Default)]
+    #[derive(Clone, PartialEq, Eq, Default)]
     pub struct StockFlowSketchCompat {
         pub segments: Vec<SketchSegmentCompat>,
         pub links: Vec<LinkSketchCompat>,
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct Aux {
         pub name: String,
         pub uid: i32,
@@ -767,9 +1301,17 @@ pub mod view_element {
         pub label_side: LabelSide,
         pub compat: Option<ViewElementCompat>,
     }
+    bitwise_eq!(Aux {
+        name,
+        uid,
+        x: float,
+        y: float,
+        label_side,
+        compat,
+    });
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct Stock {
         pub name: String,
         pub uid: i32,
@@ -778,17 +1320,30 @@ pub mod view_element {
         pub label_side: LabelSide,
         pub compat: Option<ViewElementCompat>,
     }
+    bitwise_eq!(Stock {
+        name,
+        uid,
+        x: float,
+        y: float,
+        label_side,
+        compat,
+    });
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct FlowPoint {
         pub x: f64,
         pub y: f64,
         pub attached_to_uid: Option<i32>,
     }
+    bitwise_eq!(FlowPoint {
+        x: float,
+        y: float,
+        attached_to_uid,
+    });
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct Flow {
         pub name: String,
         pub uid: i32,
@@ -801,9 +1356,19 @@ pub mod view_element {
         pub compat: Option<ViewElementCompat>,
         pub label_compat: Option<ViewElementCompat>,
     }
+    bitwise_eq!(Flow {
+        name,
+        uid,
+        x: float,
+        y: float,
+        label_side,
+        points,
+        compat,
+        label_compat,
+    });
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub enum LinkShape {
         Straight,
         Arc(f64), // angle in [0, 360)
@@ -811,14 +1376,14 @@ pub mod view_element {
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, Copy, PartialEq)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     pub enum LinkPolarity {
         Positive,
         Negative,
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone, PartialEq, Eq)]
     pub struct Link {
         pub uid: i32,
         pub from_uid: i32,
@@ -828,7 +1393,7 @@ pub mod view_element {
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct Module {
         pub name: String,
         pub uid: i32,
@@ -836,9 +1401,16 @@ pub mod view_element {
         pub y: f64,
         pub label_side: LabelSide,
     }
+    bitwise_eq!(Module {
+        name,
+        uid,
+        x: float,
+        y: float,
+        label_side,
+    });
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct Alias {
         pub uid: i32,
         pub alias_of_uid: i32,
@@ -847,9 +1419,17 @@ pub mod view_element {
         pub label_side: LabelSide,
         pub compat: Option<ViewElementCompat>,
     }
+    bitwise_eq!(Alias {
+        uid,
+        alias_of_uid,
+        x: float,
+        y: float,
+        label_side,
+        compat,
+    });
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct Cloud {
         pub uid: i32,
         pub flow_uid: i32,
@@ -857,6 +1437,13 @@ pub mod view_element {
         pub y: f64,
         pub compat: Option<ViewElementCompat>,
     }
+    bitwise_eq!(Cloud {
+        uid,
+        flow_uid,
+        x: float,
+        y: float,
+        compat,
+    });
 
     /// Visual container for grouping related model elements.
     /// In XMILE these are called "groups" and in Vensim "sectors".
@@ -864,7 +1451,7 @@ pub mod view_element {
     /// (matching the internal convention) rather than the XMILE top-left.
     /// Conversion to/from JSON handles the coordinate transformation.
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct Group {
         pub uid: i32,
         pub name: String,
@@ -878,114 +1465,34 @@ pub mod view_element {
         /// groups (organizational containers) leave this `false`.
         pub is_mdl_view_marker: bool,
     }
+    bitwise_eq!(Group {
+        uid,
+        name,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        is_mdl_view_marker,
+    });
 
-    use crate::shared_vec::{Identical, identical_fields};
-
-    // Bit-for-bit equality, for sharing a view's elements across a
-    // replacement (`SharedVec::share_identical`): `identical_fields!` lists
-    // every field, so a new one fails to compile until it is compared.
-    impl Identical for LabelSide {
-        fn identical(&self, other: &Self) -> bool {
-            self == other
-        }
-    }
-    impl Identical for LinkPolarity {
-        fn identical(&self, other: &Self) -> bool {
-            self == other
-        }
-    }
-    impl Identical for LinkShape {
-        fn identical(&self, other: &Self) -> bool {
-            match self {
-                LinkShape::Straight => matches!(other, LinkShape::Straight),
-                LinkShape::Arc(a) => matches!(other, LinkShape::Arc(b) if a.identical(b)),
-                LinkShape::MultiPoint(p) => {
-                    matches!(other, LinkShape::MultiPoint(q) if p.identical(q))
-                }
+    // A link's shape holds an angle, so it is compared by hand, bit for bit
+    // (see `bitwise_eq!`). The match names every variant, so a new one fails
+    // to compile until it is compared.
+    impl PartialEq for LinkShape {
+        fn eq(&self, other: &Self) -> bool {
+            match (self, other) {
+                (LinkShape::Straight, LinkShape::Straight) => true,
+                (LinkShape::Arc(a), LinkShape::Arc(b)) => a.to_bits() == b.to_bits(),
+                (LinkShape::MultiPoint(a), LinkShape::MultiPoint(b)) => a == b,
+                (LinkShape::Straight | LinkShape::Arc(_) | LinkShape::MultiPoint(_), _) => false,
             }
         }
     }
-    identical_fields!(ViewElementCompat {
-        width,
-        height,
-        shape,
-        bits,
-        name_field,
-        tail
-    });
-    identical_fields!(Aux {
-        name,
-        uid,
-        x,
-        y,
-        label_side,
-        compat
-    });
-    identical_fields!(Stock {
-        name,
-        uid,
-        x,
-        y,
-        label_side,
-        compat
-    });
-    identical_fields!(FlowPoint {
-        x,
-        y,
-        attached_to_uid
-    });
-    identical_fields!(Flow {
-        name,
-        uid,
-        x,
-        y,
-        label_side,
-        points,
-        compat,
-        label_compat
-    });
-    identical_fields!(Link {
-        uid,
-        from_uid,
-        to_uid,
-        shape,
-        polarity
-    });
-    identical_fields!(Module {
-        name,
-        uid,
-        x,
-        y,
-        label_side
-    });
-    identical_fields!(Alias {
-        uid,
-        alias_of_uid,
-        x,
-        y,
-        label_side,
-        compat
-    });
-    identical_fields!(Cloud {
-        uid,
-        flow_uid,
-        x,
-        y,
-        compat
-    });
-    identical_fields!(Group {
-        uid,
-        name,
-        x,
-        y,
-        width,
-        height,
-        is_mdl_view_marker
-    });
+    impl Eq for LinkShape {}
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ViewElement {
     Aux(view_element::Aux),
     Stock(view_element::Stock),
@@ -997,22 +1504,31 @@ pub enum ViewElement {
     Group(view_element::Group),
 }
 
-impl crate::shared_vec::Identical for ViewElement {
-    fn identical(&self, other: &Self) -> bool {
-        match self {
-            ViewElement::Aux(a) => matches!(other, ViewElement::Aux(b) if a.identical(b)),
-            ViewElement::Stock(a) => matches!(other, ViewElement::Stock(b) if a.identical(b)),
-            ViewElement::Flow(a) => matches!(other, ViewElement::Flow(b) if a.identical(b)),
-            ViewElement::Link(a) => matches!(other, ViewElement::Link(b) if a.identical(b)),
-            ViewElement::Module(a) => matches!(other, ViewElement::Module(b) if a.identical(b)),
-            ViewElement::Alias(a) => matches!(other, ViewElement::Alias(b) if a.identical(b)),
-            ViewElement::Cloud(a) => matches!(other, ViewElement::Cloud(b) if a.identical(b)),
-            ViewElement::Group(a) => matches!(other, ViewElement::Group(b) if a.identical(b)),
-        }
-    }
-}
-
 impl ViewElement {
+    /// The name of the variable the element draws, with its role; none for an
+    /// element that draws no variable or names it by uid.
+    pub fn names(&self) -> Vec<(NameRole, &str)> {
+        let mut names = Vec::new();
+        visit_view_element_names!(self, names, .as_str);
+        names
+    }
+
+    /// The names of [`ViewElement::names`], to write.
+    pub fn names_mut(&mut self) -> Vec<(NameRole, &mut String)> {
+        let mut names = Vec::new();
+        visit_view_element_names!(self, names);
+        names
+    }
+
+    /// The element with its name replaced by what `replace` returns for it,
+    /// or `None` when `replace` returns `None`: nothing was copied.
+    pub fn map_names(
+        &self,
+        replace: impl FnMut(NameRole, &str) -> Option<String>,
+    ) -> Option<ViewElement> {
+        mapped(self, ViewElement::names, ViewElement::names_mut, replace)
+    }
+
     pub fn get_uid(&self) -> i32 {
         match self {
             ViewElement::Aux(var) => var.uid,
@@ -1042,16 +1558,22 @@ impl ViewElement {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, Default)]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
     pub width: f64,
     pub height: f64,
 }
+bitwise_eq!(Rect {
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+});
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct StockFlow {
     pub name: Option<String>,
     pub elements: SharedVec<ViewElement>,
@@ -1073,6 +1595,15 @@ pub struct StockFlow {
     /// writer can invert the standard MDL import path when exporting again.
     pub sketch_compat: Option<view_element::StockFlowSketchCompat>,
 }
+bitwise_eq!(StockFlow {
+    name,
+    elements,
+    view_box,
+    zoom: float,
+    use_lettered_polarity,
+    font,
+    sketch_compat,
+});
 
 impl StockFlow {
     pub fn get_variable_name(&self, uid: i32) -> Option<&str> {
@@ -1087,7 +1618,7 @@ impl StockFlow {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum View {
     StockFlow(StockFlow),
 }
@@ -1143,7 +1674,7 @@ pub struct ModelGroup {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Model {
     pub name: String,
     pub sim_specs: Option<SimSpecs>,
@@ -1156,6 +1687,85 @@ pub struct Model {
 }
 
 impl Model {
+    /// Replaces each name of a variable the model holds, outside expression
+    /// texts, by what `replace` returns for it (`None` leaves it): the one
+    /// statement of where a model holds the name of one of its variables. A
+    /// pass that follows a variable through the model (a rename) decides what
+    /// each role's name becomes here, so no place a name is held is out of
+    /// its reach. Only a variable or a view element that holds a replaced
+    /// name is copied.
+    ///
+    /// The model and everything it holds are destructured without `..`, so a
+    /// field added to any of them fails to compile until it is listed as a
+    /// name or as something else.
+    pub fn map_variable_names(
+        &mut self,
+        mut replace: impl FnMut(NameRole, &str) -> Option<String>,
+    ) {
+        let Model {
+            variables,
+            views,
+            loop_metadata,
+            groups,
+            macro_spec,
+            name: _,
+            sim_specs: _,
+        } = self;
+        variables.update(|variable| variable.map_names(&mut replace));
+        for view in views {
+            let View::StockFlow(StockFlow {
+                elements,
+                name: _,
+                view_box: _,
+                zoom: _,
+                use_lettered_polarity: _,
+                font: _,
+                // Raw MDL sketch records, kept for the MDL writer.
+                sketch_compat: _,
+            }) = view;
+            elements.update(|element| element.map_names(&mut replace));
+        }
+        // A loop names its variables by uid.
+        for LoopMetadata {
+            uids: _,
+            deleted: _,
+            name: _,
+            description: _,
+        } in loop_metadata.iter()
+        {}
+        for ModelGroup {
+            members,
+            name: _,
+            doc: _,
+            parent: _,
+            run_enabled: _,
+        } in groups
+        {
+            for member in members {
+                if let Some(replacement) = replace(NameRole::GroupMember, member) {
+                    *member = replacement;
+                }
+            }
+        }
+        if let Some(MacroSpec {
+            parameters,
+            primary_output,
+            additional_outputs,
+        }) = macro_spec
+        {
+            for parameter in parameters {
+                if let Some(replacement) = replace(NameRole::MacroParameter, parameter) {
+                    *parameter = replacement;
+                }
+            }
+            for output in std::iter::once(primary_output).chain(additional_outputs) {
+                if let Some(replacement) = replace(NameRole::MacroOutput, output) {
+                    *output = replacement;
+                }
+            }
+        }
+    }
+
     /// Build a macro-marked [`Model`] from an already-built body variable
     /// list, synthesizing any missing formal-parameter port variables and
     /// attaching the [`MacroSpec`].
@@ -1308,11 +1918,26 @@ impl Default for SimMethod {
 /// Dt is a UI thing: it can be nice to specify exact
 /// fractions that don't display neatly in the UI, like 1/3
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub enum Dt {
     Dt(f64),
     Reciprocal(f64),
 }
+
+// A dt holds a float, so it is compared by hand, bit for bit (see
+// `bitwise_eq!`). The match names every variant, so a new one fails to
+// compile until it is compared.
+impl PartialEq for Dt {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Dt::Dt(a), Dt::Dt(b)) | (Dt::Reciprocal(a), Dt::Reciprocal(b)) => {
+                a.to_bits() == b.to_bits()
+            }
+            (Dt::Dt(_) | Dt::Reciprocal(_), _) => false,
+        }
+    }
+}
+impl Eq for Dt {}
 
 /// The default dt is 1, just like XMILE
 impl Default for Dt {
@@ -1322,7 +1947,7 @@ impl Default for Dt {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, Default)]
 pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
@@ -1331,6 +1956,14 @@ pub struct SimSpecs {
     pub sim_method: SimMethod,
     pub time_units: Option<String>,
 }
+bitwise_eq!(SimSpecs {
+    start: float,
+    stop: float,
+    dt,
+    save_step,
+    sim_method,
+    time_units,
+});
 
 /// The elements of a dimension: either indexed (numeric) or named.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -1499,7 +2132,7 @@ pub struct Source {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Project {
     pub name: String,
     pub sim_specs: SimSpecs,
@@ -1511,7 +2144,7 @@ pub struct Project {
 }
 
 /// Unicode TWO DOT PUNCTUATION used as a separator in stdlib model names.
-const STDLIB_PREFIX: &str = "stdlib\u{205A}";
+pub(crate) const STDLIB_PREFIX: &str = "stdlib\u{205A}";
 
 impl Project {
     /// Ensures the project's `models` vec contains definitions for every
@@ -1598,16 +2231,59 @@ pub struct AiTesting {
 }
 
 impl Project {
-    pub fn get_model(&self, model_name: &str) -> Option<&Model> {
+    /// The position in `models` of the model named `model_name`: the name as
+    /// stored, with `main` also naming a model stored under the empty name.
+    pub fn model_index(&self, model_name: &str) -> Option<usize> {
         self.models
             .iter()
-            .find(|m| m.name == model_name || (model_name == "main" && m.name.is_empty()))
+            .position(|m| m.name == model_name || (model_name == "main" && m.name.is_empty()))
+    }
+    pub fn get_model(&self, model_name: &str) -> Option<&Model> {
+        self.model_index(model_name).map(|i| &self.models[i])
     }
     pub fn get_model_mut(&mut self, model_name: &str) -> Option<&mut Model> {
-        self.models
-            .iter_mut()
-            .find(|m| m.name == model_name || (model_name == "main" && m.name.is_empty()))
+        self.model_index(model_name).map(|i| &mut self.models[i])
     }
+
+    /// The position in `models` of the model a host runs when it names none:
+    /// the model whose name is `main` ([`canonical_model_name`], so `Main`
+    /// and an unnamed model are it too), the last of several as the db files
+    /// the later of two models of one name (a project it refuses to compile,
+    /// `db::diagnostic::project_duplicate_models`); else the first model that
+    /// is neither a macro nor a stdlib model. `None` only for a project with
+    /// no such model.
+    pub fn default_model_index(&self) -> Option<usize> {
+        self.models
+            .iter()
+            .rposition(|m| canonical_model_name(&m.name) == "main")
+            .or_else(|| {
+                self.models
+                    .iter()
+                    .position(|m| m.macro_spec.is_none() && !m.name.starts_with(STDLIB_PREFIX))
+            })
+    }
+    /// The model at [`Project::default_model_index`].
+    pub fn default_model(&self) -> Option<&Model> {
+        self.default_model_index().map(|i| &self.models[i])
+    }
+    /// The model at [`Project::default_model_index`], to edit.
+    pub fn default_model_mut(&mut self) -> Option<&mut Model> {
+        self.default_model_index().map(|i| &mut self.models[i])
+    }
+}
+
+/// The name a model is known by, which two models of a project must not
+/// share: its canonical name (model names are case-, whitespace- and
+/// underscore-insensitive), with the empty name read as `main`, as
+/// [`Project::model_index`] reads a patch addressed to `main`. Empty is
+/// decided on the canonical form, so a blank name is the unnamed model's too:
+/// the db files both under the one empty key.
+pub fn canonical_model_name(name: &str) -> std::borrow::Cow<'_, str> {
+    let canonical = crate::common::canonicalize(name);
+    if canonical.is_empty() {
+        return std::borrow::Cow::Borrowed("main");
+    }
+    canonical
 }
 
 #[cfg(test)]
@@ -1975,3 +2651,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "datamodel_equality_tests.rs"]
+mod equality_tests;

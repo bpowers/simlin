@@ -4,8 +4,47 @@
 
 // pattern: Functional Core -- pure functions for immutable reference array manipulation
 
+import { canonicalize } from '@simlin/core/canonicalize';
 import { type ModuleReference, type Variable, moduleToJson } from '@simlin/core/datamodel';
 import type { JsonModule } from '@simlin/engine';
+
+/**
+ * The name the engine knows a model by, which two models of a project must
+ * not share: its canonical name, an unnamed model being `main` -- the
+ * engine's `datamodel::canonical_model_name`, which its `AddModel` refuses a
+ * taken one of. Comparing the names as written would let a new model's name
+ * collide with an existing one that differs only in case, spacing or
+ * underscores, and the engine would refuse the edit. Empty is decided on the
+ * canonical form, so a blank name is the unnamed model's too.
+ */
+export function canonicalModelName(name: string): string {
+  const canonical = canonicalize(name);
+  return canonical === '' ? 'main' : canonical;
+}
+
+/** Whether a model of `modelNames` is already known by `name`'s name. */
+export function isModelNameTaken(modelNames: Iterable<string>, name: string): boolean {
+  const wanted = canonicalModelName(name);
+  for (const existing of modelNames) {
+    if (canonicalModelName(existing) === wanted) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The first of `{base}_copy`, `{base}_copy_2`, `{base}_copy_3`, ... that no
+ * model of `modelNames` is known by.
+ */
+export function unusedCopyName(modelNames: Iterable<string>, base: string): string {
+  const names = [...modelNames];
+  let name = `${base}_copy`;
+  for (let i = 2; isModelNameTaken(names, name); i++) {
+    name = `${base}_copy_${i}`;
+  }
+  return name;
+}
 
 /**
  * Build the upsertModule payload that re-points an existing module variable at

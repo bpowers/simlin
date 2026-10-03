@@ -1559,52 +1559,61 @@ pub fn expand_conveyors(
             }
         });
 
-    // Pass 2 (mutable): give every driven flow a `0` placeholder equation so it
+    // Pass 2: give every driven flow a `0` placeholder equation so it
     // compiles to a writable slot, append the synthesized auxes, and clear the
     // conveyor/leakage markers so the expanded model compiles as a plain
     // stock-and-flow model. Clearing the markers is what lets the ordinary
     // compile path reject an UN-expanded conveyor (the marker is still set)
     // while accepting this expanded one.
-    // Every variable is visited, and each is copied out of what the project
-    // shares with the one it was cloned from only if the pass changes it.
+    // Every variable is read, and only one the pass changes is replaced: the
+    // rest stay shared with the project this one was cloned from. A variable
+    // the pass has no business with is not copied at all, and one it rewrites
+    // to what it already was (a driven flow a Stella export gave the `0`
+    // placeholder) is not replaced.
     let model = &mut project.models[model_idx];
-    model.variables.edit_each(|v| {
-        // Replace a reader's equation with its container-access-rewritten form
-        // (the container subexpressions now reference the synthesized stocks).
-        let mut changed = false;
-        if let Some(new_eqn) = rewritten_equations.remove(&canon(v.get_ident())) {
-            set_variable_equation(v, new_eqn);
-            changed = true;
+    model.variables.update(|original| {
+        let ident = canon(original.get_ident());
+        // A reader's equation in its container-access-rewritten form (the
+        // container subexpressions reference the synthesized stocks).
+        let rewritten = rewritten_equations.remove(&ident);
+        let driven =
+            matches!(original, datamodel::Variable::Flow(_)) && driven_set.contains(&ident);
+        let conveyor =
+            matches!(original, datamodel::Variable::Stock(s) if s.compat.conveyor.is_some());
+        if rewritten.is_none() && !driven && !conveyor {
+            return None;
         }
-        changed
-            | match v {
-                datamodel::Variable::Flow(f) if driven_set.contains(&canon(&f.ident)) => {
-                    // Preserve the flow's array shape so an arrayed driven flow keeps
-                    // its per-element slots (§10); the pass overwrites every slot.
-                    f.equation = placeholder_zero_equation(&f.equation);
-                    // The fraction now lives in a hidden aux; the flow slot is
-                    // pass-driven, so its own leak/gf metadata plays no runtime role.
-                    f.gf = None;
-                    // Clear the leak marker so the expanded flow is plain.
-                    f.compat.leakage = None;
-                    true
-                }
-                datamodel::Variable::Stock(s) if s.compat.conveyor.is_some() => {
-                    // A §7.2 explicit-list <eqn> compiles as its constant
-                    // normalized-total placeholder (recorded in Pass 1); the belt
-                    // itself fills from the meta's `init_values` in init_belts,
-                    // whose write-back of the identical total is defense in depth.
-                    if let Some(placeholder) = init_list_rewrites.remove(&canon(&s.ident)) {
-                        s.equation = placeholder;
-                    }
-                    // The belt is now driven by the pass; the expanded stock is an
-                    // ordinary INTEG whose Δ = admitted - out - leak (the §4.3
-                    // conservation identity), so drop the conveyor marker.
-                    s.compat.conveyor = None;
-                    true
-                }
-                _ => false,
+        let mut v = original.clone();
+        if let Some(new_eqn) = rewritten {
+            set_variable_equation(&mut v, new_eqn);
+        }
+        match &mut v {
+            datamodel::Variable::Flow(f) if driven => {
+                // Preserve the flow's array shape so an arrayed driven flow keeps
+                // its per-element slots (§10); the pass overwrites every slot.
+                f.equation = placeholder_zero_equation(&f.equation);
+                // The fraction lives in a hidden aux; the flow slot is
+                // pass-driven, so its own leak/gf metadata plays no runtime role.
+                f.gf = None;
+                // Clear the leak marker so the expanded flow is plain.
+                f.compat.leakage = None;
             }
+            datamodel::Variable::Stock(s) if conveyor => {
+                // A §7.2 explicit-list <eqn> compiles as its constant
+                // normalized-total placeholder (recorded in Pass 1); the belt
+                // itself fills from the meta's `init_values` in init_belts,
+                // whose write-back of the identical total is defense in depth.
+                if let Some(placeholder) = init_list_rewrites.remove(&ident) {
+                    s.equation = placeholder;
+                }
+                // The belt is driven by the pass; the expanded stock is an
+                // ordinary INTEG whose Δ = admitted - out - leak (the §4.3
+                // conservation identity), so drop the conveyor marker.
+                s.compat.conveyor = None;
+            }
+            _ => {}
+        }
+        (v != *original).then_some(v)
     });
     for aux in new_auxes {
         model.variables.push(datamodel::Variable::Aux(aux));
@@ -1628,23 +1637,18 @@ fn equation_scalar_strings(v: &datamodel::Variable) -> Vec<String> {
 }
 
 /// The scalar equation strings of one [`Equation`] (the single expression of a
-/// `Scalar`/`ApplyToAll`, or every element plus the default of an `Arrayed`).
+/// `Scalar`/`ApplyToAll`, or every element plus the default of an `Arrayed`),
+/// taken from the datamodel's one statement of where an equation's texts are
+/// (`Equation::expression_texts`); an element's own initial is not one of them.
 /// Shared by [`equation_scalar_strings`] and the synthesized-aux driven-flow scan
 /// (whose auxes are bare `Aux` values, not `datamodel::Variable`s).
 fn equation_strings(eqn: &Equation) -> Vec<String> {
-    match eqn {
-        Equation::Scalar(s) => vec![s.clone()],
-        Equation::ApplyToAll(_, s) => vec![s.clone()],
-        Equation::Arrayed(_, elems, default, _) => {
-            let mut out: Vec<String> = elems.iter().map(|(_, s, _, _)| s.clone()).collect();
-            if let Some(d) = default {
-                out.push(d.clone());
-            }
-            out
-        }
-    }
+    eqn.expression_texts()
+        .into_iter()
+        .filter(|(role, _)| *role == datamodel::ExpressionRole::Equation)
+        .map(|(_, text)| text.to_string())
+        .collect()
 }
-
 /// Scan `equations` (the scalar equation strings of one variable/aux) for a
 /// reference to any pass-driven flow in `driven_sorted` (sorted for a
 /// deterministic first-match), returning the first driven-flow name referenced.

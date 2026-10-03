@@ -17,8 +17,9 @@
 //! reachability closure (`expand_maps_to_chains`) the parser uses to size a
 //! variable's dimension dependency.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 
@@ -54,6 +55,14 @@ pub struct SyncedVariable {
 pub struct PersistentSyncState {
     pub project: SourceProject,
     pub models: HashMap<String, PersistentModelState>,
+    /// Which sync of these inputs produced this state, counted in `latest`.
+    generation: u64,
+    /// How many times these inputs have been synced, shared by every state of
+    /// the chain. A state describes what the inputs hold only while its
+    /// `generation` is the latest: a state kept from before a staged sync (the
+    /// one a rollback passes back) is older than the inputs, and what it
+    /// remembers of them is not trusted.
+    latest: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -94,9 +103,22 @@ impl PersistentModelState {
 #[derive(Clone)]
 pub struct PersistentVariableState {
     pub source_var: SourceVariable,
+    /// The datamodel variable the input's fields were last set from, when the
+    /// sync had it by its allocation. A project edited through a patch shares
+    /// every variable the edit left alone (`datamodel::SharedVec`), so the
+    /// next sync finds the same allocation here and has nothing to extract
+    /// or compare for it. Holding the `Arc` is what makes the identity sound:
+    /// an address alone could be a freed variable's, reused.
+    synced: Option<Arc<datamodel::Variable>>,
 }
 
 impl PersistentSyncState {
+    /// Whether this state is of the inputs' latest sync, so that what it
+    /// remembers each input was set from is what the input holds.
+    fn is_current(&self) -> bool {
+        self.generation == self.latest.load(Ordering::Relaxed)
+    }
+
     /// Reconstitute a `SyncResult` from the stored handles.
     pub fn to_sync_result(&self) -> SyncResult {
         SyncResult {
@@ -109,35 +131,59 @@ impl PersistentSyncState {
         }
     }
 
-    fn from_sync_result(sync: &SyncResult) -> Self {
+    /// The first state of a chain: the handles a fresh sync of `project`
+    /// created, each remembering the variable it was created from.
+    fn from_sync_result(sync: &SyncResult, project: &datamodel::Project) -> Self {
+        let mut models: HashMap<String, PersistentModelState> = sync
+            .models
+            .iter()
+            .map(|(name, sm)| {
+                let variables = sm
+                    .variables
+                    .iter()
+                    .map(|(vname, sv)| {
+                        (
+                            vname.clone(),
+                            PersistentVariableState {
+                                source_var: sv.source,
+                                synced: None,
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    name.clone(),
+                    PersistentModelState {
+                        source_model: sm.source,
+                        variables,
+                        is_stdlib: sm.is_stdlib,
+                    },
+                )
+            })
+            .collect();
+        // Of two variables of one canonical name the fresh sync kept the
+        // last, and so does this walk, over the models it filed.
+        for dm_model in filed_models(project) {
+            let Some(model) = models.get_mut(canonicalize(&dm_model.name).as_ref()) else {
+                continue;
+            };
+            if model.is_stdlib {
+                continue;
+            }
+            for dm_var in dm_model.variables.allocations() {
+                if let Some(variable) = model
+                    .variables
+                    .get_mut(canonicalize(dm_var.get_ident()).as_ref())
+                {
+                    variable.synced = Some(Arc::clone(dm_var));
+                }
+            }
+        }
         PersistentSyncState {
             project: sync.project,
-            models: sync
-                .models
-                .iter()
-                .map(|(name, sm)| {
-                    let variables = sm
-                        .variables
-                        .iter()
-                        .map(|(vname, sv)| {
-                            (
-                                vname.clone(),
-                                PersistentVariableState {
-                                    source_var: sv.source,
-                                },
-                            )
-                        })
-                        .collect();
-                    (
-                        name.clone(),
-                        PersistentModelState {
-                            source_model: sm.source,
-                            variables,
-                            is_stdlib: sm.is_stdlib,
-                        },
-                    )
-                })
-                .collect(),
+            models,
+            generation: 0,
+            latest: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -265,7 +311,13 @@ pub(crate) fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
             let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
             let source_var = source_variable_from_datamodel(db, dm_var, &canonical);
             source_var_map.insert(canonical_var_name.clone(), source_var);
-            variables.insert(canonical_var_name, PersistentVariableState { source_var });
+            variables.insert(
+                canonical_var_name,
+                PersistentVariableState {
+                    source_var,
+                    synced: None,
+                },
+            );
         }
         let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
         variable_names.sort();
@@ -300,6 +352,28 @@ pub(crate) fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
     }
 }
 
+/// The models of `project` the db files, in declaration order: each under
+/// its canonical name, and of several models of one canonical name only the
+/// last. Such a project is refused (`diagnostic::project_duplicate_models`,
+/// read from the as-written `model_names`, which keeps every spelling), so
+/// nothing reads the earlier ones; syncing them anyway would make inputs for
+/// them on every sync that the later one then drops, and salsa never
+/// reclaims an input.
+fn filed_models(project: &datamodel::Project) -> impl Iterator<Item = &datamodel::Model> {
+    let last: HashMap<std::borrow::Cow<'_, str>, usize> = project
+        .models
+        .iter()
+        .enumerate()
+        .map(|(index, model)| (canonicalize(&model.name), index))
+        .collect();
+    project
+        .models
+        .iter()
+        .enumerate()
+        .filter(move |(index, model)| last.get(&canonicalize(&model.name)) == Some(index))
+        .map(|(_, model)| model)
+}
+
 /// Populate salsa inputs from a `datamodel::Project`.
 ///
 /// Creates `SourceProject`, `SourceModel`, and `SourceVariable` inputs in
@@ -310,7 +384,7 @@ pub fn sync_from_datamodel(db: &SimlinDb, project: &datamodel::Project) -> SyncR
     let mut models = HashMap::new();
     let mut source_model_map: HashMap<String, SourceModel> = HashMap::new();
 
-    for dm_model in &project.models {
+    for dm_model in filed_models(project) {
         let canonical_model_name = canonicalize(&dm_model.name).into_owned();
 
         let mut variables = HashMap::new();
@@ -448,6 +522,7 @@ impl SourceModelFields {
 /// Owned rather than borrowed because every field is stored into a salsa input:
 /// the fresh path moves them in, and the incremental path compares each against
 /// the stored value before setting it.
+#[cfg_attr(test, derive(PartialEq, Debug))]
 struct SourceVariableFields {
     ident: String,
     equation: datamodel::Equation,
@@ -992,10 +1067,77 @@ impl KeyHasher {
 #[path = "simulation_key_tests.rs"]
 mod simulation_key_tests;
 
+#[cfg(test)]
+thread_local! {
+    /// How many variables this thread's syncs have extracted and compared
+    /// field by field (`update_source_variable`), for the tests that pin
+    /// which variables a re-sync looks at.
+    static VARIABLES_COMPARED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[path = "sync_identity_tests.rs"]
+mod identity_tests;
+
+#[cfg(test)]
+#[path = "sync_differential_tests.rs"]
+mod differential_tests;
+
 // ── Incremental sync ───────────────────────────────────────────────────
 
+/// What a sync pass may take on trust about the inputs it syncs into.
+///
+/// An input holds the fields of the variable it was last set from, and those
+/// fields are a function of that variable and of the model's canonical name,
+/// which is the key the input is found under. The previous state remembers
+/// that variable (`PersistentVariableState::synced`), so a variable that is
+/// the remembered allocation has nothing to extract or compare. The memory is
+/// true of an input on two conditions, and both are this type's to keep:
+///
+/// - the state is of the inputs' latest sync (`PersistentSyncState::is_current`):
+///   one kept from before a staged sync is older than what the inputs hold;
+/// - the pass has not written the input itself. Two variables of one canonical
+///   name share an input, and so do the variables of two models of one
+///   canonical name; after the first is written the input holds what this pass
+///   put there, which no state remembers yet.
+///
+/// `holds` is the only way a pass asks, and asking is what marks the input as
+/// the pass's own, so no caller can ask twice of one input and be told yes.
+struct InputMemory {
+    prev_is_current: bool,
+    visited: HashSet<SourceVariable>,
+}
+
+impl InputMemory {
+    fn of(prev: &PersistentSyncState) -> Self {
+        InputMemory {
+            prev_is_current: prev.is_current(),
+            visited: HashSet::new(),
+        }
+    }
+
+    /// Whether `input` already holds the fields `variable` gives it. The first
+    /// question about an input is answered from the previous state's memory;
+    /// every later one is answered no.
+    fn holds(
+        &mut self,
+        input: &PersistentVariableState,
+        variable: &Arc<datamodel::Variable>,
+    ) -> bool {
+        let first_visit = self.visited.insert(input.source_var);
+        self.prev_is_current
+            && first_visit
+            && input
+                .synced
+                .as_ref()
+                .is_some_and(|last| Arc::ptr_eq(last, variable))
+    }
+}
+
 /// Update a single `SourceVariable`'s fields via salsa setters, only
-/// touching fields whose values actually changed.
+/// touching fields whose values actually changed. The caller skips a variable
+/// the input is known to hold (`InputMemory::holds`), so this runs for the
+/// variables an edit replaced, not for the whole model.
 ///
 /// "Only what changed" is load-bearing, not an optimization: a salsa setter
 /// bumps the input's revision whether or not the value differs, so setting
@@ -1008,6 +1150,9 @@ fn update_source_variable(
     owner_model: &str,
 ) {
     use salsa::Setter;
+
+    #[cfg(test)]
+    VARIABLES_COMPARED.with(|count| count.set(count.get() + 1));
 
     let f = SourceVariableFields::from_datamodel(dm_var, owner_model);
 
@@ -1077,10 +1222,11 @@ pub fn sync_from_datamodel_incremental(
     let prev = match prev_state {
         None => {
             let sync = sync_from_datamodel(db, project);
-            return PersistentSyncState::from_sync_result(&sync);
+            return PersistentSyncState::from_sync_result(&sync, project);
         }
         Some(prev) => prev,
     };
+    let mut memory = InputMemory::of(prev);
 
     let source_project = prev.project;
 
@@ -1118,10 +1264,19 @@ pub fn sync_from_datamodel_incremental(
     // Process models
     let mut new_models = HashMap::new();
 
-    for dm_model in &project.models {
+    for dm_model in filed_models(project) {
         let canonical_model_name = canonicalize(&dm_model.name).into_owned();
 
-        if let Some(prev_model) = prev.models.get(&canonical_model_name) {
+        // The stdlib models' inputs are the db's own, shared by every project
+        // synced into it, and are never written: a project model that takes a
+        // stdlib model's name (a file saved with the stdlib models it uses, or
+        // a model of the modeler's own) is a model of the project, with inputs
+        // of its own, and the stdlib model is back when it is gone.
+        let prev_model = prev
+            .models
+            .get(&canonical_model_name)
+            .filter(|prev_model| !prev_model.is_stdlib);
+        if let Some(prev_model) = prev_model {
             // Existing model: update via setters
             let source_model = prev_model.source_model;
             let SourceModelFields {
@@ -1149,23 +1304,32 @@ pub fn sync_from_datamodel_incremental(
             let mut new_vars = HashMap::new();
             let mut source_var_map = HashMap::new();
 
-            for dm_var in &dm_model.variables {
+            for dm_var in dm_model.variables.allocations() {
                 let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
 
-                if let Some(prev_var) = prev_model.variables.get(&canonical_var_name) {
-                    let source_var = prev_var.source_var;
-                    update_source_variable(db, source_var, dm_var, &canonical_model_name);
-                    source_var_map.insert(canonical_var_name.clone(), source_var);
-
-                    new_vars.insert(canonical_var_name, PersistentVariableState { source_var });
-                } else {
-                    // New variable
-                    let source_var =
-                        source_variable_from_datamodel(&*db, dm_var, &canonical_model_name);
-                    source_var_map.insert(canonical_var_name.clone(), source_var);
-
-                    new_vars.insert(canonical_var_name, PersistentVariableState { source_var });
-                }
+                let source_var =
+                    if let Some(prev_var) = prev_model.variables.get(&canonical_var_name) {
+                        if !memory.holds(prev_var, dm_var) {
+                            update_source_variable(
+                                db,
+                                prev_var.source_var,
+                                dm_var,
+                                &canonical_model_name,
+                            );
+                        }
+                        prev_var.source_var
+                    } else {
+                        // New variable
+                        source_variable_from_datamodel(&*db, dm_var, &canonical_model_name)
+                    };
+                source_var_map.insert(canonical_var_name.clone(), source_var);
+                new_vars.insert(
+                    canonical_var_name,
+                    PersistentVariableState {
+                        source_var,
+                        synced: Some(Arc::clone(dm_var)),
+                    },
+                );
             }
 
             // variable_names must use canonical names to match source_var_map keys
@@ -1198,13 +1362,22 @@ pub fn sync_from_datamodel_incremental(
             let mut new_vars = HashMap::new();
             let mut source_var_map = HashMap::new();
 
-            for dm_var in &dm_model.variables {
+            for dm_var in dm_model.variables.allocations() {
                 let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
                 let source_var =
                     source_variable_from_datamodel(&*db, dm_var, &canonical_model_name);
                 source_var_map.insert(canonical_var_name.clone(), source_var);
 
-                new_vars.insert(canonical_var_name, PersistentVariableState { source_var });
+                new_vars.insert(
+                    canonical_var_name,
+                    PersistentVariableState {
+                        source_var,
+                        // Only cost depends on this: remembered, the next
+                        // re-sync skips the variable; forgotten (`None`), it
+                        // compares it once and remembers it then.
+                        synced: Some(Arc::clone(dm_var)),
+                    },
+                );
             }
 
             // variable_names must use canonical names to match source_var_map keys
@@ -1239,28 +1412,20 @@ pub fn sync_from_datamodel_incremental(
     // sync, so salsa never re-creates a stdlib input -- a SMOOTH/DELAY
     // instantiation's compiled fragment stays cached across unrelated user
     // edits. The `Arc` is cloned to release the `&db` borrow before the
-    // `&mut db` salsa setters below. A user model whose canonical name collides
-    // with a stdlib name shadows it (preserving the prior `contains_key`
-    // precedence).
+    // `&mut db` salsa setters below. A project model whose canonical name is a
+    // stdlib model's stands in its place, and the stdlib model is neither a
+    // model of the project nor a name in its list, exactly as the fresh sync
+    // has it (`sync_from_datamodel`).
     let stdlib = Arc::clone(db.stdlib_models());
-    for (canonical, _full_name) in &stdlib.ordered {
+    let mut new_model_names: Vec<String> = project.models.iter().map(|m| m.name.clone()).collect();
+    for (canonical, full_name) in &stdlib.ordered {
         if new_models.contains_key(canonical) {
             continue;
         }
         // Cloning copies the stable stdlib salsa handles, NOT the underlying
         // inputs, so every synced project shares the identical stdlib inputs.
         new_models.insert(canonical.clone(), stdlib.by_canonical[canonical].clone());
-    }
-
-    // Update model_names to include stdlib. The display name is pushed for
-    // every stdlib canonical now present in `new_models` (preserving the prior
-    // behavior, where a user model shadowing a stdlib canonical still emits the
-    // stdlib display name -- an extreme edge case kept byte-identical).
-    let mut new_model_names: Vec<String> = project.models.iter().map(|m| m.name.clone()).collect();
-    for (canonical, full_name) in &stdlib.ordered {
-        if new_models.contains_key(canonical) {
-            new_model_names.push(full_name.clone());
-        }
+        new_model_names.push(full_name.clone());
     }
     if *source_project.model_names(&*db) != new_model_names {
         source_project.set_model_names(db).to(new_model_names);
@@ -1278,6 +1443,8 @@ pub fn sync_from_datamodel_incremental(
     PersistentSyncState {
         project: source_project,
         models: new_models,
+        generation: prev.latest.fetch_add(1, Ordering::Relaxed) + 1,
+        latest: Arc::clone(&prev.latest),
     }
 }
 

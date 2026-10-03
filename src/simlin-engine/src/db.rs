@@ -63,7 +63,9 @@ mod macro_registry;
 // views (`units::unit_model`) the salsa pass builds.
 pub(crate) mod units;
 mod var_fragment;
-pub(crate) use var_fragment::lowered_source_variable;
+#[cfg(test)]
+pub(crate) use var_fragment::IMPLICIT_GLOBALS;
+pub(crate) use var_fragment::{is_implicit_global, lowered_source_variable};
 
 mod diagnostic;
 pub use crate::diagnostic::{Diagnostic, DiagnosticCategory, DiagnosticError, DiagnosticSeverity};
@@ -1260,6 +1262,18 @@ pub fn compile_project_incremental(
         &crate::db::macro_registry::project_macro_registry(db, project).build_error
     {
         return crate::sim_err!(NotSimulatable, msg.clone());
+    }
+    // Two models whose names canonicalize alike collapse into one on the
+    // canonical-keyed `models` map, the later standing for both, so the run
+    // would be of a project other than the one written. Refused like the two
+    // gates around it, with the text `collect_all_diagnostics` reports.
+    if let Some((canonical, spellings)) =
+        crate::db::diagnostic::project_duplicate_models(db, project).first()
+    {
+        return crate::sim_err!(
+            DuplicateVariable,
+            crate::common::duplicate_model_message(canonical, spellings)
+        );
     }
     // Two variables whose names canonicalize to the same ident silently
     // collapse into one on the canonical-keyed sync maps (last-in-document-

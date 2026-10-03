@@ -67,7 +67,7 @@ import {
 } from './editor-key-scope';
 import { isStdlibModel } from './module-navigation';
 import { countModelInstances } from './module-details-utils';
-import { buildModuleReferencePayload } from './module-wiring';
+import { buildModuleReferencePayload, isModelNameTaken, unusedCopyName } from './module-wiring';
 import { relabelVariable } from './rename-ops';
 import { planDelete } from './plan-delete';
 import { BreadcrumbBar } from './BreadcrumbBar';
@@ -2187,11 +2187,11 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     void r.controller?.enqueueModelEdit({
       label: 'model creation',
       buildPatch: (committed) => {
-        // Generate a unique model name to avoid collisions when the module
-        // ident already matches an existing model name.
+        // A new name when a model is already known by the module ident's
+        // name, as the engine's AddModel compares names (canonically).
         let newModelName = moduleIdent;
-        if (committed.models.has(newModelName)) {
-          newModelName = getUniqueDuplicateName(moduleIdent, committed);
+        if (isModelNameTaken(committed.models.keys(), newModelName)) {
+          newModelName = unusedCopyName(committed.models.keys(), moduleIdent);
         }
         // Look up the committed module to preserve metadata (including compat)
         // through the model reference change; the shared helper carries every
@@ -2248,7 +2248,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     moduleIdent: string,
     mName: string,
   ): JsonProjectPatch => {
-    const newModelName = getUniqueDuplicateName(sourceModel.name, project);
+    const newModelName = unusedCopyName(project.models.keys(), sourceModel.name);
 
     // Build ops to copy all variables from source model
     const variableOps: JsonModelOperation[] = [];
@@ -2300,16 +2300,6 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         },
       ],
     };
-  };
-
-  const getUniqueDuplicateName = (baseName: string, project: Project): string => {
-    let name = `${baseName}_copy`;
-    let i = 2;
-    while (project.models.has(name)) {
-      name = `${baseName}_copy_${i}`;
-      i++;
-    }
-    return name;
   };
 
   // Renamed from the class method getErrorDetails() to avoid colliding with the

@@ -324,6 +324,8 @@ fn every_mutating_entry_point_drops_the_hit_index_and_advances_the_revision() {
 enum Read {
     DryRunPatch,
     RejectedPatch,
+    /// An add of a model whose name another model has, in another spelling.
+    RejectedAddModel,
     SimNew,
     GetErrors,
     RenderScene,
@@ -401,6 +403,7 @@ impl Read {
     const ALL: &[Read] = &[
         Read::DryRunPatch,
         Read::RejectedPatch,
+        Read::RejectedAddModel,
         Read::SimNew,
         Read::GetErrors,
         Read::RenderScene,
@@ -447,6 +450,13 @@ impl Read {
                     "a patch with an equation error is rejected"
                 );
                 simlin_error_free(rejected);
+            }
+            Read::RejectedAddModel => {
+                let taken = CString::new("Main").unwrap();
+                let mut refused = ptr::null_mut();
+                simlin_project_add_model(proj, taken.as_ptr(), &mut refused);
+                assert!(!refused.is_null(), "`Main` is the model `main`");
+                simlin_error_free(refused);
             }
             Read::SimNew => {
                 let sim = simlin_sim_new(model, false, &mut err);
@@ -657,8 +667,12 @@ fn a_copy_shares_the_datamodel_until_an_edit_of_either_side_copies_it() {
 }
 
 #[test]
-fn a_dry_run_or_a_rejected_patch_leaves_a_copy_sharing_the_datamodel() {
-    for read in [Read::DryRunPatch, Read::RejectedPatch] {
+fn a_dry_run_or_a_rejected_edit_leaves_a_copy_sharing_the_datamodel() {
+    for read in [
+        Read::DryRunPatch,
+        Read::RejectedPatch,
+        Read::RejectedAddModel,
+    ] {
         unsafe {
             let original = open(100.0, 100.0);
             let copy = copy_of(original);

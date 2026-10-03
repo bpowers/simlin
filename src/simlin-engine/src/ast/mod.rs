@@ -582,12 +582,44 @@ pub(crate) fn needs_quoting(canonical: &str) -> bool {
 /// contains characters that can't appear in a bare identifier. The one spelling
 /// of a name inside equation text: code composing an equation from names goes
 /// through it rather than interpolating a name bare.
+///
+/// A literal period (one written inside quotes, which the canonical form holds
+/// as a sentinel, `common::canonicalize`) is written back as a period inside
+/// the quotes, where it reads as literal again: `"a.b"`, never the sentinel
+/// character and never the bare path `a.b`. A caller holding a canonical name
+/// passes it as it is: `Ident::to_source_repr` would turn the sentinel into a
+/// period this function could only read as a module separator.
 pub(crate) fn print_ident(raw: &str) -> String {
     let canonical = canonicalize(raw);
     if needs_quoting(&canonical) {
-        format!("\"{}\"", canonical)
+        format!(
+            "\"{}\"",
+            canonical.replace(crate::common::LITERAL_PERIOD_SENTINEL, ".")
+        )
     } else {
         canonical.into_owned()
+    }
+}
+
+#[test]
+fn a_name_with_a_literal_period_is_spelled_quoted_with_its_period() {
+    for (raw, spelled) in [
+        ("\"a.b\"", "\"a.b\""),
+        (
+            "\"Goal 1.5 for temperature\"",
+            "\"goal_1.5_for_temperature\"",
+        ),
+        // A module path whose last name holds a literal period.
+        ("m.\"b.c\"", "\"m\u{00B7}b.c\""),
+        // A path is a path, and a plain name is bare.
+        ("m.b", "m\u{00B7}b"),
+        ("Net Flow", "net_flow"),
+    ] {
+        assert_eq!(print_ident(raw), spelled, "{raw}");
+        // The spelling reads back as the name it spells, from the raw name and
+        // from its canonical form alike.
+        assert_eq!(canonicalize(spelled), canonicalize(raw), "{raw}");
+        assert_eq!(print_ident(&canonicalize(raw)), spelled, "{raw}, canonical");
     }
 }
 

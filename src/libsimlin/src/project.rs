@@ -401,7 +401,14 @@ pub unsafe extern "C" fn simlin_project_get_model_names(
 /// # Returns
 /// - 0 on success
 /// - SimlinErrorCode::Generic if project or modelName is null or empty
-/// - SimlinErrorCode::DuplicateVariable if a model with that name already exists
+/// - SimlinErrorCode::DuplicateVariable if a model with that name already
+///   exists; names are compared as the engine knows them, so a name differing
+///   from an existing one only by case, spaces or underscores is taken, and
+///   `main` is taken by an unnamed model
+/// - SimlinErrorCode::BadModelName if the name begins with the stdlib's
+///   prefix (`stdlib⁚`), which names the stdlib's own models
+///
+/// A refused add changes nothing, the revision included.
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_add_model(
     project: *mut SimlinProject,
@@ -442,32 +449,27 @@ pub unsafe extern "C" fn simlin_project_add_model(
 
     let mut datamodel_locked = proj.datamodel.lock().unwrap();
 
-    if datamodel_locked
-        .models
-        .iter()
-        .any(|model| model.name == model_name_str)
-    {
+    // The engine's `AddModel` is the one statement of which names are taken
+    // (a name whose canonical form is another model's is) and of what a new
+    // model holds.
+    let add = engine::ProjectPatch {
+        project_ops: vec![engine::ProjectOperation::AddModel {
+            name: model_name_str.to_string(),
+        }],
+        models: vec![],
+    };
+    // Staged on a copy, as `simlin_project_apply_patch` does: a mutable borrow
+    // of the contents advances the revision and drops the hit indexes, so a
+    // refused add must not take one.
+    let mut staged = (*datamodel_locked.shared()).clone();
+    if let Err(err) = engine::apply_patch(&mut staged, add) {
         store_error(
             out_error,
-            SimlinError::new(SimlinErrorCode::DuplicateVariable)
-                .with_message(format!("model '{}' already exists", model_name_str)),
+            SimlinError::new(SimlinErrorCode::from(err.code)).with_message(err.to_string()),
         );
         return;
     }
-
-    // Create new empty model
-    let new_model = engine::datamodel::Model {
-        name: model_name_str.to_string(),
-        sim_specs: None,
-        variables: vec![].into(),
-        views: vec![],
-        loop_metadata: vec![],
-        groups: vec![],
-        macro_spec: None,
-    };
-
-    // Add to datamodel
-    datamodel_locked.models.push(new_model);
+    datamodel_locked.replace(std::sync::Arc::new(staged));
 
     // Re-sync the persistent salsa DB incrementally, when one has been built
     // (one built later is built from this datamodel). The db owns its sync

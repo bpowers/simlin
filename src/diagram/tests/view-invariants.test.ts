@@ -640,11 +640,11 @@ describe('M2 delta semantics', () => {
     ]);
   });
 
-  it('reordering a list is not a change', () => {
+  it("reordering a list is a change: the order is the flows' priority", () => {
     const reordered = edit((json) => {
       stockJson(json, 'Stock A').outflows = ['Flow H', 'Flow F'];
     });
-    expect(checkStockFlowDelta(load(baseJson()), load(reordered))).toEqual([]);
+    expect(arms(checkStockFlowDelta(load(baseJson()), load(reordered)))).toEqual(['M2.otherEntryChanged']);
   });
 
   it('a canonical spelling of the new entry counts as the entry', () => {
@@ -703,14 +703,15 @@ describeWithEngine('M2 renames through the engine rename path', () => {
     }
   }
 
-  it('a renamed flow: the engine rewrites and re-sorts its list entries, which is not a change', async () => {
+  it('a renamed flow: the engine respells its list entries in place, which is not a change', async () => {
     const { base, next } = await rename('Flow F', 'Flow Renamed');
     const lists = (vv: ViewAndVariables, ident: string): unknown => {
       const s = vv.variables.get(ident);
       return s?.type === 'stock' ? { inflows: s.inflows, outflows: s.outflows } : undefined;
     };
-    // What the rename actually produced, so the exclusion below is exercised on it.
-    expect(lists(next, 'stock_a')).toEqual({ inflows: ['Inflow G'], outflows: ['Flow H', 'flow_renamed'] });
+    // What the rename actually produced, so the exclusion below is exercised
+    // on it: the renamed entry keeps its place, ahead of `Flow H`.
+    expect(lists(next, 'stock_a')).toEqual({ inflows: ['Inflow G'], outflows: ['flow_renamed', 'Flow H'] });
     expect(lists(next, 'stock_b')).toEqual({ inflows: ['flow_renamed'], outflows: [] });
     expect(checkStockFlowDelta(base, next)).toEqual([]);
   });

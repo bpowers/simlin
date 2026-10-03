@@ -1076,15 +1076,10 @@ fn a_model_runs_under_its_own_specs_after_a_protobuf_trip() {
 
 /// Setting the simulation specs changes the run, whatever the stored project
 /// holds: an editor shows and edits one set of specs, and the run a person
-/// then sees has to be under them.
-///
-/// It does not hold for a model with specs of its own: `SetSimSpecs` writes
-/// the project's specs (`patch::apply_patch`) and the run prefers the model's
-/// (`db::assemble`), so the edit changes nothing the run reads. `should_panic`
-/// holds the test to failing in exactly that way, and comes off when
-/// `SetSimSpecs` sets what the root model runs under.
+/// then sees has to be under them. A model can carry specs of its own, which
+/// the run prefers (`db::assemble`); `SetSimSpecs` takes the root model's
+/// away, so the project's are what it runs under.
 #[test]
-#[should_panic(expected = "the run follows the specs that were set")]
 fn setting_the_sim_specs_of_a_stored_project_changes_its_run() {
     let mut stored = round_trip(&a_model_with_its_own_specs());
     let mut specs = stored.sim_specs.clone();

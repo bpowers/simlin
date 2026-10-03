@@ -16,6 +16,9 @@ import {
   qualifyDst,
   unqualifyDst,
   buildModuleReferencePayload,
+  canonicalModelName,
+  isModelNameTaken,
+  unusedCopyName,
 } from '../module-wiring';
 
 function makeModule(overrides: Partial<Module> = {}): Module {
@@ -334,5 +337,34 @@ describe('buildModuleReferencePayload', () => {
     };
     const payload = buildModuleReferencePayload(aux, 'x', 'y');
     expect(payload).toEqual({ name: 'x', modelName: 'y' });
+  });
+});
+
+// The engine knows a model by its canonical name, the unnamed model as
+// `main`, and refuses a new model a name another is known by.
+describe('model names', () => {
+  it('reads a name as the engine does', () => {
+    expect(canonicalModelName('Customer Growth')).toBe('customer_growth');
+    expect(canonicalModelName('')).toBe('main');
+    expect(canonicalModelName('MAIN')).toBe('main');
+    // A name whose canonical form is empty is the unnamed model's.
+    expect(canonicalModelName('   ')).toBe('main');
+    expect(canonicalModelName('""')).toBe('main');
+  });
+
+  it('takes a name another model is known by, however it is spelled', () => {
+    const names = ['main', 'Customer Growth'];
+    for (const taken of ['main', 'Main', '', 'customer_growth', 'CUSTOMER  GROWTH', 'Customer Growth']) {
+      expect(isModelNameTaken(names, taken)).toBe(true);
+    }
+    expect(isModelNameTaken(names, 'Customer Growth 2')).toBe(false);
+    expect(isModelNameTaken([''], 'main')).toBe(true);
+    expect(isModelNameTaken([''], '  ')).toBe(true);
+  });
+
+  it('finds the first copy name no model is known by', () => {
+    expect(unusedCopyName(['hares'], 'hares')).toBe('hares_copy');
+    expect(unusedCopyName(['hares', 'Hares Copy'], 'hares')).toBe('hares_copy_2');
+    expect(unusedCopyName(['hares', 'hares_copy', 'HARES COPY 2'], 'hares')).toBe('hares_copy_3');
   });
 });

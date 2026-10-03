@@ -324,6 +324,25 @@ fn test_project_add_model() {
         assert_eq!(code, SimlinErrorCode::DuplicateVariable);
         simlin_error_free(err);
 
+        // A name that differs from an existing one only in spelling is taken
+        // too: the engine files models under their canonical names.
+        let respelled_name = CString::new("New Model").unwrap();
+        err = ptr::null_mut();
+        simlin_project_add_model(
+            proj,
+            respelled_name.as_ptr(),
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(
+            !err.is_null(),
+            "a respelling of an existing name is refused"
+        );
+        assert_eq!(
+            simlin_error_get_code(err),
+            SimlinErrorCode::DuplicateVariable
+        );
+        simlin_error_free(err);
+
         // Model count should not have changed
         let mut count_after_dup: usize = 0;
         err = ptr::null_mut();

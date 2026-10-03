@@ -154,13 +154,15 @@ interface AttachmentChange {
  * unattached on the side it is absent from. A stock present only in `next` had
  * empty lists before. Renames are excluded: a named element whose uid survives
  * with a new ident is the same variable, and the engine's RenameVariable
- * rewrites every list entry naming a renamed flow (`update_stock_flow_references`
- * in src/simlin-engine/src/patch.rs), so base idents are carried through the
- * rename before anything is compared. The new-list requirement applies only when
- * both the stock and the flow variable exist in the next model, matching the
- * plan's "only existing flow variables and existing stock variables are touched".
- * Entry order is not compared: reordering changes no entry, and the same engine
- * rename sorts both lists.
+ * respells every list entry naming a renamed flow in its place
+ * (`Rename::renamed_name` in src/simlin-engine/src/patch.rs), so base idents are
+ * carried through the rename before anything is compared. The new-list
+ * requirement applies only when both the stock and the flow variable exist in
+ * the next model, matching the plan's "only existing flow variables and existing
+ * stock variables are touched". Entry order is compared: a list's order is its
+ * flows' priority (XMILE 1.0 section 4.2), which a queue's outflows and a
+ * conveyor's inflows are served in, so reordering the other entries changes the
+ * model.
  */
 export function checkStockFlowDelta(base: ViewAndVariables, next: ViewAndVariables): ViewViolation[] {
   const baseById = new Map(base.view.elements.map((el) => [el.uid, el]));
@@ -316,10 +318,7 @@ function otherEntries(
   exempt: ReadonlySet<string>,
   rename: (ident: string) => string,
 ): string[] {
-  return list
-    .map((entry) => rename(canonicalize(entry)))
-    .filter((entry) => !exempt.has(entry))
-    .sort();
+  return list.map((entry) => rename(canonicalize(entry))).filter((entry) => !exempt.has(entry));
 }
 
 // ---------------------------------------------------------------------------

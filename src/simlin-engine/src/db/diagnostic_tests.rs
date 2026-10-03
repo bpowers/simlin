@@ -3729,3 +3729,104 @@ fn a_diagnostics_reason_reaches_the_formatted_error() {
         err.message
     );
 }
+
+// Two models known by one name (`datamodel::canonical_model_name`: their
+// canonical names, the empty name being `main`) are refused like two
+// variables of one name in a model, by the compile and by one project-level
+// row, each naming every spelling.
+
+/// A project of a model of each name, each holding one auxiliary.
+fn models_named(names: &[&str]) -> datamodel::Project {
+    use crate::testutils::{x_aux, x_model, x_project};
+    let models: Vec<datamodel::Model> = names
+        .iter()
+        .enumerate()
+        .map(|(place, name)| x_model(name, vec![x_aux(&format!("v{place}"), "1", None)]))
+        .collect();
+    x_project(dup_sim_specs(), &models)
+}
+
+#[test]
+fn models_known_by_one_name_are_refused_and_reported_once() {
+    use crate::common::ErrorCode;
+
+    // The models, and the spellings that are one name.
+    let rows: &[(&[&str], [&str; 2])] = &[
+        (&["main", "Sector", "sector"], ["Sector", "sector"]),
+        (
+            &["main", "net sector", "net_sector"],
+            ["net sector", "net_sector"],
+        ),
+        // An unnamed model is `main`, before it or after it.
+        (&["", "main"], ["", "main"]),
+        (&["main", ""], ["main", ""]),
+    ];
+    for (models, [first, second]) in rows {
+        let project = models_named(models);
+        let err = compile_main(&project).expect_err("the project must not compile");
+        assert_eq!(err.code, ErrorCode::DuplicateVariable);
+        let details = err.details.expect("the error carries a message");
+        assert!(
+            details.contains(&format!("'{first}'")) && details.contains(&format!("'{second}'")),
+            "the message names both spellings: {details}"
+        );
+        assert!(
+            details.contains("renamed or removed in the file it was opened from"),
+            "the message says what a person can do: {details}"
+        );
+
+        let mut db = SimlinDb::default();
+        let source = db.sync(&project);
+        let rows: Vec<Diagnostic> =
+            collect_all_diagnostics(&db, source, crate::db::LtmOverlay::Off)
+                .into_iter()
+                .filter(|d| d.is(DiagnosticCategory::Model, ErrorCode::DuplicateVariable))
+                .collect();
+        assert_eq!(rows.len(), 1, "one row for the pair: {rows:?}");
+        assert_eq!(rows[0].severity, DiagnosticSeverity::Error);
+        assert_eq!(
+            rows[0].reason(),
+            Some(details.as_str()),
+            "the compile and the row agree"
+        );
+
+        // The special-stock path reaches the same gate: its expansions leave
+        // model names alone and it compiles through the same entry point.
+        let mut db = SimlinDb::default();
+        let Err(special) = crate::queue_compile::build_compiled(&mut db, &project, "main") else {
+            panic!("the special-stock path must not compile it either");
+        };
+        assert_eq!(special.code, ErrorCode::DuplicateVariable);
+        assert_eq!(special.details.as_deref(), Some(details.as_str()));
+    }
+}
+
+#[test]
+fn models_with_distinct_names_and_one_named_for_a_stdlib_model_are_not_duplicates() {
+    use crate::common::ErrorCode;
+    use crate::testutils::{x_aux, x_model, x_project};
+
+    let project = x_project(
+        dup_sim_specs(),
+        &[
+            x_model("main", vec![x_aux("a", "1", None)]),
+            x_model("sector", vec![x_aux("b", "2", None)]),
+            x_model("sector 2", vec![x_aux("b", "3", None)]),
+            x_model("stdlib\u{205A}smth1", vec![x_aux("output", "4", None)]),
+        ],
+    );
+    compile_main(&project).expect("the project compiles");
+
+    // Through a fresh sync and through a re-sync, whose model list is built
+    // by the incremental path.
+    let mut db = SimlinDb::default();
+    for _ in 0..2 {
+        let source = db.sync(&project);
+        let rows: Vec<Diagnostic> =
+            collect_all_diagnostics(&db, source, crate::db::LtmOverlay::Off)
+                .into_iter()
+                .filter(|d| d.is(DiagnosticCategory::Model, ErrorCode::DuplicateVariable))
+                .collect();
+        assert!(rows.is_empty(), "{rows:?}");
+    }
+}
