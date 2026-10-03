@@ -19,4 +19,5 @@ export default async function globalSetup(): Promise<void> {
   process.env[ENV.url] = server.url;
   process.env[ENV.token] = server.token;
   process.env[ENV.rootDir] = server.rootDir;
+  process.env[ENV.logPath] = server.logPath;
 }

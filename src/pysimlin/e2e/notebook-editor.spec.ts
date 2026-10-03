@@ -33,10 +33,14 @@ import { test, expect, type Locator, type Page } from '@playwright/test';
 import {
   ENV,
   canRunCells,
+  cellRan,
   kernelState,
+  parsePrompt,
   pysimlinDir,
   pythonExecutable,
   startNotebookSession,
+  tail,
+  unrunCellReport,
   type SessionFacts,
 } from './jupyter-server';
 
@@ -252,12 +256,56 @@ async function waitForKernel(page: Page): Promise<void> {
   }
 }
 
-/** Click into cell `index`'s editor and run it with Shift+Enter. */
+/** How long a cell run may take to be answered; the journey's cells take seconds. */
+const CELL_RUN_TIMEOUT_MS = 60_000;
+
+/**
+ * Click into cell `index`'s editor, run it with Shift+Enter, and wait until
+ * the kernel has answered the run (`cellRan`: the prompt shows a new
+ * execution count).
+ *
+ * A run that is never answered otherwise surfaces later as an output that
+ * never appears, which says nothing about why; this fails at the run instead,
+ * with what the page and the server know (`unrunCellReport`).
+ */
 async function runCell(page: Page, index: number): Promise<Locator> {
   await waitForKernel(page);
   const cell = activeCells(page).nth(index);
+  const prompt = cell.locator('.jp-InputPrompt');
+  const before = parsePrompt((await prompt.textContent()) ?? '');
   await cell.locator('.jp-InputArea-editor').click();
   await page.keyboard.press('Shift+Enter');
+  let now = before;
+  try {
+    await expect
+      .poll(
+        async () => {
+          now = parsePrompt((await prompt.textContent()) ?? '');
+          return cellRan(before, now);
+        },
+        { timeout: CELL_RUN_TIMEOUT_MS },
+      )
+      .toBe(true);
+  } catch {
+    const notebook = (await visibleNotebookPath(page)) ?? 'the visible notebook';
+    let serverLog: string;
+    try {
+      serverLog = tail(fs.readFileSync(required(ENV.logPath), 'utf8'), 20);
+    } catch (err) {
+      serverLog = `(unreadable: ${err instanceof Error ? err.message : String(err)})`;
+    }
+    throw new Error(
+      unrunCellReport({
+        notebook,
+        index,
+        before,
+        now,
+        kernel: kernelState(await sessionFacts(page)),
+        waitedMs: CELL_RUN_TIMEOUT_MS,
+        serverLogTail: serverLog,
+      }),
+    );
+  }
   return cell;
 }
 

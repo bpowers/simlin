@@ -38,6 +38,7 @@ export const ENV = {
   url: 'SIMLIN_E2E_JUPYTER_URL',
   token: 'SIMLIN_E2E_JUPYTER_TOKEN',
   rootDir: 'SIMLIN_E2E_ROOT_DIR',
+  logPath: 'SIMLIN_E2E_SERVER_LOG',
 } as const;
 
 const here = __dirname;
@@ -93,7 +94,28 @@ export function userSettingsFiles(configDir: string): Array<{ file: string; cont
   ];
 }
 
-/** Read `url`/`token`/`root_dir` from a `jpserver-<pid>.json` runtime file. */
+/**
+ * Read `url`/`token`/`root_dir` from a `jpserver-<pid>.json` runtime file,
+ * or `undefined` while the file is still being written.
+ *
+ * The server writes the file in place (jupyter_server's `secure_write` opens
+ * the final path and `json.dump`s into it), so a reader that finds the file
+ * can read it truncated, or empty. Text that does not parse yet is that
+ * window; a file that parses but lacks a field is a real error.
+ */
+export function readServerInfo(json: string): ServerInfo | undefined {
+  try {
+    JSON.parse(json);
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      return undefined;
+    }
+    throw err;
+  }
+  return parseServerInfo(json);
+}
+
+/** Read `url`/`token`/`root_dir` from a complete `jpserver-<pid>.json` runtime file. */
 export function parseServerInfo(json: string): ServerInfo {
   const info = JSON.parse(json) as { url?: unknown; token?: unknown; root_dir?: unknown };
   if (typeof info.url !== 'string' || typeof info.token !== 'string' || typeof info.root_dir !== 'string') {
@@ -266,6 +288,77 @@ export function canRunCells(state: string): boolean {
   return state === 'idle' || state === 'busy';
 }
 
+/**
+ * A code cell's execution as its input prompt shows it: `null` for never run
+ * (`[ ]:`), `'running'` for sent to the kernel and not yet answered (`[*]:`),
+ * or the execution count the kernel replied with (`[3]:`).
+ */
+export type CellExecution = null | 'running' | number;
+
+/** Read a cell's input prompt text (`[ ]:`, `[*]:`, `[3]:`). */
+export function parsePrompt(text: string): CellExecution {
+  const m = /^\s*\[\s*([^\]]*?)\s*\]:?\s*$/.exec(text);
+  if (m === null) {
+    throw new Error(`not a cell input prompt: ${JSON.stringify(text)}`);
+  }
+  if (m[1] === '') {
+    return null;
+  }
+  if (m[1] === '*') {
+    return 'running';
+  }
+  if (/^\d+$/.test(m[1])) {
+    return Number(m[1]);
+  }
+  throw new Error(`not a cell input prompt: ${JSON.stringify(text)}`);
+}
+
+/**
+ * Whether a run of a cell whose prompt read `before` has been answered by the
+ * kernel, now that it reads `now`: the kernel's reply carries a new execution
+ * count, so a count that differs from the one the cell had is the kernel's
+ * word that it ran the cell. A cell that shows no count, or `[*]`, or the
+ * count it had before, has not been run by this press.
+ */
+export function cellRan(before: CellExecution, now: CellExecution): boolean {
+  return typeof now === 'number' && now !== before;
+}
+
+/**
+ * Why a cell run the journey asked for never came back, in terms that say
+ * which side to look at: a `[*]` prompt means JupyterLab sent the request and
+ * the kernel has not answered (look at the kernel and the server log), and a
+ * prompt with no new count means JupyterLab never ran the cell at all (look at
+ * the page: focus, a dialog, a cancelled run).
+ */
+export function unrunCellReport(facts: {
+  notebook: string;
+  index: number;
+  before: CellExecution;
+  now: CellExecution;
+  kernel: string;
+  waitedMs: number;
+  serverLogTail: string;
+}): string {
+  const shown = (e: CellExecution): string => (e === null ? '[ ]' : e === 'running' ? '[*]' : `[${e}]`);
+  const verdict =
+    facts.now === 'running'
+      ? 'JupyterLab sent it to the kernel, which has not answered'
+      : 'JupyterLab never ran it (no execution request went out, or the run was cancelled)';
+  return [
+    `cell ${facts.index} of ${facts.notebook} did not run within ${facts.waitedMs} ms: ${verdict}.`,
+    `prompt before the run: ${shown(facts.before)}; now: ${shown(facts.now)}; notebook kernel: ${facts.kernel}`,
+    `last lines of the jupyter server log:`,
+    facts.serverLogTail,
+  ].join('\n');
+}
+
+/** The last `lines` lines of `text`, for an error message. */
+export function tail(text: string, lines: number): string {
+  const all = text.trimEnd().split('\n');
+  return all.slice(Math.max(0, all.length - lines)).join('\n');
+}
+
 /** Launch JupyterLab and resolve once its REST API answers with our token. */
 export async function launchJupyterLab(): Promise<LaunchedServer> {
   const python = pythonExecutable();
@@ -322,7 +415,7 @@ export async function launchJupyterLab(): Promise<LaunchedServer> {
       if (files.length === 0) {
         return undefined;
       }
-      return parseServerInfo(fs.readFileSync(path.join(runtimeDir, files[0]), 'utf8'));
+      return readServerInfo(fs.readFileSync(path.join(runtimeDir, files[0]), 'utf8'));
     });
     const url = info.url;
     const bearer = info.token;

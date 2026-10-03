@@ -393,14 +393,19 @@ jobs:
         run: make -C src/pysimlin export-check
 
       # Screenshots, the trace, and the jupyter server log are what a failed
-      # journey needs to be understood.
+      # journey needs to be understood. They live in a dot-directory, and
+      # upload-artifact@v4 skips hidden files unless told otherwise (it then
+      # finds nothing at all). Nothing to upload is a warning, not an error:
+      # this step also runs when an earlier build step failed, before the
+      # journey wrote anything.
       - name: Upload journey output
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: pysimlin-e2e-output
           path: src/pysimlin/e2e/.output/
-          if-no-files-found: ignore
+          include-hidden-files: true
+          if-no-files-found: warn
 
   policy:
     name: Policy checks
