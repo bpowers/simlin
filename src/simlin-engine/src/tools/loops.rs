@@ -13,37 +13,40 @@
 //!
 //! The answer is bounded. Loops compete only within a cycle partition (the
 //! stocks feedback connects), so it is given partition by partition: the
-//! partition's stocks; a dominance timeline over about a dozen windows of the
-//! run, adjacent windows merged while the same loop leads, each naming the
-//! strongest loop there and its rivals, with their shares of the partition's
-//! loop activity; and the partition's loops, every one the timeline names and
-//! the most important others. A loop is reported with its session id, its
-//! polarity as the run shows it, its chain from a stock around to the start
-//! with each link's sign (a builtin's or macro's internal nodes left out, the
-//! links across them composed), and its mean share. The answer keeps to the
-//! outline's budget by listing fewer loops: a partition's first few and every
-//! partition's leaders before any partition's others.
+//! partition's stocks; a dominance timeline, the run cut where the lead
+//! changes ([`crate::ltm_dominance::leader_timeline`]), each span naming the
+//! loop that led it and its rivals, with their shares of the partition's loop
+//! activity; and the partition's loops, every one the timeline names and the
+//! most important others. A loop is reported with its session id, its polarity
+//! as the run shows it, its chain from a stock around to the start with each
+//! link's sign (a builtin's or macro's internal nodes left out, the links
+//! across them composed and marked with the builtin), and its mean share. The
+//! answer keeps to the outline's budget by listing fewer: the partitions and
+//! their leaders first, then the other loops ([`Selection`]).
 //!
 //! Loop ids (`L1`, `L2`, ...) are the session's, keyed by the loop's cycle --
-//! its node sequence, rotation-invariant and direction-preserving -- so a loop
-//! keeps its id across runs and edits for as long as it exists, whatever the
-//! engine's own loop ids are.
+//! its node sequence as the engine has it, each element of an arrayed variable
+//! and each builtin's instance a node, rotation-invariant and
+//! direction-preserving -- so a loop keeps its id across runs and edits for
+//! as long as it exists, from a run and from structure alike.
 //!
-//! A link's sign is the one the run gives it when the link was active with one
-//! sign throughout (the classification a loop's polarity uses), and its
-//! equation's sign otherwise.
+//! A link's sign is the one the run gives it when the run scored it
+//! ([`LinkPolarity::from_runtime_scores`]), and its equation's sign otherwise.
 //!
 //! A run in which no loop is active -- a model at rest, whose loop scores are
-//! zero throughout -- has no dominance and no runtime polarity to report. The
-//! answer says so, lists the model's loops from its structure with their
+//! zero throughout, or whose stocks move by nothing but the rounding of what
+//! they are computed from, which makes scores of noise -- has no dominance
+//! and no runtime polarity to report. The answer says so, lists the model's loops from its structure with their
 //! equations' signs, and names the repair: an experiment that disturbs the
-//! model.
+//! model. A run in which some loops are active lists the model's other loops,
+//! from its structure, as inactive.
 //!
 //! A run whose plan replaces equations reports what they cut: the links each
 //! replaced variable read and no longer reads, and the model's loops through
 //! them (its structural loops when the structure alone enumerates them, else
 //! the loops of its current run).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,49 +58,45 @@ use schemars::JsonSchema;
 
 use crate::datamodel::{self, Variable};
 use crate::db::{
-    DetectedLoopPolarity, LtmMode, LtmOverlay, SimlinDb, SourceModel, SourceProject,
-    set_project_ltm_discovery_mode,
+    LtmMode, LtmOverlay, SimlinDb, SourceModel, SourceProject, set_project_ltm_discovery_mode,
 };
 use crate::ltm::{
     LinkPolarity, LoopPolarity, canonical_rotation, is_synthetic_node_name, strip_subscript,
 };
+use crate::ltm_dominance::{LEAD_TIE, MeanShares, leader_by_step, leader_timeline, strongest};
 use crate::results::Results;
 
 use super::evidence::Evidence;
 use super::runs::{self, CURRENT, Run, RunPlan, RunStore};
 use super::series::round;
 use super::variables::LinkPolarityName;
-use super::{Session, ToolError, Workspace, names, resolve_model};
+use super::{Session, ToolError, Workspace, is_zero, names, resolve_model};
 
 /// How long discovery may search a run for loops before it reports what it
 /// found.
 const DISCOVERY_BUDGET: Duration = Duration::from_secs(20);
 
-/// The windows a dominance timeline divides a run into.
-pub(crate) const WINDOWS: usize = 12;
+/// The most spans a dominance timeline has.
+pub(crate) const MAX_SPANS: usize = 12;
 
-/// The share of a partition's loop activity a loop holds, on average over a
-/// window, to be active there: discovery's own floor for a loop worth
+/// The share of a partition's loop activity the strongest loop holds at a
+/// step for it to lead there: discovery's own floor for a loop worth
 /// reporting.
 pub(crate) const ACTIVE_SHARE: f64 = 0.001;
 
-/// The share of the strongest loop's a loop holds in a window to lead beside
-/// it.
+/// The share of the leader's a loop holds over a span to be its rival there.
 pub(crate) const RIVAL_SHARE: f64 = 0.5;
 
-/// The most leaders a timeline span names.
+/// The most loops a timeline span names: its leader and its rivals.
 pub(crate) const MAX_LEADERS: usize = 3;
 
-/// The share below which a partition's strongest loop does not dominate it:
-/// its activity is spread across many loops.
+/// The share below which a partition's leader does not dominate it: its
+/// activity is spread across many loops.
 pub(crate) const DOMINANT_SHARE: f64 = 0.1;
 
-/// The loops a partition lists beyond those its timeline names.
+/// The loops a partition lists beyond those its timeline names, and the most
+/// a cut or the inactive loops list.
 pub(crate) const MAX_LOOPS: usize = 8;
-
-/// The loops beyond its leaders a partition keeps listed while others are
-/// left out for the budget.
-const MIN_LOOPS: usize = 3;
 
 /// The longest loop an overview gives the chain of; a longer loop is given by
 /// its stocks, and whole when asked for by id.
@@ -186,18 +185,6 @@ impl From<LoopPolarity> for LoopPolarityName {
     }
 }
 
-impl From<DetectedLoopPolarity> for LoopPolarityName {
-    fn from(polarity: DetectedLoopPolarity) -> LoopPolarityName {
-        match polarity {
-            DetectedLoopPolarity::Reinforcing => LoopPolarityName::Reinforcing,
-            DetectedLoopPolarity::Balancing => LoopPolarityName::Balancing,
-            DetectedLoopPolarity::MostlyReinforcing => LoopPolarityName::MostlyReinforcing,
-            DetectedLoopPolarity::MostlyBalancing => LoopPolarityName::MostlyBalancing,
-            DetectedLoopPolarity::Undetermined => LoopPolarityName::Undetermined,
-        }
-    }
-}
-
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
@@ -209,19 +196,35 @@ pub struct AnalyzeLoopsOutput {
     /// The variable `through` named, as the model names it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub through: Option<String>,
-    /// The loops the analysis found (those through `through`, when given).
+    /// The loops the analysis has (those through `through`, when given): the
+    /// loops active in the run, or, from structure, the model's.
     pub found: usize,
-    /// Whether the loops were drawn from every loop there is: false when the
+    /// Whether those are every such loop. False when the analysis left out
+    /// loops that never held a thousandth of their partition's activity;
+    /// when it kept only the most important of the run's loops; when the
     /// model has too many to enumerate, so the run's were found by searching
-    /// for the strongest (a sample), or too many for its structure alone to
-    /// list.
+    /// for the strongest (a sample); when the model has too many for its
+    /// structure alone to list; or when it has a conveyor or a queue, whose
+    /// loops are not analyzed.
+    /// That no loop goes through a variable is shown only from every loop
+    /// of the model: a complete analysis, or the active loops with the
+    /// `inactive` ones, where the structure lists them.
     pub complete: bool,
     /// The partitions the loops are in, largest first.
     pub partitions: Vec<PartitionReport>,
+    /// The model's loops, from its structure, that are not among this run's
+    /// (those through `through`, when given): inactive in it, or among those
+    /// the analysis left out. Absent when the run has every loop of the
+    /// model, from structure, and when the model has too many loops for its
+    /// structure alone to list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inactive: Option<InactiveLoops>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub omitted: Option<OmittedLoops>,
-    /// Loops asked for by id that this run does not have: inactive in it, or
-    /// cut from it.
+    /// Loops asked for by id that the run's analysis does not have, active,
+    /// inactive or cut: a loop of another revision of the model. A loop
+    /// asked for that is inactive in the run or cut from it is listed whole
+    /// under `inactive` or `cut`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub absent: Vec<String>,
     /// Loops asked for by id left out to keep the answer within its budget:
@@ -243,27 +246,36 @@ pub struct AnalyzeLoopsOutput {
 #[serde(rename_all = "camelCase")]
 pub struct PartitionReport {
     /// Its stocks, as the model names them (an arrayed stock by element); at
-    /// most 12. Empty for loops inside a module, which belong to no
-    /// partition of this model.
+    /// most 12. Empty for the loops that pass through no stock of this model
+    /// (inside a module, or closed through a lagged value): each of those
+    /// stands alone, so they have no timeline and no shares.
     pub stocks: Vec<String>,
     /// How many more stocks it has than it names.
     #[serde(skip_serializing_if = "is_zero")]
     pub other_stocks: usize,
-    /// How many of its loops the analysis found (through `through`, when
+    /// How many of its loops the analysis has (through `through`, when
     /// given).
     pub loop_count: usize,
-    /// Which loops led, span by span: from the run's start to its end in at
-    /// most 12 spans. Absent for loops from structure.
+    /// Which loops led, span by span: the run's saved steps from its start to
+    /// its end, cut at the steps the lead changed, in at most 12 spans (the
+    /// shortest joined to their neighbours past that), each from the time of
+    /// its first step to the time of its last. With `through`, which of the
+    /// loops through it led. Absent for loops from structure.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dominance: Vec<DominanceSpan>,
     /// Every loop `dominance` names, then the most important others (the
-    /// shortest, from structure); at most 8 besides the leaders.
+    /// shortest, from structure); at most 8 besides those it names.
     pub loops: Vec<LoopReport>,
 }
 
-/// A span of a run and the loops that led in it: the strongest on average
-/// over the span, and those holding at least half its share, at most 3. None
-/// led a span in which no loop was active.
+/// A span of a run and the loops that led it: first the loop with the
+/// largest share over the span, then its rivals, those holding at least half
+/// its share there, strongest first; at most 3 in all. None led a span in
+/// which no loop (through `through`, when given) was the strongest. A span
+/// names the single strongest loop, so where several loops take over
+/// together (SIR's balancing loops after the epidemic's peak) the span
+/// changes a few steps after the turn, when one of them alone passes the
+/// loop that led before.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
@@ -282,9 +294,9 @@ pub struct LoopShare {
     /// The loop's id.
     #[serde(rename = "loop")]
     pub id: String,
-    /// Its share of the partition's loop activity, from 0 to 1: at each time
-    /// the shares of all the partition's loops sum to 1, so where many loops
-    /// are active each holds little.
+    /// Its share of the partition's loop activity over the span, from 0 to 1:
+    /// at each time the shares of all the partition's loops sum to 1, so
+    /// where many loops are active each holds little.
     pub share: f64,
 }
 
@@ -312,8 +324,10 @@ pub struct LoopReport {
     /// whose chain is not.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stocks: Vec<String>,
-    /// Its share of the partition's loop activity, averaged over the run,
-    /// from 0 to 1. Absent for loops from structure.
+    /// Its share of the partition's loop activity, from 0 to 1, averaged over
+    /// the steps at which the partition was active: the shares of a
+    /// partition's loops sum to 1. Absent for loops from structure, and for a
+    /// loop in no partition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub share: Option<f64>,
 }
@@ -330,19 +344,37 @@ pub struct ChainLink {
     /// the run scored the link, so `?` there means its sign changed over the
     /// run; otherwise its equation's.
     pub polarity: LinkPolarityName,
+    /// The builtins or macros the link passes through in the next variable's
+    /// equation (`smth1`, `delay3`), when it does: such a link carries a
+    /// delay, and is another link than a direct one between the same two
+    /// variables.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
-/// Loops the analysis found and the answer does not list.
+/// Loops the analysis has and the answer does not list.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct OmittedLoops {
-    /// Partitions past the 6 listed.
+    /// Partitions not listed.
     pub partitions: usize,
     /// Loops not listed, in listed partitions and the others. `through` finds
     /// the loops through a variable.
     pub loops: usize,
+}
+
+/// The model's loops that are not among a run's.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct InactiveLoops {
+    /// The shortest of them, with their equations' signs; at most 8.
+    pub loops: Vec<LoopReport>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub other_loops: usize,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -369,10 +401,6 @@ pub struct CutLink {
     pub to: String,
 }
 
-fn is_zero(n: &usize) -> bool {
-    *n == 0
-}
-
 /// A run's loops as an analysis keeps them, before the session names them.
 pub(crate) struct LoopAnalysis {
     basis: LoopBasis,
@@ -381,48 +409,108 @@ pub(crate) struct LoopAnalysis {
     /// Each partition's stocks (canonical, element-level), indexed by
     /// [`AnalyzedLoop::partition`].
     partitions: Vec<Vec<String>>,
-    complete: bool,
+    /// Whether discovery found the run's loops by searching for the strongest
+    /// rather than enumerating them: a sample.
+    sampled: bool,
     /// How many loops discovery kept before its cap, when the cap bound.
     capped_from: Option<usize>,
+    /// How many of the run's loops discovery left out for never holding a
+    /// thousandth of their partition's activity (its retention floor).
+    negligible: usize,
+    /// Whether the model's structure alone enumerates its loops (from
+    /// structure, whether `loops` is all of them).
+    enumerated: bool,
     /// Whether the model has a conveyor or a queue: a run of it scores no
     /// loop, and its structure leaves out the links they make.
     conveyors: bool,
-    /// Whether the run's stocks do not move, which is why an analysis from
-    /// structure has no run's loops.
-    at_rest: bool,
+    /// The model's loops from structure that the run does not have, shortest
+    /// first; `None` from structure, and when the structure alone does not
+    /// enumerate the model's loops.
+    inactive: Option<Vec<AnalyzedLoop>>,
     cut: Option<Cut>,
 }
 
 impl LoopAnalysis {
     /// About how many bytes the analysis holds: its times, and each loop's
-    /// score series and names. What a run store counts a kept analysis as.
+    /// score series and names, the inactive and cut loops included. What a
+    /// run store counts a kept analysis as.
     pub(crate) fn bytes(&self) -> usize {
         let text = |names: &[String]| names.iter().map(String::len).sum::<usize>();
-        let numbers = self.times.len() + self.loops.iter().map(|l| l.rel.len()).sum::<usize>();
-        numbers * std::mem::size_of::<f64>()
+        let of_loop = |l: &AnalyzedLoop| {
+            l.rel.len() * std::mem::size_of::<f64>()
+                + text(&l.key)
+                + l.chain
+                    .iter()
+                    .map(|step| step.node.len() + text(&step.via))
+                    .sum::<usize>()
+        };
+        let cut = self.cut.iter().flat_map(|cut| &cut.loops);
+        self.times.len() * std::mem::size_of::<f64>()
             + self
                 .loops
                 .iter()
-                .map(|l| text(&l.key) + text(&l.chain))
+                .chain(self.inactive.iter().flatten())
+                .chain(cut)
+                .map(of_loop)
                 .sum::<usize>()
             + self.partitions.iter().map(|p| text(p)).sum::<usize>()
     }
+
+    /// Whether `loops` is every loop of the run, or, from structure, of the
+    /// model: what an absence can be shown from.
+    fn complete(&self) -> bool {
+        match self.basis {
+            LoopBasis::Run => !self.sampled && self.capped_from.is_none() && self.negligible == 0,
+            LoopBasis::Structure => self.enumerated && !self.conveyors,
+        }
+    }
+
+    /// Whether the analysis knows every loop of the model, active in the run
+    /// or not, so that an absence can be shown: it is complete, or the
+    /// structure lists the model's loops, the ones the run left inactive
+    /// among them.
+    fn shows_absence(&self) -> bool {
+        self.complete() || self.inactive.is_some()
+    }
+
+    /// The loops a loop competes with for dominance, itself among them: its
+    /// partition's, or itself alone when it is in none.
+    fn peers<'a>(&'a self, l: &'a AnalyzedLoop) -> Vec<&'a AnalyzedLoop> {
+        match l.partition {
+            Some(_) => self
+                .loops
+                .iter()
+                .filter(|other| other.partition == l.partition)
+                .collect(),
+            None => vec![l],
+        }
+    }
+}
+
+/// One step of a loop's chain: a variable and the link from it to the next.
+#[derive(Clone)]
+struct ChainStep {
+    /// The variable (canonical; an element subscripted).
+    node: String,
+    sign: LinkPolarity,
+    /// The builtins the link passes through.
+    via: Vec<String>,
 }
 
 /// One loop of an analysis.
 #[derive(Clone)]
 pub(crate) struct AnalyzedLoop {
-    /// The cycle's canonical rotation: what identifies the loop.
+    /// The canonical rotation of the cycle's nodes as the engine has them, a
+    /// builtin's instance among them: what identifies the loop.
     key: Vec<String>,
-    /// The cycle from a stock (canonical names).
-    chain: Vec<String>,
-    /// `signs[i]` is the link from `chain[i]` to the next node.
-    signs: Vec<LinkPolarity>,
+    /// The cycle from a stock, builtin and macro internals left out.
+    chain: Vec<ChainStep>,
     polarity: LoopPolarityName,
     /// The signed partition-relative score at each saved step; empty from
     /// structure.
     rel: Vec<f64>,
-    /// The mean of `|rel|`; `None` from structure.
+    /// The mean of `|rel|` over the steps its partition is active at; `None`
+    /// from structure, and for a loop in no partition.
     share: Option<f64>,
     partition: Option<usize>,
     name: Option<String>,
@@ -436,9 +524,12 @@ impl AnalyzedLoop {
             Some((variable, element)) => {
                 let element = super::series::element_key(element.trim_end_matches(']'));
                 let node = format!("{variable}[{element}]");
-                self.chain.contains(&node)
+                self.chain.iter().any(|step| step.node == node)
             }
-            None => self.chain.iter().any(|node| strip_subscript(node) == ident),
+            None => self
+                .chain
+                .iter()
+                .any(|step| strip_subscript(&step.node) == ident),
         }
     }
 
@@ -447,8 +538,8 @@ impl AnalyzedLoop {
     fn has_link(&self, from: &str, to: &str) -> bool {
         let n = self.chain.len();
         (0..n).any(|i| {
-            strip_subscript(&self.chain[i]) == from
-                && strip_subscript(&self.chain[(i + 1) % n]) == to
+            strip_subscript(&self.chain[i].node) == from
+                && strip_subscript(&self.chain[(i + 1) % n].node) == to
         })
     }
 }
@@ -563,6 +654,21 @@ pub(crate) fn through_of(
         .map_err(|reason| ToolError::new(format!("{}: {reason}", var.get_ident())))
 }
 
+/// `items` grouped by the partition each comes with, the groups in the order
+/// their partitions first appear.
+fn by_partition<T>(
+    items: impl IntoIterator<Item = (Option<usize>, T)>,
+) -> Vec<(Option<usize>, Vec<T>)> {
+    let mut groups: Vec<(Option<usize>, Vec<T>)> = Vec::new();
+    for (partition, item) in items {
+        match groups.iter_mut().find(|(p, _)| *p == partition) {
+            Some((_, members)) => members.push(item),
+            None => groups.push((partition, vec![item])),
+        }
+    }
+    groups
+}
+
 /// The answer for loops asked for by id: each whole, in its partition, within
 /// `budget`, the last asked for left out for another call when they do not
 /// all fit (the first always comes).
@@ -575,17 +681,21 @@ fn report_by_id(
     budget: usize,
 ) -> AnalyzeLoopsOutput {
     let mut asked = keys;
-    let mut left_out = Vec::new();
-    loop {
-        let mut answer = report_by_id_of(analysis, model, run, revision, &asked);
-        answer.left_out = left_out.clone();
-        let size = serde_json::to_string(&answer).map_or(0, |json| json.len());
-        if size <= budget || asked.len() <= 1 {
-            return answer;
+    let mut answer = report_by_id_of(analysis, model, run, revision, &asked);
+    super::fit(&mut answer, budget, |answer| {
+        if asked.len() <= 1 {
+            return false;
         }
-        let (id, _) = asked.pop().expect("more than one");
+        let Some((id, _)) = asked.pop() else {
+            unreachable!("more than one loop is asked for")
+        };
+        let mut left_out = std::mem::take(&mut answer.left_out);
         left_out.insert(0, id);
-    }
+        *answer = report_by_id_of(analysis, model, run, revision, &asked);
+        answer.left_out = left_out;
+        true
+    });
+    answer
 }
 
 fn report_by_id_of(
@@ -596,21 +706,24 @@ fn report_by_id_of(
     keys: &[(String, Vec<String>)],
 ) -> AnalyzeLoopsOutput {
     let names = ModelNames::new(model);
-    let mut groups: Vec<(Option<usize>, Vec<LoopReport>)> = Vec::new();
     let mut absent = Vec::new();
+    let mut reports = Vec::new();
+    let (mut inactive, mut cut) = (Vec::new(), Vec::new());
     for (id, key) in keys {
-        let Some(l) = analysis.loops.iter().find(|l| l.key == *key) else {
+        let whole = |l: &AnalyzedLoop| loop_report(l, id.clone(), &names, Detail::Whole);
+        let has_key = |l: &&AnalyzedLoop| l.key == *key;
+        if let Some(l) = analysis.loops.iter().find(has_key) {
+            reports.push((l.partition, whole(l)));
+        } else if let Some(l) = analysis.inactive.iter().flatten().find(has_key) {
+            inactive.push(whole(l));
+        } else if let Some(l) = analysis.cut.iter().flat_map(|c| &c.loops).find(has_key) {
+            cut.push(whole(l));
+        } else {
             absent.push(id.clone());
-            continue;
-        };
-        let report = loop_report(l, id.clone(), &names, Detail::Whole);
-        match groups.iter_mut().find(|(p, _)| *p == l.partition) {
-            Some((_, reports)) => reports.push(report),
-            None => groups.push((l.partition, vec![report])),
         }
     }
-    let found = groups.iter().map(|(_, reports)| reports.len()).sum();
-    let partitions = groups
+    let found = reports.len();
+    let partitions = by_partition(reports)
         .into_iter()
         .map(|(partition, loops)| {
             let stocks = stocks_of(analysis, partition);
@@ -634,7 +747,7 @@ fn report_by_id_of(
     let mut notes: Vec<String> = note(analysis, None, found, &[]).into_iter().collect();
     if !absent.is_empty() {
         notes.push(format!(
-            "{} {} not a loop of this run: inactive in it, or cut from it.",
+            "{} {} no loop of this run's analysis, active, inactive or cut.",
             absent.join(", "),
             if absent.len() == 1 { "is" } else { "are" }
         ));
@@ -645,12 +758,31 @@ fn report_by_id_of(
         basis: analysis.basis,
         through: None,
         found,
-        complete: analysis.complete,
+        complete: analysis.complete(),
         partitions,
+        inactive: (!inactive.is_empty()).then_some(InactiveLoops {
+            loops: inactive,
+            other_loops: 0,
+        }),
         omitted: None,
         absent,
         left_out: vec![],
-        cut: None,
+        cut: analysis
+            .cut
+            .as_ref()
+            .filter(|_| !cut.is_empty())
+            .map(|of_plan| CutReport {
+                links: of_plan
+                    .links
+                    .iter()
+                    .map(|(from, to)| CutLink {
+                        from: names.display(from),
+                        to: names.display(to),
+                    })
+                    .collect(),
+                loops: cut,
+                other_loops: 0,
+            }),
         note: (!notes.is_empty()).then(|| notes.join(" ")),
     }
 }
@@ -699,8 +831,9 @@ pub(crate) fn cut_of(
 }
 
 /// The ids of the loops that led `analysis`'s run after `time`, strongest
-/// first, at most `n`: the leaders of every partition's spans that end after
-/// it, each by its largest share in them. None from structure.
+/// first, at most `n`: the leaders and rivals of every partition's timeline
+/// spans that end after it, each by its largest share in them. None from
+/// structure.
 pub(crate) fn leaders_after(
     evidence: &mut Evidence,
     analysis: &LoopAnalysis,
@@ -710,23 +843,15 @@ pub(crate) fn leaders_after(
     if analysis.basis != LoopBasis::Run {
         return vec![];
     }
-    let mut partitions: Vec<(Option<usize>, Vec<&AnalyzedLoop>)> = Vec::new();
-    for l in &analysis.loops {
-        match partitions.iter_mut().find(|(p, _)| *p == l.partition) {
-            Some((_, members)) => members.push(l),
-            None => partitions.push((l.partition, vec![l])),
-        }
-    }
     let mut leaders: Vec<(&AnalyzedLoop, f64)> = Vec::new();
-    for (_, members) in &partitions {
-        for span in dominance(members, analysis.times.len()) {
-            let end = analysis
-                .times
-                .get(span.end)
-                .or(analysis.times.last())
-                .copied()
-                .unwrap_or(f64::NEG_INFINITY);
-            if end <= time {
+    for (partition, members) in by_partition(analysis.loops.iter().map(|l| (l.partition, l))) {
+        if partition.is_none() {
+            continue;
+        }
+        for span in timeline(&members, analysis.times.len(), |_| true) {
+            // A span reaches past `time` when its last step does.
+            let last = analysis.times[span.end - 1];
+            if last <= time {
                 continue;
             }
             for (i, share) in span.leaders {
@@ -755,21 +880,48 @@ pub(crate) fn polarity_of(analysis: &LoopAnalysis, key: &[String]) -> Option<Loo
         .map(|l| l.polarity)
 }
 
-/// How often a loop led its partition over a span of a run.
-pub(crate) struct Leadership {
-    /// The steps it was the strongest in.
-    pub led: usize,
-    /// The steps some loop of the partition was active in.
-    pub active: usize,
-    /// The cycle of the loop that was the strongest in the most steps.
-    pub most: Option<Vec<String>>,
+/// How an answer says that the loop whose cycle is `key`, one of the model's
+/// loops from structure, is not among the analysis's loops of the run: it is
+/// inactive in a run the analysis has every loop of, and otherwise inactive
+/// or among those the analysis left out, which it cannot tell apart; `None`
+/// for a loop the structure does not list either.
+pub(crate) fn unreported(analysis: &LoopAnalysis, key: &[String], run: &str) -> Option<String> {
+    let listed = analysis.inactive.iter().flatten().any(|l| l.key == key);
+    listed.then(|| {
+        if analysis.complete() {
+            format!("inactive in run '{run}'")
+        } else {
+            format!("not among the loops this analysis reports for run '{run}'")
+        }
+    })
 }
 
-/// How often the loop whose cycle is `key` was its partition's strongest
-/// over the saved steps from `from` to `to`, counting the steps in which some
-/// loop of the partition was active; `None` when the analysis does not have
-/// the loop. A run with no active loop (loops from structure) has none
-/// active.
+/// A loop's standing in its partition over a span of a run.
+pub(crate) struct Leadership {
+    /// Its mean share of the partition's activity over the span.
+    pub share: f64,
+    /// The largest mean share of any loop of the partition over the span.
+    pub largest: f64,
+    /// The cycle of the loop that led the span ([`strongest`]).
+    pub strongest: Option<Vec<String>>,
+    /// The span's steps at which the partition was active.
+    pub active: usize,
+}
+
+impl Leadership {
+    /// Whether the loop led the span: its mean share is the largest, or ties
+    /// with it, by the rule the timeline names a span's leader by.
+    pub(crate) fn leads(&self) -> bool {
+        self.largest >= ACTIVE_SHARE && self.share >= self.largest * (1.0 - LEAD_TIE)
+    }
+}
+
+/// The standing of the loop whose cycle is `key` in its partition over the
+/// saved steps whose time, as an answer writes it ([`round`]), is from `from`
+/// to `to`, both included: the span a timeline prints as `from` and `to`,
+/// the times of its first and last steps, is exactly the steps the timeline
+/// read. `None` when the analysis does not have the loop. A run with no
+/// active loop (loops from structure) has no active step.
 pub(crate) fn leadership(
     analysis: &LoopAnalysis,
     key: &[String],
@@ -777,54 +929,43 @@ pub(crate) fn leadership(
     to: f64,
 ) -> Option<Leadership> {
     let target = analysis.loops.iter().find(|l| l.key == key)?;
-    let peers: Vec<&AnalyzedLoop> = analysis
-        .loops
-        .iter()
-        .filter(|l| l.partition == target.partition)
-        .collect();
-    let mut counts: Vec<usize> = vec![0; peers.len()];
-    let mut active = 0;
-    for (step, &time) in analysis.times.iter().enumerate() {
-        if time < from || time > to {
-            continue;
-        }
-        let strongest = peers
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (i, l.rel.get(step).map_or(0.0, |s| s.abs())))
-            .fold(
-                (0, 0.0_f64),
-                |best, (i, s)| if s > best.1 { (i, s) } else { best },
-            );
-        if strongest.1 >= ACTIVE_SHARE {
-            active += 1;
-            counts[strongest.0] += 1;
-        }
-    }
-    let target_index = peers.iter().position(|l| l.key == key).expect("a peer");
-    let most = counts
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(&a.0)))
-        .filter(|&(_, &n)| n > 0)
-        .map(|(i, _)| peers[i].key.clone());
+    let peers = analysis.peers(target);
+    let series: Vec<&[f64]> = peers.iter().map(|l| l.rel.as_slice()).collect();
+    let steps = analysis.times.len();
+    let in_span = |i: usize| {
+        let time = round(analysis.times[i]);
+        time >= from && time <= to
+    };
+    let start = (0..steps).find(|&i| in_span(i)).unwrap_or(steps);
+    let end = (start..steps).find(|&i| !in_span(i)).unwrap_or(steps);
+    let means = MeanShares::new(&series, steps);
+    let shares = means.means(start, end);
+    let target_index = peers.iter().position(|l| l.key == key)?;
     Some(Leadership {
-        led: counts[target_index],
-        active,
-        most,
+        share: shares[target_index],
+        largest: shares.iter().copied().fold(0.0, f64::max),
+        strongest: strongest(&shares, ACTIVE_SHARE).map(|i| peers[i].key.clone()),
+        active: means.active(start, end),
     })
 }
 
-/// The cycles of the analysis's loops through the variable `ident`
-/// (canonical); `None` when the analysis is not of every loop, so that no
-/// absence can be shown.
-pub(crate) fn loops_through(analysis: &LoopAnalysis, ident: &str) -> Option<Vec<Vec<String>>> {
-    analysis.complete.then(|| {
-        analysis
-            .loops
-            .iter()
-            .filter(|l| l.goes_through(ident))
-            .map(|l| l.key.clone())
+/// The cycles of the model's loops through the variable `ident` (canonical)
+/// that the analysis knows of, each with whether it is inactive in the run:
+/// its active loops, and where the structure lists the model's loops, the
+/// ones the run left inactive too. `None` when those are not every loop of
+/// the model ([`LoopAnalysis::shows_absence`]), so that no absence can be
+/// shown.
+pub(crate) fn loops_through(
+    analysis: &LoopAnalysis,
+    ident: &str,
+) -> Option<Vec<(Vec<String>, bool)>> {
+    analysis.shows_absence().then(|| {
+        let active = analysis.loops.iter().map(|l| (l, false));
+        let inactive = analysis.inactive.iter().flatten().map(|l| (l, true));
+        active
+            .chain(inactive)
+            .filter(|(l, _)| l.goes_through(ident))
+            .map(|(l, inactive)| (l.key.clone(), inactive))
             .collect()
     })
 }
@@ -978,9 +1119,11 @@ fn with_discovery_mode<T>(
 }
 
 /// The loops of a run of `model` under `plan` compiled under the LTM overlay
-/// in discovery mode, from its `results`; the model's loops from structure
-/// when none was active. Stops before discovery, and before the loops from structure, when
-/// `waiting` says other work waits for the project.
+/// in discovery mode, from its `results`, with the model's other loops from
+/// structure as inactive; the model's loops from structure when none was
+/// active, or when its stocks move by nothing but residue. Stops before
+/// discovery, and before the loops from structure, when `waiting` says other
+/// work waits for the project.
 fn read_loops(
     db: &mut SimlinDb,
     source_project: SourceProject,
@@ -1010,66 +1153,70 @@ fn read_loops(
     )
     .ok_or_else(|| unanalyzable("loop discovery could not read the model's structure"))?;
 
-    let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
-    let dims = crate::db::project_datamodel_dims(db, source_project);
-    let expansion = crate::analysis::build_link_expansion_context(db, source_model, source_project);
-    let offsets: HashMap<(String, String), usize> =
-        crate::ltm_finding::link_score_offsets(results, &ltm_vars.vars, dims, &expansion)
-            .into_iter()
-            .map(|((from, to), offset)| {
-                ((from.as_str().to_string(), to.as_str().to_string()), offset)
-            })
-            .collect();
-    let scores = LinkScores::new(&offsets);
-
     let names = ModelNames::new(model);
     let loop_names = LoopNames::new(model, project);
-    let mut seen = HashSet::new();
-    let loops: Vec<AnalyzedLoop> = discovery
-        .loops
-        .iter()
-        .filter_map(|found| {
-            let equation_sign: HashMap<(&str, &str), LinkPolarity> = found
-                .loop_info
-                .links
-                .iter()
-                .map(|link| ((link.from.as_str(), link.to.as_str()), link.polarity))
-                .collect();
-            let (key, chain, signs) = names.cycle(&node_sequence(&found.loop_info), |from, to| {
-                scores.sign(results, from, to).unwrap_or_else(|| {
-                    equation_sign
-                        .get(&(from, to))
-                        .copied()
-                        .unwrap_or(LinkPolarity::Unknown)
-                })
-            });
-            if !seen.insert(key.clone()) {
-                return None;
-            }
-            let rel: Vec<f64> = found
-                .rel_scores
-                .iter()
-                .map(|s| if s.is_finite() { *s } else { 0.0 })
-                .collect();
-            let share = mean_abs(&rel);
-            Some(AnalyzedLoop {
-                name: loop_names.of(&chain),
-                key,
-                chain,
-                signs,
-                polarity: found.loop_info.polarity.clone().into(),
-                rel,
-                share: Some(share),
-                partition: found.partition,
+    let mut loops: Vec<AnalyzedLoop> = {
+        let signs = RunSigns::new(db, source_model, source_project, results);
+        discovery
+            .loops
+            .iter()
+            .map(|found| {
+                let equation_sign: HashMap<(&str, &str), LinkPolarity> = found
+                    .loop_info
+                    .links
+                    .iter()
+                    .map(|link| ((link.from.as_str(), link.to.as_str()), link.polarity))
+                    .collect();
+                let nodes = crate::db::loop_node_sequence(&found.loop_info);
+                let chain = names.chain(&nodes, |from, to| {
+                    signs.sign(from, to).unwrap_or_else(|| {
+                        equation_sign
+                            .get(&(from, to))
+                            .copied()
+                            .unwrap_or(LinkPolarity::Unknown)
+                    })
+                });
+                AnalyzedLoop {
+                    name: loop_names.of(&chain),
+                    key: canonical_rotation(&nodes),
+                    chain,
+                    polarity: found.loop_info.polarity.into(),
+                    rel: found
+                        .rel_scores
+                        .iter()
+                        .map(|s| if s.is_finite() { *s } else { 0.0 })
+                        .collect(),
+                    share: None,
+                    partition: found.partition,
+                }
             })
-        })
-        .collect();
+            .collect()
+    };
+    set_shares(&mut loops, results.step_count);
 
-    // A run whose stocks do not move, to the precision a summary reports
-    // them, is at rest however its loop scores round: dominance there is
-    // arithmetic noise, so its loops come from structure.
-    let at_rest = stocks_at_rest(model, plan, results);
-    if !loops.is_empty() && !at_rest {
+    // The model's loops from structure: every loop of it when none was
+    // active in the run, the inactive ones otherwise.
+    yield_point()?;
+    let structure = with_discovery_mode(db, source_project, false, |db| {
+        structural_loops(db, source_project, source_model, model, project)
+    });
+    let enumerated = structure.is_some();
+    // A run whose stocks move by nothing but the rounding of what they are
+    // computed from has loop scores all the same, since a score is a ratio
+    // of changes however small; those of residue are noise, and so would be
+    // any dominance read from them. A real movement, however small, is
+    // analyzed from its scores.
+    if !loops.is_empty() && !stocks_move_by_residue(model, plan, results) {
+        let inactive = structure.map(|structure| {
+            let active: HashSet<&Vec<String>> = loops.iter().map(|l| &l.key).collect();
+            let mut inactive: Vec<AnalyzedLoop> = structure
+                .loops
+                .into_iter()
+                .filter(|l| !active.contains(&l.key))
+                .collect();
+            inactive.sort_by(|a, b| a.chain.len().cmp(&b.chain.len()).then(a.key.cmp(&b.key)));
+            inactive
+        });
         return Ok(LoopAnalysis {
             basis: LoopBasis::Run,
             times: results
@@ -1082,13 +1229,17 @@ fn read_loops(
                 .iter()
                 .map(|p| p.stocks.clone())
                 .collect(),
-            complete: discovery.enumeration_complete
-                && !discovery.agg_recovery_truncated
-                && !discovery.truncated,
+            sampled: !discovery.enumeration_complete
+                || discovery.agg_recovery_truncated
+                || discovery.truncated,
             capped_from: (discovery.retained_loops > discovery.loops.len())
                 .then_some(discovery.retained_loops),
+            negligible: discovery.universe_loops.map_or(0, |universe| {
+                universe.saturating_sub(discovery.retained_loops)
+            }),
+            enumerated,
             conveyors: false,
-            at_rest: false,
+            inactive,
             cut: None,
         });
     }
@@ -1097,33 +1248,28 @@ fn read_loops(
     // scores, and the causal graph has no link through one.
     let conveyors = crate::conveyor_compile::project_has_conveyor(project, &model.name)
         || crate::queue_compile::project_has_queue(project, &model.name);
-    yield_point()?;
-    let structure = with_discovery_mode(db, source_project, false, |db| {
-        structural_loops(db, source_project, source_model, model, project)
-    });
-    let complete = structure.is_some() && !conveyors;
     let structure = structure.unwrap_or_default();
     Ok(LoopAnalysis {
         basis: LoopBasis::Structure,
         times: vec![],
         loops: structure.loops,
         partitions: structure.partitions,
-        complete,
+        sampled: false,
         capped_from: None,
+        negligible: 0,
+        enumerated,
         conveyors,
-        at_rest,
+        inactive: None,
         cut: None,
     })
 }
 
-/// Whether every stock of `model` is at rest in `results`, a run under
-/// `plan`, each element of an arrayed one: what a behavior summary would call
-/// it. False for a model with no stock.
-fn stocks_at_rest(model: &datamodel::Model, plan: &RunPlan, results: &Results) -> bool {
-    let times: Vec<f64> = results
-        .iter()
-        .map(|row| row[crate::results::TIME_OFF])
-        .collect();
+/// Whether every stock of `model`, each element of an arrayed one, never
+/// leaves zero in `results`, a run under `plan`, by more than residue of the
+/// scale it is computed from in the run (`behavior::residue_bound` at
+/// `series::scale_in_run`, the scale every tool reads it at). False for a
+/// model with no stock.
+fn stocks_move_by_residue(model: &datamodel::Model, plan: &RunPlan, results: &Results) -> bool {
     let mut any = false;
     for var in &model.variables {
         let Variable::Stock(stock) = var else {
@@ -1135,9 +1281,7 @@ fn stocks_at_rest(model: &datamodel::Model, plan: &RunPlan, results: &Results) -
             let series: Vec<f64> = results.iter().map(|row| row[column.offset]).collect();
             let key = format!("{canonical}{}", column.subscript);
             let scale = super::series::scale_in_run(results, model, plan, &key);
-            if super::behavior::classify_at(&times, &series, scale).kind
-                != super::behavior::ModeKind::AtRest
-            {
+            if super::behavior::magnitude(&series) > super::behavior::residue_bound(scale) {
                 return false;
             }
         }
@@ -1145,86 +1289,174 @@ fn stocks_at_rest(model: &datamodel::Model, plan: &RunPlan, results: &Results) -
     any
 }
 
-/// The link scores of a run under the LTM overlay, by `(from, to)` element
-/// link, to sign a discovered loop's links with.
-struct LinkScores<'a> {
-    offsets: &'a HashMap<(String, String), usize>,
-    /// The links out of each aggregate node, the synthetic node the engine
-    /// routes an array reducer (`SUM(pop[*])`) through.
-    out_of_aggregate: HashMap<&'a str, Vec<(&'a str, usize)>>,
+/// Give each loop of a run its mean share of its partition's activity, over
+/// the steps the partition is active at. A loop in no partition competes with
+/// none, so it has no share.
+fn set_shares(loops: &mut [AnalyzedLoop], steps: usize) {
+    let groups = by_partition(loops.iter().enumerate().map(|(i, l)| (l.partition, i)));
+    for (partition, members) in groups {
+        if partition.is_none() {
+            continue;
+        }
+        let shares: Vec<f64> = {
+            let series: Vec<&[f64]> = members.iter().map(|&i| loops[i].rel.as_slice()).collect();
+            MeanShares::new(&series, steps).means(0, steps)
+        };
+        for (i, share) in members.into_iter().zip(shares) {
+            loops[i].share = Some(share);
+        }
+    }
 }
 
-impl<'a> LinkScores<'a> {
+/// The signs a run under the LTM overlay gave its links, by `(from, to)`
+/// element link, to sign a discovered loop's links with.
+struct RunSigns<'a> {
+    results: &'a Results,
+    /// Each scored link's column in the results.
+    offsets: HashMap<(String, String), usize>,
+    /// The columns of the scored links into each node, in column order: what
+    /// a link's relative score is a share of.
+    into: HashMap<String, Vec<usize>>,
+    /// The links out of each aggregate node, the synthetic node the engine
+    /// routes an array reducer (`SUM(pop[*])`) through.
+    out_of_aggregate: HashMap<String, Vec<(String, usize)>>,
+    /// The signs already read.
+    read: RefCell<HashMap<(String, String), Option<LinkPolarity>>>,
+}
+
+impl<'a> RunSigns<'a> {
     /// The longest chain of aggregate nodes a link is signed across: a
     /// reducer of a reducer's result is two.
     const MAX_AGGREGATES: usize = 4;
 
-    fn new(offsets: &'a HashMap<(String, String), usize>) -> LinkScores<'a> {
-        let mut out_of_aggregate: HashMap<&str, Vec<(&str, usize)>> = HashMap::new();
-        for ((from, to), &offset) in offsets {
+    fn new(
+        db: &SimlinDb,
+        source_model: SourceModel,
+        source_project: SourceProject,
+        results: &'a Results,
+    ) -> RunSigns<'a> {
+        let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
+        let dims = crate::db::project_datamodel_dims(db, source_project);
+        let expansion =
+            crate::analysis::build_link_expansion_context(db, source_model, source_project);
+        let offsets: HashMap<(String, String), usize> =
+            crate::ltm_finding::link_score_offsets(results, &ltm_vars.vars, dims, &expansion)
+                .into_iter()
+                .map(|((from, to), offset)| {
+                    ((from.as_str().to_string(), to.as_str().to_string()), offset)
+                })
+                .collect();
+        let mut into: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut out_of_aggregate: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+        for ((from, to), &offset) in &offsets {
+            into.entry(to.clone()).or_default().push(offset);
             if is_aggregate(from) {
                 out_of_aggregate
-                    .entry(from.as_str())
+                    .entry(from.clone())
                     .or_default()
-                    .push((to.as_str(), offset));
+                    .push((to.clone(), offset));
             }
         }
-        LinkScores {
+        // A sum of floats depends on its order, and a map's does not hold.
+        for columns in into.values_mut() {
+            columns.sort_unstable();
+        }
+        for links in out_of_aggregate.values_mut() {
+            links.sort();
+        }
+        RunSigns {
+            results,
             offsets,
+            into,
             out_of_aggregate,
+            read: RefCell::new(HashMap::new()),
         }
     }
 
-    /// The sign of the link `from -> to` in the run: its link score's, or,
+    /// The relative score series of the link in column `offset` into `to`:
+    /// its share, signed, of the change all of `to`'s scored inputs account
+    /// for at each step (`ltm_post`'s normalization, per target).
+    fn relative(&self, offset: usize, to: &str) -> Vec<f64> {
+        let column = |c: usize| self.results.iter().map(move |row| row[c]);
+        let inputs = self.into.get(to).map(Vec::as_slice).unwrap_or(&[]);
+        let totals = crate::ltm_post::group_totals(
+            inputs.iter().map(|&c| ((), column(c))),
+            self.results.step_count,
+        );
+        let totals = totals.get(&()).map(Vec::as_slice).unwrap_or(&[]);
+        crate::ltm_post::relative_series(column(offset), totals)
+    }
+
+    /// The sign of the link `from -> to` in the run
+    /// ([`LinkPolarity::from_runtime_scores`] over its relative score), or,
     /// for a link discovery stitched across aggregate nodes, the sign of the
-    /// path score through them (the product of the link scores along the
-    /// path) when every such path has the same one.
+    /// path through them (the product of the relative scores along it) when
+    /// every such path has the same one.
     ///
     /// `Unknown` when the link was active and its sign changed over the run,
     /// as a loop's polarity is undetermined, so a loop the run leaves
     /// undetermined shows which of its links did. `None` when the run never
     /// scored the link, and its equation's sign stands.
-    fn sign(&self, results: &Results, from: &str, to: &str) -> Option<LinkPolarity> {
-        let series_of = |path: &[usize]| -> Vec<f64> {
-            results
-                .iter()
-                .map(|row| path.iter().map(|&offset| row[offset]).product())
-                .collect()
-        };
-        let paths = match self.offsets.get(&(from.to_string(), to.to_string())) {
-            Some(&offset) => vec![vec![offset]],
+    fn sign(&self, from: &str, to: &str) -> Option<LinkPolarity> {
+        let link = (from.to_string(), to.to_string());
+        if let Some(sign) = self.read.borrow().get(&link) {
+            return *sign;
+        }
+        let paths = match self.offsets.get(&link) {
+            Some(&offset) => vec![vec![(offset, to)]],
             None => self.paths(from, to),
         };
-        let mut signs = paths
-            .iter()
-            .filter_map(|path| runtime_sign(&series_of(path)));
-        let first = signs.next()?;
-        Some(if signs.all(|sign| sign == first) {
-            first
-        } else {
-            LinkPolarity::Unknown
-        })
+        let mut signs = paths.iter().filter_map(|path| {
+            let mut along = vec![1.0_f64; self.results.step_count];
+            for &(offset, target) in path {
+                for (product, score) in along.iter_mut().zip(self.relative(offset, target)) {
+                    *product *= score;
+                }
+            }
+            LinkPolarity::from_runtime_scores(&along)
+        });
+        let sign = signs.next().map(|first| {
+            if signs.all(|sign| sign == first) {
+                first
+            } else {
+                LinkPolarity::Unknown
+            }
+        });
+        self.read.borrow_mut().insert(link, sign);
+        sign
     }
 
-    /// Each path of link-score offsets from `from` to `to` through aggregate
-    /// nodes only.
-    fn paths(&self, from: &str, to: &str) -> Vec<Vec<usize>> {
+    /// Each path from `from` to `to` through aggregate nodes only, as the
+    /// column and target of each link along it.
+    fn paths<'s>(&'s self, from: &str, to: &'s str) -> Vec<Vec<(usize, &'s str)>> {
         let mut found = Vec::new();
-        for ((source, node), &offset) in self.offsets {
-            if source == from && is_aggregate(node) {
-                self.extend(node, to, vec![offset], &mut found);
-            }
+        let mut first: Vec<(&str, usize)> = self
+            .offsets
+            .iter()
+            .filter(|((source, node), _)| source == from && is_aggregate(node))
+            .map(|((_, node), &offset)| (node.as_str(), offset))
+            .collect();
+        first.sort();
+        for (node, offset) in first {
+            self.extend(node, to, vec![(offset, node)], &mut found);
         }
         found
     }
 
-    fn extend(&self, node: &str, to: &str, path: Vec<usize>, found: &mut Vec<Vec<usize>>) {
-        for &(next, offset) in self.out_of_aggregate.get(node).into_iter().flatten() {
+    fn extend<'s>(
+        &'s self,
+        node: &str,
+        to: &'s str,
+        path: Vec<(usize, &'s str)>,
+        found: &mut Vec<Vec<(usize, &'s str)>>,
+    ) {
+        for (next, offset) in self.out_of_aggregate.get(node).into_iter().flatten() {
             let mut longer = path.clone();
-            longer.push(offset);
             if next == to {
+                longer.push((*offset, to));
                 found.push(longer);
-            } else if is_aggregate(next) && longer.len() <= Self::MAX_AGGREGATES {
+            } else if is_aggregate(next) && longer.len() < Self::MAX_AGGREGATES {
+                longer.push((*offset, next.as_str()));
                 self.extend(next, to, longer, found);
             }
         }
@@ -1235,18 +1467,6 @@ impl<'a> LinkScores<'a> {
 /// the loops it reports.
 fn is_aggregate(node: &str) -> bool {
     crate::ltm_agg::is_synthetic_agg_name(strip_subscript(node))
-}
-
-/// A link's sign from its score over a run, by the rule a loop's polarity is
-/// read by ([`LoopPolarity::from_runtime_scores`]): `Unknown` when its sign
-/// changed and its scores net to less than 99% of their magnitude, `None`
-/// when it was never active.
-fn runtime_sign(series: &[f64]) -> Option<LinkPolarity> {
-    Some(match LoopPolarity::from_runtime_scores(series)?.0 {
-        LoopPolarity::Reinforcing | LoopPolarity::MostlyReinforcing => LinkPolarity::Positive,
-        LoopPolarity::Balancing | LoopPolarity::MostlyBalancing => LinkPolarity::Negative,
-        LoopPolarity::Undetermined => LinkPolarity::Unknown,
-    })
 }
 
 /// A model's loops from its structure, and their partitions.
@@ -1260,6 +1480,14 @@ struct Structure {
 /// when the model is too large for its structure alone to enumerate them.
 /// The project must be out of discovery mode, in which the structural surface
 /// reports pinned loops only.
+///
+/// A loop is one cycle of the model's elements, as a run's loops are, so a
+/// loop has one key from structure and from a run: the structural surface
+/// reports an apply-to-all loop once, by its variables, and it is expanded
+/// here to the loop of each element ([`ModelNames::element_cycles`]). A
+/// loop's partition is the one its stocks are in
+/// (`db::model_element_cycle_partitions`), which each element's loop has its
+/// own of when the elements are not coupled.
 fn structural_loops(
     db: &SimlinDb,
     source_project: SourceProject,
@@ -1271,15 +1499,20 @@ fn structural_loops(
         return None;
     }
     let detected = crate::db::model_detected_loops(db, source_model, source_project);
+    if detected.loops.is_empty() {
+        return Some(Structure::default());
+    }
     let polarities = crate::db::compute_link_polarities(db, source_model, source_project);
+    let stock_partitions =
+        crate::db::model_element_cycle_partitions(db, source_model, source_project);
     let names = ModelNames::new(model);
     let loop_names = LoopNames::new(model, project);
-    let mut seen = HashSet::new();
-    let loops = detected
-        .loops
-        .iter()
-        .filter_map(|detected| {
-            let (key, chain, signs) = names.cycle(&detected.variables, |from, to| {
+    let mut partitions: Vec<Vec<String>> = Vec::new();
+    let mut listed: HashMap<usize, usize> = HashMap::new();
+    let mut loops = Vec::new();
+    for detected in &detected.loops {
+        for nodes in names.element_cycles(&detected.variables, &project.dimensions) {
+            let chain = names.chain(&nodes, |from, to| {
                 polarities
                     .get(&(
                         strip_subscript(from).to_string(),
@@ -1288,29 +1521,41 @@ fn structural_loops(
                     .copied()
                     .unwrap_or(LinkPolarity::Unknown)
             });
-            if !seen.insert(key.clone()) {
-                return None;
+            let partition = nodes
+                .iter()
+                .find_map(|node| stock_partitions.stock_partition.get(node))
+                .map(|&of_model| {
+                    *listed.entry(of_model).or_insert_with(|| {
+                        let mut stocks = stock_partitions.partitions[of_model].clone();
+                        stocks.sort();
+                        partitions.push(stocks);
+                        partitions.len() - 1
+                    })
+                });
+            let key = canonical_rotation(&nodes);
+            let polarity: LoopPolarityName = detected.polarity.into();
+            // The structural surface can report one cycle of elements twice
+            // (an apply-to-all loop through a reducer beside the direct one
+            // through the same elements, the aggregate node left out): one
+            // loop, whose sign is known only where both say the same.
+            if let Some(twin) = loops.iter_mut().find(|l: &&mut AnalyzedLoop| l.key == key) {
+                if twin.polarity != polarity {
+                    twin.polarity = LoopPolarityName::Undetermined;
+                }
+                continue;
             }
-            Some(AnalyzedLoop {
+            loops.push(AnalyzedLoop {
                 name: detected.name.clone().or_else(|| loop_names.of(&chain)),
                 key,
                 chain,
-                signs,
-                polarity: detected.polarity.into(),
+                polarity,
                 rel: vec![],
                 share: None,
-                partition: detected.partition,
-            })
-        })
-        .collect();
-    Some(Structure {
-        loops,
-        partitions: detected
-            .partitions
-            .iter()
-            .map(|p| p.stocks.clone())
-            .collect(),
-    })
+                partition,
+            });
+        }
+    }
+    Some(Structure { loops, partitions })
 }
 
 /// The variables each of `variables` (canonical idents) reads, as
@@ -1348,60 +1593,27 @@ fn cut(before: Vec<(String, String)>, after: &[(String, String)], base: Vec<Anal
     Cut { links, loops }
 }
 
-/// A loop's nodes in its links' order. Discovery has already collapsed its
-/// aggregate nodes, so a link across one is signed by [`LinkScores::sign`].
-fn node_sequence(l: &crate::ltm::Loop) -> Vec<String> {
-    let Some(last) = l.links.last() else {
-        return Vec::new();
-    };
-    std::iter::once(last)
-        .chain(l.links.iter().take(l.links.len() - 1))
-        .map(|link| link.to.to_string())
-        .collect()
-}
-
-/// A cycle and its links' signs with the engine's synthetic nodes (a
-/// builtin's or macro's internals, an aggregate) left out, each link across
-/// them signed by composing the links it stands for, from the first node that
-/// is not one.
-fn without_synthetic(
-    chain: Vec<String>,
-    signs: Vec<LinkPolarity>,
-) -> (Vec<String>, Vec<LinkPolarity>) {
-    let Some(start) = chain.iter().position(|node| !is_synthetic_node_name(node)) else {
-        return (chain, signs);
-    };
-    let n = chain.len();
-    let mut nodes: Vec<String> = Vec::with_capacity(n);
-    let mut composed: Vec<LinkPolarity> = Vec::with_capacity(n);
-    for i in (start..n).chain(0..start) {
-        if is_synthetic_node_name(&chain[i]) {
-            let last = composed.last_mut().expect("the walk starts at a real node");
-            *last = last.compose(signs[i]);
-        } else {
-            nodes.push(chain[i].clone());
-            composed.push(signs[i]);
-        }
+/// The builtin or macro a node the engine synthesized is an instance of
+/// (`smth1` for `$⁚perceived⁚0⁚smth1`, the spelling of
+/// `capture::synthetic_ident`: parent, call number, part, and an element for
+/// a per-element helper); `None` for a call's hoisted argument or a capture
+/// (`arg{n}`), which is part of its call's link and names nothing, and for an
+/// aggregate node.
+fn instance_of(node: &str) -> Option<&str> {
+    let name = strip_subscript(node);
+    if crate::ltm_agg::is_synthetic_agg_name(name) || !is_synthetic_node_name(name) {
+        return None;
     }
-    (nodes, composed)
-}
-
-/// The links of a cycle, `(chain[i], chain[i + 1])`, the last returning to the
-/// first.
-fn links_of(chain: &[String]) -> impl Iterator<Item = (&str, &str)> {
-    let n = chain.len();
-    (0..n).map(move |i| (chain[i].as_str(), chain[(i + 1) % n].as_str()))
-}
-
-fn mean_abs(series: &[f64]) -> f64 {
-    if series.is_empty() {
-        return 0.0;
-    }
-    series.iter().map(|s| s.abs()).sum::<f64>() / series.len() as f64
+    let instance = name.split('\u{00B7}').next()?;
+    let part = instance.split('\u{205A}').nth(3)?;
+    let is_argument = part
+        .strip_prefix("arg")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    (!is_argument).then_some(part)
 }
 
 /// A share rounded to hundredths.
-fn rounded_share(x: f64) -> f64 {
+pub(crate) fn rounded_share(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 
@@ -1438,34 +1650,103 @@ impl<'a> ModelNames<'a> {
         )
     }
 
-    /// The loop through `nodes` (its node sequence, as the engine reports
-    /// it) as a report gives it: its key, its chain from a stock with the
-    /// engine's synthetic nodes left out, and each link's sign, from
-    /// `sign(from, to)` for the links of `nodes`.
-    ///
-    /// The key is the chain's canonical rotation, taken after the synthetic
-    /// nodes are left out, so a loop is known by the variables a person sees:
-    /// the same from a run and from structure, however each spells a
-    /// builtin's internals.
-    fn cycle(
+    /// The dimensions the model declares the variable `ident` over; none for
+    /// a scalar, a module, and a node that is no variable of the model.
+    fn dimensions(&self, ident: &str) -> Vec<String> {
+        self.by_ident
+            .get(ident)
+            .and_then(|var| var.get_equation())
+            .map(super::outline::dimensions)
+            .unwrap_or_default()
+    }
+
+    /// The cycles of elements the structural loop through `nodes` stands for.
+    /// The structural surface names a loop that every element of an
+    /// apply-to-all family has its own of by the family's variables, without
+    /// subscripts; that is one loop per element of the variables'
+    /// dimensions, each arrayed node subscripted with it. A loop whose nodes
+    /// carry elements already, and a loop of scalars, is itself.
+    fn element_cycles(
         &self,
         nodes: &[String],
-        sign: impl Fn(&str, &str) -> LinkPolarity,
-    ) -> (Vec<String>, Vec<String>, Vec<LinkPolarity>) {
-        let start = nodes
+        dimensions: &[datamodel::Dimension],
+    ) -> Vec<Vec<String>> {
+        let itself = || vec![nodes.to_vec()];
+        // A node that carries its element is no name the model declares, so
+        // has no dimensions here: a loop of elements is itself.
+        let Some(over) = nodes
+            .iter()
+            .map(|node| self.dimensions(node))
+            .find(|dims| !dims.is_empty())
+        else {
+            return itself();
+        };
+        let elements = crate::ltm::loop_dimension_element_tuples(&over, dimensions);
+        if elements.is_empty() {
+            return itself();
+        }
+        elements
+            .iter()
+            .map(|element| {
+                nodes
+                    .iter()
+                    .map(|node| {
+                        if self.dimensions(node).is_empty() {
+                            node.clone()
+                        } else {
+                            format!("{node}[{element}]")
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The loop through `nodes` (its node sequence, as the engine reports
+    /// it) as a report gives it: from a stock, the engine's synthetic nodes
+    /// (a builtin's or macro's internals) left out, each link signed by
+    /// `sign(from, to)` over the links of `nodes`, a link across synthetic
+    /// nodes by composing the links it stands for and marked with the
+    /// builtins among them.
+    fn chain(&self, nodes: &[String], sign: impl Fn(&str, &str) -> LinkPolarity) -> Vec<ChainStep> {
+        let n = nodes.len();
+        let visible = |node: &String| !is_synthetic_node_name(node);
+        // From a stock; else from a variable, which a chain has to start at
+        // for the links across the synthetic nodes to have one to belong to.
+        let Some(start) = nodes
             .iter()
             .position(|node| self.is_stock(node))
-            .unwrap_or(0);
-        let from_a_stock: Vec<String> = nodes[start..]
-            .iter()
-            .chain(&nodes[..start])
-            .cloned()
-            .collect();
-        let signs = links_of(&from_a_stock)
-            .map(|(from, to)| sign(from, to))
-            .collect();
-        let (chain, signs) = without_synthetic(from_a_stock, signs);
-        (canonical_rotation(&chain), chain, signs)
+            .or_else(|| nodes.iter().position(visible))
+        else {
+            return (0..n)
+                .map(|i| ChainStep {
+                    node: nodes[i].clone(),
+                    sign: sign(&nodes[i], &nodes[(i + 1) % n]),
+                    via: vec![],
+                })
+                .collect();
+        };
+        let mut chain: Vec<ChainStep> = Vec::with_capacity(n);
+        for i in (start..n).chain(0..start) {
+            let (from, to) = (&nodes[i], &nodes[(i + 1) % n]);
+            let link = sign(from, to);
+            match chain.last_mut() {
+                Some(last) if !visible(from) => {
+                    last.sign = last.sign.compose(link);
+                    if let Some(builtin) = instance_of(from)
+                        && !last.via.iter().any(|via| via == builtin)
+                    {
+                        last.via.push(builtin.to_string());
+                    }
+                }
+                _ => chain.push(ChainStep {
+                    node: from.clone(),
+                    sign: link,
+                    via: vec![],
+                }),
+            }
+        }
+        chain
     }
 }
 
@@ -1486,10 +1767,10 @@ impl<'a> LoopNames<'a> {
     }
 
     /// The name of the loop through `chain`, if the model gives it one.
-    fn of(&self, chain: &[String]) -> Option<String> {
+    fn of(&self, chain: &[ChainStep]) -> Option<String> {
         let variables: HashSet<String> = chain
             .iter()
-            .map(|node| strip_subscript(node).to_string())
+            .map(|step| strip_subscript(&step.node).to_string())
             .collect();
         crate::analysis::persisted_loop_name(
             &variables,
@@ -1500,8 +1781,8 @@ impl<'a> LoopNames<'a> {
     }
 }
 
-/// A timeline span over saved steps `[start, end)`, and its leaders as
-/// indices into the partition's loops with their shares.
+/// A timeline span over saved steps `[start, end)`: its leader, then its
+/// rivals, as indices into the partition's loops with their shares over it.
 struct Span {
     start: usize,
     end: usize,
@@ -1509,88 +1790,70 @@ struct Span {
 }
 
 /// The dominance timeline of a partition's loops over a run of `steps` saved
-/// steps: [`WINDOWS`] windows, adjacent ones merged while the same loop leads,
-/// and each boundary between two leaders moved to the step at which the new
-/// one overtakes the old.
-fn dominance(loops: &[&AnalyzedLoop], steps: usize) -> Vec<Span> {
-    let leaders_over = |start: usize, end: usize| {
-        let mut shares: Vec<(usize, f64)> = loops
-            .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                let window = &l.rel[start.min(l.rel.len())..end.min(l.rel.len())];
-                let total: f64 = window.iter().map(|s| s.abs()).sum();
-                (i, total / (end - start).max(1) as f64)
-            })
-            .filter(|&(_, share)| share >= ACTIVE_SHARE)
-            .collect();
-        shares.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        let strongest = shares.first().map_or(0.0, |&(_, share)| share);
-        shares.retain(|&(_, share)| share >= RIVAL_SHARE * strongest);
-        shares.truncate(MAX_LEADERS);
-        shares
-    };
-    let windows = WINDOWS.min(steps);
-    // Each merged span: its steps, the loop that leads each of its windows
-    // (`None` where none does), and where its first window ends and its last
-    // begins.
-    struct Merged {
-        start: usize,
-        end: usize,
-        top: Option<usize>,
-        first_window_end: usize,
-        last_window_start: usize,
-    }
-    let mut merged: Vec<Merged> = Vec::new();
-    for w in 0..windows {
-        let (start, end) = (w * steps / windows, (w + 1) * steps / windows);
-        let top = leaders_over(start, end).first().map(|&(i, _)| i);
-        match merged.last_mut() {
-            Some(last) if last.top == top => {
-                last.end = end;
-                last.last_window_start = start;
+/// steps: the run cut where the lead changes, in at most [`MAX_SPANS`] spans
+/// ([`leader_timeline`] over [`leader_by_step`]), each span led by the loop
+/// with the largest mean share over its steps ([`strongest`]), so a span
+/// joined from several is led by what its shares show. The loops are taken
+/// in key order, so a tie goes to the same loop however a caller lists them.
+/// Each span names its leader and its rivals: the loops whose share over the
+/// span is at least [`RIVAL_SHARE`] of the leader's, strongest first, at most
+/// [`MAX_LEADERS`] in all. Only the loops `counts` says count are named: a
+/// span another loop leads is led by none of them, and neighbouring spans led
+/// by none are one.
+fn timeline(loops: &[&AnalyzedLoop], steps: usize, counts: impl Fn(usize) -> bool) -> Vec<Span> {
+    let mut order: Vec<usize> = (0..loops.len()).collect();
+    order.sort_by(|&a, &b| loops[a].key.cmp(&loops[b].key));
+    let series: Vec<&[f64]> = order.iter().map(|&i| loops[i].rel.as_slice()).collect();
+    let means = MeanShares::new(&series, steps);
+    let shares = |start: usize, end: usize| means.means(start, end);
+    let leaders = leader_by_step(&series, steps, ACTIVE_SHARE);
+    let mut spans: Vec<Span> = Vec::new();
+    for span in leader_timeline(&leaders, MAX_SPANS, |start, end| {
+        strongest(&shares(start, end), ACTIVE_SHARE)
+    }) {
+        let leader = span.leader.map(|o| order[o]).filter(|&i| counts(i));
+        match spans.last_mut() {
+            Some(last) if leader.is_none() && last.leaders.is_empty() => last.end = span.end,
+            _ => {
+                // Each loop's share, by its place in `loops`.
+                let mut share_of = vec![0.0; loops.len()];
+                for (o, share) in shares(span.start, span.end).into_iter().enumerate() {
+                    share_of[order[o]] = share;
+                }
+                let mut named = Vec::new();
+                if let Some(leader) = leader {
+                    let leads = share_of[leader];
+                    let mut rivals: Vec<(usize, f64)> = order
+                        .iter()
+                        .map(|&i| (i, share_of[i]))
+                        .filter(|&(i, s)| {
+                            i != leader
+                                && counts(i)
+                                && s >= ACTIVE_SHARE
+                                && s >= RIVAL_SHARE * leads
+                        })
+                        .collect();
+                    // Strongest first, a tie in key order (`order`'s).
+                    rivals.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    rivals.truncate(MAX_LEADERS - 1);
+                    named.push((leader, leads));
+                    named.extend(rivals);
+                }
+                spans.push(Span {
+                    start: span.start,
+                    end: span.end,
+                    leaders: named,
+                });
             }
-            _ => merged.push(Merged {
-                start,
-                end,
-                top,
-                first_window_end: end,
-                last_window_start: start,
-            }),
         }
     }
-    // Between two spans each led by a loop, the boundary is the step from
-    // which the second loop stays at least as strong as the first through the
-    // windows either side, so a switch mid-window reads where it happened
-    // rather than at the window's edge.
-    let magnitude = |i: usize, k: usize| loops[i].rel.get(k).map_or(0.0, |s| s.abs());
-    for i in 1..merged.len() {
-        let (Some(old), Some(new)) = (merged[i - 1].top, merged[i].top) else {
-            continue;
-        };
-        let (from, to) = (merged[i - 1].last_window_start, merged[i].first_window_end);
-        let mut boundary = to;
-        while boundary > from && magnitude(new, boundary - 1) >= magnitude(old, boundary - 1) {
-            boundary -= 1;
-        }
-        if boundary > merged[i - 1].start && boundary < merged[i].end && boundary < to {
-            merged[i - 1].end = boundary;
-            merged[i].start = boundary;
-        }
-    }
-    merged
-        .into_iter()
-        .map(|span| Span {
-            start: span.start,
-            end: span.end,
-            leaders: leaders_over(span.start, span.end),
-        })
-        .collect()
+    spans
 }
 
 /// The answer for `analysis`, its loops named by `evidence`, within `budget`
-/// bytes: what it lists is left out, least important first
-/// ([`Selection::shed`]), until it fits.
+/// bytes: the longest prefix of what it would list ([`Selection`]) that fits.
+/// The fit is made on the ids the loops would be given, and only the answer's
+/// loops are named, so a loop left out has no id.
 fn report(
     evidence: &mut Evidence,
     analysis: &LoopAnalysis,
@@ -1604,17 +1867,18 @@ fn report(
     let through_ident = through
         .as_deref()
         .map(|name| crate::canonicalize(name).into_owned());
-    let mut selection = Selection::new(analysis, through_ident.as_deref());
-    let answer = |selection: &Selection<'_>, evidence: &mut Evidence| {
-        let body = selection.build(evidence, analysis, &names);
+    let selection = Selection::new(analysis, through_ident.as_deref());
+    let answer = |units: usize, rivals: bool, id: &mut dyn FnMut(&[String]) -> String| {
+        let body = selection.build(units, rivals, id, analysis, &names);
         AnalyzeLoopsOutput {
             revision,
             run: run.to_string(),
             basis: analysis.basis,
             through: through.clone(),
             found: selection.found,
-            complete: analysis.complete,
+            complete: analysis.complete(),
             partitions: body.partitions,
+            inactive: body.inactive,
             omitted: body.omitted,
             absent: vec![],
             left_out: vec![],
@@ -1623,48 +1887,85 @@ fn report(
                 analysis,
                 through.as_deref(),
                 selection.found,
-                &selection.spread(analysis, &names),
+                &selection.spread(units, analysis, &names),
             ),
         }
     };
-    // Fit on a copy of the session's ids, so a loop left out is given none.
-    loop {
-        let trial = answer(&selection, &mut evidence.clone());
-        let size = serde_json::to_string(&trial).map_or(0, |json| json.len());
-        if size <= budget || !selection.shed() {
-            break;
+    let trial = |units: usize, rivals: bool| {
+        let mut preview = evidence.preview_loop_ids();
+        answer(units, rivals, &mut |key| preview.loop_id(key))
+    };
+    // One unit fewer at a time; the first partition's timeline and leaders
+    // always come, without the rivals when even that is over the budget.
+    let (mut units, mut rivals) = (selection.units(), true);
+    let mut fitted = trial(units, rivals);
+    super::fit(&mut fitted, budget, |fitted| {
+        if units > 1 {
+            units -= 1;
+        } else if rivals {
+            rivals = false;
+        } else {
+            return false;
         }
-    }
-    answer(&selection, evidence)
+        *fitted = trial(units, rivals);
+        true
+    });
+    answer(units, rivals, &mut |key| evidence.loop_id(key))
 }
 
-/// The partitions, loops and cut an answer lists, before the session names
-/// them.
+/// What an answer would list, in the order it is worth listing: one unit for
+/// each partition (its stocks, its timeline, and the loops the timeline
+/// names), the largest partition first; then the loops a cut names; then the
+/// partitions' other loops, the most important first; then the model's
+/// inactive loops. An answer lists a prefix of the units.
 struct Selection<'a> {
+    /// The partitions an answer may list: those with a matching loop, the
+    /// largest first, at most [`MAX_PARTITIONS`].
     groups: Vec<Group<'a>>,
-    /// The loops the analysis found that match.
+    /// How many partitions have a matching loop.
+    partitions: usize,
+    /// The loops the analysis has that match.
     found: usize,
-    omitted_partitions: usize,
-    /// How many of the cut's loops are listed.
-    cut_listed: usize,
+    /// The inactive loops that match, shortest first.
+    inactive: Vec<&'a AnalyzedLoop>,
+    /// The units after the partitions'.
+    extras: Vec<Extra>,
 }
 
-/// A partition an answer lists.
+/// A loop an answer lists past its partitions' leaders.
+#[derive(Clone, Copy)]
+enum Extra {
+    /// The cut's loop at this index.
+    Cut(usize),
+    /// A partition's loop its timeline does not name.
+    Other { group: usize, member: usize },
+    /// The inactive loop at this index.
+    Inactive(usize),
+}
+
+/// A partition an answer may list.
 struct Group<'a> {
     partition: Option<usize>,
     /// Its loops, most important first.
     members: Vec<&'a AnalyzedLoop>,
-    spans: Vec<Span>,
-    /// Indices into `members`: its leaders, then the others it lists.
-    listed: Vec<usize>,
-    leaders: usize,
     /// Whether each of `members` matches.
     matching: Vec<bool>,
+    spans: Vec<Span>,
 }
 
 impl Group<'_> {
-    fn matching_count(&self) -> usize {
-        self.matching.iter().filter(|&&m| m).count()
+    /// The members the timeline names, most important first: every span's
+    /// leader and rivals, or without `rivals` its leader alone.
+    fn named(&self, rivals: bool) -> Vec<usize> {
+        let per_span = if rivals { MAX_LEADERS } else { 1 };
+        let mut named: Vec<usize> = self
+            .spans
+            .iter()
+            .flat_map(|span| span.leaders.iter().take(per_span).map(|&(i, _)| i))
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+        named
     }
 }
 
@@ -1672,6 +1973,7 @@ impl Group<'_> {
 /// selection.
 struct Body {
     partitions: Vec<PartitionReport>,
+    inactive: Option<InactiveLoops>,
     omitted: Option<OmittedLoops>,
     cut: Option<CutReport>,
 }
@@ -1681,13 +1983,7 @@ impl<'a> Selection<'a> {
         let matches = |l: &AnalyzedLoop| through.is_none_or(|ident| l.goes_through(ident));
 
         // The loops of each partition; loops in no partition last.
-        let mut groups: Vec<(Option<usize>, Vec<&AnalyzedLoop>)> = Vec::new();
-        for l in &analysis.loops {
-            match groups.iter_mut().find(|(p, _)| *p == l.partition) {
-                Some((_, members)) => members.push(l),
-                None => groups.push((l.partition, vec![l])),
-            }
-        }
+        let mut groups = by_partition(analysis.loops.iter().map(|l| (l.partition, l)));
         groups.retain(|(_, members)| members.iter().any(|l| matches(l)));
         groups.sort_by(|(a, _), (b, _)| {
             let (a_stocks, b_stocks) = (stocks_of(analysis, *a), stocks_of(analysis, *b));
@@ -1698,8 +1994,8 @@ impl<'a> Selection<'a> {
         });
 
         let found = analysis.loops.iter().filter(|l| matches(l)).count();
-        let omitted_partitions = groups.len().saturating_sub(MAX_PARTITIONS);
-        let groups = groups
+        let partitions = groups.len();
+        let groups: Vec<Group<'a>> = groups
             .into_iter()
             .take(MAX_PARTITIONS)
             .map(|(partition, mut members)| {
@@ -1712,53 +2008,73 @@ impl<'a> Selection<'a> {
                         .then(a.chain.len().cmp(&b.chain.len()))
                         .then(a.key.cmp(&b.key))
                 });
-                let spans = match analysis.basis {
-                    LoopBasis::Run => dominance(&members, analysis.times.len()),
-                    LoopBasis::Structure => vec![],
+                let matching: Vec<bool> = members.iter().map(|l| matches(l)).collect();
+                // Loops in no partition do not compete, so they have no
+                // timeline.
+                let spans = match (analysis.basis, partition) {
+                    (LoopBasis::Run, Some(_)) => {
+                        timeline(&members, analysis.times.len(), |i| matching[i])
+                    }
+                    (LoopBasis::Run, None) | (LoopBasis::Structure, _) => vec![],
                 };
-                let mut listed: Vec<usize> = spans
-                    .iter()
-                    .flat_map(|span| span.leaders.iter().map(|&(i, _)| i))
-                    .collect::<HashSet<usize>>()
-                    .into_iter()
-                    .collect();
-                listed.sort_unstable();
-                let leaders = listed.len();
-                for (i, l) in members.iter().enumerate() {
-                    if listed.len() - leaders >= MAX_LOOPS {
-                        break;
-                    }
-                    if !listed.contains(&i) && matches(l) {
-                        listed.push(i);
-                    }
-                }
-                let matching = members.iter().map(|l| matches(l)).collect();
                 Group {
                     partition,
                     members,
-                    spans,
-                    listed,
-                    leaders,
                     matching,
+                    spans,
                 }
             })
             .collect();
+
+        let inactive: Vec<&AnalyzedLoop> = analysis
+            .inactive
+            .iter()
+            .flatten()
+            .filter(|l| matches(l))
+            .collect();
+
+        let cut = analysis.cut.as_ref().map_or(0, |cut| cut.loops.len());
+        let mut extras: Vec<Extra> = (0..cut.min(MAX_LOOPS)).map(Extra::Cut).collect();
+        // Each partition's first few others, the partitions' taken together
+        // by share, then by standing within their partition.
+        let mut others: Vec<(f64, usize, usize, usize)> = Vec::new();
+        for (g, group) in groups.iter().enumerate() {
+            let named = group.named(true);
+            let unnamed = (0..group.members.len())
+                .filter(|i| group.matching[*i] && !named.contains(i))
+                .take(MAX_LOOPS);
+            for (rank, member) in unnamed.enumerate() {
+                others.push((group.members[member].share.unwrap_or(0.0), rank, g, member));
+            }
+        }
+        others.sort_by(|a, b| b.0.total_cmp(&a.0).then((a.1, a.2).cmp(&(b.1, b.2))));
+        extras.extend(
+            others
+                .into_iter()
+                .map(|(_, _, group, member)| Extra::Other { group, member }),
+        );
+        extras.extend((0..inactive.len().min(MAX_LOOPS)).map(Extra::Inactive));
+
         Selection {
             groups,
+            partitions,
             found,
-            omitted_partitions,
-            cut_listed: analysis
-                .cut
-                .as_ref()
-                .map_or(0, |cut| cut.loops.len().min(MAX_LOOPS)),
+            inactive,
+            extras,
         }
     }
 
-    /// The first stock of each listed partition in which, over some span,
-    /// the strongest loop does not dominate.
-    fn spread(&self, analysis: &LoopAnalysis, names: &ModelNames<'_>) -> Vec<String> {
+    /// How many units there are to list.
+    fn units(&self) -> usize {
+        self.groups.len() + self.extras.len()
+    }
+
+    /// The first stock of each of the partitions the first `units` units list
+    /// in which, over some span, the leader does not dominate.
+    fn spread(&self, units: usize, analysis: &LoopAnalysis, names: &ModelNames<'_>) -> Vec<String> {
         self.groups
             .iter()
+            .take(units)
             .filter(|g| {
                 g.spans.iter().any(|span| {
                     span.leaders
@@ -1771,75 +2087,43 @@ impl<'a> Selection<'a> {
             .collect()
     }
 
-    /// Leave the least important thing listed out; false when nothing is left
-    /// to. In order: a partition's loops past its leaders and first
-    /// [`MIN_LOOPS`] others, the smallest partition's first; the cut's loops
-    /// past its first; the smallest partitions, past the first; the first
-    /// partition's other loops; the timeline's rivals of each span's
-    /// strongest loop.
-    fn shed(&mut self) -> bool {
-        let others = |g: &Group<'_>| g.listed.len() - g.leaders;
-        if let Some(group) = self.groups.iter_mut().rev().find(|g| others(g) > MIN_LOOPS) {
-            group.listed.pop();
-            return true;
-        }
-        if self.cut_listed > 1 {
-            self.cut_listed -= 1;
-            return true;
-        }
-        if self.groups.len() > 1 {
-            self.groups.pop();
-            self.omitted_partitions += 1;
-            return true;
-        }
-        if let Some(group) = self.groups.first_mut().filter(|g| others(g) > 0) {
-            group.listed.pop();
-            return true;
-        }
-        // Last, the timeline's rivals, the last partition's first: a loop no
-        // span names any more is no longer listed.
-        for group in self.groups.iter_mut().rev() {
-            let Some(span) = group
-                .spans
-                .iter_mut()
-                .filter(|span| span.leaders.len() > 1)
-                .max_by_key(|span| span.leaders.len())
-            else {
-                continue;
-            };
-            let (rival, _) = span.leaders.pop().expect("more than one");
-            let named = group
-                .spans
-                .iter()
-                .any(|span| span.leaders.iter().any(|&(i, _)| i == rival));
-            if !named {
-                group.listed.retain(|&i| i != rival);
-                group.leaders -= 1;
-            }
-            return true;
-        }
-        false
-    }
-
-    /// The answer's parts, the loops they list named by `evidence`.
+    /// The answer's parts for the first `units` units, with each span's
+    /// rivals or without, the loops they list named by `id` in the order
+    /// they are listed.
     fn build(
         &self,
-        evidence: &mut Evidence,
+        units: usize,
+        rivals: bool,
+        id: &mut dyn FnMut(&[String]) -> String,
         analysis: &LoopAnalysis,
         names: &ModelNames<'_>,
     ) -> Body {
-        let mut listed_matching = 0;
-        let partitions = self
+        let extras = &self.extras[..units
+            .saturating_sub(self.groups.len())
+            .min(self.extras.len())];
+        let per_span = if rivals { MAX_LEADERS } else { 1 };
+        let mut listed = 0;
+        let partitions: Vec<PartitionReport> = self
             .groups
             .iter()
-            .map(|group| {
-                let ids: HashMap<usize, String> = group
-                    .listed
+            .enumerate()
+            .take(units.max(1))
+            .map(|(g, group)| {
+                let mut members = group.named(rivals);
+                let mut others: Vec<usize> = extras
                     .iter()
-                    .map(|&i| (i, evidence.loop_id(&group.members[i].key)))
+                    .filter_map(|extra| match *extra {
+                        Extra::Other { group, member } if group == g => Some(member),
+                        Extra::Other { .. } | Extra::Cut(_) | Extra::Inactive(_) => None,
+                    })
                     .collect();
-                // Leaders are listed whether or not they match.
-                listed_matching += group.listed.iter().filter(|&&i| group.matching[i]).count();
+                others.sort_unstable();
+                members.extend(others);
+                listed += members.len();
+                let ids: HashMap<usize, String> = members
+                    .iter()
+                    .map(|&i| (i, id(&group.members[i].key)))
+                    .collect();
                 let stocks = stocks_of(analysis, group.partition);
                 PartitionReport {
                     stocks: stocks
@@ -1848,25 +2132,19 @@ impl<'a> Selection<'a> {
                         .map(|s| names.display(s))
                         .collect(),
                     other_stocks: stocks.len().saturating_sub(MAX_STOCKS),
-                    loop_count: group.matching_count(),
+                    loop_count: group.matching.iter().filter(|&&m| m).count(),
                     dominance: group
                         .spans
                         .iter()
                         .map(|span| DominanceSpan {
-                            // Spans tile the run: each ends where the next
-                            // begins, and the last at the run's end.
+                            // A span is its saved steps, from its first to
+                            // its last: one step is from a time to itself.
                             from: round(analysis.times[span.start]),
-                            to: round(
-                                analysis
-                                    .times
-                                    .get(span.end)
-                                    .or(analysis.times.last())
-                                    .copied()
-                                    .unwrap_or(0.0),
-                            ),
+                            to: round(analysis.times[span.end - 1]),
                             leaders: span
                                 .leaders
                                 .iter()
+                                .take(per_span)
                                 .map(|&(i, s)| LoopShare {
                                     id: ids[&i].clone(),
                                     share: rounded_share(s),
@@ -1874,8 +2152,7 @@ impl<'a> Selection<'a> {
                                 .collect(),
                         })
                         .collect(),
-                    loops: group
-                        .listed
+                    loops: members
                         .iter()
                         .map(|&i| {
                             loop_report(group.members[i], ids[&i].clone(), names, Detail::Overview)
@@ -1884,29 +2161,51 @@ impl<'a> Selection<'a> {
                 }
             })
             .collect();
-        let cut = analysis.cut.as_ref().map(|cut| CutReport {
-            links: cut
-                .links
+        let cut = analysis.cut.as_ref().map(|cut| {
+            let loops: Vec<LoopReport> = extras
                 .iter()
-                .map(|(from, to)| CutLink {
-                    from: names.display(from),
-                    to: names.display(to),
+                .filter_map(|extra| match *extra {
+                    Extra::Cut(i) => Some(&cut.loops[i]),
+                    Extra::Other { .. } | Extra::Inactive(_) => None,
                 })
-                .collect(),
-            loops: cut
-                .loops
-                .iter()
-                .take(self.cut_listed)
-                .map(|l| loop_report(l, evidence.loop_id(&l.key), names, Detail::Elsewhere))
-                .collect(),
-            other_loops: cut.loops.len() - self.cut_listed,
+                .map(|l| loop_report(l, id(&l.key), names, Detail::Elsewhere))
+                .collect();
+            CutReport {
+                links: cut
+                    .links
+                    .iter()
+                    .map(|(from, to)| CutLink {
+                        from: names.display(from),
+                        to: names.display(to),
+                    })
+                    .collect(),
+                other_loops: cut.loops.len() - loops.len(),
+                loops,
+            }
         });
-        // Every matching loop not listed: in listed partitions and the others.
-        let omitted_loops = self.found - listed_matching;
+        let inactive = (!self.inactive.is_empty()).then(|| {
+            let loops: Vec<LoopReport> = extras
+                .iter()
+                .filter_map(|extra| match *extra {
+                    Extra::Inactive(i) => Some(self.inactive[i]),
+                    Extra::Other { .. } | Extra::Cut(_) => None,
+                })
+                .map(|l| loop_report(l, id(&l.key), names, Detail::Elsewhere))
+                .collect();
+            InactiveLoops {
+                other_loops: self.inactive.len() - loops.len(),
+                loops,
+            }
+        });
+        // Every matching loop not listed: in listed partitions and the
+        // others. Every loop a partition lists matches.
+        let omitted_partitions = self.partitions - partitions.len();
+        let omitted_loops = self.found - listed;
         Body {
             partitions,
-            omitted: (self.omitted_partitions > 0 || omitted_loops > 0).then_some(OmittedLoops {
-                partitions: self.omitted_partitions,
+            inactive,
+            omitted: (omitted_partitions > 0 || omitted_loops > 0).then_some(OmittedLoops {
+                partitions: omitted_partitions,
                 loops: omitted_loops,
             }),
             cut,
@@ -1928,7 +2227,7 @@ enum Detail {
     Overview,
     /// Its chain however long; and its share in the run.
     Whole,
-    /// As in an overview, without a share: a loop of another run.
+    /// As in an overview, without a share: a loop this run does not have.
     Elsewhere,
 }
 
@@ -1942,10 +2241,10 @@ fn loop_report(l: &AnalyzedLoop, id: String, names: &ModelNames<'_>, detail: Det
         chain: whole.then(|| {
             l.chain
                 .iter()
-                .zip(&l.signs)
-                .map(|(node, sign)| ChainLink {
-                    variable: names.display(node),
-                    polarity: (*sign).into(),
+                .map(|step| ChainLink {
+                    variable: names.display(&step.node),
+                    polarity: step.sign.into(),
+                    via: (!step.via.is_empty()).then(|| step.via.join(", ")),
                 })
                 .collect()
         }),
@@ -1954,8 +2253,8 @@ fn loop_report(l: &AnalyzedLoop, id: String, names: &ModelNames<'_>, detail: Det
         } else {
             l.chain
                 .iter()
-                .filter(|node| names.is_stock(node))
-                .map(|node| names.display(node))
+                .filter(|step| names.is_stock(&step.node))
+                .map(|step| names.display(&step.node))
                 .collect()
         },
         share: match detail {
@@ -1965,17 +2264,9 @@ fn loop_report(l: &AnalyzedLoop, id: String, names: &ModelNames<'_>, detail: Det
     }
 }
 
-/// What an answer says in words: why its loops come from structure, or are a
-/// sample.
-/// Why a run has no active loop.
-fn inactive(analysis: &LoopAnalysis) -> &'static str {
-    if analysis.at_rest {
-        "its stocks do not move, as in a model at rest"
-    } else {
-        "every loop score is zero"
-    }
-}
-
+/// What an answer says in words: why its loops come from structure, or are
+/// not every loop, or lead without dominating; and what finding no loop
+/// through `through` shows.
 fn note(
     analysis: &LoopAnalysis,
     through: Option<&str>,
@@ -1985,6 +2276,9 @@ fn note(
     const DISTURB: &str = "To see which loop dominates, disturb the model: run_experiment with a \
                            change from a time after the start (a step in an input), then analyze \
                            that run.";
+    const INACTIVE: &str = "No loop was active in this run: every loop's score is zero \
+                            throughout, or its stocks move only by the rounding of what they are \
+                            computed from, as in a model at rest";
     let mut notes: Vec<String> = Vec::new();
     match analysis.basis {
         LoopBasis::Structure if analysis.conveyors => {
@@ -2000,46 +2294,62 @@ fn note(
                 }
             ));
         }
-        LoopBasis::Structure if analysis.complete && analysis.loops.is_empty() => {
+        LoopBasis::Structure if analysis.enumerated && analysis.loops.is_empty() => {
             notes.push(if analysis.cut.is_some() {
                 "With its equations replaced, the model has no feedback loops.".to_string()
             } else {
                 "The model has no feedback loops.".to_string()
             });
         }
-        LoopBasis::Structure if analysis.complete => {
+        LoopBasis::Structure if analysis.enumerated => {
             notes.push(format!(
-                "No loop was active in this run: {}, so which loop dominates is undefined. \
-                 These are the model's loops from its structure, with their equations' signs. \
-                 {DISTURB}",
-                inactive(analysis)
+                "{INACTIVE}, so which loop dominates is undefined. These are the model's loops \
+                 from its structure, with their equations' signs. {DISTURB}"
             ));
         }
         LoopBasis::Structure => {
             notes.push(format!(
-                "No loop was active in this run: {}, and the model has too many loops to list \
-                 from its structure alone. {DISTURB}",
-                inactive(analysis)
+                "{INACTIVE}, and the model has too many loops to list from its structure alone. \
+                 {DISTURB}"
             ));
         }
         LoopBasis::Run => {
-            if !analysis.complete {
+            if analysis.sampled {
                 notes.push(
                     "The model has too many loops to enumerate, so these were found by searching \
                      the run for the strongest: a sample, not every loop."
                         .to_string(),
                 );
             }
-            if let Some(retained) = analysis.capped_from {
-                notes.push(format!(
-                    "The analysis keeps the {} most important of the run's {retained} loops.",
-                    analysis.loops.len()
-                ));
+            let kept = analysis.loops.len();
+            let loops = |n: usize| match n {
+                1 => "1 loop".to_string(),
+                n => format!("{n} loops"),
+            };
+            let their = |n: usize| if n == 1 { "its" } else { "their" };
+            match (analysis.capped_from, analysis.negligible) {
+                (None, 0) => {}
+                (Some(retained), 0) => notes.push(format!(
+                    "The analysis keeps the {kept} most important of the run's {retained} loops."
+                )),
+                (None, negligible) => notes.push(format!(
+                    "The analysis leaves out {} that never held a thousandth of {} \
+                     partition's activity.",
+                    loops(negligible),
+                    their(negligible)
+                )),
+                (Some(retained), negligible) => notes.push(format!(
+                    "Of the run's {} loops, {negligible} never held a thousandth of {} \
+                     partition's activity; the analysis keeps the {kept} most important of \
+                     the other {retained}.",
+                    retained + negligible,
+                    their(negligible)
+                )),
             }
             if !spread.is_empty() {
                 notes.push(format!(
-                    "In the partition{} with {}, the spans whose strongest loop holds less than \
-                     a tenth of the loop activity have it spread across many loops: no one loop \
+                    "In the partition{} with {}, the spans whose leader holds less than a tenth \
+                     of the loop activity have it spread across many loops: no one loop \
                      dominates there.",
                     if spread.len() == 1 { "" } else { "s" },
                     spread.join(", ")
@@ -2051,9 +2361,21 @@ fn note(
         && found == 0
         && !analysis.loops.is_empty()
     {
-        notes.push(match analysis.basis {
-            LoopBasis::Run => format!("No loop active in this run goes through {through}."),
-            LoopBasis::Structure => format!("No loop goes through {through}."),
+        notes.push(match (analysis.shows_absence(), analysis.basis) {
+            (true, LoopBasis::Run) if analysis.complete() => {
+                format!("No loop active in this run goes through {through}.")
+            }
+            // The structure's other loops are inactive in the run or among
+            // those the analysis left out, which it cannot tell apart.
+            (true, LoopBasis::Run) => format!(
+                "No loop this analysis reports for the run goes through {through}; the model's \
+                 other loops are listed as inactive."
+            ),
+            (true, LoopBasis::Structure) => format!("No loop goes through {through}."),
+            (false, _) => format!(
+                "None of the loops the analysis has goes through {through}; it does not have \
+                 every loop, so one it left out may."
+            ),
         });
     }
     (!notes.is_empty()).then(|| notes.join(" "))

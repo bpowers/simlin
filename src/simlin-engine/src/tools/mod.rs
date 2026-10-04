@@ -87,8 +87,9 @@ pub use experiment::{
     SpecsInput,
 };
 pub use loops::{
-    AnalyzeLoopsInput, AnalyzeLoopsOutput, ChainLink, CutLink, CutReport, DominanceSpan, LoopBasis,
-    LoopPolarityName, LoopReport, LoopShare, OmittedLoops, PartitionReport,
+    AnalyzeLoopsInput, AnalyzeLoopsOutput, ChainLink, CutLink, CutReport, DominanceSpan,
+    InactiveLoops, LoopBasis, LoopPolarityName, LoopReport, LoopShare, OmittedLoops,
+    PartitionReport,
 };
 pub use outline::{
     ConstantOutline, Counts, IntegrationMethod, LookupOutline, LookupSummary, ModuleInputOutline,

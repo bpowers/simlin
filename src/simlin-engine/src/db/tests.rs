@@ -1333,6 +1333,166 @@ fn test_model_causal_edges_feedback_loop() {
     );
 }
 
+/// The initial-value argument of a builtin with one sets where its stock
+/// starts and nothing after, so it is no causal input of the instance: every
+/// stdlib model with an `initial_value` port, the argument a bare variable and
+/// an expression (a hoisted helper).
+#[test]
+fn a_builtins_initial_value_argument_is_no_causal_edge() {
+    let mut with_initial_value: Vec<&str> = crate::stdlib::MODEL_NAMES
+        .iter()
+        .copied()
+        .filter(|name| {
+            crate::stdlib::get(name).is_some_and(|model| {
+                model
+                    .variables
+                    .iter()
+                    .any(|var| canonicalize(var.get_ident()) == "initial_value")
+            })
+        })
+        .collect();
+    with_initial_value.sort_unstable();
+    assert_eq!(
+        with_initial_value,
+        ["delay1", "delay3", "npv", "smth1", "smth3", "trend"]
+    );
+    for builtin in with_initial_value {
+        for (argument, source) in [
+            ("start", "start".to_string()),
+            (
+                "start * 0.5",
+                crate::capture::synthetic_ident("target", 0, "arg2", None),
+            ),
+        ] {
+            let project = crate::test_common::TestProject::new("initial value")
+                .stock("level", "10", &["change"], &[], None)
+                .flow("change", "(target - level) / 4", None)
+                .aux("start", "5", None)
+                .aux("target", &format!("{builtin}(level, 2, {argument})"), None)
+                .build_datamodel();
+            let db = SimlinDb::default();
+            let result = sync_from_datamodel(&db, &project);
+            let edges = model_causal_edges(&db, result.models["main"].source, result.project);
+            let instance = crate::capture::synthetic_ident("target", 0, builtin, None);
+            let reads = |from: &str, to: &str| {
+                edges
+                    .edges
+                    .get(from)
+                    .is_some_and(|readers| readers.contains(to))
+            };
+            assert!(
+                reads("level", &instance) && reads(&instance, "target"),
+                "{builtin}({argument}): the input is an edge: {:?}",
+                edges.edges
+            );
+            assert!(
+                !reads(&source, &instance),
+                "{builtin}({argument}): the initial value is none: {:?}",
+                edges.edges
+            );
+        }
+    }
+}
+
+/// A module's input source is a causal edge into it exactly where a port it
+/// binds is read per step inside the sub-model: not one read by a stock's
+/// initial value alone, and still one when it binds such a port and a port
+/// read per step both.
+#[test]
+fn a_module_input_read_by_initial_values_alone_is_no_causal_edge() {
+    let aux = |ident: &str, equation: &str, input: bool| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar(equation.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input: input,
+                ..datamodel::Compat::default()
+            },
+        })
+    };
+    let reference = |src: &str, port: &str| datamodel::ModuleReference {
+        src: src.to_string(),
+        dst: format!("tank.{port}"),
+    };
+    let mut project = crate::test_common::TestProject::new("ports")
+        .aux("seed_only", "1", None)
+        .aux("rate_only", "2", None)
+        .aux("both", "3", None)
+        .aux("reading", "tank.contents", None)
+        .build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "tank".to_string(),
+            model_name: "tank_model".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![
+                reference("seed_only", "seed"),
+                reference("rate_only", "rate"),
+                reference("both", "floor"),
+                reference("both", "boost"),
+            ],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+    project.models.push(datamodel::Model {
+        name: "tank_model".to_string(),
+        sim_specs: None,
+        variables: vec![
+            aux("seed", "0", true),
+            aux("floor", "0", true),
+            aux("rate", "0", true),
+            aux("boost", "0", true),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "contents".to_string(),
+                equation: datamodel::Equation::Scalar("seed + floor".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["filling".to_string()],
+                outflows: vec![],
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "filling".to_string(),
+                equation: datamodel::Equation::Scalar("rate + boost".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+        ]
+        .into(),
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let edges = model_causal_edges(&db, result.models["main"].source, result.project);
+    let into_tank: Vec<&str> = ["seed_only", "rate_only", "both"]
+        .into_iter()
+        .filter(|source| {
+            edges
+                .edges
+                .get(*source)
+                .is_some_and(|readers| readers.contains("tank"))
+        })
+        .collect();
+    assert_eq!(into_tank, ["rate_only", "both"], "{:?}", edges.edges);
+}
+
 #[test]
 fn test_model_causal_edges_normalizes_inter_module_output_refs() {
     let db = SimlinDb::default();
@@ -1701,19 +1861,33 @@ fn test_model_causal_edges_normalizes_leading_middot_parent_refs() {
             datamodel::Model {
                 name: "nested_model".to_string(),
                 sim_specs: None,
-                variables: vec![datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "val".to_string(),
-                    equation: datamodel::Equation::Scalar("0".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat {
-                        can_be_module_input: true,
-                        ..datamodel::Compat::default()
-                    },
-                })]
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "val".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    // The port is read per step, so its source is a causal
+                    // input of the instance.
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "doubled".to_string(),
+                        equation: datamodel::Equation::Scalar("val * 2".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ]
                 .into(),
                 views: vec![],
                 loop_metadata: vec![],

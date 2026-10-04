@@ -7186,6 +7186,17 @@ fn corpus_clearn_macros_import() {
 /// capture slots, which is why the helper exists. The margin is 36,556 free
 /// against the 65,536-slot ceiling.
 ///
+/// A module instance's input source that binds only a port read by initial
+/// values is no causal edge (`db::model_causal_edges`), which takes its link
+/// score with it. In C-LEARN that is the `initval` argument of the
+/// `SAMPLE UNTIL` macro (`INTEG(.., initval)`), hoisted into a helper at four
+/// call sites over the seven COP regions: the count is 6,199, 28 under what
+/// it is with those edges scored, one scalar score each, so the width is 28
+/// slots under too.
+/// `examples/ltm_slot_width.rs`, which reads the compiled layout, measures
+/// 6,199 variables and 34,365 slots (34,393 with the 28 scores), 31,171 free
+/// against the 65,536-slot ceiling.
+///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
 #[test]
@@ -7210,7 +7221,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6227,
+        total, 6199,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

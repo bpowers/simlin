@@ -922,11 +922,15 @@ pub(crate) fn module_link_score_equation(
     // (`module·port`) -- a readable scalar, unlike the bare module name.
     //
     // The `ports.first()` (alphabetically-first parent-read output) choice is
-    // arbitrary, but reaching this fallback is now a near-unreachable residual:
-    // since PR #684 any module with an input->output pathway exposes a
-    // composite (used instead, below), so this unit transfer fires only when
-    // the module's output does not depend on its input at all -- a pathway-less
-    // module whose link score is moot (it transmits no change around the loop).
+    // arbitrary, but reaching this fallback is a near-unreachable residual:
+    // any module with an input->output pathway exposes a composite (used
+    // instead, below), and a source that binds only a port nothing in the
+    // sub-model reads per step (an initial-value argument) is no causal edge
+    // at all (`model_causal_edges`). So this unit transfer fires only for a
+    // port the sub-model reads per step without it reaching an output a
+    // parent reads. Such a link transmits no change, and the unit transfer
+    // scores it at magnitude one all the same: the residual is an
+    // approximation, not a zero.
     // For a multi-output module that DOES have pathways, the loop's per-link
     // score is fixed exactly by `model_ltm_variables`'s per-exit-port pathway
     // selection, not by this port choice.

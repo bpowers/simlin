@@ -400,7 +400,16 @@ signed unit transfer when nothing better exists:
   This is the module's internal transfer -- exactly the macro treatment
   (ref §6). When the sub-model exposes no composite (a passthrough), the link
   score is the **signed unit transfer** (below) against the module's *output*
-  ref `module·port` -- a readable scalar, never the bare module name.
+  ref `module·port` -- a readable scalar, never the bare module name. Not
+  every input source is such an edge: `model_causal_edges` records one only
+  where a port the source binds is read per step inside the sub-model
+  (`init_only_sources`). The initial-value argument of a `SMTH1` or a `DELAY3`
+  binds a port only the stocks' initial values read, so it is no causal edge,
+  no link is scored for it, and no loop passes through it -- as a stock's own
+  initial-value equation is no edge into the stock. (Scored, it would take the
+  unit transfer, magnitude one whenever the argument and the instance's output
+  both move, and discovery would find a loop through it that leads at whichever
+  steps the two happen to move together.)
 
 - **Module-output-to-variable** (`from_is_module && !to_is_module`): The
   dependent's equation references the module output via `module·port`, so a

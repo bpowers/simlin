@@ -35,14 +35,9 @@ FEATURES="simlin-engine/ext_data"
 # no gate, from being built under a second profile.
 TARGETS=(--lib --test integration)
 
-# Gates known to fail, skipped by exact name so every other gate still runs.
-# The C-LEARN LTM digest's pin is stale; the change that re-pins it deletes
-# this skip.
-SKIP=(--skip simulate_ltm::clearn_ltm_slot_maxima_digest)
-
 if [ "${1:-}" = "--no-run" ]; then
     exec cargo test "${PACKAGES[@]}" --profile gates --features "$FEATURES" "${TARGETS[@]}" --no-run
 fi
 
 exec cargo test "${PACKAGES[@]}" --profile gates --features "$FEATURES" "${TARGETS[@]}" \
-    --no-fail-fast -- --include-ignored "${SKIP[@]}" "$@"
+    --no-fail-fast -- --include-ignored "$@"

@@ -184,6 +184,32 @@ fn what_a_smooth_reads_its_variable_reads() {
     );
 }
 
+/// A smooth's initial-value argument sets where the smooth starts and moves
+/// nothing after, so it is read at the start, bare or hoisted into a helper:
+/// the causal edges leave it out for the same reason
+/// (`db::model_causal_edges`'s `start_only_inputs`).
+#[test]
+fn a_smooths_initial_value_argument_is_read_at_the_start() {
+    let project = TestProject::new("smooth")
+        .aux("bare", "SMTH1(input, delay_time, start)", None)
+        .aux("hoisted", "SMTH1(input, delay_time, start * 2)", None)
+        .aux("input", "TIME", None)
+        .aux("delay_time", "4", None)
+        .aux("start", "1", None)
+        .build_datamodel();
+    assert_eq!(
+        pairs(&reads_of(&project)),
+        [
+            ("delay_time", "bare", false),
+            ("input", "bare", false),
+            ("start", "bare", true),
+            ("delay_time", "hoisted", false),
+            ("input", "hoisted", false),
+            ("start", "hoisted", true),
+        ]
+    );
+}
+
 #[test]
 fn a_table_is_read_by_the_variable_that_looks_it_up() {
     let gf = datamodel::GraphicalFunction {
@@ -346,6 +372,11 @@ fn every_causal_link_is_a_read_and_every_read_past_the_start_a_link() {
         .aux("delay_time", "3", None)
         .aux("s0", "100", None)
         .aux("first_level", "INIT(level)", None)
+        .aux(
+            "perceived",
+            "SMTH1(level, delay_time, first_level * 2)",
+            None,
+        )
         .build_datamodel();
     assert_reads_agree_with_the_causal_links("mixed", &project);
 }

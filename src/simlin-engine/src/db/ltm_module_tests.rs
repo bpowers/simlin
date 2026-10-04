@@ -559,7 +559,8 @@ fn test_passthrough_module_link_score_uses_composite_on_real_output_port() {
 }
 
 /// A module whose output does NOT depend on its input (`result = 7`, a
-/// constant) has no internal input->output pathway, so it exposes NO
+/// constant, while the input is read per step by a variable no output
+/// depends on) has no internal input->output pathway, so it exposes NO
 /// composite. The base `input → module` link score then falls back to the
 /// magnitude-1 signed unit transfer against the module's real output port
 /// (`custom_pt·result`), never the bare module name nor a hardcoded `output`
@@ -619,6 +620,10 @@ fn test_pathless_module_link_score_uses_unit_transfer() {
                     }),
                     // Output ignores the input: NO internal pathway, NO composite.
                     x_aux("result", "7", None),
+                    // The input is read per step all the same, so its source
+                    // is a causal input of the instance (one read by initial
+                    // values alone is not: `model_causal_edges`).
+                    x_aux("tally", "input * 2", None),
                 ],
             ),
         ],

@@ -244,11 +244,13 @@ fn element_reducer_scores_are_invariant_to_the_units_scale() {
 }
 
 /// `main`: `s -> m -> growth -> s`, where `m`'s output ignores its input
-/// (`out = scale * (1 + TIME)`). A module with an input->output pathway
-/// exposes a composite for the port instead, so only a pathway-less module
-/// reaches the magnitude-1 black-box unit transfer for `s -> m`: the third
-/// link-score generator beside the ceteris-paribus guard form and the element
-/// reducer (the two tests above).
+/// (`out = scale * (1 + TIME)`), which only `seen` reads. A module with an
+/// input->output pathway exposes a composite for the port instead, so only a
+/// pathway-less module reaches the magnitude-1 black-box unit transfer for
+/// `s -> m`: the third link-score generator beside the ceteris-paribus guard
+/// form and the element reducer (the two tests above). The input has to be
+/// read per step by something: a port nothing reads per step makes its source
+/// no causal edge at all (`db::model_causal_edges`).
 fn black_box_loop_project(scale: f64) -> simlin_engine::datamodel::Project {
     use simlin_engine::datamodel;
 
@@ -292,6 +294,7 @@ fn black_box_loop_project(scale: f64) -> simlin_engine::datamodel::Project {
         sim_specs: None,
         variables: vec![
             aux("input_val", "0", true),
+            aux("seen", "input_val * 2", false),
             aux("out", &format!("{scale} * (1 + TIME)"), false),
         ]
         .into(),

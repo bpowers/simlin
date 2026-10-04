@@ -2973,7 +2973,7 @@
             "type": "object",
             "properties": {
               "stocks": {
-                "description": "Its stocks, as the model names them (an arrayed stock by element); at\nmost 12. Empty for loops inside a module, which belong to no\npartition of this model.",
+                "description": "Its stocks, as the model names them (an arrayed stock by element); at\nmost 12. Empty for the loops that pass through no stock of this model\n(inside a module, or closed through a lagged value): each of those\nstands alone, so they have no timeline and no shares.",
                 "type": "array",
                 "items": {
                   "type": "string"
@@ -2986,20 +2986,20 @@
                 "minimum": 0
               },
               "loopCount": {
-                "description": "How many of its loops the analysis found (through `through`, when\ngiven).",
+                "description": "How many of its loops the analysis has (through `through`, when\ngiven).",
                 "type": "integer",
                 "format": "uint",
                 "minimum": 0
               },
               "dominance": {
-                "description": "Which loops led, span by span: from the run's start to its end in at\nmost 12 spans. Absent for loops from structure.",
+                "description": "Which loops led, span by span: the run's saved steps from its start to\nits end, cut at the steps the lead changed, in at most 12 spans (the\nshortest joined to their neighbours past that), each from the time of\nits first step to the time of its last. With `through`, which of the\nloops through it led. Absent for loops from structure.",
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/DominanceSpan"
                 }
               },
               "loops": {
-                "description": "Every loop `dominance` names, then the most important others (the\nshortest, from structure); at most 8 besides the leaders.",
+                "description": "Every loop `dominance` names, then the most important others (the\nshortest, from structure); at most 8 besides those it names.",
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/LoopReport"
@@ -3013,7 +3013,7 @@
             ]
           },
           "DominanceSpan": {
-            "description": "A span of a run and the loops that led in it: the strongest on average\nover the span, and those holding at least half its share, at most 3. None\nled a span in which no loop was active.",
+            "description": "A span of a run and the loops that led it: first the loop with the\nlargest share over the span, then its rivals, those holding at least half\nits share there, strongest first; at most 3 in all. None led a span in\nwhich no loop (through `through`, when given) was the strongest. A span\nnames the single strongest loop, so where several loops take over\ntogether (SIR's balancing loops after the epidemic's peak) the span\nchanges a few steps after the turn, when one of them alone passes the\nloop that led before.",
             "type": "object",
             "properties": {
               "from": {
@@ -3045,7 +3045,7 @@
                 "type": "string"
               },
               "share": {
-                "description": "Its share of the partition's loop activity, from 0 to 1: at each time\nthe shares of all the partition's loops sum to 1, so where many loops\nare active each holds little.",
+                "description": "Its share of the partition's loop activity over the span, from 0 to 1:\nat each time the shares of all the partition's loops sum to 1, so\nwhere many loops are active each holds little.",
                 "type": "number",
                 "format": "double"
               }
@@ -3096,7 +3096,7 @@
                 }
               },
               "share": {
-                "description": "Its share of the partition's loop activity, averaged over the run,\nfrom 0 to 1. Absent for loops from structure.",
+                "description": "Its share of the partition's loop activity, from 0 to 1, averaged over\nthe steps at which the partition was active: the shares of a\npartition's loops sum to 1. Absent for loops from structure, and for a\nloop in no partition.",
                 "type": [
                   "number",
                   "null"
@@ -3131,6 +3131,13 @@
               "polarity": {
                 "description": "The sign of the link from this variable to the next: the run's, when\nthe run scored the link, so `?` there means its sign changed over the\nrun; otherwise its equation's.",
                 "$ref": "#/$defs/LinkPolarityName"
+              },
+              "via": {
+                "description": "The builtins or macros the link passes through in the next variable's\nequation (`smth1`, `delay3`), when it does: such a link carries a\ndelay, and is another link than a direct one between the same two\nvariables.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -3147,12 +3154,33 @@
               "?"
             ]
           },
+          "InactiveLoops": {
+            "description": "The model's loops that are not among a run's.",
+            "type": "object",
+            "properties": {
+              "loops": {
+                "description": "The shortest of them, with their equations' signs; at most 8.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LoopReport"
+                }
+              },
+              "otherLoops": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "loops"
+            ]
+          },
           "OmittedLoops": {
-            "description": "Loops the analysis found and the answer does not list.",
+            "description": "Loops the analysis has and the answer does not list.",
             "type": "object",
             "properties": {
               "partitions": {
-                "description": "Partitions past the 6 listed.",
+                "description": "Partitions not listed.",
                 "type": "integer",
                 "format": "uint",
                 "minimum": 0
@@ -3235,13 +3263,13 @@
             ]
           },
           "found": {
-            "description": "The loops the analysis found (those through `through`, when given).",
+            "description": "The loops the analysis has (those through `through`, when given): the\nloops active in the run, or, from structure, the model's.",
             "type": "integer",
             "format": "uint",
             "minimum": 0
           },
           "complete": {
-            "description": "Whether the loops were drawn from every loop there is: false when the\nmodel has too many to enumerate, so the run's were found by searching\nfor the strongest (a sample), or too many for its structure alone to\nlist.",
+            "description": "Whether those are every such loop. False when the analysis left out\nloops that never held a thousandth of their partition's activity;\nwhen it kept only the most important of the run's loops; when the\nmodel has too many to enumerate, so the run's were found by searching\nfor the strongest (a sample); when the model has too many for its\nstructure alone to list; or when it has a conveyor or a queue, whose\nloops are not analyzed.\nThat no loop goes through a variable is shown only from every loop\nof the model: a complete analysis, or the active loops with the\n`inactive` ones, where the structure lists them.",
             "type": "boolean"
           },
           "partitions": {
@@ -3250,6 +3278,17 @@
             "items": {
               "$ref": "#/$defs/PartitionReport"
             }
+          },
+          "inactive": {
+            "description": "The model's loops, from its structure, that are not among this run's\n(those through `through`, when given): inactive in it, or among those\nthe analysis left out. Absent when the run has every loop of the\nmodel, from structure, and when the model has too many loops for its\nstructure alone to list.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InactiveLoops"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "omitted": {
             "anyOf": [
@@ -3262,7 +3301,7 @@
             ]
           },
           "absent": {
-            "description": "Loops asked for by id that this run does not have: inactive in it, or\ncut from it.",
+            "description": "Loops asked for by id that the run's analysis does not have, active,\ninactive or cut: a loop of another revision of the model. A loop\nasked for that is inactive in the run or cut from it is listed whole\nunder `inactive` or `cut`.",
             "type": "array",
             "items": {
               "type": "string"

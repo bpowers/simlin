@@ -193,13 +193,13 @@ fn max_loops() -> usize {
 /// panicking test does not leak the override to the next test reusing the
 /// thread.
 #[cfg(test)]
-struct MaxLoopsGuard {
+pub(crate) struct MaxLoopsGuard {
     prev: Option<usize>,
 }
 
 #[cfg(test)]
 impl MaxLoopsGuard {
-    fn new(cap: usize) -> Self {
+    pub(crate) fn new(cap: usize) -> Self {
         let prev = MAX_LOOPS_OVERRIDE.with(|c| c.replace(Some(cap)));
         Self { prev }
     }
