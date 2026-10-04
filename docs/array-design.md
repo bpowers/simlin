@@ -2,7 +2,8 @@
 
 ## Overview
 
-The simlin-engine implements comprehensive array support following the XMILE v1.0 specification. The implementation is complete for the core array functionality, with a few edge cases remaining as documented below.
+The simlin-engine implements comprehensive array support following the XMILE v1.0 specification.
+The implementation is complete for the core array functionality, with a few edge cases remaining as documented below.
 
 ## Subscript Notation Quick Reference
 
@@ -35,7 +36,8 @@ Array expressions go through a multi-phase compilation pipeline:
 6. **Materialization (`compiler::array_operand`)**: the one pass that moves an
    array value into a temp -- the array-producing builtins, the per-element
    arrayed-GF applies, and the computed array operands -- so codegen only ever
-   sees views. Generates `AssignTemp`, `TempArray`, `TempArrayElement`
+   sees views.
+   Generates `AssignTemp`, `TempArray`, `TempArrayElement`
 7. **Bytecode Generation**: Emits VM opcodes
    - View stack operations for array access
    - Iteration loops for element-wise operations
@@ -78,7 +80,8 @@ When combining arrays with different dimensions (broadcasting), the VM uses a tw
 1. **Pass 1 - Name Matching**: Match dimensions by exact `dim_id` (semantic identity)
 2. **Pass 2 - Positional Matching**: For **indexed dimensions only**, fall back to size-based matching
 
-Named dimensions (e.g., `Cities=[Boston,Seattle]`) must match by name because their elements have semantic meaning. Two different named dimensions of the same size will NOT match.
+Named dimensions (e.g., `Cities=[Boston,Seattle]`) must match by name because their elements have semantic meaning.
+Two different named dimensions of the same size will NOT match.
 
 Indexed dimensions (e.g., numeric dimensions like `Periods(5)`) can use positional matching when names don't match but sizes do.
 
@@ -209,7 +212,8 @@ The following test categories exercise array functionality and pass:
 ## Design Principles
 
 ### Zero-Copy Operations
-`ArrayView` enables efficient array operations by adjusting iteration patterns rather than copying data. This is crucial for large array performance.
+`ArrayView` enables efficient array operations by adjusting iteration patterns rather than copying data.
+This is crucial for large array performance.
 
 ### Static Optimization
 The compiler aggressively optimizes array operations resolvable at compile time, reducing runtime overhead for common patterns.
@@ -221,7 +225,8 @@ All array operations follow XMILE v1.0 semantics:
 - Inclusive ranges
 
 ### Semantic Dimension Matching
-Named dimensions preserve semantic meaning - `Cities` will never match `Products` even if both have the same size. This prevents subtle bugs from accidental dimension mismatches.
+Named dimensions preserve semantic meaning - `Cities` will never match `Products` even if both have the same size.
+This prevents subtle bugs from accidental dimension mismatches.
 
 ## Future Enhancements
 

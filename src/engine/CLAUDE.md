@@ -1,15 +1,23 @@
 # @simlin/engine
 
-TypeScript API for interacting with the WASM-compiled simulation engine. Promise-based; in the browser, WASM runs in a Web Worker to avoid jank.
+TypeScript API for interacting with the WASM-compiled simulation engine.
+Promise-based; in the browser, WASM runs in a Web Worker to avoid jank.
 
 ## WASM artifacts
 
-`build.sh` produces two wasm binaries in the gitignored `core` output directory (each with a `.raw` sibling, build.sh's wasm-opt change-detection cache, and a `.mode` stamp recording whether wasm-opt ran). The two build concurrently, each in its own target directory. `DISABLE_WASM_OPT=1` (the pre-commit hook and CI's PR lanes) marks a gate build: build.sh skips wasm-opt and compiles with the workspace's `wasm-gate` cargo profile (opt-level 3, no LTO, parallel codegen, ~21 s per artifact on an engine change) instead of the shipping `wasm-release` profile (fat LTO, codegen-units 1, ~120 s); the workspace Cargo.toml carries the measured trade-off, and `.github/workflows/wasm-opt.yml` is the lane that tests the shipping build. `tests/build-sh.test.ts` pins the orchestration (concurrency, failure propagation, profile selection) against stub tools:
+`build.sh` produces two wasm binaries in the gitignored `core` output directory (each with a `.raw` sibling, build.sh's wasm-opt change-detection cache, and a `.mode` stamp recording whether wasm-opt ran).
+The two build concurrently, each in its own target directory.
+`DISABLE_WASM_OPT=1` (the pre-commit hook and CI's PR lanes) marks a gate build: build.sh skips wasm-opt and compiles with the workspace's `wasm-gate` cargo profile (opt-level 3, no LTO, parallel codegen, ~21 s per artifact on an engine change) instead of the shipping `wasm-release` profile (fat LTO, codegen-units 1, ~120 s); the workspace Cargo.toml carries the measured trade-off, and `.github/workflows/wasm-opt.yml` is the lane that tests the shipping build.
+`tests/build-sh.test.ts` pins the orchestration (concurrency, failure propagation, profile selection) against stub tools:
 
-- `libsimlin.wasm` -- full build (libsimlin default features, including `png_render`). Loaded by Node via `wasm.node.ts`; `src/server`'s model-preview pipeline calls `Project.renderPng`, which needs the `simlin_project_render_png` export.
-- `libsimlin-browser.wasm` -- slim `--no-default-features` build, imported by `wasm.browser.ts` and bundled into SPAs (the notebook widget ships the same file beside its JS and hands the bytes to the engine at runtime; see the flavors below). Omits the PNG rasterization stack (resvg + text shaping + embedded font, ~17% of the full binary); calling `Project.renderPng` against it throws a descriptive error from `src/internal/import-export.ts`. SVG rendering (pure string generation) remains available.
+- `libsimlin.wasm` -- full build (libsimlin default features, including `png_render`).
+  Loaded by Node via `wasm.node.ts`; `src/server`'s model-preview pipeline calls `Project.renderPng`, which needs the `simlin_project_render_png` export.
+- `libsimlin-browser.wasm` -- slim `--no-default-features` build, imported by `wasm.browser.ts` and bundled into SPAs (the notebook widget ships the same file beside its JS and hands the bytes to the engine at runtime; see the flavors below).
+  Omits the PNG rasterization stack (resvg + text shaping + embedded font, ~17% of the full binary); calling `Project.renderPng` against it throws a descriptive error from `src/internal/import-export.ts`.
+  SVG rendering (pure string generation) remains available.
 
-`tests/wasm-artifacts.test.ts` pins this contract (export presence/absence and the size delta); `scripts/verify-deploy-build.sh` re-checks it on the assembled deploy. Both files ship in the npm package; the GAE deploy excludes the browser artifact from the upload (`.gcloudignore`) because rsbuild bundles a hashed copy into the SPA's static assets.
+`tests/wasm-artifacts.test.ts` pins this contract (export presence/absence and the size delta); `scripts/verify-deploy-build.sh` re-checks it on the assembled deploy.
+Both files ship in the npm package; the GAE deploy excludes the browser artifact from the upload (`.gcloudignore`) because rsbuild bundles a hashed copy into the SPA's static assets.
 
 For global development standards, see the root [CLAUDE.md](/CLAUDE.md).
 For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
@@ -28,26 +36,47 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 - `src/errors.ts` -- Engine-specific error types
 - `src/patch.ts` -- Model patching logic
 - `src/worker-protocol.ts` -- Worker message protocol
-- `src/backend-factory.ts` / `.browser.ts` / `.direct.ts` -- Platform-specific backend factories. `.browser.ts` spawns the Web Worker; `.direct.ts` returns a main-thread `DirectBackend` and is platform-neutral (Node, every package's test suite, and single-file browser bundles that cannot load a second worker file, such as the notebook widget)
-- `src/internal/wasm-runtime.ts` -- The platform-neutral WASM singleton shared by every `@simlin/engine/internal/wasm` flavor: exports/memory state, `instantiate` (from bytes or a precompiled `WebAssembly.Module`), `adoptInstance` (for the bundler-instantiated artifact), single-flight `ensureInitializedWith`, `configureWasm` override, panic-message accessors. The flavors are thin source resolvers over it and MUST NOT grow their own copies of any of this: `wasm.node.ts` (default: read `core/libsimlin.wasm` from disk; also filesystem paths, file and http URLs), `wasm.browser.ts` (default: the bundler-instantiated `libsimlin-browser.wasm`; a caller-supplied source overrides it), `wasm.supplied.ts` (no default and no reference to any `.wasm` file -- `init()` without a source throws; a bundle that aliases the specifier to this flavor emits no wasm asset and performs no asset fetch, which is what the notebook widget needs). `WasmSource` accepts `string | URL | ArrayBuffer | Uint8Array | WebAssembly.Module`; a precompiled module skips `WebAssembly.compile`, so several independently loaded copies of the package on one page can share one compilation. The worker protocol carries a module in the message body (structured clone), bytes in the transfer list. Two standing rules for browser hosts: `configureWasm` throws once the engine is initialized in every flavor, and a source passed to `WorkerBackend.configureWasm(...)` / `init(source)` is delivered into the worker and honoured there -- a browser host that passes a source gets that source, not the bundled artifact
-- `src/worker-trampoline.ts` -- Cross-origin embed support (issue #688): pure decision/construction functions plus an injectable spawn shell that boots the engine worker through a same-origin blob: trampoline when the resolved chunk URL is cross-origin (third-party pages hotlinking sd-component.js). The bundler-facing constraints (inline `new Worker(new URL(...))` pattern, classic-worker downgrade under UMD, `publicPath: 'auto'` deriving from `self.location` in classic worker chunks) are documented in the module header; `backend-factory.browser.ts` and `engine-worker.ts` are the two consumers
+- `src/backend-factory.ts` / `.browser.ts` / `.direct.ts` -- Platform-specific backend factories.
+  `.browser.ts` spawns the Web Worker; `.direct.ts` returns a main-thread `DirectBackend` and is platform-neutral (Node, every package's test suite, and single-file browser bundles that cannot load a second worker file, such as the notebook widget)
+- `src/internal/wasm-runtime.ts` -- The platform-neutral WASM singleton shared by every `@simlin/engine/internal/wasm` flavor: exports/memory state, `instantiate` (from bytes or a precompiled `WebAssembly.Module`), `adoptInstance` (for the bundler-instantiated artifact), single-flight `ensureInitializedWith`, `configureWasm` override, panic-message accessors.
+  The flavors are thin source resolvers over it and MUST NOT grow their own copies of any of this: `wasm.node.ts` (default: read `core/libsimlin.wasm` from disk; also filesystem paths, file and http URLs), `wasm.browser.ts` (default: the bundler-instantiated `libsimlin-browser.wasm`; a caller-supplied source overrides it), `wasm.supplied.ts` (no default and no reference to any `.wasm` file -- `init()` without a source throws; a bundle that aliases the specifier to this flavor emits no wasm asset and performs no asset fetch, which is what the notebook widget needs).
+  `WasmSource` accepts `string | URL | ArrayBuffer | Uint8Array | WebAssembly.Module`; a precompiled module skips `WebAssembly.compile`, so several independently loaded copies of the package on one page can share one compilation.
+  The worker protocol carries a module in the message body (structured clone), bytes in the transfer list.
+  Two standing rules for browser hosts: `configureWasm` throws once the engine is initialized in every flavor, and a source passed to `WorkerBackend.configureWasm(...)` / `init(source)` is delivered into the worker and honoured there -- a browser host that passes a source gets that source, not the bundled artifact
+- `src/worker-trampoline.ts` -- Cross-origin embed support (issue #688): pure decision/construction functions plus an injectable spawn shell that boots the engine worker through a same-origin blob: trampoline when the resolved chunk URL is cross-origin (third-party pages hotlinking sd-component.js).
+  The bundler-facing constraints (inline `new Worker(new URL(...))` pattern, classic-worker downgrade under UMD, `publicPath: 'auto'` deriving from `self.location` in classic worker chunks) are documented in the module header; `backend-factory.browser.ts` and `engine-worker.ts` are the two consumers
 - `src/internal/` -- Internal modules (project, model, memory, error, import-export)
 - `src/internal/wasmgen.ts` -- `simlin_model_compile_to_wasm` FFI wrapper + the pure `parseWasmLayout` / `readStridedSeries` / `decodeWasmError` decoders for the per-model wasm blob (re-exported via `@simlin/engine/internal`)
 - `src/internal/canonicalize.ts` -- pure `canonicalizeIdent`, a faithful port of the Rust canonicalizer (used to resolve caller names to wasm-layout slots); not re-exported from the `internal` barrel
 
 ## Contracts
 
-- `JsonProjectOperation` is a union type: `SetSimSpecsOp | AddModelOp`. The `AddModelOp` (`type: 'addModel'`) creates a new empty model in the project. Type guards `isSetSimSpecs` and `isAddModel` are provided.
+- `JsonProjectOperation` is a union type: `SetSimSpecsOp | AddModelOp`.
+  The `AddModelOp` (`type: 'addModel'`) creates a new empty model in the project.
+  Type guards `isSetSimSpecs` and `isAddModel` are provided.
 - The engine processes `projectOps` before model-level `ops` in a patch, so `AddModel` can be combined with `upsertModule` in a single patch to atomically create a model and reference it.
 
 ### Simulation engine selection (vm vs wasm)
 
-- `SimEngine = 'vm' | 'wasm'` (exported from `backend.ts`). `Model.simulate(overrides, { engine })` and `Model.run(overrides, { engine })` accept it; `'vm'` (the bytecode VM, via libsimlin) is the default. `'wasm'` runs the model as a self-contained per-model WebAssembly blob, intended for fast repeated re-runs (interactive scrubbing).
-- The wasm path is currently exercised under Node (`DirectBackend`) and through the Web Worker (`WorkerBackend`). The VM remains the correctness oracle; the wasm twin is held to VM parity by tests.
-- `EngineBackend.simNew(modelHandle, enableLtm, engine?)` takes the optional engine. `DirectBackend` demuxes every sim op on the entry's engine: a `'wasm'` handle has no native sim pointer (`ptr === 0`); it owns a `WebAssembly.Instance` plus decoded `WasmLayout`, drives the blob's exports directly (`run_to`/`reset`/`set_value`/`memory`), reads series strided from linear memory, and resolves caller names via `canonicalizeIdent`. `'vm'` (the default/absent case) calls libsimlin.
+- `SimEngine = 'vm' | 'wasm'` (exported from `backend.ts`).
+  `Model.simulate(overrides, { engine })` and `Model.run(overrides, { engine })` accept it; `'vm'` (the bytecode VM, via libsimlin) is the default.
+  `'wasm'` runs the model as a self-contained per-model WebAssembly blob, intended for fast repeated re-runs (interactive scrubbing).
+- The wasm path is currently exercised under Node (`DirectBackend`) and through the Web Worker (`WorkerBackend`).
+  The VM remains the correctness oracle; the wasm twin is held to VM parity by tests.
+- `EngineBackend.simNew(modelHandle, enableLtm, engine?)` takes the optional engine.
+  `DirectBackend` demuxes every sim op on the entry's engine: a `'wasm'` handle has no native sim pointer (`ptr === 0`); it owns a `WebAssembly.Instance` plus decoded `WasmLayout`, drives the blob's exports directly (`run_to`/`reset`/`set_value`/`memory`), reads series strided from linear memory, and resolves caller names via `canonicalizeIdent`.
+  `'vm'` (the default/absent case) calls libsimlin.
 - Worker path: an optional `engine` field on the `simNew` worker message (`worker-protocol.ts` / `-server.ts` / `-backend.ts`) threads selection through; it is purely additive and defaults to vm when absent.
-- Runtime errors on wasm: a wasm export cannot return a `Result`, so a blob that hits a simulation error (today only the conveyor belt pass's `ConveyorTransitTooLong` / `ConveyorTransitNotPositive`) abandons the failing step, records the error in an internal channel, and returns *normally*. `DirectBackend` therefore polls the blob's `get_error()` after every `run_to` (`throwIfWasmRuntimeError`) and throws, so the wasm path cannot hand back a silently truncated series where the VM would have returned `Err`. The channel is sticky until `reset`. It reports the raw `ErrorCode` discriminant and conveyor plan index rather than the VM's message text, which needs the model's `ConveyorPlan` list (Rust-side only: `wasmgen::reconstruct_error`). Reachable since GH #924 removed the wasm-side conveyor reject: a belt model compiles to wasm, and a non-positive or out-of-bound transit raises. A queue-only or ordinary model still cannot raise (its blob elides the guards). The decode half is unit-tested by the pure `decodeWasmError` tests.
-- LTM on wasm (enforced authoritatively in the backend, covering the worker path): `Model.simulate({ engine: 'wasm', enableLtm: true })` resolves a `Sim`; the wasm compile threads `enableLtm` through to `simlin_model_compile_to_wasm` so the blob carries the LTM series, and `simGetLinks` on a wasm sim reads that slab and runs the shared analytic core via `simlin_analyze_links_from_wasm_results` -- matching the VM's link set, polarities, and per-step scores within `1e-6`. The wasm sim retains its model pointer (`simlin_model_ref`/`unref` paired with `simNew`/`dispose`) so the from-wasm analysis FFI has a valid handle. A genuinely-unlowerable LTM model (the wasm backend cannot lower a construct used in the model) surfaces the `WasmGenError` to the caller with **no silent VM fallback**, exactly like a non-LTM unsupported model -- `Model.simulate({ engine: 'wasm' })` rejects; the same model still runs on `engine: 'vm'`.
+- Runtime errors on wasm: a wasm export cannot return a `Result`, so a blob that hits a simulation error (today only the conveyor belt pass's `ConveyorTransitTooLong` / `ConveyorTransitNotPositive`) abandons the failing step, records the error in an internal channel, and returns *normally*.
+  `DirectBackend` therefore polls the blob's `get_error()` after every `run_to` (`throwIfWasmRuntimeError`) and throws, so the wasm path cannot hand back a silently truncated series where the VM would have returned `Err`.
+  The channel is sticky until `reset`.
+  It reports the raw `ErrorCode` discriminant and conveyor plan index rather than the VM's message text, which needs the model's `ConveyorPlan` list (Rust-side only: `wasmgen::reconstruct_error`).
+  Reachable since GH #924 removed the wasm-side conveyor reject: a belt model compiles to wasm, and a non-positive or out-of-bound transit raises.
+  A queue-only or ordinary model still cannot raise (its blob elides the guards).
+  The decode half is unit-tested by the pure `decodeWasmError` tests.
+- LTM on wasm (enforced authoritatively in the backend, covering the worker path): `Model.simulate({ engine: 'wasm', enableLtm: true })` resolves a `Sim`; the wasm compile threads `enableLtm` through to `simlin_model_compile_to_wasm` so the blob carries the LTM series, and `simGetLinks` on a wasm sim reads that slab and runs the shared analytic core via `simlin_analyze_links_from_wasm_results` -- matching the VM's link set, polarities, and per-step scores within `1e-6`.
+  The wasm sim retains its model pointer (`simlin_model_ref`/`unref` paired with `simNew`/`dispose`) so the from-wasm analysis FFI has a valid handle.
+  A genuinely-unlowerable LTM model (the wasm backend cannot lower a construct used in the model) surfaces the `WasmGenError` to the caller with **no silent VM fallback**, exactly like a non-LTM unsupported model -- `Model.simulate({ engine: 'wasm' })` rejects; the same model still runs on `engine: 'vm'`.
 
 ## Tests
 
@@ -61,11 +90,15 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 - `tests/wasm-supplied.test.ts` -- The host-supplied flavor and the shared runtime core: every `WasmSource` shape (ArrayBuffer, offset `Uint8Array` view, precompiled module, URL via global `fetch`, provider function, `configureWasm` override), the loud no-source failure, single-flight and retry-after-failure semantics, `adoptInstance` memory selection
 - `tests/worker-trampoline.test.ts` -- Unit tests for the cross-origin worker trampoline (origin decision, trampoline source, spawn interception with fake Worker/URL)
 - `tests/wasm-backend.test.ts`, `tests/wasm-model.test.ts`, `tests/worker-wasm.test.ts` -- wasm-vs-VM parity through `DirectBackend`, the `Model`/`Sim` facade, and the Web Worker
-- `tests/wasm-ltm.test.ts` -- LTM-on-wasm parity through the TypeScript surface: drives `Model.simulate({ engine: 'wasm', enableLtm: true })` end-to-end and asserts the resulting `Run.links` match the VM (link set, polarities, per-step scores). Includes a `WorkerBackend` twin and an Unsupported-LTM case that surfaces as a rejection without falling back to the VM
+- `tests/wasm-ltm.test.ts` -- LTM-on-wasm parity through the TypeScript surface: drives `Model.simulate({ engine: 'wasm', enableLtm: true })` end-to-end and asserts the resulting `Run.links` match the VM (link set, polarities, per-step scores).
+  Includes a `WorkerBackend` twin and an Unsupported-LTM case that surfaces as a rejection without falling back to the VM
 - `tests/ltm-test-helpers.ts` -- shared helpers for the LTM tests (`linksByKey`, `expectScoresClose`); kept separate from the test files so the wasm and worker LTM suites compare links the same way
 
 ## Benchmarks
 
-`tests/backend-bench.ts` (runner) + `tests/bench-stats.ts` (pure median/warmup harness, always unit-tested) measure node VM-vs-wasm eval time via `Model.simulate({ engine })`. The runner is gated behind `RUN_BENCH` so it stays out of the default `pnpm test`. See [docs/dev/benchmarks.md](/docs/dev/benchmarks.md#node-vm-vs-wasm-eval-benchmark).
+`tests/backend-bench.ts` (runner) + `tests/bench-stats.ts` (pure median/warmup harness, always unit-tested) measure node VM-vs-wasm eval time via `Model.simulate({ engine })`.
+The runner is gated behind `RUN_BENCH` so it stays out of the default `pnpm test`.
+See [docs/dev/benchmarks.md](/docs/dev/benchmarks.md#node-vm-vs-wasm-eval-benchmark).
 
-`bench/clearn-alloc.mjs` is a standalone script (not a test) that compares two or more wasm bundles -- builds with different global allocators -- on the whole C-LEARN pipeline through this package's public API, per stage, with peak `memory.size`. See [docs/dev/benchmarks.md](/docs/dev/benchmarks.md#node-allocator-benchmark-for-the-wasm-bundle).
+`bench/clearn-alloc.mjs` is a standalone script (not a test) that compares two or more wasm bundles -- builds with different global allocators -- on the whole C-LEARN pipeline through this package's public API, per stage, with peak `memory.size`.
+See [docs/dev/benchmarks.md](/docs/dev/benchmarks.md#node-allocator-benchmark-for-the-wasm-bundle).

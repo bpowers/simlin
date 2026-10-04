@@ -4,28 +4,38 @@ MCP (Model Context Protocol) server exposing the Simlin simulation engine as too
 
 ## Architecture
 
-This crate is a thin binary wrapper around `simlin-mcp-core`, which owns the entire MCP tool surface (tool implementations, output types, the rmcp `ServerHandler` impl). The binary contributes:
+This crate is a thin binary wrapper around `simlin-mcp-core`, which owns the entire MCP tool surface (tool implementations, output types, the rmcp `ServerHandler` impl).
+The binary contributes:
 
-- **Build-time content embedding** -- `build.rs` substitutes `{PYSIMLIN_VERSION}` from `pysimlin.version` into `instructions.md` and `src/skills/pysimlin-basics.md`, writing processed files to `OUT_DIR`. Skill files without version placeholders are included verbatim from source via `include_str!`.
-- **Choice of `ProjectAccess` impl** -- the `simlin-mcp-core` library is generic over `A: ProjectAccess`; this binary mounts the stateless `FileSystemAccess` that re-reads/writes the file on every call (preserving the pre-rmcp wire semantics). The impl itself lives in `simlin-mcp-core` (`fs_access.rs`) so that crate's integration suites run against the shipping code rather than a copy of it.
+- **Build-time content embedding** -- `build.rs` substitutes `{PYSIMLIN_VERSION}` from `pysimlin.version` into `instructions.md` and `src/skills/pysimlin-basics.md`, writing processed files to `OUT_DIR`.
+  Skill files without version placeholders are included verbatim from source via `include_str!`.
+- **Choice of `ProjectAccess` impl** -- the `simlin-mcp-core` library is generic over `A: ProjectAccess`; this binary mounts the stateless `FileSystemAccess` that re-reads/writes the file on every call (preserving the pre-rmcp wire semantics).
+  The impl itself lives in `simlin-mcp-core` (`fs_access.rs`) so that crate's integration suites run against the shipping code rather than a copy of it.
 - **Stdio transport glue** -- `main.rs` constructs `SimlinMcpServer<FileSystemAccess>` with the embedded resources and hands it to rmcp's `ServiceExt::serve(stdio())`.
 
 ### Files
 
 - `build.rs` -- Build script reading `pysimlin.version` and templating `instructions.md` + `pysimlin-basics.md` into `OUT_DIR`.
-- `pysimlin.version` -- Single source of truth for the pysimlin version embedded in MCP content. Updated by `scripts/release-pysimlin.sh`.
-- `src/main.rs` -- Binary entry point. Loads OUT_DIR-substituted content via `include_str!`, builds the `Vec<ResourceContent>` for the four skill resources, constructs `SimlinMcpServer<FileSystemAccess>`, and runs `serve(stdio()).await?.waiting().await`.
-- `src/lib.rs` -- Library half. `pub mod access` is a one-line re-export of `simlin_mcp_core::fs_access::FileSystemAccess`, keeping the `simlin_mcp::access::FileSystemAccess` path working for integration tests that exercise it without spawning the binary. The impl lives in `simlin-mcp-core` (see that crate's `fs_access.rs`) so its integration suites run against the shipping code rather than a copy: `open` uses `tokio::fs::read_to_string` + `open_project`, `save` serialises per `SourceFormat` (including `.mdl`, rewritten in place as Vensim text with lossiness reported on `SaveOutcome::warnings`) and atomic-writes, `create` validates non-existence then atomic-writes, and `SourceFormat::SdaiJson` regenerates `relationships` from `compute_link_polarities` + `generate_relationships`.
-- `src/instructions.md` -- Comprehensive instructions template embedded in the binary, covering tool usage, SD concepts, Vensim syntax, and workflow guidance. Contains `{PYSIMLIN_VERSION}` placeholder resolved at build time.
+- `pysimlin.version` -- Single source of truth for the pysimlin version embedded in MCP content.
+  Updated by `scripts/release-pysimlin.sh`.
+- `src/main.rs` -- Binary entry point.
+  Loads OUT_DIR-substituted content via `include_str!`, builds the `Vec<ResourceContent>` for the four skill resources, constructs `SimlinMcpServer<FileSystemAccess>`, and runs `serve(stdio()).await?.waiting().await`.
+- `src/lib.rs` -- Library half.
+  `pub mod access` is a one-line re-export of `simlin_mcp_core::fs_access::FileSystemAccess`, keeping the `simlin_mcp::access::FileSystemAccess` path working for integration tests that exercise it without spawning the binary.
+  The impl lives in `simlin-mcp-core` (see that crate's `fs_access.rs`) so its integration suites run against the shipping code rather than a copy: `open` uses `tokio::fs::read_to_string` + `open_project`, `save` serialises per `SourceFormat` (including `.mdl`, rewritten in place as Vensim text with lossiness reported on `SaveOutcome::warnings`) and atomic-writes, `create` validates non-existence then atomic-writes, and `SourceFormat::SdaiJson` regenerates `relationships` from `compute_link_polarities` + `generate_relationships`.
+- `src/instructions.md` -- Comprehensive instructions template embedded in the binary, covering tool usage, SD concepts, Vensim syntax, and workflow guidance.
+  Contains `{PYSIMLIN_VERSION}` placeholder resolved at build time.
 - `src/skills/` -- Four skill markdown files compiled into the binary as MCP resources:
-  - `pysimlin-basics.md` -- Loading models, simulation, DataFrame access. Contains `{PYSIMLIN_VERSION}` placeholder resolved at build time.
+  - `pysimlin-basics.md` -- Loading models, simulation, DataFrame access.
+    Contains `{PYSIMLIN_VERSION}` placeholder resolved at build time.
   - `scenario-analysis.md` -- Parameter sweeps and intervention analysis.
   - `loop-dominance.md` -- Plotting behavior, annotating dominant periods.
   - `vensim-equation-syntax.md` -- MDL-to-XMILE mapping table.
 
 ### Tools
 
-The actual tool implementations (`ReadModel`, `EditModel`, `CreateModel`) live in `../simlin-mcp-core/src/tools/` and are dispatched via rmcp's `#[tool]`/`#[tool_router]`/`#[tool_handler]` macros on `simlin_mcp_core::server::SimlinMcpServer`. See `../simlin-mcp-core/` for the per-tool input/output shape and behaviour notes.
+The actual tool implementations (`ReadModel`, `EditModel`, `CreateModel`) live in `../simlin-mcp-core/src/tools/` and are dispatched via rmcp's `#[tool]`/`#[tool_router]`/`#[tool_handler]` macros on `simlin_mcp_core::server::SimlinMcpServer`.
+See `../simlin-mcp-core/` for the per-tool input/output shape and behaviour notes.
 
 ## npm Distribution
 
@@ -50,8 +60,10 @@ Published to npm as `@simlin/mcp` with platform-specific binary packages followi
 - `build-npm-packages.sh` -- generates platform `package.json` files in `npm/@simlin/mcp-*`
 - `scripts/cross-build.sh` -- local cross-compilation via Docker + cargo-zigbuild (outputs to dist/)
 - `Dockerfile.cross` -- toolchain image for cross-build.sh
-- `scripts/release-mcp.sh <version>` (repo root) -- bumps Cargo.toml + npm package versions, runs tests, commits, and creates `mcp-v<version>` tag. Does not push
-- `scripts/release-pysimlin.sh <version>` (repo root) -- updates `pysimlin.version`, commits, and creates `pysimlin-v<version>` tag. Does not push
+- `scripts/release-mcp.sh <version>` (repo root) -- bumps Cargo.toml + npm package versions, runs tests, commits, and creates `mcp-v<version>` tag.
+  Does not push
+- `scripts/release-pysimlin.sh <version>` (repo root) -- updates `pysimlin.version`, commits, and creates `pysimlin-v<version>` tag.
+  Does not push
 
 ## Version Management
 
@@ -72,12 +84,17 @@ cargo build -p simlin-mcp
 ```
 
 Tests in this crate cover transport, filesystem access, and the npm release workflow:
-- `tests/integration/file_system_access.rs` -- E2E coverage of `FileSystemAccess` (open/save/create, the in-place `.mdl` rewrite and its lossiness warnings, and the SD-AI `relationships` regeneration on save). It lives in this crate even though the impl is in `simlin-mcp-core`: these are the tests of the binary's chosen backing store.
-- `tests/integration/stdio_smoke.rs` -- spawns the built binary, exchanges a JSON-RPC `initialize`, asserts the wire surface (server name, capabilities, instructions). The single smoke test replaces the deleted JSON-RPC dispatcher unit tests; rmcp owns those wire mechanics now.
+- `tests/integration/file_system_access.rs` -- E2E coverage of `FileSystemAccess` (open/save/create, the in-place `.mdl` rewrite and its lossiness warnings, and the SD-AI `relationships` regeneration on save).
+  It lives in this crate even though the impl is in `simlin-mcp-core`: these are the tests of the binary's chosen backing store.
+- `tests/integration/stdio_smoke.rs` -- spawns the built binary, exchanges a JSON-RPC `initialize`, asserts the wire surface (server name, capabilities, instructions).
+  The single smoke test replaces the deleted JSON-RPC dispatcher unit tests; rmcp owns those wire mechanics now.
 - `tests/integration/build_npm_packages.rs`, `tests/integration/mcp_release_workflow.rs` -- CI/release validators (independent of the runtime).
 
 Tool-level behaviour tests (success and validation-error paths for each tool) live in `../simlin-mcp-core/tests/`.
 
 ## Dependencies
 
-Depends on `simlin-engine` for model types, file format parsing, error formatting (`simlin_engine::errors`), atomic file writes (`simlin_engine::io`), and SD-AI relationship regeneration (`compute_link_polarities` + `generate_relationships`). Depends on `simlin-mcp-core` for the tool surface and `ProjectAccess` trait. Depends on `rmcp` for the stdio transport. Does NOT depend on `libsimlin` (the C FFI crate).
+Depends on `simlin-engine` for model types, file format parsing, error formatting (`simlin_engine::errors`), atomic file writes (`simlin_engine::io`), and SD-AI relationship regeneration (`compute_link_polarities` + `generate_relationships`).
+Depends on `simlin-mcp-core` for the tool surface and `ProjectAccess` trait.
+Depends on `rmcp` for the stdio transport.
+Does NOT depend on `libsimlin` (the C FFI crate).

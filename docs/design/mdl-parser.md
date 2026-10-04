@@ -10,7 +10,9 @@ The reader is native Rust for two reasons:
 1. **Build complexity**: it needs no parser generator, no C++ toolchain, and no cross-compilation setup beyond the engine's own.
 2. **WASM compatibility**: it builds for wasm with the rest of the engine, so the browser imports `.mdl` files directly.
 
-Its algorithms are ported from xmutil, Bob Eberlein's C++ Vensim-to-XMILE converter (https://github.com/bobeberlein/xmutil). Where a comment cites an xmutil function or a `File.cpp:line`, it names the code a rule was ported from, under that repository's `src/` directory. What a model computes is settled by Vensim's own output (see "What Holds the Reader to Ground Truth"), not by xmutil.
+Its algorithms are ported from xmutil, Bob Eberlein's C++ Vensim-to-XMILE converter (https://github.com/bobeberlein/xmutil).
+Where a comment cites an xmutil function or a `File.cpp:line`, it names the code a rule was ported from, under that repository's `src/` directory.
+What a model computes is settled by Vensim's own output (see "What Holds the Reader to Ground Truth"), not by xmutil.
 
 ## Architecture
 
@@ -30,7 +32,8 @@ simlin_engine::datamodel::Project  <-- target output
 (optional) xmile::project_to_xmile()  <-- "free" XMILE export
 ```
 
-We deliberately skip the XMILE intermediate representation. By targeting `datamodel` directly:
+We deliberately skip the XMILE intermediate representation.
+By targeting `datamodel` directly:
 - We leverage existing XMILE conversion functions for free
 - We avoid double-parsing (MDL -> XMILE XML string -> parse XMILE -> datamodel)
 - We can extend the datamodel if needed for Vensim-specific features
@@ -45,7 +48,8 @@ Some Vensim concepts require intermediate representations before conversion to d
 
 ## Vensim MDL Format Features
 
-The feature set is xmutil's. This section documents it, organized by implementation phase.
+The feature set is xmutil's.
+This section documents it, organized by implementation phase.
 
 ### Phase 1: Lexer (`lexer.rs`)
 
@@ -97,7 +101,8 @@ The feature set is xmutil's. This section documents it, organized by implementat
 
 #### Operator Precedence (low to high)
 
-The table `mdl::parser` implements. Its binary levels disagree with Vensim and XMILE, which put `+`/`-` above the comparisons and `:AND:` below them (GH #914); the importer emits operands flat so the XMILE grammar re-establishes the intended grouping, and the writer groups by the XMILE/Vensim table (`ast::BinaryOp::precedence`).
+The table `mdl::parser` implements.
+Its binary levels disagree with Vensim and XMILE, which put `+`/`-` above the comparisons and `:AND:` below them (GH #914); the importer emits operands flat so the XMILE grammar re-establishes the intended grouping, and the writer groups by the XMILE/Vensim table (`ast::BinaryOp::precedence`).
 
 1. `- +` (addition/subtraction)
 2. `:OR:`
@@ -109,7 +114,8 @@ The table `mdl::parser` implements. Its binary levels disagree with Vensim and X
 
 ### Phase 4: Built-in Functions (`builtins.rs`)
 
-Function recognition via `is_builtin()` using `to_lower_space()` canonicalization. Categories:
+Function recognition via `is_builtin()` using `to_lower_space()` canonicalization.
+Categories:
 - Mathematical: ABS, EXP, SQRT, LN, LOG, SIN, COS, TAN, MIN, MAX, INTEGER, MODULO, QUANTUM
 - Conditional: IF THEN ELSE, ZIDZ, XIDZ
 - Time: PULSE, PULSE TRAIN, STEP, RAMP
@@ -124,7 +130,8 @@ What some of these mean, as the importer translates them:
 
 - **PULSE(start, width)** is 1 while `Time + TIME STEP/2` is strictly between `start` and `start + width`, and a width of 0 is one TIME STEP (vensim.com/documentation/fn_pulse.html).
 - **PULSE TRAIN(start, width, interval, end)** is PULSE repeated every `interval` up to `end`, inclusive, each pulse at least one TIME STEP long (fn_pulse_train.html, which gives no equation; the inclusive end follows Vensim's own run in `test/sdeverywhere/models/pulsetrain/pulsetrain.dat`).
-- **INTEGER** truncates toward zero and **MODULO** is the remainder of that truncated division, `A - QUANTUM(A, B)` (fn_integer.html, fn_modulo.html; `test/test-models/tests/rounding/output.tab`), so they import as the engine's `TRUNC` and `REM`, not XMILE's flooring `INT` and `MOD`. Vensim's function reference has no INT or MOD; a two-argument `MOD` call of a name the model does not define is read as the floored modulus, the writer's spelling of it.
+- **INTEGER** truncates toward zero and **MODULO** is the remainder of that truncated division, `A - QUANTUM(A, B)` (fn_integer.html, fn_modulo.html; `test/test-models/tests/rounding/output.tab`), so they import as the engine's `TRUNC` and `REM`, not XMILE's flooring `INT` and `MOD`.
+  Vensim's function reference has no INT or MOD; a two-argument `MOD` call of a name the model does not define is read as the floored modulus, the writer's spelling of it.
 - **QUANTUM(A, B)** returns A for B at or below zero (fn_quantum.html).
 - **A FUNCTION OF** "is not intended for use in writing equations, and precludes simulation" (fn_a_function_of.html); it imports as `NAN`, an equation that reads but does not simulate.
 
@@ -134,7 +141,8 @@ What some of these mean, as the importer translates them:
 - Flow linking via is_all_plus_minus algorithm with synthetic net flow generation
 - Sim specs extraction from control variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER)
 - Dimension building with range expansion and equivalence handling
-- A variable's dimensions are those of the elements its equations define: per axis, a dimension a left-hand side names that holds exactly the defined elements, else the smallest declared dimension holding them all, the first declared of several that size (GH #1059). Vensim runs a variable whose equations define only some elements of a dimension over those elements (`test/test-models/tests/except_subranges`); which of several dimensions holding them is the variable's is Simlin's rule, since Vensim keeps no dimension per variable.
+- A variable's dimensions are those of the elements its equations define: per axis, a dimension a left-hand side names that holds exactly the defined elements, else the smallest declared dimension holding them all, the first declared of several that size (GH #1059).
+  Vensim runs a variable whose equations define only some elements of a dimension over those elements (`test/test-models/tests/except_subranges`); which of several dimensions holding them is the variable's is Simlin's rule, since Vensim keeps no dimension per variable.
 - Element keys are canonical (`CanonicalElementName::from_subscript`), as every reader of a datamodel stores them; an element's spelling is its dimension's.
 - An import is a function of the file: no decision reads a `HashMap`'s iteration order (`import_determinism_tests`).
 - XMILE-compatible expression formatting (`xmile_compat.rs`)
@@ -156,18 +164,25 @@ What some of these mean, as the importer translates them:
 
 ## Writer
 
-`writer.rs` writes a `datamodel::Project` as MDL. Its contract is that a save reads back as the datamodel it saved, up to what MDL cannot hold (views, which a save lays out anew, and an equation's spelling): `save_roundtrip_tests` holds every corpus `.mdl` to it, and `writer_proptest` holds generated models to it and to the save being a fixed point. What MDL cannot spell is written as close as it can be, with an `ExportWarning`. The format constrains the writer in ways worth stating:
+`writer.rs` writes a `datamodel::Project` as MDL.
+Its contract is that a save reads back as the datamodel it saved, up to what MDL cannot hold (views, which a save lays out anew, and an equation's spelling): `save_roundtrip_tests` holds every corpus `.mdl` to it, and `writer_proptest` holds generated models to it and to the save being a fixed point.
+What MDL cannot spell is written as close as it can be, with an `ExportWarning`.
+The format constrains the writer in ways worth stating:
 
-- An element equation names no dimension, so an arrayed variable is written under left-hand sides that name its dimensions wherever its equations allow (`writer_arrayed.rs`): a number list, a group of elements agreeing across a dimension, or an `:EXCEPT:` equation over its dimensions or a subrange its default names. Otherwise the reader infers the dimensions from the elements, and of several dimensions holding the same elements it takes the first declared; the writer warns.
-- Every equation written holds Vensim's rule for a subscript range on a right-hand side: "When you use a Subscript Range in an equation it must appear on the left hand side" (vensim.com/documentation/ref_subscripts.html), unless it is mapped onto one there (ref_subscript_mapping.html). An `:EXCEPT:` default no left-hand side can hold that way, or whose equation would except every element it names, is written as the equations of its elements, with a warning that the default is not kept.
-- A function Vensim does not have (ROUND, INT, MOD) is written by name: Simlin reads it back, Vensim does not. Lowering one to Vensim primitives would repeat its argument, wrong for a stochastic one.
+- An element equation names no dimension, so an arrayed variable is written under left-hand sides that name its dimensions wherever its equations allow (`writer_arrayed.rs`): a number list, a group of elements agreeing across a dimension, or an `:EXCEPT:` equation over its dimensions or a subrange its default names.
+  Otherwise the reader infers the dimensions from the elements, and of several dimensions holding the same elements it takes the first declared; the writer warns.
+- Every equation written holds Vensim's rule for a subscript range on a right-hand side: "When you use a Subscript Range in an equation it must appear on the left hand side" (vensim.com/documentation/ref_subscripts.html), unless it is mapped onto one there (ref_subscript_mapping.html).
+  An `:EXCEPT:` default no left-hand side can hold that way, or whose equation would except every element it names, is written as the equations of its elements, with a warning that the default is not kept.
+- A function Vensim does not have (ROUND, INT, MOD) is written by name: Simlin reads it back, Vensim does not.
+  Lowering one to Vensim primitives would repeat its argument, wrong for a stochastic one.
 - A display newline in a name is the `\n` escape inside a quoted name, as Vensim writes one, and a reference is spelled as its definition is, since the reader matches names as written.
 
 ## Error Handling & Compatibility Goals
 
 - **No panics across FFI/WASM boundaries**: Use `Result` for all invariant failures in production paths.
 - **Invalid MDL input**: Collect and report multiple errors rather than failing fast.
-- **Preserve xmutil permissive fallbacks**: Keep xmutil-compatible behavior (atoi semantics, empty-equation shims, implicit defaults) and document each fallback. Long-term goal is full-fidelity translation.
+- **Preserve xmutil permissive fallbacks**: Keep xmutil-compatible behavior (atoi semantics, empty-equation shims, implicit defaults) and document each fallback.
+  Long-term goal is full-fidelity translation.
 
 ## Panic/Unwrap Reduction
 
@@ -180,13 +195,17 @@ The production paths return errors rather than panicking:
 
 ## What Holds the Reader to Ground Truth
 
-Vensim's own output does. The MDL corpus tests in `tests/integration/simulate.rs` (`simulate_mdl_path` and its variants) import a corpus `.mdl` that has a Vensim run beside it (`output.csv`, `output.tab`, or the model's `.dat`), simulate it, and compare the result with that run. A change to how a file imports is right when every such test still passes.
+Vensim's own output does.
+The MDL corpus tests in `tests/integration/simulate.rs` (`simulate_mdl_path` and its variants) import a corpus `.mdl` that has a Vensim run beside it (`output.csv`, `output.tab`, or the model's `.dat`), simulate it, and compare the result with that run.
+A change to how a file imports is right when every such test still passes.
 
-The census in `tests/integration/mdl_vensim_truth.rs` asks the same question of every corpus `.mdl` with a Vensim run beside it, and pins, for each file that differs, the series that differ (`mdl_vensim_truth_series.tsv`). It is a gate: `scripts/gates.sh mdl_vensim_truth`.
+The census in `tests/integration/mdl_vensim_truth.rs` asks the same question of every corpus `.mdl` with a Vensim run beside it, and pins, for each file that differs, the series that differ (`mdl_vensim_truth_series.tsv`).
+It is a gate: `scripts/gates.sh mdl_vensim_truth`.
 
 The gates that read a `.mdl` and compare Simlin with Simlin (the save fixed point, the save-meaning check) cannot stand in for them: a reader that is wrong is wrong on both sides of those.
 
-C-LEARN (`test/xmutil_test_models/C-LEARN v77 for Vensim.mdl`) exercises subscripts, subranges, bang notation, and element-specific equations extensively. It is held to its own Vensim reference run by `simulates_clearn` and its companions in `tests/integration/simulate.rs`.
+C-LEARN (`test/xmutil_test_models/C-LEARN v77 for Vensim.mdl`) exercises subscripts, subranges, bang notation, and element-specific equations extensively.
+It is held to its own Vensim reference run by `simulates_clearn` and its companions in `tests/integration/simulate.rs`.
 
 ### Key xmutil Reference Code for Subscript Handling
 
@@ -203,6 +222,7 @@ C-LEARN (`test/xmutil_test_models/C-LEARN v77 for Vensim.mdl`) exercises subscri
 
 ## Future: Module-Style View Splitting
 
-The current `merge_views` approach combines all views into a single StockFlow view with group wrappers. Enhancement needed for module/level-structured models:
+The current `merge_views` approach combines all views into a single StockFlow view with group wrappers.
+Enhancement needed for module/level-structured models:
 - `vele->Ghost(adds)` parameter determines cross-level references
 - Cross-level connector handling in `XMILEGenerator.cpp:910-960`

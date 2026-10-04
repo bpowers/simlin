@@ -1,9 +1,11 @@
 # Frontend audit: src/app and src/diagram (June 2026)
 
 A multi-agent audit of the frontend TypeScript/React/CSS code in `src/app` and
-`src/diagram`, focused on real bugs (not function-component conversion). Eight
+`src/diagram`, focused on real bugs (not function-component conversion).
+Eight
 area/dimension reviewers swept the code; every finding was then adversarially
-verified by an independent agent before being accepted. 51 raw findings were
+verified by an independent agent before being accepted.
+51 raw findings were
 reduced to the confirmed list below (10 were refuted in verification).
 
 Status legend: **fixed** (in the PR introducing this doc), **deferred**
@@ -68,7 +70,8 @@ Status legend: **fixed** (in the PR introducing this doc), **deferred**
 - **Engine round-trip per view-change event** (tracked: [#707](https://github.com/bpowers/simlin/issues/707)):
   every wheel tick, momentum animation frame, and pinch update runs
   `applyPatch` + `serializeProtobuf` + full project JSON re-parse through the
-  WASM engine. Excluding these from undo history (H2) removes the worst
+  WASM engine.
+  Excluding these from undo history (H2) removes the worst
   symptom; debouncing the persistence is the tracked follow-up.
 - **Dark-mode coverage for the component library** (L14, tracked:
   [#709](https://github.com/bpowers/simlin/issues/709)): needs a pass over

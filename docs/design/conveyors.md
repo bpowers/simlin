@@ -1,25 +1,31 @@
 # Conveyor support: specification
 
-Status: proposed. This is a complete, implementable specification of XMILE
+Status: proposed.
+This is a complete, implementable specification of XMILE
 conveyor support for the simlin engine, written for an engineer or agent with no
-prior conveyor context. It commits to concrete algorithms and formulas: every
+prior conveyor context.
+It commits to concrete algorithms and formulas: every
 per-DT rule, leakage formula, initialization rule, and edge case is specified
-here, not left open. Where a rule is derived rather than quoted verbatim from a
+here, not left open.
+Where a rule is derived rather than quoted verbatim from a
 vendor spec, it says so and defines simlin's behavior authoritatively; the
 vendored fixtures ([§13](#13-test-oracles)) are the regression oracles that pin
 the numerics.
 
 Sources: the OASIS XMILE 1.0 spec (`docs/reference/xmile-v1.0.html`; windows-1252,
 use `grep -a`) for syntax and prose semantics, and isee systems' "Computational
-Details" help pages for the per-DT math. The isee "traditional conveyor" model
+Details" help pages for the per-DT math.
+The isee "traditional conveyor" model
 is the reference behavior simlin implements.
 
 **Precedence rule: Stella wins.** Where the OASIS XMILE prose and documented or
-observed Stella/isee behavior conflict, simlin follows **Stella**. Conveyors
+observed Stella/isee behavior conflict, simlin follows **Stella**.
+Conveyors
 exist in exactly one implementation that real models were built against; the
 XMILE spec is a description of that implementation, and it is far more likely
 the description is imperfect than that anyone has faithfully implemented the
-description against Stella's behavior. Where Stella's behavior is unknown
+description against Stella's behavior.
+Where Stella's behavior is unknown
 (neither documented nor observable), simlin defines deterministic behavior and
 flags it for cross-engine confirmation ([§14](#14-validation-and-logistics)).
 
@@ -27,7 +33,8 @@ flags it for cross-engine confirmation ([§14](#14-validation-and-logistics)).
 
 Conveyors are a first-class stock type in Stella / isee systems models, used for
 aging chains, disease-progression stages, and material-transport structures.
-XMILE 1.0 marks them OPTIONAL (§3.7.2, §4.2.1, §4.3). Many real `.stmx` models
+XMILE 1.0 marks them OPTIONAL (§3.7.2, §4.2.1, §4.3).
+Many real `.stmx` models
 use them; without support simlin cannot faithfully import, round-trip, or
 simulate those models.
 
@@ -40,7 +47,8 @@ confusingly**:
    (`src/simlin-engine/src/xmile/variables.rs`) has no field for `<conveyor>`;
    quick-xml ignores unknown child elements, so the conveyor spec is discarded.
 2. **Compilation then fails on the outflow.** A conveyor outflow MUST NOT have an
-   equation (the conveyor drives it — XMILE §4.3). With the block gone, that
+   equation (the conveyor drives it — XMILE §4.3).
+   With the block gone, that
    equation-less flow errors with `empty_equation`, giving no hint that the real
    problem is an unsupported conveyor.
 3. **Export loses the block.** The `<uses_conveyor/>` header option round-trips
@@ -58,13 +66,17 @@ It is now the corpus's core-conveyor oracle ([§13](#13-test-oracles)).
 
 ## 2. Concepts and vocabulary
 
-A conveyor is a stock whose contents ride a belt of fixed length. Material enters
+A conveyor is a stock whose contents ride a belt of fixed length.
+Material enters
 at the back, advances one **slat** per DT, and falls off the front after the
 **transit time** elapses.
 
-- The belt is an ordered list of slats, one slat = one DT of travel. The slat
-  count is `N = transit_time / DT`. Slat 1 is the exit (front); the highest-index
-  slat is the entry (back). Each slat holds a real quantity of material.
+- The belt is an ordered list of slats, one slat = one DT of travel.
+  The slat
+  count is `N = transit_time / DT`.
+  Slat 1 is the exit (front); the highest-index
+  slat is the entry (back).
+  Each slat holds a real quantity of material.
 - Each DT: leakage is removed, the exit slat's contents leave as the primary
   **outflow**, every slat shifts one position toward the exit, and the admitted
   inflow is deposited at the entry.
@@ -72,7 +84,8 @@ at the back, advances one **slat** per DT, and falls off the front after the
   or exponential, optionally confined to a **leak zone** (a fractional span of
   the belt).
 - Conveyors are **not FIFO**: if the transit time shrinks, material added later
-  can exit earlier. Material already on the belt keeps advancing one slat/DT
+  can exit earlier.
+  Material already on the belt keeps advancing one slat/DT
   regardless of later transit-time changes.
 
 Two related XMILE stock modes are distinct objects, not conveyors: **queues**
@@ -91,7 +104,8 @@ Reference: OASIS XMILE v1.0 §2.2.1, §3.7.2, §4.2, §4.2.1, §4.3.
 ```
 
 Two OPTIONAL boolean attributes advertise sub-features: `arrest="true|false"`
-(default false) and `leak="true|false"` (default false). They are advisory; the
+(default false) and `leak="true|false"` (default false).
+They are advisory; the
 authoritative source is the per-stock `<conveyor>` block.
 
 Three encodings of the header option exist in the wild; the reader treats
@@ -104,7 +118,8 @@ them as follows:
    `<smile>` header element (both vendored `.stmx` fixtures use this form;
    the same spelling on the `<xmile>` root is treated identically) — is
    **deliberately not mapped** onto the feature set: it is ignored,
-   harmlessly. The header option is advisory only and the per-stock
+   harmlessly.
+   The header option is advisory only and the per-stock
    `<conveyor>` block is authoritative, so such files open and simulate
    normally (pinned by reader/simulation regression tests).
 
@@ -116,7 +131,8 @@ uses those features.
 ### 3.2 The conveyor block (on a stock)
 
 `<conveyor>` is one of three mutually exclusive stock options (`<conveyor>`,
-`<queue/>`, `<non_negative/>`). The stock's `<eqn>` is the conveyor's initial
+`<queue/>`, `<non_negative/>`).
+The stock's `<eqn>` is the conveyor's initial
 value ([§7](#7-initialization)); `<inflow>`/`<outflow>` name the flows.
 
 ```xml
@@ -152,14 +168,17 @@ value ([§7](#7-initialization)); `<inflow>`/`<outflow>` name the flows.
 
 The **primary** (belt-end) outflow is the first `<outflow>` that is *not*
 marked as a leakage; every leak-marked outflow is a leakage regardless of list
-position. This implements the operative halves of XMILE §4.2.1: first-is-primary
+position.
+This implements the operative halves of XMILE §4.2.1: first-is-primary
 and its explicit-override provision ("this behavior MAY be explicitly
 overridden by tagging each leakage flow with the `<leak/>` property") — so a
-model whose first listed outflow carries `<leak/>` gets a later primary. The
+model whose first listed outflow carries `<leak/>` gets a later primary.
+The
 §4.2.1 *convention* that unmarked trailing outflows are implicitly leakages is
 deliberately NOT followed: real Stella exports always mark leaks, and silently
 leaking an unmarked flow would mis-simulate a typo, so unmarked extras are
-rejected instead (below). Compile **errors**: a conveyor with no outflows, or whose
+rejected instead (below).
+Compile **errors**: a conveyor with no outflows, or whose
 outflows are all leak-marked, cannot simulate (XMILE: at least one outflow MUST
 be the normal outflow); and, symmetrically, a conveyor with **more than one**
 non-leak outflow is rejected (`ConveyorMultipleNonLeakOutflows`) — the slat
@@ -169,13 +188,16 @@ outflow has no defined meaning (mark it `<leak/>` if leakage was intended).
 XMILE says a conveyor outflow MUST NOT carry a normal equation — the conveyor
 drives it — but real Stella exports put a **placeholder** `<eqn>0</eqn>` on
 primary conveyor outflows anyway (both vendored `.stmx` fixtures do, e.g.
-`recovering` in `sir_social_distancing_mixnot.stmx`). Per the precedence rule,
+`recovering` in `sir_social_distancing_mixnot.stmx`).
+Per the precedence rule,
 Stella's practice governs: the reader **preserves but ignores** any `<eqn>` on
 a primary conveyor outflow (it plays no role in simulation — never an error),
 and the writer **re-emits a preserved placeholder** so a round-tripped Stella
 file keeps its shape; the writer never *invents* a placeholder for a conveyor
-authored in simlin. On a *leak-marked* flow the `<eqn>` is meaningful — it
-carries the leak fraction. Real Stella models put the leak **fraction** in the
+authored in simlin.
+On a *leak-marked* flow the `<eqn>` is meaningful — it
+carries the leak fraction.
+Real Stella models put the leak **fraction** in the
 `<eqn>` of a `<leak/>`-tagged flow:
 
 ```xml
@@ -189,9 +211,11 @@ carries the leak fraction. Real Stella models put the leak **fraction** in the
 
 The reader MUST accept both encodings: the marker-`<leak/>`-plus-`<eqn>` form
 (what the vendored fixtures use) and the value-bearing `<leak>expr</leak>` form
-(the spec's example). If a flow carries **both** a value-bearing `<leak>` and an
+(the spec's example).
+If a flow carries **both** a value-bearing `<leak>` and an
 `<eqn>`, the `<leak>` content wins (it is the more specific, spec-blessed
-carrier); the `<eqn>` is preserved for round-trip but ignored for simulation. A
+carrier); the `<eqn>` is preserved for round-trip but ignored for simulation.
+A
 `<leak/>` with no fraction and no `<eqn>` is a valid "leakage, fraction TBD"
 marker (used mid-edit); it parses and represents but contributes zero leakage
 until a fraction is supplied.
@@ -206,10 +230,12 @@ until a fraction is supplied.
 ### 3.4 Non-negativity
 
 Conveyor and queue **inflows** are non-negative by requirement (uniflow); the
-primary conveyor outflow is non-negative by definition. `<non_negative/>` is
+primary conveyor outflow is non-negative by definition.
+`<non_negative/>` is
 redundant on those flows, but Stella emits it on primary conveyor outflows and
 leak flows alike (verified in the vendored fixtures), despite XMILE §4.3's
-"this property MUST NOT appear for them". Per the precedence rule the reader
+"this property MUST NOT appear for them".
+Per the precedence rule the reader
 accepts it anywhere without error (semantically inert on conveyor-driven
 flows), and the writer **preserves it as read** — round-tripped Stella files
 keep their shape; simlin-authored conveyors don't gain it.
@@ -224,7 +250,8 @@ parse and preserve them.
 
 ## 4. Runtime model and the per-DT algorithm
 
-This section is the core. It defines the exact state and update; §5–§8 fill in
+This section is the core.
+It defines the exact state and update; §5–§8 fill in
 leakage, capacity, transit-time changes, and placement.
 
 ### 4.1 Slat count and non-integer transit times
@@ -232,11 +259,13 @@ leakage, capacity, transit-time changes, and placement.
 For a conveyor with transit time `T` (the latched value — [§6](#6-variable-transit-time-sample-and-len)) and time step `DT`:
 
 - `N = round(T / DT)`, rounding half away from zero, clamped to `N ≥ 1`.
-- The **effective transit time** is `N × DT`. When `T` is not an integer multiple
+- The **effective transit time** is `N × DT`.
+  When `T` is not an integer multiple
   of `DT` (`|T/DT − round(T/DT)| > 1e-9`), the compiler emits a **Warning**
   naming the conveyor and reporting the effective transit time. simlin does not
   model fractional slats: the belt is DT-quantized, matching how isee's slat
-  model discretizes. This is a deliberate, documented divergence from a
+  model discretizes.
+  This is a deliberate, documented divergence from a
   fractional-belt reading of the FIFO help page; it is deterministic and keeps
   the belt an integer array.
 
@@ -245,7 +274,8 @@ For a conveyor with transit time `T` (the latched value — [§6](#6-variable-tr
 `N` is also bounded above defensively (`MAX_SLATS_PER_BELT`, 1,000,000 slats
 per belt): a transit/DT ratio beyond the bound — a typo'd or hostile `<len>`
 — is a loud **error** naming the conveyor, the computed slat count, and the
-bound, at initialization and at any mid-run re-latch. Without the bound the
+bound, at initialization and at any mid-run re-latch.
+Without the bound the
 belt allocation itself would abort the host process.
 
 ### 4.2 Conveyor runtime state
@@ -280,24 +310,30 @@ Slat {
 `leak_basis`/`leak_window` carry each cohort's **linear** leak *schedule* —
 what is fixed at entry is the transit-derived basis and travel window, while
 the leak fraction itself is re-read every DT ([§5.1](#51-linear-leakage));
-exponential leakage needs no per-cohort state (it reads current content). When
+exponential leakage needs no per-cohort state (it reads current content).
+When
 cohorts merge into one slat (a shortened transit time —
 [§6.2](#62-belt-growth-merging-and-non-fifo-exit)), `content`, `leak_basis`,
 and `leak_window` are all **summed**, which is exact because both are linear in
-the entering amount. For a constant transit time the deque has a fixed length
+the entering amount.
+For a constant transit time the deque has a fixed length
 `N`; a variable transit time grows/shrinks it.
 
 The conveyor variable's **reported scalar value** is the sum of all slat
-contents (total material on the belt). This is simlin's defined semantics and is
+contents (total material on the belt).
+This is simlin's defined semantics and is
 consistent with the steady-state initialization ([§7](#7-initialization)).
 
 ### 4.3 Per-DT update
 
-Conveyors integrate under Euler only ([§9.4](#94-integration-method)). Within
+Conveyors integrate under Euler only ([§9.4](#94-integration-method)).
+Within
 each Euler step, after ordinary flow equations are evaluated and before stocks
-are updated, the conveyor pass runs in **two phases over all conveyors**. Phase A
+are updated, the conveyor pass runs in **two phases over all conveyors**.
+Phase A
 reads only each conveyor's own start-of-step state; Phase B consumes Phase A's
-outputs. Because no phase reads another conveyor's same-phase results, the
+outputs.
+Because no phase reads another conveyor's same-phase results, the
 iteration order **within** each phase is irrelevant — conveyor chains and even
 conveyor cycles (A feeds B feeds A) are deterministic with no topological sort.
 
@@ -310,7 +346,8 @@ A downstream conveyor admits conveyor-driven inflow unconditionally — its
 `capacity` may be transiently exceeded (sanctioned by the XMILE capacity prose,
 which allows exceedance until drainage) and its `in_limit` does not apply
 (isee: the inflow limit "is not available if the inflow comes from another
-conveyor"). A modeler who wants blocking between conveyors inserts a queue,
+conveyor").
+A modeler who wants blocking between conveyors inserts a queue,
 which is exactly isee's guidance.
 
 **Phase A — leak and exit (each conveyor, from its own start-of-step state):**
@@ -318,23 +355,28 @@ which is exactly isee's guidance.
 0. **Arrest.** Evaluate `<arrest>` **first — before the latch**, because an
    arrested conveyor's time is suspended and it must not re-latch (otherwise a
    step where arrest, sample, and a `<len>` change coincide would freeze the
-   material yet still change the post-release entry depth). If nonzero, this
+   material yet still change the post-release entry depth).
+   If nonzero, this
    conveyor is *arrested* this step: every inflow and outflow of this conveyor
    reports 0, `slats` is left untouched (material frozen, not lost), and all
-   remaining steps — including the latch — are skipped for it. Arrest flags
+   remaining steps — including the latch — are skipped for it.
+   Arrest flags
    come from ordinary expressions already evaluated this step, so all flags
-   are known before any conveyor mutates. Clock-based state is unaffected by
+   are known before any conveyor mutates.
+   Clock-based state is unaffected by
    arrest: the `in_carry` integer-time-boundary reset
    ([§6.3](#63-capacity-and-inflow-limit)) still fires, and
    `leak_carry`/`quant_carry` persist untouched.
 
 1. **Latch.** Evaluate `<sample>`; when it is nonzero, update `latched_transit`
    from `<len>` (with the runtime hygiene of
-   [§4.4](#44-runtime-expression-hygiene)). This happens before any belt
+   [§4.4](#44-runtime-expression-hygiene)).
+   This happens before any belt
    mutation, so this step's insert (step 6) uses the newly latched depth.
 
 2. **Leak.** Evaluate each leak flow's *current* fraction (fractions are
-   re-read every DT — [§5.1](#51-linear-leakage)). Then, per slat `i`:
+   re-read every DT — [§5.1](#51-linear-leakage)).
+   Then, per slat `i`:
    - *Linear* conveyors: for each leak flow `k` in outflow-list order with slat
      `i` in its zone ([§5.3](#53-leak-zones)), compute `leak_{k,i}` per
      [§5.1](#51-linear-leakage), clamp it to the slat's **running** content
@@ -345,14 +387,16 @@ which is exactly isee's guidance.
      order-independent — [§5.2](#52-exponential-leakage)); if the sum exceeds
      that content, scale all of them down proportionally; subtract.
    Flow `k`'s reported **rate** = `(Σ_i leak_{k,i}) / DT`, quantized per
-   [§5.4](#54-integer-leakage) when `<leak_integers/>` is set. Exception: if
+   [§5.4](#54-integer-leakage) when `<leak_integers/>` is set.
+   Exception: if
    leak flow `k`'s destination is an arrested conveyor, skip it entirely this
    step (rate 0, content stays).
 
 3. **Exit.** If the primary outflow's destination is an arrested conveyor, the
    exit is *held*: outflow rate 0, and the exit slat's contents stay in place
    (they merge with the slat arriving behind them in Phase B, accumulating at
-   the exit until the destination un-arrests). Otherwise: exit **volume**
+   the exit until the destination un-arrests).
+   Otherwise: exit **volume**
    `out_vol = slats[0].content` (post-leak); primary outflow **rate** =
    `out_vol / DT`.
 
@@ -360,7 +404,8 @@ which is exactly isee's guidance.
 
 4. **Admit inflow.** Partition this conveyor's inflows into *conveyor-driven*
    (the value is an upstream conveyor's Phase-A outflow or leak) and
-   *equation-driven* (everything else; already evaluated). Then:
+   *equation-driven* (everything else; already evaluated).
+   Then:
    - `conv_vol` = Σ conveyor-driven inflow volumes — admitted unconditionally.
    - `contents_after = contents₀ − (Σ leak this step) − out_vol`.
    - `cap_room = capacity == INF ? INF : max(0, capacity − contents_after − conv_vol)`.
@@ -377,28 +422,35 @@ which is exactly isee's guidance.
 5. **Shift.** If the exit was held (step 3), leave slat 0 in place and merge the
    next slat into it (summing `content`/`leak_basis`/`leak_window`; with a
    single-slat belt there is nothing to merge and slat 0 simply stays);
-   otherwise pop slat 0 (it left as outflow). Every remaining slat advances one
-   position toward the exit. Drop trailing empty slats.
+   otherwise pop slat 0 (it left as outflow).
+   Every remaining slat advances one
+   position toward the exit.
+   Drop trailing empty slats.
 
 6. **Insert.** This step **always executes, even when `admitted = 0`** — so
    after step 6 the belt always has at least `d` slats (this matters: belt
-   length feeds zone membership, [§5.3](#53-leak-zones)). Place `admitted` into
+   length feeds zone membership, [§5.3](#53-leak-zones)).
+   Place `admitted` into
    the belt at **entry depth** `d = round(latched_transit / DT)` from the exit
    ([§6](#6-variable-transit-time-sample-and-len)) using the placement method of
-   [§8](#8-inflow-placement-spread-inputs) (default: all at depth `d`). Extend
-   the belt with empty slats if `d` exceeds its current length. Compute the
+   [§8](#8-inflow-placement-spread-inputs) (default: all at depth `d`).
+   Extend
+   the belt with empty slats if `d` exceeds its current length.
+   Compute the
    cohort's linear-leak `leak_basis`/`leak_window` per
    [§5.1](#51-linear-leakage) and **add** all three fields into the target
    slat(s) (summing with any cohort already there).
 
 **Transit-time check.** A cohort inserted at depth `d` is popped as outflow after
 exactly `d` steps (it occupies each of `d` slats for one DT), so its transit is
-`d × DT = effective transit time`. Leakage applies on every DT it is on the belt,
+`d × DT = effective transit time`.
+Leakage applies on every DT it is on the belt,
 including the DT it exits.
 
 **Conservation.** Every step, for every conveyor:
 `admitted − out_vol − Σ leak = Δ(Σ slats.content)` exactly (up to f64
-arithmetic). The reference prototype asserts this on every scenario step.
+arithmetic).
+The reference prototype asserts this on every scenario step.
 
 **Visibility to other equations.** The values the pass produces follow the VM's
 normal flow/stock timing ([§9.3](#93-runtime-vm-design)):
@@ -410,10 +462,12 @@ normal flow/stock timing ([§9.3](#93-runtime-vm-design)):
   reader never sees a pre-clamp requested rate.
 - The conveyor's own stock value follows stock semantics: equations evaluated
   during step `t` read the **start-of-step** contents; the post-update
-  `Σ slats.content` becomes the value at `t + DT`. Reading the stock therefore
+  `Σ slats.content` becomes the value at `t + DT`.
+  Reading the stock therefore
   never creates an ordering dependency on the pass.
 - The pass's *inputs* (`arrest`/`sample`/`len`/`capacity`/`in_limit`, leak
-  fractions, requested inflow rates) must be computable **before** the pass. A
+  fractions, requested inflow rates) must be computable **before** the pass.
+  A
   same-step cycle from a pass output back into a pass input (e.g.
   `capacity = f(graduating)`) is a compile-time `CircularDependency` error —
   unless the path runs through the conveyor's stock value, which (as a
@@ -423,15 +477,18 @@ normal flow/stock timing ([§9.3](#93-runtime-vm-design)):
 
 `<len>`, `<capacity>`, `<in_limit>`, leak fractions, and inflow equations are
 arbitrary expressions, so invalid values are reachable at runtime even when the
-compile-time checks pass. The rules (all simlin-defined, chosen for
+compile-time checks pass.
+The rules (all simlin-defined, chosen for
 determinism):
 
 - **Transit time.** At each latch (step 1): a finite value is clamped to
   `max(DT, value)`; a non-finite (NaN/±INF) value leaves `latched_transit`
-  unchanged. The *initial* latch (during initialization) with a non-finite or
+  unchanged.
+  The *initial* latch (during initialization) with a non-finite or
   `≤ 0` value is a runtime initialization error.
 - **Leak fractions.** Linear fractions clamp to `[0, 1]`; exponential rates
-  clamp to `[0, ∞)`; NaN is treated as 0 (no leak). All leak fractions are
+  clamp to `[0, ∞)`; NaN is treated as 0 (no leak).
+  All leak fractions are
   **re-read every DT** (isee: "leak fractions can change over time and the
   current values will be used") — what is fixed at a cohort's entry is its
   transit-derived `leak_basis`/`leak_window` schedule, never the fraction
@@ -448,7 +505,8 @@ determinism):
 ## 5. Leakage
 
 The conveyor-level `exponential_leak` flag selects the model for **all** its leak
-flows. The per-flow number `f` from `<leak>`/`<eqn>` is interpreted differently
+flows.
+The per-flow number `f` from `<leak>`/`<eqn>` is interpreted differently
 by model (this dual meaning is isee's actual behavior and is specified here
 explicitly):
 
@@ -474,7 +532,8 @@ depth** `d = round(latched_transit / DT)` is where default-placement material is
 inserted (step 6); a cohort's **insertion depth** `d_c` is where it actually
 lands (`d_c = d` for default placement; `d_c < d` for most spread-input shares;
 only a `dest` share can land beyond `d`, on a stale-tail slat —
-[§8](#8-inflow-placement-spread-inputs)). After a transit shrink the *physical*
+[§8](#8-inflow-placement-spread-inputs)).
+After a transit shrink the *physical*
 belt can be longer than `d` (a stale tail of older material) — a new cohort's
 journey is its own `d_c` slats, **not** the physical belt length.
 
@@ -502,16 +561,20 @@ leak_window[k] -= use                        // consumed by travel, regardless o
 
 (The `min` with `M_k(d)` in the window matters only for a `dest` share landing
 on a stale-tail slat beyond `d`: it caps that share's travel window at an entry
-cohort's. For every other placement `d_c ≤ d` and the `min` is a no-op.)
+cohort's.
+For every other placement `d_c ≤ d` and the `min` is a no-op.)
 
 For default placement (`d_c = d`) with a constant fraction, the lifetime total
 is exactly `f_k × A` — the full documented fraction, leaked evenly over the
-cohort's own `d`-slat journey. This holds **regardless of the physical belt
+cohort's own `d`-slat journey.
+This holds **regardless of the physical belt
 length**: after a transit shrink a new cohort still leaks `f_k × A` in total
-(the denominator is its own path, never the stale-tail length). With a
+(the denominator is its own path, never the stale-tail length).
+With a
 time-varying fraction the lifetime total is `Σ over its in-zone DTs of
 f_k(t) × basis` — the isee current-values rule; "fraction of the entering
-cohort" is then only the constant-`f` reading. For a spread-input share
+cohort" is then only the constant-`f` reading.
+For a spread-input share
 inserted mid-belt (`d_c < d`) the per-DT amount matches an entry cohort of the
 same size and the window is prorated to the zone slats it will actually
 traverse — matching isee's "linear leak fractions will be applied only for the
@@ -522,15 +585,18 @@ flow `k`.
 Under a constant transit time the window never binds early and the totals are
 exact (scenario S3); the window exists to bound a cohort's leakable travel when
 zone membership shifts under it (a partial zone combined with a belt-length
-change, the one corner where in-zone DT counts can drift). In that corner a
+change, the one corner where in-zone DT counts can drift).
+In that corner a
 cohort under-leaks deterministically, never over-leaks; the residual is
 simlin-defined behavior (vendor docs are silent at this level of detail).
 
 Constraint: `Σ_k f_k ≤ 1` across a conveyor's linear leak flows; at exactly 1
 the primary outflow is 0 (isee: "with a leak fraction of 1, there will be no
-outflow. If the sum of the leak fractions over multiple leakages is larger
+outflow.
+If the sum of the leak fractions over multiple leakages is larger
 than 1, the last, or later, leakages may get less than their leak fraction
-suggests"). The check is enforced at runtime by the content clamp in step-2
+suggests").
+The check is enforced at runtime by the content clamp in step-2
 priority order — exactly the later-leakages-get-less behavior isee describes —
 and the compiler warns when constant leak fractions sum above 1.
 
@@ -551,14 +617,16 @@ with time-varying fractions). isee's **"Ignore losses from earlier leak
 zones"** toggle selects the other interpretation: when the conveyor sets
 `ignore_earlier_zone_losses` ([§9.1](#91-data-model)), `r_k = 1` for every
 flow (each `f` applies to the inflowing amount — the same two leaks then
-remove 100%, and the XMILE prose becomes exact). For identical or full-belt
+remove 100%, and the XMILE prose becomes exact).
+For identical or full-belt
 zones — every model in the vendored corpus — the two interpretations coincide
 (`r_k = 1` always).
 
 ### 5.2 Exponential leakage
 
 `f` is a per-time-unit **rate**, re-read every DT like all leak fractions; each
-in-zone slat loses that fraction of its content per DT. With multiple
+in-zone slat loses that fraction of its content per DT.
+With multiple
 exponential flows, **overlapping rates add** (isee: "If the leak zones overlap
 the leakage fractions will be added" and "with exponential leakage all the
 leakages are computed always"): every flow's leak is computed from the slat's
@@ -572,12 +640,15 @@ leak_{k,i} = content₀_i × f_k(now) × DT               (slat i in flow k's zo
 
 Two 0.1/time leaks over the same zone therefore behave exactly like one
 0.2/time leak (each reporting half), not the `1 − 0.9×0.9` sequential
-compounding. If the summed leaks would exceed the slat's content
+compounding.
+If the summed leaks would exceed the slat's content
 (`Σ_k leak_{k,i} > content₀_i`), all flows' leaks from that slat scale down
 proportionally so exactly the content drains — never negative, and still
-order-independent. Exponential leakage carries no per-cohort state — it depends
+order-independent.
+Exponential leakage carries no per-cohort state — it depends
 only on current content — so it is unaffected by transit-time changes and by
-cohort merging. Steady state per slat is the factor `(1 − (Σ_k f_k)×DT)`,
+cohort merging.
+Steady state per slat is the factor `(1 − (Σ_k f_k)×DT)`,
 matching the isee closed form for a single flow.
 
 ### 5.3 Leak zones
@@ -585,13 +656,17 @@ matching the isee closed form for a single flow.
 `leak_start = a` and `leak_end = b` (`0 ≤ a ≤ b ≤ 1`) measure fractional belt
 position **from the inflow (entry) side**: position 0 = entry, position 1 = exit
 (XMILE's "fraction of conveyor length" — the zone is a region of the *belt*, not
-of a cohort's journey). With `L` the current belt length in slats, slat `i`
+of a cohort's journey).
+With `L` the current belt length in slats, slat `i`
 (where `i = 0` is the exit) has center position `p_i = (i + 0.5) / L` measured
-from the exit, i.e. `1 − p_i` from the entry. Slat `i` is **in zone** when
-`a ≤ (1 − p_i) ≤ b`. In-zone membership is evaluated against the belt as it
+from the exit, i.e. `1 − p_i` from the entry.
+Slat `i` is **in zone** when
+`a ≤ (1 − p_i) ≤ b`.
+In-zone membership is evaluated against the belt as it
 exists at that moment: at step 2 for leaking, and at step 6 (for the `M_k(d)` /
 `M_k(d_c)` counts of [§5.1](#51-linear-leakage)) for a cohort's fixed schedule.
-Defaults `a = 0, b = 1` put the whole belt in zone. A shorter zone leaks the
+Defaults `a = 0, b = 1` put the whole belt in zone.
+A shorter zone leaks the
 same total (linear) or the same per-DT fraction (exponential) concentrated over
 fewer slats.
 
@@ -600,7 +675,9 @@ fewer slats.
 With `<leak_integers/>`, flow `k` accumulates its computed real leak into
 `leak_carry[k]` each DT; it actually removes `floor(leak_carry[k])` whole units
 (distributed from the in-zone slats, exit-most first) and retains the fractional
-remainder in `leak_carry[k]`. Reported rate = whole units removed / DT. Linear
+remainder in `leak_carry[k]`.
+Reported rate = whole units removed / DT.
+Linear
 `leak_window` is consumed by in-zone travel ([§5.1](#51-linear-leakage))
 independent of the quantization, so the carry redistributes timing without
 changing a cohort's schedule.
@@ -614,32 +691,40 @@ changing a cohort's schedule.
 
 ### 6.1 Latching
 
-`latched_transit` starts at the initial value of `<len>`. Each DT, `<sample>` is
+`latched_transit` starts at the initial value of `<len>`.
+Each DT, `<sample>` is
 evaluated; when it is nonzero, `latched_transit` is updated to the current value
-of `<len>` (default `<sample> = 1`, so it re-latches every DT). Newly entering
-material is placed at depth `round(latched_transit / DT)` (step 6). Material
+of `<len>` (default `<sample> = 1`, so it re-latches every DT).
+Newly entering
+material is placed at depth `round(latched_transit / DT)` (step 6).
+Material
 already on the belt is **never** repositioned — it keeps advancing one slat/DT.
 
 ### 6.2 Belt growth, merging, and non-FIFO exit
 
 If `latched_transit` increases, the entry depth `d` grows; the belt extends with
 empty slats behind existing material (which continues shifting forward on
-schedule). If `latched_transit` decreases, newly entering material is placed
+schedule).
+If `latched_transit` decreases, newly entering material is placed
 shallower and can therefore exit **before** older, deeper material — the
-documented non-FIFO behavior. The belt is not truncated; it shrinks naturally as
+documented non-FIFO behavior.
+The belt is not truncated; it shrinks naturally as
 empty tail slats fall off during shifts.
 
 When a new cohort's insertion depth lands on a slat that already holds material
 (a shortened transit), the cohorts **merge**: `content`, `leak_basis`, and
-`leak_window` are summed field-wise. Summation is exact for linear leakage
+`leak_window` are summed field-wise.
+Summation is exact for linear leakage
 (both the per-DT amount and the lifetime budget are linear in the entering
-volume) and irrelevant for exponential leakage (stateless). Each cohort's leak
+volume) and irrelevant for exponential leakage (stateless).
+Each cohort's leak
 schedule was fixed at its own entry ([§5.1](#51-linear-leakage)), so a later
 transit change never retroactively alters it.
 
 ### 6.3 Capacity and inflow limit
 
-Both default to INF. Per-DT (`vol = rate × DT`):
+Both default to INF.
+Per-DT (`vol = rate × DT`):
 
 Both apply to **equation-driven** inflows only; conveyor-driven inflows bypass
 both (the never-blocked rule of [§4.3](#43-per-dt-update): capacity may be
@@ -649,10 +734,12 @@ available if the inflow comes from another conveyor").
 - **Capacity** bounds instantaneous contents: `cap_room = capacity −
   contents_after − conv_vol` (step 4), where `contents_after` credits the room
   freed by this DT's outflow **and leak**, and `conv_vol` is the
-  unconditionally-admitted conveyor-driven inflow. This implements isee's
+  unconditionally-admitted conveyor-driven inflow.
+  This implements isee's
   documented `MIN((Capacity − Conveyor)/DT + total outflow volume, inflow)`
   formula, reading "total outflow volume" as the sum of everything leaving the
-  conveyor this DT — leakage flows *are* outflows of a conveyor. If Stella's
+  conveyor this DT — leakage flows *are* outflows of a conveyor.
+  If Stella's
   "total outflow" turns out to mean the primary outflow only, capacity+leak
   models would admit slightly less there; the interpretation is flagged for
   cross-engine confirmation ([§14](#14-validation-and-logistics)).
@@ -668,12 +755,14 @@ available if the inflow comes from another conveyor").
     volume in violation of the uniflow rule ([§3.4](#34-non-negativity)).
 
 Equation-driven admitted inflow is `min(req_vol, cap_room, limit_vol)`,
-apportioned in inflow order (step 4). Blocked material stays upstream.
+apportioned in inflow order (step 4).
+Blocked material stays upstream.
 
 ### 6.4 Discrete conveyors
 
 `discrete="true"` makes the conveyor move whole units ("batches") instead of a
-continuous stream. Its complete semantics are three rules, all already
+continuous stream.
+Its complete semantics are three rules, all already
 integrated into the algorithm above:
 
 1. **Quantized admission, tracked per inflow.** Step 4's *equation-driven*
@@ -683,7 +772,8 @@ integrated into the algorithm above:
    boundary-resetting `in_carry`) so that every whole unit that eventually
    inserts is attributable to the specific upstream flow whose clearance
    accrued it — even on a later step where that inflow's request has dropped
-   to 0, and even with several inflows. Per step:
+   to 0, and even with several inflows.
+   Per step:
    - Step 4 apportions the clearance in listed order as usual; each inflow's
      share accrues to its own carry: `quant_carry[j] += cleared_j`.
    - Insertion walks the inflows **in listed order** with a shared capacity
@@ -701,8 +791,10 @@ integrated into the algorithm above:
      insertion.
    Un-inserted carry is never taken from upstream — an inflow's reported rate
    reflects only its inserted units, so conservation and the capacity bound
-   both hold exactly. Slat contents therefore stay integral, and exits arrive
-   as integral lumps. Conveyor-driven inflow bypasses quantization entirely
+   both hold exactly.
+   Slat contents therefore stay integral, and exits arrive
+   as integral lumps.
+   Conveyor-driven inflow bypasses quantization entirely
    (never blocked — [§4.3](#43-per-dt-update); it is already integral when the
    upstream is discrete, which the queue-fed case mandates).
 
@@ -723,7 +815,8 @@ integrated into the algorithm above:
    slat `i` belongs to block `u = floor(i × DT)` (well-defined for any DT,
    integer `1/DT` or not), giving `U = floor((N − 1) × DT) + 1` blocks (the
    number of blocks that actually own a slat; equal to `N × DT` when `1/DT` is
-   integral, and never producing an empty block when it is not). A scalar
+   integral, and never producing an empty block when it is not).
+   A scalar
    initial value is divided across the `U` blocks, the whole per-block share
    placed in that block's deepest slat rather than spread evenly; an explicit
    init list places each entry the same way
@@ -734,7 +827,8 @@ enforced as a compile error — [§11](#11-queues-and-the-conveyor-side-of-queue
 
 ## 7. Initialization
 
-The stock `<eqn>` gives the initial value `V`. Two forms:
+The stock `<eqn>` gives the initial value `V`.
+Two forms:
 
 ### 7.1 Scalar initial value, steady-state fill
 
@@ -752,7 +846,8 @@ configuration, linear or exponential, any zones, any number of flows):
    `c[i-1] = max(0, c[i] −` (the leak slat `i` sheds in one DT)`)` — the
    `max(0, ·)` clamp matters exactly when leak fractions sum above 1, which
    compiles with only a warning ([§5.1](#51-linear-leakage)).
-2. Let `S = Σ_i c[i]`. Set the cohort scale `E = V / S` (or `E = 0` if `S = 0`).
+2. Let `S = Σ_i c[i]`.
+   Set the cohort scale `E = V / S` (or `E = 0` if `S = 0`).
 3. Initialize each slat `i` as a cohort of entering volume `E` that has already
    traveled to position `i`, carrying **exactly the [§5.1](#51-linear-leakage)
    schedule** of an entry cohort (fractions and `r_k` evaluated at their
@@ -761,7 +856,8 @@ configuration, linear or exponential, any zones, any number of flows):
    included, so a staggered later-zone flow (S15) leaks against the surviving
    material, not the original entry amount — and `leak_window[k] =
    leak_basis[k] ×` (the number of flow-`k` in-zone slats from `i` to the
-   exit, inclusive), i.e. the unspent remainder of its schedule. The
+   exit, inclusive), i.e. the unspent remainder of its schedule.
+   The
    retained-profile simulation in step 1 uses the same initial-value
    fractions.
 
@@ -776,21 +872,24 @@ authoritative):
 
 ### 7.2 Explicit per-slat list
 
-A comma-separated `<eqn>` list initializes the belt directly. Two
+A comma-separated `<eqn>` list initializes the belt directly.
+Two
 interpretations exist in isee's documentation (its "Initializing Discrete
 Stocks" help page — an isee source, not the OASIS spec: "a number of values
 equal to the transit time, or the transit time divided by DT"), disambiguated
 by list length:
 
 - **Length `N` (one entry per slat):** entry `j` (1-based, front first) fills
-  slat `j − 1` directly. This is the only interpretation available for
+  slat `j − 1` directly.
+  This is the only interpretation available for
   non-integer transit times, per the isee rule.
 - **Any other length (one entry per time unit):** using the time-unit blocks of
   [§6.4](#64-discrete-conveyors) rule 3 (slat `i` in block `floor(i × DT)`,
   `U = floor((N − 1) × DT) + 1` blocks), entry `v_u` fills block `u`: split evenly across
   the block's slats for a **continuous** conveyor (so the outflow during unit
   `u` totals `v_u`), or placed whole in the block's deepest slat for a
-  **discrete** conveyor (isee "start of each time unit" semantics). The list is
+  **discrete** conveyor (isee "start of each time unit" semantics).
+  The list is
   normalized to `U` entries first: extra entries are truncated, a short list
   repeats its last entry.
 - When `N` equals `U` (DT = 1) the two interpretations coincide.
@@ -804,11 +903,13 @@ On an **arrayed** conveyor the list follows the array equation form
 list is shared by every element belt, while in the non-apply-to-all form each
 `<element>` equation that is a list initializes **that element's** belt (XMILE
 §4.5.2: each element MAY define its own equation, and a conveyor stock's
-equation is its initial value). Mixing forms is well-defined because each
+equation is its initial value).
+Mixing forms is well-defined because each
 element belt is independent: an element whose equation is not a list keeps
 the ordinary [§7.1](#71-scalar-initial-value-steady-state-fill) steady fill
 from its own initial, and an EXCEPT-default equation that is itself a list
-applies to every element without an explicit `<element>` entry. Each
+applies to every element without an explicit `<element>` entry.
+Each
 element's list is normalized independently, and the compile-time placeholder
 (below) carries each element's own normalized total.
 
@@ -826,7 +927,8 @@ queue initial, another belt's parameters) sees the normalized total.
 The default XMILE conveyor places all admitted inflow at the entry (depth `d`).
 isee models may select another placement via `isee:spreadflow` on the inflow.
 The **bytecode VM** implements all five; each distributes the admitted volume `A`
-(from step 4) across slats at insert time (step 6). The **wasm backend** lowers
+(from step 4) across slats at insert time (step 6).
+The **wasm backend** lowers
 only `beginning` and refuses the other four loudly
 ([§9.5](#95-wasmgen), GH #946), so a spread-input model is VM-only today:
 
@@ -835,7 +937,8 @@ Definitions used below: `d` = the entry depth (step 6); target slats are indexed
 physical belt `i ∈ 0..L−1` (see its row); a slat's **fractional position from
 the entry side** over the entry path is `x_i = 1 − (i + 0.5)/d` (so `x ≈ 0` at
 the entry slat `i = d−1`, `x ≈ 1` at the exit slat `i = 0`, consistent with the
-[§5.3](#53-leak-zones) orientation). Every placement distributes the admitted
+[§5.3](#53-leak-zones) orientation).
+Every placement distributes the admitted
 volume `A` as per-slat shares `A_i ≥ 0` with `Σ A_i = A` **exactly** — no
 placement may lose admitted material:
 
@@ -892,12 +995,16 @@ pub enum SpreadFlow { Beginning, Even, Dest, Dist(String), Source }  // on a Flo
 ### 9.2 Protobuf, compatibility-critical
 
 Protobuf is the one place backward compatibility is REQUIRED (a DB holds
-serialized instances). `Variable.Stock` and `Variable.Flow` use field numbers up
+serialized instances).
+`Variable.Stock` and `Variable.Flow` use field numbers up
 through 12. Add new fields with **fresh, never-reused numbers** (e.g. `optional
 Conveyor conveyor = 13;` on Stock, `optional Leakage leakage = 13;` and `optional
 SpreadFlow spreadflow = 14;` on Flow) plus new `Conveyor`/`Leakage`/`SpreadFlow`
-messages. Absent fields decode to `None`, so old serialized stocks remain valid
-plain stocks. Regenerate with `pnpm build:gen-protobufs`. Never renumber or
+messages.
+Absent fields decode to `None`, so old serialized stocks remain valid
+plain stocks.
+Regenerate with `pnpm build:gen-protobufs`.
+Never renumber or
 repurpose an existing field.
 
 ### 9.3 Runtime (VM) design
@@ -910,7 +1017,8 @@ pushback on the inflow cannot be expressed as fixed equations):
 
 - **State.** `Vm` gains a `conveyors: Box<[ConveyorState]>` side table
   ([§4.2](#42-conveyor-runtime-state)), parallel to `graphical_functions` /
-  `prev_values` (`src/simlin-engine/src/vm.rs`). Each conveyor variable and its
+  `prev_values` (`src/simlin-engine/src/vm.rs`).
+  Each conveyor variable and its
   driven outflow/leak/inflow slots map to entries in this table via the layout.
 - **Update hook.** Add the two-phase conveyor pass
   ([§4.3](#43-per-dt-update)) inside the Euler loop's `eval_step`, ordered
@@ -919,9 +1027,11 @@ pushback on the inflow cannot be expressed as fixed equations):
   expressions) and **before** both stock integration and any equation that
   *reads* a pass output — the §4.3 "Visibility to other equations" rules are
   the normative ordering; equations reading a driven flow are dependency-
-  ordered after the pass, not lumped with "ordinary flows" generally. Phase A
+  ordered after the pass, not lumped with "ordinary flows" generally.
+  Phase A
   writes each conveyor's outflow and leak rates; Phase B writes admitted-inflow
-  rates and advances the belts. Within each phase the iteration order over
+  rates and advances the belts.
+  Within each phase the iteration order over
   conveyors is arbitrary (no topological sort — [§4.3](#43-per-dt-update)).
   The conveyor's own value slot receives `Σ slats.content`.
 - **Initialization** ([§7](#7-initialization)) runs in the initials pass, filling
@@ -930,24 +1040,29 @@ pushback on the inflow cannot be expressed as fixed equations):
   leak flows) compile to a "driven by conveyor" marker, not an equation — the
   primary outflow's `<eqn>` is absent or an ignored Stella placeholder
   ([§3.3](#33-leakage-flows)), and a leak flow's fraction expression feeds the
-  cohort schedule rather than the flow slot. The `empty_equation` error no
+  cohort schedule rather than the flow slot.
+  The `empty_equation` error no
   longer fires; instead the compiler wires the flow's value slot to the owning
   conveyor's update output.
 
 ### 9.4 Integration method
 
-Conveyors require **Euler**. The slat model is defined per-DT; RK2/RK4 substeps
+Conveyors require **Euler**.
+The slat model is defined per-DT; RK2/RK4 substeps
 (`src/simlin-engine/src/vm.rs`, the `RungeKutta4` arm evaluates the derivative at
 fractional-DT points) have no meaning for a belt that advances one slat per full
-DT. If `sim_specs.method` is RK2 or RK4 and any conveyor is present, compilation
+DT.
+If `sim_specs.method` is RK2 or RK4 and any conveyor is present, compilation
 **fails with a clear error** naming a conveyor and stating that conveyors require
-Euler integration. This follows the GH #486 precedent (LTM's non-Euler
+Euler integration.
+This follows the GH #486 precedent (LTM's non-Euler
 rejection, `src/simlin-engine/src/db/assemble.rs`).
 
 ### 9.5 wasmgen
 
 The WebAssembly backend mirrors the VM opcode-for-opcode with **no silent VM
-fallback** (established rule, `src/simlin-engine/src/wasmgen`). The conveyor
+fallback** (established rule, `src/simlin-engine/src/wasmgen`).
+The conveyor
 side table and update pass are lowered to wasm the same way the GF/snapshot
 regions are, by `src/simlin-engine/src/wasmgen/belt.rs`: each belt's slats live
 in a bump-allocated growable ring addressed by a static descriptor, and the
@@ -958,10 +1073,12 @@ per-DT phase A / phase B update is emitted as unrolled, plan-specialized code
 `compile_datamodel_to_artifact` / `compile_datamodel_to_wasm` route it through the
 same `queue_compile::compile_sim` dispatch the VM takes, so the blob simulates the
 identical expanded project and the resolved `ConveyorPlan`s are byte-identical to
-the VM's. There is no up-front marker scan, no `#[cfg(test)]` seam, and no silent VM
+the VM's.
+There is no up-front marker scan, no `#[cfg(test)]` seam, and no silent VM
 fallback: a conveyor construct the belt pass cannot lower correctly is refused
 loudly by `belt::reject_unsupported`, and there are exactly two such conditions --
-see below. Both backends simulate belts in production, and the whole
+see below.
+Both backends simulate belts in production, and the whole
 `test/conveyors/` corpus is gated on them agreeing column-for-column
 (`tests/integration/simulate.rs`, `simulate_special_path`).
 
@@ -999,90 +1116,116 @@ The lowering covers everything but §8 spread inputs:
   container-skipping initials re-run.
 
 **Container access publishes at step start** (`emit_publish_containers`), before the
-Flows phase -- not between Flows and Stocks where the pass proper runs. The two hook
-points are separate on purpose. A container variable is a hidden no-flow stock, so the
+Flows phase -- not between Flows and Stocks where the pass proper runs.
+The two hook
+points are separate on purpose.
+A container variable is a hidden no-flow stock, so the
 value published there is what a Flows-phase reader of `SUM(belt)` sees, and it must
-reflect the slats as the previous step's pass left them. Publishing after Flows would
+reflect the slats as the previous step's pass left them.
+Publishing after Flows would
 feed every consumer the step-before-last's belt; publishing after the pass would save
-this step's row with the NEXT step's start state. Both mis-placements are pinned red by
-`container_publish_is_start_of_step_not_post_pass`. The belt branch runs before the
+this step's row with the NEXT step's start state.
+Both mis-placements are pinned red by
+`container_publish_is_start_of_step_not_post_pass`.
+The belt branch runs before the
 queue branch, matching the VM; they write disjoint slots, so the order is documentation
 rather than a constraint.
 
 Each access kind is a compile-time constant of the plan, so the publish is one
 open-coded reduction per container variable with no runtime dispatch on the kind; the
-only runtime loops are the reducers' walks over the belt's dynamic slat count. Two
+only runtime loops are the reducers' walks over the belt's dynamic slat count.
+Two
 details are easy to get wrong and are pinned by
-`container_reduces_over_the_physical_length_not_the_entry_depth`. Every reducer -- and
+`container_reduces_over_the_physical_length_not_the_entry_depth`.
+Every reducer -- and
 `conv[j]`'s bound check, and `SIZE` itself -- ranges over the PHYSICAL slat count
 `len`, never the entry depth `d`: the two diverge whenever `<len>` collapses onto a
 belt whose tail still holds material, since `shift` refuses to retire a non-empty
-trailing slat. And `MIN`/`MAX` fold with a `select` on a strict comparison, because
+trailing slat.
+And `MIN`/`MAX` fold with a `select` on a strict comparison, because
 Rust's `f64::min`/`f64::max` skip a NaN operand where wasm's instructions propagate it
 -- reachable on a belt carrying infinite material, where `INF - INF` leaves NaN slats
-beside finite ones. The empty-container arms (`NaN` for every reducer but `SUM` and
+beside finite ones.
+The empty-container arms (`NaN` for every reducer but `SUM` and
 `SIZE`) are emitted, but unreachable from a belt: `init_belts` allocates
 `slat_count() >= 1` slats and every phase B ends by regrowing to `d >= 1`.
 
-`INIT(<container access>)` needs the same reconciliation the queue side needed. The
+`INIT(<container access>)` needs the same reconciliation the queue side needed.
+The
 `initial_values` snapshot precedes belt init (belt init reads Flows-phase parameters),
-so it freezes each container stock's `0` placeholder. `run_initials` therefore
+so it freezes each container stock's `0` placeholder.
+`run_initials` therefore
 re-evaluates the initials runlist over the published `curr` -- SKIPPING the container
 stocks themselves, along with a §7.2 list-initialized conveyor stock -- and
-re-snapshots. Both wasm skip sets come from `ConveyorPass::reconcile_skip_offsets`,
-mirroring `vm.rs:1616-1628`. Published container slots are also `pass_written_offsets`,
+re-snapshots.
+Both wasm skip sets come from `ConveyorPass::reconcile_skip_offsets`,
+mirroring `vm.rs:1616-1628`.
+Published container slots are also `pass_written_offsets`,
 so `set_value` rejects them in both backends (GH #871).
 
 Two conditions still return `WasmGenError::Unsupported` (loud), never a silent
-fallback or a mis-lowering. One is a missing feature: a non-`beginning`
+fallback or a mis-lowering.
+One is a missing feature: a non-`beginning`
 `isee:spreadflow` inflow placement (§8 -- `even`, `dest`, `dist`, `source`; GH #946).
 The other is a soundness guard on the emitted code rather than a feature gap: a
-`conveyor::slat_bound()` above `i32::MAX`. `b_slat_count`'s result is narrowed with
+`conveyor::slat_bound()` above `i32::MAX`.
+`b_slat_count`'s result is narrowed with
 `i32.trunc_f64_s`, which traps outside i32's range, and the §4.1 bound check that
-precedes it makes the narrowing sound only if the bound ITSELF fits. Production's
+precedes it makes the narrowing sound only if the bound ITSELF fits.
+Production's
 1,000,000 does, and so does every test `SlatBoundGuard`, but the narrowing must not
-silently depend on a constant it never checks. That guard also underwrites `conv[j]`:
+silently depend on a constant it never checks.
+That guard also underwrites `conv[j]`:
 because every belt's `len` fits in an i32, a `j` whose 0-based form does not is out of
 range for every belt and lowers to a constant NaN -- narrowing it with `as i32` would
-wrap `conv[2^32 + 1]` onto the exit slat. That arm survives GH #946 and has no issue to
+wrap `conv[2^32 + 1]` onto the exit slat.
+That arm survives GH #946 and has no issue to
 close it.
 
 Three pieces of the belt's cross-step state live in a **static** region rather
 than in the slat ring or the descriptor: `leak_carry` (§5.4), `quant_carry`
-(§6.4 rule 1), and the model-wide `conveyor_last_unit` (§6.3). The VM clones a
+(§6.4 rule 1), and the model-wide `conveyor_last_unit` (§6.3).
+The VM clones a
 whole `Vec<ConveyorState>` plus its `last_unit` for the mid-run preview, so the
 wasm preview must save and restore all three EXPLICITLY -- everything else rides
-the ring clone or the descriptor save. `emit_preview_save`'s rustdoc carries the
+the ring clone or the descriptor save.
+`emit_preview_save`'s rustdoc carries the
 exhaustive table; an omission there is silent, leaving the real belt with an
 advanced carry that changes what the resumed step admits.
 
 Two Rust-vs-wasm divergences hide in `conveyor_time_unit`'s three lines.
 `f64::round` rounds half away from zero where wasm's `f64.nearest` rounds half to
 even; `expr as i64` saturates in Rust (mapping NaN to 0) where `i64.trunc_f64_s`
-traps. Neither is reachable from today's clock -- `time` advances by exactly
+traps.
+Neither is reachable from today's clock -- `time` advances by exactly
 `dt`, so the quotient lands within a few ULP of an integer -- but `b_round` and
 `b_sat_i64` reproduce the Rust functions anyway: "unreachable" is a property of
-the caller, not of the lowering. The time unit is computed on the IDEAL grid
+the caller, not of the lowering.
+The time unit is computed on the IDEAL grid
 (`floor(start + round((time - start) / dt) * dt)`), not from the drifted
 accumulated clock, and the difference is observable: with `dt = 0.3` the
 accumulated clock reads `1.1999999999999997` at step 4, whose floor is 0, while
 the ideal `4 * 0.3` floors to 1.
 
-The `<sample>` gate must be an `if`, never a `select`. A non-latching step whose
+The `<sample>` gate must be an `if`, never a `select`.
+A non-latching step whose
 `<len>` aux holds `1e300` has a finite, i32-overflowing slat count the VM never
 looks at, and `select` evaluates both arms -- so the narrowing `i32.trunc_f64_s`
 would trap where the VM simply keeps the previous entry depth.
 
 The leak-driven flows are written into `curr` by the pass, so -- exactly like the
 exit flow -- they are retracted from the overridable-constant set and `set_value`
-rejects them, in both backends. Capacity room credits the leaked volume in the
+rejects them, in both backends.
+Capacity room credits the leaked volume in the
 same step it is shed.
 
-Two implementation notes worth keeping in view. First, `emit_quantize_integer_leak`
+Two implementation notes worth keeping in view.
+First, `emit_quantize_integer_leak`
 needs each slat's continuous shed in order to undo and re-quantize it, and that
 value cannot be recovered once `content` has moved; a linear belt's slat stride
 therefore carries one scratch word per integer leak flow, riding in the ring where
-grow, clone, and zero-tail already stride generically. Second, wasm's `f64.min`
+grow, clone, and zero-tail already stride generically.
+Second, wasm's `f64.min`
 propagates NaN where Rust's `f64::min` returns the other operand, so every §5.1
 `min` goes through a `b_fmin` helper that reproduces the Rust semantics -- the
 divergence is observable on a belt carrying infinite CONTENTS (a transit time that is
@@ -1098,11 +1241,14 @@ bound mid-run.
 ### 9.6 LTM
 
 A conveyor is a stock with non-INTEG dynamics; the flow-to-stock link-score
-formula assumes plain INTEG under Euler (GH #486). LTM treats a conveyor's
+formula assumes plain INTEG under Euler (GH #486).
+LTM treats a conveyor's
 primary outflow → downstream as an ordinary link, but the internal slat dynamics
-are not scored as INTEG. LTM analysis over a model containing a conveyor
+are not scored as INTEG.
+LTM analysis over a model containing a conveyor
 degrades **loudly** (a `Warning` naming the conveyor, emitted through the same
-diagnostic path as the auto-flip warnings), never a silently-wrong score. Full
+diagnostic path as the auto-flip warnings), never a silently-wrong score.
+Full
 LTM-through-conveyor attribution is a separate enhancement.
 
 ### 9.7 Readers, writers, and other surfaces
@@ -1111,7 +1257,8 @@ LTM-through-conveyor attribution is a separate enhancement.
   `<conveyor>` block and `<element>`-level plumbing to `Stock`, the leak
   properties and `isee:spreadflow`/`<isee:distrib_eq>` to `Flow`; accept both
   leak encodings ([§3.3](#33-leakage-flows)); emit the `<conveyor>` block and
-  `<uses_conveyor/>`. This alone fixes the round-trip corruption.
+  `<uses_conveyor/>`.
+  This alone fixes the round-trip corruption.
 - MDL: Vensim has no conveyor primitive; the `delay conveyor` name recognized in
   `src/simlin-engine/src/mdl/builtins.rs` is a distinct, separate function — not
   a conveyor, not covered here.
@@ -1139,20 +1286,24 @@ stock's units `S` and the model's time unit `t` — `<len>`: `t`; `<capacity>`:
 `S`; `<in_limit>`: `S/t`; a linear leak fraction: dimensionless; an exponential
 leak rate: `1/t`; `<sample>` and `<arrest>`: dimensionless (both are
 *conditions* evaluated for nonzero — a predicate like `TIME > 10` type-checks
-dimensionless, so requiring `t` would reject valid sample expressions). Driven
+dimensionless, so requiring `t` would reject valid sample expressions).
+Driven
 flows (primary outflow, leaks, admitted inflows) carry `S/t` like any flow.
 
 **VM lifecycle**: `Vm::reset` re-initializes the conveyor side table exactly as
 it re-runs initials (the belt is derived state — same pattern as the
-`prev_values`/`initial_values` buffers it sits beside). Each module *instance*
+`prev_values`/`initial_values` buffers it sits beside).
+Each module *instance*
 containing a conveyor owns its own `ConveyorState` (the side table is per
-instance, like module state generally). `PREVIOUS(conv, …)` reads the previous
+instance, like module state generally).
+`PREVIOUS(conv, …)` reads the previous
 step's `Σ slats.content` (the ordinary `prev_values` snapshot of the stock
 slot); `INIT(conv)` reads the initial value `V` (the ordinary `initial_values`
 snapshot).
 
 **Double-clamp composition**: a flow can be simultaneously an equation-driven
-conveyor inflow and the outflow of a non-negative upstream stock. Clamps
+conveyor inflow and the outflow of a non-negative upstream stock.
+Clamps
 compose upstream-first: the non-negative-stock clamp bounds what the upstream
 can supply, then conveyor admission (step 4) clips further; the flow's single
 reported value is the final admitted rate. (Today simlin does not enforce
@@ -1162,15 +1313,18 @@ does.)
 ## 10. Arrayed conveyors and container access
 
 An arrayed conveyor is `N_elem` **independent** conveyors, one per array element,
-each with its own `ConveyorState` and belt. Each element's belt updates by
+each with its own `ConveyorState` and belt.
+Each element's belt updates by
 [§4.3](#43-per-dt-update) independently.
 
 XMILE §4.5.2 allows a non-apply-to-all array's `<element>` blocks to carry
-per-element simulation attributes such as a per-element `<len>`. Simlin does
+per-element simulation attributes such as a per-element `<len>`.
+Simlin does
 **not** implement this: the `<conveyor>` block (transit time, capacity, inflow
 limit, sample/arrest, leak markers) is a single shared block per stock
 (`datamodel::Conveyor`), and every element evaluates the same shared
-expressions. A per-element `<conveyor>`/`<len>` inside an `<element>` block has
+expressions.
+A per-element `<conveyor>`/`<len>` inside an `<element>` block has
 no representation (tracked as GH #904); today's reader behavior is:
 
 - `<element>` with both `<eqn>` and `<len>`: the `<len>` is **silently
@@ -1184,17 +1338,21 @@ no representation (tracked as GH #904); today's reader behavior is:
 The shared expressions can still **vary per element**, because each is
 evaluated per element (apply-to-all over the stock's dimensions): a `<len>` of
 `base_transit[board]` gives each element its own transit time via an arrayed
-aux. Only a distinct per-element attribute *inside* `<element>` blocks is
-unsupported. Per-element **initial values** are supported — an `<element>`'s
+aux.
+Only a distinct per-element attribute *inside* `<element>` blocks is
+unsupported.
+Per-element **initial values** are supported — an `<element>`'s
 `<eqn>` (including a §7.2 explicit init list per element, GH #889) initializes
-that element's belt. Shared properties (units, the conveyor/leak markers)
+that element's belt.
+Shared properties (units, the conveyor/leak markers)
 apply to all elements as XMILE requires.
 
 **Container access** (XMILE §3.7.1: conveyors are containers, so `[]` and the
 array builtins MUST work over their contents when arrays are supported):
 
 - For a **scalar** conveyor, `conv[j]` (`j` 1-based from the front/exit) reads
-  `slats[j−1].content` of the current belt. `j` outside `[1, L]` (where `L` is
+  `slats[j−1].content` of the current belt.
+  `j` outside `[1, L]` (where `L` is
   the current physical belt length, which can exceed `N` after a transit
   shrink) yields NaN — the same rule as an out-of-range dynamic array
   subscript in simlin.
@@ -1203,19 +1361,23 @@ array builtins MUST work over their contents when arrays are supported):
   rules.
 - The array builtins (`SUM`, `MIN`, `MAX`, `MEAN`, `STDDEV`) over a conveyor
   operate on the current slat-content vector (length `L`); `SIZE(conv)` returns
-  `L`. All values are read from start-of-step state (like the stock value —
+  `L`.
+  All values are read from start-of-step state (like the stock value —
   [§4.3](#43-per-dt-update) visibility rules).
 - The isee **cycle-time builtin family** (`CTMEAN`, `CTSTDDEV`, `CTMAX`,
   `CTMIN`, `CTFLOW`, `CYCLETIME`, `THROUGHPUT`) requires per-material age
-  tracking the slat model does not carry. These are isee extensions, not
+  tracking the slat model does not carry.
+  These are isee extensions, not
   XMILE-mandated: they are **explicitly out of scope** and fail loudly as
   unknown builtins, exactly as today.
 
 ## 11. Queues and the conveyor side of queue–conveyor coupling
 
 Queues (`<queue/>`) are a separate FIFO batch-tracking stock type with their own
-`<uses_queue>` option and `<overflow/>` flow property (XMILE §3.7.3). Their
-internal batch management is specified in a companion queue document. This
+`<uses_queue>` option and `<overflow/>` flow property (XMILE §3.7.3).
+Their
+internal batch management is specified in a companion queue document.
+This
 section fully specifies the **conveyor side** of a queue feeding a conveyor,
 which is where the `discrete` / `batch_integrity` / `one_at_a_time` attributes
 take effect:
@@ -1246,13 +1408,16 @@ suggested implementation sequence, each step independently shippable:
 
 1. **Represent & round-trip.** Datamodel + proto + XMILE reader/writer
    ([§9.1](#91-data-model)–[§9.2](#92-protobuf-compatibility-critical),
-   [§9.7](#97-readers-writers-and-other-surfaces)). Import preserves the block;
+   [§9.7](#97-readers-writers-and-other-surfaces)).
+   Import preserves the block;
    export re-emits it; the `empty_equation` error is replaced by the conveyor
-   wiring ([§9.3](#93-runtime-vm-design)). Fixtures parse without data loss.
+   wiring ([§9.3](#93-runtime-vm-design)).
+   Fixtures parse without data loss.
 2. **Core continuous conveyor.** [§4](#4-runtime-model-and-the-per-dt-algorithm)
    update, [§7.1](#71-scalar-initial-value-steady-state-fill) scalar init,
    constant transit, single primary outflow, capacity + inflow limit, Euler-only
-   enforcement ([§9.4](#94-integration-method)). Oracle: `minimal_conveyor.xmile`.
+   enforcement ([§9.4](#94-integration-method)).
+   Oracle: `minimal_conveyor.xmile`.
 3. **Leakage & variable transit.** [§5](#5-leakage) linear + exponential + zones
    + integer leakage, [§6](#6-variable-transit-time-sample-and-len) variable
    `<len>`/`<sample>`, arrest, discrete conveyors,
@@ -1266,18 +1431,23 @@ suggested implementation sequence, each step independently shippable:
 ## 13. Test oracles
 
 The fixtures live under `test/conveyors/` (see its README for full provenance,
-licenses, and the CC BY 4.0 attribution). There is no cross-simulator reference
-series beside them: **the bytecode VM is the oracle**. What the corpus harness adds
+licenses, and the CC BY 4.0 attribution).
+There is no cross-simulator reference
+series beside them: **the bytecode VM is the oracle**.
+What the corpus harness adds
 is that every OTHER path — the protobuf round-trip, the XMILE round-trip, and the
 wasm blob — reproduces the VM column-for-column, synthetic driven flows and
 container auxes included.
 
-That is round-trip fidelity and backend parity, not numeric truth. `wasmgen/belt.rs`
+That is round-trip fidelity and backend parity, not numeric truth.
+`wasmgen/belt.rs`
 reproduces `conveyor.rs` bit for bit including its quirks (GH #942), so a shared
-belt-pass bug clears every gate here. The VM's own numerics are pinned automatically
+belt-pass bug clears every gate here.
+The VM's own numerics are pinned automatically
 only by `conveyor_tests.rs`, which transcribes the `reference_prototype.py`
 ([§15](#15-worked-examples-verified-reference-trajectories)) trajectories by hand;
-nothing executes that script. GH #951 tracks extending the prototype to the
+nothing executes that script.
+GH #951 tracks extending the prototype to the
 leak-zone, discrete, and coupled cases and running it from a Rust test against the
 fixtures below — the only check that catches a lockstep VM+wasm drift.
 
@@ -1300,25 +1470,31 @@ Each hand-authored fixture below has one `simulate_special_path` test in
   [§6.4](#64-discrete-conveyors)).
 - `queue_coupled_conveyor.xmile` — a queue serving a discrete belt, with the
   queue's `<overflow/>` claiming the refused volume
-  ([§11](#11-queues-and-the-conveyor-side-of-queueconveyor-coupling)). It pins the
+  ([§11](#11-queues-and-the-conveyor-side-of-queueconveyor-coupling)).
+  It pins the
   phase-A-before-serve interleaving, and nothing else about the queue: the
   `<overflow/>` drains the FIFO every DT, so backlog discipline and the four batch
   rules go untested (queues.md §12's `queue_wait.xmile` is still missing), and the
   belt's only inflow is the coupled one, so the `rem_cap` drawdown into the
-  equation-driven apportion loop is never exercised either. Both gaps are GH #954.
+  equation-driven apportion loop is never exercised either.
+  Both gaps are GH #954.
   Its fractional slat contents are the GH #950 divergence above.
 
 The two vendored real-world models cannot join the corpus, for reasons unrelated
-to conveyor support in either backend. Both are pinned on the exact `ErrorCode`
+to conveyor support in either backend.
+Both are pinned on the exact `ErrorCode`
 that blocks them (`BLOCKED_CONVEYOR_FIXTURES`), so resolving the underlying issue
 turns the pin red and forces a promotion decision rather than leaving the fixture
 parked as a tolerated failure:
 
-- `sir_social_distancing_mixnot.stmx` — peterhovmand corpus, CC BY 4.0. Its
+- `sir_social_distancing_mixnot.stmx` — peterhovmand corpus, CC BY 4.0.
+  Its
   conveyors live in sub-models, which expansion never descends into
-  (`ConveyorInSubmodelUnsupported`, GH #941 / #940). It would also need the §8
+  (`ConveyorInSubmodelUnsupported`, GH #941 / #940).
+  It would also need the §8
   `dist` placement (GH #946) and the isee builtin `LOOKUPMEAN`.
-- `covid19_severity.stmx` — peterhovmand corpus, CC BY 4.0. Leakage
+- `covid19_severity.stmx` — peterhovmand corpus, CC BY 4.0.
+  Leakage
   (`exponential_leak="true"` `<leak/>` flows) + arrayed conveyors, but its
   `death rate` aux sums the belts' conveyor-driven leak flows, which the engine
   refuses with `ConveyorDrivenFlowRead` (GH #944) on BOTH backends.
@@ -1338,15 +1514,18 @@ trajectories are the concrete acceptance oracles for step 2/3. §15 states
 exactly which rules the prototype does and does not execute; the unexecuted
 rules (integer/zoned leakage, discrete quantization, spread placements,
 explicit-list init) are specified in prose and get fixtures with the Rust
-implementation. Two items are logistics, not spec gaps:
+implementation.
+Two items are logistics, not spec gaps:
 
 - **Cross-engine confirmation.** Stella is the ground truth this spec targets
-  (the precedence rule in the preamble). The prototype pins simlin's own
+  (the precedence rule in the preamble).
+  The prototype pins simlin's own
   numerics; a Stella run of the vendored fixtures is the authoritative check
   and **overrides this spec wherever they disagree** — flagged interpretation
   points to probe first: the §6.3 "total outflow volume" reading, the §4.1
   non-integer-transit rounding, the §4.2 stale-tail corners, and staggered
-  zones under time-varying fractions (§5.1). Not required to start
+  zones under time-varying fractions (§5.1).
+  Not required to start
   implementing — the §15 trajectories are sufficient to build against — but
   any Stella disagreement is a spec bug to fix, not a delta to document.
 - **Diagram/editor authoring.** Rendering and authoring conveyor stocks and leak
@@ -1358,7 +1537,8 @@ implementation. Two items are logistics, not spec gaps:
 The core of the spec was transcribed into a standalone reference prototype
 (`test/conveyors/reference_prototype.py`) and run on the scenarios below; its
 trajectories are the acceptance oracles a Rust implementation must reproduce.
-Every check below **passes**. Run it with
+Every check below **passes**.
+Run it with
 `python3 test/conveyors/reference_prototype.py` (exits nonzero on any failure).
 
 **Prototype coverage — what these scenarios do and do not verify.** Executed:
@@ -1369,10 +1549,12 @@ zone-start-remaining basis (§5.1–§5.3),
 capacity and inflow limits (§6.3), discrete quantized admission against a tight
 capacity with per-inflow attribution (§6.4 rule 1), transit latching/shrink/merging (§6.1–§6.2),
 steady-state initialization (§7.1), conveyor chains, and half-away rounding
-(§4.1). **Not** executed (specified in prose only; they get fixtures with the
+(§4.1).
+**Not** executed (specified in prose only; they get fixtures with the
 Rust implementation): leak zones narrower than the belt, `<leak_integers/>`,
 spread-input placements, explicit-list initialization, and leak-fed chains
-(`source` placement). Treat only the executed set as prototype-verified.
+(`source` placement).
+Treat only the executed set as prototype-verified.
 
 **Reporting convention.** Each trajectory row shows the stock's
 **start-of-step** contents at time `t` together with the flow rates during
@@ -1408,13 +1590,17 @@ scenario.
 Reading S1–S2 together confirms the transit-time semantics: a step of inflow
 into an empty conveyor produces zero outflow for exactly `T` time units, then the
 outflow equals the inflow — a pure `T`-unit delay, which is the defining
-behavior of a conveyor. S3/S4 confirm the two leakage models produce the
+behavior of a conveyor.
+S3/S4 confirm the two leakage models produce the
 documented conservation (`1 − f` of a cohort survives for linear; the geometric
-`(1 − f·DT)^N` survival for exponential). S5/S6 confirm capacity and inflow limit
+`(1 − f·DT)^N` survival for exponential).
+S5/S6 confirm capacity and inflow limit
 throttle the admitted inflow and push unadmitted material back upstream, settling
-at the `inflow·T` / `in_limit·T` equilibria. S13/S14 pin the isee
+at the `inflow·T` / `in_limit·T` equilibria.
+S13/S14 pin the isee
 current-values rule (fractions re-read every DT against entry-fixed schedules)
-and the additive overlapping-exponential rule. S8–S10 confirm the structural
+and the additive overlapping-exponential rule.
+S8–S10 confirm the structural
 rules added in review: conveyor-driven flows are never blocked (so conveyor
 chains and cycles need no topological ordering), cohort merging under a
 shortened transit is exact summation with the full leak fraction preserved,
