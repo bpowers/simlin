@@ -34,7 +34,9 @@ Run at the start of every session:
 | `pnpm test` | Run all TypeScript tests |
 | `pnpm tsc` | TypeScript type checking |
 
-`cargo test --workspace` runs under a 3-minute wall-clock cap in both the pre-commit hook (`timeout(1)`) and CI (GitHub Actions `timeout-minutes: 3`). A test too heavy for that suite is a gate: `#[ignore = "<what it sweeps>; run under the gates profile"]`, run by `scripts/gates.sh` and by CI's `gates` job on every push to main and every pull request to main. See [rust.md](rust.md#test-time-budgets) for the budget and for what makes a test a gate.
+`cargo test --workspace` runs under a 3-minute wall-clock cap in both the pre-commit hook (`timeout(1)`) and CI (GitHub Actions `timeout-minutes: 3`).
+A test too heavy for that suite is a gate: `#[ignore = "<what it sweeps>; run under the gates profile"]`, run by `scripts/gates.sh` and by CI's `gates` job on every push to main and every pull request to main.
+See [rust.md](rust.md#test-time-budgets) for the budget and for what makes a test a gate.
 
 ## Code Coverage
 
@@ -54,7 +56,8 @@ Install: `cargo install cargo-llvm-cov`
 | `cargo bench -p simlin-engine --bench simulation` | Simulation/VM benchmarks |
 | `cargo bench -p simlin-engine --bench array_ops` | Array operation benchmarks |
 
-Results are saved in `target/criterion/` with HTML reports. See [benchmarks.md](benchmarks.md) for profiling instructions.
+Results are saved in `target/criterion/` with HTML reports.
+See [benchmarks.md](benchmarks.md) for profiling instructions.
 
 ## Generated Files
 
@@ -88,7 +91,9 @@ uv run python scripts/build_wheels.py   # Build the wheel (libsimlin + widget as
 ```
 
 `make e2e` launches a real `jupyter lab` from the pysimlin venv (synced with the
-`e2e` extra) and drives the notebook editor widget end to end. It is its own CI
-job (`pysimlin-e2e`), not part of the pre-commit hook. It needs the widget
+`e2e` extra) and drives the notebook editor widget end to end.
+It is its own CI
+job (`pysimlin-e2e`), not part of the pre-commit hook.
+It needs the widget
 assets staged into `simlin/_widget/` (`make assets`) and Playwright's chromium
 (`npx playwright install --with-deps chromium`).

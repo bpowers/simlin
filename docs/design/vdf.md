@@ -13,7 +13,8 @@ Vensim can open a `.vdf` file and show its contents without the `.mdl` model,
 because the file carries enough metadata to map variable names to time series.
 This document describes that metadata and the deterministic procedure that
 reconstructs a `Results` struct (variable names -> time series) from a VDF
-alone. The implementation is in `src/simlin-engine/src/vdf.rs` and its
+alone.
+The implementation is in `src/simlin-engine/src/vdf.rs` and its
 submodules; `tools/vdf_xray.py` is a structural inspector for the same format.
 The two implementations are pinned together by a differential parity harness
 (`parity_python_and_rust_vdf_extraction_agree` in
@@ -22,8 +23,10 @@ VDF under `test/`, extracts named results with both readers via the tool's
 `--extract-json` mode, and requires identical name sets and bitwise-identical
 values -- so a behavior change in one reader without the other fails CI.
 
-**Conventions.** All values are little-endian. Numeric data is 32-bit floats
-unless noted. All offsets are byte offsets.
+**Conventions.** All values are little-endian.
+Numeric data is 32-bit floats
+unless noted.
+All offsets are byte offsets.
 
 **Container kinds.** The first four bytes identify the container:
 
@@ -35,10 +38,12 @@ unless noted. All offsets are byte offsets.
 
 There is **no Vensim version field** anywhere in the file: a corpus survey
 across 2005-2026 found no header word or section-header field that partitions
-files by era. The format evolved compatibly -- 2008-era Vensim writes small
+files by era.
+The format evolved compatibly -- 2008-era Vensim writes small
 integers into the section-1 pre-record header region where 2019+ writes
 arena-pointer-shaped values, and a reader simply tolerates whatever is there
-because those words are not read for decoding. The magic byte is the only
+because those words are not read for decoding.
+The magic byte is the only
 structural fork.
 
 
@@ -79,7 +84,8 @@ structural fork.
 
 ## File header
 
-168 bytes, `0x00..0xA7`. Section 0's magic bytes begin at `0xA8`.
+168 bytes, `0x00..0xA7`.
+Section 0's magic bytes begin at `0xA8`.
 
 | Offset | Size | Description |
 |---|---|---|
@@ -104,7 +110,8 @@ Derived quantities:
 
 Bytes in `0x80..0xA7` are mostly zero padding plus runtime-state residue (one
 word at `0x94` carries either a small integer or a RAM-pointer-shaped value and
-is volatile across reruns of the same model). The parser locates section 0 by
+is volatile across reruns of the same model).
+The parser locates section 0 by
 scanning for the section magic starting at `0x80`, so this region does not
 affect decoded output.
 
@@ -123,11 +130,13 @@ Every section is delimited by a 4-byte magic value and has a 24-byte header:
 | `+20` | 4 | `u32 field5` |
 
 A section's data region runs from the end of its 24-byte header to the start of
-the next section's magic; the last section runs to end-of-file. **Identify
+the next section's magic; the last section runs to end-of-file.
+**Identify
 sections by index, not by `field4`** -- `field4` values vary across files.
 
 `field1` is a 1-based word pointer from the section magic:
-`section.file_offset + 4 * (field1 - 1)`. For **section 1** it points at the
+`section.file_offset + 4 * (field1 - 1)`.
+For **section 1** it points at the
 first entry of the slot table (see "Slot table"); for section 6 it points at
 the OT class-code array start (`header[0x58] - OT_count`); for section 7 it
 points at `header[0x60]`; for section 5 it points at the section's final word
@@ -153,10 +162,13 @@ Section 1's data region holds three packed sub-structures.
 ### Header region
 
 The first 204 bytes are reserved: a 12-byte preamble followed by three 64-byte
-"header blocks". They never represent variable records. Most of the 51 `u32`
+"header blocks".
+They never represent variable records.
+Most of the 51 `u32`
 words here are byte-identical across reruns of the same model; only
 `block0[14]`, `block0[15]`, and `block1[1]` vary (as a deterministic
-`(N-1, N, N+1)` triple). Block 2 carries a float-`1.0` marker at `block2[9]`.
+`(N-1, N, N+1)` triple).
+Block 2 carries a float-`1.0` marker at `block2[9]`.
 
 Three words in the preamble are stable cross-corpus invariants:
 
@@ -170,7 +182,8 @@ Block 1 also satisfies `block1[10] >> 16 == block1[11]` on every observed file.
 every run-file and dataset VDF in the corpus (see "Slot table").
 
 The first variable record starts at `sec1.data_offset() + 204` and records
-follow on 64-byte strides until just before the slot table. A few files leave a
+follow on 64-byte strides until just before the slot table.
+A few files leave a
 sub-64-byte trailer; it is not a record.
 
 ### Variable metadata records (64 bytes, 16 `u32` fields)
@@ -194,18 +207,22 @@ The format does not store a tag that distinguishes a graphical-function
 **descriptor** record (whose `f[11]` is a lookup-record index) from an **owner**
 record (whose `f[11]` is an OT start): every field's value set on descriptor
 records is a subset of the owner records' value set, and the section-6 lookup
-record carries no back-pointer. A reader that has the model knows the descriptor
+record carries no back-pointer.
+A reader that has the model knows the descriptor
 set; a model-free reader recognises it from the lookup-def names (see
-"Name-to-OT mapping"). Once the descriptor records are set aside, the remaining
+"Name-to-OT mapping").
+Once the descriptor records are set aside, the remaining
 owner spans form a non-overlapping OT partition **on every file whose overlaps
 the descriptor peel fully resolves** -- the whole tracked corpus except the
 two 2007-era SimService `Base.vdf` files, where some records survive the peel
-still in owner-vs-owner conflict. That residual case, and the stale-`f[11]`
+still in owner-vs-owner conflict.
+That residual case, and the stale-`f[11]`
 record phenomenon behind it, is described in "Residual OT-overlap" below.
 
 ### Slot table
 
-An array of `N` `u32` values, each a byte offset into section-1 data. The
+An array of `N` `u32` values, each a byte offset into section-1 data.
+The
 pairing is direct: `slot_table[i]` belongs to `names[i]`. (`#`-signature
 internal-helper names sit past the slotted prefix in the name table and have no
 slot-table entry, so `N <= name_count`.)
@@ -221,23 +238,30 @@ heuristic is needed:
 
 These three facts over-determine each other -- `start + (N + 1) * 4` equals the
 name-table section's file offset on every run-file and dataset VDF in the corpus
-(138 run files + 6 datasets, zero exceptions). A reader can take any two and
+(138 run files + 6 datasets, zero exceptions).
+A reader can take any two and
 cross-check the third; `vdf::slot_table_from_header` reads `field1` + `block1[7]`
 and verifies the terminator and boundary. (An earlier reader scanned backward
 for "the largest run of unique, in-range, 4-byte-aligned offsets"; that heuristic
 under-counted on edited files whose name table contained stale entries and
-over-counted by one elsewhere. It has been replaced by the structural decode.)
+over-counted by one elsewhere.
+It has been replaced by the structural decode.)
 
 
 ## Section 2: name table
 
-The name table is a superset of the stored variables. The section header's
+The name table is a superset of the stored variables.
+The section header's
 `field5 >> 16` gives the byte length of the first name; that first name (`Time`
-in run files) has no length prefix. Every subsequent entry is a `u16`
-length-prefixed string. A `u16` value of `0` is a group separator. Some edited
+in run files) has no length prefix.
+Every subsequent entry is a `u16`
+length-prefixed string.
+A `u16` value of `0` is a group separator.
+Some edited
 files contain length-prefixed entries whose payload is non-printable binary --
 treat these as stale/deleted entries and skip exactly the declared byte count
-rather than stopping the table. A stale entry consumes **no name index**: the
+rather than stopping the table.
+A stale entry consumes **no name index**: the
 record `f[2]` key formula maps a printable name's string offset to its index
 among the *printable* entries only, so a reader that counts stale entries as
 indices mislabels every name after the first stale entry.
@@ -267,17 +291,20 @@ Vensim emits stdlib-call output and internal-stock names in two encodings:
 | New | `#alias>FUNC#` | `#alias>FUNC>LV1#`, `#alias>FUNC>DL#`, ... |
 
 The new-style form encodes the user alias directly in the prefix; the old-style
-form leaves it implicit. An *output* signature (the name a user alias binds to)
+form leaves it implicit.
+An *output* signature (the name a user alias binds to)
 is recognised by a positive structural signal -- a `(` for old-style, exactly
 one top-level `>` for new-style -- which rejects non-stdlib `#`-bracketed
 display names and the multi-`>` sub-part names that stateful macros like
-`RAMP FROM TO` emit. `VdfFile::output_signatures` and
+`RAMP FROM TO` emit.
+`VdfFile::output_signatures` and
 `VdfFile::new_style_alias_signatures` expose these.
 
 
 ## Section 3: array shape directory
 
-Scalar models keep section 3 as 104 zero bytes (`field4 == 0`). Array models
+Scalar models keep section 3 as 104 zero bytes (`field4 == 0`).
+Array models
 store a 25-word zero prefix, a run of fixed-width 27-word entries, and a single
 trailing zero word.
 
@@ -290,7 +317,8 @@ trailing zero word.
 | 26 | encoded axis count (`1` or `2` in the validated corpus) |
 
 The decoded shape normalizes to `flat_size`, `axis_sizes` (one per axis), and
-`axis_refs` (one anchor pointer per axis). The same template can be referenced
+`axis_refs` (one anchor pointer per axis).
+The same template can be referenced
 by several record `f[6]` values, which is why section 3 is a shape *directory*
 rather than a per-variable save list.
 
@@ -298,12 +326,16 @@ rather than a per-variable save list.
 ## Section 4: view/sketch metadata
 
 Variable-length structured entries that reference section-1 slot values and
-encode view/sketch (diagram) information. Each entry is a packed count word
+encode view/sketch (diagram) information.
+Each entry is a packed count word
 `p`, then `(p >> 16) + (p & 0xffff)` slot refs, then a trailing self-positional
 `index_word` (`(entry_file_offset - sec4_file_offset) / 4`; the last entry's is
-`0`, acting as a terminator). All parsed refs resolve to in-range section-1
-offsets that also appear in the slot table. This section is view-connector
-metadata; it is **not** a variable-owner or shape-owner directory. Numeric
+`0`, acting as a terminator).
+All parsed refs resolve to in-range section-1
+offsets that also appear in the slot table.
+This section is view-connector
+metadata; it is **not** a variable-owner or shape-owner directory.
+Numeric
 overlap between section-3 and section-4 `index_word` values is an arithmetic
 coincidence (both encode `index_word` self-positionally).
 
@@ -316,7 +348,8 @@ before section 5's data offset, so it has zero region data.
 In array models, section 5 holds `u32 n; u32 marker; u32 refs[refs_len]`
 entries (`marker == 0` => `refs_len == n + 1`; `marker == 1` => `refs_len ==
 n + 2`; the trailing one or two refs are axis anchors, the leading `n` are the
-payload). The entries start immediately at the section's data offset.
+payload).
+The entries start immediately at the section's data offset.
 
 **Section-5 entries pair 1:1 with record `field[8]` dimension-anchor groups.**
 Sorting the anchors by `f[8]` ascending produces a sequence whose cardinalities
@@ -327,8 +360,10 @@ match `sec5[i].n` pointwise (validated across the array corpus, including
 the dimension anchor carries the group's `f[8]` value (and usually the `f[14]`
 sentinel; on anchors `f[11]` is a compact dimension id, not an OT start); each
 element record has the same `f[8]`, `f[6] == 0`, `f[10] == 0`, `f[12] == 124`,
-and a zero-based element index in `f[11]`. Element records may be out of file
-order, so `f[11]` is the ordering key. A mixed catalog can also use a compact
+and a zero-based element index in `f[11]`.
+Element records may be out of file
+order, so `f[11]` is the ordering key.
+A mixed catalog can also use a compact
 late-record layout (`f[12]` = group id, `f[15]` = element index, `f[6]` = the
 section-2 name key) -- `Ref.vdf`'s `scenario` does this for two of its three
 elements.
@@ -336,9 +371,11 @@ elements.
 **Subrange dimensions recover their elements from the parent root.** A
 subrange's section-5 payload is a strict in-order subsequence of its parent
 root's payload; the positions where the subrange's refs occur in the parent's
-payload are the element indices into the parent's element list. The root is the
+payload are the element indices into the parent's element list.
+The root is the
 dimension whose payload is not a subsequence of any other dimension's payload
-(when a subrange matches multiple candidates, prefer the actual root). The
+(when a subrange matches multiple candidates, prefer the actual root).
+The
 payload refs themselves resolve to unrelated variable slots -- the VDF uses
 their physical slot identity as opaque "axis-participation tokens"; only the
 subsequence relationship is load-bearing.
@@ -348,20 +385,25 @@ subsequence relationship is load-bearing.
 
 Layout, in order:
 
-1. Skip `max(0, sec6.field4 - 1)` 4-byte words. Almost always 0 (when
+1. Skip `max(0, sec6.field4 - 1)` 4-byte words.
+   Almost always 0 (when
    `field4 == 1`); when `field4 == 2`, one section-1-descriptor-offset-shaped
    prefix word of unknown binding.
 2. **Leading ref stream**: variable-length `u32 n_refs; u32 refs[n_refs]`
-   entries. The refs resolve to a mix of model variables, unit annotations,
+   entries.
+   The refs resolve to a mix of model variables, unit annotations,
    view markers, builtin names, system variables, and stdlib helpers -- not a
    clean variable save list.
 3. **Post-ref record region** (empty on small/medium fixtures): a stream of
-   fixed-width 16-byte records. On `Ref.vdf` (226 records) these form a
+   fixed-width 16-byte records.
+   On `Ref.vdf` (226 records) these form a
    linked-list node pool: `word[0]` is runtime residue, `word[1]` is an OT
    start, `word[2]` an OT width, `word[3]` the next node's 1-based section-6
-   word pointer (or 0). A reader walks each lookup's input-dependency chain in
+   word pointer (or 0).
+   A reader walks each lookup's input-dependency chain in
    O(n) from the lookup record's `word[12]`.
-4. **OT class-code array**: `OT_count` bytes, one per OT entry. Boundary fact:
+4. **OT class-code array**: `OT_count` bytes, one per OT entry.
+   Boundary fact:
    this array starts at both `header[0x58] - OT_count` and
    `sec6.file_offset + 4 * (sec6.field1 - 1)`.
 5. **OT final-value array**: `OT_count` little-endian f32 values (the last saved
@@ -388,7 +430,8 @@ dynamic / 5 const / 10 total; pop: 2/3/7/13; econ: 11/37/29/78; WRLD3:
 
 ### Lookup mapping records
 
-These describe graphical-function definitions. Each record is 13 `u32` words:
+These describe graphical-function definitions.
+Each record is 13 `u32` words:
 
 | Word | Role |
 |---|---|
@@ -405,7 +448,8 @@ These describe graphical-function definitions. Each record is 13 `u32` words:
 The lookup-record array is in **case-insensitive alphabetical order of the
 lookup-definition names**, so a descriptor record's `f[11]` (a zero-based index
 into this array) is a direct, O(1) link to the lookup's x/y arrays and output
-OT. There is no reverse link from a lookup record to its descriptor record.
+OT.
+There is no reverse link from a lookup record to its descriptor record.
 
 
 ## Section 7: lookup data, offset table, data blocks
@@ -425,23 +469,29 @@ Section 7 packs three sub-structures, with no separators between lookup tables:
 ### Lookup table packing
 
 Each lookup table is `[x_0..x_n, y_0..y_n]` -- a contiguous f32 x-array
-followed immediately by the y-array. Tables appear in lookup-definition order
-(matching the section-6 lookup-record array). Table boundaries are inferred
+followed immediately by the y-array.
+Tables appear in lookup-definition order
+(matching the section-6 lookup-record array).
+Table boundaries are inferred
 from x-value monotonicity, but the section-6 lookup records' `word[5..6]` give
-the exact x/y offsets directly. The section header's `field4`/`field5` double
+the exact x/y offsets directly.
+The section header's `field4`/`field5` double
 as the first two f32 values, so `sec7.data_offset()` is already two words into
 the lookup-data stream.
 
 ### Offset table
 
 `OT_count` `u32` entries (one per OT entry, including OT[0] = Time), starting at
-`header[0x60]`. Each entry is either a **file offset to a data block** (value
+`header[0x60]`.
+Each entry is either a **file offset to a data block** (value
 `>= first_data_block_offset`) or an **inline f32 constant** (any smaller value,
-reinterpreted as f32). A raw `0` decodes as the constant `0.0` for
+reinterpreted as f32).
+A raw `0` decodes as the constant `0.0` for
 constant-like class codes, but a raw-`0` entry with the dynamic class `0x11`
 and a *nonzero* section-6 final value is a missing/no-saved-data slot (the
 variable ran -- its final value is recorded -- but Vensim's save configuration
-omitted the series), decoded as all-NaN, not numeric zero. On `Ref.vdf` there
+omitted the series), decoded as all-NaN, not numeric zero.
+On `Ref.vdf` there
 are 455 such entries, carrying the `:NA:`-arithmetic final `-1.3e33`.
 
 ### Data blocks
@@ -452,31 +502,39 @@ are 455 such entries, carrying the `:NA:`-arithmetic final `-1.3e33`.
   +2+bm    count * 4  f32 values, in time order
 ```
 
-Block 0 is the Time series, with a fully dense bitmap. The reader follows OT
+Block 0 is the Time series, with a fully dense bitmap.
+The reader follows OT
 offsets rather than assuming the referenced blocks form a gapless stream --
-files can contain padding or unreferenced bytes between blocks. A non-time
+files can contain padding or unreferenced bytes between blocks.
+A non-time
 block's value at a time point with a clear bit holds (zero-order hold).
 
 The bitmap width is decoded **per block** against up to three grids: the
 saved grid (`ceil(header[0x78] / 8)` bytes -- most blocks), the block grid
 (`ceil(header[0x7C] / 8)`; wider on saved-suffix files like `risk.vdf`), and
-the **data grid** (`ceil(header[0x74] / 8)`; see below). The deterministic
+the **data grid** (`ceil(header[0x74] / 8)`; see below).
+The deterministic
 discriminator is local to the block: the `u16 count` equals the bitmap
-popcount for the correct width. Candidates are tried in that order and the
+popcount for the correct width.
+Candidates are tried in that order and the
 first match wins.
 
-The ordering is justified empirically, not geometrically. Saved-before-block
+The ordering is justified empirically, not geometrically.
+Saved-before-block
 follows the narrower-first logic (the saved width never exceeds the block
 width, and a wider bitmap that also matched would be popcounting past the
-real bitmap into payload bytes). The data width, however, is usually the
+real bitmap into payload bytes).
+The data width, however, is usually the
 NARROWEST candidate, and it still must come LAST: ordinary saved-grid blocks
 dominate every file, and more than 1,100 of them across the tracked corpora
 coincidentally popcount-match the narrower data width (a small count whose
 set bits happen to fall in the first `ceil(0x74/8)` bytes), while zero
-exogenous blocks match a wider distinct width. Residual latent risk: an
+exogenous blocks match a wider distinct width.
+Residual latent risk: an
 exogenous block with a small count and zero-heavy leading payload bytes
 could in principle popcount-match the wider saved width and silently decode
-with wrong placement; no corpus file does. The section-6 class code
+with wrong placement; no corpus file does.
+The section-6 class code
 (`0x05`/`0x06`/`0x0c` marks exogenous blocks) is available as a future
 discriminator or mismatch diagnostic if such a file appears.
 
@@ -485,7 +543,8 @@ undecodable: readers NaN-fill its series and report the OT on a per-file
 diagnostic list (Rust `VdfData::unreconciled_ots` /
 `VdfFile::unreconciled_data_blocks`, Python
 `NamedResultsDiagnostics.bitmap_unreconciled_ots`) -- visibly-missing data is
-strictly better than garbage decoded under an assumed width. No tracked
+strictly better than garbage decoded under an assumed width.
+No tracked
 corpus file has such a block.
 
 When a block uses the larger block grid, decode the full grid and sample the
@@ -500,7 +559,8 @@ back to identity positions, and out-of-range positions decode as NaN.
 Exogenous-data blocks -- class codes `0x05` (risk/zambaqui), `0x06`, and
 `0x0c` (groupon) -- are the loaded data file's sparse blocks embedded in the
 run file, bitmapped over the DATA FILE's time grid, whose point count is
-header word `0x74`. The zambaqui corpus proves this three ways:
+header word `0x74`.
+The zambaqui corpus proves this three ways:
 
 - `baserun.vdf`'s `gdp deflator` block is **byte-identical** (count=26,
   4-byte dense bitmap `ff ff ff 03`, payload) to the corresponding block in
@@ -512,7 +572,8 @@ header word `0x74`. The zambaqui corpus proves this three ways:
   of a 9-byte bitmap, and interior blocks tile exactly against the next
   block's offset (`next - this == 2 + ceil(0x74/8) + 4*count`), pinning the
   width. (Most old-runs files -- 31 -- are instead 28-point yearly runs
-  with `0x74 = 26`; see the same-width collision below. The remaining eight
+  with `0x74 = 26`; see the same-width collision below.
+  The remaining eight
   share `baserun.vdf`'s 71-point-run shape.);
 - `risk.vdf`'s mixed-width story is the same phenomenon in degenerate form:
   its `0x74` equals its `0x7C` (225), so the data grid coincides with the
@@ -539,16 +600,20 @@ live in the external data file (a dataset VDF's Time series or a spreadsheet
 row -- groupon's is a `GET XLS DATA` workbook that is not part of the run).
 There is no companion time block, no lookup-record linkage (no section-6
 lookup record's `word[10]` points at these OTs), and no other header word
-carrying the axis. Mapping data-grid values onto the saved time axis is
+carrying the axis.
+Mapping data-grid values onto the saved time axis is
 therefore an approximation: readers assume the grid spans the saved run
 uniformly, anchored at the first saved time
 (`step = (t_last - t_first) / (grid_count - 1)`), with floor semantics
-(zero-order hold). This is exact whenever the data file's axis spans the run
+(zero-order hold).
+This is exact whenever the data file's axis spans the run
 horizon (the zambaqui "old runs" family -- verified against the tiled
 blocks); when the data ends early (`baserun.vdf`'s deflator, 1980..2005
 inside a 1980..2050 run) the VALUES are correct but interior placement is
-dilated toward the run end. First/last placement is exact in both cases,
-which is what the section-6 final-value oracle pins. A reader with access to
+dilated toward the run end.
+First/last placement is exact in both cases,
+which is what the section-6 final-value oracle pins.
+A reader with access to
 the sibling data file could recover the exact axis; the model-guided mapping
 work tracks that direction.
 
@@ -568,39 +633,46 @@ Reconstructing the result set is a single pass over the section-1 records:
    records.)
 
 2. **Descriptor pruning.** Spans that overlap in OT space form a connected
-   component. Within each component, peel off the graphical-function descriptor
+   component.
+   Within each component, peel off the graphical-function descriptor
    record: if exactly one candidate's name is lexically lookupish (contains
    the space-prefixed ` lookup` or ` table`, or the phrase `graphical
    function` -- the space prefix keeps names like `stable population` from
    matching), it is the descriptor; otherwise
    the candidate with the highest `f[10]` is treated as the descriptor (this
    fallback fires on `Ref.vdf`, where descriptor names like `RS N2O` are domain
-   abbreviations). A descriptor's `f[11]` is its index into the section-6
+   abbreviations).
+   A descriptor's `f[11]` is its index into the section-6
    lookup-record array; its data lives there, not at `f[11]` as an OT start.
 
 3. **Emit.** The remaining owner spans plus `Time` at OT[0] are the result set.
    System variables (`INITIAL TIME`, `FINAL TIME`, `SAVEPER`, `TIME STEP`) are
    ordinary records here; `#`-signature internal helpers own real OT slots and
-   are emitted under their decoded names. Within each span, an OT entry that is
+   are emitted under their decoded names.
+   Within each span, an OT entry that is
    a file offset reads its sparse data block; an inline f32 constant fills a
-   flat series. Multi-slot (arrayed) spans whose section-3 shape resolves
+   flat series.
+   Multi-slot (arrayed) spans whose section-3 shape resolves
    through axis refs to dimension anchors with matching cardinalities get
    element labels (`name[a]`, `name[b]`, ...); otherwise elements get numeric
    labels (`name[0]`, `name[1]`, ...).
 
-`VdfFile::to_results_via_records` implements this. The "stocks-first
+`VdfFile::to_results_via_records` implements this.
+The "stocks-first
 alphabetical" ordering visible in the OT array is a consequence of Vensim's
 compiler allocation, not a rule a reader needs.
 
 ### Standalone graphical-function ("lookup-only") descriptors
 
 A lookup-only variable is a **graphical function = a table indexed by an
-explicit input** (`y = lookup(input)`). A *bare* lookup -- a table with no
+explicit input** (`y = lookup(input)`).
+A *bare* lookup -- a table with no
 call site of its own -- is **not a time series**, so Vensim saves no data block
 for it: only a descriptor record exists, with no separate consumer-owner record.
 The overlap-pruning step above never sees it (it collides with nothing), so it
 would otherwise decode at its `f[11]`-as-OT-start ghost slot (a class-`0x08`
-stock slot holding `0`/garbage). The reader recognises it structurally (its
+stock slot holding `0`/garbage).
+The reader recognises it structurally (its
 ghost slots all carry the stock class code -- a lookup is never a stock -- its
 `f[11]` is a valid lookup-record index, and the forward link
 `lookup_record[f[11]].word[10]` is a valid owner OT, with `word[11]` matching the
@@ -619,12 +691,14 @@ and an unrelated lookup's forward link can complete the physical gates;
 4 of its 17 exposed stocks were silently dropped this way):
 
 - **Consumer corroboration**: the forward link must be the exact *start* of a
-  different decoded span of exactly the descriptor's length. A genuine bare
+  different decoded span of exactly the descriptor's length.
+  A genuine bare
   lookup's consumer is a real saved variable, so this always resolves
   (10/10 on `Ref.vdf`); a stock-by-coincidence points at an arbitrary OT that
   is usually not a span start.
 - **Per-file coherence**: if any candidate passing the physical gates fails
-  consumer corroboration, no standalone drop happens in the file at all. A
+  consumer corroboration, no standalone drop happens in the file at all.
+  A
   writer that emits standalone descriptors does so coherently; a single
   incoherent candidate marks the population as owners-by-coincidence.
 
@@ -636,14 +710,16 @@ graph-metadata floats in `f[8]`/`f[9]`/`f[14]` instead of sentinels.
 
 This is why the reader does not (and should not) reconstruct a series for a
 lookup-only variable: the variable's value is `lookup(input)` for whatever input
-the model passes, which the VDF does not store. The forward link only points at
+the model passes, which the VDF does not store.
+The forward link only points at
 *a* consumer, and the model defines how that consumer relates to the lookup --
 on `Ref.vdf`: an identity pass-through (`Historical GDP[COP] = IF Time<=cutoff
 THEN Historical GDP LOOKUP(Time/One year) ELSE :NA:`), a unit-scaled copy
 (`RS GDP = RS GDP in trillions(...) * million per trillion dollars`), a fixed-time
 snapshot (`Forestry emissions at start year = Historical forestry LOOKUP(start
 year)`), or one row of a wider 2-D consumer (`rs_hfc125` is the `HFC125` column
-of `RS HFC[COP, HFC type]`). Recovering the lookup variable's own series from any
+of `RS HFC[COP, HFC type]`).
+Recovering the lookup variable's own series from any
 of these needs the model, not the VDF. (A `gf(Time)` lowering for such a bare
 lookup is an engine bug -- a table is not generally a function of time; see
 #597.)
@@ -652,10 +728,12 @@ lookup is an engine bug -- a table is not generally a function of time; see
 
 The descriptor peel and the standalone drop resolve every owner/descriptor
 overlap on the whole tracked corpus **except** the two 2007-era SimService
-`Base.vdf` files (GH #841). On those, some decoded spans survive the peel still
+`Base.vdf` files (GH #841).
+On those, some decoded spans survive the peel still
 claiming a shared OT slot with another, differently-named span -- an
 owner-vs-owner conflict no structural signal (lexical lookup-def name, forward
-link) can adjudicate. Emitting both would let alphabetical column order
+link) can adjudicate.
+Emitting both would let alphabetical column order
 silently pick the OT owner and scatter one variable's data under another
 variable's name.
 
@@ -664,13 +742,16 @@ to the SimService writer emitting section-1 records for model variables that
 were **not saved in the run** (data variables, lookup/table definitions,
 supplementary vars), and those records carrying a stale `f[11]` -- plausibly the
 variable's slot in the *full runtime array*, while the file's OT contains only
-the *saved* variables. The stale `f[11]`-as-OT-start spans therefore land on
-arbitrary saved slots. The observed evidence on `Base.vdf`:
+the *saved* variables.
+The stale `f[11]`-as-OT-start spans therefore land on
+arbitrary saved slots.
+The observed evidence on `Base.vdf`:
 
 - A wide ghost span `AGE SPECIFIC FERTILITY DISTRIBUTION FUNCTION` (an unsaved
   lookup/table, `f[11] == 18 == n_lookups`, 82 elements) covers OT[18,100),
   overlapping ~38 real narrow owners saved in that range (`c real gdp`,
-  `Capital Agriculture`, `CO2 in Deep Ocean`, ...). Because its `f[11]` is
+  `Capital Agriculture`, `CO2 in Deep Ocean`, ...).
+  Because its `f[11]` is
   **not** `< n_lookups`, it is never a peel candidate, so the peel can neither
   remove it nor detect that it failed.
 - A mirror shape at OT[174,338): the real 164-element arrayed stock
@@ -688,9 +769,11 @@ connected components.
 
 **Recovery (`record_results::resolve_residual_components`).** Each component is
 re-resolved from scratch, recovering the real owners and dropping only the
-ghosts. This leans on one empirical invariant: **Vensim allocates OT slots in
+ghosts.
+This leans on one empirical invariant: **Vensim allocates OT slots in
 case-insensitive alphabetical order within a run** (a "run" being a contiguous
-alphabetical block; run boundaries are where the sequence restarts). Per
+alphabetical block; run boundaries are where the sequence restarts).
+Per
 component:
 
 1. **Un-peel.** Discard the component's phase-1 overlap peels -- any peeled
@@ -700,22 +783,26 @@ component:
 2. **Lexical peel.** Drop spans whose names are lookupish (` lookup`, ` table`,
    `graphical function`, ...) *without* the `f[11] < n_lookups` gate: a lookup
    definition is a table, not a series, so its stale `f[11]` cannot
-   forward-link. This alone resolves the scalar pairs whose ghost is a table
+   forward-link.
+   This alone resolves the scalar pairs whose ghost is a table
    (`c total population table`, `Coal Fraction Discoverable Table`, ...).
 3. **Ordering oracle (`residual_span_is_owner`).** A span is a real owner iff it
    sits where the alphabetical allocation would put it, judged against an
-   anchor bracket. The nearest **uncontested** owners on each side are the
+   anchor bracket.
+   The nearest **uncontested** owners on each side are the
    default anchors; an **inverted** bracket (prev sorts after next) signals a
    run boundary between them, so only the more reliable prev side is tested
    (this is how the wide ghost `AGE SPECIFIC ...`, which sorts before the `c *`
-   owners it covers, is dropped while every narrow owner passes). When a span is
+   owners it covers, is dropped while every narrow owner passes).
+   When a span is
    bracketed on **both** sides by owners already **recovered** from adjacent
    components, those win: recovered reals share the span's interleaved run, so
    they are the reliable same-run evidence (this is what adjudicates
    `indicated per capita fish demand` vs `China future GDP growth rate` at
    OT 127 -- the recovered `Indicated China GDP`@123 / `indicated row Coal
    demand`@128 bracket, not the nearest uncontested owner `cafe history`@124,
-   which belongs to a different run). The oracle iterates a fixpoint: a span
+   which belongs to a different run).
+   The oracle iterates a fixpoint: a span
    confirmed as an owner becomes an anchor for its neighbours.
 4. **Honest-drop fallback.** Any conflict the oracle cannot adjudicate (no
    ordering-consistent owner) is dropped -- honest missing data over a silent
@@ -727,16 +814,20 @@ component:
 The whole recovery is **gated per file** on the measured alphabetical
 consistency of the uncontested owners (`RESIDUAL_ORDERING_GATE`, the fraction of
 adjacent OT-sorted owner pairs that are name-ordered): a file must clear
-**0.95** -- an overwhelming majority -- to run the oracle. The gate also
+**0.95** -- an overwhelming majority -- to run the oracle.
+The gate also
 requires a minimum number of measured pairs (`RESIDUAL_ORDERING_MIN_PAIRS`, 8):
 below it the ratio carries no real evidence (with fewer than two owners it is
-vacuously 1.0), so the oracle abstains rather than adjudicate on nothing. The
+vacuously 1.0), so the oracle abstains rather than adjudicate on nothing.
+The
 four probed corpus files measure 98.6-99.6% over ~840 pairs (and the two
 SimService files with residual components both sit at 0.9964), comfortably above
 both bars; the sub-0.95 corpus files are all tiny run files with no residual
-components. A file that does not exhibit the invariant -- or offers too few
+components.
+A file that does not exhibit the invariant -- or offers too few
 pairs to tell -- fails the gate, the oracle abstains, and every residual span is
-honest-dropped, so it is never mis-adjudicated. On the two SimService files the
+honest-dropped, so it is never mis-adjudicated.
+On the two SimService files the
 recovery is complete: every real owner is recovered (`Population`'s 164 elements,
 the oil reserve series, the four `indicated`/`industrial` owners) and nothing is
 left honest-dropped, so the diagnostics come back empty.
@@ -748,7 +839,8 @@ inserted into the contiguous stock block); **+2 records** (a function-token stub
 with `f[6] == 0` and no OT, plus a `#alias>SMOOTH#` helper record with
 `f[6] == 5` and `f[11]` = the level's OT); **+5 names** (`FUNC` ×2 -- the
 call-site copy and the macro-definition copy -- the two macro parameter names,
-and `#alias>FUNC#`); **+3 slots** (the three slotted names). Per-macro internal
+and `#alias>FUNC#`); **+3 slots** (the three slotted names).
+Per-macro internal
 helper-slot counts: `SMOOTH1`/`SMOOTHI` 1, `SMOOTH3` 4 (LV3=output, LV2, LV1,
 DL), `DELAY1` 2, `DELAY3` 7, `RAMP FROM TO` 7, `SSHAPE` 2, `SAMPLE UNTIL` 1. A
 `#`-signature helper record's authoritative stock/non-stock signal is the OT
@@ -776,7 +868,8 @@ record's `f[11]` to the section-4 block list.
 
 These files have the same eight-section layout as run files; the ordinary
 header offsets, section-6 class/final/lookup tail, offset table, and sparse
-blocks parse with the same rules. Header word `0x68` is nonzero and points past
+blocks parse with the same rules.
+Header word `0x68` is nonzero and points past
 the normal sparse-block run into an additional sensitivity payload that is not
 decoded -- treat any data past the normal sparse-block run as unknown.
 
@@ -784,10 +877,12 @@ Both readers accept the magic and parse these files with the 0x52 rules: the
 Rust reader (`VDF_SENSITIVITY_FILE_MAGIC`, probed as
 `VdfKind::SensitivityRun`; `VdfFile::parse` treats it identically to a
 simulation run, since following OT offsets ignores the undecoded tail by
-construction) and the Python inspector (`VDF_ALT_RESULT_MAGIC`). The zambaqui
+construction) and the Python inspector (`VDF_ALT_RESULT_MAGIC`).
+The zambaqui
 0x53 fixtures are validated end-to-end against the section-6 final-values
 oracle by `sensitivity_run_files_parse_and_match_final_values_oracle` in
-`src/simlin-engine/tests/integration/vdf_sensitivity.rs`. Two 0x53-visible
+`src/simlin-engine/tests/integration/vdf_sensitivity.rs`.
+Two 0x53-visible
 behaviors to know about: unsaved OT slots (an optimization run saves only a
 subset of variables) carry class code 0, a zero offset-table word, and the
 `:NA:` sentinel (-1.298e33) as their section-6 final value; and the zambaqui
@@ -815,7 +910,8 @@ A field-by-field analysis across the corpus confirms this:
   record, so the association cannot be inverted from that side either.
 
 Vensim's own reader never needs the tag: it has the compiled model and already
-knows which symbols are graphical-function definitions. A model-free reader
+knows which symbols are graphical-function definitions.
+A model-free reader
 must reconstruct the descriptor set, which is why the pipeline in
 "Name-to-OT mapping" uses:
 

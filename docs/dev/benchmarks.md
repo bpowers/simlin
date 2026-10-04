@@ -42,11 +42,13 @@ Models used:
 - `wrld3` — World3 model (151 KB, ~3,800 lines), a classic system dynamics model
 - `clearn` — C-LEARN climate model (1.4 MB, ~53,000 lines), a stress test for the compiler
 
-C-LEARN currently uses builtins that are not yet implemented in the bytecode compiler, so it is automatically skipped for `bytecode_compile` and `full_pipeline`. It still participates in `parse_mdl` and `project_build`, which are the most allocation-heavy stages.
+C-LEARN currently uses builtins that are not yet implemented in the bytecode compiler, so it is automatically skipped for `bytecode_compile` and `full_pipeline`.
+It still participates in `parse_mdl` and `project_build`, which are the most allocation-heavy stages.
 
 ## Node VM-vs-wasm eval benchmark
 
-`@simlin/engine` can run a model on two backends: the libsimlin VM or a compiled WebAssembly blob. This benchmark compares their **simulation (eval) time** through the public `Model.simulate({}, { engine, enableLtm })` API, on fishbanks, WORLD3, and C-LEARN.
+`@simlin/engine` can run a model on two backends: the libsimlin VM or a compiled WebAssembly blob.
+This benchmark compares their **simulation (eval) time** through the public `Model.simulate({}, { engine, enableLtm })` API, on fishbanks, WORLD3, and C-LEARN.
 
 It is an [rstest](https://rstest.rs/) test gated behind `RUN_BENCH` so it stays out of the default `pnpm test` (a full C-LEARN run on both engines exceeds the per-test time budget):
 
@@ -73,19 +75,26 @@ It prints a markdown table of the warm **median** eval time per engine and LTM s
 
 What it measures, and what it deliberately excludes:
 
-- **Eval only.** The `Sim` for each `(model, engine)` is built once in untimed setup; for wasm that one-time cost is the blob compile and instantiate. Each measured iteration is a `reset()` (also untimed) followed by a timed `runToEnd()`. Result extraction (`getRun`/`getSeries`) is not timed.
-- **Median over an explicit warmup.** A discard-only warmup runs first, then the harness collects timings adaptively (until a max iteration count or a per-model wall-clock budget) and reports the median. The pure stats/harness lives in `src/engine/tests/bench-stats.ts` and is always-on unit-tested.
-- **Cross-checked before trusted.** Before timing, the benchmark runs each model and selected LTM setting on both engines and compares every public variable series within the engine's tolerance. A generated module that V8 rejects fails the test. This checks public trajectories; link-score analysis has separate tests.
+- **Eval only.** The `Sim` for each `(model, engine)` is built once in untimed setup; for wasm that one-time cost is the blob compile and instantiate.
+  Each measured iteration is a `reset()` (also untimed) followed by a timed `runToEnd()`.
+  Result extraction (`getRun`/`getSeries`) is not timed.
+- **Median over an explicit warmup.** A discard-only warmup runs first, then the harness collects timings adaptively (until a max iteration count or a per-model wall-clock budget) and reports the median.
+  The pure stats/harness lives in `src/engine/tests/bench-stats.ts` and is always-on unit-tested.
+- **Cross-checked before trusted.** Before timing, the benchmark runs each model and selected LTM setting on both engines and compares every public variable series within the engine's tolerance.
+  A generated module that V8 rejects fails the test.
+  This checks public trajectories; link-score analysis has separate tests.
 
 Absolute numbers include the async public-API overhead, so the VM/wasm ratio is the figure to compare across runs.
 
 The Rust counterpart is `src/simlin-engine/examples/backend_bench.rs`, which uses the same eval-vs-eval methodology and median statistic against the lower-level `Vm`/wasm interfaces.
 
-Results are reported in the PR or chat, not committed: the harness is regenerable, but checked-in numbers go stale and mislead. Do not add a results file.
+Results are reported in the PR or chat, not committed: the harness is regenerable, but checked-in numbers go stale and mislead.
+Do not add a results file.
 
 ## Node allocator benchmark for the wasm bundle
 
-`src/engine/bench/clearn-alloc.mjs` compares two or more builds of the libsimlin wasm bundle on the full public-API pipeline for C-LEARN v77 -- `Project.openVensim` (parse + salsa sync), `Model.simulate` (the salsa compile plus `Vm::new`), `Sim.runToEnd`, every series, the LTM link scores, and dispose -- and prints median and min per stage plus the peak `memory.size`. It exists to compare **global allocators**: the compile stage makes tens of millions of small, short-lived allocations on this model, so the allocator the bundle links (`src/libsimlin/src/lib.rs`) is a first-order term in its time, and a synthetic allocation loop would not show how that plays out on the real allocation mix.
+`src/engine/bench/clearn-alloc.mjs` compares two or more builds of the libsimlin wasm bundle on the full public-API pipeline for C-LEARN v77 -- `Project.openVensim` (parse + salsa sync), `Model.simulate` (the salsa compile plus `Vm::new`), `Sim.runToEnd`, every series, the LTM link scores, and dispose -- and prints median and min per stage plus the peak `memory.size`.
+It exists to compare **global allocators**: the compile stage makes tens of millions of small, short-lived allocations on this model, so the allocator the bundle links (`src/libsimlin/src/lib.rs`) is a first-order term in its time, and a synthetic allocation loop would not show how that plays out on the real allocation mix.
 
 ```bash
 # Build the bundle to compare against on its branch and copy it out of
@@ -99,7 +108,10 @@ node --expose-gc src/engine/bench/clearn-alloc.mjs --ltm off --iters 20 --count-
     a=/path/to/a.wasm b=/path/to/b.wasm
 ```
 
-The bundles are interleaved (A, B, A, B, ...) so machine drift is shared rather than attributed to whichever ran last. Each iteration runs on a fresh instance of a module compiled once per bundle: every iteration starts from a cold heap, the state a page load leaves the allocator in, and no iteration inherits fragmentation from the one before, while V8 keeps its optimized code for the shared module, so the warm-up iterations warm the JIT and only the JIT. Instantiation is not timed. Run it under both node 22 and node 24 (V8 12 and 13), with `--expose-gc` so it can collect between iterations and pinned with `taskset` to reduce drift; like the eval benchmark, its results belong in the PR or chat, never in a committed file.
+The bundles are interleaved (A, B, A, B, ...) so machine drift is shared rather than attributed to whichever ran last.
+Each iteration runs on a fresh instance of a module compiled once per bundle: every iteration starts from a cold heap, the state a page load leaves the allocator in, and no iteration inherits fragmentation from the one before, while V8 keeps its optimized code for the shared module, so the warm-up iterations warm the JIT and only the JIT.
+Instantiation is not timed.
+Run it under both node 22 and node 24 (V8 12 and 13), with `--expose-gc` so it can collect between iterations and pinned with `taskset` to reduce drift; like the eval benchmark, its results belong in the PR or chat, never in a committed file.
 
 ## Editing latency at the libsimlin FFI
 
@@ -113,9 +125,11 @@ cargo run --release -p simlin --example editing_latency -- test/metasd/WRLD3-03/
 cargo run --release -p simlin --example editing_latency -- "test/xmutil_test_models/C-LEARN v77 for Vensim.mdl" --samples 40
 ```
 
-It prints the p50, p90, p99, max and mean of every scenario. It keeps the system allocator, which a host runs on when it builds libsimlin without the `mimalloc` feature, and its results belong in the PR or chat, never in a committed file.
+It prints the p50, p90, p99, max and mean of every scenario.
+It keeps the system allocator, which a host runs on when it builds libsimlin without the `mimalloc` feature, and its results belong in the PR or chat, never in a committed file.
 
-To see where the time goes, build it with symbols and record it under a sampling profiler, as [Profiling](#profiling) describes. The `bench` profile is `release` with debug info and no stripping, and cargo writes its examples to `target/release/examples/`:
+To see where the time goes, build it with symbols and record it under a sampling profiler, as [Profiling](#profiling) describes.
+The `bench` profile is `release` with debug info and no stripping, and cargo writes its examples to `target/release/examples/`:
 
 ```bash
 cargo build --profile bench -p simlin --example editing_latency
@@ -125,7 +139,8 @@ perf report
 
 ## Memory at the libsimlin FFI
 
-`src/libsimlin/examples/memory_census.rs` measures what a native host holds while it works on a model, step by step through the entry points a host calls. A counting global allocator over the system allocator reports the heap each step leaves live and the peak reached during it, and a retained size is attributed by dropping one owner at a time (a run, an undo copy, the compiled project) and reading how far the live count falls.
+`src/libsimlin/examples/memory_census.rs` measures what a native host holds while it works on a model, step by step through the entry points a host calls.
+A counting global allocator over the system allocator reports the heap each step leaves live and the peak reached during it, and a retained size is attributed by dropping one owner at a time (a run, an undo copy, the compiled project) and reading how far the live count falls.
 
 ```bash
 # Every workload in one process
@@ -135,19 +150,23 @@ cargo run --release -p simlin --example memory_census -- "test/xmutil_test_model
 /usr/bin/time -v target/release/examples/memory_census test/metasd/WRLD3-03/wrld3-03.mdl --workload undo --edits 50
 ```
 
-The workloads are `open`, `simulate` (compile, run and read the series a diagram's sparklines draw), `diagnostics`, `loops` (structural loops, a Loops That Matter run and its links, loop discovery), `undo` (`--edits` edits landed the way a host lands them, each copied for the undo history, then all undone; `--edit` picks what each changes: `equation`, the default, for the first constant's equation, `last-equation` for the last constant's, `move` for an aux nudged by a unit, and `rename` for the last constant renamed and back, and `synced-equation` for the first constant's equation followed by a diagram sync, since a copy that shares what its edit leaves alone costs only what the edit reaches) and `draft` (an equation draft previewed on a scratch copy). The live count covers the heap alone: the allocator's own retention and anything outside the heap show only in the process's peak. Like the other harnesses, its results belong in the PR or chat, never in a committed file.
+The workloads are `open`, `simulate` (compile, run and read the series a diagram's sparklines draw), `diagnostics`, `loops` (structural loops, a Loops That Matter run and its links, loop discovery), `undo` (`--edits` edits landed the way a host lands them, each copied for the undo history, then all undone; `--edit` picks what each changes: `equation`, the default, for the first constant's equation, `last-equation` for the last constant's, `move` for an aux nudged by a unit, and `rename` for the last constant renamed and back, and `synced-equation` for the first constant's equation followed by a diagram sync, since a copy that shares what its edit leaves alone costs only what the edit reaches) and `draft` (an equation draft previewed on a scratch copy).
+The live count covers the heap alone: the allocator's own retention and anything outside the heap show only in the process's peak.
+Like the other harnesses, its results belong in the PR or chat, never in a committed file.
 
 ## Profiling
 
 ### Build a benchmark binary for profiling
 
-Criterion benchmark binaries are standalone executables. To build one without running it:
+Criterion benchmark binaries are standalone executables.
+To build one without running it:
 
 ```bash
 cargo bench -p simlin-engine --bench compiler --no-run
 ```
 
-The binary will be in `target/release/deps/compiler-<hash>`. Find the exact path with:
+The binary will be in `target/release/deps/compiler-<hash>`.
+Find the exact path with:
 
 ```bash
 cargo bench -p simlin-engine --bench compiler --no-run 2>&1 | grep -o 'target/[^ ]*'
@@ -175,7 +194,8 @@ cargo flamegraph --bench compiler -- --bench parse_mdl/clearn
 
 ### CPU profiling with callgrind (valgrind)
 
-Callgrind provides instruction-level profiling and call graphs. It runs the program under emulation, so it's slower but gives precise, deterministic results unaffected by system load.
+Callgrind provides instruction-level profiling and call graphs.
+It runs the program under emulation, so it's slower but gives precise, deterministic results unaffected by system load.
 
 ```bash
 # Profile a specific benchmark
@@ -190,7 +210,8 @@ kcachegrind callgrind.out
 
 ### Allocation profiling with DHAT (valgrind)
 
-DHAT tracks every allocation: size, lifetime, and access patterns. Useful for finding unnecessary allocations or short-lived temporaries.
+DHAT tracks every allocation: size, lifetime, and access patterns.
+Useful for finding unnecessary allocations or short-lived temporaries.
 
 ```bash
 valgrind --tool=dhat \
@@ -236,7 +257,8 @@ pprof --web target/release/deps/compiler-* heap.prof.0001.heap
 
 ### Allocation counting with the global allocator
 
-For tracking allocation counts and bytes in CI or quick checks, Rust's global allocator can be overridden. This isn't wired up in the benchmarks by default, but you can use it in a one-off test:
+For tracking allocation counts and bytes in CI or quick checks, Rust's global allocator can be overridden.
+This isn't wired up in the benchmarks by default, but you can use it in a one-off test:
 
 ```rust
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -263,7 +285,8 @@ static A: CountingAlloc = CountingAlloc;
 
 ## Comparing results
 
-Criterion automatically compares against the previous run and reports statistical significance. To save an explicit baseline for later comparison:
+Criterion automatically compares against the previous run and reports statistical significance.
+To save an explicit baseline for later comparison:
 
 ```bash
 # Save a baseline

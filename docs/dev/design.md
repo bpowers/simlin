@@ -2,33 +2,46 @@
 
 Design context for user-facing surfaces: `src/diagram` (editor and component
 library), `src/app` (the hosted application), `src/simlin-serve`'s web UI, and
-`website`. Consult this when doing frontend or visual-design work.
+`website`.
+Consult this when doing frontend or visual-design work.
 
 ## Users
 
-System dynamics modelers and researchers who build stock-and-flow models. They come to Simlin to construct, simulate, and debug mental models of complex systems. The tool should feel like a natural extension of their thinking -- lowering barriers to SD modeling rather than adding cognitive overhead.
+System dynamics modelers and researchers who build stock-and-flow models.
+They come to Simlin to construct, simulate, and debug mental models of complex systems.
+The tool should feel like a natural extension of their thinking -- lowering barriers to SD modeling rather than adding cognitive overhead.
 
 ## Brand Personality
 
-**Approachable, playful, modern.** Simlin should feel friendly and inviting, not intimidating or academic. The tagline "Debug your intuition" sets the tone: serious about insight, light about process.
+**Approachable, playful, modern.** Simlin should feel friendly and inviting, not intimidating or academic.
+The tagline "Debug your intuition" sets the tone: serious about insight, light about process.
 
 ## Aesthetic Direction
 
-**Modern minimal** -- reduce visual weight, fewer shadows, flatter surfaces, generous whitespace. Inspired by **Figma and Linear**: clean professional tools with polished UX and obsessive attention to detail. Avoid dense IDE-like interfaces or cluttered dashboards.
+**Modern minimal** -- reduce visual weight, fewer shadows, flatter surfaces, generous whitespace.
+Inspired by **Figma and Linear**: clean professional tools with polished UX and obsessive attention to detail.
+Avoid dense IDE-like interfaces or cluttered dashboards.
 
-The existing Material Design-inspired component library provides a solid foundation. Evolve it toward a lighter, more distinctive look: thinner borders, subtler elevation, more breathing room.
+The existing Material Design-inspired component library provides a solid foundation.
+Evolve it toward a lighter, more distinctive look: thinner borders, subtler elevation, more breathing room.
 
 ## Design Principles
 
-1. **Clarity over decoration** -- Every visual element should serve comprehension. Remove what doesn't help the user think.
-2. **Quiet until needed** -- Chrome and controls should recede. The model diagram is the primary artifact; UI supports it, not competes with it.
-3. **Friendly precision** -- Warm and approachable, but never imprecise. Data and simulation results demand visual accuracy.
-4. **Progressive disclosure** -- Simple by default, powerful on demand. Don't overwhelm new users; reward exploration for experts.
-5. **Consistent and predictable** -- Follow established patterns from the component library. Spacing (8px grid), typography (Roboto), and color (primary #1976d2) should be applied uniformly.
+1. **Clarity over decoration** -- Every visual element should serve comprehension.
+   Remove what doesn't help the user think.
+2. **Quiet until needed** -- Chrome and controls should recede.
+   The model diagram is the primary artifact; UI supports it, not competes with it.
+3. **Friendly precision** -- Warm and approachable, but never imprecise.
+   Data and simulation results demand visual accuracy.
+4. **Progressive disclosure** -- Simple by default, powerful on demand.
+   Don't overwhelm new users; reward exploration for experts.
+5. **Consistent and predictable** -- Follow established patterns from the component library.
+   Spacing (8px grid), typography (Roboto), and color (primary #1976d2) should be applied uniformly.
 
 ## Design Tokens Reference
 
-These tokens govern the surfaces that load `src/diagram/theme.css`: the editor packages (`src/diagram`, `src/app`, and `simlin-serve`'s web UI). The website does not consume `theme.css` -- it carries its own brand palette (Simlin red, `--rp-c-brand: #c83639`, defined in `website/src/css/custom.css`) -- but the users, brand personality, and design principles above apply there too.
+These tokens govern the surfaces that load `src/diagram/theme.css`: the editor packages (`src/diagram`, `src/app`, and `simlin-serve`'s web UI).
+The website does not consume `theme.css` -- it carries its own brand palette (Simlin red, `--rp-c-brand: #c83639`, defined in `website/src/css/custom.css`) -- but the users, brand personality, and design principles above apply there too.
 
 - **Primary**: #1976d2 | **Secondary**: #dc004e | **Selected**: #4444dd
 - **Error**: #c62828 | **Success**: #2e7d32 | **Warning**: #f57f17
