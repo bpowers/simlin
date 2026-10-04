@@ -113,7 +113,8 @@ The rules:
 - **A gate fails when its property breaks.** Check that the same way as any other test: make the obvious wrong change and see it fail under `scripts/gates.sh`.
 - **An instrument** -- an ignored test that prints a measurement or writes files for a person, and asserts nothing about them -- runs in the job too, so it has to run to completion; its reason string says it is one.
 - Where it is cheap, keep a small default-suite test beside a gate that exercises the same code on one or two models, so the hook sees a break before CI does.
-- `scripts/gates.sh` also runs the rest of each suite it covers, with the `ext_data` feature on: the only run of the suite with the Excel data provider compiled in.
+- `scripts/gates.sh` runs the ignored tests only, since the default suite runs the rest.
+  It builds with the `ext_data` feature on and also runs that feature's own tests (`data_provider::`), which no other run compiles.
   To give another crate gates, add it to `PACKAGES` in that script.
 
 The simlin-serve smoke test is ignored for a different reason (it spawns the built binary with its embedded SPA) and has a CI job of its own, `serve-smoke`.

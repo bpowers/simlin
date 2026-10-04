@@ -576,7 +576,7 @@ It is behind the `agent_tools` feature (default on; libsimlin's browser bundle l
   `#[ignore]` means exactly "needs an optimized build", so every ignored test passes under `scripts/gates.sh` (the `gates` cargo profile: optimized, with debug assertions and overflow checks), which CI's `gates` job runs on every push to main and every pull request to main; a test that records a known defect asserts the defect in the default suite instead.
   The corpus sweeps and the C-LEARN and World3 gates are gates.
   The default suite's budget is CPU-seconds on four cores, which rayon hides from a test's wall time (`docs/dev/rust.md`); test a threshold with a test-only override, not a fixture large enough to trip it.
-- `scripts/gates.sh` also runs the rest of the suite, with the `ext_data` feature (the Excel data provider) on, which no default build compiles.
+- `scripts/gates.sh` runs the ignored tests only; it builds with the `ext_data` feature (the Excel data provider) on and also runs that feature's tests (`data_provider::`), which no default build compiles.
 
 ## Cargo features and generated files
 
