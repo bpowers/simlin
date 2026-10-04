@@ -30,7 +30,7 @@ Run at the start of every session:
 | Command | Description |
 |---------|-------------|
 | `cargo test` | Run all Rust tests but the gates |
-| `scripts/gates.sh` | Run the gates: the `#[ignore]`d tests, and the rest of the engine suite with the `ext_data` feature on, optimized (`scripts/gates.sh <filter>` for some of them) |
+| `scripts/gates.sh` | Run the gates: the `#[ignore]`d tests, and the tests of the `ext_data` feature, optimized (`scripts/gates.sh <filter>` for some of them) |
 | `pnpm test` | Run all TypeScript tests |
 | `pnpm tsc` | TypeScript type checking |
 

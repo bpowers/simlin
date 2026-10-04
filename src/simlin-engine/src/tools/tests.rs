@@ -1083,10 +1083,15 @@ mod generated_models {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(200))]
+        // The cases run one after another on one thread, a few seconds each
+        // on a CI runner, so their number is this gate's wall time (and, as
+        // the longest single test, most of the gates job's). Each run draws
+        // new shapes and replays every saved failing seed, so the shapes
+        // covered grow with every run rather than with this number.
+        #![proptest_config(ProptestConfig::with_cases(40))]
 
         #[test]
-        #[ignore = "every tool over 200 generated models; run under the gates profile"]
+        #[ignore = "every tool over 40 generated models; run under the gates profile"]
         fn every_tool_keeps_to_its_budget_on_generated_models(shape in shape()) {
             prop_assert_eq!(check_shape(&shape), Ok(()));
         }

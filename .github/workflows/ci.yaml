@@ -151,11 +151,11 @@ jobs:
   #
   # scripts/gates.sh is the one statement of what runs (the packages, the
   # features, the `gates` cargo profile: optimized, with debug assertions and
-  # overflow checks) and is what a developer runs too. It runs the rest of
-  # each suite as well, with `ext_data` on: the only run of the suite with the
-  # Excel data provider compiled in.
+  # overflow checks) and is what a developer runs too. It runs the ignored
+  # tests only (the Build job runs the rest), plus the tests of `ext_data`,
+  # the Excel data provider, which no other run compiles.
   #
-  # The run is about two minutes on four desktop cores (5 CPU-minutes); the
+  # The run is a few minutes on a four-core runner; the
   # caps leave room for several times that, since corpus sweeps are added
   # here rather than to the capped debug suite.
   gates:
