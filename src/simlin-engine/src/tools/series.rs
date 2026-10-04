@@ -591,8 +591,14 @@ pub struct ReadBehaviorOutput {
     pub revision: u64,
     /// One summary per variable (or element) and run, variable by variable.
     pub series: Vec<SeriesSummary>,
+    /// The names no variable has: as many of them, in the order asked, as
+    /// the budget has room for.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub not_found: Vec<NotFound>,
+    /// How many names no variable has, when `not_found` does not list them
+    /// all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_found_count: Option<usize>,
     /// Arrayed variables with more elements than a summary lists, and how
     /// many were left out.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -619,9 +625,14 @@ pub struct LeftOut {
     /// Every summary's turning points.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub turns: bool,
-    /// Variables left out whole, to read in another call.
+    /// Variables left out whole, to read in another call: as many of them,
+    /// in the order asked, as the budget has room to name.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub variables: Vec<String>,
+    /// How many variables were left out, when `variables` does not name
+    /// them all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variables_count: Option<usize>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -675,7 +686,7 @@ pub(crate) fn read_behavior(
     let mut not_found = Vec::new();
     let mut variables: Vec<(&datamodel::Variable, Option<String>)> = Vec::new();
     for name in &input.variables {
-        match resolve_series(ws.project, model, name) {
+        match names::resolve_reference(ws.project, model, name) {
             Ok((var, element)) => {
                 if !variables
                     .iter()
@@ -684,10 +695,10 @@ pub(crate) fn read_behavior(
                     variables.push((var, element));
                 }
             }
-            Err(suggestions) => not_found.push(NotFound {
-                name: name.clone(),
-                suggestions,
-                reason: None,
+            Err(unresolved) => not_found.push(NotFound {
+                name: super::evidence::echo(name),
+                suggestions: unresolved.suggestions,
+                reason: unresolved.reason,
             }),
         }
     }
@@ -743,22 +754,18 @@ pub(crate) fn read_behavior(
                     None => var.get_ident().to_string(),
                 })
                 .collect(),
+            variables_count: None,
         };
         let any_left = left.samples || left.turns || !left.variables.is_empty();
         ReadBehaviorOutput {
             revision: ws.revision,
             series,
             not_found: not_found.clone(),
+            not_found_count: None,
             omitted_elements,
             stale_runs: stale_runs.clone(),
             left_out: any_left.then_some(left),
         }
-    };
-    let fits = |output: &ReadBehaviorOutput| {
-        serde_json::to_string(output)
-            .expect("summaries serialize")
-            .len()
-            <= session.outline_budget
     };
     let all = variables.len();
     let mut attempts: Vec<(Detail, usize)> = vec![
@@ -799,16 +806,41 @@ pub(crate) fn read_behavior(
             count,
         ));
     }
-    let mut output = None;
-    for (detail, count) in attempts {
-        let candidate = answer(detail, count);
-        let done = fits(&candidate);
-        output = Some(candidate);
-        if done {
-            break;
+    // Each attempt in turn; past the last, the names of the variables left
+    // out, from the end of the list and counted; then the suggestions for
+    // names no variable has, then those names, counted. The first
+    // variable's summary always comes.
+    let mut next = attempts.iter().skip(1);
+    let mut output = answer(attempts[0].0, attempts[0].1);
+    super::fit(&mut output, session.outline_budget, |output| {
+        if let Some(&(detail, count)) = next.next() {
+            *output = answer(detail, count);
+            return true;
         }
-    }
-    Ok(output.unwrap_or_else(|| answer(Detail::FULL, all)))
+        if let Some(left) = output.left_out.as_mut()
+            && !left.variables.is_empty()
+        {
+            left.variables_count.get_or_insert(left.variables.len());
+            left.variables.pop();
+            return true;
+        }
+        if output
+            .not_found
+            .iter_mut()
+            .rev()
+            .find_map(|missing| missing.suggestions.pop())
+            .is_some()
+        {
+            return true;
+        }
+        if output.not_found.is_empty() {
+            return false;
+        }
+        output.not_found_count.get_or_insert(output.not_found.len());
+        output.not_found.pop();
+        true
+    });
+    Ok(output)
 }
 
 /// How much of each summary an answer carries.
@@ -826,29 +858,6 @@ impl Detail {
         turns: true,
         elements: MAX_ELEMENTS,
     };
-}
-
-/// What `name` summarizes: a variable, or with a subscript one element of an
-/// arrayed variable; the closest names when it names neither.
-fn resolve_series<'a>(
-    project: &datamodel::Project,
-    model: &'a datamodel::Model,
-    name: &str,
-) -> Result<(&'a datamodel::Variable, Option<String>), Vec<String>> {
-    if let Some(var) = model.get_variable(name) {
-        return Ok((var, None));
-    }
-    let Some((base, subscripts)) = names::split_subscript(name) else {
-        return names::resolve(model, name).map(|var| (var, None));
-    };
-    let var = names::resolve(model, base)?;
-    let dims = var
-        .get_equation()
-        .map(super::outline::dimensions)
-        .unwrap_or_default();
-    names::resolve_element(project, &dims, &subscripts)
-        .map(|element| (var, Some(element)))
-        .map_err(|reason| vec![format!("{}: {reason}", var.get_ident())])
 }
 
 #[cfg(test)]

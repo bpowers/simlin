@@ -494,6 +494,74 @@ fn an_answer_over_its_budget_leaves_out_samples_then_turns_then_elements_then_va
     }
 }
 
+/// Twelve constants with names of `chars` characters each.
+fn long_names(chars: usize) -> (TestProject, Vec<String>) {
+    let names: Vec<String> = (0..12)
+        .map(|i| format!("{}_{i:02}", "n".repeat(chars)))
+        .collect();
+    let project = names.iter().fold(
+        TestProject::new("long").with_sim_time(0.0, 10.0, 1.0),
+        |project, name| project.aux(name, "1", None),
+    );
+    (project, names)
+}
+
+/// The variables an answer leaves out are named as far as the budget allows
+/// and counted past that (`variablesCount`, the whole list's length), so a
+/// budget too small for their names is kept all the same: the first
+/// variable's summary, then the names that fit.
+#[test]
+fn variables_left_out_are_named_as_far_as_the_budget_allows_and_counted() {
+    let (project, names) = long_names(120);
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    session.outline_budget = 1_000;
+    let output = behavior(&mut host, &mut session, json!({ "variables": names }));
+    let len = output.to_string().len();
+    assert!(len <= 1_000, "{len} bytes: {output}");
+    assert_eq!(output["series"].as_array().unwrap().len(), 1, "{output}");
+    let named = output["leftOut"]["variables"].as_array().unwrap();
+    assert!(named.len() < 11, "{output}");
+    assert_eq!(output["leftOut"]["variablesCount"], 11, "{output}");
+    for (i, name) in named.iter().enumerate() {
+        assert_eq!(name, &json!(names[i + 1]), "named in the order asked");
+    }
+
+    // With room for every name, the list is whole and not counted.
+    session.outline_budget = 3_000;
+    let output = behavior(&mut host, &mut session, json!({ "variables": names }));
+    assert!(
+        output["leftOut"].get("variablesCount").is_none(),
+        "{output}"
+    );
+}
+
+/// A name no variable has is repeated cut, as every answer repeats a
+/// caller's text (`evidence::echo`); when the budget is short the
+/// suggestions go, then the names past those that fit, counted
+/// (`notFoundCount`), so names the agent wrote never take an answer over its
+/// budget.
+#[test]
+fn names_not_found_keep_the_answer_within_its_budget() {
+    let (project, names) = long_names(120);
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    session.outline_budget = 1_000;
+    let mut asked = vec![names[0].clone()];
+    asked.extend((0..11).map(|i| format!("{}_{i:02}x", "n".repeat(400))));
+    let output = behavior(&mut host, &mut session, json!({ "variables": asked }));
+    let len = output.to_string().len();
+    assert!(len <= 1_000, "{len} bytes: {output}");
+    assert_eq!(output["series"].as_array().unwrap().len(), 1, "{output}");
+    let not_found = output["notFound"].as_array().unwrap();
+    assert!(!not_found.is_empty() && not_found.len() < 11, "{output}");
+    assert_eq!(output["notFoundCount"], 11, "{output}");
+    assert!(
+        not_found[0]["name"].as_str().unwrap().chars().count() < 400,
+        "{output}"
+    );
+}
+
 /// A model in equilibrium whose flows do not cancel to the last bit: `gap`
 /// is fed `demand * fraction` and drained `demand / 10`, which differ by
 /// 5.5e-17, so it creeps to 1e-15 over the run.

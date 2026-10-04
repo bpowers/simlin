@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 4b51222db75bb0916cf3f769890d8f0d8e5f036298af3195c90f942c44e08ec6 # shrinks to shape = Shape { stocks: 0, auxes: 1, sectors: 0, name_chars: 1, documentation_chars: 0, errors: 0, budget: 150 }
 cc bf2e0e3129924360587b4e4d589dcefe43a899089ab267cfa7827b12c64c3487 # shrinks to shape = Shape { stocks: 0, auxes: 4, sectors: 0, name_chars: 1, documentation_chars: 0, errors: 0, budget: 150 }
+cc ea84fd304c8845bc8cd0685cbb19801fe636633fe1f8c4cc3329d32332d92c00 # shrinks to shape = Shape { stocks: 0, auxes: 11, sectors: 0, name_chars: 62, documentation_chars: 0, errors: 0, budget: 150 }
