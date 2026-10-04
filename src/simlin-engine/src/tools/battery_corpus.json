@@ -354,6 +354,15 @@
         },
         {
           "test": "sensitivity",
+          "variable": "initial_potentially_arable_land",
+          "condition": "double",
+          "value": 4600000000.0,
+          "outcome": "flagged",
+          "accept": true,
+          "why": "Real: twice the land left to develop at the start keeps development cheap (its cost reads the land left over potentially_arable_land_total), so population and pollution grow through 2100 instead of overshooting. The 4.6e9 hectares also exceed the 3.2e9 total, which the model states apart from its initial values and never checks; a modeler would want both."
+        },
+        {
+          "test": "sensitivity",
           "variable": "inherent_land_fertility",
           "condition": "double",
           "value": 1200.0,
@@ -399,12 +408,12 @@
         },
         {
           "test": "sensitivity",
-          "variable": "potentially_arable_land_total",
-          "condition": "double",
-          "value": 6400000000.0,
+          "variable": "initial_potentially_arable_land",
+          "condition": "half",
+          "value": 1150000000.0,
           "outcome": "flagged",
           "accept": true,
-          "why": "Real and unexpected: with twice the potentially arable land, arable land shrinks until 1965 before it expands; a modeler would want to see why."
+          "why": "Real: with half the land left to develop at the start, the share of the total left starts at 0.36 instead of 0.72, development is dear from the start, and arable land ends at half its standard run and swings instead of overshooting. Folded with potentially_arable_land_total double, which halves the same share from the other side."
         }
       ]
     },
@@ -625,6 +634,15 @@
         },
         {
           "test": "extreme_conditions",
+          "variable": "land_area_fraction",
+          "condition": "high",
+          "value": 1.0,
+          "outcome": "failed",
+          "accept": false,
+          "why": "A planet with no ocean: the model divides the deep ocean's heat by its volume, area*(1 - land_area_fraction)*depth, so every run is undefined from 1850. The land fraction is a measured constant of the planet, not a condition of the system; a caller who knows its range can give it in extremes."
+        },
+        {
+          "test": "extreme_conditions",
           "variable": "preindustrial_c",
           "condition": "high",
           "value": 5900.0,
@@ -686,12 +704,12 @@
         },
         {
           "test": "sensitivity",
-          "variable": "natural_n2o_emissions",
-          "condition": "half",
-          "value": 5.65,
+          "variable": "initial_n2o_conc",
+          "condition": "double",
+          "value": 550.0,
           "outcome": "flagged",
           "accept": true,
-          "why": "An uncertain natural flux: halving it puts the 1850 N2O concentration above its natural balance, so N2O falls for decades before emissions turn it up. True of the model, and shows the initial state assumes this flux."
+          "why": "Real: N2O starting at twice its 1850 value is above the balance natural emissions hold against a 114-year lifetime, so it falls for decades before emissions turn it up; the initial state is that balance. Folded with natural_n2o_emissions half, which shows it from the other side, and the N2O-N molar mass double, which scales the start the same way."
         }
       ]
     }

@@ -445,6 +445,181 @@ fn a_constant_an_equation_divides_by_is_tried_at_a_tenth_and_any_other_at_zero()
     );
 }
 
+/// Constants nothing reads as the run goes, one for every role the battery's
+/// extreme rules read and one a rate is frozen from at the start (`INIT`),
+/// and one (`both`) a stock starts from that a flow also reads as the run
+/// goes.
+fn starting_points() -> TestProject {
+    TestProject::new("starts")
+        .with_sim_time(2000.0, 2010.0, 0.25)
+        .with_time_units("year")
+        .stock("plain_level", "plain", &[], &[], None)
+        .aux("plain", "100", None)
+        .stock("divided_level", "100 / divisor", &[], &[], None)
+        .aux("divisor", "4", None)
+        .stock("lag_level", "lag", &[], &[], None)
+        .aux("lag", "2", Some("year"))
+        .stock(
+            "dated_level",
+            "IF TIME >= start_year THEN 1 ELSE 0",
+            &[],
+            &[],
+            None,
+        )
+        .aux("start_year", "2005", Some("year"))
+        .stock("share_level", "share_held * 10", &[], &[], None)
+        .aux("share_held", "0.3", None)
+        .stock("rate_level", "rate * 10", &[], &[], None)
+        .aux("rate", "0.1", Some("1/year"))
+        .stock("frozen_level", "0", &["frozen_inflow"], &[], None)
+        .flow("frozen_inflow", "held", None)
+        .aux("held", "INIT(frozen_base * 2)", None)
+        .aux("frozen_base", "1", None)
+        .stock("both_level", "both", &["inflow"], &[], None)
+        .flow("inflow", "both", None)
+        .aux("both", "5", None)
+}
+
+/// A constant nothing reads as the run goes only sets where the run starts,
+/// which has no condition of the system at zero -- a stock that starts empty
+/// is rarely one the model is meant to survive -- so its low extreme is a
+/// tenth of its value, the divisor's rule. A role with a rule of its own keeps it: the call's own
+/// extremes, then a date's, then a time constant's, then the tenth; the high
+/// extremes are the role's as for any constant. A constant also read as the
+/// run goes is any constant, and goes to zero.
+#[test]
+fn a_constant_nothing_reads_as_the_run_goes_is_tried_at_a_tenth() {
+    let project = starting_points();
+    let given = GivenExtremes {
+        low: Some(1.0),
+        high: Some(1000.0),
+    };
+    for rule in ExtremeRule::ALL {
+        // (constant, low or high, the call's extremes, the value chosen)
+        let (name, low, given, value) = match rule {
+            ExtremeRule::Zero => ("both", true, GivenExtremes::default(), 0.0),
+            ExtremeRule::Tenth => ("plain", true, GivenExtremes::default(), 10.0),
+            ExtremeRule::ShortTime => ("lag", true, GivenExtremes::default(), 1.0),
+            ExtremeRule::RunStart => ("start_year", true, GivenExtremes::default(), 2000.0),
+            ExtremeRule::TenTimes => ("plain", false, GivenExtremes::default(), 1000.0),
+            ExtremeRule::Whole => ("share_held", false, GivenExtremes::default(), 1.0),
+            ExtremeRule::FastestRate => ("rate", false, GivenExtremes::default(), 1.0),
+            ExtremeRule::PastStop => ("start_year", false, GivenExtremes::default(), 2011.0),
+            ExtremeRule::Given => ("plain", true, given, 1.0),
+        };
+        let chosen = read_as_the_battery(project.build_datamodel(), |model, reading, base| {
+            let var = model.get_variable(name).unwrap();
+            let current = element_values(base, model, var)[0];
+            let specs = &base.results.specs;
+            let extreme = if low {
+                reading.roles.low(var, given, specs).0
+            } else {
+                reading.roles.high(var, given, specs)
+            };
+            (extreme.rule, (extreme.to)(current))
+        });
+        assert_eq!(chosen, (rule, value), "{name}, low: {low}");
+    }
+    // Each other start's low extreme is the tenth, however it is read there.
+    for name in ["divisor", "share_held", "rate", "frozen_base"] {
+        assert_eq!(low_rule(&project, name), ExtremeRule::Tenth, "{name}");
+    }
+}
+
+/// A constant only sets where the run starts when it moves no stock as the
+/// run goes: one a stock starts from, directly or through an auxiliary, and
+/// one a rate is frozen from at the start (`INIT`); not one a flow also
+/// reads, nor a constant flow, which its stock reads as the run goes.
+#[test]
+fn a_constant_only_sets_where_the_run_starts_when_it_moves_no_stock_as_the_run_goes() {
+    let starts = |project: &TestProject| {
+        constants_that(project, |roles| roles.starts.iter().cloned().collect())
+    };
+    assert_eq!(
+        starts(&crate::tools::test_support::initial_reads()),
+        ["base_rate", "s0"]
+    );
+    assert_eq!(
+        starts(&starting_points()),
+        [
+            "divisor",
+            "frozen_base",
+            "lag",
+            "plain",
+            "rate",
+            "share_held",
+            "start_year"
+        ]
+    );
+    let project = TestProject::new("chain")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "start * 2", &["filling"], &[], None)
+        .aux("start", "seed + 1", None)
+        .aux("seed", "3", None)
+        .flow("filling", "2", None);
+    assert_eq!(starts(&project), ["seed"]);
+}
+
+/// A model whose only constant sets where its stock starts has it for a
+/// default target of the tests that change a constant, at a tenth and ten
+/// times, though no flow reads the stock; a disturbance, a step a tenth of
+/// the way into the run, would move nothing, and steps nothing.
+#[test]
+fn a_constant_that_only_sets_where_a_stock_starts_is_a_default_target() {
+    let project = TestProject::new("draining")
+        .with_sim_time(0.0, 10.0, 0.5)
+        .stock("level", "s0", &[], &["draining"], None)
+        .flow("draining", "STEP(1, 5)", None)
+        .aux("s0", "100", None);
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    session.outline_budget = usize::MAX;
+    let output = run(
+        &mut host,
+        &mut session,
+        json!({"tests": ["extreme_conditions", "sensitivity", "disturbance"]}),
+    );
+    assert_eq!(
+        summary(&output, "extreme_conditions"),
+        &json!({"test": "extreme_conditions", "checks": 3, "passed": 3}),
+        "the model's own run, and s0 at a tenth and at ten times: {output}"
+    );
+    assert_eq!(summary(&output, "sensitivity")["checks"], 2, "{output}");
+    assert_eq!(
+        summary(&output, "disturbance")["skipped"],
+        "the model has nothing this test changes",
+        "{output}"
+    );
+    assert_eq!(
+        extremes_of(&project, "s0"),
+        [(ExtremeRule::Tenth, 10.0), (ExtremeRule::TenTimes, 1000.0)]
+    );
+}
+
+/// What a stock moves is what it moves as the run goes: a quantity frozen
+/// from a stock at the start (`INIT`) does not make what a rate divides it
+/// by a time constant, as a stock-dependent quantity would.
+#[test]
+fn a_quantity_frozen_at_the_start_does_not_make_its_divisor_a_time_constant() {
+    let project = TestProject::new("frozen")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "10", &["adjusting"], &[], None)
+        .flow(
+            "adjusting",
+            "(goal - level) / adjustment_time + start / scale",
+            None,
+        )
+        .aux("start", "INIT(level)", None)
+        .aux("goal", "20", None)
+        .aux("adjustment_time", "4", None)
+        .aux("scale", "40", None);
+    let names: Vec<String> = time_constants_of(&project)
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect();
+    assert_eq!(names, ["adjustment_time"]);
+}
+
 /// What an equation divides by: a factor of a divisor, through products,
 /// quotients, powers, signs, IF branches, a sum over an array's elements,
 /// and an auxiliary that is itself divided by; not a term of a sum, a
@@ -1756,7 +1931,7 @@ fn the_largest_corpus_models_are_tested_within_bounds() {
                 let results = &base.results;
                 let run_bytes =
                     results.specs.n_chunks * results.step_size * std::mem::size_of::<f64>();
-                (reading.graph.feeding_flows(model).len(), run_bytes)
+                (reading.graph.reaching_stocks(model).len(), run_bytes)
             });
         let at_once = runs::concurrent_runs(run_bytes);
         assert!(
@@ -1771,7 +1946,7 @@ fn the_largest_corpus_models_are_tested_within_bounds() {
         assert!(!output.is_error, "{}", output.json);
         let answer: Value = serde_json::from_str(&output.json).unwrap();
         eprintln!(
-            "{path}: {} bytes in {took:?}; {constants} constants feed flows; {} results listed, \
+            "{path}: {} bytes in {took:?}; {constants} default targets; {} results listed, \
              {} omitted; runs of {run_bytes} bytes, {at_once} at once",
             output.json.len(),
             answer["results"].as_array().unwrap().len(),
@@ -3899,9 +4074,9 @@ fn a_call_gives_a_constant_its_own_extremes() {
     }));
 }
 
-/// The default targets are the constants that feed a flow, those that reach
-/// the most stocks first; a disturbance steps the first few that are not
-/// zero.
+/// The default targets are the constants that reach a flow or a stock, those
+/// that reach the most stocks first; a disturbance steps the first few that
+/// are not zero.
 #[test]
 fn a_disturbance_steps_by_default_the_constants_that_reach_the_most_stocks() {
     // Constants a to e feed one stock each, and `a` is zero; `wide` feeds
@@ -4362,14 +4537,16 @@ const CORPUS_LABELS: &str = "src/tools/battery_corpus.json";
 /// false alarm or losing a finding. The rejected labels are of four kinds,
 /// each a limit of the battery its `why` names: a start-up transient that a
 /// parameter deepens until the classifier counts it as a movement; an
-/// oscillation whose period moved past the run's horizon; a constant that is a definition or a
-/// reference rather than a condition of the system (a unit carrier, a
-/// reference concentration, an assignment matrix); and an integration
-/// artifact of the model's own run that a change removes or amplifies.
-const MAX_CORPUS_FALSE_ALARMS: usize = 16;
+/// oscillation whose period moved past the run's horizon; a constant that is
+/// a definition, a reference or a measured constant rather than a condition
+/// of the system (a unit carrier, a reference concentration, an assignment
+/// matrix, the planet's land fraction), whose meaningful range a caller can
+/// give in `extremes`; and an integration artifact of the model's own run
+/// that a change removes or amplifies.
+const MAX_CORPUS_FALSE_ALARMS: usize = 17;
 /// The corpus models, every check each lists labeled.
 const CORPUS_MODELS: usize = 29;
-const MIN_CORPUS_ACCEPTED: usize = 52;
+const MIN_CORPUS_ACCEPTED: usize = 53;
 
 /// Run the battery on each labeled model `include` picks, as an agent's call
 /// with no arguments does, and hold what it lists against the labels: every

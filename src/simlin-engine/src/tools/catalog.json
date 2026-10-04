@@ -3423,7 +3423,7 @@
             "default": []
           },
           "targets": {
-            "description": "The variables the targeted tests change, in place of their defaults:\nextreme conditions, sensitivity and disturbance take constants (the\nconstants that feed the model's flows by default, less its unit\nconversions); a loop knockout holds variables at their initial\nvalues, and runs only on targets named here. At most 12.",
+            "description": "The variables the targeted tests change, in place of their defaults:\nextreme conditions, sensitivity and disturbance take constants (by\ndefault the constants that reach a stock, where it starts or as the\nrun goes, less the model's unit conversions); a loop knockout holds\nvariables at their initial values, and runs only on targets named\nhere. At most 12.",
             "type": "array",
             "items": {
               "type": "string"
@@ -3770,7 +3770,7 @@
                 "const": "zero"
               },
               {
-                "description": "Low: a tenth of its value, for a constant some equation divides\nby, whose domain zero is outside.",
+                "description": "Low: a tenth of its value, for a constant some equation divides\nby, whose domain zero is outside, or one nothing reads as the run\ngoes, which only sets where the run starts.",
                 "type": "string",
                 "const": "tenth"
               },

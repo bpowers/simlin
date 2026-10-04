@@ -769,18 +769,33 @@ fn a_call_stopped_at_any_checkpoint_leaves_the_session_as_it_was() {
     stopped_calls_keep_nothing(&warned(), full, &every_store(), || Box::new(0..));
 }
 
-/// The record and both citations answer what a model reads from one owner
-/// (`analysis::model_reads`), so a constant read only as the model starts is
-/// read for all of them.
-///
-/// The battery's default targets are not among them: it follows the links a
-/// run carries as it goes (`battery::Graph`, over `analysis::model_links`),
-/// so a constant that only sets where a stock starts is tested when a call
-/// names it and not by default.
+/// The record, both citations and the battery's default targets answer what a
+/// model reads from one owner (`analysis::model_reads`), so a constant read
+/// only as the model starts is read for all of them: `s0` sets where a stock
+/// starts, and `base_rate` a rate frozen at the start (`INIT`). A step after
+/// the start moves neither, so the battery disturbs neither by default.
 #[test]
 fn a_constant_read_only_at_the_start_is_read_for_every_consumer() {
     let mut host = Host::from_test_project(&test_support::initial_reads());
     let mut session = Session::new("main");
+    session.outline_budget = usize::MAX;
+    // Sensitivity lists its strongest responses whether or not they flag
+    // anything, so what it lists is what it changed.
+    let battery = host.call(&mut session, "run_tests", json!({"tests": ["sensitivity"]}));
+    let mut targets: Vec<&str> = battery["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|result| result["variable"].as_str())
+        .collect();
+    targets.sort_unstable();
+    targets.dedup();
+    assert_eq!(targets, ["base_rate", "s0"], "{battery}");
+    let disturbed = host.call(&mut session, "run_tests", json!({"tests": ["disturbance"]}));
+    assert_eq!(
+        disturbed["tests"][0]["skipped"], "the model has nothing this test changes",
+        "{disturbed}"
+    );
     for (constant, reader) in [("base_rate", "rate"), ("s0", "level")] {
         let record = host.call(&mut session, "read_variables", json!({"names": [constant]}));
         assert_eq!(

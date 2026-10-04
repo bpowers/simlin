@@ -17,7 +17,10 @@
 //!   ([`ExtremeRule`]). An extreme is a condition of the system, never a
 //!   value outside the constant's domain or an artifact of the integration:
 //!   - a constant some equation divides by has zero outside its domain, so
-//!     its low extreme is a tenth of its value; any other's is zero;
+//!     its low extreme is a tenth of its value, as is that of a constant
+//!     nothing reads as the run goes, which only sets where the run starts (a
+//!     stock that starts empty is rarely a condition the system is meant to
+//!     survive); any other's is zero;
 //!   - a time constant's low extreme is a tenth of its value, and at least
 //!     four DTs for each of its stages, in its own unit of time: below that
 //!     the run shows the integration, not the system;
@@ -62,14 +65,17 @@
 //!   after it. A model at rest hides its loops, and this is how the battery
 //!   sees its structure.
 //!
-//! The targeted tests' default targets are the constants that feed the
-//! model's flows, less its unit conversions: a constant whose value is one of
-//! its units (`1e6 tons/Mton`, `one_year = 1 year`) changes the units a
-//! quantity is counted in, not the quantity ([`Roles`]). Sensitivity and
-//! disturbance leave out dates too, whose half, double and step are no
-//! conditions of the system. A time constant is recognized by its units where
-//! it has them, and by its role where it has none (`time_constants`); each
-//! check of one says which.
+//! The targeted tests' default targets are the constants that reach a stock,
+//! by any read (`analysis::model_reads`): as the run goes, or as it starts,
+//! where a stock starts from one. They leave out the model's unit
+//! conversions: a constant whose value is one of its units (`1e6 tons/Mton`,
+//! `one_year = 1 year`) changes the units a quantity is counted in, not the
+//! quantity ([`Roles`]). Sensitivity and disturbance leave out dates too,
+//! whose half, double and step are no conditions of the system, and a
+//! disturbance the constants nothing reads as the run goes, which a step
+//! after the start moves nothing of. A time constant is recognized by its
+//! units where it has them, and by its role where it has none
+//! (`time_constants`); each check of one says which.
 //!
 //! A model that does not simulate says why once, and every test is skipped;
 //! so is a test that would compare nothing (a model whose stocks are all in
@@ -364,7 +370,8 @@ pub enum ExtremeRule {
     /// Low: zero, for a constant no equation divides by.
     Zero,
     /// Low: a tenth of its value, for a constant some equation divides
-    /// by, whose domain zero is outside.
+    /// by, whose domain zero is outside, or one nothing reads as the run
+    /// goes, which only sets where the run starts.
     Tenth,
     /// Low: a tenth of a time constant's value, and at least four DTs for
     /// each of its stages (in its own unit of time).
@@ -427,10 +434,11 @@ pub struct RunTestsInput {
     #[serde(default)]
     pub tests: Vec<TestName>,
     /// The variables the targeted tests change, in place of their defaults:
-    /// extreme conditions, sensitivity and disturbance take constants (the
-    /// constants that feed the model's flows by default, less its unit
-    /// conversions); a loop knockout holds variables at their initial
-    /// values, and runs only on targets named here. At most 12.
+    /// extreme conditions, sensitivity and disturbance take constants (by
+    /// default the constants that reach a stock, where it starts or as the
+    /// run goes, less the model's unit conversions); a loop knockout holds
+    /// variables at their initial values, and runs only on targets named
+    /// here. At most 12.
     #[serde(default)]
     #[cfg_attr(feature = "schema", schemars(length(max = 12)))]
     pub targets: Vec<String>,
@@ -1152,9 +1160,13 @@ pub(crate) fn run_tests(
                         reading
                             .roles
                             .defaults(model, &reading.graph, Targeted::Changes);
+                    // A step a tenth of the way into the run is past every
+                    // start, and moves nothing a constant only starts.
                     let defaults = defaults
                         .into_iter()
-                        .filter(|var| !is_zero_valued(base, model, var))
+                        .filter(|var| {
+                            !is_zero_valued(base, model, var) && !reading.roles.only_starts(var)
+                        })
                         .take(MAX_DEFAULT_DISTURBANCES)
                         .collect();
                     (defaults, left_out)
@@ -1481,34 +1493,50 @@ fn fitted(
     output
 }
 
-/// A model's causal links between its variables, by canonical ident.
+/// What reads each of a model's variables, by canonical ident
+/// (`analysis::model_reads`, the one owner of it): the reads made as the run
+/// goes and those made only as it starts.
 pub(crate) struct Graph {
-    readers: HashMap<String, Vec<String>>,
+    readers: HashMap<String, Vec<Read>>,
+    stocks: HashSet<String>,
+}
+
+/// One read of a variable: its reader, and whether every read of the pair is
+/// made only as the model starts (a stock's initial value, `INIT`).
+struct Read {
+    reader: String,
+    start_only: bool,
 }
 
 impl Graph {
     fn of(db: &crate::db::SimlinDb, resolved: &ResolvedModel<'_>) -> Graph {
-        let mut readers: HashMap<String, Vec<String>> = HashMap::new();
-        for link in crate::analysis::model_links(
-            db,
-            resolved.source_model,
-            resolved.source_project,
-            None,
-            false,
-        ) {
-            readers.entry(link.from).or_default().push(link.to);
+        let mut readers: HashMap<String, Vec<Read>> = HashMap::new();
+        for read in crate::analysis::model_reads(db, resolved.source_model, resolved.source_project)
+        {
+            readers.entry(read.from).or_default().push(Read {
+                reader: read.to,
+                start_only: read.start_only,
+            });
         }
-        Graph { readers }
+        let stocks = resolved
+            .model
+            .variables
+            .iter()
+            .filter(|v| matches!(v, Variable::Stock(_)))
+            .map(|v| crate::canonicalize(v.get_ident()).into_owned())
+            .collect();
+        Graph { readers, stocks }
     }
 
-    /// Every variable `from` reaches through links, itself excluded.
-    fn downstream(&self, from: &str) -> HashSet<String> {
+    /// Every variable `from` reaches, itself excluded: through every read,
+    /// or only through those made as the run goes.
+    fn reach(&self, from: &str, as_it_runs: bool) -> HashSet<String> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<&str> = VecDeque::from([from]);
         while let Some(node) = queue.pop_front() {
-            for next in self.readers.get(node).into_iter().flatten() {
-                if seen.insert(next.clone()) {
-                    queue.push_back(next);
+            for read in self.readers.get(node).into_iter().flatten() {
+                if !(as_it_runs && read.start_only) && seen.insert(read.reader.clone()) {
+                    queue.push_back(&read.reader);
                 }
             }
         }
@@ -1516,29 +1544,41 @@ impl Graph {
         seen
     }
 
-    /// The model's constants that feed its flows, those that reach the most
-    /// stocks first (then by name).
-    fn feeding_flows<'m>(&self, model: &'m datamodel::Model) -> Vec<&'m Variable> {
-        let kinds: HashMap<String, &Variable> = model
-            .variables
+    /// Every variable `from` reaches through any read: what the model does
+    /// depends on it, from the start or as the run goes.
+    fn downstream(&self, from: &str) -> HashSet<String> {
+        self.reach(from, false)
+    }
+
+    /// Every variable `from` moves as the run goes: a quantity frozen from it
+    /// at the start (`INIT(level)`, a stock started from it) is no part of it.
+    fn moved_by(&self, from: &str) -> HashSet<String> {
+        self.reach(from, true)
+    }
+
+    /// Whether `from` moves no stock as the run goes: whatever it does, it
+    /// does where the run starts. A flow it moves moves its stock.
+    fn only_starts(&self, from: &str) -> bool {
+        !self
+            .moved_by(from)
             .iter()
-            .map(|v| (crate::canonicalize(v.get_ident()).into_owned(), v))
-            .collect();
+            .any(|name| self.stocks.contains(name))
+    }
+
+    /// The model's constants that reach a stock, where it starts or as the
+    /// run goes, those that reach the most stocks first (then by name).
+    fn reaching_stocks<'m>(&self, model: &'m datamodel::Model) -> Vec<&'m Variable> {
         let mut constants: Vec<(usize, &Variable)> = model
             .variables
             .iter()
             .filter(|v| settable(v).is_ok())
             .filter_map(|v| {
-                let reached = self.downstream(&crate::canonicalize(v.get_ident()));
-                let kind = |name: &String| kinds.get(name).copied();
-                let feeds_a_flow = reached
+                let stocks = self
+                    .downstream(&crate::canonicalize(v.get_ident()))
                     .iter()
-                    .any(|name| matches!(kind(name), Some(Variable::Flow(_))));
-                let stocks = reached
-                    .iter()
-                    .filter(|name| matches!(kind(name), Some(Variable::Stock(_))))
+                    .filter(|name| self.stocks.contains(*name))
                     .count();
-                feeds_a_flow.then_some((stocks, v))
+                (stocks > 0).then_some((stocks, v))
             })
             .collect();
         constants.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.get_ident().cmp(b.1.get_ident())));
@@ -1845,6 +1885,8 @@ struct Roles {
     shares: HashMap<String, f64>,
     /// Constants some equation divides by, whose domain zero is outside.
     divisors: HashSet<String>,
+    /// Constants nothing reads as the run goes ([`Graph::only_starts`]).
+    starts: HashSet<String>,
     /// Constants used as points in time.
     dates: HashSet<String>,
     /// Fractional rates, constants in units of one over a unit of time, each
@@ -1884,8 +1926,12 @@ impl Roles {
         let (mut time_constants, literal_times) = time_constants(model, graph, units, parsed);
         let used_as_dates = points_in_time(parsed);
         let mut dates = HashSet::new();
+        let mut starts = HashSet::new();
         for var in model.variables.iter().filter(|v| settable(v).is_ok()) {
             let canonical = crate::canonicalize(var.get_ident()).into_owned();
+            if graph.only_starts(&canonical) {
+                starts.insert(canonical.clone());
+            }
             let declared = units.of_variable(var);
             // A date is in units of time, or in none: a constant in other
             // units that an equation compares with the time is a threshold
@@ -1925,14 +1971,16 @@ impl Roles {
             conversions,
             shares,
             divisors: divisors(parsed),
+            starts,
             dates,
             rates,
         }
     }
 
-    /// The constants a targeted test changes by default: those that feed the
-    /// model's flows, less its unit conversions and, for a test that changes
-    /// a constant by a factor, its dates; and what was left out.
+    /// The constants a targeted test changes by default: those that reach a
+    /// stock, where it starts or as the run goes, less the model's unit
+    /// conversions and, for a test that changes a constant by a factor, its
+    /// dates; and what was left out.
     fn defaults<'m>(
         &self,
         model: &'m datamodel::Model,
@@ -1943,7 +1991,7 @@ impl Roles {
             set.contains(crate::canonicalize(var.get_ident()).as_ref())
         };
         let (conversions, rest): (Vec<&Variable>, Vec<&Variable>) = graph
-            .feeding_flows(model)
+            .reaching_stocks(model)
             .into_iter()
             .partition(|var| is_in(&self.conversions, var));
         let scaled = targeted == Targeted::Changes;
@@ -1963,6 +2011,11 @@ impl Roles {
         self.shares
             .get(crate::canonicalize(var.get_ident()).as_ref())
             .copied()
+    }
+
+    fn only_starts(&self, var: &Variable) -> bool {
+        self.starts
+            .contains(crate::canonicalize(var.get_ident()).as_ref())
     }
 
     fn is_date(&self, var: &Variable) -> bool {
@@ -2004,10 +2057,8 @@ impl Roles {
                 Some(tc.evidence),
             );
         }
-        if self
-            .divisors
-            .contains(crate::canonicalize(var.get_ident()).as_ref())
-        {
+        let canonical = crate::canonicalize(var.get_ident());
+        if self.divisors.contains(canonical.as_ref()) || self.starts.contains(canonical.as_ref()) {
             return (
                 Extreme::new(ExtremeRule::Tenth, |value| value / EXTREME_FACTOR),
                 None,
@@ -2545,12 +2596,13 @@ fn time_constants(
         }
     }
 
-    // What depends on a stock: everything a stock reaches.
+    // What depends on a stock: everything a stock moves as the run goes. A
+    // quantity frozen from one at the start is a constant of the run.
     let mut stock_dependent: HashSet<String> = HashSet::new();
     for var in &model.variables {
         if matches!(var, Variable::Stock(_)) {
             let stock = crate::canonicalize(var.get_ident()).into_owned();
-            stock_dependent.extend(graph.downstream(&stock));
+            stock_dependent.extend(graph.moved_by(&stock));
             stock_dependent.insert(stock);
         }
     }
