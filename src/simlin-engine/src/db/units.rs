@@ -477,6 +477,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                                                 other_src,
                                                 other_units,
                                             )),
+                                            None,
                                         ),
                                     ),
                                 }
@@ -777,7 +778,7 @@ fn check_conveyor_param_units(
             // Matches, or a pure constant (compatible with any expected unit).
             Ok(_) => None,
             // A dependency's units are unknown -- skip, not a dimensional error.
-            Err(UnitError::ConsistencyError(ErrorCode::DoesNotExist, _, _)) => None,
+            Err(UnitError::ConsistencyError(ErrorCode::DoesNotExist, _, _, _)) => None,
             // An internal dimensional inconsistency in the expression itself
             // (e.g. adding incompatible units); surface it against the conveyor.
             Err(err) => Some(format!(
@@ -796,6 +797,7 @@ fn check_conveyor_param_units(
                     ErrorCode::UnitMismatch,
                     crate::builtins::Loc::default(),
                     Some(detail),
+                    None,
                 )),
             }
             .accumulate(db);

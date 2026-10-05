@@ -336,6 +336,7 @@ fn a_diagnostic_with_neither_reason_nor_span_says_what_its_code_means() {
             kind: crate::common::ErrorKind::Model,
             code: ErrorCode::CircularDependency,
             details: None,
+            element: None,
         }),
     };
     let formatted = format_diagnostic_with_datamodel(&diagnostic, &inventory().build_datamodel());

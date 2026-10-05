@@ -538,6 +538,14 @@ typedef struct {
   // the code means. Appended additively: existing field offsets are
   // unchanged.
   const char *details;
+  // The element of an arrayed variable the detail is about, as its
+  // canonical key (`young`; `nyc,young` for an element of two
+  // dimensions), or NULL when it is about the variable as a whole. When
+  // the element has an equation of its own, `start_offset..end_offset`
+  // index that equation's text; otherwise they index the equation every
+  // element follows. Appended additively: existing field offsets are
+  // unchanged.
+  const char *element_name;
 } SimlinErrorDetail;
 
 // Opaque project structure

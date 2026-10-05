@@ -864,10 +864,10 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
 /// consumer does with it.
 ///
 /// The complementary GH #905 shape is the second advisory: one Warning-
-/// severity [`crate::common::ErrorCode::MissingElementEquation`] per variable
-/// naming, in row-major order, every declared element combination no arm
-/// covers -- the elements `compiler::expand_per_element` assigns a fabricated
-/// 0. Coverage is `variable::elements_without_an_arm` over the PARSED
+/// severity [`crate::common::ErrorCode::MissingElementEquation`] per declared
+/// element combination no arm covers, in row-major order, each naming its
+/// element (`Error::element`) -- the elements `compiler::expand_per_element`
+/// assigns a fabricated 0. Coverage is `variable::elements_without_an_arm` over the PARSED
 /// equation the compiler expands, not the entry list: an entry with an empty
 /// equation is no arm, an empty EXCEPT default covers nothing, and a gf-only
 /// entry is an arm. A variable carrying a fatal diagnostic (an arm that does
@@ -930,7 +930,7 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
             if combination_keys.contains(&key) {
                 continue;
             }
-            if !warned.insert(key) {
+            if !warned.insert(key.clone()) {
                 continue;
             }
             let dims_display = dim_names.join(", ");
@@ -944,11 +944,14 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
                 variable: Some(var_name.clone()),
                 owner: None,
                 severity: DiagnosticSeverity::Warning,
-                error: DiagnosticError::Model(Error::new(
-                    ErrorKind::Model,
-                    ErrorCode::UnknownElementSubscript,
-                    Some(msg),
-                )),
+                error: DiagnosticError::Model(
+                    Error::new(
+                        ErrorKind::Model,
+                        ErrorCode::UnknownElementSubscript,
+                        Some(msg),
+                    )
+                    .in_element(&key),
+                ),
             }
             .accumulate(db);
         }
@@ -956,9 +959,8 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
         // The declared elements no arm covers: `compiler::arrayed_arm` gives
         // each of these the fabricated 0. Read off the parsed equation (a memo
         // read, see `parsed_equation_ast`) and the per-element table layout,
-        // the two shapes the compiler expands. One Warning per variable,
-        // elements in row-major order, so a run reports the same text every
-        // time.
+        // the two shapes the compiler expands. One Warning per element, in
+        // row-major order, so a run reports the same rows every time.
         let parsed = parse_source_variable(db, *svar, project);
         let Some(ast) = parsed.variable.ast() else {
             continue;
@@ -972,38 +974,31 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
         }
         let tables = parsed.variable.tables();
         let per_element_tables = crate::variable::has_per_element_tables(equation);
-        let missing: Vec<String> = crate::variable::elements_without_an_arm(ast, |offset| {
+        let missing = crate::variable::elements_without_an_arm(ast, |offset| {
             per_element_tables && tables.get(offset).is_some_and(|t| !t.x.is_empty())
-        })
-        .iter()
-        .map(|key| format!("'{}'", key.as_str()))
-        .collect();
-        if missing.is_empty() {
-            continue;
+        });
+        for key in &missing {
+            let msg = format!(
+                "array variable '{var_name}' has no equation for '{}': no element entry \
+                 names it and no default equation applies, so it evaluates to 0",
+                key.as_str()
+            );
+            Diagnostic {
+                model: model_name.clone(),
+                variable: Some(var_name.clone()),
+                owner: None,
+                severity: DiagnosticSeverity::Warning,
+                error: DiagnosticError::Model(
+                    Error::new(
+                        ErrorKind::Model,
+                        ErrorCode::MissingElementEquation,
+                        Some(msg),
+                    )
+                    .in_element(key),
+                ),
+            }
+            .accumulate(db);
         }
-        let msg = format!(
-            "array variable '{var_name}' has no equation for {}: no element entry names \
-             {} and no default equation applies, so {} to 0",
-            missing.join(", "),
-            if missing.len() == 1 { "it" } else { "them" },
-            if missing.len() == 1 {
-                "it evaluates"
-            } else {
-                "they evaluate"
-            },
-        );
-        Diagnostic {
-            model: model_name.clone(),
-            variable: Some(var_name.clone()),
-            owner: None,
-            severity: DiagnosticSeverity::Warning,
-            error: DiagnosticError::Model(Error::new(
-                ErrorKind::Model,
-                ErrorCode::MissingElementEquation,
-                Some(msg),
-            )),
-        }
-        .accumulate(db);
     }
 }
 

@@ -71,7 +71,7 @@ impl DiagnosticError {
             DiagnosticError::Equation(err) => err.code,
             DiagnosticError::Model(err) => err.code,
             DiagnosticError::Unit(UnitError::DefinitionError(err)) => err.code,
-            DiagnosticError::Unit(UnitError::ConsistencyError(code, _, _))
+            DiagnosticError::Unit(UnitError::ConsistencyError(code, _, _, _))
             | DiagnosticError::Unit(UnitError::InferenceError { code, .. }) => *code,
             DiagnosticError::Assembly(_) => ErrorCode::NotSimulatable,
         }
@@ -104,11 +104,29 @@ impl DiagnosticError {
                 start: err.start,
                 end: err.end,
             }),
-            DiagnosticError::Unit(UnitError::ConsistencyError(_, loc, _)) => Some(*loc),
+            DiagnosticError::Unit(UnitError::ConsistencyError(_, loc, _, _)) => Some(*loc),
             DiagnosticError::Unit(UnitError::InferenceError { sources, .. }) => {
                 sources.first().and_then(|(_, loc)| *loc)
             }
             DiagnosticError::Model(_) | DiagnosticError::Assembly(_) => None,
+        }
+    }
+
+    /// The element of an arrayed variable the error is about, as its
+    /// canonical key: the raising site's, on [`EquationError::element`],
+    /// [`Error::element`] or a unit consistency error. A units string's error
+    /// is the variable's, a unit inference error spans variables, and they
+    /// and a codegen refusal name none.
+    pub fn element(&self) -> Option<&str> {
+        match self {
+            DiagnosticError::Equation(err) => err.element.as_deref(),
+            DiagnosticError::Model(err) => err.element.as_deref(),
+            DiagnosticError::Unit(UnitError::ConsistencyError(_, _, _, element)) => {
+                element.as_deref()
+            }
+            DiagnosticError::Unit(UnitError::DefinitionError(_))
+            | DiagnosticError::Unit(UnitError::InferenceError { .. })
+            | DiagnosticError::Assembly(_) => None,
         }
     }
 
@@ -119,7 +137,7 @@ impl DiagnosticError {
             DiagnosticError::Equation(err)
             | DiagnosticError::Unit(UnitError::DefinitionError(err)) => err.details.as_deref(),
             DiagnosticError::Model(err) => err.details.as_deref(),
-            DiagnosticError::Unit(UnitError::ConsistencyError(_, _, details))
+            DiagnosticError::Unit(UnitError::ConsistencyError(_, _, details, _))
             | DiagnosticError::Unit(UnitError::InferenceError { details, .. }) => {
                 details.as_deref()
             }
@@ -163,6 +181,12 @@ impl Diagnostic {
 
     pub fn reason(&self) -> Option<&str> {
         self.error.reason()
+    }
+
+    /// The element of an arrayed variable the diagnostic is about
+    /// ([`DiagnosticError::element`]).
+    pub fn element(&self) -> Option<&str> {
+        self.error.element()
     }
 
     /// Whether this diagnostic is `code` raised on `category`'s surface.

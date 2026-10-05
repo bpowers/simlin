@@ -329,14 +329,17 @@ pub fn compile_var_fragment<'db>(
 
 /// The element of the variable `input` lowers that the slot at `offset`
 /// holds, or `None` for a scalar.
-fn element_at(input: &FragmentInput<'_>, offset: usize) -> Option<String> {
+fn element_at(
+    input: &FragmentInput<'_>,
+    offset: usize,
+) -> Option<crate::common::CanonicalElementName> {
     let dims = input.target.get_dimensions()?;
     if dims.is_empty() {
         return None;
     }
     crate::dimensions::SubscriptIterator::new(dims)
         .nth(offset)
-        .map(|element| element.join(","))
+        .map(|element| crate::common::CanonicalElementName::from_parts(&element))
 }
 
 /// File one `SubscriptOutOfRange` warning, on `reported_on`, for each read
@@ -354,7 +357,7 @@ fn report_out_of_range_reads(
     input: &FragmentInput<'_>,
     var: &crate::compiler::Var,
     reported_on: &str,
-    element_of: impl Fn(usize) -> Option<String>,
+    element_of: impl Fn(usize) -> Option<crate::common::CanonicalElementName>,
 ) {
     for read in crate::compiler::out_of_range_reads(var) {
         let source = read.source.as_str();
@@ -371,9 +374,11 @@ fn report_out_of_range_reads(
             Some(dim) => format!("{side} element of '{}'", dim.name()),
             None => format!("{side} element"),
         };
-        let details = match element_of(read.element_offset) {
+        let element = element_of(read.element_offset);
+        let details = match &element {
             Some(element) => format!(
-                "the equation for '{element}' reads '{source}' {axis}, which is not a number"
+                "the equation for '{}' reads '{source}' {axis}, which is not a number",
+                element.as_str()
             ),
             None => format!("the equation reads '{source}' {axis}, which is not a number"),
         };
@@ -387,6 +392,7 @@ fn report_out_of_range_reads(
                 end: read.loc.end,
                 code: crate::common::ErrorCode::SubscriptOutOfRange,
                 details: Some(details),
+                element: element.map(|e| e.as_str().to_string()),
             }),
         }
         .accumulate(db);
@@ -807,19 +813,32 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
             .map(|arg| arg.get_loc())
     };
     let emit_ctx = input.emit_ctx();
-    // A helper is one element of its parent's body (or the whole of a scalar
-    // parent's), and what it reads is reported on the parent, at the parent's
-    // element. One that iterates its parent's own dimensions (an apply-to-all
-    // argument a `PREVIOUS` or an `INIT` captures) writes, at each slot, the
-    // parent's element of that name.
+    // A per-element helper is one element of its parent's body, and what is
+    // reported of it is reported on the parent; a helper of a scalar body is
+    // at no element. One that iterates its parent's own dimensions (an
+    // apply-to-all argument a `PREVIOUS` or an `INIT` captures) writes, at
+    // each slot, the parent's element of that name.
     let helper_element = input.target.element_scope().map(|scope| {
-        scope
-            .element
-            .iter()
-            .map(|e| e.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
+        crate::common::CanonicalElementName::from_parts(
+            &scope.element.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+        )
     });
+    // A helper's lowering error is in the parent's equation text: the
+    // element's own equation when it has one (so the error names the
+    // element, whose text its span indexes), else the equation every
+    // element follows, whose error every element meets and none is named by.
+    let own_arm_element = helper_element
+        .as_ref()
+        .filter(|element| {
+            matches!(
+                meta.parent_source_var.equation(db),
+                crate::datamodel::Equation::Arrayed(_, arms, _, _)
+                    if arms.iter().any(|(subscript, ..)| {
+                        crate::common::CanonicalElementName::from_subscript(subscript) == **element
+                    })
+            )
+        })
+        .map(|element| element.as_str().to_string());
     // Whether the helper iterates its parent's own dimensions, asked only of a
     // read that runs off its axis: the answer reads the parent's equation, and
     // a helper's fragment must not depend on it otherwise, or every edit of
@@ -880,6 +899,7 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                             end: loc.end,
                             code: err.code,
                             details: err.details,
+                            element: err.element.or_else(|| own_arm_element.clone()),
                         }),
                     }
                     .accumulate(db),

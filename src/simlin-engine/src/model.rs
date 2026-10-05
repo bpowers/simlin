@@ -13,9 +13,10 @@
 //! a consumer that needs several variables assembles handles to the memos
 //! (`db::model_lowered_variables`).
 
-use crate::ast::{Ast, Expr0, Expr1, Expr2, LoweringScope, lower_ast, lower_typed_ast, typed_ast};
+use crate::ast::{
+    Ast, Expr0, Expr1, Expr2, LoweringResult, LoweringScope, lower_ast, lower_typed_ast, typed_ast,
+};
 use crate::canonicalize;
-use crate::common::EquationResult;
 use crate::datamodel;
 use crate::db::{build_module_inputs, module_input_prefix};
 use crate::diagnostic::DiagnosticError;
@@ -51,15 +52,15 @@ pub(crate) fn lower_variable(scope: &LoweringScope, parsed: &ParsedVariable) -> 
 pub(crate) fn lower_variable_from_typed(
     scope: &LoweringScope,
     parsed: &ParsedVariable,
-    primary: Option<EquationResult<Ast<Expr1>>>,
+    primary: Option<LoweringResult<Ast<Expr1>>>,
 ) -> Variable {
     let mut diagnostics = parsed.diagnostics.clone();
     let element_scoped = parsed.element_scope().is_some();
-    let mut record = |lowered: EquationResult<Ast<Expr2>>| -> Option<Ast<Expr2>> {
+    let mut record = |lowered: LoweringResult<Ast<Expr2>>| -> Option<Ast<Expr2>> {
         match lowered {
             Ok(ast) => Some(ast),
-            Err(err) => {
-                diagnostics.push(DiagnosticError::Equation(err));
+            Err(errors) => {
+                diagnostics.extend(errors.into_iter().map(DiagnosticError::Equation));
                 None
             }
         }

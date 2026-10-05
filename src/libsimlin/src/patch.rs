@@ -93,6 +93,7 @@ struct ErrorDetailBuilder {
     unit_error_kind: SimlinUnitErrorKind,
     severity: crate::SimlinErrorSeverity,
     details: Option<String>,
+    element_name: Option<String>,
 }
 
 impl ErrorDetailBuilder {
@@ -108,6 +109,7 @@ impl ErrorDetailBuilder {
             unit_error_kind: SimlinUnitErrorKind::default(),
             severity: crate::SimlinErrorSeverity::default(),
             details: None,
+            element_name: None,
         }
     }
 
@@ -152,6 +154,11 @@ impl ErrorDetailBuilder {
         self
     }
 
+    fn element_name(mut self, element: Option<String>) -> Self {
+        self.element_name = element;
+        self
+    }
+
     fn build(self) -> ErrorDetailData {
         ErrorDetailData {
             code: self.code,
@@ -164,6 +171,7 @@ impl ErrorDetailBuilder {
             unit_error_kind: self.unit_error_kind,
             severity: self.severity,
             details: self.details,
+            element_name: self.element_name,
         }
     }
 
@@ -195,7 +203,8 @@ impl ErrorDetailBuilder {
             .kind(kind)
             .unit_error_kind(unit_error_kind)
             .severity(severity)
-            .details(error.details);
+            .details(error.details)
+            .element_name(error.element);
         if let Some(message) = error.message {
             builder = builder.message(Some(message));
         }

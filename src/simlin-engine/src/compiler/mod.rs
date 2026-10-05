@@ -1605,7 +1605,17 @@ fn expand_per_element(
             continue;
         };
         let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-        let main_expr = lower_element(ctx, &elem_ctx, ast)?;
+        // An element whose own equation does not compile names itself. One
+        // that follows the equation every element follows does not: the
+        // error is that equation's, and the first element to meet it is no
+        // more at fault than the rest.
+        let main_expr = lower_element(ctx, &elem_ctx, ast).map_err(|e| {
+            if elements.contains_key(&key) {
+                e.in_element(&key)
+            } else {
+                e
+            }
+        })?;
         exprs.push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
     }
     Ok(exprs)

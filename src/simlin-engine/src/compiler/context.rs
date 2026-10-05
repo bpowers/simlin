@@ -814,6 +814,7 @@ impl Context<'_> {
             kind: ErrorKind::Model,
             code: e.code,
             details: e.details,
+            element: e.element,
         })?;
 
         self.lower_from_expr3(&expr3)
@@ -1142,6 +1143,7 @@ impl Context<'_> {
                             details: Some(format!(
                                 "Dimension '{id}' cannot be used in a scalar equation"
                             )),
+                            element: None,
                         });
                     }
                 }

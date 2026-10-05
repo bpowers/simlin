@@ -131,6 +131,11 @@ export interface ErrorDetail {
   // 'person'"). Null when the error has no
   // separate reason string.
   details: string | null;
+  // The element of an arrayed variable the error is about, as its canonical
+  // key ("young", "nyc,young"), or null when it is about the variable as a
+  // whole. When the element has an equation of its own, startOffset and
+  // endOffset index that equation's text.
+  elementName: string | null;
 }
 
 // Link structure - matches SimlinLink in simlin.h

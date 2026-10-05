@@ -843,19 +843,24 @@ pub(crate) fn explicit_fragment_input<'db>(
         return fatal(diagnostics);
     }
     if let Some(head) = unknown_head {
-        let loc = parsed
+        // The span indexes the text the reference is written in, so the
+        // error names the element whose own equation that is.
+        let (element, loc) = parsed
             .variable
             .ast()
-            .and_then(|ast| ast.get_var_loc(head.as_str()))
+            .and_then(|ast| ast.locate_var(head.as_str()))
             .unwrap_or_default();
-        diagnostics.push(diagnostic(DiagnosticError::Equation(
-            crate::common::EquationError::detailed(
-                crate::common::ErrorCode::UnknownDependency,
-                loc.start,
-                loc.end,
-                format!("'{head}' is not a variable of model '{model_name}'"),
-            ),
-        )));
+        let error = crate::common::EquationError::detailed(
+            crate::common::ErrorCode::UnknownDependency,
+            loc.start,
+            loc.end,
+            format!("'{head}' is not a variable of model '{model_name}'"),
+        );
+        let error = match &element {
+            Some(element) => error.in_element(element),
+            None => error,
+        };
+        diagnostics.push(diagnostic(DiagnosticError::Equation(error)));
         return fatal(diagnostics);
     }
 

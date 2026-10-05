@@ -888,6 +888,15 @@ pub struct EquationError {
     /// the user unchanged, through `Diagnostic` -> `FormattedError::details`
     /// -> the FFI's `SimlinErrorDetail::details`.
     pub details: Option<String>,
+    /// The element of an arrayed variable the error is about, as its
+    /// canonical key (`CanonicalElementName::from_parts`: `young`,
+    /// `nyc,young`): an error in that element's own equation, or one that
+    /// shows at that element alone (a read past a dimension's end). `None`
+    /// for an error of a scalar's equation, or of the equation every element
+    /// follows that every element meets. `start..end` index the element's
+    /// own equation when it has one, and otherwise the equation every element
+    /// follows.
+    pub element: Option<String>,
 }
 
 impl EquationError {
@@ -898,6 +907,7 @@ impl EquationError {
             end,
             code,
             details: None,
+            element: None,
         }
     }
 
@@ -908,7 +918,17 @@ impl EquationError {
             end,
             code,
             details: Some(details.into()),
+            element: None,
         }
+    }
+
+    /// This error, placed at `element` (see [`EquationError::element`]). An
+    /// error already placed keeps its element: the innermost site knows it.
+    pub fn in_element(mut self, element: &CanonicalElementName) -> Self {
+        if self.element.is_none() {
+            self.element = Some(element.as_str().to_string());
+        }
+        self
     }
 
     /// Add `context` to this error's reason: the one it carries, or, when it
@@ -949,6 +969,7 @@ impl From<Error> for EquationError {
             start: 0,
             end: 0,
             details: err.details,
+            element: err.element,
         }
     }
 }
@@ -971,6 +992,12 @@ pub struct Error {
     /// unchanged, through [`Error::reason`] and, when the error becomes a
     /// diagnostic, `FormattedError::details`.
     pub details: Option<String>,
+    /// The element of an arrayed variable the error is about, as its
+    /// canonical key (`CanonicalElementName::from_parts`); `None` when it is
+    /// about the variable as a whole. Carried into an `EquationError` with
+    /// the rest of the error, so a diagnostic names the element whichever
+    /// kind it is.
+    pub element: Option<String>,
 }
 
 impl From<Box<dyn std::error::Error>> for Error {
@@ -979,6 +1006,7 @@ impl From<Box<dyn std::error::Error>> for Error {
             kind: ErrorKind::Simulation,
             code: ErrorCode::Generic,
             details: Some(err.to_string()),
+            element: None,
         }
     }
 }
@@ -989,7 +1017,17 @@ impl Error {
             kind,
             code,
             details,
+            element: None,
         }
+    }
+
+    /// This error, placed in one element of an arrayed variable (see
+    /// [`Error::element`]). An error already placed keeps its element.
+    pub fn in_element(mut self, element: &CanonicalElementName) -> Self {
+        if self.element.is_none() {
+            self.element = Some(element.as_str().to_string());
+        }
+        self
     }
 
     pub fn get_details(&self) -> Option<String> {
@@ -3321,7 +3359,11 @@ pub enum UnitError {
     /// `ConsistencyError` and `InferenceError` carry their own only because
     /// neither has an `EquationError` to put it on.
     DefinitionError(EquationError),
-    ConsistencyError(ErrorCode, Loc, Option<String>),
+    /// A dimensional inconsistency: its code, the span it was found at, the
+    /// reason, and the element of an arrayed variable whose own equation the
+    /// span indexes (its canonical key), `None` for an equation every element
+    /// follows.
+    ConsistencyError(ErrorCode, Loc, Option<String>, Option<String>),
     /// For inference errors that may span multiple variables.
     /// Each source is (variable_identifier, optional_location_in_that_equation).
     InferenceError {
@@ -3335,7 +3377,7 @@ impl fmt::Display for UnitError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             UnitError::DefinitionError(err) => write!(f, "unit definition:{err}"),
-            UnitError::ConsistencyError(err, loc, details) => {
+            UnitError::ConsistencyError(err, loc, details, _) => {
                 if let Some(details) = details {
                     write!(f, "unit consistency:{loc}:{err} -- {details}")
                 } else {

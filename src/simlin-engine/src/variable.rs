@@ -1422,8 +1422,11 @@ fn parse_equation(
                     } else {
                         parse_inner(eqn)
                     };
-                    errors.extend(single_errors);
-                    (CanonicalElementName::from_subscript(subscript), ast)
+                    // Each element's own equation is a text of its own, so
+                    // its errors name the element their spans index.
+                    let element = CanonicalElementName::from_subscript(subscript);
+                    errors.extend(single_errors.into_iter().map(|e| e.in_element(&element)));
+                    (element, ast)
                 })
                 .filter(|(_, ast)| ast.is_some())
                 .map(|(subscript, ast)| (subscript, ast.unwrap()))

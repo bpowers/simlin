@@ -70,6 +70,12 @@ pub struct FormattedError {
     /// snippet. It never repeats the code's name, which `message` carries for
     /// terminals and language-model clients.
     pub details: Option<String>,
+    /// The element of an arrayed variable the error is about, as its
+    /// canonical key (`Diagnostic::element`); `None` for an error of the
+    /// variable as a whole. When the element has an equation of its own,
+    /// `start_offset..end_offset` index that equation, and `message`'s
+    /// snippet shows it.
+    pub element: Option<String>,
 }
 
 /// Collection of formatted errors plus bookkeeping flags that mirror previous CLI output
@@ -125,6 +131,7 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
         severity: DiagnosticSeverity::Error,
         category: None,
         details: Some(error.reason().to_owned()),
+        element: error.element.clone(),
     }
 }
 
@@ -245,12 +252,14 @@ fn format_diagnostic_inner(diag: &db::Diagnostic, var: Option<&Variable>) -> For
     let presented = presented_variable(diag);
     let var_name = presented.unwrap_or("<unknown>");
     let code = diag.code();
+    let element = diag.element();
     let mut details = diag.reason().map(str::to_owned);
+    let equation_text = |v: &Variable| variable_equation_text(v, element);
     let (kind, noun, snippet_text) = match diag.category() {
         DiagnosticCategory::Equation => (
             FormattedErrorKind::Variable,
             "",
-            var.and_then(variable_equation_text),
+            var.and_then(equation_text),
         ),
         DiagnosticCategory::Model => (FormattedErrorKind::Model, "", None),
         DiagnosticCategory::UnitDefinition => (
@@ -262,12 +271,12 @@ fn format_diagnostic_inner(diag: &db::Diagnostic, var: Option<&Variable>) -> For
         DiagnosticCategory::UnitConsistency => (
             FormattedErrorKind::Units,
             "units ",
-            var.and_then(variable_equation_text),
+            var.and_then(equation_text),
         ),
         DiagnosticCategory::UnitInference => (
             FormattedErrorKind::Units,
             "units inference ",
-            var.and_then(variable_equation_text),
+            var.and_then(equation_text),
         ),
         DiagnosticCategory::Assembly => (FormattedErrorKind::Simulation, "assembly ", None),
     };
@@ -308,10 +317,16 @@ fn format_diagnostic_inner(diag: &db::Diagnostic, var: Option<&Variable>) -> For
                 code_and_reason(code, raw.as_deref())
             )
         }
-        DiagnosticError::Equation(_) | DiagnosticError::Unit(_) => format!(
-            "{noun}{word} in model '{model}' variable '{var_name}': {}",
-            code_and_reason(code, diag.reason())
-        ),
+        DiagnosticError::Equation(_) | DiagnosticError::Unit(_) => match element {
+            Some(element) => format!(
+                "{noun}{word} in model '{model}' variable '{var_name}' element '{element}': {}",
+                code_and_reason(code, diag.reason())
+            ),
+            None => format!(
+                "{noun}{word} in model '{model}' variable '{var_name}': {}",
+                code_and_reason(code, diag.reason())
+            ),
+        },
     };
     // A span is an offset into the presented variable's text; a diagnostic
     // filed under no variable has nothing for it to index.
@@ -331,6 +346,7 @@ fn format_diagnostic_inner(diag: &db::Diagnostic, var: Option<&Variable>) -> For
         severity: diag.severity,
         category: Some(diag.category()),
         details: Some(details.unwrap_or_else(|| code.description().to_owned())),
+        element: element.map(str::to_owned),
     }
 }
 
@@ -355,11 +371,26 @@ pub fn collect_formatted_errors<'a>(
     formatted
 }
 
-fn variable_equation_text(var: &Variable) -> Option<String> {
+/// The equation text a span of an error at `element` indexes: that
+/// element's own equation when it has one, else the equation every element
+/// follows (an apply-to-all equation, or an arrayed equation's default).
+fn variable_equation_text(var: &Variable, element: Option<&str>) -> Option<String> {
     match var.get_equation() {
         Some(Equation::Scalar(eqn)) => Some(eqn.clone()),
         Some(Equation::ApplyToAll(_, eqn)) => Some(eqn.clone()),
-        _ => None,
+        Some(Equation::Arrayed(_, arms, default, _)) => {
+            let own = element.and_then(|element| {
+                arms.iter().find(|(subscript, ..)| {
+                    crate::common::CanonicalElementName::from_subscript(subscript).as_str()
+                        == element
+                })
+            });
+            match own {
+                Some((_, eqn, ..)) => Some(eqn.clone()),
+                None => default.clone(),
+            }
+        }
+        None => None,
     }
 }
 
@@ -858,10 +889,12 @@ mod tests {
                 kind: ErrorKind::Model,
                 code: ErrorCode::ConveyorLtmDegraded,
                 details: Some("belt scores are advisory".to_string()),
+                element: None,
             })),
             arm(DiagnosticError::Unit(UnitError::ConsistencyError(
                 ErrorCode::UnitMismatch,
                 Loc::new(0, 1),
+                None,
                 None,
             ))),
             arm(DiagnosticError::Assembly("could not assemble".to_string())),
@@ -975,6 +1008,7 @@ mod tests {
                     kind: ErrorKind::Model,
                     code: ErrorCode::CircularDependency,
                     details: Some("a -> b -> a".to_string()),
+                    element: None,
                 }),
                 ErrorCode::CircularDependency,
                 FormattedErrorKind::Model,
@@ -1000,6 +1034,7 @@ mod tests {
                     ErrorCode::UnitMismatch,
                     Loc::new(2, 8),
                     Some("kg vs m".to_string()),
+                    None,
                 )),
                 ErrorCode::UnitMismatch,
                 FormattedErrorKind::Units,
@@ -1065,6 +1100,7 @@ mod tests {
                 kind: ErrorKind::Model,
                 code,
                 details: details.map(str::to_owned),
+                element: None,
             })
         };
         // (label, error, expected details, expected summary tail)
@@ -1106,6 +1142,7 @@ mod tests {
                 DiagnosticError::Unit(UnitError::ConsistencyError(
                     ErrorCode::UnitMismatch,
                     Loc::new(0, 1),
+                    None,
                     None,
                 )),
                 ErrorCode::UnitMismatch.description().to_string(),
@@ -1187,6 +1224,7 @@ mod tests {
             DiagnosticError::Unit(UnitError::ConsistencyError(
                 ErrorCode::UnitMismatch,
                 Loc::new(0, 1),
+                None,
                 None,
             )),
         ];

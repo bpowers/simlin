@@ -1101,13 +1101,16 @@ pub fn instantiate_implicit_modules(
             }
             // An explicit slot is one element's own equation, walked for that
             // element: every helper it mints carries the slot's element, so
-            // distinct slots never claim one name (PR #668).
+            // distinct slots never claim one name (PR #668), and an error in
+            // it is about that element, whose text its span indexes.
             let mut new_elements = HashMap::new();
             for (subscript_key, equation) in elements_in_stable_order(elements) {
                 let subscript_parts: Vec<String> =
                     subscript_key.parts().map(str::to_string).collect();
                 let mut walker = visitor().with_active_element(&dimensions, &subscript_parts);
-                let transformed = walker.walk(equation)?;
+                let transformed = walker
+                    .walk(equation)
+                    .map_err(|err| err.in_element(&subscript_key))?;
                 collect(walker)?;
                 new_elements.insert(subscript_key, transformed);
             }

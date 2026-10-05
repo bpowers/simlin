@@ -33,7 +33,7 @@ use simlin_engine::open_vensim;
 /// both into a single string so filters can use simple substring checks.
 fn diag_details(d: &Diagnostic) -> String {
     match &d.error {
-        DiagnosticError::Unit(UnitError::ConsistencyError(_, _, Some(s))) => s.clone(),
+        DiagnosticError::Unit(UnitError::ConsistencyError(_, _, Some(s), _)) => s.clone(),
         DiagnosticError::Unit(UnitError::InferenceError {
             details: Some(s), ..
         }) => s.clone(),

@@ -34,6 +34,8 @@ pub struct ErrorDetail {
     /// Bare reason string without snippet/summary formatting (see
     /// `SimlinErrorDetail::details`).
     pub details: Option<String>,
+    /// The element the detail is about (see `SimlinErrorDetail::element_name`).
+    pub element_name: Option<String>,
 }
 
 impl ErrorDetail {
@@ -49,6 +51,7 @@ impl ErrorDetail {
             unit_error_kind: SimlinUnitErrorKind::default(),
             severity: SimlinErrorSeverity::default(),
             details: None,
+            element_name: None,
         }
     }
 }
@@ -65,6 +68,7 @@ struct OwnedDetail {
     unit_error_kind: SimlinUnitErrorKind,
     severity: SimlinErrorSeverity,
     details: Option<CString>,
+    element_name: Option<CString>,
 }
 
 impl OwnedDetail {
@@ -80,6 +84,7 @@ impl OwnedDetail {
             unit_error_kind: detail.unit_error_kind,
             severity: detail.severity,
             details: detail.details.map(sanitize_for_c),
+            element_name: detail.element_name.map(sanitize_for_c),
         }
     }
 
@@ -105,6 +110,10 @@ impl OwnedDetail {
             severity: self.severity,
             details: self
                 .details
+                .as_ref()
+                .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
+            element_name: self
+                .element_name
                 .as_ref()
                 .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
         }

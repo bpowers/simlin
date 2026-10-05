@@ -2601,7 +2601,7 @@ TIME STEP = 1 ~~|
         (get("h[a3]") - 0.0).abs() < 1e-10,
         "h[A3] is Simlin's fabricated 0 (Vensim has no such element)"
     );
-    // ... and the warning names those two elements on h.
+    // ... and the warning names those two elements on h, one row each.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
     let diagnostics = simlin_engine::db::collect_all_diagnostics(
@@ -2609,23 +2609,29 @@ TIME STEP = 1 ~~|
         sync.project,
         simlin_engine::db::LtmOverlay::Off,
     );
-    let h_missing: Vec<String> = diagnostics
+    let h_missing: Vec<(Option<&str>, String)> = diagnostics
         .iter()
         .filter_map(|d| match &d.error {
             simlin_engine::db::DiagnosticError::Model(e)
                 if e.code == simlin_engine::common::ErrorCode::MissingElementEquation
                     && d.variable.as_deref() == Some("h") =>
             {
-                e.get_details()
+                Some((d.element(), e.get_details().unwrap_or_default()))
             }
             _ => None,
         })
         .collect();
-    assert_eq!(h_missing.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        h_missing.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+        vec![Some("a2"), Some("a3")],
+        "{diagnostics:?}"
+    );
     assert!(
-        h_missing[0].starts_with("array variable 'h' has no equation for 'a2', 'a3'"),
-        "{}",
         h_missing[0]
+            .1
+            .starts_with("array variable 'h' has no equation for 'a2'"),
+        "{}",
+        h_missing[0].1
     );
 
     // p[DimA] :EXCEPT: [A1] = 2, p[A1] = 5

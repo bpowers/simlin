@@ -742,7 +742,7 @@ fn a_module_output_read_the_compiler_refuses_is_still_unit_checked() {
         on_mism.iter().any(|d| d.severity == DiagnosticSeverity::Warning
             && matches!(&d.error,
                 DiagnosticError::Unit(crate::common::UnitError::ConsistencyError(
-                    ErrorCode::UnitMismatch, _, Some(detail))) if detail.contains("units to match"))),
+                    ErrorCode::UnitMismatch, _, Some(detail), _)) if detail.contains("units to match"))),
         "mism is still unit-checked and reports the person/dollar mismatch: {diags:?}"
     );
 }

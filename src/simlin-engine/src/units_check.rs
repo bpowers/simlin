@@ -80,6 +80,7 @@ impl UnitEvaluator<'_> {
                 Some(format!(
                     "expected left and right argument units to match, but '{a_units}' and '{b_units}' don't",
                 )),
+                None,
             ));
         }
         Ok(a_units.first_explicit(b_units))
@@ -107,6 +108,7 @@ impl UnitEvaluator<'_> {
                             ErrorCode::DoesNotExist,
                             *loc,
                             Some(format!("can't find or no units for dependency '{ident}'")),
+                            None,
                         )
                     })?;
 
@@ -143,6 +145,7 @@ impl UnitEvaluator<'_> {
                                         "lookup table expression must be a variable or subscript"
                                             .to_string(),
                                     ),
+                                    None,
                                 ));
                             }
                         };
@@ -161,6 +164,7 @@ impl UnitEvaluator<'_> {
                                 Some(format!(
                                     "can't find or no units for dependency '{table_name}'",
                                 )),
+                                None,
                             ))
                         }
                     }
@@ -195,6 +199,7 @@ impl UnitEvaluator<'_> {
                                     "the argument to SQRT has units '{units}', which is not a \
                                      perfect square, so its square root has no valid units"
                                 )),
+                                None,
                             )),
                         },
                     },
@@ -228,6 +233,7 @@ impl UnitEvaluator<'_> {
                                         Some(format!(
                                             "expected all arguments to mean() to have the same units '{expected}'",
                                         )),
+                                        None,
                                     ))
                                 }
                             }
@@ -262,6 +268,7 @@ impl UnitEvaluator<'_> {
                                     bottom_units.to_unit_map(),
                                     top_units.to_unit_map()
                                 )),
+                                None,
                             ));
                         }
                         Ok(bottom_units.first_explicit(top_units))
@@ -290,6 +297,7 @@ impl UnitEvaluator<'_> {
                                         c_units.to_unit_map(),
                                         units.to_unit_map()
                                     )),
+                                    None,
                                 ));
                             }
                             // A constant-classified quotient (both operands
@@ -327,6 +335,7 @@ impl UnitEvaluator<'_> {
                                     fallback_units.to_unit_map(),
                                     units.to_unit_map()
                                 )),
+                                None,
                             ));
                         }
                         Ok(units.first_explicit(fallback_units))
@@ -351,6 +360,7 @@ impl UnitEvaluator<'_> {
                         Some(format!(
                             "can't find or no units for subscripted variable '{base_name}'",
                         )),
+                        None,
                     ))
                 }
             }
@@ -370,7 +380,12 @@ impl UnitEvaluator<'_> {
                                     "expected left and right argument units to match, but '{lunits}' and '{runits}' don't",
                                 ));
                                 let loc = l.get_loc().union(&r.get_loc());
-                                Err(ConsistencyError(ErrorCode::UnitMismatch, loc, details))
+                                Err(ConsistencyError(
+                                    ErrorCode::UnitMismatch,
+                                    loc,
+                                    details,
+                                    None,
+                                ))
                             } else {
                                 Ok(Units::Explicit(lunits))
                             }
@@ -398,6 +413,7 @@ impl UnitEvaluator<'_> {
                                         "raising units '{base}' to the power {n} requires \
                                              them to be a perfect square"
                                     )),
+                                    None,
                                 )),
                                 crate::units::PowerUnits::Polymorphic => Ok(Units::Constant),
                             }
@@ -449,6 +465,7 @@ impl UnitEvaluator<'_> {
                             lunits.to_unit_map(),
                             runits.to_unit_map()
                         )),
+                        None,
                     ));
                 }
 
@@ -529,6 +546,18 @@ pub fn evaluate_expr_units(
     evaluator.check(expr)
 }
 
+/// `err`, raised in the own equation of `element` of an arrayed variable, as
+/// an error about that element: its span indexes that element's text. Only a
+/// consistency error has such a span; the others are left as they are.
+fn in_element(err: UnitError, element: &crate::common::CanonicalElementName) -> UnitError {
+    match err {
+        UnitError::ConsistencyError(code, loc, details, _) => {
+            UnitError::ConsistencyError(code, loc, details, Some(element.as_str().to_string()))
+        }
+        err @ (UnitError::DefinitionError(_) | UnitError::InferenceError { .. }) => err,
+    }
+}
+
 /// Evaluate every equation of `model` under `ctx` (and the inferred units of
 /// the variables that declare none) and return each variable's unit problem:
 /// the list is the analysis' whole outcome, empty when every equation agrees
@@ -605,6 +634,7 @@ pub fn check(
                                             "array element '{}' has units '{}' but previous element(s) have units '{}'",
                                             element, element_units, existing
                                         )),
+                                        Some(element.as_str().to_string()),
                                     ),
                                 ));
                             }
@@ -615,13 +645,13 @@ pub fn check(
                     Ok(Units::Constant) => {
                         // Constants are compatible with any units
                     }
-                    Err(ConsistencyError(ErrorCode::DoesNotExist, _, _)) => {
+                    Err(ConsistencyError(ErrorCode::DoesNotExist, _, _, _)) => {
                         // If we can't determine units for an element (e.g., it uses a module
                         // that doesn't have inferred units yet), skip the consistency check.
                         // Other error types are propagated as actual errors.
                     }
                     Err(err) => {
-                        errors.push((ident.clone(), err));
+                        errors.push((ident.clone(), in_element(err, element)));
                     }
                 }
             }
@@ -642,12 +672,13 @@ pub fn check(
                                         "array default expression has units '{}' but element(s) have units '{}'",
                                         default_units, existing
                                     )),
+                                    None,
                                 ),
                             ));
                         }
                     }
                     Ok(Units::Constant) => {}
-                    Err(ConsistencyError(ErrorCode::DoesNotExist, _, _)) => {}
+                    Err(ConsistencyError(ErrorCode::DoesNotExist, _, _, _)) => {}
                     Err(err) => {
                         errors.push((ident.clone(), err));
                     }
@@ -707,10 +738,11 @@ pub fn check(
                                 "the equation computes to units '{actual}', but the \
                                  variable's specified units are '{expected}'"
                             )),
+                            None,
                         ))
                     }
                     Ok(_) => None,
-                    Err(ConsistencyError(ErrorCode::DoesNotExist, _, _)) => None,
+                    Err(ConsistencyError(ErrorCode::DoesNotExist, _, _, _)) => None,
                     Err(err) => Some(err),
                 }
             };
@@ -729,9 +761,9 @@ pub fn check(
                         // an observable of the diagnostics collection.
                         let mut sorted_elems: Vec<_> = asts.iter().collect();
                         sorted_elems.sort_unstable_by_key(|(element, _)| element.as_str());
-                        for (_element, expr) in sorted_elems {
+                        for (element, expr) in sorted_elems {
                             if let Some(err) = check_against_expected(expr) {
-                                errors.push((ident.clone(), err));
+                                errors.push((ident.clone(), in_element(err, element)));
                             }
                         }
                         if let Some(default_expr) = default_expr
@@ -757,7 +789,7 @@ pub fn check(
     // what dedups.
     let dedup_key = |err: &UnitError| -> (u32, String) {
         match err {
-            ConsistencyError(code, _loc, details) => {
+            ConsistencyError(code, _loc, details, _) => {
                 (*code as u32, details.clone().unwrap_or_default())
             }
             DefinitionError(eq_err) => (

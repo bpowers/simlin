@@ -3317,7 +3317,7 @@ fn diagnostic_code(d: &Diagnostic) -> crate::common::ErrorCode {
         DiagnosticError::Model(e) => e.code,
         DiagnosticError::Unit(u) => match u {
             crate::common::UnitError::DefinitionError(e) => e.code,
-            crate::common::UnitError::ConsistencyError(code, _, _) => *code,
+            crate::common::UnitError::ConsistencyError(code, _, _, _) => *code,
             crate::common::UnitError::InferenceError { code, .. } => *code,
         },
         DiagnosticError::Assembly(_) => crate::common::ErrorCode::NotSimulatable,
@@ -3335,7 +3335,7 @@ fn diagnostic_reason(d: &Diagnostic) -> Option<String> {
         DiagnosticError::Model(e) => e.details.clone(),
         DiagnosticError::Unit(u) => match u {
             crate::common::UnitError::DefinitionError(e) => e.details.clone(),
-            crate::common::UnitError::ConsistencyError(_, _, d) => d.clone(),
+            crate::common::UnitError::ConsistencyError(_, _, d, _) => d.clone(),
             crate::common::UnitError::InferenceError { details, .. } => details.clone(),
         },
         DiagnosticError::Assembly(msg) => Some(msg.clone()),
