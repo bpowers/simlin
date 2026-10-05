@@ -380,8 +380,8 @@ impl Context<'_> {
         self.shape_of(ident).ok().and_then(DepShape::dimensions)
     }
 
-    /// The active subscript each of `dims` reads, for a subscript-less arrayed
-    /// reference inside an apply-to-all body.
+    /// The active axis each of `dims` is paired with, for a subscript-less
+    /// arrayed reference inside an apply-to-all body.
     ///
     /// The axis ALLOCATION -- which active axis supplies which of `dims` -- is
     /// `dimensions::allocate_implicit_axes`, shared with the LTM per-element
@@ -414,78 +414,61 @@ impl Context<'_> {
     /// `test_get_implicit_subscript_off_translates_through_mapping_parent`,
     /// which invokes [`Self::get_implicit_subscript_off`] directly.
     ///
-    /// That split is why the flow reference and the bare in-equation one are
-    /// two rules: the flow pairs axes under the full context (a mapping onto a
-    /// parent dimension included) and resolves the paired element through
-    /// `translate_via_mapping`, though only when the source dimension does not
-    /// already contain an element of the same NAME; the in-equation one is
-    /// rewritten by pass 0 under `DirectMappingsOnly` and resolves its
-    /// dimension-named subscript name-first, then through the map
+    /// That split is why the flow reference and the bare in-equation one take
+    /// two routes to one rule: the flow pairs axes under the full context (a
+    /// mapping onto a parent dimension included) and resolves the paired
+    /// element through `DimensionsContext::resolve_mapped_read`; the
+    /// in-equation one is rewritten by pass 0 under `DirectMappingsOnly` and
+    /// resolves its dimension-named subscript through the same rule
     /// (`build_view_from_ops`). Both halves are pinned in
     /// `crate::mapped_reference_semantics_tests`. It is also why the GH #996
     /// hazard fixture there is built from a two-axis FLOW under a stock: no
     /// ordinary expression can reach this allocation at all.
-    fn get_implicit_subscripts(&self, dims: &[Dimension], ident: &str) -> Result<Vec<&str>> {
-        if self.active_dimension.is_none() {
+    ///
+    /// The answer is the active POSITION each of `dims` is paired with, not
+    /// its element: two active dimensions can declare one element name (two
+    /// overlapping subranges of one dimension), and only the position says
+    /// which of them the axis was paired with.
+    fn get_implicit_axes(&self, dims: &[Dimension], ident: &str) -> Result<Vec<usize>> {
+        let Some(active_dims) = self.active_dimension.as_ref() else {
             return sim_err!(
                 ArrayReferenceNeedsExplicitSubscripts,
                 needs_subscripts(ident)
             );
-        }
-        let active_dims = self.active_dimension.as_ref().unwrap();
-        let active_subscripts = self.active_subscript.as_ref().unwrap();
-        assert_eq!(active_dims.len(), active_subscripts.len());
+        };
 
         match allocate_implicit_axes(dims, active_dims, self.dimensions_ctx) {
-            Some(alloc) => Ok(alloc
-                .into_iter()
-                .map(|i| active_subscripts[i].as_str())
-                .collect()),
+            Some(alloc) => Ok(alloc),
             None => sim_err!(MismatchedDimensions, dimensions_do_not_match(ident)),
         }
     }
 
     fn get_implicit_subscript_off(&self, dims: &[Dimension], ident: &str) -> Result<usize> {
-        let subscripts = self.get_implicit_subscripts(dims, ident)?;
+        let active_positions = self.get_implicit_axes(dims, ident)?;
         let active_dims = self.active_dimension.as_ref().unwrap();
+        let active_subscripts = self.active_subscript.as_ref().unwrap();
+        assert_eq!(active_dims.len(), active_subscripts.len());
 
         let mut off = 0_usize;
-        for (dim, subscript) in dims.iter().zip(subscripts) {
-            let element = CanonicalElementName::from_raw(subscript);
-            // The subscript comes from an active dimension; which element of
-            // THIS source axis it selects is
-            // `DimensionsContext::resolve_mapped_read` (GH #997) -- name
-            // first, then the declared mapping, then a mapped parent of the
-            // active subdimension.
-            //
-            // The `get_offset` guard is the SEARCH half and stays here: with
-            // several active dimensions, only the one that owns this element
-            // can supply it, and the shared rule is per (source axis, active
-            // dimension) pair rather than a search over candidates. At least
-            // one active dimension always passes it -- `get_implicit_subscripts`
-            // returns active SUBSCRIPTS, each an element of its own active
-            // dimension -- so the shared rule's name-first arm is reached for
-            // every element.
-            //
-            // A translation that resolves to an element this axis does not
-            // declare (a malformed element map) falls through to the remaining
-            // active dimensions rather than aborting the whole resolution;
-            // that can only resolve a reference that would otherwise fail to
-            // compile.
-            let element_off = active_dims.iter().find_map(|active_dim| {
-                active_dim.get_offset(&element)?;
-                let resolved = self
-                    .dimensions_ctx
-                    .resolve_mapped_read(dim, active_dim, &element)?;
-                dim.get_offset(&resolved)
-            });
+        for (dim, active_idx) in dims.iter().zip(active_positions) {
+            let active_dim = &active_dims[active_idx];
+            let element = &active_subscripts[active_idx];
+            // Which element of THIS source axis the active element selects is
+            // `DimensionsContext::resolve_mapped_read` (GH #997): the element's
+            // own name where this axis declares every active element, and
+            // otherwise the declared mapping, then the name, then a mapped
+            // parent of the active subdimension.
+            let element_off = self
+                .dimensions_ctx
+                .resolve_mapped_read(dim, active_dim, element)
+                .and_then(|resolved| dim.get_offset(&resolved));
             let element_off = element_off.ok_or_else(|| {
                 crate::Error::new(
                     ErrorKind::Model,
                     ErrorCode::MismatchedDimensions,
                     Some(format!(
                         "cannot resolve subscript '{}' for dimension '{}' on variable '{}'",
-                        subscript,
+                        element.as_str(),
                         dim.name(),
                         ident
                     )),
@@ -1712,12 +1695,18 @@ impl Context<'_> {
     /// lengths to agree -- except for a range-derived axis, which is allowed
     /// to be shorter and produces NaN past its end.
     ///
-    /// WHICH ELEMENT of the source axis that active subscript selects is the
-    /// source axis's own name first, then the declared mapping in either
-    /// direction, then a mapped parent of the active subdimension, then the
-    /// dimension both axes map onto ([`Self::common_mapping_target`]). Those
-    /// last three arms answer the same three relations the pairing ran on, so
-    /// a reference resolves its element through the rung that paired its axes
+    /// WHICH ELEMENT of the source axis that active subscript selects follows
+    /// `DimensionsContext::resolve_mapped_read`. An axis over the source's
+    /// own dimension, where that dimension declares every element of the
+    /// active one, reads the element's own name. Otherwise, asked of the
+    /// dimension the view axis ranges over (a star range's subdimension, else
+    /// the source's own): the declared mapping in either direction, then the
+    /// element's own name on the source axis, then a mapped parent of the
+    /// active subdimension, then the dimension both axes map onto
+    /// ([`Self::common_mapping_target`]). An element outside a star range's
+    /// subdimension that no mapping pairs reads NaN, past the range. The
+    /// mapping arms answer the same relations the pairing ran on, so a
+    /// reference resolves its element through the rung that paired its axes
     /// rather than through a second, weaker guess. A mapping that EXISTS but
     /// cannot translate is an error rather than a fallback onto the target
     /// axis: falling back hides a misconfigured element map (a size mismatch,
@@ -1823,38 +1812,69 @@ impl Context<'_> {
             let target_dim = &active_dims[active_idx];
             let is_sparse = view.sparse.iter().any(|s| s.dim_index == view_idx);
 
-            let prefer_source = source_dim.name() == target_dim.name()
-                || matches!(source_dim, Dimension::Named(_, _));
-            let mut source_offset = if prefer_source {
-                source_dim.get_offset(subscript)
+            // The dimension the view axis ranges over: a star range over a
+            // subdimension (`x[*:Younger]`) names its own, and that is the
+            // dimension the matcher paired with the active one, so its
+            // mapping is the one that decides the element. Every other axis
+            // ranges over the source's own dimension.
+            let axis_dim = self
+                .dimensions_ctx
+                .get(&CanonicalDimensionName::from_raw(
+                    view.dim_names[view_idx].as_str(),
+                ))
+                .filter(|dim| {
+                    dim.canonical_name() != source_dim.canonical_name()
+                        && self
+                            .dimensions_ctx
+                            .is_subdimension_of(dim.canonical_name(), source_dim.canonical_name())
+                })
+                .unwrap_or(source_dim);
+            let source_dim_name = axis_dim.canonical_name();
+            let target_dim_name = target_dim.canonical_name();
+            let has_direct_or_reverse_mapping = self
+                .dimensions_ctx
+                .has_mapping_to(source_dim_name, target_dim_name)
+                || self
+                    .dimensions_ctx
+                    .has_mapping_to(target_dim_name, source_dim_name);
+
+            // An axis over the source's own dimension, which declares every
+            // element of the target's, reads each element by name
+            // (`DimensionsContext::resolve_mapped_read`). Any other axis
+            // paired through a declared mapping reads through it, before any
+            // element name the two dimensions share: a star range over a
+            // subrange mapped to the iterated dimension, or a target that is
+            // not a subrange of the source.
+            let by_name = axis_dim.canonical_name() == source_dim.canonical_name()
+                && self
+                    .dimensions_ctx
+                    .declares_every_element_of(source_dim, target_dim);
+            let mut source_offset = if has_direct_or_reverse_mapping && !by_name {
+                self.dimensions_ctx
+                    .translate_via_mapping(source_dim_name, target_dim_name, subscript)
+                    .and_then(|translated| source_dim.get_offset(&translated))
             } else {
                 None
             };
+
+            // The element's own name, on the source axis. An element outside
+            // a star range's subdimension resolves here too, and lands outside
+            // the range, where it reads NaN below rather than a neighbour.
+            let prefer_source = source_dim.name() == target_dim.name()
+                || matches!(source_dim, Dimension::Named(_, _));
+            if source_offset.is_none() && prefer_source {
+                source_offset = source_dim.get_offset(subscript);
+            }
 
             // A mapping that exists but cannot translate is authoritative:
             // `mapping_failed` suppresses the target-axis fallback below.
             let mut mapping_failed = false;
             if source_offset.is_none() {
-                let source_dim_name = source_dim.canonical_name();
-                let target_dim_name = target_dim.canonical_name();
-
-                let has_direct_or_reverse_mapping = self
-                    .dimensions_ctx
-                    .has_mapping_to(source_dim_name, target_dim_name)
-                    || self
-                        .dimensions_ctx
-                        .has_mapping_to(target_dim_name, source_dim_name);
                 let has_parent_mapping = self
                     .dimensions_ctx
                     .has_mapping_to_parent_of(source_dim_name, target_dim_name);
 
-                if let Some(translated) = self.dimensions_ctx.translate_via_mapping(
-                    source_dim_name,
-                    target_dim_name,
-                    subscript,
-                ) {
-                    source_offset = source_dim.get_offset(&translated);
-                } else if has_parent_mapping {
+                if has_parent_mapping {
                     // The source maps onto a PARENT of the target: translate
                     // through that specific parent rather than the first
                     // mapping target.
@@ -1870,8 +1890,7 @@ impl Context<'_> {
                     } else {
                         mapping_failed = true;
                     }
-                } else if let Some(via) =
-                    Self::common_mapping_target(pairing, source_dim, target_dim)
+                } else if let Some(via) = Self::common_mapping_target(pairing, axis_dim, target_dim)
                 {
                     // The COMMON-MAPPING-TARGET rung: neither axis maps onto
                     // the other, but both declare a mapping onto `via`, so the
@@ -1927,7 +1946,7 @@ impl Context<'_> {
                         "{}: dimension mapping from {} to {} failed for subscript '{}' \
                          (check that both dimensions have the same number of elements)",
                         id.as_str(),
-                        source_dim.name(),
+                        axis_dim.name(),
                         target_dim.name(),
                         subscript.as_str()
                     )

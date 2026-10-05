@@ -3457,7 +3457,7 @@ fn every_diagnostic_stage_keeps_its_message() {
             // An apply-to-all over `e` reading an array declared over `d`:
             // every whole-variable gate passes, and `lower_fragment` refuses
             // while allocating the reference's implicit axes
-            // (`Context::get_implicit_subscripts`), naming the variable whose
+            // (`Context::get_implicit_axes`), naming the variable whose
             // axes it could not match.
             project: TestProject::new("incomparable_axes")
                 .named_dimension("d", &["e1", "e2"])

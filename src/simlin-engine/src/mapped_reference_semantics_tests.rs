@@ -6,10 +6,16 @@
 //! reference, pinned cell by cell against the VM (GH #997, and the
 //! execution-side issues #756 / #753 it describes).
 //!
-//! ONE rule answers every spelling: the active element's own NAME in the
-//! source dimension, then the declared ELEMENT MAP in either direction, then a
-//! mapped parent of the active subdimension
-//! (`DimensionsContext::resolve_mapped_read`, GH #997). Reading by ORDINAL is
+//! The rule is Vensim's: a mapping is consulted for a subscript on the right
+//! of an equation that is not on its left. A reference naming the ITERATED
+//! dimension, or naming none, reads each element by its own NAME wherever the
+//! source dimension declares every iterated element
+//! (`DimensionsContext::resolve_mapped_read`, GH #997). A reference naming
+//! another dimension -- the source's own, or a subrange of it (the
+//! mapped-subranges section) -- and one whose source lacks some iterated
+//! element read through the declared MAPPING in either direction, then the
+//! element's own name, then a mapped parent of the active subdimension
+//! (`DimensionsContext::read_through_mapping`). Reading by ORDINAL is
 //! the last resort, reached only where the two dimensions declare no
 //! correspondence at all -- the `no_mapping_*` controls, and the unpaired-axis
 //! case `Context::resolve_iteration_element` handles one axis-collapse later.
@@ -64,14 +70,20 @@
 //! `fixture_discriminates` asserts which rows discriminate and which do not,
 //! so "not discriminating" is recorded rather than implied by a missing test.
 //!
-//! # Name-first, not element-map-first
+//! # Which side of the equation a subscript is on
 //!
-//! The obvious framing is positional-versus-element-map. It is wrong, and
-//! [`MappingKind::SharedElementNames`] is the row that shows it: resolution is
-//! **name-first**, trying the active element's own name in the source
-//! dimension and consulting the element map only when that misses. So there
-//! are three candidate answers per fixture, and [`assert_cell`] excludes every
-//! one that did not happen instead of merely matching the one that did.
+//! The obvious framing is positional-versus-element-map, and it misses a
+//! third reading: two dimensions can share element names, and a reference can
+//! read those by name. [`MappingKind::SharedElementNames`] is the row that
+//! separates the three, and the only row where the spelling decides the
+//! answer: `x[State]` names a dimension on both sides of the equation and
+//! reads by name, while `x[Region]` names one on the right alone and reads
+//! through the element map. So there are three candidate answers per fixture,
+//! and [`assert_cell`] excludes every one that did not happen instead of
+//! merely matching the one that did. The case that matters in practice is two
+//! overlapping subranges of one dimension, where the shared names are the
+//! overlap and the mapping is a chain: the mapped-subranges section below,
+//! held to Vensim's output.
 //!
 //! # What the Vensim reference actually says
 //!
@@ -111,21 +123,29 @@
 //!   (`Rhsub -> Lhsub`, the form the prose describes) = [`Direction::OnSourceDim`];
 //!   Example 3 declares it on `PTASKS`, a range the left side iterates,
 //!   pointing at `TASKS`, the source's own range = [`Direction::OnIteratedDim`].
-//!   Neither direction is a Simlin extension. (Example 2 does not bear on
-//!   this, PROVIDED `aging` is declared over `AGE`: both of its ranges are
-//!   then subranges of the source's own. The page never states `aging`'s
-//!   declaration; it is inferable only from its three subscripted uses,
-//!   which between them cover all five `AGE` cohorts.)
+//!   Neither direction is a Simlin extension.
+//! - overlapping subranges: Example 2's aging chain reads `aging[PREVIOUS
+//!   COHORT]` under an `ALL BUT YOUNGEST` iteration, both subranges of
+//!   `aging`'s own `AGE`, with `PREVIOUS COHORT` mapped to `ALL BUT
+//!   YOUNGEST`. Vensim DSS's output for that model is checked in
+//!   (`test/test-models/tests/subscript_mapping_vensim`), and it reads the
+//!   mapped element -- the cohort before -- for every element, including
+//!   those both subranges declare (the mapped-subranges section).
+//!
+//! The trigger sentence settles the iterated spelling: its subscript is on
+//! the left too, so no mapping is consulted, and `x[State]` is the element of
+//! `x` each `State` element names. Example 3 agrees without discriminating,
+//! because `PTASKS` is a full subrange copy of `TASKS` with identical element
+//! names in the same order, so positional, name-identity and map-following
+//! all coincide there. This is read from the documentation, not from a Vensim
+//! run.
 //!
 //! What the page does NOT settle, recorded as UNVERIFIED rather than assumed:
 //!
-//! - which RULE Vensim applies to the iterated spelling. Example 3 cannot
-//!   say, because `PTASKS` is a full subrange copy of `TASKS` with identical
-//!   element names in the same order, so positional, name-identity and
-//!   map-following all coincide there. This engine maps on that spelling like
-//!   every other, which is the reading the page's prose leans toward -- it
-//!   credits a mapping for the shape -- but the page does not settle it, and
-//!   nothing here should be read as a parity claim.
+//! - an iterated subscript whose elements the source does not all declare,
+//!   `target[Older] = y[Older]` with `y` over `Younger`. Vensim's grammar
+//!   gives no reading for it; this engine reads it as the reference naming
+//!   the source's own dimension would, through the mapping.
 //! - anything about [`MappingKind::ReverseCardinality`]. That fixture leaves
 //!   one source element with no correspondent, which the page's Example 4
 //!   forbids ("the Subscript Ranges ... must not overlap and must completely
@@ -160,10 +180,8 @@
 //! - As a stock's inflow/outflow (`level[State] = INTEG(feed, 0)` with
 //!   `feed` declared over `Region`), the reference never passes through
 //!   pass 0: `Context::fold_flows` calls `get_ref` directly, reaching
-//!   `get_implicit_subscript_off`, whose
-//!   `dim.get_offset(&element).or_else(...)` tries the active element's own
-//!   NAME in the source dimension first and consults
-//!   `DimensionsContext::translate_via_mapping` only when that misses.
+//!   `get_implicit_subscript_off`, which resolves the element through
+//!   `DimensionsContext::resolve_mapped_read` directly.
 //!
 //! So the two subscript-less spellings take different routes to the same rule,
 //! and `a_bare_equation_reference_and_a_flow_reference_agree` pins the
@@ -222,9 +240,10 @@ enum MappingKind {
     /// element names in a DIFFERENT order -- Vensim's Example 3 idiom, where
     /// a subrange copy shares its parent's element names.
     ///
-    /// This is the row that shows map-following is really NAME-first: all
-    /// three candidate answers are distinct here, and the two map-following
-    /// spellings return the name-identity one.
+    /// This is the row that shows which side of the equation a subscript is
+    /// on decides: all three candidate answers are distinct here, the
+    /// spellings naming the iterated dimension or none read by name, and the
+    /// one naming the source's own reads the element map's.
     SharedElementNames,
 }
 
@@ -533,17 +552,19 @@ fn run_cell(
 fn expected(kind: MappingKind, spelling: Spelling) -> Expected {
     use MappingKind::*;
     use Spelling::*;
-    // Spelling is NOT a parameter of the answer: all four resolve a
-    // dimension-named subscript through the one executed rule
-    // (`DimensionsContext::resolve_mapped_read` -- the active element's own
-    // name on the source axis, then the declared mapping in either direction,
-    // then a mapped parent of the active subdimension). The enumeration is kept
-    // as a parameter because WHICH ROUTE each spelling takes to that rule is
-    // still different, and a change that reintroduced a fork would show up here
-    // as a cell that no longer matches its siblings.
-    match spelling {
-        IteratedDim | SourceOwnDim | BareInEquation | StockFlow => {}
-    }
+    // Spelling is a parameter of the answer only where the iterated
+    // dimension's elements are all the source's and a mapping reorders them:
+    // the SharedElementNames row. Everywhere else the reference reads across
+    // two dimensions, and every spelling reaches the same rule
+    // (`DimensionsContext::read_through_mapping` -- the declared mapping in
+    // either direction, then the active element's own name on the source
+    // axis, then a mapped parent of the active subdimension) by its own
+    // ROUTE, so a change that reintroduced a fork would show up here as a
+    // cell that no longer matches its siblings.
+    let names_the_source = match spelling {
+        SourceOwnDim => true,
+        IteratedDim | BareInEquation | StockFlow => false,
+    };
     match kind {
         // A positional mapping makes map-following and ordinal reading agree,
         // so this row cannot tell the rules apart. It is the control.
@@ -562,9 +583,12 @@ fn expected(kind: MappingKind, spelling: Spelling) -> Expected {
         // ordinal read would stay in range and read the wrong elements.
         ReverseCardinality => Expected::Reads(&[30.0, 10.0]),
 
-        // Shared element names: the rule is NAME identity FIRST, so `Cal`
-        // reads `Cal` (30) though the element map says `Bob` (20). Source
-        // values 10/20/30 over {Ann,Bob,Cal}; target {Cal,Ann,Bob}.
+        // Shared element names. Source values 10/20/30 over {Ann,Bob,Cal};
+        // target {Cal,Ann,Bob}. `x[Region]` is on the right alone, so the
+        // declared map decides and `Cal` reads `Bob` (20). `x[State]`, `x`
+        // and a flow name the iterated dimension or none, and every `State`
+        // element is a `Region` element, so `Cal` reads `Cal` (30).
+        SharedElementNames if names_the_source => Expected::Reads(&[20.0, 30.0, 10.0]),
         SharedElementNames => Expected::Reads(&[30.0, 10.0, 20.0]),
     }
 }
@@ -682,7 +706,7 @@ fn fixture_discriminates() {
             }
             // The only row where all THREE rules apply and disagree. That is
             // the whole point of it: without three distinct answers it could
-            // not show that map-following is really name-first.
+            // not show that the declared map decides before a shared name.
             MappingKind::SharedElementNames => {
                 let map = Some(map);
                 assert_ne!(map, positional, "{}", kind.label());
@@ -1312,11 +1336,12 @@ fn a_wildcard_argument_under_an_apply_to_all_body_reads_the_active_element() {
     assert_eq!(verdict(&build(&captured_rhs("vals[*]")), &elements), plain);
 }
 
-/// Every cell of the matrix, of the no-mapping controls and of the two-axes
-/// section, hoisted into a module argument and captured under a snapshot,
-/// reads what the plain equation reads, and is refused with the plain
-/// equation's code where that is refused. No cell diverges: the compiler
-/// lowers each helper as the element of the body it is (GH #1035).
+/// Every cell of the matrix, of the no-mapping controls, of the two-axes
+/// section and of the mapped subranges, hoisted into a module argument and
+/// captured under a snapshot, reads what the plain equation reads, and is
+/// refused with the plain equation's code where that is refused. No cell
+/// diverges: the compiler lowers each helper as the element of the body it is
+/// (GH #1035).
 #[test]
 fn a_hoisted_argument_reads_what_the_plain_equation_reads() {
     let mut cells: Vec<HoistedCell> = Vec::new();
@@ -1333,6 +1358,11 @@ fn a_hoisted_argument_reads_what_the_plain_equation_reads() {
         }
     }
     cells.extend(two_axes_cells());
+    for direction in Direction::all() {
+        for spelling in CohortSpelling::all() {
+            cells.extend(cohort_cell(direction, spelling));
+        }
+    }
 
     let mut disagreements: Vec<String> = Vec::new();
     let mut reads = 0usize;
@@ -1419,7 +1449,7 @@ fn a_bare_equation_reference_and_a_flow_reference_agree() {
 /// self-reference and module input wiring), with zero arriving via
 /// `lower_from_expr3` -- so a stock whose FLOW is declared over two
 /// dimensions is the way in. The counts and their measurement condition are
-/// on `compiler::context`'s `get_implicit_subscripts`.
+/// on `compiler::context`'s `get_implicit_axes`.
 ///
 /// `feed` is declared `[Board Type, Line]` and `level` iterates
 /// `[Line, Shift]`. `Board Type` maps to BOTH `Line` (positionally) and
@@ -1490,6 +1520,520 @@ fn the_996_hazard_shape_compiles_and_reads_name_first() {
         assert_eq!(got, want, "{cell}");
         assert_ne!(got, wrong, "{cell}: read the axis-swapped element instead");
     }
+}
+
+// ===========================================================================
+// Mapped subranges of one dimension
+// ===========================================================================
+//
+// The matrix above relates two dimensions that share either no element name
+// or every one. A chain -- an aging chain, the layers of an ocean -- relates
+// two OVERLAPPING subranges of one dimension: `Younger = [Young, Adult]` and
+// `Older = [Adult, Old]` of `Age = [Young, Adult, Old]`, with a mapping between
+// them, and each older cohort reads the cohort before it. `Adult` is in both
+// subranges, so its own name and the mapping give different answers there, and
+// the mapping is the one that means "the cohort before".
+//
+// Vensim's own subscript mapping documentation writes the chain this way, and
+// `test/test-models/tests/subscript_mapping_vensim` holds that model with
+// Vensim DSS's output: `POPULATION[ALL BUT YOUNGEST] = INTEG(aging[PREVIOUS
+// COHORT] - aging[ALL BUT YOUNGEST], ..)` with `PREVIOUS COHORT : INFANT,
+// CHILD, TEEN, MIDDLE -> ALL BUT YOUNGEST`, where `POPULATION[CHILD]` goes from
+// 900 to 920 in the first year: 900 + aging[INFANT] (300) - aging[CHILD] (280).
+// Read by name, `aging[CHILD]` would cancel itself and leave it at 900.
+
+/// How a reference spells the younger cohort an older one reads.
+#[derive(Copy, Clone)]
+enum CohortSpelling {
+    /// `target[Older] = x[Younger]`, `x` declared over the whole `Age`: the
+    /// subscript names a subrange of the source's dimension, mapped to the
+    /// iterated one. Vensim's spelling.
+    SubrangeOfSource,
+    /// `target[Older] = x[*:Younger]`: a star range over the subrange, whose
+    /// one axis the iteration's element selects.
+    StarRangeOfSubrange,
+    /// The same subscript beside an index evaluated as the model runs,
+    /// `target[Older] = grid[Younger, idx]`, which takes the dynamic subscript
+    /// path rather than the static one.
+    SubrangeOfSourceDynamic,
+    /// `target[Older] = y[Younger]`, `y` declared over `Younger`.
+    SourceOwnDim,
+    /// `target[Older] = y[Older]`, `y` declared over `Younger`.
+    IteratedDim,
+    /// `target[Older] = y`.
+    BareInEquation,
+    /// `target[Older] = INTEG(y, 0)`, `y` a flow declared over `Younger`.
+    StockFlow,
+}
+
+impl CohortSpelling {
+    fn all() -> Vec<Self> {
+        successors(CohortSpelling::SubrangeOfSource, |s| match s {
+            CohortSpelling::SubrangeOfSource => Some(CohortSpelling::StarRangeOfSubrange),
+            CohortSpelling::StarRangeOfSubrange => Some(CohortSpelling::SubrangeOfSourceDynamic),
+            CohortSpelling::SubrangeOfSourceDynamic => Some(CohortSpelling::SourceOwnDim),
+            CohortSpelling::SourceOwnDim => Some(CohortSpelling::IteratedDim),
+            CohortSpelling::IteratedDim => Some(CohortSpelling::BareInEquation),
+            CohortSpelling::BareInEquation => Some(CohortSpelling::StockFlow),
+            CohortSpelling::StockFlow => None,
+        })
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            CohortSpelling::SubrangeOfSource => "target[Older] = x[Younger], x over Age",
+            CohortSpelling::StarRangeOfSubrange => "target[Older] = x[*:Younger], x over Age",
+            CohortSpelling::SubrangeOfSourceDynamic => {
+                "target[Older] = grid[Younger, idx], grid over Age"
+            }
+            CohortSpelling::SourceOwnDim => "target[Older] = y[Younger], y over Younger",
+            CohortSpelling::IteratedDim => "target[Older] = y[Older], y over Younger",
+            CohortSpelling::BareInEquation => "target[Older] = y, y over Younger",
+            CohortSpelling::StockFlow => "target[Older] = INTEG(y, 0), y over Younger",
+        }
+    }
+
+    /// What `target[Adult]` and `target[Old]` read if each older element
+    /// looked its own name up first and used the mapping only for the element
+    /// left over -- the reading this section rules out.
+    fn by_name_reads(self) -> [f64; 2] {
+        match self {
+            // `Adult` and `Old` are both elements of `Age`.
+            CohortSpelling::SubrangeOfSource | CohortSpelling::SubrangeOfSourceDynamic => {
+                [20.0, 30.0]
+            }
+            // `Adult` is the range's second element; `Old` is past its end.
+            CohortSpelling::StarRangeOfSubrange => [20.0, f64::NAN],
+            // `Adult` is an element of `Younger`; `Old` is not, and maps to
+            // `Adult`.
+            CohortSpelling::SourceOwnDim
+            | CohortSpelling::IteratedDim
+            | CohortSpelling::BareInEquation
+            | CohortSpelling::StockFlow => [20.0, 20.0],
+        }
+    }
+}
+
+/// `Age` and its two overlapping subranges, the mapping declared on the
+/// younger one (`Direction::OnSourceDim`, as Vensim's example does) or on the
+/// older one.
+fn cohort_dimensions(project: TestProject, direction: Direction) -> TestProject {
+    let project = project.named_dimension("Age", &["Young", "Adult", "Old"]);
+    match direction {
+        Direction::OnSourceDim => project
+            .named_dimension_with_mapping("Younger", &["Young", "Adult"], "Older")
+            .named_dimension("Older", &["Adult", "Old"]),
+        Direction::OnIteratedDim => project
+            .named_dimension("Younger", &["Young", "Adult"])
+            .named_dimension_with_mapping("Older", &["Adult", "Old"], "Younger"),
+    }
+}
+
+fn cohort_model(direction: Direction, spelling: CohortSpelling) -> TestProject {
+    match spelling.rhs() {
+        Some(rhs) => cohort_sources(direction, spelling).array_aux("target[Older]", rhs),
+        None => {
+            cohort_sources(direction, spelling).array_stock("target[Older]", "0", &["y"], &[], None)
+        }
+    }
+}
+
+impl CohortSpelling {
+    /// The right-hand side of the target's equation, for the spellings that
+    /// are an equation.
+    fn rhs(self) -> Option<&'static str> {
+        match self {
+            CohortSpelling::SubrangeOfSource => Some("x[Younger]"),
+            CohortSpelling::StarRangeOfSubrange => Some("x[*:Younger]"),
+            CohortSpelling::SubrangeOfSourceDynamic => Some("grid[Younger, idx]"),
+            CohortSpelling::SourceOwnDim => Some("y[Younger]"),
+            CohortSpelling::IteratedDim => Some("y[Older]"),
+            CohortSpelling::BareInEquation => Some("y"),
+            CohortSpelling::StockFlow => None,
+        }
+    }
+}
+
+/// The chain's cell for the hoisted-argument column.
+fn cohort_cell(direction: Direction, spelling: CohortSpelling) -> Option<HoistedCell> {
+    let rhs = spelling.rhs()?;
+    let build =
+        |equation: &str| cohort_sources(direction, spelling).array_aux("target[Older]", equation);
+    Some(HoistedCell {
+        label: format!("mapped subranges / {}", spelling.label()),
+        plain: build(rhs),
+        hoisted: build(&hoisted_rhs(rhs)),
+        captured: build(&captured_rhs(rhs)),
+        target_elements: vec!["Adult", "Old"],
+    })
+}
+
+/// The chain's dimensions and the source each spelling reads.
+fn cohort_sources(direction: Direction, spelling: CohortSpelling) -> TestProject {
+    let project = cohort_dimensions(
+        TestProject::new("mapped_subranges").with_sim_time(0.0, 1.0, 1.0),
+        direction,
+    );
+    let x = vec![("Young", "10"), ("Adult", "20"), ("Old", "30")];
+    let y = vec![("Young", "10"), ("Adult", "20")];
+    match spelling {
+        CohortSpelling::SubrangeOfSource | CohortSpelling::StarRangeOfSubrange => {
+            project.array_with_ranges("x[Age]", x)
+        }
+        CohortSpelling::SubrangeOfSourceDynamic => project
+            .named_dimension("Column", &["only"])
+            .array_with_ranges(
+                "grid[Age, Column]",
+                vec![
+                    ("Young,only", "10"),
+                    ("Adult,only", "20"),
+                    ("Old,only", "30"),
+                ],
+            )
+            .aux("idx", "1", None),
+        CohortSpelling::SourceOwnDim
+        | CohortSpelling::IteratedDim
+        | CohortSpelling::BareInEquation => project.array_with_ranges("y[Younger]", y),
+        CohortSpelling::StockFlow => project.array_flow_with_ranges("y[Younger]", y),
+    }
+}
+
+/// Every spelling of the chain, with the mapping declared on either subrange,
+/// reads the cohort before: `target[Adult]` reads `Young` (10) and
+/// `target[Old]` reads `Adult` (20). The stock reads its flow at the end of the
+/// one step, so its values are the same.
+#[test]
+fn an_older_cohort_reads_the_cohort_before_it_in_every_spelling() {
+    let mut wrong: Vec<String> = Vec::new();
+    for direction in Direction::all() {
+        for spelling in CohortSpelling::all() {
+            let where_ = format!(
+                "{} / mapping declared on {}",
+                spelling.label(),
+                match direction {
+                    Direction::OnIteratedDim => "Older",
+                    Direction::OnSourceDim => "Younger",
+                }
+            );
+            let got = match cohort_model(direction, spelling).run_vm() {
+                Ok(results) => [
+                    *results["target[adult]"].last().expect("empty series"),
+                    *results["target[old]"].last().expect("empty series"),
+                ],
+                Err(e) => {
+                    wrong.push(format!("{where_}: did not run: {e}"));
+                    continue;
+                }
+            };
+            // The by-name reading differs from the cohort before in every
+            // row, so a row that reads it is caught by the first comparison.
+            assert_ne!(spelling.by_name_reads(), [10.0, 20.0]);
+            if got != [10.0, 20.0] {
+                wrong.push(format!("{where_}: read {got:?}"));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "spellings that do not read the cohort before ([10.0, 20.0]):\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// The control beside it: a subscript naming the ITERATED subrange over a
+/// source declared on the whole dimension, `target[Older] = x[Older]`, reads
+/// each element by its name, since nothing maps `Age` to `Older` and `Older`'s
+/// elements are `Age`'s.
+#[test]
+fn an_iterated_subrange_over_its_parent_reads_by_name() {
+    for direction in Direction::all() {
+        let results = cohort_dimensions(
+            TestProject::new("subrange_by_name").with_sim_time(0.0, 1.0, 1.0),
+            direction,
+        )
+        .array_with_ranges(
+            "x[Age]",
+            vec![("Young", "10"), ("Adult", "20"), ("Old", "30")],
+        )
+        .array_aux("target[Older]", "x[Older]")
+        .run_vm()
+        .expect("the subrange reference runs");
+        assert_eq!(results["target[adult]"].last(), Some(&20.0));
+        assert_eq!(results["target[old]"].last(), Some(&30.0));
+    }
+}
+
+/// The LTM element graph names every read the chain makes, in every
+/// spelling: an edge from each younger cohort into the older cohort that
+/// reads it. Where the describers' correspondence states the read exactly
+/// (every spelling but a subrange of the source's dimension) those are the
+/// only edges; a subrange of the source's dimension reads through its own
+/// mapping, which the describers' `(iterated, source)` correspondence does not
+/// state, so `DimensionsContext::mapped_read_partner` declines it and the
+/// graph keeps its cross-product, a superset of the reads.
+#[test]
+fn the_element_graph_names_the_cohort_each_older_cohort_reads() {
+    for direction in Direction::all() {
+        for spelling in CohortSpelling::all() {
+            let (source, row) = match spelling {
+                CohortSpelling::SubrangeOfSource | CohortSpelling::StarRangeOfSubrange => ("x", ""),
+                CohortSpelling::SubrangeOfSourceDynamic => ("grid", ",only"),
+                CohortSpelling::SourceOwnDim
+                | CohortSpelling::IteratedDim
+                | CohortSpelling::BareInEquation
+                | CohortSpelling::StockFlow => ("y", ""),
+            };
+            let edges = edges_from(&cohort_model(direction, spelling), &format!("{source}["));
+            let reads = vec![
+                format!("{source}[adult{row}] -> target[old]"),
+                format!("{source}[young{row}] -> target[adult]"),
+            ];
+            let label = spelling.label();
+            for read in &reads {
+                assert!(edges.contains(read), "{label}: missing {read} in {edges:?}");
+            }
+            match spelling {
+                CohortSpelling::SubrangeOfSource
+                | CohortSpelling::StarRangeOfSubrange
+                | CohortSpelling::SubrangeOfSourceDynamic => {
+                    assert!(edges.len() > reads.len(), "{label}: {edges:?}")
+                }
+                _ => assert_eq!(edges, reads, "{label}"),
+            }
+        }
+    }
+}
+
+/// A stock over both subranges whose flow lists them the other way round:
+/// each of the flow's axes reads the element of the active axis it is paired
+/// with, and no other. `Adult` is an element of both active axes, so finding
+/// the axis by the element it holds would pair the flow's `Younger` axis with
+/// the stock's `Older` one at `level[Adult, Adult]` and, through the mapping,
+/// read `f[Young, Adult]`.
+#[test]
+fn a_transposed_flow_over_both_subranges_reads_each_axis_from_its_own() {
+    for direction in Direction::all() {
+        let results = cohort_dimensions(
+            TestProject::new("transposed_cohorts").with_sim_time(0.0, 1.0, 1.0),
+            direction,
+        )
+        .array_flow_with_ranges(
+            "f[Younger, Older]",
+            vec![
+                ("Young,Adult", "1"),
+                ("Young,Old", "2"),
+                ("Adult,Adult", "3"),
+                ("Adult,Old", "4"),
+            ],
+        )
+        .array_stock("level[Older, Younger]", "0", &["f"], &[], None)
+        .run_vm()
+        .expect("the transposed flow runs");
+        for (cell, want) in [
+            ("level[adult,young]", 1.0),
+            ("level[old,young]", 2.0),
+            ("level[adult,adult]", 3.0),
+            ("level[old,adult]", 4.0),
+        ] {
+            assert_eq!(results[cell].last(), Some(&want), "{cell}");
+        }
+    }
+}
+
+/// A chain written as one Vensim equation over a subrange is imported as
+/// that one equation, not written out per element: the MDL importer expands
+/// a variable only when more than one equation defines it. So the mapped
+/// read reaches the engine as written.
+#[test]
+fn a_single_equation_chain_from_mdl_reads_the_cohort_before() {
+    let mdl = "Age: Young, Adult, Old ~~|
+Younger: Young, Adult -> Older ~~|
+Older: Adult, Old ~~|
+x[Age] = 10, 20, 30 ~~|
+target[Older] = x[Younger] ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = 1 ~~|
+\\\\\\---///
+";
+    let project = crate::open_vensim(mdl).expect("the model imports");
+    let target = project.models[0]
+        .variables
+        .iter()
+        .find(|v| v.get_ident() == "target")
+        .expect("target is imported");
+    assert_eq!(
+        target.get_equation(),
+        Some(&datamodel::Equation::ApplyToAll(
+            vec!["Older".to_string()],
+            "x[Younger]".to_string()
+        )),
+        "the importer keeps the one equation"
+    );
+    let results = TestProject::from_datamodel(project)
+        .run_vm()
+        .expect("the model runs");
+    assert_eq!(results["target[adult]"].last(), Some(&10.0));
+    assert_eq!(results["target[old]"].last(), Some(&20.0));
+}
+
+/// Vensim's own aging chain, unexpanded, against Vensim's numbers.
+///
+/// `test/test-models/tests/subscript_mapping_vensim/output.tab` (Vensim DSS
+/// 7.3.4) gives `POPULATION[CHILD..OLD]` as 900, 900, 800, 200 at time 0 and
+/// 920, 980, 850, 250 at time 1, each cohort's flows constant. The MDL importer
+/// writes that model's equations out once per element, so opening the file
+/// does not exercise the mapped read; this model keeps the one equation for
+/// every element of `All But Youngest` that the file states.
+#[test]
+fn the_vensim_aging_chain_matches_vensims_output() {
+    let results = TestProject::new("vensim_aging_chain")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Age", &["Infant", "Child", "Teen", "Middle", "Old"])
+        .named_dimension("All But Youngest", &["Child", "Teen", "Middle", "Old"])
+        .named_dimension_with_mapping(
+            "Previous Cohort",
+            &["Infant", "Child", "Teen", "Middle"],
+            "All But Youngest",
+        )
+        .array_with_ranges(
+            "aging[Age]",
+            vec![
+                ("Infant", "300"),
+                ("Child", "280"),
+                ("Teen", "200"),
+                ("Middle", "150"),
+                ("Old", "100"),
+            ],
+        )
+        .array_with_ranges(
+            "initial population[Age]",
+            vec![
+                ("Infant", "1000"),
+                ("Child", "900"),
+                ("Teen", "900"),
+                ("Middle", "800"),
+                ("Old", "200"),
+            ],
+        )
+        .array_flow("aging in[All But Youngest]", "aging[Previous_Cohort]", None)
+        .array_flow(
+            "aging out[All But Youngest]",
+            "aging[All_But_Youngest]",
+            None,
+        )
+        .array_stock(
+            "population[All But Youngest]",
+            "initial_population[All_But_Youngest]",
+            &["aging in"],
+            &["aging out"],
+            None,
+        )
+        .run_vm()
+        .expect("the aging chain runs");
+    for (element, want) in [
+        ("child", [900.0, 920.0, 940.0, 960.0]),
+        ("teen", [900.0, 980.0, 1060.0, 1140.0]),
+        ("middle", [800.0, 850.0, 900.0, 950.0]),
+        ("old", [200.0, 250.0, 300.0, 350.0]),
+    ] {
+        let key = format!("population[{element}]");
+        assert_eq!(results[&key], want, "{key}");
+    }
+}
+
+/// A subrange on BOTH sides of an equation is the element each of its
+/// elements names, whatever mapping the subrange also declares: Vensim
+/// consults a mapping for "a Subscript that appears on the right but not the
+/// left of an equation", and `P` is on the left. `P` reorders `D`'s elements
+/// and maps them positionally onto `D`, so the name and the mapping disagree
+/// for every element, and the same subscript on the right alone, `t[D] =
+/// x[P]`, reads through the mapping.
+#[test]
+fn a_subrange_on_both_sides_reads_by_name_and_on_the_right_alone_through_its_mapping() {
+    let run = |equations: &str| {
+        let mdl = format!(
+            "D: a, b, c ~~|\nP: c, a, b -> D ~~|\nx[D] = 1, 2, 3 ~~|\n{equations}\n\
+             INITIAL TIME = 0 ~~|\nFINAL TIME = 1 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = 1 ~~|\n\
+             \\\\\\---///\n"
+        );
+        let project = crate::open_vensim(&mdl).expect("imports");
+        TestProject::from_datamodel(project).run_vm().expect("runs")
+    };
+    let last = |r: &std::collections::HashMap<String, Vec<f64>>, key: &str| {
+        *r[key]
+            .last()
+            .unwrap_or_else(|| panic!("no series for {key}"))
+    };
+
+    let both_sides = run("t[P] = x[P] ~~|");
+    assert_eq!(
+        [
+            last(&both_sides, "t[a]"),
+            last(&both_sides, "t[b]"),
+            last(&both_sides, "t[c]")
+        ],
+        [1.0, 2.0, 3.0],
+        "t[P] = x[P] is x's own element for each element of P"
+    );
+
+    // The positional mapping pairs `D`'s first element, `a`, with `P`'s
+    // first, `c`, and so on along both lists.
+    let right_only = run("u[D] = x[P] ~~|");
+    assert_eq!(
+        [
+            last(&right_only, "u[a]"),
+            last(&right_only, "u[b]"),
+            last(&right_only, "u[c]")
+        ],
+        [3.0, 1.0, 2.0],
+        "u[D] = x[P] reads, for each element of D, the element of P mapped to it"
+    );
+}
+
+/// A star range over a subrange, read by an element outside it with no
+/// mapping pairing the two axes, is past the range and reads NaN, never the
+/// neighbouring element at the iterated element's ordinal.
+#[test]
+fn a_star_range_read_outside_its_subrange_is_nan() {
+    let last = |r: &std::collections::HashMap<String, Vec<f64>>, key: &str| {
+        *r[key]
+            .last()
+            .unwrap_or_else(|| panic!("no series for {key}"))
+    };
+    let base = || {
+        TestProject::new("star_outside")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("Age", &["Young", "Adult", "Old"])
+            .named_dimension("Younger", &["Young", "Adult"])
+            .named_dimension("Older", &["Adult", "Old"])
+            .array_with_ranges(
+                "x[Age]",
+                vec![("Young", "10"), ("Adult", "20"), ("Old", "30")],
+            )
+    };
+
+    let over_parent = base()
+        .array_aux("t[Age]", "x[*:Older]")
+        .run_vm()
+        .expect("runs");
+    assert!(
+        last(&over_parent, "t[young]").is_nan(),
+        "young is not in Older"
+    );
+    assert_eq!(last(&over_parent, "t[adult]"), 20.0);
+    assert_eq!(last(&over_parent, "t[old]"), 30.0);
+
+    let over_sibling = base()
+        .array_aux("t[Older]", "x[*:Younger]")
+        .run_vm()
+        .expect("runs");
+    assert_eq!(last(&over_sibling, "t[adult]"), 20.0);
+    assert!(
+        last(&over_sibling, "t[old]").is_nan(),
+        "old is not in Younger, and nothing maps it there"
+    );
 }
 
 // ===========================================================================

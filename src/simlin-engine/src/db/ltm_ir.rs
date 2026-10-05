@@ -297,7 +297,8 @@ fn classify_iterated_dim_shape(
     // the index names and resolves the element through the one executed
     // correspondence: exactly the read `build_view_from_ops` performs (a
     // dimension-name index pairs with the ACTIVE dimension it names, then
-    // resolves name-first), and never a cross-product.
+    // resolves through `DimensionsContext::resolve_mapped_read`), and never a
+    // cross-product.
     //
     // A target that REPEATS a dimension pairs each occurrence with its own
     // axis on both sides (the matcher is positional and one-to-one, as
@@ -1443,8 +1444,8 @@ pub(crate) enum OccurrenceAxis {
     Iterated { dim: String, source_dim: String },
     /// Iterated over the target's dimension space, but spelled with a
     /// NON-ACTIVE dimension name that execution pairs with a target-iterated
-    /// dimension through a declared mapping and resolves name-first then
-    /// through the element map (`AxisRead::MappedRead`, GH #997).
+    /// dimension through a declared mapping and resolves through that mapping
+    /// (`AxisRead::MappedRead`, GH #997).
     MappedRead { dim: String, source_dim: String },
     /// A reduced axis (`*` / StarRange); present only inside reducer args
     /// (`AxisRead::Reduced`).

@@ -5559,7 +5559,7 @@ fn declined_sliced_reducer_edge_skips_loudly() {
 ///
 /// `SUM(matrix[State,*])` names the dimension the equation ITERATES; the index
 /// survives to `IndexOp::ActiveDimRef` and `build_view_from_ops` resolves it
-/// name-first, then through the declared map
+/// through the declared map
 /// (`mapped_reference_semantics_tests`' `(Permuted, IteratedDim)` cell,
 /// measured against the VM). The map here is the reverse permutation
 /// (CA -> east) and the two regions start apart, so the value and the
@@ -5663,7 +5663,7 @@ fn element_mapped_sliced_reducer_hoists_and_scores_its_loops() {
 /// with the `State`/`Region` correspondence supplied by the caller.
 ///
 /// `target[State] = x[State] * w` reads the ITERATED spelling, which resolves
-/// name-first, then through the declared map; `w = 1 + TIME / 100` is a
+/// through the declared map; `w = 1 + TIME / 100` is a
 /// varying scalar the `x -> target` partial freezes, so that partial's value
 /// depends on WHICH element of `x` it reads. `x[Region] = level[Region] * 0.5`
 /// and a stock close the loop, so every element edge of the mapped pair sits

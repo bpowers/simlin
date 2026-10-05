@@ -153,8 +153,8 @@ pub(crate) fn live_source_occurrence_axis(
             return OccurrenceAxis::MismatchedIterated { dim: d };
         }
         // GH #997: a NON-iterated dimension name execution pairs with one of
-        // the target's iterated dims, resolved name-first then through the
-        // element map. Mirrors `classify_axis_access`'s `Unresolved` arm --
+        // the target's iterated dims, resolved through the declared mapping.
+        // Mirrors `classify_axis_access`'s `Unresolved` arm --
         // element-of-this-axis first (the literal pass below), then the
         // partner pairing and the executed correspondence.
         if let Some(dim_ctx) = dim_ctx
@@ -164,13 +164,8 @@ pub(crate) fn live_source_occurrence_axis(
             let index_dim = crate::common::CanonicalDimensionName::from_raw(&d);
             let source_dim =
                 crate::common::CanonicalDimensionName::from_raw(ic.source_dim_names[i].as_str());
-            if let Some(partner) = dim_ctx
-                .mapped_read_partner_dim(&index_dim, ic.target_iterated_dims)
-                .filter(|p| {
-                    dim_ctx
-                        .executed_read_correspondence(p, &source_dim)
-                        .is_some()
-                })
+            if let Some(partner) =
+                dim_ctx.mapped_read_partner(&index_dim, ic.target_iterated_dims, &source_dim)
             {
                 return OccurrenceAxis::MappedRead {
                     dim: partner.as_str().to_string(),
@@ -505,10 +500,7 @@ pub(crate) fn classify_expr0_per_element_axes(
                     ctx.source_dim_names[i].as_str(),
                 );
                 if let Some(partner) =
-                    dim_ctx.mapped_read_partner_dim(&index_dim, ctx.target_iterated_dims)
-                    && dim_ctx
-                        .executed_read_correspondence(&partner, &source_dim)
-                        .is_some()
+                    dim_ctx.mapped_read_partner(&index_dim, ctx.target_iterated_dims, &source_dim)
                 {
                     axes.push(AxisRead::MappedRead {
                         dim: partner.as_str().to_string(),
@@ -584,13 +576,11 @@ pub(crate) fn other_dep_occurrence_axes(
                 return match (dep_dims.and_then(|dd| dd.get(i)), dim_ctx) {
                     (Some(dep_dim), Some(dim_ctx)) if dep_dim.canonical_element(&d).is_none() => {
                         let index_dim = crate::common::CanonicalDimensionName::from_raw(&d);
-                        match dim_ctx
-                            .mapped_read_partner_dim(&index_dim, ctx.target_iterated_dims)
-                            .filter(|p| {
-                                dim_ctx
-                                    .executed_read_correspondence(p, dep_dim.canonical_name())
-                                    .is_some()
-                            }) {
+                        match dim_ctx.mapped_read_partner(
+                            &index_dim,
+                            ctx.target_iterated_dims,
+                            dep_dim.canonical_name(),
+                        ) {
                             Some(partner) => OccurrenceAxis::MappedRead {
                                 dim: partner.as_str().to_string(),
                                 source_dim: canonicalize(dep_dim.name()).into_owned(),

@@ -1452,9 +1452,10 @@ fn a_common_mapping_target_resolves_through_its_element_maps() {
 ///
 /// Three spellings, because the axis name is what changed and each reaches it
 /// differently: the plain read, the transposed one, and a target axis that
-/// reaches `Parent` through a declared mapping rather than by name. The
-/// mapped-onto-`Sub` spelling is refused on both sides of the change and is
-/// rowed so the refusal is not read as covering more than it does.
+/// reaches `Parent` through a declared mapping rather than by name. A target
+/// axis mapped onto `Sub` itself is the control: it pairs with the range's
+/// axis through that mapping, and each of its elements reads the `Sub` row
+/// the mapping gives it (`m1` row `A`, `m2` row `C`).
 #[test]
 fn a_star_range_over_a_subdimension_is_refused_by_a_parent_target() {
     fn project(name: &str) -> simlin_engine::test_common::TestProject {
@@ -1511,11 +1512,17 @@ fn a_star_range_over_a_subdimension_is_refused_by_a_parent_target() {
     let mapped_to_sub = project("star_sub_mapped")
         .named_dimension_with_mapping("DimM", &["m1", "m2"], "Sub")
         .array_aux("out[DimM,Other]", "arr[*:Sub, *]");
-    assert_eq!(
-        mapped_to_sub.error_diagnostics(),
-        vec![("main.out".to_string(), ErrorCode::MismatchedDimensions)],
-        "the mapped-onto-Sub spelling is refused on both sides of the change"
-    );
+    let results = mapped_to_sub
+        .run_vm()
+        .expect("a target axis mapped onto Sub reads Sub's rows");
+    for (cell, want) in [
+        ("out[m1,x]", 11.0),
+        ("out[m1,z]", 13.0),
+        ("out[m2,x]", 31.0),
+        ("out[m2,z]", 33.0),
+    ] {
+        assert_eq!(results[cell].last(), Some(&want), "{cell}");
+    }
 }
 
 /// Two operands' bounds unify through a declared MAPPING, not by name alone.
@@ -8152,8 +8159,8 @@ fn a_private_materialization_beside_a_shared_one_stays_in_its_element() {
 }
 
 /// A temp axis the target does not NAME is read through the declared
-/// correspondence -- the element's own name on the temp's axis, then the
-/// declared mapping -- and refused when there is none.
+/// correspondence -- the declared mapping, then the element's own name on the
+/// temp's axis -- and refused when there is none.
 ///
 /// `out[D] = VECTOR SORT ORDER(w[E], 1)` sorts a `[E]`-shaped array into a
 /// `[E]`-shaped temp that `out[D]` reads back one element at a time.

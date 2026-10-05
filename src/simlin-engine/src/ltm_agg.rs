@@ -462,14 +462,15 @@ pub enum AxisRead {
     /// the source's own (`ff_stop_growth_year_aggregated[Aggregated Regions]`
     /// inside a `COP`-iterating equation, C-LEARN's shape and GH #997's).
     ///
-    /// Structurally the same pair as [`AxisRead::Iterated`], and read through
-    /// the same correspondence (`DimensionsContext::executed_read_correspondence`;
-    /// execution resolves every dimension-named subscript through
-    /// `compiler::subscript::build_view_from_ops`'s one rule). What differs is
-    /// the PAIRING: an `Iterated` index names the target dimension it is
-    /// driven by, a `MappedRead` index names a non-active dimension and is
-    /// paired with an iterated one through `mapped_read_partner_dim`, which
-    /// declines an ambiguous pairing. The row derivations walk a `MappedRead`
+    /// Structurally the same pair as [`AxisRead::Iterated`]. What differs is
+    /// the PAIRING and the rule: an `Iterated` index names the target
+    /// dimension it is driven by and reads through
+    /// `DimensionsContext::executed_read_correspondence`; a `MappedRead`
+    /// index names a non-active dimension, on the right of the equation
+    /// alone, is paired with an iterated one through
+    /// `mapped_read_partner_dim`, which declines an ambiguous pairing, and
+    /// reads through the declared mapping
+    /// (`DimensionsContext::mapped_read_correspondence`). The row derivations walk a `MappedRead`
     /// axis from the TARGET side, so a many-to-one correspondence is one row
     /// under several slots.
     ///
@@ -1941,15 +1942,16 @@ fn slots_remap_every_foreign_axis(
 ///   (`x[Region]` under a `State`-iterating equation, GH #997) -- and
 ///   execution pairs it with exactly one of the target's iterated dims
 ///   through a declared mapping ⇒ [`AxisRead::MappedRead`] carrying the
-///   `(partner, src)` pair. The pairing is
-///   [`crate::dimensions::DimensionsContext::mapped_read_partner_dim`],
-///   mirroring `compiler::subscript::normalize_subscripts3`; the usability
-///   gate is `executed_read_correspondence`, the name-first-then-element-map
-///   rule this spelling gets. Declined (⇒ `None`, conservative): no partner,
-///   an AMBIGUOUS pairing (two viable iterated dims), and an unusable
-///   per-element correspondence. Note this arm is checked LAST, after the
-///   element and iterated-dimension readings, so it can never change what a
-///   colliding name selects.
+///   `(partner, src)` pair. The pairing and its usability gate are
+///   [`crate::dimensions::DimensionsContext::mapped_read_partner`], mirroring
+///   `compiler::subscript::normalize_subscripts3` and the
+///   `executed_read_correspondence` every consumer derives the rows from.
+///   Declined (⇒ `None`, conservative): no partner, an AMBIGUOUS pairing (two
+///   viable iterated dims), an unusable per-element correspondence, and a
+///   subrange of the source's dimension whose own mapping execution reads
+///   through, which that correspondence does not state. Note this arm is
+///   checked LAST, after the element and iterated-dimension readings, so it
+///   can never change what a colliding name selects.
 /// - anything else (`DimPosition`, `Range`, a non-literal `Expr`, a
 ///   `Var`/`Const` that resolves to none of the above) ⇒ `None`.
 pub(crate) fn classify_axis_access(
@@ -2038,17 +2040,19 @@ pub(crate) fn classify_axis_access(
                 // target's iterated dims through a declared mapping
                 // (`x[Region]` under a `State`-iterating equation, GH #997) --
                 // the spelling `compiler::subscript::normalize_subscripts3`
-                // turns into an `IndexOp::ActiveDimRef` and resolves
-                // name-first, then through the element map. `MappedRead` is
-                // that verdict, and it declines when the pairing is absent or
-                // ambiguous, or when the per-element correspondence is not
-                // usable -- in which case the reference keeps the conservative
-                // shape it had before.
+                // turns into an `IndexOp::ActiveDimRef` and resolves through
+                // the declared mapping. `MappedRead` is that verdict, and it
+                // declines when the pairing is absent or ambiguous, or when the
+                // per-element correspondence is not usable or not the one
+                // execution reads -- in which case the reference keeps the
+                // conservative shape it had before.
                 crate::dimensions::AxisIndexName::Unresolved => {
                     let index_dim = crate::common::CanonicalDimensionName::from_raw(name_str);
-                    let partner =
-                        dim_ctx.mapped_read_partner_dim(&index_dim, target_iterated_dims)?;
-                    dim_ctx.executed_read_correspondence(&partner, axis_dim.canonical_name())?;
+                    let partner = dim_ctx.mapped_read_partner(
+                        &index_dim,
+                        target_iterated_dims,
+                        axis_dim.canonical_name(),
+                    )?;
                     Some(AxisRead::MappedRead {
                         dim: partner.as_str().to_string(),
                         source_dim: src_dim_name.to_string(),

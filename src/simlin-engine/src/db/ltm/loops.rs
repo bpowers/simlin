@@ -401,7 +401,7 @@ pub(crate) fn read_slice_row_parts(
             AxisRead::MappedRead { dim, source_dim } => {
                 let target_dim =
                     dim_ctx.get(&crate::common::CanonicalDimensionName::from_raw(dim))?;
-                let corr = dim_ctx.executed_read_correspondence(
+                let corr = dim_ctx.mapped_read_correspondence(
                     &crate::common::CanonicalDimensionName::from_raw(dim),
                     &crate::common::CanonicalDimensionName::from_raw(source_dim),
                 )?;

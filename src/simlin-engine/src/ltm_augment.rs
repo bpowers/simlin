@@ -3961,7 +3961,7 @@ pub(crate) fn flow_to_stock_wiring<'a>(
 /// into `level[suba]`, `dimb -> dima` with `suba` inside `dima`) is bare
 /// because under the iteration over the stock's dimensions the compiler
 /// resolves a bare arrayed name through its implicit subscripts
-/// (`get_implicit_subscripts`, the pairing the wiring itself uses to fold
+/// (`get_implicit_axes`, the pairing the wiring itself uses to fold
 /// the flow into the stock), where `inflow[dimb]` names an axis that
 /// iteration does not carry and does not lower. A scalar flow into an
 /// arrayed stock is bare too: it broadcasts into every element's net flow.

@@ -438,24 +438,31 @@ pub(crate) fn build_view_from_ops(
                 let subscript = &active_subscripts[*active_idx];
                 let dim = &config.dims[i];
 
-                let offset = dim.get_offset(subscript).or_else(|| {
-                    // The active element's own name is not declared on this
-                    // source axis, so the element is the shared rule's
-                    // (`DimensionsContext::resolve_dimension_subscript`): the
-                    // declared mapping, then a mapped parent of the active
-                    // subdimension (GH #997), and -- for a subscript that NAMES
-                    // its active dimension over an axis declaring nothing --
-                    // the active element's ordinal, the one last resort the
-                    // dynamic subscript path (`Context::lower_index_expr3`)
-                    // takes too, so a sibling index never decides which rule
-                    // fires (GH #1044). `normalize_subscripts3` already picked
-                    // the active dimension, so this is one call rather than a
-                    // search. Out of range is an error, exactly as it is for
-                    // the `IndexOp::Single` an explicit element produces.
-                    let dims_ctx = config.dimensions_ctx?;
-                    let active_dim = &config.active_dimension?[*active_idx];
-                    dims_ctx.resolve_dimension_subscript(dim, spelled, active_dim, subscript)
-                });
+                // The element is the shared rule's
+                // (`DimensionsContext::resolve_dimension_subscript`): by name
+                // for a subscript naming the active dimension over a source
+                // that declares its every element, and otherwise through the
+                // dimension the subscript names, the declared mapping, the
+                // element's own name, then a mapped parent of the active
+                // subdimension (GH #997), and -- for a subscript that NAMES
+                // its active dimension over an axis declaring nothing -- the
+                // active element's ordinal, the one last resort the dynamic
+                // subscript path (`Context::lower_index_expr3`) takes too, so a
+                // sibling index never decides which rule fires (GH #1044).
+                // `normalize_subscripts3` already picked the active dimension,
+                // so this is one call rather than a search. Out of range is an
+                // error, exactly as it is for the `IndexOp::Single` an explicit
+                // element produces. Without a dimensions context (a caller
+                // that resolves no mapping) the element is read by its name.
+                let offset = match (config.dimensions_ctx, config.active_dimension) {
+                    (Some(dims_ctx), Some(active_dims)) => dims_ctx.resolve_dimension_subscript(
+                        dim,
+                        spelled,
+                        &active_dims[*active_idx],
+                        subscript,
+                    ),
+                    _ => dim.get_offset(subscript),
+                };
 
                 if let Some(offset) = offset {
                     single_indices.push(offset);
