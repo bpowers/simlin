@@ -1196,8 +1196,8 @@ fn shape(equation: &Equation) -> &'static str {
 
 /// `set_equation` on each shape of equation, for one element and for all:
 /// what it sets is set, and everything else the equation holds stays -- the
-/// other elements' equations, the `:EXCEPT:` default and the flag that
-/// applies it to the elements with no arm of their own.
+/// other elements' equations, the equation every element follows, and each
+/// element's own equation when the one every element follows is set.
 #[test]
 fn set_equation_keeps_what_it_does_not_set_for_every_shape_of_equation() {
     let project = TestProject::new("regions")
@@ -1238,22 +1238,30 @@ fn set_equation_keeps_what_it_does_not_set_for_every_shape_of_equation() {
             Ok(Equation::ApplyToAll(region(), "7".to_string())),
             vec![("all[north]", 7.0), ("all[south]", 7.0)],
         ),
+        // The element gets an equation of its own; the rest still follow the
+        // one every element follows.
         (
             "all",
             Some("South"),
             Ok(Equation::Arrayed(
                 region(),
-                vec![arm("north", "0.1"), arm("south", "7"), arm("east", "0.1")],
-                None,
-                false,
+                vec![arm("south", "7")],
+                Some("0.1".to_string()),
+                true,
             )),
             vec![("all[north]", 0.1), ("all[south]", 7.0), ("all[east]", 0.1)],
         ),
+        // The equation every element follows; north keeps its own.
         (
             "partial",
             None,
-            Ok(Equation::ApplyToAll(region(), "7".to_string())),
-            vec![("partial[north]", 7.0), ("partial[east]", 7.0)],
+            Ok(Equation::Arrayed(
+                region(),
+                vec![arm("north", "0.5")],
+                Some("7".to_string()),
+                true,
+            )),
+            vec![("partial[north]", 0.5), ("partial[east]", 7.0)],
         ),
         // An arm the equation has: the default still applies to the rest.
         (
@@ -2093,6 +2101,8 @@ fn operation_row(op: &EditOperation) -> usize {
         EditOperation::Delete { .. } => 9,
         EditOperation::NameLoop { .. } => 10,
         EditOperation::SetSimSpecs { .. } => 11,
+        EditOperation::ClearElement { .. } => 12,
+        EditOperation::SetDimensions { .. } => 13,
     }
 }
 
@@ -2400,6 +2410,28 @@ fn every_operation_on_every_kind_of_variable() {
                 Made(|p, _| assert_eq!(p.sim_specs.stop, 8.0)),
                 Made(|p, _| assert_eq!(p.sim_specs.stop, 8.0)),
                 Made(|p, _| assert_eq!(p.sim_specs.stop, 8.0)),
+            ],
+        ),
+        (
+            // None of the four is arrayed (an arrayed one:
+            // `an_element_edit_keeps_the_equation_every_element_follows`).
+            |t| json!({"op": "clear_element", "variable": t, "element": "north"}),
+            [
+                Rejected("it is not arrayed"),
+                Rejected("it is not arrayed"),
+                Rejected("it is not arrayed"),
+                Rejected("it is not arrayed"),
+            ],
+        ),
+        (
+            // The model declares no dimensions (a split by one:
+            // `a_variable_is_split_by_a_dimension_and_back`).
+            |t| json!({"op": "set_dimensions", "variable": t, "dimensions": ["Region"]}),
+            [
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
             ],
         ),
     ];
@@ -3924,10 +3956,11 @@ fn a_model_brought_back_to_life_names_its_undefined_series() {
     );
 }
 
-/// One equation written over per-element ones says it now holds for every
-/// element.
+/// An equation for every element written over per-element ones is the one
+/// the elements with no equation of their own would follow; each element
+/// keeps its own, and the change line says both.
 #[test]
-fn one_equation_over_per_element_ones_says_every_element() {
+fn an_equation_for_every_element_keeps_each_elements_own() {
     let project = TestProject::new("regions")
         .named_dimension("region", &["north", "south"])
         .array_with_ranges("growth[region]", vec![("north", "10"), ("south", "20")]);
@@ -3941,7 +3974,110 @@ fn one_equation_over_per_element_ones_says_every_element() {
     );
     let detail = output["changes"][0]["detail"].as_str().unwrap();
     assert!(
-        detail.starts_with("equation 5 for every element (was "),
+        detail.starts_with("equation north: 10; south: 20; others: 5 (was "),
         "{detail}"
     );
+}
+
+/// An element's own equation, written and cleared through `edit_model`,
+/// leaves the equation every element follows as it was.
+#[test]
+fn an_element_edit_keeps_the_equation_every_element_follows() {
+    let project = TestProject::new("regions")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_aux("growth[region]", "0.1");
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    read(&mut host, &mut session);
+    let equation = |host: &Host| {
+        host.project.models[0]
+            .get_variable("growth")
+            .unwrap()
+            .get_equation()
+            .unwrap()
+            .clone()
+    };
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "set_equation", "variable": "growth", "element": "North", "equation": "0.5"}
+        ])),
+    );
+    assert_eq!(
+        equation(&host),
+        Equation::Arrayed(
+            vec!["region".to_string()],
+            vec![("north".to_string(), "0.5".to_string(), None, None)],
+            Some("0.1".to_string()),
+            true
+        )
+    );
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "clear_element", "variable": "growth", "element": "north"}
+        ])),
+    );
+    assert_eq!(
+        equation(&host),
+        Equation::ApplyToAll(vec!["region".to_string()], "0.1".to_string())
+    );
+}
+
+/// `set_dimensions` splits a variable by a dimension, and removing it again,
+/// with the element whose equation stays, makes it a scalar.
+#[test]
+fn a_variable_is_split_by_a_dimension_and_back() {
+    let project = TestProject::new("regions")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .aux("growth", "0.1", None);
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    read(&mut host, &mut session);
+    let equation = |host: &Host| {
+        host.project.models[0]
+            .get_variable("growth")
+            .unwrap()
+            .get_equation()
+            .unwrap()
+            .clone()
+    };
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "set_dimensions", "variable": "growth", "dimensions": ["region"]},
+            {"op": "set_equation", "variable": "growth", "element": "south", "equation": "0.2"}
+        ])),
+    );
+    assert_eq!(
+        equation(&host),
+        Equation::Arrayed(
+            vec!["region".to_string()],
+            vec![("south".to_string(), "0.2".to_string(), None, None)],
+            Some("0.1".to_string()),
+            true
+        )
+    );
+    let refused = host.call_raw(
+        &mut session,
+        "edit_model",
+        &operations(json!([
+            {"op": "set_dimensions", "variable": "growth", "dimensions": []}
+        ]))
+        .to_string(),
+    );
+    assert!(refused.is_error, "north and south differ: {}", refused.json);
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "set_dimensions", "variable": "growth", "dimensions": [], "keep": "south"}
+        ])),
+    );
+    assert_eq!(equation(&host), Equation::Scalar("0.2".to_string()));
 }

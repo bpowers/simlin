@@ -1426,6 +1426,24 @@ void simlin_clear_panic_message(void);
 
 // Applies a JSON patch to the project datamodel.
 //
+// A model operation that edits one field of one variable leaves the rest of
+// it as it is, where an upsert replaces the variable whole:
+// - `setEquation {ident, equation}`: a scalar's equation -- a STOCK's is
+//   its initial value; its flows are `updateStockFlows` -- or the equation
+//   every element of an arrayed variable follows, each element keeping an
+//   equation of its own;
+// - `setElementEquation {ident, element, equation}`: one element's own
+//   equation, `element` naming it on each of the variable's dimensions in
+//   order; a null `equation` returns the element to following the
+//   equation every element follows;
+// - `setUnits {ident, units}` and `setNotes {ident, notes}`;
+// - `setLookup {ident, element?, lookup}`: the variable's lookup or one
+//   element's, null removing it;
+// - `setDimensions {ident, dimensions, keep?}`: the dimensions it is
+//   arrayed over, in order; one added repeats it along the dimension, one
+//   removed keeps the element of `keep` on it or is refused where its
+//   elements differ.
+//
 // # Safety
 // - `project` must point to a valid `SimlinProject`.
 // - `patch_data` must either be null with `patch_len == 0` or reference at

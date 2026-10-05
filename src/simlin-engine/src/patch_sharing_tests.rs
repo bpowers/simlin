@@ -82,7 +82,7 @@ pub(crate) fn for_each_corpus_project(mut f: impl FnMut(&Path, &Project)) {
 }
 
 /// How many variants `ModelOperation` has.
-pub(crate) const MODEL_OPERATION_VARIANTS: usize = 11;
+pub(crate) const MODEL_OPERATION_VARIANTS: usize = 17;
 
 /// The position of `op`'s variant. The match has no wildcard, so a variant
 /// added to `ModelOperation` fails to compile here until it has a number, and
@@ -101,6 +101,12 @@ pub(crate) fn model_operation_variant(op: &ModelOperation) -> usize {
         ModelOperation::UpdateStockFlows { .. } => 8,
         ModelOperation::SetLoopName { .. } => 9,
         ModelOperation::EditView { .. } => 10,
+        ModelOperation::SetEquation { .. } => 11,
+        ModelOperation::SetElementEquation { .. } => 12,
+        ModelOperation::SetUnits { .. } => 13,
+        ModelOperation::SetNotes { .. } => 14,
+        ModelOperation::SetLookup { .. } => 15,
+        ModelOperation::SetDimensions { .. } => 16,
     }
 }
 
@@ -156,6 +162,97 @@ fn upsert_of(variable: &Variable, changed: bool) -> ModelOperation {
             }
             ModelOperation::UpsertModule(m)
         }
+    }
+}
+
+/// The edits by field of `variable`: each field changed, and each set to
+/// what it already holds.
+fn push_field_edits(push: &mut impl FnMut(String, Vec<ModelOperation>), variable: &Variable) {
+    let ident = variable.get_ident().to_string();
+    let set_notes = |notes: String| ModelOperation::SetNotes {
+        ident: ident.clone(),
+        notes,
+    };
+    push(
+        format!("notes of {ident}"),
+        vec![set_notes("edited".to_string())],
+    );
+    let notes = match variable {
+        Variable::Stock(s) => s.documentation.clone(),
+        Variable::Flow(f) => f.documentation.clone(),
+        Variable::Aux(a) => a.documentation.clone(),
+        Variable::Module(m) => m.documentation.clone(),
+    };
+    push(
+        format!("notes of {ident} as they are"),
+        vec![set_notes(notes)],
+    );
+    push(
+        format!("units of {ident}"),
+        vec![ModelOperation::SetUnits {
+            ident: ident.clone(),
+            units: Some("widget".to_string()),
+        }],
+    );
+    let Some(equation) = variable.get_equation() else {
+        return;
+    };
+    let every = match equation {
+        Equation::Scalar(text) | Equation::ApplyToAll(_, text) => Some(text.clone()),
+        Equation::Arrayed(_, _, default, applies) => default.clone().filter(|_| *applies),
+    };
+    if let Some(every) = every {
+        push(
+            format!("equation of {ident}"),
+            vec![ModelOperation::SetEquation {
+                ident: ident.clone(),
+                equation: format!("{every} + 0"),
+            }],
+        );
+        push(
+            format!("equation of {ident} as it is"),
+            vec![ModelOperation::SetEquation {
+                ident: ident.clone(),
+                equation: every,
+            }],
+        );
+    }
+    let dims = match equation {
+        Equation::Scalar(_) => Vec::new(),
+        Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, ..) => dims.clone(),
+    };
+    push(
+        format!("dimensions of {ident} as they are"),
+        vec![ModelOperation::SetDimensions {
+            ident: ident.clone(),
+            dimensions: dims,
+            keep: None,
+        }],
+    );
+    if let Equation::Arrayed(_, arms, _, _) = equation
+        && let Some((subscript, text, ..)) = arms.first()
+    {
+        let element: Vec<String> = subscript.split(',').map(|s| s.trim().to_string()).collect();
+        for (what, equation) in [("its own", Some(format!("{text} + 0"))), ("none", None)] {
+            push(
+                format!("{ident}[{subscript}] {what}"),
+                vec![ModelOperation::SetElementEquation {
+                    ident: ident.clone(),
+                    element: element.clone(),
+                    equation,
+                }],
+            );
+        }
+    }
+    if matches!(variable, Variable::Aux(_) | Variable::Flow(_)) {
+        push(
+            format!("no lookup for {ident}"),
+            vec![ModelOperation::SetLookup {
+                ident: ident.clone(),
+                element: None,
+                lookup: None,
+            }],
+        );
     }
 }
 
@@ -239,6 +336,7 @@ fn generated_patches(project: &Project, max: usize) -> Vec<(String, ProjectPatch
                     rename(&format!("{ident} renamed"), format!("{ident} again")),
                 ],
             );
+            push_field_edits(&mut push, variable);
             if let Variable::Stock(stock) = variable {
                 let mut inflows = stock.inflows.clone();
                 inflows.reverse();
@@ -470,6 +568,14 @@ fn a_patch_copies_only_what_it_changes_and_lands_the_same_shared_or_not() {
     // assertion holds, and the corpus gate samples every model more widely.
     check_sharing(&world3(), 1, &mut covered, "world3");
     check_sharing(&hares_and_lynxes(), 4, &mut covered, "hares and lynxes");
+    // Neither of those is arrayed: an element's own equation needs a model
+    // that is.
+    let arrayed = crate::test_common::TestProject::new("arrayed")
+        .named_dimension("Region", &["North", "South"])
+        .array_with_default_and_overrides("growth[Region]", "0.1", vec![("South", "0.2")])
+        .array_aux("level[Region]", "growth * 2")
+        .build_datamodel();
+    check_sharing(&arrayed, 4, &mut covered, "arrayed");
     assert_eq!(
         covered,
         (

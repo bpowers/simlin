@@ -54,6 +54,12 @@ fn describe(op: &ModelOperation) -> String {
         ModelOperation::DeleteView { .. } => "delete view".to_string(),
         ModelOperation::SetLoopName { .. } => "set loop name".to_string(),
         ModelOperation::EditView { .. } => "edit view".to_string(),
+        ModelOperation::SetEquation { ident, equation } => format!("{ident} = {equation}"),
+        ModelOperation::SetElementEquation { ident, .. } => format!("{ident} element"),
+        ModelOperation::SetUnits { ident, .. } => format!("{ident} units"),
+        ModelOperation::SetNotes { ident, .. } => format!("{ident} notes"),
+        ModelOperation::SetLookup { ident, .. } => format!("{ident} lookup"),
+        ModelOperation::SetDimensions { ident, .. } => format!("{ident} dimensions"),
     }
 }
 

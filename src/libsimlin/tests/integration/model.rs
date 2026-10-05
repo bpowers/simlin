@@ -1376,3 +1376,45 @@ fn an_equation_is_read_as_its_tree_and_cells() {
         simlin_project_unref(proj);
     }
 }
+
+/// A field edit through the patch reaches what a host reads back: an
+/// element given its own equation is `own` and the rest still follow.
+#[test]
+fn a_field_edit_lands_through_the_patch() {
+    let datamodel = TestProject::new("fields")
+        .named_dimension("Age", &["Young", "Old"])
+        .array_aux("pop[Age]", "2")
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let patch = serde_json::json!({"models": [{"name": "main", "ops": [
+            {"type": "setElementEquation",
+             "payload": {"ident": "pop", "element": ["old"], "equation": "3"}}
+        ]}]});
+        let bytes = serde_json::to_vec(&patch).unwrap();
+        let (mut collected, mut err) = (ptr::null_mut(), ptr::null_mut());
+        simlin_project_apply_patch(
+            proj,
+            bytes.as_ptr(),
+            bytes.len(),
+            false,
+            false,
+            &mut collected,
+            &mut err,
+        );
+        expect_no_error(err, "the field edit");
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        let mut err = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        expect_no_error(err, "getting the model");
+        let pop = equation_json(model, "pop").expect("pop's equations");
+        assert_eq!(pop["every"]["text"], "2");
+        assert_eq!(pop["cells"][0]["state"], "follows");
+        assert_eq!(pop["cells"][1]["state"], "own");
+        assert_eq!(pop["cells"][1]["own"]["text"], "3");
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

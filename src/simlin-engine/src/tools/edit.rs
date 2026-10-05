@@ -133,23 +133,42 @@ pub enum EditOperation {
         notes: Option<String>,
     },
     /// Replace a variable's equation (a stock's: its initial value). For an
-    /// arrayed variable, the equation applies to every element, or to the
-    /// one `element` names (`north`; `north, young` for an element of several
-    /// dimensions).
+    /// arrayed variable, the equation every element follows -- elements with
+    /// equations of their own keep them -- or, with `element`, that one
+    /// element's own equation (`north`; `north, young` for an element of
+    /// several dimensions).
     SetEquation {
         variable: String,
         equation: String,
         #[serde(default)]
         element: Option<String>,
     },
+    /// Return one element of an arrayed variable to the equation every
+    /// element follows: it loses its own equation and lookup.
+    ClearElement { variable: String, element: String },
+    /// Set the dimensions a variable is arrayed over, in order. A dimension
+    /// added splits the variable by it: each element starts from what the
+    /// variable said before. A dimension removed keeps what every element
+    /// along it says, or the element `keep` names on the removed dimensions
+    /// (`north`; `north, young` for two); none makes the variable a scalar.
+    SetDimensions {
+        variable: String,
+        dimensions: Vec<String>,
+        #[serde(default)]
+        keep: Option<String>,
+    },
     /// Set a variable's units; empty clears them.
     SetUnits { variable: String, units: String },
     /// Set a variable's documentation; empty clears it.
     SetNotes { variable: String, notes: String },
     /// Make a variable a lookup of its equation: `points` are `[x, y]` pairs,
-    /// x never decreasing (two points at one x are a vertical step).
+    /// x never decreasing (two points at one x are a vertical step). With
+    /// `element`, that one element of an arrayed variable is a lookup of its
+    /// equation.
     SetLookup {
         variable: String,
+        #[serde(default)]
+        element: Option<String>,
         points: Vec<[f64; 2]>,
         /// How it reads between and past its points: continuous (the
         /// default: interpolated, held at the ends), extrapolate, or
@@ -204,6 +223,8 @@ impl EditOperation {
             EditOperation::AddFlow { .. } => "add_flow",
             EditOperation::AddVariable { .. } => "add_variable",
             EditOperation::SetEquation { .. } => "set_equation",
+            EditOperation::ClearElement { .. } => "clear_element",
+            EditOperation::SetDimensions { .. } => "set_dimensions",
             EditOperation::SetUnits { .. } => "set_units",
             EditOperation::SetNotes { .. } => "set_notes",
             EditOperation::SetLookup { .. } => "set_lookup",
@@ -226,6 +247,8 @@ impl EditOperation {
             EditOperation::SetUnits { .. }
             | EditOperation::SetNotes { .. }
             | EditOperation::SetLookup { .. }
+            | EditOperation::ClearElement { .. }
+            | EditOperation::SetDimensions { .. }
             | EditOperation::ConnectFlow { .. }
             | EditOperation::Rename { .. }
             | EditOperation::Delete { .. }
@@ -1514,69 +1537,134 @@ impl<'a> Builder<'a> {
                 equation,
                 element,
             } => {
-                let mut var = self.existing(&variable)?;
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
                 if equation.trim().is_empty() {
                     return Err(ToolError::new(format!(
-                        "give '{}' an equation that is not empty",
-                        var.get_ident()
+                        "give '{ident}' an equation that is not empty"
                     )));
                 }
-                let (new, element) = self.equation(&var, &equation, element.as_deref())?;
-                match &mut var {
-                    Variable::Stock(stock) => stock.equation = new,
-                    Variable::Flow(flow) => flow.equation = new,
-                    Variable::Aux(aux) => aux.equation = new,
-                    Variable::Module(_) => {
-                        return Err(ToolError::new(format!(
-                            "'{}' is a module, which has no equation",
-                            var.get_ident()
-                        )));
+                if let Variable::Module(_) = var {
+                    return Err(ToolError::new(format!(
+                        "'{ident}' is a module, which has no equation"
+                    )));
+                }
+                match element {
+                    None => {
+                        self.authors(&ident, None);
+                        self.field(
+                            &ident,
+                            ModelOperation::SetEquation {
+                                ident: ident.clone(),
+                                equation,
+                            },
+                        )
+                    }
+                    Some(element) => {
+                        let (parts, key) = self.element(&var, &element)?;
+                        self.authors(&ident, Some(key));
+                        self.field(
+                            &ident,
+                            ModelOperation::SetElementEquation {
+                                ident: ident.clone(),
+                                element: parts,
+                                equation: Some(equation),
+                            },
+                        )
                     }
                 }
-                self.authors(var.get_ident(), element);
-                self.upsert(var)
+            }
+            EditOperation::ClearElement { variable, element } => {
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
+                let (parts, key) = self.element(&var, &element)?;
+                self.authors(&ident, Some(key));
+                self.field(
+                    &ident,
+                    ModelOperation::SetElementEquation {
+                        ident: ident.clone(),
+                        element: parts,
+                        equation: None,
+                    },
+                )
+            }
+            EditOperation::SetDimensions {
+                variable,
+                dimensions,
+                keep,
+            } => {
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
+                let keep = keep.map(|keep| {
+                    keep.split(',')
+                        .map(|part| part.trim().to_string())
+                        .collect::<Vec<_>>()
+                });
+                self.authors(&ident, None);
+                self.field(
+                    &ident,
+                    ModelOperation::SetDimensions {
+                        ident: ident.clone(),
+                        dimensions,
+                        keep,
+                    },
+                )
             }
             EditOperation::SetUnits { variable, units } => {
-                let mut var = self.existing(&variable)?;
-                let units = Some(units.trim().to_string()).filter(|u| !u.is_empty());
-                match &mut var {
-                    Variable::Stock(stock) => stock.units = units,
-                    Variable::Flow(flow) => flow.units = units,
-                    Variable::Aux(aux) => aux.units = units,
-                    Variable::Module(module) => module.units = units,
-                }
-                self.upsert(var)
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
+                self.field(
+                    &ident,
+                    ModelOperation::SetUnits {
+                        ident: ident.clone(),
+                        units: Some(units),
+                    },
+                )
             }
             EditOperation::SetNotes { variable, notes } => {
-                let mut var = self.existing(&variable)?;
-                let notes = notes.trim().to_string();
-                match &mut var {
-                    Variable::Stock(stock) => stock.documentation = notes,
-                    Variable::Flow(flow) => flow.documentation = notes,
-                    Variable::Aux(aux) => aux.documentation = notes,
-                    Variable::Module(module) => module.documentation = notes,
-                }
-                self.upsert(var)
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
+                self.field(
+                    &ident,
+                    ModelOperation::SetNotes {
+                        ident: ident.clone(),
+                        notes: notes.trim().to_string(),
+                    },
+                )
             }
             EditOperation::SetLookup {
                 variable,
+                element,
                 points,
                 kind,
             } => {
-                let mut var = self.existing(&variable)?;
-                let gf = lookup(var.get_ident(), &points, kind)?;
-                match &mut var {
-                    Variable::Flow(flow) => flow.gf = Some(gf),
-                    Variable::Aux(aux) => aux.gf = Some(gf),
-                    Variable::Stock(_) | Variable::Module(_) => {
-                        return Err(ToolError::new(format!(
-                            "'{}' cannot be a lookup: only an auxiliary or a flow can",
-                            var.get_ident()
-                        )));
-                    }
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
+                if let Variable::Stock(_) | Variable::Module(_) = var {
+                    return Err(ToolError::new(format!(
+                        "'{ident}' cannot be a lookup: only an auxiliary or a flow can"
+                    )));
                 }
-                self.authors(var.get_ident(), None);
-                self.upsert(var)
+                let gf = lookup(&ident, &points, kind)?;
+                let element = match element {
+                    None => {
+                        self.authors(&ident, None);
+                        None
+                    }
+                    Some(element) => {
+                        let (parts, key) = self.element(&var, &element)?;
+                        self.authors(&ident, Some(key));
+                        Some(parts)
+                    }
+                };
+                self.field(
+                    &ident,
+                    ModelOperation::SetLookup {
+                        ident: ident.clone(),
+                        element,
+                        lookup: Some(gf),
+                    },
+                )
             }
             EditOperation::ConnectFlow { flow, from, to } => {
                 let flow = match self.existing(&flow)? {
@@ -1662,18 +1750,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Upsert `var`, which the edit names.
-    fn upsert(&mut self, var: Variable) -> Result<(), ToolError> {
-        self.touch(var.get_ident());
-        let op = match var {
-            Variable::Stock(stock) => ModelOperation::UpsertStock(stock),
-            Variable::Flow(flow) => ModelOperation::UpsertFlow(flow),
-            Variable::Aux(aux) => ModelOperation::UpsertAux(aux),
-            Variable::Module(module) => ModelOperation::UpsertModule(module),
-        };
-        self.apply(vec![op])
-    }
-
     /// The stocks that list the flow `ident` among their flows.
     fn stocks_with(&self, ident: &str) -> Result<Vec<datamodel::Stock>, ToolError> {
         let canonical = crate::canonicalize(ident);
@@ -1754,37 +1830,21 @@ impl<'a> Builder<'a> {
         self.apply(ops)
     }
 
-    /// `var`'s equation with `text` in place: of every element, or of the
-    /// one `element` names, which is returned as the model's arms name it.
-    ///
-    /// An element is named as the read tools name one
-    /// (`names::resolve_element`), and an arm is matched as the engine
-    /// matches one (`CanonicalElementName::from_subscript`).
-    fn equation(
+    /// Make the field edit `op` of the variable named `ident`.
+    fn field(&mut self, ident: &str, op: ModelOperation) -> Result<(), ToolError> {
+        self.touch(ident);
+        self.apply(vec![op])
+    }
+
+    /// The element of `var` that `element` names (`north`; `north, young`
+    /// for an element of several dimensions): each part as its dimension
+    /// spells it, and its canonical key.
+    fn element(
         &self,
         var: &Variable,
-        text: &str,
-        element: Option<&str>,
-    ) -> Result<(Equation, Option<CanonicalElementName>), ToolError> {
-        let Some(old) = var.get_equation() else {
-            return Err(ToolError::new(format!(
-                "'{}' has no equation",
-                var.get_ident()
-            )));
-        };
-        let text = text.to_string();
-        let Some(element) = element else {
-            return Ok((
-                match old {
-                    Equation::Scalar(_) => Equation::Scalar(text),
-                    Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, ..) => {
-                        Equation::ApplyToAll(dims.clone(), text)
-                    }
-                },
-                None,
-            ));
-        };
-        let dims = dimensions(old);
+        element: &str,
+    ) -> Result<(Vec<String>, CanonicalElementName), ToolError> {
+        let dims = var.get_equation().map(dimensions).unwrap_or_default();
         let subscripts: Vec<&str> = element.split(',').map(str::trim).collect();
         let name = names::resolve_element(&self.working, &dims, &subscripts).map_err(|why| {
             ToolError::new(format!(
@@ -1802,40 +1862,11 @@ impl<'a> Builder<'a> {
             )
         })?;
         let key = CanonicalElementName::from_subscript(&name);
-        // An apply-to-all equation becomes an arm per element; an arrayed
-        // one keeps its arms, its default and whether the default applies to
-        // the elements with no arm.
-        let (mut elements, default, applies_default) = match old {
-            Equation::Scalar(_) => {
-                return Err(ToolError::new(format!(
-                    "'{}' is not arrayed, so it has no element '{}'",
-                    var.get_ident(),
-                    super::evidence::echo(element)
-                )));
-            }
-            Equation::ApplyToAll(dims, all) => (
-                element_names(&self.working, dims)
-                    .into_iter()
-                    .map(|e| (e, all.clone(), None, None))
-                    .collect::<Vec<_>>(),
-                None,
-                false,
-            ),
-            Equation::Arrayed(_, elements, default, applies_default) => {
-                (elements.clone(), default.clone(), *applies_default)
-            }
-        };
-        match elements
-            .iter_mut()
-            .find(|(e, ..)| CanonicalElementName::from_subscript(e) == key)
-        {
-            Some(entry) => entry.1 = text,
-            None => elements.push((name, text, None, None)),
-        }
-        Ok((
-            Equation::Arrayed(dims, elements, default, applies_default),
-            Some(key),
-        ))
+        let parts = name
+            .split(',')
+            .map(|part| part.trim().to_string())
+            .collect();
+        Ok((parts, key))
     }
 
     /// The variables of the loop this session calls `id`, as the model

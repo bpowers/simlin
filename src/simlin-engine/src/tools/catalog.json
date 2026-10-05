@@ -4365,7 +4365,7 @@
                 ]
               },
               {
-                "description": "Replace a variable's equation (a stock's: its initial value). For an\narrayed variable, the equation applies to every element, or to the\none `element` names (`north`; `north, young` for an element of several\ndimensions).",
+                "description": "Replace a variable's equation (a stock's: its initial value). For an\narrayed variable, the equation every element follows -- elements with\nequations of their own keep them -- or, with `element`, that one\nelement's own equation (`north`; `north, young` for an element of\nseveral dimensions).",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -4391,6 +4391,60 @@
                   "op",
                   "variable",
                   "equation"
+                ]
+              },
+              {
+                "description": "Return one element of an arrayed variable to the equation every\nelement follows: it loses its own equation and lookup.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "clear_element"
+                  },
+                  "variable": {
+                    "type": "string"
+                  },
+                  "element": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "variable",
+                  "element"
+                ]
+              },
+              {
+                "description": "Set the dimensions a variable is arrayed over, in order. A dimension\nadded splits the variable by it: each element starts from what the\nvariable said before. A dimension removed keeps what every element\nalong it says, or the element `keep` names on the removed dimensions\n(`north`; `north, young` for two); none makes the variable a scalar.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_dimensions"
+                  },
+                  "variable": {
+                    "type": "string"
+                  },
+                  "dimensions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "keep": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "variable",
+                  "dimensions"
                 ]
               },
               {
@@ -4438,7 +4492,7 @@
                 ]
               },
               {
-                "description": "Make a variable a lookup of its equation: `points` are `[x, y]` pairs,\nx never decreasing (two points at one x are a vertical step).",
+                "description": "Make a variable a lookup of its equation: `points` are `[x, y]` pairs,\nx never decreasing (two points at one x are a vertical step). With\n`element`, that one element of an arrayed variable is a lookup of its\nequation.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -4447,6 +4501,13 @@
                   },
                   "variable": {
                     "type": "string"
+                  },
+                  "element": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
                   },
                   "points": {
                     "type": "array",

@@ -1017,9 +1017,11 @@ pub(crate) fn out_of_range_reads(var: &Var) -> Vec<OutOfRangeRead> {
 /// - non-A2A PER-ELEMENT gfs: `tables` holds one table per element at the
 ///   element's row-major declared-dimension index (`variable::build_tables` /
 ///   `reorder_arrayed_element_tables`), so element `i` looks up table `i`. An
-///   element WITHOUT a gf carries an empty placeholder table and keeps its raw
-///   input equation -- Stella has nothing to apply there (wrapping would turn
-///   its value into NaN, the empty-table lookup result).
+///   element WITHOUT a gf of its own carries the variable's table, which it
+///   reads through; where the variable has none either, an empty placeholder
+///   table, and it keeps its raw input equation -- Stella has nothing to apply
+///   there (wrapping would turn its value into NaN, the empty-table lookup
+///   result).
 ///
 /// A table with NO points is deliberately treated as ABSENT for every shape,
 /// scalars included: the variable evaluates its raw input equation rather

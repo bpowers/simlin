@@ -239,14 +239,76 @@ fn every_operation_leaves_a_stocks_flows_in_the_order_they_were_given() {
             inflows.clone(),
             outflows.clone(),
         ),
+        // The field edits of the stock leave its lists as they are.
+        (
+            "the stock's initial value",
+            ModelOperation::SetEquation {
+                ident: "tank".to_string(),
+                equation: "5".to_string(),
+            },
+            inflows.clone(),
+            outflows.clone(),
+        ),
+        (
+            "the stock's units",
+            ModelOperation::SetUnits {
+                ident: "tank".to_string(),
+                units: Some("litres".to_string()),
+            },
+            inflows.clone(),
+            outflows.clone(),
+        ),
+        (
+            "the stock's notes",
+            ModelOperation::SetNotes {
+                ident: "tank".to_string(),
+                notes: "holds water".to_string(),
+            },
+            inflows.clone(),
+            outflows.clone(),
+        ),
+        (
+            "the stock's dimensions as they are",
+            ModelOperation::SetDimensions {
+                ident: "tank".to_string(),
+                dimensions: vec![],
+                keep: None,
+            },
+            inflows.clone(),
+            outflows.clone(),
+        ),
+        (
+            "a flow's lookup removed",
+            ModelOperation::SetLookup {
+                ident: "mid".to_string(),
+                element: None,
+                lookup: None,
+            },
+            inflows.clone(),
+            outflows.clone(),
+        ),
+        (
+            "an element of a scalar, refused before it reaches the lists",
+            ModelOperation::SetElementEquation {
+                ident: "tank".to_string(),
+                element: vec![],
+                equation: None,
+            },
+            inflows.clone(),
+            outflows.clone(),
+        ),
     ];
 
     let mut covered = [false; MODEL_OPERATION_VARIANTS];
     for (what, op, want_inflows, want_outflows) in rows {
         covered[model_operation_variant(&op)] = true;
         let mut project = base.clone();
-        apply_patch(&mut project, model_patch(vec![op]))
-            .unwrap_or_else(|err| panic!("{what}: {err:?}"));
+        let applied = apply_patch(&mut project, model_patch(vec![op]));
+        if what.contains("refused") {
+            assert!(applied.is_err(), "{what}");
+        } else {
+            applied.unwrap_or_else(|err| panic!("{what}: {err:?}"));
+        }
         let after = tank_stock(&project);
         assert_eq!(after.inflows, want_inflows, "{what}: inflows");
         assert_eq!(after.outflows, want_outflows, "{what}: outflows");

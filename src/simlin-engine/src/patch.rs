@@ -111,6 +111,47 @@ pub enum ModelOperation {
         upsert: Vec<datamodel::ViewElement>,
         remove: Vec<i32>,
     },
+    /// A scalar's equation (a stock's initial value), or the equation every
+    /// element of an arrayed variable follows; elements with equations of
+    /// their own keep them (`patch_fields::set_equation`).
+    SetEquation {
+        ident: String,
+        equation: String,
+    },
+    /// One element's own equation (`element` names it on each of the
+    /// variable's dimensions), or with `None` none, so the element follows
+    /// the equation every element follows again
+    /// (`patch_fields::set_element_equation`).
+    SetElementEquation {
+        ident: String,
+        element: Vec<String>,
+        equation: Option<String>,
+    },
+    /// The variable's units; `None` or empty clears them.
+    SetUnits {
+        ident: String,
+        units: Option<String>,
+    },
+    /// The variable's documentation; empty clears it.
+    SetNotes {
+        ident: String,
+        notes: String,
+    },
+    /// The variable's lookup table, or one element's; `None` removes it
+    /// (`patch_fields::set_lookup`).
+    SetLookup {
+        ident: String,
+        element: Option<Vec<String>>,
+        lookup: Option<datamodel::GraphicalFunction>,
+    },
+    /// The dimensions the variable is arrayed over, in order; none makes it
+    /// a scalar. `keep` names the element kept on each dimension removed
+    /// (`patch_fields::set_dimensions`).
+    SetDimensions {
+        ident: String,
+        dimensions: Vec<String>,
+        keep: Option<Vec<String>>,
+    },
 }
 
 /// Whether applying the patch to `project` changes only views: no project-level
@@ -235,8 +276,63 @@ fn apply_model_operation(
     {
         return apply_edit_view(project, model_name, *index, upsert, remove);
     }
+    // A field edit that names elements reads the project's dimensions.
+    let project_dims = match &op {
+        ModelOperation::SetElementEquation { .. }
+        | ModelOperation::SetLookup { .. }
+        | ModelOperation::SetDimensions { .. } => project.dimensions.clone(),
+        _ => Vec::new(),
+    };
     let model = get_model_mut(project, model_name)?;
     match op {
+        ModelOperation::SetEquation { ident, equation } => {
+            crate::patch_fields::set_equation(model, &ident, equation)?;
+        }
+        ModelOperation::SetElementEquation {
+            ident,
+            element,
+            equation,
+        } => {
+            crate::patch_fields::set_element_equation(
+                &project_dims,
+                model,
+                &ident,
+                &element,
+                equation,
+            )?;
+        }
+        ModelOperation::SetUnits { ident, units } => {
+            crate::patch_fields::set_units(model, &ident, units)?;
+        }
+        ModelOperation::SetNotes { ident, notes } => {
+            crate::patch_fields::set_notes(model, &ident, notes)?;
+        }
+        ModelOperation::SetLookup {
+            ident,
+            element,
+            lookup,
+        } => {
+            crate::patch_fields::set_lookup(
+                &project_dims,
+                model,
+                &ident,
+                element.as_deref(),
+                lookup,
+            )?;
+        }
+        ModelOperation::SetDimensions {
+            ident,
+            dimensions,
+            keep,
+        } => {
+            crate::patch_fields::set_dimensions(
+                &project_dims,
+                model,
+                &ident,
+                &dimensions,
+                keep.as_deref(),
+            )?;
+        }
         ModelOperation::UpsertStock(mut stock) => {
             canonicalize_stock_references(&mut stock);
             upsert_variable(model, Variable::Stock(stock));

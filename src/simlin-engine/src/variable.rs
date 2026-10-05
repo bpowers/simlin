@@ -427,8 +427,9 @@ pub(crate) fn reorder_arrayed_element_tables<T>(
 }
 
 /// Whether an equation's graphical-function tables are laid out PER ELEMENT
-/// -- one slot per declared combination in row-major order, an empty
-/// placeholder where the element has no gf (`reorder_arrayed_element_tables`)
+/// -- one slot per declared combination in row-major order, the variable's
+/// own table or an empty placeholder where the element has no gf
+/// (`reorder_arrayed_element_tables`)
 /// -- rather than one variable-level table. The layout [`build_tables`]
 /// chooses when any entry of an arrayed equation carries its own gf; the one
 /// rule, read by the missing-element advisory to tell a gf-only element's
@@ -463,7 +464,17 @@ fn build_tables(
     {
         // Parse each element's table, keyed by the element's canonical
         // (comma-joined) subscript name. Elements without a GF are simply
-        // absent from the map and get an empty placeholder at their slot.
+        // absent from the map and get the variable's own table at their slot,
+        // as an element that has none of its own reads through it -- or an
+        // empty placeholder where the variable has none.
+        let shared = match parse_table(gf) {
+            Ok(table) => table,
+            Err(err) => {
+                errors.push(err);
+                None
+            }
+        };
+        let placeholder = || shared.clone().unwrap_or_else(Table::empty);
         let mut present: HashMap<CanonicalElementName, Table> = HashMap::new();
         for (subscript, _, _, elem_gf) in elements {
             match parse_table(elem_gf.as_ref()) {
@@ -489,7 +500,7 @@ fn build_tables(
         // Vec-positional layout rather than dropping tables.
         let tables = match get_dimensions(dimensions, dim_names) {
             Ok(dims) => {
-                reorder_arrayed_element_tables(&dims, &present, Table::empty, |t: &Table| t.clone())
+                reorder_arrayed_element_tables(&dims, &present, placeholder, |t: &Table| t.clone())
             }
             Err(_) => elements
                 .iter()
@@ -497,7 +508,7 @@ fn build_tables(
                     present
                         .get(&CanonicalElementName::from_subscript(subscript))
                         .cloned()
-                        .unwrap_or_else(Table::empty)
+                        .unwrap_or_else(placeholder)
                 })
                 .collect(),
         };

@@ -2407,6 +2407,50 @@ pub enum ModelOperation {
         #[serde(default)]
         remove: Vec<i32>,
     },
+    /// A scalar's equation (a stock's initial value), or the equation every
+    /// element of an arrayed variable follows; elements with equations of
+    /// their own keep them.
+    SetEquation {
+        ident: String,
+        equation: String,
+    },
+    /// One element's own equation, the element named on each of the
+    /// variable's dimensions in order; `null` returns the element to
+    /// following the equation every element follows.
+    SetElementEquation {
+        ident: String,
+        element: Vec<String>,
+        #[serde(default)]
+        equation: Option<String>,
+    },
+    /// The variable's units; `null` or empty clears them.
+    SetUnits {
+        ident: String,
+        #[serde(default)]
+        units: Option<String>,
+    },
+    /// The variable's documentation; empty clears it.
+    SetNotes {
+        ident: String,
+        notes: String,
+    },
+    /// The variable's lookup table, or with `element` one element's; `null`
+    /// removes it.
+    SetLookup {
+        ident: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        element: Option<Vec<String>>,
+        #[serde(default)]
+        lookup: Option<GraphicalFunction>,
+    },
+    /// The dimensions the variable is arrayed over, in order; none makes it
+    /// a scalar. `keep` names the element kept on each dimension removed.
+    SetDimensions {
+        ident: String,
+        dimensions: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep: Option<Vec<String>>,
+    },
 }
 
 impl From<ProjectPatch> for crate::patch::ProjectPatch {
@@ -2477,6 +2521,36 @@ impl From<ModelOperation> for crate::patch::ModelOperation {
                 index,
                 upsert: upsert.into_iter().map(Into::into).collect(),
                 remove,
+            },
+            ModelOperation::SetEquation { ident, equation } => Op::SetEquation { ident, equation },
+            ModelOperation::SetElementEquation {
+                ident,
+                element,
+                equation,
+            } => Op::SetElementEquation {
+                ident,
+                element,
+                equation,
+            },
+            ModelOperation::SetUnits { ident, units } => Op::SetUnits { ident, units },
+            ModelOperation::SetNotes { ident, notes } => Op::SetNotes { ident, notes },
+            ModelOperation::SetLookup {
+                ident,
+                element,
+                lookup,
+            } => Op::SetLookup {
+                ident,
+                element,
+                lookup: lookup.map(Into::into),
+            },
+            ModelOperation::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            } => Op::SetDimensions {
+                ident,
+                dimensions,
+                keep,
             },
         }
     }
@@ -2566,6 +2640,36 @@ impl From<crate::patch::ModelOperation> for ModelOperation {
                 upsert: upsert.into_iter().map(Into::into).collect(),
                 remove,
             },
+            Op::SetEquation { ident, equation } => ModelOperation::SetEquation { ident, equation },
+            Op::SetElementEquation {
+                ident,
+                element,
+                equation,
+            } => ModelOperation::SetElementEquation {
+                ident,
+                element,
+                equation,
+            },
+            Op::SetUnits { ident, units } => ModelOperation::SetUnits { ident, units },
+            Op::SetNotes { ident, notes } => ModelOperation::SetNotes { ident, notes },
+            Op::SetLookup {
+                ident,
+                element,
+                lookup,
+            } => ModelOperation::SetLookup {
+                ident,
+                element,
+                lookup: lookup.map(Into::into),
+            },
+            Op::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            } => ModelOperation::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            },
         }
     }
 }
@@ -2586,6 +2690,8 @@ mod tests {
             .flow("inflow", "rate", None)
             .aux("rate", "1", None)
             .aux("spare", "2", None)
+            .named_dimension("Region", &["North", "South"])
+            .array_aux("share[Region]", "1")
             .build_datamodel();
         let aux = |name: &str, eqn: &str| datamodel::Aux {
             ident: name.to_string(),
@@ -2643,6 +2749,33 @@ mod tests {
                         name: "draining".to_string(),
                         description: Some("the level empties".to_string()),
                     },
+                    Op::SetEquation {
+                        ident: "level".to_string(),
+                        equation: "11".to_string(),
+                    },
+                    Op::SetUnits {
+                        ident: "rate".to_string(),
+                        units: Some("1/month".to_string()),
+                    },
+                    Op::SetNotes {
+                        ident: "rate".to_string(),
+                        notes: "how fast".to_string(),
+                    },
+                    Op::SetLookup {
+                        ident: "rate".to_string(),
+                        element: None,
+                        lookup: None,
+                    },
+                    Op::SetElementEquation {
+                        ident: "share".to_string(),
+                        element: vec!["North".to_string()],
+                        equation: Some("2".to_string()),
+                    },
+                    Op::SetDimensions {
+                        ident: "share".to_string(),
+                        dimensions: vec![],
+                        keep: Some(vec!["North".to_string()]),
+                    },
                     Op::UpsertView {
                         index: 0,
                         view: datamodel::View::StockFlow(datamodel::StockFlow {
@@ -2686,6 +2819,14 @@ mod tests {
         crate::apply_patch(&mut through_json, back.into()).unwrap();
         assert!(direct == through_json, "the same project either way");
         assert!(direct.models[0].get_variable("bonus").is_some());
+        assert_eq!(
+            direct.models[0]
+                .get_variable("share")
+                .unwrap()
+                .get_equation(),
+            Some(&datamodel::Equation::Scalar("2".to_string())),
+            "the field edits land through JSON as directly"
+        );
     }
 
     #[test]

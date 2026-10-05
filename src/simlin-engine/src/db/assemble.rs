@@ -54,8 +54,10 @@ pub(crate) fn variable_tables(
     // table is laid out at the element's flat declared dimension index (not
     // its `elems` Vec position), because the runtime selects a per-element
     // table by the row-major dimension offset (vm.rs Lookup/LookupArray); see
-    // `crate::variable::reorder_arrayed_element_tables`. Elements without a GF
-    // get an empty placeholder so that table[element_offset] stays aligned.
+    // `crate::variable::reorder_arrayed_element_tables`. An element without a
+    // GF gets the variable's own table, which it reads through, or an empty
+    // placeholder where there is none, so that table[element_offset] stays
+    // aligned.
     if let datamodel::Equation::Arrayed(_, elements, _, _) = eq {
         // The per-element gf is the 4th tuple field
         // `(subscript, equation, gf_equation, gf)`.
@@ -81,6 +83,13 @@ pub(crate) fn variable_tables(
             // element name to its row-major declared-order flat offset. If the
             // dimensions cannot be resolved, fall back to the original
             // Vec-positional layout rather than dropping tables.
+            let shared = source_var.gf(db).as_ref().and_then(|gf| {
+                crate::variable::parse_table(Some(gf))
+                    .ok()
+                    .flatten()
+                    .and_then(|vt| crate::compiler::Table::new(ident, &vt).ok())
+            });
+            let placeholder = || shared.clone().unwrap_or_else(crate::compiler::Table::empty);
             let dims = variable_dimensions(db, *source_var, project);
             if dims.is_empty() {
                 return elements
@@ -89,14 +98,14 @@ pub(crate) fn variable_tables(
                         present
                             .get(&crate::common::CanonicalElementName::from_raw(subscript))
                             .cloned()
-                            .unwrap_or_else(crate::compiler::Table::empty)
+                            .unwrap_or_else(placeholder)
                     })
                     .collect();
             }
             return crate::variable::reorder_arrayed_element_tables(
                 dims,
                 &present,
-                crate::compiler::Table::empty,
+                placeholder,
                 |t: &crate::compiler::Table| t.clone(),
             );
         }

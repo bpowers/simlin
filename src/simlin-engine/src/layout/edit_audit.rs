@@ -1016,7 +1016,13 @@ fn named_by_op(op: &ModelOperation) -> Option<String> {
         ModelOperation::UpsertModule(m) => &m.ident,
         ModelOperation::RenameVariable { to, .. } => to,
         ModelOperation::UpdateStockFlows { ident, .. } => ident,
-        ModelOperation::DeleteVariable { .. }
+        ModelOperation::SetEquation { ident, .. }
+        | ModelOperation::SetElementEquation { ident, .. }
+        | ModelOperation::SetLookup { ident, .. }
+        | ModelOperation::SetDimensions { ident, .. } => ident,
+        ModelOperation::SetUnits { .. }
+        | ModelOperation::SetNotes { .. }
+        | ModelOperation::DeleteVariable { .. }
         | ModelOperation::UpsertView { .. }
         | ModelOperation::DeleteView { .. }
         | ModelOperation::SetLoopName { .. }
