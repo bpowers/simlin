@@ -607,6 +607,12 @@ unsafe fn run_revision(call: &Call) -> String {
     format!("{:?}", take_error(err))
 }
 
+unsafe fn run_simulation_key(call: &Call) -> String {
+    let (mut key, mut err) = (0, ptr::null_mut());
+    call.entry(|| simlin_project_get_simulation_key(call.proj, &mut key, &mut err));
+    format!("{:?}", take_error(err))
+}
+
 unsafe fn run_model_names(call: &Call) -> String {
     let mut names = vec![ptr::null_mut(); 8];
     let (mut written, mut err) = (0, ptr::null_mut());
@@ -1441,6 +1447,13 @@ pub(crate) const ALL: &[EntryPoint] = &[
         CONTENTS,
         Writes::Nothing,
         run_revision,
+    ),
+    row(
+        "simlin_project_get_simulation_key",
+        "",
+        CONTENTS,
+        Writes::Nothing,
+        run_simulation_key,
     ),
     row(
         "simlin_project_get_model_names",

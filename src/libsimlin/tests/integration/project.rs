@@ -2323,3 +2323,136 @@ fn test_replace_contents_self_and_null_safety() {
         simlin_project_unref(proj);
     }
 }
+
+unsafe fn simulation_key(proj: *mut SimlinProject) -> u64 {
+    let (mut key, mut err) = (0, ptr::null_mut());
+    simlin_project_get_simulation_key(proj, &mut key, &mut err);
+    expect_no_error(err, "reading the simulation key");
+    key
+}
+
+unsafe fn revision(proj: *mut SimlinProject) -> u64 {
+    let (mut revision, mut err) = (0, ptr::null_mut());
+    simlin_project_get_revision(proj, &mut revision, &mut err);
+    expect_no_error(err, "reading the revision");
+    revision
+}
+
+unsafe fn apply_json(proj: *mut SimlinProject, patch: &serde_json::Value) {
+    let bytes = serde_json::to_vec(patch).unwrap();
+    let (mut collected, mut err) = (ptr::null_mut(), ptr::null_mut());
+    simlin_project_apply_patch(
+        proj,
+        bytes.as_ptr(),
+        bytes.len(),
+        false,
+        true,
+        &mut collected,
+        &mut err,
+    );
+    if !collected.is_null() {
+        simlin_error_free(collected);
+    }
+    expect_no_error(err, "the patch");
+}
+
+fn set_rate(equation: &str, units: &str, notes: &str) -> serde_json::Value {
+    serde_json::json!({"models": [{"name": "main", "ops": [
+        {"type": "upsertAux", "payload": {"aux": {
+            "name": "rate", "equation": equation, "units": units, "documentation": notes
+        }}}
+    ]}]})
+}
+
+/// The simulation key moves exactly when what the model computes may have:
+/// an edit of what the compiler reads moves it, and an edit of what it does
+/// not (the diagram, a note, a unit) leaves it, though each advances the
+/// revision. A copy of the project has its key.
+#[test]
+fn the_simulation_key_moves_when_what_the_model_computes_does() {
+    let datamodel = TestProject::new("key")
+        .stock("population", "100", &["births"], &[], Some("people"))
+        .flow("births", "population * rate", Some("people/month"))
+        .aux("rate", "0.1", Some("1/month"))
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let start = simulation_key(proj);
+        assert_eq!(simulation_key(proj), start, "a read changes nothing");
+
+        let model_name = CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let before = revision(proj);
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
+        expect_no_error(err, "laying out the diagram");
+        assert_ne!(revision(proj), before, "the layout is a change");
+        assert_eq!(simulation_key(proj), start, "a diagram computes nothing");
+
+        let before = revision(proj);
+        apply_json(
+            proj,
+            &set_rate("0.1", "1/month", "the fraction born each month"),
+        );
+        assert_ne!(revision(proj), before, "a note is a change");
+        assert_eq!(simulation_key(proj), start, "a note computes nothing");
+
+        apply_json(
+            proj,
+            &set_rate("0.1", "1/year", "the fraction born each month"),
+        );
+        assert_eq!(
+            simulation_key(proj),
+            start,
+            "units are checked, never simulated"
+        );
+
+        apply_json(
+            proj,
+            &set_rate("0.2", "1/year", "the fraction born each month"),
+        );
+        let changed = simulation_key(proj);
+        assert_ne!(changed, start, "an equation is what the model computes");
+
+        apply_json(
+            proj,
+            &serde_json::json!({"projectOps": [{"type": "setSimSpecs", "payload": {"simSpecs": {
+                "startTime": 0.0, "endTime": 20.0, "dt": "1", "saveStep": 1.0
+            }}}]}),
+        );
+        assert_ne!(simulation_key(proj), changed, "the specs are what a run is");
+
+        let name = CString::new("copy").unwrap();
+        let copy = simlin_project_new(name.as_ptr(), &mut err);
+        expect_no_error(err, "a new project");
+        simlin_project_replace_contents(copy, proj, &mut err);
+        expect_no_error(err, "copying the project");
+        assert_eq!(
+            simulation_key(copy),
+            simulation_key(proj),
+            "a copy has its key"
+        );
+
+        simlin_project_unref(copy);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn the_simulation_key_refuses_null_pointers() {
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let mut key = 0;
+        simlin_project_get_simulation_key(ptr::null_mut(), &mut key, &mut err);
+        assert!(!err.is_null(), "a NULL project is refused");
+        simlin_error_free(err);
+
+        let datamodel = TestProject::new("key")
+            .aux("x", "1", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+        err = ptr::null_mut();
+        simlin_project_get_simulation_key(proj, ptr::null_mut(), &mut err);
+        expect_error_code(err, SimlinErrorCode::Generic, "a NULL out_key");
+        simlin_project_unref(proj);
+    }
+}

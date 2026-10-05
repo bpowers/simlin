@@ -320,6 +320,53 @@ pub unsafe extern "C" fn simlin_project_get_revision(
     *out_revision = datamodel_locked.revision();
 }
 
+/// Gets the project's simulation key: a number that is equal for two
+/// contents whose simulations are the same, read from the contents alone,
+/// with nothing compiled and nothing run.
+///
+/// A host keeps the key its last run was made at and compares it after an
+/// edit lands: an equal key means the run still describes the model, so a
+/// diagram edit, a note or a unit needs no new run. Equations, the
+/// simulation specs, dimensions, flows and everything else the compiler
+/// reads are in the key; units are not, since they are checked and never
+/// simulated.
+///
+/// The key never calls two different simulations the same (but for a hash
+/// collision), and may call one simulation by two keys: an equation
+/// respelled, or a variable renamed in case only, has another key. It
+/// compares contents within one build of the library and is not to be
+/// stored across launches. A tool session's runs are kept fresh by the same
+/// key, so its `"current"` run is always of the contents at this key.
+///
+/// The key hashes the project's contents, which takes a few milliseconds
+/// for the largest models in a debug build. The project's lock is held only
+/// to take the contents, so the call waits for no compile and holds up no
+/// edit.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `out_key` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_get_simulation_key(
+    project: *mut SimlinProject,
+    out_key: *mut u64,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_key.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("out_key pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let project_ref = ffi_try!(out_error, require_project(project));
+    let contents = project_ref.datamodel.lock().unwrap().shared();
+    *out_key = engine::db::simulation_key(&contents);
+}
+
 /// Gets the list of model names in the project
 ///
 /// # Safety

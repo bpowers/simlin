@@ -1507,6 +1507,36 @@ void simlin_project_get_revision(SimlinProject *project,
                                  uint64_t *out_revision,
                                  SimlinError **out_error);
 
+// Gets the project's simulation key: a number that is equal for two
+// contents whose simulations are the same, read from the contents alone,
+// with nothing compiled and nothing run.
+//
+// A host keeps the key its last run was made at and compares it after an
+// edit lands: an equal key means the run still describes the model, so a
+// diagram edit, a note or a unit needs no new run. Equations, the
+// simulation specs, dimensions, flows and everything else the compiler
+// reads are in the key; units are not, since they are checked and never
+// simulated.
+//
+// The key never calls two different simulations the same (but for a hash
+// collision), and may call one simulation by two keys: an equation
+// respelled, or a variable renamed in case only, has another key. It
+// compares contents within one build of the library and is not to be
+// stored across launches. A tool session's runs are kept fresh by the same
+// key, so its `"current"` run is always of the contents at this key.
+//
+// The key hashes the project's contents, which takes a few milliseconds
+// for the largest models in a debug build. The project's lock is held only
+// to take the contents, so the call waits for no compile and holds up no
+// edit.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `out_key` must be a valid pointer
+void simlin_project_get_simulation_key(SimlinProject *project,
+                                       uint64_t *out_key,
+                                       SimlinError **out_error);
+
 // Gets the list of model names in the project
 //
 // # Safety
