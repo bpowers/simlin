@@ -46,7 +46,7 @@ use crate::datamodel;
 use crate::db::var_fragment::{helper_dimensions, source_dimensions};
 use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, model_implicit_var_info, model_lowered_variables,
+    SourceVariable, SourceVariableKind, model_implicit_var_info, model_written_variables,
     project_dimensions_context, project_units_context, source_model_is_stdlib,
 };
 use crate::units_check::UnitModel;
@@ -243,14 +243,14 @@ pub(crate) fn model_scope_models(
 }
 
 /// One model as the unit pass reads it: its lowered variables
-/// (`model_lowered_variables`, the handle map shared with the LTM describers)
+/// (`model_written_variables`, the handle map the LTM describers build on)
 /// plus the model-level facts inference needs. Built on the stack, per unit
 /// check and per scope model; it owns no lowered tree.
 pub(crate) fn unit_model(db: &dyn Db, model: SourceModel, project: SourceProject) -> UnitModel {
     let macro_spec = model.macro_spec(db);
     UnitModel {
         name: Ident::new(model.name(db)),
-        variables: model_lowered_variables(db, model, project),
+        variables: model_written_variables(db, model, project),
         is_macro: macro_spec.is_some(),
         macro_params: macro_spec
             .as_ref()

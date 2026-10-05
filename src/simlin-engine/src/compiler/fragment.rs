@@ -211,6 +211,98 @@ impl FragmentInput<'_> {
         )
     }
 
+    /// An arrayed target as the equations of its elements, each with every
+    /// read its element pins to one element spelled as that element's static
+    /// index (`Context::pin_element_reads`), for a describer that classifies
+    /// reads by their spelling (LTM's reference-site IR); `None` for a target
+    /// that needs no such view.
+    ///
+    /// A target needs it where its equations read one variable in more than
+    /// one spelling across its elements, or read an element computed from
+    /// the element's position: an arrayed equation with elements of their
+    /// own (one element's `c[young]` beside the others' `c[Age]`), and an
+    /// equation that reads an offset (`c[Age - 1]`, which a describer would
+    /// otherwise take as a read of any element). Pinned, every element reads
+    /// what its slot of the compiled fragment reads, the form an equation
+    /// written element by element has. An element with no equation is left
+    /// out, as it is from the target.
+    pub(crate) fn elementwise_target(&self) -> Option<Variable> {
+        use crate::ast::Ast;
+        if self.target.element_scope().is_some() {
+            return None;
+        }
+        let ctx = self.context(false);
+        let per_element = |ast: &Ast<crate::ast::Expr2>| -> Option<Ast<crate::ast::Expr2>> {
+            let (dims, arms, default, applies) = match ast {
+                Ast::Scalar(_) => return None,
+                Ast::ApplyToAll(dims, expr) => {
+                    if !reads_a_computed_position(expr, dims) {
+                        return None;
+                    }
+                    (dims, None, Some(expr), false)
+                }
+                Ast::Arrayed(dims, arms, default, applies) => (
+                    dims,
+                    Some(arms),
+                    default.as_ref().filter(|_| *applies),
+                    *applies,
+                ),
+            };
+            let bodies = || {
+                arms.into_iter()
+                    .flat_map(|arms| arms.values())
+                    .chain(default)
+            };
+            let names: Vec<&str> = dims.iter().map(|d| d.canonical_name().as_str()).collect();
+            let mut reads = ReadSpellings::default();
+            for body in bodies() {
+                reads.collect(body, &names, false);
+            }
+            let mut elements = std::collections::HashMap::new();
+            for parts in crate::dimensions::SubscriptIterator::new(dims) {
+                let key = crate::common::CanonicalElementName::from_parts(&parts);
+                let Some(expr) = arms.and_then(|arms| arms.get(&key)).or(default) else {
+                    continue;
+                };
+                let elem_ctx =
+                    ctx.with_active_subscripts(std::sync::Arc::<[_]>::from(dims.clone()), &parts);
+                elements.insert(key, describe_at_element(&elem_ctx, expr, &reads.pinned));
+            }
+            // Equations whose elements each read as written are their own
+            // view.
+            if arms.is_some_and(|arms| *arms == elements) {
+                return None;
+            }
+            Some(Ast::Arrayed(dims.clone(), elements, None, applies))
+        };
+        let mut view = self.target.as_ref().clone();
+        let changed = match &mut view.kind {
+            crate::variable::VarKind::Aux { ast, init_ast, .. } => {
+                let new_ast = ast.as_ref().and_then(per_element);
+                let new_init = init_ast.as_ref().and_then(per_element);
+                let changed = new_ast.is_some() || new_init.is_some();
+                if let Some(new_ast) = new_ast {
+                    *ast = Some(new_ast);
+                }
+                if let Some(new_init) = new_init {
+                    *init_ast = Some(new_init);
+                }
+                changed
+            }
+            crate::variable::VarKind::Stock { init_ast, .. } => {
+                match init_ast.as_ref().and_then(per_element) {
+                    Some(new_ast) => {
+                        *init_ast = Some(new_ast);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            crate::variable::VarKind::Module { .. } => false,
+        };
+        changed.then_some(view)
+    }
+
     /// The target with its element scope resolved into its body: every read
     /// the scope's element pins to one element spelled as that element's
     /// static index (`Context::pin_element_reads`), and no scope left, so a
@@ -312,5 +404,198 @@ fn collect_instance_extents(
                 );
             }
         }
+    }
+}
+
+/// The variables an equation reads in a spelling loop analysis would take
+/// for other than the read the run makes, gathered over every element's
+/// body: those [`describe_at_element`] pins at every read.
+///
+/// A variable read only by the dimensions the equation iterates (`gdp[COP]`,
+/// or `gdp` alone) is read at the same element everywhere, which is how loop
+/// analysis reads that spelling, and it scores such a read over the
+/// variable's dimensions at once. Any other read -- an index computed at the
+/// element (`c[Age - 1]`), a literal element (`c[l1]`), a wildcard, a read in
+/// a reducer's argument -- makes the variable pinned at every read, so that
+/// loop analysis never sees one variable read in two spellings it would
+/// reconcile wrongly (`c[Age]` beside `c[l1]`).
+#[derive(Default)]
+struct ReadSpellings {
+    pinned: std::collections::HashSet<Ident<Canonical>>,
+}
+
+impl ReadSpellings {
+    fn collect(&mut self, expr: &crate::ast::Expr2, dims: &[&str], in_reducer: bool) {
+        use crate::ast::{Expr2, IndexExpr2};
+        use crate::builtins::ArgKind;
+        match expr {
+            Expr2::Var(id, ..) => {
+                if in_reducer {
+                    self.pinned.insert(id.clone());
+                }
+            }
+            Expr2::Const(..) => {}
+            Expr2::Subscript(id, indices, ..) => {
+                let iterated = indices.iter().all(|index| {
+                    matches!(index, IndexExpr2::Expr(Expr2::Var(name, ..)) if dims.contains(&name.as_str()))
+                });
+                if in_reducer || !iterated {
+                    self.pinned.insert(id.clone());
+                }
+                for index in indices {
+                    match index {
+                        IndexExpr2::Expr(e) => self.collect(e, dims, in_reducer),
+                        IndexExpr2::Range(l, r, _) => {
+                            self.collect(l, dims, in_reducer);
+                            self.collect(r, dims, in_reducer);
+                        }
+                        IndexExpr2::Wildcard(_)
+                        | IndexExpr2::StarRange(..)
+                        | IndexExpr2::DimPosition(..) => {}
+                    }
+                }
+            }
+            Expr2::App(builtin, ..) => {
+                for (arg, kind) in builtin.args_with_kinds() {
+                    let reduces = matches!(kind, ArgKind::Array { whole: false });
+                    self.collect(arg, dims, in_reducer || reduces);
+                }
+            }
+            Expr2::Op1(_, inner, ..) => self.collect(inner, dims, in_reducer),
+            Expr2::Op2(_, l, r, ..) => {
+                self.collect(l, dims, in_reducer);
+                self.collect(r, dims, in_reducer);
+            }
+            Expr2::If(c, t, f, ..) => {
+                self.collect(c, dims, in_reducer);
+                self.collect(t, dims, in_reducer);
+                self.collect(f, dims, in_reducer);
+            }
+        }
+    }
+}
+
+/// `expr` as loop analysis describes it at the active element of `ctx`: each
+/// read of a variable in `pinned` ([`ReadSpellings`]) as the read the run
+/// makes (`Context::pin_element_reads`) -- a computed index the element it
+/// comes to, or not a number where it comes to none; a reducer's argument
+/// with the axes the element names fixed -- and every other read as written.
+/// A condition the element decides (`IF Age = 1`) takes its branch, and a
+/// dimension read as a value is the element's position.
+fn describe_at_element(
+    ctx: &Context,
+    expr: &crate::ast::Expr2,
+    pinned: &std::collections::HashSet<Ident<Canonical>>,
+) -> crate::ast::Expr2 {
+    use crate::ast::Expr2;
+    use crate::builtins::ArgKind;
+    let recur = |e: &Expr2| describe_at_element(ctx, e, pinned);
+    match expr {
+        Expr2::Var(id, ..) if ctx.is_active_dimension(id) || pinned.contains(id) => {
+            ctx.pin_element_reads(expr)
+        }
+        Expr2::Subscript(id, ..) if pinned.contains(id) => ctx.pin_element_reads(expr),
+        Expr2::Var(..) | Expr2::Const(..) | Expr2::Subscript(..) => expr.clone(),
+        Expr2::App(builtin, bounds, loc) => {
+            if builtin
+                .arg_kinds()
+                .iter()
+                .any(|kind| matches!(kind, ArgKind::Array { whole: false }))
+            {
+                return ctx.pin_element_reads(expr);
+            }
+            Expr2::App(
+                builtin
+                    .try_map_ref_with_kinds(|arg, kind| {
+                        Ok::<_, std::convert::Infallible>(match kind {
+                            ArgKind::Array { whole: true } => arg.clone(),
+                            _ => recur(arg),
+                        })
+                    })
+                    .unwrap(),
+                bounds.clone(),
+                *loc,
+            )
+        }
+        Expr2::Op1(op, inner, bounds, loc) => {
+            Expr2::Op1(*op, Box::new(recur(inner)), bounds.clone(), *loc)
+        }
+        Expr2::Op2(op, l, r, bounds, loc) => Expr2::Op2(
+            *op,
+            Box::new(recur(l)),
+            Box::new(recur(r)),
+            bounds.clone(),
+            *loc,
+        ),
+        Expr2::If(c, t, f, bounds, loc) => match ctx.decided_branch(c) {
+            Some(true) => recur(t),
+            Some(false) => recur(f),
+            None => Expr2::If(
+                Box::new(recur(c)),
+                Box::new(recur(t)),
+                Box::new(recur(f)),
+                bounds.clone(),
+                *loc,
+            ),
+        },
+    }
+}
+
+/// Whether a subscript of `expr` computes its index from one of `dims`: an
+/// offset (`c[Age - 1]`), whose element is a constant at each element.
+fn reads_a_computed_position(
+    expr: &crate::ast::Expr2,
+    dims: &[crate::dimensions::Dimension],
+) -> bool {
+    use crate::ast::{Expr2, IndexExpr2};
+    fn names_one(expr: &Expr2, dims: &[crate::dimensions::Dimension]) -> bool {
+        match expr {
+            Expr2::Var(id, ..) => dims
+                .iter()
+                .any(|d| d.canonical_name().as_str() == id.as_str()),
+            Expr2::Op1(_, inner, ..) => names_one(inner, dims),
+            Expr2::Op2(_, l, r, ..) => names_one(l, dims) || names_one(r, dims),
+            Expr2::If(c, t, f, ..) => {
+                names_one(c, dims) || names_one(t, dims) || names_one(f, dims)
+            }
+            Expr2::App(builtin, ..) => {
+                let mut found = false;
+                crate::builtins::walk_builtin_expr(builtin, |contents| {
+                    if let crate::builtins::BuiltinContents::Expr(e)
+                    | crate::builtins::BuiltinContents::LookupTable(e) = contents
+                    {
+                        found |= names_one(e, dims);
+                    }
+                });
+                found
+            }
+            Expr2::Const(..) | Expr2::Subscript(..) => false,
+        }
+    }
+    let computes = |e: &Expr2| reads_a_computed_position(e, dims);
+    match expr {
+        Expr2::Const(..) | Expr2::Var(..) => false,
+        Expr2::App(builtin, ..) => {
+            let mut found = false;
+            crate::builtins::walk_builtin_expr(builtin, |contents| {
+                if let crate::builtins::BuiltinContents::Expr(e)
+                | crate::builtins::BuiltinContents::LookupTable(e) = contents
+                {
+                    found |= computes(e);
+                }
+            });
+            found
+        }
+        Expr2::Subscript(_, indexes, ..) => indexes.iter().any(|index| match index {
+            IndexExpr2::Expr(Expr2::Var(..)) => false,
+            IndexExpr2::Expr(e) => names_one(e, dims) || computes(e),
+            IndexExpr2::Range(lo, hi, _) => computes(lo) || computes(hi),
+            IndexExpr2::Wildcard(_) | IndexExpr2::StarRange(..) | IndexExpr2::DimPosition(..) => {
+                false
+            }
+        }),
+        Expr2::Op1(_, inner, ..) => computes(inner),
+        Expr2::Op2(_, l, r, ..) => computes(l) || computes(r),
+        Expr2::If(c, t, f, ..) => computes(c) || computes(t) || computes(f),
     }
 }

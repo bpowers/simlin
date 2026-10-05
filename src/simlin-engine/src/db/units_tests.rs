@@ -468,7 +468,7 @@ fn a_module_cycle_yields_a_finite_scope() {
     assert_eq!(scope_names(&db, &sync, "b"), ["a", "b"]);
     for name in ["a", "b"] {
         assert!(
-            !model_lowered_variables(&db, sync.models[name].source, sync.project).is_empty(),
+            !model_written_variables(&db, sync.models[name].source, sync.project).is_empty(),
             "a cyclic project's models must still lower"
         );
     }
@@ -524,7 +524,7 @@ fn cycle_through_helper_project(cyclic: bool) -> datamodel::Project {
 /// y[d], 1)`, `xs[d] = SMTH1(m.outarr[d] + y[d], 1)`, `m` an instance of `a`,
 /// `a <-> b`). The helper's element-pinned projection resolves `m` through the
 /// instance's sub-model layout, a recursive query salsa cannot run under a
-/// module cycle, so `model_lowered_variables` holds the memo's unpinned handle
+/// module cycle, so `model_written_variables` holds the memo's unpinned handle
 /// where the module graph reaches a cycle and the pinned projection where it
 /// does not; the unit pass reads the two identically, and the diagnostics
 /// collector reports the cycle for `main`.
@@ -540,7 +540,7 @@ fn a_module_cycle_reached_through_a_per_element_helper_still_unit_checks() {
     // memo's handle (unpinned) rather than a projection of it (pinned).
     let element_scoped_entries = |db: &SimlinDb, sync: &SyncResult| -> Vec<(String, bool)> {
         let model = sync.models["main"].source;
-        let map = model_lowered_variables(db, model, sync.project);
+        let map = model_written_variables(db, model, sync.project);
         let mut rows: Vec<(String, bool)> =
             crate::db::model_implicit_var_info(db, model, sync.project)
                 .keys()
@@ -772,7 +772,7 @@ fn whole_project_diagnostics_lower_each_variable_once() {
          it: {counts:?} (diagnostics: {diagnostics:?})"
     );
     assert_eq!(
-        counts.get("model_lowered_variables"),
+        counts.get("model_written_variables"),
         Some(&(n_user, n_user)),
         "the unit pass assembles each user model's map once, though `main`'s scope reads \
          all three: {counts:?}"
@@ -787,12 +787,12 @@ fn whole_project_diagnostics_lower_each_variable_once() {
     probed.reset();
     for source in sync.project.models(probed.db()).values() {
         crate::db::units::check_model_units(probed.db(), *source, sync.project);
-        let _ = model_lowered_variables(probed.db(), *source, sync.project);
+        let _ = model_written_variables(probed.db(), *source, sync.project);
     }
     let counts = probed.counts();
     assert_eq!(
         counts
-            .get("model_lowered_variables")
+            .get("model_written_variables")
             .map(|c| c.0)
             .unwrap_or(0),
         n_models - n_user,
@@ -852,7 +852,7 @@ fn an_unrelated_models_edit_invalidates_neither_lowering_nor_unit_check() {
     let counts = probed.counts();
     assert_eq!(counts.get("check_model_units"), None, "{counts:?}");
     assert_eq!(counts.get("lowered_source_variable"), None, "{counts:?}");
-    assert_eq!(counts.get("model_lowered_variables"), None, "{counts:?}");
+    assert_eq!(counts.get("model_written_variables"), None, "{counts:?}");
 
     crate::db::units::check_model_units(probed.db(), sync3.models["other"].source, sync3.project);
     let counts = probed.counts();
@@ -998,7 +998,7 @@ fn a_module_targets_edit_invalidates_the_unit_check_and_not_the_instantiators_lo
          {counts:?}"
     );
     assert_eq!(
-        counts.get("model_lowered_variables"),
+        counts.get("model_written_variables"),
         Some(&(1, 1)),
         "only `sub`'s map is rebuilt: {counts:?}"
     );

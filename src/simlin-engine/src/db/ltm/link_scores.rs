@@ -2661,10 +2661,26 @@ pub(super) fn emit_per_shape_link_scores(
         // left for the shaped loop.
         return;
     }
+    let computed_index = shapes.contains(&RefShape::DynamicIndex);
 
     emit_shaped_link_scores(
         db, from, to, shapes, vars_start, model, project, dm_dims, vars, warnings,
     );
+    // An edge declined above has said why it has no score; one scored
+    // through a computed index says the score is not exact.
+    if computed_index
+        && !warnings
+            .unscoreable_edges
+            .contains(&(from.to_string(), to.to_string()))
+    {
+        // A helper hoisted out of a variable's equation reads for it: the
+        // warning names the variable, once.
+        let reader = crate::db::model_implicit_var_info(db, model, project)
+            .get(to)
+            .map(|helper| helper.parent_source_var.ident(db).to_string())
+            .unwrap_or_else(|| to.to_string());
+        warnings.warn_of_a_computed_index(from, &reader);
+    }
 }
 
 /// Emit one link-score variable per shape of `shapes` for the `(from, to)`

@@ -228,13 +228,11 @@ fn unhoisted_source_read_declines_per_element_full_extent_slots() {
 }
 
 /// GH #792 finding 1: the DIM-NAME spelling (`SUM(pop[Region,*] * w[*])`
-/// per slot). In a per-element slot no iterated dimension is in scope
-/// (mirroring `enumerate_agg_nodes`' Arrayed arm), so the dim-named index
-/// is not statically describable -- but the read IS a reducer read, so the
-/// edge still declines, with no representative slice for the diagnostic.
-/// (Execution pins `Region` to the slot's element -- a strict read -- so
-/// the previous `Iterated => full extent` classification was wrong; the
-/// executed-value pin lives in the integration twin.)
+/// per slot). Execution pins `Region` to the slot's element -- a strict
+/// read -- and loop analysis describes each slot as the run reads it
+/// (`FragmentInput::elementwise_target`), so the slots classify exactly as
+/// their literal twin (`unhoisted_source_read_declines_per_element_strict_slots`):
+/// declined, with the first slot's strict slice for the diagnostic.
 #[test]
 fn unhoisted_source_read_declines_per_element_dim_named_slots() {
     let project = TestProject::new("per_element_dim_named")
@@ -251,10 +249,12 @@ fn unhoisted_source_read_declines_per_element_dim_named_slots() {
             ],
             None,
         );
-    assert!(matches!(
-        source_read(&project, "pop", "share"),
-        UnhoistedSourceRead::PerElementReducerRead(None)
-    ));
+    let UnhoistedSourceRead::PerElementReducerRead(Some(slice)) =
+        source_read(&project, "pop", "share")
+    else {
+        panic!("dim-named slots must classify as their literal twin");
+    };
+    assert_eq!(render_read_slice_for_diagnostic(&slice), "boston,*");
 }
 
 /// GH #792 explicit sub-case decision: a DYNAMIC-INDEX reducer read inside

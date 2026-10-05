@@ -218,9 +218,24 @@ impl Context<'_> {
     /// written; the compile of the same body refuses it or lowers it
     /// dynamically, and the describer's conservative reading of the spelling
     /// is the right one for it.
+    ///
+    /// An active dimension's name read as a value is the active element's
+    /// position, which is what it computes at the element: so an offset
+    /// (`x[PM - 1]`) is an index of numbers, which the compiler resolves to
+    /// one element, rather than a dimension in a scalar body.
     pub(crate) fn pin_element_reads(&self, expr: &ast::Expr2) -> ast::Expr2 {
         use ast::Expr2;
         match expr {
+            Expr2::Var(id, _, loc) if self.dims_of(id).is_none() => {
+                match self.active_position(id) {
+                    Some(position) => Expr2::Const(
+                        position.to_string(),
+                        ast::Literal::new(position as f64),
+                        *loc,
+                    ),
+                    None => expr.clone(),
+                }
+            }
             Expr2::Var(id, _, loc) if self.dims_of(id).is_some() => {
                 // What `lower_pass0` spells a bare arrayed reference as: the
                 // reference's bounds are the variable's own axes. The axes are
@@ -273,14 +288,48 @@ impl Context<'_> {
                 bounds.clone(),
                 *loc,
             ),
-            Expr2::If(c, t, f, bounds, loc) => Expr2::If(
-                Box::new(self.pin_element_reads(c)),
-                Box::new(self.pin_element_reads(t)),
-                Box::new(self.pin_element_reads(f)),
-                bounds.clone(),
-                *loc,
-            ),
+            Expr2::If(c, t, f, bounds, loc) => {
+                // A condition the element decides (`IF Age = 1`) is decided:
+                // the element's slot computes the branch it takes, and the
+                // other reads nothing there.
+                let cond = self.pin_element_reads(c);
+                match constant_value(&cond).map(crate::vm::is_truthy) {
+                    Some(true) => self.pin_element_reads(t),
+                    Some(false) => self.pin_element_reads(f),
+                    None => Expr2::If(
+                        Box::new(cond),
+                        Box::new(self.pin_element_reads(t)),
+                        Box::new(self.pin_element_reads(f)),
+                        bounds.clone(),
+                        *loc,
+                    ),
+                }
+            }
         }
+    }
+
+    /// Whether `id`, read as a value, is an active dimension: the active
+    /// element's position.
+    pub(crate) fn is_active_dimension(&self, id: &Ident<Canonical>) -> bool {
+        self.dims_of(id).is_none() && self.active_position(id).is_some()
+    }
+
+    /// The branch a condition takes at the active element, where the element
+    /// alone decides it (`Age = 1`): `None` where it reads anything else.
+    pub(crate) fn decided_branch(&self, cond: &ast::Expr2) -> Option<bool> {
+        constant_value(&self.pin_element_reads(cond)).map(crate::vm::is_truthy)
+    }
+
+    /// The 1-based position of the active element on the active dimension
+    /// named `id`, or `None` where `id` names none.
+    fn active_position(&self, id: &Ident<Canonical>) -> Option<usize> {
+        let dims = self.active_dimension.as_ref()?;
+        let elements = self.active_subscript.as_ref()?;
+        dims.iter().zip(elements).find_map(|(dim, element)| {
+            (dim.canonical_name().as_str() == id.as_str())
+                .then(|| dim.get_offset(element).map(|offset| offset + 1))
+                .flatten()
+        })
     }
 
     /// [`Self::pin_element_reads`] for one subscript: the nested index
@@ -294,18 +343,66 @@ impl Context<'_> {
         loc: Loc,
     ) -> ast::Expr2 {
         use ast::{Expr2, IndexExpr2};
-        let indices: Vec<IndexExpr2> = indices
+        // Each index, with whether it is a number only once pinned: an index
+        // the element computes, which the compiler reads as the run does.
+        let (indices, computed): (Vec<IndexExpr2>, Vec<bool>) = indices
             .into_iter()
             .map(|idx| match idx {
-                IndexExpr2::Expr(e) => IndexExpr2::Expr(self.pin_element_reads(&e)),
-                IndexExpr2::Range(l, r, range_loc) => IndexExpr2::Range(
-                    self.pin_element_reads(&l),
-                    self.pin_element_reads(&r),
-                    range_loc,
+                // A dimension's name alone in brackets is the axis it names,
+                // which the active element resolves below; inside an index
+                // expression it is the element's position.
+                IndexExpr2::Expr(Expr2::Var(ref id, ..)) if self.active_position(id).is_some() => {
+                    (idx, false)
+                }
+                IndexExpr2::Expr(Expr2::Const(..)) => (idx, false),
+                IndexExpr2::Expr(e) => {
+                    let pinned = self.pin_element_reads(&e);
+                    // An index of numbers is the number it computes, which is
+                    // how the compiler reads it (`compiler::fold`).
+                    match constant_value(&pinned) {
+                        Some(value) => (
+                            IndexExpr2::Expr(Expr2::Const(
+                                value.to_string(),
+                                ast::Literal::new(value),
+                                pinned.get_loc(),
+                            )),
+                            true,
+                        ),
+                        None => (IndexExpr2::Expr(pinned), false),
+                    }
+                }
+                IndexExpr2::Range(l, r, range_loc) => (
+                    IndexExpr2::Range(
+                        self.pin_element_reads(&l),
+                        self.pin_element_reads(&r),
+                        range_loc,
+                    ),
+                    false,
                 ),
-                other => other,
+                other => (other, false),
             })
-            .collect();
+            .unzip();
+        // A computed index that comes to no element is a read of no element,
+        // by the VM's index rule (floored, 1-based), which reads not a number
+        // (`compiler::fold::constant_element`). A number written as the index
+        // is resolved where the equation is lowered, which reads the first
+        // element for a position below one.
+        if let Ok(dims) = self.subscript_dims(id)
+            && indices.len() == dims.len()
+            && indices
+                .iter()
+                .zip(&computed)
+                .zip(dims)
+                .any(|((idx, computed), dim)| match idx {
+                    IndexExpr2::Expr(Expr2::Const(_, value, _)) if *computed => {
+                        let index = value.value().floor() as u16;
+                        index == 0 || index as usize > dim.len()
+                    }
+                    _ => false,
+                })
+        {
+            return Expr2::Const("NaN".to_string(), ast::Literal::new(f64::NAN), loc);
+        }
         let indices = match self.static_element_indices(id, &indices) {
             Some(resolved) => indices
                 .into_iter()
@@ -2911,4 +3008,46 @@ fn rank_sliced_view_inside_reducer_in_arrayed_equation_runs() {
         );
 
     project.assert_vm_result("share", &[3.0, 3.0]);
+}
+
+/// The value of an expression of numbers alone -- arithmetic, comparisons
+/// and logic on them -- as the VM computes it (`vm::eval_op2`, as
+/// `compiler::fold` folds): `None` where it reads anything else, or takes a
+/// power, which the fold leaves to the run.
+fn constant_value(expr: &ast::Expr2) -> Option<f64> {
+    use crate::bytecode::Op2;
+    use ast::{BinaryOp, Expr2};
+    match expr {
+        Expr2::Const(_, value, _) => Some(value.value()),
+        Expr2::Op1(ast::UnaryOp::Positive, inner, ..) => constant_value(inner),
+        Expr2::Op1(ast::UnaryOp::Negative, inner, ..) => constant_value(inner).map(|v| -v),
+        Expr2::Op1(ast::UnaryOp::Not, inner, ..) => {
+            constant_value(inner).map(|v| (!crate::vm::is_truthy(v)) as i8 as f64)
+        }
+        Expr2::Op2(op, l, r, ..) => {
+            let (l, r) = (constant_value(l)?, constant_value(r)?);
+            let op = match op {
+                BinaryOp::Add => Op2::Add,
+                BinaryOp::Sub => Op2::Sub,
+                BinaryOp::Mul => Op2::Mul,
+                BinaryOp::Div => Op2::Div,
+                BinaryOp::Mod => Op2::Mod,
+                BinaryOp::Gt => Op2::Gt,
+                BinaryOp::Gte => Op2::Gte,
+                BinaryOp::Lt => Op2::Lt,
+                BinaryOp::Lte => Op2::Lte,
+                BinaryOp::Eq => Op2::Eq,
+                BinaryOp::And => Op2::And,
+                BinaryOp::Or => Op2::Or,
+                BinaryOp::Neq => {
+                    return Some(
+                        (!crate::vm::is_truthy(crate::vm::eval_op2(Op2::Eq, l, r))) as i8 as f64,
+                    );
+                }
+                BinaryOp::Exp => return None,
+            };
+            Some(crate::vm::eval_op2(op, l, r))
+        }
+        _ => None,
+    }
 }
