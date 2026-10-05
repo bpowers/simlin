@@ -83,6 +83,27 @@ class TestProjectAnalysis:
             assert hasattr(error, "message")
 
 
+class TestErrorElements:
+    def test_an_error_in_one_elements_equation_names_the_element(self) -> None:
+        """A detail about one element's own equation names the element, and
+        its span indexes that element's text."""
+        from simlin.project import FileFormat
+
+        mdl = (
+            "Cities: Boston, Seattle ~~|\n"
+            "y[Boston] = 1 ~~|\n"
+            "y[Seattle] = nosuch + 1 ~~|\n"
+            "INITIAL TIME = 0 ~~|\nFINAL TIME = 1 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = 1 ~~|\n"
+            "\\\\\\---///\n"
+        )
+        project = Project._from_bytes(mdl.encode("utf-8"), FileFormat.MDL)
+        errors = [e for e in project.get_errors() if e.variable_name == "y"]
+        assert errors, project.get_errors()
+        assert errors[0].element_name == "seattle"
+        assert "element 'seattle'" in str(errors[0])
+        assert (errors[0].start_offset, errors[0].end_offset) == (0, 6)
+
+
 class TestProjectSerialization:
     """Test project serialization and export."""
 

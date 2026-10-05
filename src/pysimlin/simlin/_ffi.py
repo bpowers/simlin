@@ -111,6 +111,7 @@ def extract_error_details(err_ptr: Any) -> list[Any]:
                     ),
                     severity=coerce_int_enum(ErrorSeverity, c_detail.severity, ErrorSeverity.ERROR),
                     details=c_to_string(c_detail.details),
+                    element_name=c_to_string(c_detail.element_name),
                 )
             )
     return details

@@ -107,6 +107,11 @@ class ErrorDetail:
     # sets it on every diagnostic, saying what the code means when the raising
     # site wrote no reason of its own; None only on a detail built without one.
     details: str | None = None
+    # The element of an arrayed variable the error is about, as its canonical
+    # key (``new_york``; ``boston,young`` for an element of two dimensions);
+    # None for the variable as a whole. Where the element has an equation of
+    # its own, ``start_offset``/``end_offset`` index that equation's text.
+    element_name: str | None = None
 
     def __str__(self) -> str:
         """Return a human-readable string representation."""
@@ -117,6 +122,9 @@ class ErrorDetail:
 
         if self.variable_name:
             parts.append(f"for variable '{self.variable_name}'")
+
+        if self.element_name:
+            parts.append(f"element '{self.element_name}'")
 
         if self.message:
             parts.append(f": {self.message}")
