@@ -19,9 +19,9 @@ use crate::datamodel::{self, Equation, GraphicalFunction, Variable};
 
 /// One element's arm as `Equation::Arrayed` stores it: its subscript, its
 /// equation, its active initial, and its lookup.
-type Arm = (String, String, Option<String>, Option<GraphicalFunction>);
+pub(crate) type Arm = (String, String, Option<String>, Option<GraphicalFunction>);
 
-fn refuse(code: ErrorCode, details: String) -> Error {
+pub(crate) fn refuse(code: ErrorCode, details: String) -> Error {
     Error::new(ErrorKind::Model, code, Some(details))
 }
 
@@ -93,7 +93,7 @@ fn dimension<'a>(dims: &'a [datamodel::Dimension], name: &str) -> Result<&'a dat
 
 /// A dimension's elements as the model spells them; an indexed one's are
 /// `1` to its size.
-fn elements_of(dim: &datamodel::Dimension) -> Vec<String> {
+pub(crate) fn elements_of(dim: &datamodel::Dimension) -> Vec<String> {
     match &dim.elements {
         datamodel::DimensionElements::Named(names) => names.clone(),
         datamodel::DimensionElements::Indexed(size) => (1..=*size).map(|n| n.to_string()).collect(),
@@ -136,7 +136,7 @@ fn key(parts: &[String]) -> CanonicalElementName {
 
 /// `arms` in the row-major order of `dims`, arms naming no element of them
 /// after, in the order they were in.
-fn in_dimension_order(dims: &[&datamodel::Dimension], arms: Vec<Arm>) -> Vec<Arm> {
+pub(crate) fn in_dimension_order(dims: &[&datamodel::Dimension], arms: Vec<Arm>) -> Vec<Arm> {
     let order: Vec<CanonicalElementName> =
         combinations(dims).iter().map(|parts| key(parts)).collect();
     let mut arms: Vec<(usize, Arm)> = arms
@@ -155,7 +155,12 @@ fn in_dimension_order(dims: &[&datamodel::Dimension], arms: Vec<Arm>) -> Vec<Arm
 
 /// An arrayed equation from its default and arms, in its smallest form: no
 /// arms left and a default every element follows is apply-to-all.
-fn arrayed(dims: Vec<String>, arms: Vec<Arm>, default: Option<String>, applies: bool) -> Equation {
+pub(crate) fn arrayed(
+    dims: Vec<String>,
+    arms: Vec<Arm>,
+    default: Option<String>,
+    applies: bool,
+) -> Equation {
     match default {
         Some(default) if applies && arms.is_empty() => Equation::ApplyToAll(dims, default),
         default => Equation::Arrayed(dims, arms, default, applies),

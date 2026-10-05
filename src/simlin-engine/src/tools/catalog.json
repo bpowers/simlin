@@ -4699,6 +4699,122 @@
                 "required": [
                   "op"
                 ]
+              },
+              {
+                "description": "Add a dimension with its elements, in order.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "add_dimension"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "elements": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "name",
+                  "elements"
+                ]
+              },
+              {
+                "description": "Set a dimension's elements and their order. An element left out\ntakes with it every variable's own equation there; an element added\nfollows the equation every element follows. To rename an element,\nuse rename_element, which keeps what is there.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "change_dimension"
+                  },
+                  "dimension": {
+                    "type": "string"
+                  },
+                  "elements": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "dimension",
+                  "elements"
+                ]
+              },
+              {
+                "description": "Rename a dimension; every variable over it and every equation that\nnames it is rewritten.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "rename_dimension"
+                  },
+                  "dimension": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "dimension",
+                  "to"
+                ]
+              },
+              {
+                "description": "Rename one element of a dimension; every element's own equation and\nevery subscript that names it is rewritten.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "rename_element"
+                  },
+                  "dimension": {
+                    "type": "string"
+                  },
+                  "element": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "dimension",
+                  "element",
+                  "to"
+                ]
+              },
+              {
+                "description": "Delete a dimension that no variable, equation or other dimension\nuses.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "delete_dimension"
+                  },
+                  "dimension": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "dimension"
+                ]
               }
             ]
           },
@@ -4749,7 +4865,7 @@
             "type": "object",
             "properties": {
               "variable": {
-                "description": "The variable, as the model names it (before a rename; with its model\nwhen it is another model's), a loop's name, or \"sim specs\".",
+                "description": "The variable, as the model names it (before a rename; with its model\nwhen it is another model's), a loop's name, \"sim specs\", or a\ndimension's name.",
                 "type": "string"
               },
               "action": {
@@ -4774,7 +4890,8 @@
               "renamed",
               "deleted",
               "loop_named",
-              "sim_specs"
+              "sim_specs",
+              "dimension"
             ]
           },
           "EditDiagnostic": {
@@ -5773,7 +5890,7 @@
         "type": "object",
         "properties": {
           "variable": {
-            "description": "The variable, as the model names it (before a rename; with its model\nwhen it is another model's), a loop's name, or \"sim specs\".",
+            "description": "The variable, as the model names it (before a rename; with its model\nwhen it is another model's), a loop's name, \"sim specs\", or a\ndimension's name.",
             "type": "string"
           },
           "action": {
@@ -5798,7 +5915,8 @@
           "renamed",
           "deleted",
           "loop_named",
-          "sim_specs"
+          "sim_specs",
+          "dimension"
         ]
       },
       "EditDiagnostic": {

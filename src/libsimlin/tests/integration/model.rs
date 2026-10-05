@@ -1418,3 +1418,47 @@ fn a_field_edit_lands_through_the_patch() {
         simlin_project_unref(proj);
     }
 }
+
+/// A dimension edit through the patch reaches what a host reads back: a
+/// renamed element keys the element's own equation, and the renamed
+/// dimension is the one the variable is over.
+#[test]
+fn a_dimension_edit_lands_through_the_patch() {
+    let datamodel = TestProject::new("dimensions")
+        .named_dimension("Age", &["Young", "Old"])
+        .array_with_default_and_overrides("pop[Age]", "2", vec![("Old", "pop[Young] + 1")])
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let patch = serde_json::json!({"projectOps": [
+            {"type": "renameElement",
+             "payload": {"dimension": "Age", "from": "Young", "to": "Child"}},
+            {"type": "renameDimension", "payload": {"from": "Age", "to": "Cohort"}}
+        ]});
+        let bytes = serde_json::to_vec(&patch).unwrap();
+        let (mut collected, mut err) = (ptr::null_mut(), ptr::null_mut());
+        simlin_project_apply_patch(
+            proj,
+            bytes.as_ptr(),
+            bytes.len(),
+            false,
+            false,
+            &mut collected,
+            &mut err,
+        );
+        expect_no_error(err, "the dimension edit");
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        let mut err = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        expect_no_error(err, "getting the model");
+        let pop = equation_json(model, "pop").expect("pop's equations");
+        assert_eq!(pop["dimensions"][0]["name"], "Cohort");
+        assert_eq!(pop["dimensions"][0]["elements"][0], "Child");
+        assert_eq!(pop["cells"][1]["state"], "own");
+        assert_eq!(pop["cells"][1]["own"]["text"], "pop[Child] + 1");
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

@@ -110,7 +110,7 @@ pub(crate) fn model_operation_variant(op: &ModelOperation) -> usize {
     }
 }
 
-const PROJECT_OPERATION_VARIANTS: usize = 3;
+const PROJECT_OPERATION_VARIANTS: usize = 7;
 
 /// `model_operation_variant`, for `ProjectOperation`.
 fn project_operation_variant(op: &ProjectOperation) -> usize {
@@ -118,6 +118,10 @@ fn project_operation_variant(op: &ProjectOperation) -> usize {
         ProjectOperation::SetSimSpecs(_) => 0,
         ProjectOperation::SetSource(_) => 1,
         ProjectOperation::AddModel { .. } => 2,
+        ProjectOperation::UpsertDimension(_) => 3,
+        ProjectOperation::RenameDimension { .. } => 4,
+        ProjectOperation::RenameElement { .. } => 5,
+        ProjectOperation::DeleteDimension { .. } => 6,
     }
 }
 
@@ -449,6 +453,65 @@ fn generated_patches(project: &Project, max: usize) -> Vec<(String, ProjectPatch
                 models: vec![],
             },
         ));
+    }
+
+    // The dimension edits, on the first named dimension.
+    let named = project
+        .dimensions
+        .iter()
+        .find(|d| matches!(d.elements, datamodel::DimensionElements::Named(_)));
+    if let Some(dimension) = named {
+        let datamodel::DimensionElements::Named(elements) = &dimension.elements else {
+            unreachable!("found named");
+        };
+        let mut grown = dimension.clone();
+        grown.elements = datamodel::DimensionElements::Named(
+            elements
+                .iter()
+                .cloned()
+                .chain(["another element".to_string()])
+                .collect(),
+        );
+        let unused =
+            datamodel::Dimension::named("an unused dimension".to_string(), vec!["u1".to_string()]);
+        for (what, ops) in [
+            (
+                "add an element to a dimension",
+                vec![ProjectOperation::UpsertDimension(grown)],
+            ),
+            (
+                "rename a dimension",
+                vec![ProjectOperation::RenameDimension {
+                    from: dimension.name.clone(),
+                    to: "a renamed dimension".to_string(),
+                }],
+            ),
+            (
+                "rename an element",
+                vec![ProjectOperation::RenameElement {
+                    dimension: dimension.name.clone(),
+                    from: elements[0].clone(),
+                    to: "a renamed element".to_string(),
+                }],
+            ),
+            (
+                "add a dimension and delete it",
+                vec![
+                    ProjectOperation::UpsertDimension(unused),
+                    ProjectOperation::DeleteDimension {
+                        name: "an unused dimension".to_string(),
+                    },
+                ],
+            ),
+        ] {
+            out.push((
+                what.to_string(),
+                ProjectPatch {
+                    project_ops: ops,
+                    models: vec![],
+                },
+            ));
+        }
     }
     out
 }

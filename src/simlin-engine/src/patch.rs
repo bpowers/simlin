@@ -40,6 +40,25 @@ pub enum ProjectOperation {
     AddModel {
         name: String,
     },
+    /// Adds a dimension, or sets the elements, mappings and parent of the
+    /// declared dimension of its name (`patch_dimensions::upsert_dimension`).
+    UpsertDimension(datamodel::Dimension),
+    /// Renames a dimension, and every variable and equation that names it.
+    RenameDimension {
+        from: String,
+        to: String,
+    },
+    /// Renames one element of a dimension, and every key and subscript that
+    /// names it.
+    RenameElement {
+        dimension: String,
+        from: String,
+        to: String,
+    },
+    /// Deletes a dimension nothing uses.
+    DeleteDimension {
+        name: String,
+    },
 }
 
 /// A patch targeting a specific model within the project.
@@ -244,6 +263,22 @@ pub(crate) fn apply_patch_in_place(
             }
             ProjectOperation::AddModel { name } => {
                 apply_add_model(project, name)?;
+            }
+            ProjectOperation::UpsertDimension(dimension) => {
+                crate::patch_dimensions::upsert_dimension(project, dimension)?;
+            }
+            ProjectOperation::RenameDimension { from, to } => {
+                crate::patch_dimensions::rename_dimension(project, &from, &to)?;
+            }
+            ProjectOperation::RenameElement {
+                dimension,
+                from,
+                to,
+            } => {
+                crate::patch_dimensions::rename_element(project, &dimension, &from, &to)?;
+            }
+            ProjectOperation::DeleteDimension { name } => {
+                crate::patch_dimensions::delete_dimension(project, &name)?;
             }
         }
     }
@@ -1082,20 +1117,23 @@ pub(crate) enum Site {
     Subscripted,
     /// Alone in a subscript's brackets, or an end of a range there.
     Index,
+    /// The dimension a star range ranges over (`*:Sub`), which names a
+    /// dimension, never a variable.
+    StarRange,
 }
 
 /// A reference a rename would have to respell without knowing what the
 /// compiler reads it as, and why: a phrase completing "the equation of
 /// `reader` ...".
-struct Ambiguity(String);
+pub(crate) struct Ambiguity(pub(crate) String);
 
 /// What a rename makes of a reference in an expression, by where it is
 /// written: the name it reads after the rename, `None` for one the rename
 /// leaves, or the ambiguity that refuses the rename.
-type Respelled = std::result::Result<Option<Ident<Canonical>>, Ambiguity>;
+pub(crate) type Respelled = std::result::Result<Option<Ident<Canonical>>, Ambiguity>;
 
 /// What a rename makes of each reference in an expression ([`Respelled`]).
-type Respelling<'f> = dyn Fn(Site, &Ident<Canonical>) -> Respelled + 'f;
+pub(crate) type Respelling<'f> = dyn Fn(Site, &Ident<Canonical>) -> Respelled + 'f;
 
 /// One rename, and what each name of the renamed variable reads after it.
 ///
@@ -1442,6 +1480,9 @@ impl Reader<'_> {
     /// when it does not name the renamed variable, an [`Ambiguity`] when the
     /// compiler could read it, or its new spelling, as something else.
     fn renamed(&self, site: Site, reference: &Ident<Canonical>) -> Respelled {
+        if site == Site::StarRange {
+            return Ok(None);
+        }
         let dimensions = &self.rename.dimensions;
         let is_identifier = site != Site::Subscripted;
         if is_identifier && dimensions.lookup(reference.as_str()).is_some() {
@@ -1507,15 +1548,31 @@ const SPAN_REACH: usize = u16::MAX as usize;
 /// may well stand. It goes through the printer instead, which spells the same
 /// expression without the modeler's layout, and that is decided on the text's
 /// length, before any span is read.
-fn renamed_text(
+pub(crate) fn renamed_text(
     text: &str,
     renamed: &Respelling<'_>,
+) -> std::result::Result<Option<String>, Ambiguity> {
+    respelled_text(text, renamed, &|name| {
+        crate::ast::print_ident(name.as_str())
+    })
+}
+
+/// [`renamed_text`], with each new name written as `spell` spells it rather
+/// than as the printer spells its canonical form: an edit that knows how the
+/// model writes a name (a dimension's, an element's) keeps that spelling.
+/// `spell` must give a spelling that reads back as the name.
+pub(crate) fn respelled_text(
+    text: &str,
+    renamed: &Respelling<'_>,
+    spell: &dyn Fn(&Ident<Canonical>) -> String,
 ) -> std::result::Result<Option<String>, Ambiguity> {
     let Ok(Some(expr)) = Expr0::new(text, LexerType::Equation) else {
         return Ok(None);
     };
     let mut walk = Walk {
+        text,
         renamed,
+        spell,
         splices: Vec::new(),
         ambiguity: None,
     };
@@ -1558,7 +1615,9 @@ pub(crate) fn text_references(text: &str) -> Option<Vec<(Site, Ident<Canonical>)
         Ok(None)
     };
     let mut walk = Walk {
+        text,
         renamed: &record,
+        spell: &|name| crate::ast::print_ident(name.as_str()),
         splices: Vec::new(),
         ambiguity: None,
     };
@@ -1581,7 +1640,11 @@ struct Splice {
 /// each new name in `splices` with its place in the text, which is what the
 /// text takes otherwise, and the first ambiguity met.
 struct Walk<'r, 'f> {
+    /// The text walked, which a star range's name is found in.
+    text: &'r str,
     renamed: &'r Respelling<'f>,
+    /// How a new name is written in the text.
+    spell: &'r dyn Fn(&Ident<Canonical>) -> String,
     splices: Vec<Splice>,
     ambiguity: Option<Ambiguity>,
 }
@@ -1637,10 +1700,22 @@ impl Walk<'_, '_> {
             | Expr0::If(..) => self.expr(expr),
         };
         match index {
-            // A star range names a dimension, never a variable.
-            IndexExpr0::Wildcard(_)
-            | IndexExpr0::StarRange(_, _)
-            | IndexExpr0::DimPosition(_, _) => index.clone(),
+            IndexExpr0::Wildcard(_) | IndexExpr0::DimPosition(_, _) => index.clone(),
+            // A star range's span covers `*:Sub`, or `Sub.*` as Vensim writes
+            // it; the name ends the one and starts the other.
+            IndexExpr0::StarRange(ident, loc) => {
+                let written_first = self
+                    .text
+                    .get(loc.start as usize..)
+                    .is_some_and(|rest| !rest.starts_with('*'));
+                let start = if written_first {
+                    loc.start
+                } else {
+                    loc.end.saturating_sub(ident.as_str().len() as u16)
+                };
+                let at = Loc::new(start as usize, loc.end as usize);
+                IndexExpr0::StarRange(self.ident(ident, at, Site::StarRange), *loc)
+            }
             IndexExpr0::Range(lhs, rhs, loc) => {
                 IndexExpr0::Range(Box::new(alone(lhs)), Box::new(alone(rhs)), *loc)
             }
@@ -1651,14 +1726,14 @@ impl Walk<'_, '_> {
     /// A reference as written at `site`, respelled when `renamed` gives it a
     /// new name (and then recorded in `splices`); a reference the rename
     /// leaves alone, or finds ambiguous, keeps the modeler's spelling. The
-    /// new spelling is `ast::print_ident`'s of the canonical name, the one
-    /// spelling of a name inside equation text, which quotes a name the lexer
-    /// cannot read bare: a name holding a literal period is written `"a.b"`,
-    /// never as the path `a.b`.
+    /// new spelling is `spell`'s; a variable rename's is `ast::print_ident`'s
+    /// of the canonical name, the one spelling of a name inside equation
+    /// text, which quotes a name the lexer cannot read bare: a name holding a
+    /// literal period is written `"a.b"`, never as the path `a.b`.
     fn ident(&mut self, ident: &RawIdent, loc: Loc, site: Site) -> RawIdent {
         match (self.renamed)(site, &ident.canonicalize()) {
             Ok(Some(renamed)) => {
-                let spelled = crate::ast::print_ident(renamed.as_str());
+                let spelled = (self.spell)(&renamed);
                 self.splices.push(Splice {
                     start: loc.start as usize,
                     old_len: ident.as_str().len(),

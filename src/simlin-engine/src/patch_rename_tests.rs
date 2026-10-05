@@ -1940,8 +1940,12 @@ fn a_rename_to_and_from_a_name_with_a_period_keeps_the_model_the_same() {
     assert_eq!(series(&project)["reader"], before["reader"]);
 }
 
+/// A respelling of the variable `target`: a star range names a dimension,
+/// never a variable, so it is left.
 fn to(new: &'static str) -> impl Fn(Site, &Ident<Canonical>) -> Respelled {
-    move |_, reference| Ok((reference.as_str() == "target").then(|| Ident::new(new)))
+    move |site, reference| {
+        Ok((site != Site::StarRange && reference.as_str() == "target").then(|| Ident::new(new)))
+    }
 }
 
 /// The text `renamed` respells, for a respelling that finds nothing
@@ -1953,7 +1957,9 @@ fn spliced(text: &str, renamed: &Respelling<'_>) -> Option<String> {
 /// The tree the one walk gives `expr` under `renamed`.
 fn renamed_tree(expr: &Expr0, renamed: &Respelling<'_>) -> Expr0 {
     Walk {
+        text: "",
         renamed,
+        spell: &|name| crate::ast::print_ident(name.as_str()),
         splices: Vec::new(),
         ambiguity: None,
     }
@@ -2039,6 +2045,7 @@ fn the_walk_reads_each_reference_at_its_site() {
         Site::Value => "value",
         Site::Subscripted => "subscripted",
         Site::Index => "index",
+        Site::StarRange => "star range",
     };
     let rows: &[(&str, &[(&str, &str)])] = &[
         (
@@ -2054,6 +2061,16 @@ fn the_walk_reads_each_reference_at_its_site() {
                 ("d", "index"),
                 ("e", "value"),
                 ("f", "value"),
+                ("g", "star range"),
+            ],
+        ),
+        (
+            "x[Sub.*] + y[ *:Other]",
+            &[
+                ("x", "subscripted"),
+                ("sub", "star range"),
+                ("y", "subscripted"),
+                ("other", "star range"),
             ],
         ),
         (

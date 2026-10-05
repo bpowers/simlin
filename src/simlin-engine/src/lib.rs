@@ -83,6 +83,7 @@ mod model;
 mod module_functions;
 mod parser;
 mod patch;
+mod patch_dimensions;
 mod patch_fields;
 #[cfg(test)]
 mod patch_sharing_tests;

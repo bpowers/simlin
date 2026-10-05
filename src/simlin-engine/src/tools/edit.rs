@@ -214,6 +214,29 @@ pub enum EditOperation {
         #[serde(default)]
         method: Option<IntegrationMethod>,
     },
+    /// Add a dimension with its elements, in order.
+    AddDimension { name: String, elements: Vec<String> },
+    /// Set a dimension's elements and their order. An element left out
+    /// takes with it every variable's own equation there; an element added
+    /// follows the equation every element follows. To rename an element,
+    /// use rename_element, which keeps what is there.
+    ChangeDimension {
+        dimension: String,
+        elements: Vec<String>,
+    },
+    /// Rename a dimension; every variable over it and every equation that
+    /// names it is rewritten.
+    RenameDimension { dimension: String, to: String },
+    /// Rename one element of a dimension; every element's own equation and
+    /// every subscript that names it is rewritten.
+    RenameElement {
+        dimension: String,
+        element: String,
+        to: String,
+    },
+    /// Delete a dimension that no variable, equation or other dimension
+    /// uses.
+    DeleteDimension { dimension: String },
 }
 
 impl EditOperation {
@@ -233,6 +256,11 @@ impl EditOperation {
             EditOperation::Delete { .. } => "delete",
             EditOperation::NameLoop { .. } => "name_loop",
             EditOperation::SetSimSpecs { .. } => "set_sim_specs",
+            EditOperation::AddDimension { .. } => "add_dimension",
+            EditOperation::ChangeDimension { .. } => "change_dimension",
+            EditOperation::RenameDimension { .. } => "rename_dimension",
+            EditOperation::RenameElement { .. } => "rename_element",
+            EditOperation::DeleteDimension { .. } => "delete_dimension",
         }
     }
 
@@ -253,7 +281,12 @@ impl EditOperation {
             | EditOperation::Rename { .. }
             | EditOperation::Delete { .. }
             | EditOperation::NameLoop { .. }
-            | EditOperation::SetSimSpecs { .. } => None,
+            | EditOperation::SetSimSpecs { .. }
+            | EditOperation::AddDimension { .. }
+            | EditOperation::ChangeDimension { .. }
+            | EditOperation::RenameDimension { .. }
+            | EditOperation::RenameElement { .. }
+            | EditOperation::DeleteDimension { .. } => None,
         }
     }
 
@@ -265,6 +298,11 @@ impl EditOperation {
                 | EditOperation::SetNotes { .. }
                 | EditOperation::NameLoop { .. }
                 | EditOperation::SetSimSpecs { .. }
+                | EditOperation::AddDimension { .. }
+                | EditOperation::ChangeDimension { .. }
+                | EditOperation::RenameDimension { .. }
+                | EditOperation::RenameElement { .. }
+                | EditOperation::DeleteDimension { .. }
         )
     }
 }
@@ -391,7 +429,8 @@ impl GateRule {
 #[serde(rename_all = "camelCase")]
 pub struct ChangeLine {
     /// The variable, as the model names it (before a rename; with its model
-    /// when it is another model's), a loop's name, or "sim specs".
+    /// when it is another model's), a loop's name, "sim specs", or a
+    /// dimension's name.
     pub variable: String,
     pub action: ChangeAction,
     /// What changes, in words.
@@ -409,6 +448,7 @@ pub enum ChangeAction {
     Deleted,
     LoopNamed,
     SimSpecs,
+    Dimension,
 }
 
 /// A diagnostic the edit adds or leaves, or would.
@@ -497,7 +537,8 @@ struct LoopChange {
 /// It holds every variable whose record the edit changes, in any model, by
 /// its model's name and its canonical name, with the record before and
 /// after (a rename is the old name gone and the new one there); the
-/// project's sim specs as they were, when the edit changes them; and every
+/// project's sim specs and its dimensions as they were, when the edit
+/// changes them; and every
 /// loop name it changes, by its model and its variables' uids. The answer's
 /// lines are this in words (`change_lines`). Records compare by
 /// `changes::same_record`. Views and groups are no part of it: a diagram is
@@ -506,6 +547,7 @@ struct LoopChange {
 pub(crate) struct Delta {
     variables: BTreeMap<(String, String), VariableChange>,
     specs: Option<datamodel::SimSpecs>,
+    dimensions: Option<Vec<datamodel::Dimension>>,
     loops: BTreeMap<(String, Vec<i32>), LoopChange>,
 }
 
@@ -533,9 +575,12 @@ fn loop_names(model: &datamodel::Model) -> BTreeMap<Vec<i32>, LoopName> {
 
 impl Delta {
     /// Whether the edit changes nothing an agent reads: no record, no sim
-    /// specs, no loop name.
+    /// specs, no dimension, no loop name.
     fn is_empty(&self) -> bool {
-        self.variables.is_empty() && self.specs.is_none() && self.loops.is_empty()
+        self.variables.is_empty()
+            && self.specs.is_none()
+            && self.dimensions.is_none()
+            && self.loops.is_empty()
     }
 
     /// The variables the edit leaves out of the project, deleted or renamed
@@ -616,6 +661,9 @@ impl Delta {
         if before.sim_specs != after.sim_specs {
             delta.specs = Some(before.sim_specs.clone());
         }
+        if before.dimensions != after.dimensions {
+            delta.dimensions = Some(before.dimensions.clone());
+        }
         delta
     }
 
@@ -637,6 +685,11 @@ impl Delta {
             && before != snapshot.specs()
         {
             stale.push("the sim specs".to_string());
+        }
+        if let Some(before) = &self.dimensions
+            && before.as_slice() != snapshot.dimensions()
+        {
+            stale.push("the dimensions".to_string());
         }
         for ((model, uids), change) in &self.loops {
             // A read holds the loop names of the session's model alone, the
@@ -669,6 +722,9 @@ impl Delta {
             && let Some(model) = edited.models.iter().find(|m| m.name == session_model)
         {
             snapshot.absorb_specs(effective_specs(edited, model));
+        }
+        if self.dimensions.is_some() {
+            snapshot.absorb_dimensions(&edited.dimensions);
         }
         for (model, uids) in self.loops.keys() {
             if model == session_model
@@ -1747,7 +1803,74 @@ impl<'a> Builder<'a> {
                 dt,
                 method,
             } => self.sim_specs(start, stop, dt, method),
+            EditOperation::AddDimension { name, elements } => {
+                if self.dimension(&name).is_some() {
+                    return Err(ToolError::new(format!(
+                        "the project already has a dimension named '{name}'"
+                    )));
+                }
+                self.dimension_edit(ProjectOperation::UpsertDimension(
+                    datamodel::Dimension::named(name.trim().to_string(), trimmed(elements)),
+                ))
+            }
+            EditOperation::ChangeDimension {
+                dimension,
+                elements,
+            } => {
+                let Some(mut changed) = self.dimension(&dimension) else {
+                    return Err(ToolError::new(format!(
+                        "'{dimension}' is not a declared dimension"
+                    )));
+                };
+                changed.elements = datamodel::DimensionElements::Named(trimmed(elements));
+                self.dimension_edit(ProjectOperation::UpsertDimension(changed))
+            }
+            EditOperation::RenameDimension { dimension, to } => {
+                self.dimension_edit(ProjectOperation::RenameDimension {
+                    from: dimension,
+                    to: to.trim().to_string(),
+                })
+            }
+            EditOperation::RenameElement {
+                dimension,
+                element,
+                to,
+            } => self.dimension_edit(ProjectOperation::RenameElement {
+                dimension,
+                from: element,
+                to: to.trim().to_string(),
+            }),
+            EditOperation::DeleteDimension { dimension } => {
+                self.dimension_edit(ProjectOperation::DeleteDimension { name: dimension })
+            }
         }
+    }
+
+    /// The project's dimension `name`, by canonical name.
+    fn dimension(&self, name: &str) -> Option<datamodel::Dimension> {
+        let canonical = crate::canonicalize(name.trim());
+        self.working
+            .dimensions
+            .iter()
+            .find(|d| crate::canonicalize(d.name()) == canonical)
+            .cloned()
+    }
+
+    /// Apply one edit of the project's dimensions (`patch_dimensions`).
+    fn dimension_edit(&mut self, op: ProjectOperation) -> Result<(), ToolError> {
+        crate::apply_patch(
+            &mut self.working,
+            ProjectPatch {
+                project_ops: vec![op],
+                models: vec![],
+            },
+        )
+        .map_err(|err| {
+            ToolError::new(format!(
+                "it cannot apply: {}",
+                err.details.unwrap_or_else(|| err.code.to_string())
+            ))
+        })
     }
 
     /// The stocks that list the flow `ident` among their flows.
@@ -1985,6 +2108,11 @@ impl<'a> Builder<'a> {
         }])
         .map_err(|err| err.error)
     }
+}
+
+/// Element names as given, trimmed.
+fn trimmed(elements: Vec<String>) -> Vec<String> {
+    elements.into_iter().map(|e| e.trim().to_string()).collect()
 }
 
 /// The element names of dimensions `dims`, joined by commas across
@@ -3345,7 +3473,55 @@ fn change_lines(
             });
         }
     }
+    if let Some(old_dimensions) = &delta.dimensions {
+        changes.extend(dimension_lines(old_dimensions, &after.dimensions));
+    }
     changes
+}
+
+/// One line per dimension an edit adds, deletes or changes, in the order
+/// the project declares them, the deleted ones last. A renamed dimension is
+/// the old one deleted and the new one added.
+fn dimension_lines(
+    before: &[datamodel::Dimension],
+    after: &[datamodel::Dimension],
+) -> Vec<ChangeLine> {
+    let find = |dims: &[datamodel::Dimension], name: &str| {
+        let canonical = crate::canonicalize(name);
+        dims.iter()
+            .find(|d| crate::canonicalize(d.name()) == canonical)
+            .cloned()
+    };
+    let listed = |dim: &datamodel::Dimension| match &dim.elements {
+        datamodel::DimensionElements::Named(names) => names.join(", "),
+        datamodel::DimensionElements::Indexed(size) => format!("1 to {size}"),
+    };
+    let mut lines = Vec::new();
+    for dim in after {
+        let detail = match find(before, dim.name()) {
+            None => format!("adds the dimension, its elements {}", listed(dim)),
+            Some(was) if was == *dim => continue,
+            Some(was) if listed(&was) != listed(dim) => {
+                format!("its elements {} (were {})", listed(dim), listed(&was))
+            }
+            Some(_) => "its mappings or its name's spelling".to_string(),
+        };
+        lines.push(ChangeLine {
+            variable: dim.name().to_string(),
+            action: ChangeAction::Dimension,
+            detail,
+        });
+    }
+    for dim in before {
+        if find(after, dim.name()).is_none() {
+            lines.push(ChangeLine {
+                variable: dim.name().to_string(),
+                action: ChangeAction::Dimension,
+                detail: "deletes the dimension".to_string(),
+            });
+        }
+    }
+    lines
 }
 
 fn method_name(method: datamodel::SimMethod) -> &'static str {

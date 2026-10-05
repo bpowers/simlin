@@ -2347,6 +2347,29 @@ pub enum ProjectOperation {
     AddModel {
         name: String,
     },
+    /// Adds a dimension, or sets the elements, mappings and parent of the
+    /// declared dimension of its name. An element removed takes with it the
+    /// variables' own equations there; renaming an element is
+    /// `renameElement`.
+    UpsertDimension {
+        dimension: Dimension,
+    },
+    /// Renames a dimension, and every variable and equation that names it.
+    RenameDimension {
+        from: String,
+        to: String,
+    },
+    /// Renames one element of a dimension, and every key and subscript that
+    /// names it.
+    RenameElement {
+        dimension: String,
+        from: String,
+        to: String,
+    },
+    /// Deletes a dimension no variable, equation or dimension uses.
+    DeleteDimension {
+        name: String,
+    },
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -2466,6 +2489,24 @@ impl From<ProjectPatch> for crate::patch::ProjectPatch {
                     ProjectOperation::AddModel { name } => {
                         crate::patch::ProjectOperation::AddModel { name }
                     }
+                    ProjectOperation::UpsertDimension { dimension } => {
+                        crate::patch::ProjectOperation::UpsertDimension(dimension.into())
+                    }
+                    ProjectOperation::RenameDimension { from, to } => {
+                        crate::patch::ProjectOperation::RenameDimension { from, to }
+                    }
+                    ProjectOperation::RenameElement {
+                        dimension,
+                        from,
+                        to,
+                    } => crate::patch::ProjectOperation::RenameElement {
+                        dimension,
+                        from,
+                        to,
+                    },
+                    ProjectOperation::DeleteDimension { name } => {
+                        crate::patch::ProjectOperation::DeleteDimension { name }
+                    }
                 })
                 .collect(),
             models: patch
@@ -2576,6 +2617,26 @@ impl TryFrom<crate::patch::ProjectPatch> for ProjectPatch {
                 }
                 crate::patch::ProjectOperation::SetSource(_) => {
                     Err("a change of the project's source has no JSON form".to_string())
+                }
+                crate::patch::ProjectOperation::UpsertDimension(dimension) => {
+                    Ok(ProjectOperation::UpsertDimension {
+                        dimension: dimension.into(),
+                    })
+                }
+                crate::patch::ProjectOperation::RenameDimension { from, to } => {
+                    Ok(ProjectOperation::RenameDimension { from, to })
+                }
+                crate::patch::ProjectOperation::RenameElement {
+                    dimension,
+                    from,
+                    to,
+                } => Ok(ProjectOperation::RenameElement {
+                    dimension,
+                    from,
+                    to,
+                }),
+                crate::patch::ProjectOperation::DeleteDimension { name } => {
+                    Ok(ProjectOperation::DeleteDimension { name })
                 }
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -2706,7 +2767,29 @@ mod tests {
         let mut specs = base.sim_specs.clone();
         specs.stop = 20.0;
         let patch = crate::patch::ProjectPatch {
-            project_ops: vec![PO::SetSimSpecs(specs)],
+            project_ops: vec![
+                PO::SetSimSpecs(specs),
+                PO::UpsertDimension(datamodel::Dimension::named(
+                    "Size".to_string(),
+                    vec!["Small".to_string(), "Big".to_string()],
+                )),
+                PO::RenameElement {
+                    dimension: "Size".to_string(),
+                    from: "Big".to_string(),
+                    to: "Large".to_string(),
+                },
+                PO::RenameDimension {
+                    from: "Size".to_string(),
+                    to: "Scale".to_string(),
+                },
+                PO::DeleteDimension {
+                    name: "Scale".to_string(),
+                },
+                PO::RenameDimension {
+                    from: "Region".to_string(),
+                    to: "Area".to_string(),
+                },
+            ],
             models: vec![MP {
                 name: "main".to_string(),
                 ops: vec![
@@ -2806,6 +2889,14 @@ mod tests {
         let text = serde_json::to_string(&json).unwrap();
         let wire: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(wire["projectOps"][0]["type"], "setSimSpecs");
+        assert_eq!(wire["projectOps"][1]["type"], "upsertDimension");
+        assert_eq!(
+            wire["projectOps"][1]["payload"]["dimension"]["elements"][1],
+            "Big"
+        );
+        assert_eq!(wire["projectOps"][2]["type"], "renameElement");
+        assert_eq!(wire["projectOps"][3]["payload"]["to"], "Scale");
+        assert_eq!(wire["projectOps"][4]["type"], "deleteDimension");
         assert_eq!(wire["models"][0]["ops"][0]["type"], "upsertAux");
         assert_eq!(
             wire["models"][0]["ops"][0]["payload"]["aux"]["name"],

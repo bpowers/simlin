@@ -2103,6 +2103,11 @@ fn operation_row(op: &EditOperation) -> usize {
         EditOperation::SetSimSpecs { .. } => 11,
         EditOperation::ClearElement { .. } => 12,
         EditOperation::SetDimensions { .. } => 13,
+        EditOperation::AddDimension { .. } => 14,
+        EditOperation::ChangeDimension { .. } => 15,
+        EditOperation::RenameDimension { .. } => 16,
+        EditOperation::RenameElement { .. } => 17,
+        EditOperation::DeleteDimension { .. } => 18,
     }
 }
 
@@ -2434,6 +2439,53 @@ fn every_operation_on_every_kind_of_variable() {
                 Rejected("is not a declared dimension"),
             ],
         ),
+        // The dimension edits name no variable (each on a model with
+        // dimensions: `the_dimensions_are_edited_with_what_is_over_them`).
+        (
+            |_| json!({"op": "add_dimension", "name": "Region", "elements": ["north", "south"]}),
+            [
+                Made(|p, _| assert_eq!(p.dimensions[0].name, "Region")),
+                Made(|p, _| assert_eq!(p.dimensions[0].name, "Region")),
+                Made(|p, _| assert_eq!(p.dimensions[0].name, "Region")),
+                Made(|p, _| assert_eq!(p.dimensions[0].name, "Region")),
+            ],
+        ),
+        (
+            |_| json!({"op": "change_dimension", "dimension": "Region", "elements": ["north"]}),
+            [
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+            ],
+        ),
+        (
+            |_| json!({"op": "rename_dimension", "dimension": "Region", "to": "Area"}),
+            [
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+            ],
+        ),
+        (
+            |_| json!({"op": "rename_element", "dimension": "Region", "element": "north", "to": "n"}),
+            [
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+            ],
+        ),
+        (
+            |_| json!({"op": "delete_dimension", "dimension": "Region"}),
+            [
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+            ],
+        ),
     ];
     for (row, (operation, comes)) in rows.into_iter().enumerate() {
         for (target, comes) in targets.iter().zip(comes) {
@@ -2473,7 +2525,10 @@ fn every_operation_on_every_kind_of_variable() {
                     assert!(output.edited.is_none() && host.project == before, "{op}");
                 }
                 Made(check) => {
-                    assert!(output.edited.as_ref() == Some(&host.project), "{op}");
+                    assert!(
+                        output.edited.as_ref() == Some(&host.project),
+                        "{op}: {answer}"
+                    );
                     check(&host.project, target);
                 }
             }
@@ -4080,4 +4135,58 @@ fn a_variable_is_split_by_a_dimension_and_back() {
         ])),
     );
     assert_eq!(equation(&host), Equation::Scalar("0.2".to_string()));
+}
+
+/// The agent makes and changes dimensions as a person does, and what is over
+/// a dimension follows each edit.
+#[test]
+fn the_dimensions_are_edited_with_what_is_over_them() {
+    let project = TestProject::new("regions")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .aux("growth", "0.1", None);
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    read(&mut host, &mut session);
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "add_dimension", "name": "Region", "elements": ["north", " south "]},
+            {"op": "set_dimensions", "variable": "growth", "dimensions": ["Region"]},
+            {"op": "set_equation", "variable": "growth", "element": "south", "equation": "0.2"},
+            {"op": "rename_element", "dimension": "Region", "element": "south", "to": "lower"},
+            {"op": "rename_dimension", "dimension": "Region", "to": "Area"},
+            {"op": "change_dimension", "dimension": "Area", "elements": ["lower", "north", "east"]}
+        ])),
+    );
+    assert_eq!(
+        host.project.dimensions[0],
+        crate::datamodel::Dimension::named(
+            "Area".to_string(),
+            vec!["lower".to_string(), "north".to_string(), "east".to_string()]
+        )
+    );
+    assert_eq!(
+        host.project.models[0]
+            .get_variable("growth")
+            .unwrap()
+            .get_equation()
+            .unwrap(),
+        &Equation::Arrayed(
+            vec!["Area".to_string()],
+            vec![("lower".to_string(), "0.2".to_string(), None, None)],
+            Some("0.1".to_string()),
+            true
+        )
+    );
+    let refused = host.call_raw(
+        &mut session,
+        "edit_model",
+        &operations(json!([{"op": "delete_dimension", "dimension": "Area"}])).to_string(),
+    );
+    assert!(
+        refused.is_error && refused.json.contains("'growth' in model 'main'"),
+        "{}",
+        refused.json
+    );
 }

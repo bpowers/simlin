@@ -524,6 +524,20 @@ pub(crate) unsafe fn apply_project_patch_internal(
 ///   removed keeps the element of `keep` on it or is refused where its
 ///   elements differ.
 ///
+/// A project operation edits the project's dimensions, and carries the edit
+/// through every variable and equation over them:
+/// - `upsertDimension {dimension}`: adds a dimension, in the shape
+///   `simlin_project_get_dimensions` gives it, or sets the elements, their
+///   order, the mappings and the parent of the one of its name; an element
+///   removed takes the variables' own equations there with it, and one added
+///   follows the equation every element follows;
+/// - `renameDimension {from, to}` and `renameElement {dimension, from, to}`:
+///   rename, rewriting every variable's dimensions, its own elements' keys
+///   and every equation that names it, refused where a name in a subscript
+///   could then mean two things;
+/// - `deleteDimension {name}`: refused while anything uses the dimension,
+///   naming what does.
+///
 /// # Safety
 /// - `project` must point to a valid `SimlinProject`.
 /// - `patch_data` must either be null with `patch_len == 0` or reference at
