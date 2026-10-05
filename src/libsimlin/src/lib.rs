@@ -368,6 +368,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             // A save step off the step grid likewise collapses to the wire
             // Generic code; the message says what the saved rows are.
             engine::ErrorCode::SaveStepOffTheStepGrid => SimlinErrorCode::Generic,
+            engine::ErrorCode::SubscriptOutOfRange => SimlinErrorCode::Generic,
         }
     }
 }

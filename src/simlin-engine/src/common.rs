@@ -650,6 +650,14 @@ pub enum ErrorCode {
     /// specs ask for as nearly as steps allow, and a reader of the rows
     /// should know they are not evenly spaced.
     SaveStepOffTheStepGrid,
+    /// A subscript whose index is the same number at every step reads
+    /// before the first or past the last element of its dimension -- the
+    /// first element of `c[Age - 1]` in an equation for every element of
+    /// `Age` -- so the read is not a number. Warning-level, one per element
+    /// that reads it, naming that element: the model runs, and the person
+    /// gives that element an equation of its own (a chain's first element
+    /// usually reads an inflow, not the element before it).
+    SubscriptOutOfRange,
 }
 
 impl fmt::Display for ErrorCode {
@@ -741,6 +749,7 @@ impl fmt::Display for ErrorCode {
             UnfilledEquation => "unfilled_equation",
             MissingElementEquation => "missing_element_equation",
             SaveStepOffTheStepGrid => "save_step_off_the_step_grid",
+            SubscriptOutOfRange => "subscript_out_of_range",
         };
 
         write!(f, "{name}")
@@ -855,6 +864,9 @@ impl ErrorCode {
             UnfilledEquation => "the equation has not been written yet",
             MissingElementEquation => "some of the variable's elements have no equation",
             SaveStepOffTheStepGrid => "the save step is not a whole number of time steps",
+            SubscriptOutOfRange => {
+                "a subscript reads before the first or past the last element of a dimension"
+            }
         }
     }
 }

@@ -112,6 +112,8 @@ mod shared_vec;
 mod snapshot_arg;
 #[path = "stdlib.gen.rs"]
 mod stdlib;
+#[cfg(test)]
+mod subscript_out_of_range_tests;
 pub mod systems;
 #[cfg(test)]
 #[path = "systems_stdlib_tests.rs"]

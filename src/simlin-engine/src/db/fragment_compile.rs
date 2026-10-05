@@ -267,7 +267,12 @@ pub fn compile_var_fragment<'db>(
     // phase it is not a member of is never compiled, so its lowering outcome
     // is not a diagnostic either.
     let emit = |lowered: &Result<crate::compiler::Var, crate::Error>| match lowered {
-        Ok(var) => compile_phase(&var.ast),
+        Ok(var) => {
+            report_out_of_range_reads(db, model, &input, var, var.ident.as_str(), |offset| {
+                element_at(&input, offset)
+            });
+            compile_phase(&var.ast)
+        }
         Err(err) => {
             accumulate_var_compile_error(err);
             None
@@ -320,6 +325,72 @@ pub fn compile_var_fragment<'db>(
         },
         flow_locally_invariant,
     })
+}
+
+/// The element of the variable `input` lowers that the slot at `offset`
+/// holds, or `None` for a scalar.
+fn element_at(input: &FragmentInput<'_>, offset: usize) -> Option<String> {
+    let dims = input.target.get_dimensions()?;
+    if dims.is_empty() {
+        return None;
+    }
+    crate::dimensions::SubscriptIterator::new(dims)
+        .nth(offset)
+        .map(|element| element.join(","))
+}
+
+/// File one `SubscriptOutOfRange` warning, on `reported_on`, for each read
+/// in `var`'s lowered equations that reads no element at every step
+/// (`compiler::out_of_range_reads`), naming the element that makes the read
+/// (`element_of` its slot offset; `None` for a scalar) and pointing at the
+/// reference in the equation's text.
+///
+/// One row per element and reference, so a host can show each beside its
+/// element. Both phases of one variable lower the same equation, and the
+/// drain collapses their identical rows.
+fn report_out_of_range_reads(
+    db: &dyn Db,
+    model: SourceModel,
+    input: &FragmentInput<'_>,
+    var: &crate::compiler::Var,
+    reported_on: &str,
+    element_of: impl Fn(usize) -> Option<String>,
+) {
+    for read in crate::compiler::out_of_range_reads(var) {
+        let source = read.source.as_str();
+        let side = if read.before_start {
+            "before the first"
+        } else {
+            "past the last"
+        };
+        let axis = match input
+            .deps
+            .get(&read.source)
+            .and_then(|shape| shape.dims.get(read.axis))
+        {
+            Some(dim) => format!("{side} element of '{}'", dim.name()),
+            None => format!("{side} element"),
+        };
+        let details = match element_of(read.element_offset) {
+            Some(element) => format!(
+                "the equation for '{element}' reads '{source}' {axis}, which is not a number"
+            ),
+            None => format!("the equation reads '{source}' {axis}, which is not a number"),
+        };
+        Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(reported_on.to_string()),
+            owner: None,
+            severity: DiagnosticSeverity::Warning,
+            error: DiagnosticError::Equation(crate::common::EquationError {
+                start: read.loc.start,
+                end: read.loc.end,
+                code: crate::common::ErrorCode::SubscriptOutOfRange,
+                details: Some(details),
+            }),
+        }
+        .accumulate(db);
+    }
 }
 
 /// Why [`implicit_fragment_input`] produced no input.
@@ -736,9 +807,57 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
             .map(|arg| arg.get_loc())
     };
     let emit_ctx = input.emit_ctx();
+    // A helper is one element of its parent's body (or the whole of a scalar
+    // parent's), and what it reads is reported on the parent, at the parent's
+    // element. One that iterates its parent's own dimensions (an apply-to-all
+    // argument a `PREVIOUS` or an `INIT` captures) writes, at each slot, the
+    // parent's element of that name.
+    let helper_element = input.target.element_scope().map(|scope| {
+        scope
+            .element
+            .iter()
+            .map(|e| e.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    });
+    // Whether the helper iterates its parent's own dimensions, asked only of a
+    // read that runs off its axis: the answer reads the parent's equation, and
+    // a helper's fragment must not depend on it otherwise, or every edit of
+    // the parent would recompile every helper.
+    let iterates_parent_dims = || {
+        let parent_dims: Vec<String> = match meta.parent_source_var.equation(db) {
+            crate::datamodel::Equation::ApplyToAll(dims, ..)
+            | crate::datamodel::Equation::Arrayed(dims, ..) => {
+                dims.iter().map(|d| canonicalize(d).into_owned()).collect()
+            }
+            crate::datamodel::Equation::Scalar(..) => vec![],
+        };
+        let helper_dims: Vec<String> = input
+            .target
+            .get_dimensions()
+            .unwrap_or_default()
+            .iter()
+            .map(|d| d.canonical_name().as_str().to_string())
+            .collect();
+        !parent_dims.is_empty() && parent_dims == helper_dims
+    };
     let phase = |is_initial: bool| -> Option<PerVarBytecodes> {
         match lower_fragment(&input, is_initial) {
             Ok(var) => {
+                report_out_of_range_reads(
+                    db,
+                    model,
+                    &input,
+                    &var,
+                    meta.parent_source_var.ident(db),
+                    |offset| {
+                        helper_element.clone().or_else(|| {
+                            iterates_parent_dims()
+                                .then(|| element_at(&input, offset))
+                                .flatten()
+                        })
+                    },
+                );
                 match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
                     &emit_ctx, &var.ast,
                 ) {
