@@ -2065,7 +2065,13 @@ fn write_variable_entry_ctx_warn(
     let data_source_eqn = compat_get_direct_equation(compat);
     let effective_gf = if data_source_eqn.is_some() { None } else { gf };
 
-    match equation {
+    let with_table = match (effective_gf, equation) {
+        (Some(gf), arrayed @ Equation::Arrayed(..)) => {
+            arrayed::with_the_variables_table(arrayed, gf, ctx)
+        }
+        _ => None,
+    };
+    match with_table.as_ref().unwrap_or(equation) {
         Equation::Scalar(eqn) => {
             let effective_eqn = data_source_eqn
                 .clone()

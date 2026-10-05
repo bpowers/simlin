@@ -915,10 +915,19 @@ impl VariableMeaning {
             }
             Some(Equation::Arrayed(dims, elements, default, applies_default)) => {
                 meaning.dims = canonical_dims(dims);
+                let applied_default = default.as_deref().filter(|_| *applies_default);
                 let mut keys = BTreeSet::new();
                 for (key, text, initial, table) in elements {
                     let key = element_key(key);
                     keys.insert(key.clone());
+                    // An empty element equation is no equation to the
+                    // compiler, which fills the element from the default
+                    // where it applies: a table with no input of its own
+                    // reads the default.
+                    let text = match applied_default {
+                        Some(default) if text.trim().is_empty() => default,
+                        _ => text.as_str(),
+                    };
                     defined.push(DefinedElement {
                         key,
                         equation: text,

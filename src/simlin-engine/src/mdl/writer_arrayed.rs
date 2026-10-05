@@ -150,13 +150,15 @@ pub(super) fn write_arrayed(
         .as_deref()
         .filter(|d| var.has_except_default && !d.trim().is_empty());
     if let Some(default) = default {
+        // Whether the default is kept or not, an element with a table and no
+        // equation is the default through its table.
+        let taken = take_the_default_as_input(&mut slots, default);
         match except_equations(var, default, &slots, ctx, warnings) {
             Ok(text) => {
                 buf.push_str(&text);
                 return;
             }
             Err(why) => {
-                let taken = take_the_default_as_input(&mut slots, default);
                 let undefined = undefined_elements(&slots, axes.as_deref());
                 warnings.push(except_fallback_warning(var.name, why, &taken, undefined));
             }
@@ -189,6 +191,71 @@ fn take_the_default_as_input(slots: &mut [Slot], default: &str) -> Vec<String> {
         }
     }
     taken
+}
+
+/// An arrayed `equation` of a variable with a table of its own (`gf`), as the
+/// equations of its elements, each through its own table or else the
+/// variable's: MDL gives a table to an element's equation (`WITH LOOKUP`), not
+/// to a variable whose elements have equations of their own, so the
+/// variable's table is written into every element that reads through it.
+/// `None` for an equation that is not arrayed, or whose dimensions' elements
+/// are unknown.
+pub(super) fn with_the_variables_table(
+    equation: &datamodel::Equation,
+    gf: &GraphicalFunction,
+    ctx: &WriterContext,
+) -> Option<datamodel::Equation> {
+    let datamodel::Equation::Arrayed(dims, arms, default, applies) = equation else {
+        return None;
+    };
+    let axes: Vec<Vec<String>> = dims
+        .iter()
+        .map(|d| axis_keys(d, ctx))
+        .collect::<Option<_>>()?;
+    let default = default.as_ref().filter(|_| *applies);
+    let mut every: Vec<Vec<String>> = vec![Vec::new()];
+    for axis in &axes {
+        every = every
+            .iter()
+            .flat_map(|prefix| {
+                axis.iter().map(move |e| {
+                    let mut key = prefix.clone();
+                    key.push(e.clone());
+                    key
+                })
+            })
+            .collect();
+    }
+    let slots: Vec<Slot> = every
+        .into_iter()
+        .filter_map(|key| {
+            let own = arms.iter().find(|arm| key_parts(&arm.0) == key);
+            let (text, initial, table) = match own {
+                Some((_, text, initial, table)) => {
+                    let text = match default {
+                        Some(default) if table.is_some() && is_lookup_only_equation(text) => {
+                            default.clone()
+                        }
+                        _ => text.clone(),
+                    };
+                    (text, initial.clone(), table.clone())
+                }
+                None => (default?.clone(), None, None),
+            };
+            Some((
+                key.join(","),
+                text,
+                initial,
+                Some(table.unwrap_or_else(|| gf.clone())),
+            ))
+        })
+        .collect();
+    Some(datamodel::Equation::Arrayed(
+        dims.clone(),
+        slots,
+        None,
+        false,
+    ))
 }
 
 /// The keys of the elements of `axes` that no slot holds, which only the
