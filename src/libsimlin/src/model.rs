@@ -794,6 +794,105 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
     }
 }
 
+/// Writes a variable's equations as UTF-8 JSON to a buffer the caller frees
+/// with `simlin_free`: each text with its parse tree, and an arrayed
+/// variable as the equation every element follows plus one cell per
+/// element, in its dimensions' declared order (`engine::equation_view`).
+///
+/// ```json
+/// {"kind": "aux", "dimensions": [{"name": "Age", "elements": ["Young", "Adult"]}],
+///  "every": {"text": "c[Age - 1]", "tree": {...}},
+///  "cells": [{"element": ["Young"], "key": "young", "state": "own",
+///             "own": {"text": "inflow", "tree": {...}}},
+///            {"element": ["Adult"], "key": "adult", "state": "follows"}]}
+/// ```
+///
+/// A scalar has no dimensions and no cells, its equation being `every`. A
+/// stock's equation is its initial value. A cell's `state` is `own` (it has
+/// an equation, or a lookup, of its own), `follows` (it reads `every`) or
+/// `missing` (it has neither); its `key` is the canonical element key a
+/// diagnostic's `element_name` names. A tree node has a `kind` -- `number`,
+/// `ref` (with `ident`, `name` as the model spells the variable, `known`,
+/// and an `index` per subscript: `element`, `dimension`, `all`, `subrange`,
+/// `range`, `position` or `expr`), `dimension`, `op`, `unary`, `if`, `call`,
+/// or `group` where the grouping rule needs parentheses -- and a `span`.
+/// A text that does not parse has a null `tree` and an `error`.
+///
+/// Every span is a pair of UTF-8 BYTE offsets into its own `text`,
+/// `[start, end)`. A host whose strings are indexed in UTF-16 code units
+/// converts them; they differ wherever the text holds a character outside
+/// ASCII.
+///
+/// `DoesNotExist` when the model has no such variable. Reads the contents
+/// alone (the project's lock is held only to take them), so it waits for no
+/// compile.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `ident` must be a valid C string
+/// - `out_buffer` and `out_len` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_equation(
+    model: *mut SimlinModel,
+    ident: *const c_char,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+    if ident.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("ident pointer must not be NULL"),
+        );
+        return;
+    }
+    let model_ref = ffi_try!(out_error, require_model(model));
+    let Ok(ident) = CStr::from_ptr(ident).to_str() else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic).with_message("ident is not valid UTF-8"),
+        );
+        return;
+    };
+    let contents = (*model_ref.project).datamodel.lock().unwrap().shared();
+    let Some(view) =
+        engine::equation_view::variable_equation(&contents, &model_ref.model_name, ident)
+    else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                "model '{}' has no variable '{ident}'",
+                model_ref.model_name
+            )),
+        );
+        return;
+    };
+    let bytes = match serde_json::to_vec(&view) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to encode the equation: {err}")),
+            );
+            return;
+        }
+    };
+    write_bytes_to_ffi_output(&bytes, out_buffer, out_len, out_error, "the equation");
+}
+
 /// Gets a single variable from the model as tagged JSON.
 ///
 /// Returns JSON with a `"type"` discriminator (`"stock"`, `"flow"`, `"aux"`, `"module"`).

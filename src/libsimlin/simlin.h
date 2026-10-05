@@ -1334,6 +1334,49 @@ char *simlin_model_get_latex_equation(SimlinModel *model,
                                       const char *ident,
                                       SimlinError **out_error);
 
+// Writes a variable's equations as UTF-8 JSON to a buffer the caller frees
+// with `simlin_free`: each text with its parse tree, and an arrayed
+// variable as the equation every element follows plus one cell per
+// element, in its dimensions' declared order (`engine::equation_view`).
+//
+// ```json
+// {"kind": "aux", "dimensions": [{"name": "Age", "elements": ["Young", "Adult"]}],
+//  "every": {"text": "c[Age - 1]", "tree": {...}},
+//  "cells": [{"element": ["Young"], "key": "young", "state": "own",
+//             "own": {"text": "inflow", "tree": {...}}},
+//            {"element": ["Adult"], "key": "adult", "state": "follows"}]}
+// ```
+//
+// A scalar has no dimensions and no cells, its equation being `every`. A
+// stock's equation is its initial value. A cell's `state` is `own` (it has
+// an equation, or a lookup, of its own), `follows` (it reads `every`) or
+// `missing` (it has neither); its `key` is the canonical element key a
+// diagnostic's `element_name` names. A tree node has a `kind` -- `number`,
+// `ref` (with `ident`, `name` as the model spells the variable, `known`,
+// and an `index` per subscript: `element`, `dimension`, `all`, `subrange`,
+// `range`, `position` or `expr`), `dimension`, `op`, `unary`, `if`, `call`,
+// or `group` where the grouping rule needs parentheses -- and a `span`.
+// A text that does not parse has a null `tree` and an `error`.
+//
+// Every span is a pair of UTF-8 BYTE offsets into its own `text`,
+// `[start, end)`. A host whose strings are indexed in UTF-16 code units
+// converts them; they differ wherever the text holds a character outside
+// ASCII.
+//
+// `DoesNotExist` when the model has no such variable. Reads the contents
+// alone (the project's lock is held only to take them), so it waits for no
+// compile.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `ident` must be a valid C string
+// - `out_buffer` and `out_len` must be valid pointers
+void simlin_model_get_equation(SimlinModel *model,
+                               const char *ident,
+                               uint8_t **out_buffer,
+                               uintptr_t *out_len,
+                               SimlinError **out_error);
+
 // Gets a single variable from the model as tagged JSON.
 //
 // Returns JSON with a `"type"` discriminator (`"stock"`, `"flow"`, `"aux"`, `"module"`).

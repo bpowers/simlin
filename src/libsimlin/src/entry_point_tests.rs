@@ -988,6 +988,13 @@ unsafe fn run_model_links(call: &Call) -> String {
     format!("{:?} / {:?}", link_pairs(links), take_error(err))
 }
 
+unsafe fn run_equation(call: &Call) -> String {
+    let births = CString::new("births").unwrap();
+    buffer(call, |buf, len, err| {
+        simlin_model_get_equation(call.model, births.as_ptr(), buf, len, err)
+    })
+}
+
 unsafe fn run_latex_equation(call: &Call) -> String {
     let births = CString::new("births").unwrap();
     let mut err = ptr::null_mut();
@@ -1727,6 +1734,13 @@ pub(crate) const ALL: &[EntryPoint] = &[
         DB_ALONE,
         Writes::Nothing,
         run_latex_equation,
+    ),
+    row(
+        "simlin_model_get_equation",
+        "",
+        CONTENTS,
+        Writes::Nothing,
+        run_equation,
     ),
     row(
         "simlin_model_compile_to_wasm",

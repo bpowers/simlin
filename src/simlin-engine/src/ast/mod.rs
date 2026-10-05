@@ -476,7 +476,18 @@ pub(crate) fn paren_if_necessary(
     is_right_child: bool,
     eqn: String,
 ) -> String {
-    let needs = match parent {
+    if needs_parens(parent, child, is_right_child) {
+        format!("({eqn})")
+    } else {
+        eqn
+    }
+}
+
+/// Whether `child`, written under `parent` (on its right when
+/// `is_right_child`), needs parentheses: the grouping rule every printer
+/// applies, and what `equation_view` draws as a group.
+pub(crate) fn needs_parens(parent: NodeShape, child: NodeShape, is_right_child: bool) -> bool {
+    match parent {
         NodeShape::Atom | NodeShape::Call | NodeShape::If => false,
         NodeShape::Op1(UnaryOp::Transpose) => child != NodeShape::Atom,
         NodeShape::Op1(_) => matches!(child, NodeShape::Op2(_) | NodeShape::If),
@@ -490,8 +501,7 @@ pub(crate) fn paren_if_necessary(
             NodeShape::If => true,
             NodeShape::Atom | NodeShape::Call => false,
         },
-    };
-    if needs { format!("({eqn})") } else { eqn }
+    }
 }
 
 impl Expr0 {

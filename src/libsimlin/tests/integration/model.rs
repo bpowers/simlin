@@ -1329,3 +1329,50 @@ fn test_model_get_links_collapses_macro_internals() {
         simlin_project_unref(proj);
     }
 }
+
+unsafe fn equation_json(model: *mut SimlinModel, ident: &str) -> Result<Value, SimlinErrorCode> {
+    let ident = CString::new(ident).unwrap();
+    let (mut buf, mut len, mut err) = (ptr::null_mut(), 0, ptr::null_mut());
+    simlin_model_get_equation(model, ident.as_ptr(), &mut buf, &mut len, &mut err);
+    if !err.is_null() {
+        let code = simlin_error_get_code(err);
+        simlin_error_free(err);
+        return Err(code);
+    }
+    let value = serde_json::from_slice(std::slice::from_raw_parts(buf, len)).unwrap();
+    simlin_free(buf);
+    Ok(value)
+}
+
+/// A variable's equations reach a host as JSON: an arrayed variable as its
+/// top row and a cell per element, and a variable the model lacks as
+/// `DoesNotExist`.
+#[test]
+fn an_equation_is_read_as_its_tree_and_cells() {
+    let datamodel = TestProject::new("equations")
+        .named_dimension("Age", &["Young", "Old"])
+        .aux("inflow", "1", None)
+        .array_with_default_and_overrides("pop[Age]", "inflow * 2", vec![("Young", "inflow")])
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let mut err = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        expect_no_error(err, "getting the model");
+
+        let pop = equation_json(model, "pop").expect("pop's equations");
+        assert_eq!(pop["every"]["text"], "inflow * 2");
+        assert_eq!(pop["every"]["tree"]["kind"], "op");
+        assert_eq!(pop["cells"][0]["state"], "own");
+        assert_eq!(pop["cells"][0]["own"]["tree"]["kind"], "ref");
+        assert_eq!(pop["cells"][1]["state"], "follows");
+
+        assert_eq!(
+            equation_json(model, "nothing_here"),
+            Err(SimlinErrorCode::DoesNotExist)
+        );
+
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

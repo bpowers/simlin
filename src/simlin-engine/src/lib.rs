@@ -51,6 +51,7 @@ mod diagnostic;
 pub mod diagram;
 mod dimensions;
 pub mod editing;
+pub mod equation_view;
 pub mod errors;
 pub mod float;
 mod import_losses;
