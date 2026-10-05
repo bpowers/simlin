@@ -368,11 +368,36 @@ pub(crate) fn model_cycle_diagnostics(db: &dyn Db, model: SourceModel, project: 
             .collect();
         let var = path.first().copied().unwrap_or(cycle.variable.as_str());
         let path = path.join(" → ");
-        let reason = if cycle.initial {
+        let mut reason = if cycle.initial {
             format!("the initial value of '{var}' depends on itself: {path}")
         } else {
             format!("'{var}' depends on itself: {path}")
         };
+        // A recurrence whose elements read one another through an index the
+        // model computes as it runs may be no circle at all, element by
+        // element; it is refused because no order can be fixed before the
+        // run, and the index is what the modeller can change.
+        let members: std::collections::BTreeSet<crate::common::Ident<crate::common::Canonical>> =
+            cycle
+                .path
+                .iter()
+                .map(|name| crate::common::Ident::new(name))
+                .collect();
+        let phase = if cycle.initial {
+            crate::db::SccPhase::Initial
+        } else {
+            crate::db::SccPhase::Dt
+        };
+        if let Some((reader, read)) =
+            crate::db::dep_graph::computed_index_read(db, model, project, &members, phase)
+        {
+            reason.push_str(&format!(
+                "; '{reader}' reads '{read}' at an element computed as the model runs, \
+                 so its elements cannot be put in an order before the run, as they \
+                 can where the index is fixed at each element (an element, or an \
+                 offset of the dimension)"
+            ));
+        }
         Diagnostic {
             model: model.name(db).clone(),
             variable: Some(var.to_string()),

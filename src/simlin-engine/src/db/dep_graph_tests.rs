@@ -3712,6 +3712,63 @@ fn an_offset_mapped_over_by_vector_elm_map_reads_on_along_the_variable() {
     }
 }
 
+/// A recurrence through an index the model computes as it runs
+/// (`x[T] = y[idx[T]] + 1`, `y[T] = x[T] * 2`) cannot be ordered element by
+/// element before the run: the element read is whatever `idx` holds. It is
+/// refused as a cycle, never run in an order that reads a value from the step
+/// before, and the refusal says the computed index is why -- element by
+/// element there may be no circle at all, as there is none here. The computed
+/// load named only `y`'s first element to the element graph, which then
+/// ordered `x[t3]` before `y[t2]`: `x[t3]` was 1 where the recurrence it
+/// states gives 7, with no diagnostic. A recurrence of one variable through
+/// its own computed index (`x[idx[T]]`) is refused the same way; one whose
+/// index is fixed at each element runs (`a_recurrence_through_an_offset_is_ordered_by_element`).
+#[test]
+fn a_recurrence_through_a_computed_index_is_refused_not_misordered() {
+    let refusal = |project: &TestProject, expected: &str| match project.run_vm() {
+        Ok(results) => assert_eq!(
+            results["x[t3]"],
+            vec![expected.parse::<f64>().unwrap(); 2],
+            "a run must compute the recurrence it states"
+        ),
+        Err(_) => {
+            let datamodel = project.build_datamodel();
+            let db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &datamodel);
+            let diags =
+                crate::db::collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
+            let reason = diags
+                .iter()
+                .find_map(|d| match &d.error {
+                    crate::db::DiagnosticError::Model(e)
+                        if e.code == crate::common::ErrorCode::CircularDependency =>
+                    {
+                        e.details.clone()
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("refused as a cycle: {diags:?}"));
+            assert!(
+                reason.contains("at an element computed as the model runs"),
+                "the refusal names the computed index: {reason}"
+            );
+        }
+    };
+    let two = TestProject::new("computed_recurrence")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("T", &["t1", "t2", "t3"])
+        .array_aux("idx[T]", "T - 1")
+        .array_aux("x[T]", "IF T = 1 THEN 1 ELSE y[idx[T]] + 1")
+        .array_aux("y[T]", "x[T] * 2");
+    refusal(&two, "7");
+    let one = TestProject::new("computed_self_recurrence")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("T", &["t1", "t2", "t3"])
+        .array_aux("idx[T]", "T - 1")
+        .array_aux("x[T]", "IF T = 1 THEN 1 ELSE x[idx[T]] + 1");
+    refusal(&one, "3");
+}
+
 /// A member prologue that reads an SCC member is an edge into EVERY element
 /// of that member, so a recurrence whose HOISTED operand reads the recurrence
 /// itself is refused.

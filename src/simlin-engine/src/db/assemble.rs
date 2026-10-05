@@ -1133,10 +1133,20 @@ pub(crate) fn combine_scc_fragment(
                 if !scc.members.contains(name) {
                     continue;
                 }
-                let read_at = scc
-                    .element_order
-                    .iter()
-                    .position(|(m, e)| m == name && e == elem);
+                // A read computed as the model runs can be any element of the
+                // member, so every one of them must come first.
+                let read_at = if *elem == crate::db::dep_graph::ANY_ELEMENT {
+                    scc.element_order
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (m, _))| m == name)
+                        .map(|(at, _)| at)
+                        .max()
+                } else {
+                    scc.element_order
+                        .iter()
+                        .position(|(m, e)| m == name && e == elem)
+                };
                 if read_at.is_none_or(|at| at >= first_reader) {
                     return Err(format!(
                         "SCC member `{}`'s prologue reads `{}`[{}], which element_order does not evaluate before the prologue's first reader; keeping CircularDependency",
