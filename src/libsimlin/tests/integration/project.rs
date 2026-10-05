@@ -2456,3 +2456,66 @@ fn the_simulation_key_refuses_null_pointers() {
         simlin_project_unref(proj);
     }
 }
+
+unsafe fn dimensions_json(proj: *mut SimlinProject) -> serde_json::Value {
+    let (mut buf, mut len, mut err) = (ptr::null_mut(), 0, ptr::null_mut());
+    simlin_project_get_dimensions(proj, &mut buf, &mut len, &mut err);
+    expect_no_error(err, "reading the dimensions");
+    let value = serde_json::from_slice(std::slice::from_raw_parts(buf, len)).unwrap();
+    simlin_free(buf);
+    value
+}
+
+/// The dimensions come back in declaration order, each in the native
+/// project JSON's shape: named elements in their declared order (not
+/// sorted), a size, a subdimension's parent, and both kinds of mapping.
+#[test]
+fn the_dimensions_are_read_in_the_project_jsons_shape() {
+    let datamodel = TestProject::new("dims")
+        .named_dimension("Layers", &["layer1", "layer10", "layer2"])
+        .indexed_dimension("Slots", 4)
+        .indexed_subdimension("Front", 2, "Slots")
+        .named_dimension_with_mapping("Younger", &["Young", "Adult"], "Older")
+        .named_dimension("Older", &["Adult", "Old"])
+        .named_dimension_with_element_mapping(
+            "Region",
+            &["North", "South"],
+            "Zone",
+            &[("North", "Z2"), ("South", "Z1")],
+        )
+        .named_dimension("Zone", &["Z1", "Z2"])
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        assert_eq!(
+            dimensions_json(proj),
+            serde_json::json!([
+                {"name": "Layers", "elements": ["layer1", "layer10", "layer2"]},
+                {"name": "Slots", "size": 4},
+                {"name": "Front", "size": 2, "parent": "Slots"},
+                {"name": "Younger", "elements": ["Young", "Adult"], "mapsTo": "Older"},
+                {"name": "Older", "elements": ["Adult", "Old"]},
+                {"name": "Region", "elements": ["North", "South"], "mappings": [
+                    {"target": "Zone", "elementMap": [
+                        {"source": "North", "target": "Z2"},
+                        {"source": "South", "target": "Z1"}
+                    ]}
+                ]},
+                {"name": "Zone", "elements": ["Z1", "Z2"]}
+            ])
+        );
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let mut len = 0;
+        simlin_project_get_dimensions(proj, ptr::null_mut(), &mut len, &mut err);
+        expect_error_code(err, SimlinErrorCode::Generic, "a NULL out_buffer");
+        simlin_project_unref(proj);
+
+        let datamodel = TestProject::new("none")
+            .aux("x", "1", None)
+            .build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+        assert_eq!(dimensions_json(proj), serde_json::json!([]));
+        simlin_project_unref(proj);
+    }
+}

@@ -367,6 +367,74 @@ pub unsafe extern "C" fn simlin_project_get_simulation_key(
     *out_key = engine::db::simulation_key(&contents);
 }
 
+/// Writes the project's dimensions as UTF-8 JSON to a buffer the caller frees
+/// with `simlin_free`: an array in declaration order, each dimension in the
+/// shape the native project JSON gives it --
+/// `{"name", "elements": [...]}` for named elements in their declared order,
+/// `{"name", "size": n}` for an indexed dimension, with `"parent"` for an
+/// indexed subdimension, `"mapsTo"` for a positional mapping and
+/// `"mappings": [{"target", "elementMap": [{"source", "target"}]}]` for the
+/// rest. Names are spelled as the model writes them. A host reads here the
+/// dimensions it lists and the order of an arrayed variable's elements,
+/// without serializing the whole project.
+///
+/// The project's lock is held only to take the contents.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `out_buffer` and `out_len` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_get_dimensions(
+    project: *mut SimlinProject,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let project_ref = ffi_try!(out_error, require_project(project));
+    let contents = project_ref.datamodel.lock().unwrap().shared();
+    let dimensions: Vec<engine::json::Dimension> = contents
+        .dimensions
+        .iter()
+        .cloned()
+        .map(engine::json::Dimension::from)
+        .collect();
+    let bytes = match serde_json::to_vec(&dimensions) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to encode the dimensions: {err}")),
+            );
+            return;
+        }
+    };
+    let buf = crate::memory::simlin_malloc(bytes.len());
+    if buf.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("allocation failed while writing the dimensions"),
+        );
+        return;
+    }
+    ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+    *out_buffer = buf;
+    *out_len = bytes.len();
+}
+
 /// Gets the list of model names in the project
 ///
 /// # Safety

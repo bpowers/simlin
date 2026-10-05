@@ -1545,6 +1545,27 @@ void simlin_project_get_simulation_key(SimlinProject *project,
                                        uint64_t *out_key,
                                        SimlinError **out_error);
 
+// Writes the project's dimensions as UTF-8 JSON to a buffer the caller frees
+// with `simlin_free`: an array in declaration order, each dimension in the
+// shape the native project JSON gives it --
+// `{"name", "elements": [...]}` for named elements in their declared order,
+// `{"name", "size": n}` for an indexed dimension, with `"parent"` for an
+// indexed subdimension, `"mapsTo"` for a positional mapping and
+// `"mappings": [{"target", "elementMap": [{"source", "target"}]}]` for the
+// rest. Names are spelled as the model writes them. A host reads here the
+// dimensions it lists and the order of an arrayed variable's elements,
+// without serializing the whole project.
+//
+// The project's lock is held only to take the contents.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `out_buffer` and `out_len` must be valid pointers
+void simlin_project_get_dimensions(SimlinProject *project,
+                                   uint8_t **out_buffer,
+                                   uintptr_t *out_len,
+                                   SimlinError **out_error);
+
 // Gets the list of model names in the project
 //
 // # Safety
