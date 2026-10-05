@@ -28,7 +28,8 @@
 //! `(x*2)*3` is left alone -- f64 multiplication is non-associative, so
 //! reassociation would change bits.
 
-use crate::ast::BinaryOp;
+use crate::ast::{ArrayView, BinaryOp};
+use crate::builtins::ArgKind;
 use crate::bytecode::Op2;
 use crate::vm::{eval_op2, is_truthy};
 
@@ -68,6 +69,69 @@ fn eval_const_binary_op(op: BinaryOp, l: f64, r: f64) -> Option<f64> {
     Some(result)
 }
 
+/// The element a subscript whose every index is a constant reads, by the
+/// VM's own test (`Opcode::PushSubscriptIndex`: floored, narrowed to `u16`,
+/// 1-based) and layout (`Opcode::LoadSubscript`: row-major over `bounds`),
+/// or `None` when an index is computed as the model runs or reads no element.
+///
+/// An offset in an equation for every element (`c[Age - 1]`) is such a
+/// subscript once lowering has given the dimension its element's position,
+/// and reading the element directly is what lets the dependency graph order
+/// it: a computed load names only the variable's first element there
+/// (`db::dep_graph::ordering_reads`), which orders a recurrence through it
+/// wrongly. A read of no element stays a subscript, which reads not a number
+/// and is what `compiler::out_of_range_reads` reports.
+fn constant_element(indices: &[SubscriptIndex], bounds: &[usize]) -> Option<usize> {
+    if indices.len() != bounds.len() {
+        return None;
+    }
+    let mut element = 0usize;
+    for (index, bound) in indices.iter().zip(bounds) {
+        let SubscriptIndex::Single(Expr::Const(value, _)) = index else {
+            return None;
+        };
+        let index = value.floor() as u16;
+        if index == 0 || index as usize > *bound {
+            return None;
+        }
+        element = element * bound + (index as usize - 1);
+    }
+    Some(element)
+}
+
+/// [`fold_constants`] for an operand an array-producing builtin reads in whole
+/// from where it starts (`VECTOR ELM MAP(arr[T - 1], ..)`): a subscript that
+/// comes to one element is read as that element of the whole variable, as a
+/// literal element is lowered there (`Context::collapsed_element_read`), so
+/// the builtin still sees the variable's full extent
+/// (`codegen::full_source_len`) rather than one element of it.
+fn fold_whole_operand(expr: Expr) -> Expr {
+    let Expr::Subscript(off, indices, bounds, loc) = expr else {
+        return fold_constants(expr);
+    };
+    let indices = fold_indices(indices);
+    match constant_element(&indices, &bounds) {
+        Some(element) => {
+            let mut view = ArrayView::contiguous(vec![]);
+            view.offset = element;
+            Expr::StaticSubscript(off, view, loc)
+        }
+        None => Expr::Subscript(off, indices, bounds, loc),
+    }
+}
+
+fn fold_indices(indices: Vec<SubscriptIndex>) -> Vec<SubscriptIndex> {
+    indices
+        .into_iter()
+        .map(|idx| match idx {
+            SubscriptIndex::Single(e) => SubscriptIndex::Single(fold_constants(e)),
+            SubscriptIndex::Range(s, e) => {
+                SubscriptIndex::Range(fold_constants(s), fold_constants(e))
+            }
+        })
+        .collect()
+}
+
 /// Recursively fold constant subtrees in a lowered expression.
 ///
 /// Children are always folded first; a node folds itself only when every
@@ -84,23 +148,24 @@ pub(crate) fn fold_constants(expr: Expr) -> Expr {
         | Expr::Dt(..)
         | Expr::ModuleInput(..) => expr,
         Expr::Subscript(off, indices, bounds, loc) => {
-            let indices = indices
-                .into_iter()
-                .map(|idx| match idx {
-                    SubscriptIndex::Single(e) => SubscriptIndex::Single(fold_constants(e)),
-                    SubscriptIndex::Range(s, e) => {
-                        SubscriptIndex::Range(fold_constants(s), fold_constants(e))
-                    }
-                })
-                .collect();
-            Expr::Subscript(off, indices, bounds, loc)
+            let indices = fold_indices(indices);
+            match constant_element(&indices, &bounds) {
+                Some(element) => Expr::Var(off.offset_by(element), loc),
+                None => Expr::Subscript(off, indices, bounds, loc),
+            }
         }
         Expr::App(builtin, loc) => {
             // Fold within arguments; the builtin application itself is left
             // for runtime (transcendentals are platform libm, and the cheap
             // exact ones -- ABS/INT/MIN/MAX -- are not worth a special case
             // until measurement says otherwise).
-            Expr::App(builtin.map(fold_constants), loc)
+            Expr::App(
+                builtin.map_with_kinds(|arg, kind| match kind {
+                    ArgKind::Array { whole: true } => fold_whole_operand(arg),
+                    _ => fold_constants(arg),
+                }),
+                loc,
+            )
         }
         Expr::EvalModule(ident, model_name, input_set, args) => {
             let args = args.into_iter().map(fold_constants).collect();
@@ -181,6 +246,38 @@ mod tests {
             }
             other => panic!("expected Const, got {:?}", std::mem::discriminant(&other)),
         }
+    }
+
+    fn subscript(indices: Vec<Expr>, bounds: Vec<usize>) -> Expr {
+        Expr::Subscript(
+            vref(0),
+            indices.into_iter().map(SubscriptIndex::Single).collect(),
+            bounds,
+            Loc::default(),
+        )
+    }
+
+    /// A subscript whose every index folds to a constant reads that element
+    /// directly, by the VM's index rule: floored, 1-based, row-major. One
+    /// that comes to no element, or that the model computes, stays a
+    /// subscript.
+    #[test]
+    fn a_constant_subscript_reads_its_element() {
+        let at = |expr: Expr| match fold_constants(expr) {
+            Expr::Var(var, _) => Some(var.element_offset),
+            Expr::Subscript(..) => None,
+            _ => panic!("a subscript folds to a read or stays one"),
+        };
+        // `c[3 - 1]` over three elements.
+        assert_eq!(
+            at(subscript(vec![op2(BinaryOp::Sub, c(3.0), c(1.0))], vec![3])),
+            Some(1)
+        );
+        assert_eq!(at(subscript(vec![c(2.0), c(3.9)], vec![2, 3])), Some(5));
+        assert_eq!(at(subscript(vec![c(0.0)], vec![3])), None);
+        assert_eq!(at(subscript(vec![c(4.0)], vec![3])), None);
+        assert_eq!(at(subscript(vec![c(f64::NAN)], vec![3])), None);
+        assert_eq!(at(subscript(vec![var(1)], vec![3])), None);
     }
 
     #[test]
