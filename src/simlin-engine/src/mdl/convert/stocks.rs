@@ -1440,7 +1440,7 @@ stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
         let Variable::Flow(f) = net_flow else {
             panic!("expected the synthetic net-flow to be a Flow");
         };
-        let Equation::Arrayed(_dims, elements, _, _) = &f.equation else {
+        let Equation::Arrayed(_dims, elements, default, _) = &f.equation else {
             panic!(
                 "expected an Arrayed synthetic net-flow equation, got {:?}",
                 f.equation
@@ -1449,10 +1449,14 @@ stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
 
         // The raw rate carried unresolved subrange dimension names
         // (`upper`/`lower`). Per-element resolution must replace them with
-        // concrete elements -- NO element rate may still contain the
-        // subrange tokens (pre-fix every `upper` slot is the verbatim
-        // `dflux[scenario, upper] - dflux[scenario, lower]`).
-        for (key, rate, _, _) in elements {
+        // concrete elements -- NO rate may still contain the subrange tokens
+        // (pre-fix every `upper` slot is the verbatim `dflux[scenario, upper]
+        // - dflux[scenario, lower]`).
+        let rates = elements
+            .iter()
+            .map(|(key, rate, _, _)| (key.as_str(), rate.as_str()))
+            .chain(default.iter().map(|rate| ("the default", rate.as_str())));
+        for (key, rate) in rates {
             for tok in ["upper", "lower"] {
                 assert!(
                     !rate
@@ -1464,19 +1468,16 @@ stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
                 );
             }
         }
-        // Per-element resolution makes the three `upper`-subrange elements
-        // (s1,L1/L2/L3, keyed canonically) distinct.
-        let upper_rates: Vec<&String> = elements
-            .iter()
-            .filter(|(k, _, _, _)| matches!(k.as_str(), "s1,l1" | "s1,l2" | "s1,l3"))
-            .map(|(_, r, _, _)| r)
-            .collect();
-        assert_eq!(upper_rates.len(), 3, "expected 3 s1 upper-subrange slots");
-        assert!(
-            upper_rates[0] != upper_rates[1] && upper_rates[1] != upper_rates[2],
-            "the `upper`-subrange element rates must be per-element \
-             distinct after resolution, got {upper_rates:?}"
+        // Per-element resolution makes each `upper`-subrange element read the
+        // layer below its own, so the three say one thing as an offset
+        // (`element_equations`), and the bottom layer, which reads its own
+        // flux, keeps an equation of its own.
+        assert_eq!(
+            default.as_deref(),
+            Some("dflux[scenario, layers] - dflux[scenario, layers + 1]")
         );
+        let own: Vec<&str> = elements.iter().map(|(k, ..)| k.as_str()).collect();
+        assert_eq!(own, ["s1,l4", "s2,l4"]);
     }
 
     /// Issue #908: a stock defined PIECEWISE over subranges of a parent

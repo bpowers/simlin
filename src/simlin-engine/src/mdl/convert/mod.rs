@@ -117,6 +117,9 @@ pub struct ConversionContext<'input> {
     /// Whether to find what the file holds that the project does not keep.
     /// Only a caller that asks for the losses pays to find them.
     report_losses: bool,
+    /// Whether the last pass keeps one equation where a variable's elements
+    /// say one thing (`element_equations`); off only to compare against.
+    compact_elements: bool,
     /// The control variables whose equations are not constants, so the sim
     /// specs hold their defaults (`control::read_controls`).
     unread_controls: Vec<control::Control>,
@@ -214,6 +217,7 @@ impl<'input> ConversionContext<'input> {
             file_aliases,
             post_equations: "",
             report_losses: false,
+            compact_elements: true,
             unread_controls: Vec::new(),
         }
     }
@@ -314,10 +318,13 @@ impl<'input> ConversionContext<'input> {
 
         // Pass 7: Build the final project (the "main" model) and attach the
         // macro-marked models alongside it.
+        let self_compact = self.compact_elements;
         let (mut project, losses) = self.build_project(&materialization)?;
         // Pass 8: Where the file wrote a variable out once per element and
         // its elements say one thing, keep that one equation.
-        crate::element_equations::compact_element_equations(&mut project);
+        if self_compact {
+            crate::element_equations::compact_element_equations(&mut project);
+        }
         project.models.extend(macro_models);
         Ok((project, losses))
     }
@@ -473,6 +480,15 @@ pub fn convert_mdl_with_data(
     data_provider: Option<&dyn crate::data_provider::DataProvider>,
 ) -> Result<Project, ConvertError> {
     let ctx = ConversionContext::new_with_data(source, data_provider)?;
+    ctx.convert().map(|(project, _)| project)
+}
+
+/// The project an MDL file opens as with every variable the reader writes out
+/// once per element left so: what the compaction pass is compared against.
+#[cfg(test)]
+pub(crate) fn convert_mdl_per_element(source: &str) -> Result<Project, ConvertError> {
+    let mut ctx = ConversionContext::new_with_data(source, None)?;
+    ctx.compact_elements = false;
     ctx.convert().map(|(project, _)| project)
 }
 

@@ -98,18 +98,70 @@ fn what_cannot_be_read_as_one_equation_stays_per_element() {
 }
 
 #[test]
-fn an_element_a_fixed_number_of_places_along_is_kept_as_written() {
-    // Read as "this element", each older cohort reads the one before it, an
-    // offset; the compaction stores no offset (the module docs), so the
-    // elements keep their equations, and the run is Vensim's.
+fn an_element_a_fixed_number_of_places_along_reads_an_offset() {
+    // Read as "this element", each older cohort reads the one before it: an
+    // offset, with the youngest, which has none before it, as an exception.
     let project = open(&format!(
         "{AGES}d[young] = 0 ~~|\nd[adult] = c[young] ~~|\nd[old] = c[adult] ~~|\n"
     ));
-    assert!(matches!(
-        equation(&project, "d"),
-        Equation::Arrayed(_, _, None, false)
-    ));
+    let Equation::Arrayed(_, arms, Some(default), true) = equation(&project, "d") else {
+        panic!("a default and an exception: {:?}", equation(&project, "d"));
+    };
+    assert_eq!(default, "c[Age - 1]");
+    let arms: Vec<(&str, &str)> = arms.iter().map(|a| (a.0.as_str(), a.1.as_str())).collect();
+    assert_eq!(arms, [("young", "0")]);
     assert_eq!(run(&project)["d[old]"], vec![20.0, 20.0, 20.0]);
+}
+
+/// An equation for every element that names a fixed element of its own
+/// dimension (`c[young]`, a base it normalizes by) is found in the copies,
+/// though read at each element the copies differ (`c[Age - 1]` at `adult`):
+/// the equation written out at each element is that element's copy. Saved as
+/// MDL and opened, it is the same equation.
+#[test]
+fn an_equation_naming_a_fixed_element_opens_as_one_equation() {
+    let project = open(&format!(
+        "{AGES}d[young] = c[young] / c[young] ~~|\nd[adult] = c[adult] / c[young] ~~|\n\
+         d[old] = 0 ~~|\n"
+    ));
+    let Equation::Arrayed(_, arms, Some(default), true) = equation(&project, "d") else {
+        panic!("a default and an exception: {:?}", equation(&project, "d"));
+    };
+    assert_eq!(default, "c[Age] / c[young]");
+    let arms: Vec<(&str, &str)> = arms.iter().map(|a| (a.0.as_str(), a.1.as_str())).collect();
+    assert_eq!(arms, [("old", "0")]);
+
+    let built = TestProject::new("fixed")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Age", &["young", "adult", "old"])
+        .array_with_ranges(
+            "c[Age]",
+            vec![("young", "10"), ("adult", "20"), ("old", "30")],
+        )
+        .array_with_default_and_overrides("d[Age]", "c[Age] / c[young]", vec![("old", "0")])
+        .build_datamodel();
+    let save = crate::mdl::project_to_mdl(&built).expect("the model writes");
+    let back = crate::open_vensim(&save).expect("the save opens");
+    assert_eq!(equation(&back, "d"), equation(&built, "d"));
+    assert!(
+        crate::save_check::check_save(&built, crate::save_check::SaveFormat::Mdl)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// An element read in whole by an array-producing builtin, opened as an
+/// offset, computes what the file's elements did.
+#[test]
+fn an_offset_opened_under_vector_elm_map_keeps_its_numbers() {
+    let project = open(
+        "T: t1, t2, t3 ~~|\narr[T] = 10, 20, 30 ~~|\noff[T] = 0, 1, 1 ~~|\nv[t1] = 0 ~~|\n\
+         v[t2] = VECTOR ELM MAP(arr[t1], off[t2]) ~~|\n\
+         v[t3] = VECTOR ELM MAP(arr[t2], off[t3]) ~~|\n",
+    );
+    let results = run(&project);
+    assert_eq!(results["v[t2]"][0], 20.0);
+    assert_eq!(results["v[t3]"][0], 30.0);
 }
 
 /// The save check reads each element's equation at its element, so an
@@ -136,4 +188,96 @@ fn an_element_equation_is_compared_at_its_element() {
         Some("c[Age - 1] * 2")
     );
     assert_eq!(reader.read("c[Age] * 2", &dims, "adult"), None);
+}
+
+/// Every MDL file of the corpus scores the same loops, with the same loop
+/// scores, the same loops found by the model's analysis and the same LTM
+/// diagnostics, opened with the compaction as opened with each variable left
+/// as the reader writes it out: a variable kept as one equation is the same
+/// model to loop analysis as it is to the run. Every file that runs under
+/// loop analysis is compared, those the compaction leaves as they were
+/// included, and the floors keep the comparison from passing on a corpus
+/// that has lost its loops.
+#[test]
+#[ignore = "runs loop analysis on every MDL file of the corpus twice; run under the gates profile"]
+fn the_corpus_scores_the_same_loops_compacted_or_not() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test");
+    let mut files = Vec::new();
+    let mut dirs = vec![root];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("mdl"))
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    // Files compared, those with a compacted variable, and the loops scored
+    // or found in each set.
+    let (mut compared, mut compacted, mut loops, mut compacted_loops) = (0, 0, 0, 0);
+    let mut differ = Vec::new();
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let (Ok(per_element), Ok(opened)) = (
+            crate::mdl::parse_mdl_per_element(&text),
+            crate::open_vensim(&text),
+        ) else {
+            continue;
+        };
+        let changed = per_element != opened;
+        let (before, after) = (
+            crate::ltm_loop_scores_test_support::loop_scores(&per_element),
+            crate::ltm_loop_scores_test_support::loop_scores(&opened),
+        );
+        match (&before, &after) {
+            (Ok(b), Ok(a)) => {
+                compared += 1;
+                let found = b.loops.len().max(b.discovered.len());
+                loops += found;
+                if changed {
+                    compacted += 1;
+                    compacted_loops += found;
+                }
+                if a != b {
+                    differ.push(format!(
+                        "{}: {} loops scored, {} compacted; {} loops found, {}; diagnostics {} then {}",
+                        path.display(),
+                        b.loops.len(),
+                        a.loops.len(),
+                        b.discovered.len(),
+                        a.discovered.len(),
+                        b.diagnostics.len(),
+                        a.diagnostics.len()
+                    ));
+                }
+            }
+            (Err(b), Err(a)) if a == b => {}
+            _ => differ.push(format!("{}: {before:?} then {after:?}", path.display())),
+        }
+    }
+    println!(
+        "{compared} files run with loop analysis, with {loops} loops; {compacted} of them hold a \
+         compacted variable, with {compacted_loops} loops"
+    );
+    assert!(compared >= 190, "files compared: {compared}");
+    assert!(loops >= 450, "loops compared: {loops}");
+    assert!(
+        compacted >= 15,
+        "files with a compacted variable: {compacted}"
+    );
+    assert!(
+        compacted_loops >= 150,
+        "loops of files with a compacted variable: {compacted_loops}"
+    );
+    assert_eq!(differ, Vec::<String>::new());
 }
