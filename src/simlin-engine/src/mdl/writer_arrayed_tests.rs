@@ -375,6 +375,73 @@ fn an_elements_table_under_an_except_default_reads_the_default() {
     assert_eq!(changes, Vec::<String>::new(), "{save}");
 }
 
+fn run_project(project: &datamodel::Project) -> std::collections::HashMap<String, Vec<f64>> {
+    crate::test_common::TestProject::from_datamodel(project.clone())
+        .run_vm()
+        .expect("the model runs")
+}
+
+/// An equation for every element that reads an element a fixed number of
+/// places along is written to MDL once per element, each computed index the
+/// element it comes to, and one that comes to no element `NaN`; the save reads
+/// back as the same model and runs the same.
+#[test]
+fn an_offset_is_saved_to_mdl_as_each_elements_own_equation() {
+    let project = crate::test_common::TestProject::new("offsets")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("Age", &["young", "adult", "old"])
+        .array_with_ranges(
+            "c[Age]",
+            vec![("young", "10"), ("adult", "20"), ("old", "30")],
+        )
+        .array_aux("d[Age]", "c[Age - 1] + c[Age]")
+        .array_with_default_and_overrides("e[Age]", "c[Age + 1]", vec![("old", "0")])
+        .build_datamodel();
+    let save = crate::mdl::project_to_mdl(&project)
+        .expect("the model writes")
+        .replace("\r\n", "\n");
+    assert!(
+        !save.contains("Age - 1") && !save.contains("Age + 1"),
+        "{save}"
+    );
+    assert!(save.contains("d[adult]"), "{save}");
+    assert!(save.contains("NaN"), "{save}");
+    let back = crate::open_vensim(&save).expect("the save reads");
+    assert_eq!(
+        crate::mdl::subscript_rule::ranges_not_on_the_left(&save, &back),
+        Vec::<String>::new()
+    );
+    let (was, is) = (run_project(&project), run_project(&back));
+    for key in ["d[young]", "d[adult]", "d[old]", "e[young]", "e[old]"] {
+        let (a, b) = (&was[key], &is[key]);
+        assert!(
+            a.iter()
+                .zip(b)
+                .all(|(a, b)| a == b || (a.is_nan() && b.is_nan())),
+            "{key}: {a:?} then {b:?}"
+        );
+    }
+    // What the save changes is how the model is written, never what it
+    // computes: the element that reads no element is written `NaN`, and the
+    // equation the elements followed is written into each of them.
+    let changes = check_save(&project, SaveFormat::Mdl).expect("the check runs");
+    assert!(
+        changes
+            .iter()
+            .all(|c| c.kind == crate::save_check::ChangeKind::Structure),
+        "{:?}",
+        changes.iter().map(|c| &c.reason).collect::<Vec<_>>()
+    );
+    let (_, warnings) = crate::mdl::project_to_mdl_with_warnings(&project).expect("writes");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.message.contains("'d'") && w.message.contains("at young")),
+        "{:?}",
+        warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
 fn table() -> datamodel::GraphicalFunction {
     datamodel::GraphicalFunction {
         kind: datamodel::GraphicalFunctionKind::Continuous,
@@ -424,6 +491,28 @@ fn ages_with(equation: Equation, gf: Option<datamodel::GraphicalFunction>) -> da
             compat: datamodel::Compat::default(),
         }));
     project
+}
+
+#[test]
+fn an_elements_table_under_an_offset_default_reads_the_default_at_the_element() {
+    // The default reads an offset, so the elements are written out one by
+    // one; the element with a table and no equation is still the default --
+    // at that element -- through its table.
+    let project = ages_with(
+        Equation::Arrayed(
+            vec!["Age".to_string()],
+            vec![
+                ("young".to_string(), "5".to_string(), None, None),
+                ("old".to_string(), String::new(), None, Some(table())),
+            ],
+            Some("c[Age - 1]".to_string()),
+            true,
+        ),
+        None,
+    );
+    assert_eq!(computed_changes(&project), Vec::<String>::new());
+    let save = project_to_mdl(&project).expect("the model writes");
+    assert!(save.contains("WITH LOOKUP"), "{save}");
 }
 
 #[test]

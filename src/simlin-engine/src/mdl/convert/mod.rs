@@ -315,6 +315,9 @@ impl<'input> ConversionContext<'input> {
         // Pass 7: Build the final project (the "main" model) and attach the
         // macro-marked models alongside it.
         let (mut project, losses) = self.build_project(&materialization)?;
+        // Pass 8: Where the file wrote a variable out once per element and
+        // its elements say one thing, keep that one equation.
+        crate::element_equations::compact_element_equations(&mut project);
         project.models.extend(macro_models);
         Ok((project, losses))
     }

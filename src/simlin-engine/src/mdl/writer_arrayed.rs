@@ -193,71 +193,6 @@ fn take_the_default_as_input(slots: &mut [Slot], default: &str) -> Vec<String> {
     taken
 }
 
-/// An arrayed `equation` of a variable with a table of its own (`gf`), as the
-/// equations of its elements, each through its own table or else the
-/// variable's: MDL gives a table to an element's equation (`WITH LOOKUP`), not
-/// to a variable whose elements have equations of their own, so the
-/// variable's table is written into every element that reads through it.
-/// `None` for an equation that is not arrayed, or whose dimensions' elements
-/// are unknown.
-pub(super) fn with_the_variables_table(
-    equation: &datamodel::Equation,
-    gf: &GraphicalFunction,
-    ctx: &WriterContext,
-) -> Option<datamodel::Equation> {
-    let datamodel::Equation::Arrayed(dims, arms, default, applies) = equation else {
-        return None;
-    };
-    let axes: Vec<Vec<String>> = dims
-        .iter()
-        .map(|d| axis_keys(d, ctx))
-        .collect::<Option<_>>()?;
-    let default = default.as_ref().filter(|_| *applies);
-    let mut every: Vec<Vec<String>> = vec![Vec::new()];
-    for axis in &axes {
-        every = every
-            .iter()
-            .flat_map(|prefix| {
-                axis.iter().map(move |e| {
-                    let mut key = prefix.clone();
-                    key.push(e.clone());
-                    key
-                })
-            })
-            .collect();
-    }
-    let slots: Vec<Slot> = every
-        .into_iter()
-        .filter_map(|key| {
-            let own = arms.iter().find(|arm| key_parts(&arm.0) == key);
-            let (text, initial, table) = match own {
-                Some((_, text, initial, table)) => {
-                    let text = match default {
-                        Some(default) if table.is_some() && is_lookup_only_equation(text) => {
-                            default.clone()
-                        }
-                        _ => text.clone(),
-                    };
-                    (text, initial.clone(), table.clone())
-                }
-                None => (default?.clone(), None, None),
-            };
-            Some((
-                key.join(","),
-                text,
-                initial,
-                Some(table.unwrap_or_else(|| gf.clone())),
-            ))
-        })
-        .collect();
-    Some(datamodel::Equation::Arrayed(
-        dims.clone(),
-        slots,
-        None,
-        false,
-    ))
-}
-
 /// The keys of the elements of `axes` that no slot holds, which only the
 /// `:EXCEPT:` default defines; none when an axis's elements are unknown.
 fn undefined_elements(slots: &[Slot], axes: Option<&[Vec<String>]>) -> (Vec<String>, usize) {
@@ -1035,3 +970,398 @@ fn lhs_groups<'a>(
 #[cfg(test)]
 #[path = "writer_arrayed_tests.rs"]
 mod tests;
+
+/// `equation` written out once per element where Vensim cannot read it as
+/// it is, or `None` where it can.
+///
+/// Vensim has no arithmetic inside a subscript's brackets, so an equation
+/// for every element that reads an element a fixed number of places along
+/// (`aging[AGE - 1]`) is written as each element's own, with the element's
+/// names in place: each bracketed dimension name the element itself, each
+/// computed index the element it comes to on the axis it indexes, and each
+/// dimension's name as a value (which Vensim reads as the element's number)
+/// the element's position.
+/// An index that comes to no element is a read of no element, which reads
+/// not a number, and is written as `NaN`, which this reader reads and Vensim
+/// does not; a warning names each such element. A `:EXCEPT:` default the
+/// elements follow is written into each element it fills; one that names no
+/// dimension so is kept.
+pub(super) fn per_element_for_vensim(
+    equation: &datamodel::Equation,
+    name: &str,
+    ctx: &WriterContext,
+    warnings: &mut Vec<ExportWarning>,
+) -> Option<datamodel::Equation> {
+    use datamodel::Equation;
+    let (dims, arms, default, applies) = match equation {
+        Equation::Scalar(_) => return None,
+        Equation::ApplyToAll(dims, text) => (dims, &[][..], Some(text), true),
+        Equation::Arrayed(dims, arms, default, applies) => {
+            (dims, arms.as_slice(), default.as_ref(), *applies)
+        }
+    };
+    let names: Vec<String> = dims
+        .iter()
+        .map(|d| crate::common::canonicalize(d).into_owned())
+        .collect();
+    let needs = |text: &str| {
+        Expr0::new(text, LexerType::Equation)
+            .ok()
+            .flatten()
+            .is_some_and(|expr| computes_an_index(&expr, &names))
+    };
+    let default_needs = applies && default.is_some_and(|text| needs(text));
+    if !default_needs && !arms.iter().any(|(_, text, ..)| needs(text)) {
+        return None;
+    }
+    let axes: Vec<Vec<String>> = dims
+        .iter()
+        .map(|d| axis_keys(d, ctx))
+        .collect::<Option<_>>()?;
+
+    let reads_nothing = std::cell::RefCell::new(Vec::new());
+    let at_element = |text: &str, key: &[String]| -> String {
+        let Ok(Some(expr)) = Expr0::new(text, LexerType::Equation) else {
+            return text.to_owned();
+        };
+        let positions: Vec<usize> = key
+            .iter()
+            .zip(&axes)
+            .map(|(part, axis)| axis.iter().position(|e| e == part).unwrap_or(0))
+            .collect();
+        let element = Element {
+            names: &names,
+            keys: key,
+            positions: &positions,
+            ctx,
+            reads_nothing: std::cell::Cell::new(false),
+        };
+        let written = crate::ast::print_eqn(&element.expr(&expr));
+        if element.reads_nothing.get() {
+            reads_nothing.borrow_mut().push(key.join(","));
+        }
+        written
+    };
+
+    let mut slots: Vec<Slot> = arms
+        .iter()
+        .map(|(key, text, initial, gf)| {
+            let parts = key_parts(key);
+            // An element with a table and no equation of its own is the
+            // default through its table, here at the element.
+            let text = match default {
+                Some(default) if applies && gf.is_some() && is_lookup_only_equation(text) => {
+                    default
+                }
+                _ => text,
+            };
+            let text = if needs(text) {
+                at_element(text, &parts)
+            } else {
+                text.clone()
+            };
+            (key.clone(), text, initial.clone(), gf.clone())
+        })
+        .collect();
+    let mut kept_default = default.cloned();
+    if default_needs {
+        let default = default.expect("a default that needs writing out");
+        let held: HashSet<Vec<String>> = slots.iter().map(|slot| key_parts(&slot.0)).collect();
+        let mut every: Vec<Vec<String>> = vec![Vec::new()];
+        for axis in &axes {
+            every = every
+                .iter()
+                .flat_map(|prefix| {
+                    axis.iter().map(move |e| {
+                        let mut key = prefix.clone();
+                        key.push(e.clone());
+                        key
+                    })
+                })
+                .collect();
+        }
+        for key in every {
+            if !held.contains(&key) {
+                slots.push((key.join(","), at_element(default, &key), None, None));
+            }
+        }
+        kept_default = None;
+    }
+    let applies = applies && kept_default.is_some();
+    let reads_nothing = reads_nothing.into_inner();
+    if !reads_nothing.is_empty() {
+        warnings.push(ExportWarning::new(format!(
+            "'{name}' is written once per element, as Vensim has no arithmetic in a \
+             subscript; at {} a subscript comes to no element, which reads not a number \
+             and is written NaN, which Vensim does not read",
+            reads_nothing.join("; ")
+        )));
+    }
+    Some(Equation::Arrayed(
+        dims.clone(),
+        slots,
+        kept_default,
+        applies,
+    ))
+}
+
+/// An arrayed `equation` of a variable with a table of its own (`gf`), as the
+/// equations of its elements, each through its own table or else the
+/// variable's: MDL gives a table to an element's equation (`WITH LOOKUP`), not
+/// to a variable whose elements have equations of their own, so the
+/// variable's table is written into every element that reads through it.
+/// `None` for an equation that is not arrayed, or whose dimensions' elements
+/// are unknown.
+pub(super) fn with_the_variables_table(
+    equation: &datamodel::Equation,
+    gf: &GraphicalFunction,
+    ctx: &WriterContext,
+) -> Option<datamodel::Equation> {
+    let datamodel::Equation::Arrayed(dims, arms, default, applies) = equation else {
+        return None;
+    };
+    let axes: Vec<Vec<String>> = dims
+        .iter()
+        .map(|d| axis_keys(d, ctx))
+        .collect::<Option<_>>()?;
+    let default = default.as_ref().filter(|_| *applies);
+    let mut every: Vec<Vec<String>> = vec![Vec::new()];
+    for axis in &axes {
+        every = every
+            .iter()
+            .flat_map(|prefix| {
+                axis.iter().map(move |e| {
+                    let mut key = prefix.clone();
+                    key.push(e.clone());
+                    key
+                })
+            })
+            .collect();
+    }
+    let slots: Vec<Slot> = every
+        .into_iter()
+        .filter_map(|key| {
+            let own = arms.iter().find(|arm| key_parts(&arm.0) == key);
+            let (text, initial, table) = match own {
+                Some((_, text, initial, table)) => {
+                    let text = match default {
+                        Some(default) if table.is_some() && is_lookup_only_equation(text) => {
+                            default.clone()
+                        }
+                        _ => text.clone(),
+                    };
+                    (text, initial.clone(), table.clone())
+                }
+                None => (default?.clone(), None, None),
+            };
+            Some((
+                key.join(","),
+                text,
+                initial,
+                Some(table.unwrap_or_else(|| gf.clone())),
+            ))
+        })
+        .collect();
+    Some(datamodel::Equation::Arrayed(
+        dims.clone(),
+        slots,
+        None,
+        false,
+    ))
+}
+
+/// Whether a subscript of `expr` computes its index from one of the
+/// dimensions `names` (canonical).
+fn computes_an_index(expr: &Expr0, names: &[String]) -> bool {
+    let computes = |e: &Expr0| computes_an_index(e, names);
+    match expr {
+        Expr0::Const(..) | Expr0::Var(..) => false,
+        Expr0::App(UntypedBuiltinFn(_, args), _) => args.iter().any(computes),
+        Expr0::Subscript(_, indexes, _) => indexes.iter().any(|index| match index {
+            IndexExpr0::Expr(Expr0::Var(..)) => false,
+            IndexExpr0::Expr(e) => reads_a_position(e, names) || computes(e),
+            IndexExpr0::Range(lo, hi, _) => {
+                reads_a_position(lo, names) || reads_a_position(hi, names)
+            }
+            IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(..) | IndexExpr0::DimPosition(..) => {
+                false
+            }
+        }),
+        Expr0::Op1(_, inner, _) => computes(inner),
+        Expr0::Op2(_, l, r, _) => computes(l) || computes(r),
+        Expr0::If(c, t, f, _) => computes(c) || computes(t) || computes(f),
+    }
+}
+
+/// Whether `expr` reads one of the dimensions `names` (canonical) as a
+/// position: as a value, or inside a computed index.
+fn reads_a_position(expr: &Expr0, names: &[String]) -> bool {
+    let is_dim = |name: &str| {
+        names
+            .iter()
+            .any(|n| *n == crate::common::canonicalize(name))
+    };
+    match expr {
+        Expr0::Const(..) => false,
+        Expr0::Var(name, _) => is_dim(name.as_str()),
+        Expr0::App(UntypedBuiltinFn(_, args), _) => args.iter().any(|a| reads_a_position(a, names)),
+        Expr0::Subscript(_, indexes, _) => indexes.iter().any(|index| match index {
+            IndexExpr0::Expr(Expr0::Var(..)) => false,
+            IndexExpr0::Expr(e) => reads_a_position(e, names),
+            IndexExpr0::Range(lo, hi, _) => {
+                reads_a_position(lo, names) || reads_a_position(hi, names)
+            }
+            IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(..) | IndexExpr0::DimPosition(..) => {
+                false
+            }
+        }),
+        Expr0::Op1(_, inner, _) => reads_a_position(inner, names),
+        Expr0::Op2(_, l, r, _) => reads_a_position(l, names) || reads_a_position(r, names),
+        Expr0::If(c, t, f, _) => {
+            reads_a_position(c, names) || reads_a_position(t, names) || reads_a_position(f, names)
+        }
+    }
+}
+
+/// One element of a variable, which an equation for every element is
+/// written out at.
+struct Element<'a> {
+    /// The variable's dimensions, canonical.
+    names: &'a [String],
+    /// The element's key on each, as an axis spells it (`axis_keys`).
+    keys: &'a [String],
+    /// Its position on each, from 0.
+    positions: &'a [usize],
+    ctx: &'a WriterContext,
+    /// Whether a subscript came to no element.
+    reads_nothing: std::cell::Cell<bool>,
+}
+
+impl Element<'_> {
+    /// Which of the variable's dimensions `name` is.
+    fn dimension(&self, name: &str) -> Option<usize> {
+        let name = crate::common::canonicalize(name);
+        self.names.iter().position(|n| *n == name)
+    }
+
+    fn expr(&self, expr: &Expr0) -> Expr0 {
+        let loc = expr.get_loc();
+        match expr {
+            Expr0::Const(..) => expr.clone(),
+            Expr0::Var(name, _) => match self.dimension(name.as_str()) {
+                Some(k) => number(self.positions[k] as f64 + 1.0, loc),
+                None => expr.clone(),
+            },
+            Expr0::App(UntypedBuiltinFn(func, args), _) => Expr0::App(
+                UntypedBuiltinFn(func.clone(), args.iter().map(|a| self.expr(a)).collect()),
+                loc,
+            ),
+            Expr0::Subscript(ident, indexes, _) => {
+                let source = crate::common::canonicalize(ident.as_str());
+                let mut written = Vec::with_capacity(indexes.len());
+                for (position, index) in indexes.iter().enumerate() {
+                    let index = match index {
+                        IndexExpr0::Expr(Expr0::Var(name, var_loc)) => {
+                            match self.dimension(name.as_str()) {
+                                Some(k) => IndexExpr0::Expr(Expr0::Var(
+                                    crate::common::RawIdent::new(self.keys[k].clone()),
+                                    *var_loc,
+                                )),
+                                None => index.clone(),
+                            }
+                        }
+                        IndexExpr0::Expr(e) if reads_a_position(e, self.names) => {
+                            match self.element_at(&source, position, e) {
+                                Some(Some(element)) => IndexExpr0::Expr(element),
+                                // A read of no element.
+                                Some(None) => {
+                                    self.reads_nothing.set(true);
+                                    return number(f64::NAN, loc);
+                                }
+                                None => IndexExpr0::Expr(self.expr(e)),
+                            }
+                        }
+                        IndexExpr0::Expr(e) => IndexExpr0::Expr(self.expr(e)),
+                        IndexExpr0::Range(lo, hi, range_loc) => IndexExpr0::Range(
+                            Box::new(self.expr(lo)),
+                            Box::new(self.expr(hi)),
+                            *range_loc,
+                        ),
+                        IndexExpr0::Wildcard(_)
+                        | IndexExpr0::StarRange(..)
+                        | IndexExpr0::DimPosition(..) => index.clone(),
+                    };
+                    written.push(index);
+                }
+                Expr0::Subscript(ident.clone(), written.into(), loc)
+            }
+            Expr0::Op1(op, inner, _) => Expr0::Op1(*op, Box::new(self.expr(inner)), loc),
+            Expr0::Op2(op, l, r, _) => {
+                Expr0::Op2(*op, Box::new(self.expr(l)), Box::new(self.expr(r)), loc)
+            }
+            Expr0::If(c, t, f, _) => Expr0::If(
+                Box::new(self.expr(c)),
+                Box::new(self.expr(t)),
+                Box::new(self.expr(f)),
+                loc,
+            ),
+        }
+    }
+
+    /// The element the computed index `index` comes to at this element, on
+    /// the axis `position` of the variable `source`: `Some(None)` where it
+    /// comes to no element, and `None` where it cannot be computed here (it
+    /// reads something the model computes) or the axis is unknown.
+    fn element_at(&self, source: &str, position: usize, index: &Expr0) -> Option<Option<Expr0>> {
+        let value = self.value(index)?;
+        let dimension = self.ctx.dim_at(source, position)?;
+        let keys = axis_keys(dimension, self.ctx)?;
+        let place = value.floor();
+        if !(place >= 1.0 && place <= keys.len() as f64) {
+            return Some(None);
+        }
+        let key = &keys[place as usize - 1];
+        let loc = index.get_loc();
+        Some(Some(match self.ctx.dim_named_elements(dimension) {
+            Some(_) => Expr0::Var(crate::common::RawIdent::new(key.clone()), loc),
+            None => number(place, loc),
+        }))
+    }
+
+    /// The value of a computed index at this element: numbers, the
+    /// variable's dimensions as positions, and arithmetic on them.
+    fn value(&self, expr: &Expr0) -> Option<f64> {
+        use crate::ast::BinaryOp;
+        match expr {
+            Expr0::Const(_, value, _) => Some(value.value()),
+            Expr0::Var(name, _) => {
+                Some(self.positions[self.dimension(name.as_str())?] as f64 + 1.0)
+            }
+            Expr0::Op1(UnaryOp::Positive, inner, _) => self.value(inner),
+            Expr0::Op1(UnaryOp::Negative, inner, _) => self.value(inner).map(|v| -v),
+            Expr0::Op2(op, l, r, _) => {
+                let (l, r) = (self.value(l)?, self.value(r)?);
+                match op {
+                    BinaryOp::Add => Some(l + r),
+                    BinaryOp::Sub => Some(l - r),
+                    BinaryOp::Mul => Some(l * r),
+                    BinaryOp::Div => Some(l / r),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+fn number(value: f64, loc: crate::builtins::Loc) -> Expr0 {
+    Expr0::Const(
+        if value.is_nan() {
+            "NaN".to_string()
+        } else {
+            crate::results::written(value)
+        },
+        crate::ast::Literal::new(value),
+        loc,
+    )
+}

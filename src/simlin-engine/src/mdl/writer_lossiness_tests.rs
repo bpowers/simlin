@@ -416,21 +416,19 @@ fn an_except_default_is_written_as_the_except_equation_it_was() {
         arrayed_aux("z", &["DimA"], elements, Some(default), true)
     };
     let rows = [
-        (z(vec![("A1", "10"), ("A2", "1"), ("A3", "1")], "10"), false),
-        (
-            z(
-                vec![("A1", "a[A1] * 2"), ("A2", "5"), ("A3", "a[A3] * 2")],
-                "a[DimA] * 2",
-            ),
-            false,
+        z(vec![("A1", "10"), ("A2", "1"), ("A3", "1")], "10"),
+        z(
+            vec![("A1", "a[A1] * 2"), ("A2", "5"), ("A3", "a[A3] * 2")],
+            "a[DimA] * 2",
         ),
-        (z(vec![("A1", "4"), ("A2", "4"), ("A3", "4")], "4"), false),
-        (z(vec![("A2", "14"), ("A3", "13")], "14"), false),
+        z(vec![("A1", "4"), ("A2", "4"), ("A3", "4")], "4"),
+        z(vec![("A2", "14"), ("A3", "13")], "14"),
         // The reader spells a filled element's dimension reference per
-        // element (`a[a1] * 2`), which means what the default does for it.
-        (z(vec![("A2", "5")], "a[DimA] * 2"), true),
+        // element (`a[a1] * 2`) and then reads it at its element, the default
+        // it means (`element_equations`).
+        z(vec![("A2", "5")], "a[DimA] * 2"),
     ];
-    for (var, respelled) in rows {
+    for var in rows {
         let project = project_with_dims(
             vec![make_model(vec![a.clone(), var])],
             vec![named_dim("DimA", &["A1", "A2", "A3"])],
@@ -440,18 +438,7 @@ fn an_except_default_is_written_as_the_except_equation_it_was() {
         assert!(mdl.contains(":EXCEPT:"), "{mdl}");
         let (changes, fixed_point) = except_round_trip(&project);
         assert!(fixed_point, "{mdl}");
-        if respelled {
-            assert!(
-                !changes.is_empty()
-                    && changes.iter().all(|c| {
-                        c.kind == crate::save_check::ChangeKind::Structure
-                            && c.reason.starts_with("'z' is computed as 'a[a")
-                    }),
-                "{changes:?}"
-            );
-        } else {
-            assert!(changes.is_empty(), "{changes:?}\n{mdl}");
-        }
+        assert!(changes.is_empty(), "{changes:?}\n{mdl}");
     }
 }
 

@@ -2065,13 +2065,14 @@ fn write_variable_entry_ctx_warn(
     let data_source_eqn = compat_get_direct_equation(compat);
     let effective_gf = if data_source_eqn.is_some() { None } else { gf };
 
-    let with_table = match (effective_gf, equation) {
+    let per_element = arrayed::per_element_for_vensim(equation, &name, ctx, warnings);
+    let per_element = match (effective_gf, per_element.as_ref().unwrap_or(equation)) {
         (Some(gf), arrayed @ Equation::Arrayed(..)) => {
-            arrayed::with_the_variables_table(arrayed, gf, ctx)
+            arrayed::with_the_variables_table(arrayed, gf, ctx).or(per_element)
         }
-        _ => None,
+        _ => per_element,
     };
-    match with_table.as_ref().unwrap_or(equation) {
+    match per_element.as_ref().unwrap_or(equation) {
         Equation::Scalar(eqn) => {
             let effective_eqn = data_source_eqn
                 .clone()
@@ -2445,7 +2446,8 @@ fn write_stock_variable(
         equation_to_mdl(&initial_src, &name, ctx, warnings)
     };
 
-    match &stock.equation {
+    let per_element = arrayed::per_element_for_vensim(&stock.equation, &name, ctx, warnings);
+    match per_element.as_ref().unwrap_or(&stock.equation) {
         Equation::Scalar(eqn) => {
             let initial = stock_initial(eqn, warnings);
             write_stock_entry(
