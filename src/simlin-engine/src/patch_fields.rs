@@ -16,6 +16,7 @@
 
 use crate::common::{CanonicalElementName, Error, ErrorCode, ErrorKind, Result, canonicalize};
 use crate::datamodel::{self, Equation, GraphicalFunction, Variable};
+use crate::patch::Site;
 
 /// One element's arm as `Equation::Arrayed` stores it: its subscript, its
 /// equation, its active initial, and its lookup.
@@ -377,10 +378,11 @@ pub(crate) fn set_lookup(
 /// dimension, in the order the variable had them -- or, without `keep`, needs
 /// the variable to say the same thing at every element of the removed
 /// dimensions, and is refused, naming two elements that differ, when it does
-/// not. The equation every element follows is kept as written: a reference
-/// it makes to a dimension the variable no longer has is the model's to
-/// repair, and its diagnostics say so. An element kept for its lookup alone
-/// reads the equation every element follows through it.
+/// not. A removed dimension the equations name (`c[Age]`, `Age > 1`) is
+/// read at the element `keep` names (`c[old]`, `Age.old > 1`), and without
+/// `keep` the removal is refused, since the elements then differ in what they
+/// compute. An element kept for its lookup alone reads the equation every
+/// element follows through it.
 pub(crate) fn set_dimensions(
     project_dims: &[datamodel::Dimension],
     model: &mut datamodel::Model,
@@ -503,6 +505,79 @@ pub(crate) fn set_dimensions(
             }
         }
         let default = default.filter(|_| applies);
+        // The removed dimensions the equations name, read at the kept
+        // element; refused without one.
+        let removed_dims: Vec<&datamodel::Dimension> = removed.iter().map(|&at| old[at]).collect();
+        let at_kept = |text: &str| -> Result<String> {
+            let names_one = crate::patch::text_references(text).is_some_and(|refs| {
+                refs.iter().any(|(site, reference)| {
+                    !matches!(site, Site::StarRange | Site::Subscripted)
+                        && removed_dims
+                            .iter()
+                            .any(|d| canonicalize(d.name()).as_ref() == reference.as_str())
+                })
+            });
+            if !names_one {
+                return Ok(text.to_string());
+            }
+            let Some(kept) = &kept else {
+                return Err(refuse(
+                    ErrorCode::MismatchedDimensions,
+                    format!(
+                        "'{name}' names a dimension it would no longer have (`{text}`), so its \
+                         elements differ, and removing the dimension needs the element whose \
+                         equation is kept"
+                    ),
+                ));
+            };
+            let at = |reference: &str| {
+                removed_dims
+                    .iter()
+                    .position(|d| canonicalize(d.name()).as_ref() == reference)
+            };
+            // A position is written qualified (`Age.old`), which a name in
+            // quotes cannot be.
+            let unwritable = crate::patch::text_references(text).and_then(|refs| {
+                refs.iter().find_map(|(site, reference)| {
+                    let k = at(reference.as_str()).filter(|_| *site == Site::Value)?;
+                    let written =
+                        crate::patch_dimensions::qualified(removed_dims[k].name(), &kept[k]);
+                    written.contains('"').then_some((k, written))
+                })
+            });
+            if let Some((k, written)) = unwritable {
+                return Err(refuse(
+                    ErrorCode::BadDimensionName,
+                    format!(
+                        "'{name}' reads '{dim}' as a position (`{text}`), which at '{element}' would \
+                         be written `{written}`, and a name written in quotes cannot qualify an \
+                         element: keep an element whose name needs no quotes, rename '{element}' \
+                         to one first, or write the position as a number in the equation",
+                        dim = removed_dims[k].name(),
+                        element = kept[k],
+                    ),
+                ));
+            }
+            Ok(
+                crate::patch_dimensions::respelled(text, &|site, reference| {
+                    let k = at(reference)?;
+                    match site {
+                        Site::Index => Some(crate::patch_dimensions::spelled(&kept[k])),
+                        Site::Value => Some(crate::patch_dimensions::qualified(
+                            removed_dims[k].name(),
+                            &kept[k],
+                        )),
+                        Site::StarRange | Site::Subscripted => None,
+                    }
+                })
+                .unwrap_or_else(|| text.to_string()),
+            )
+        };
+        let default = default.map(|text| at_kept(&text)).transpose()?;
+        let mut new_arms: Vec<Arm> = new_arms
+            .into_iter()
+            .map(|(key, text, gf_text, gf)| Ok((key, at_kept(&text)?, gf_text, gf)))
+            .collect::<Result<_>>()?;
         if new.is_empty() {
             let (text, gf) = match new_arms.pop() {
                 // An element with a lookup and no equation of its own reads

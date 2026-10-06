@@ -407,6 +407,50 @@ fn a_scalar_kept_from_an_element_with_a_lookup_alone() {
     assert_eq!(results["d"].last(), before.last());
 }
 
+/// A removed dimension the equation names is read at the element `keep`
+/// names, as an index (`c[Age]` at `old` is `c[old]`) and as a position
+/// (`Age` is `Age.old`); without `keep` the elements differ, and the removal
+/// is refused.
+#[test]
+fn a_removed_dimension_the_equation_names_is_read_at_the_kept_element() {
+    let base = ages()
+        .array_aux("m[Region, Age]", "Age * 100 + c[Age]")
+        .build_datamodel();
+    assert_eq!(
+        edit(&base, set_dimensions("m", &["Region"], None)).err(),
+        Some(ErrorCode::MismatchedDimensions),
+        "the elements along Age differ"
+    );
+    let kept = edit(&base, set_dimensions("m", &["Region"], Some(&["old"]))).unwrap();
+    assert_eq!(
+        equation(&kept, "m"),
+        Equation::ApplyToAll(strings(&["Region"]), "Age.Old * 100 + c[Old]".to_string())
+    );
+    assert_eq!(values(kept, "m", &["north", "south"]), vec![330.0, 330.0]);
+    // An element whose name needs quotes cannot qualify a position, so a
+    // removal that would write one is refused; in brackets it can stand.
+    let quoted = TestProject::new("quoted")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Age", &["young", "65+"])
+        .named_dimension("Region", &["North", "South"])
+        .array_with_ranges("c[Age]", vec![("young", "10"), ("\"65+\"", "30")])
+        .array_aux("m[Region, Age]", "Age * 100 + c[Age]")
+        .array_aux("n[Region, Age]", "c[Age]")
+        .build_datamodel();
+    assert_eq!(
+        edit(&quoted, set_dimensions("m", &["Region"], Some(&["65+"]))).err(),
+        Some(ErrorCode::BadDimensionName)
+    );
+    let kept = edit(&quoted, set_dimensions("n", &["Region"], Some(&["65+"]))).unwrap();
+    assert_eq!(values(kept, "n", &["north"]), vec![30.0]);
+    // A star range over the dimension reads every element wherever it is.
+    let summed = ages()
+        .array_aux("s[Region, Age]", "SUM(c[*:Age])")
+        .build_datamodel();
+    let narrower = edit(&summed, set_dimensions("s", &["Region"], None)).unwrap();
+    assert_eq!(values(narrower, "s", &["north"]), vec![60.0]);
+}
+
 /// Adding a dimension repeats the variable along it: a scalar's equation
 /// becomes the equation every element follows, and an element's own
 /// equation is its equation at every element of the new dimension.
