@@ -3402,7 +3402,7 @@ fn change_lines(
                 .into_iter()
                 // A rename says so itself.
                 .filter(|field| !(*field == ChangedField::Name && new_name.is_some()))
-                .map(|field| field_detail(field, was, is, spelled_in)),
+                .map(|field| field_detail(field, was, is, spelled_in, &after.dimensions)),
         );
         changes.push(ChangeLine {
             variable: label(was),
@@ -3669,6 +3669,7 @@ fn field_detail(
     was: &Variable,
     is: &Variable,
     model: Option<&datamodel::Model>,
+    dimensions: &[datamodel::Dimension],
 ) -> String {
     let flows = |var: &Variable, inflows: bool| match var {
         Variable::Stock(stock) => flow_list(
@@ -3702,6 +3703,9 @@ fn field_detail(
             equation_of(was)
         ),
         ChangedField::Equation => {
+            if let Some(detail) = element_equations_detail(what(is), was, is, dimensions) {
+                return detail;
+            }
             // One equation in place of per-element ones applies to them all.
             let every = matches!(was.get_equation(), Some(Equation::Arrayed(..)))
                 && matches!(is.get_equation(), Some(Equation::ApplyToAll(..)));
@@ -3742,6 +3746,110 @@ fn field_detail(
         ChangedField::Name => format!("written {} (was {})", is.get_ident(), was.get_ident()),
         ChangedField::Other => "other settings".to_string(),
     }
+}
+
+/// An arrayed variable's equation change, said for what changed: the
+/// equation every element follows, then each element whose own equation was
+/// written, changed or cleared, spelled as its dimensions spell it, so a
+/// host shows which cells an edit changed. None unless the variable is
+/// arrayed over the same dimensions before and after.
+fn element_equations_detail(
+    what: &str,
+    was: &Variable,
+    is: &Variable,
+    dimensions: &[datamodel::Dimension],
+) -> Option<String> {
+    let (was_dims, was_every, was_own) = element_arms(was.get_equation()?)?;
+    let (is_dims, is_every, is_own) = element_arms(is.get_equation()?)?;
+    if was_dims != is_dims {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if was_every != is_every {
+        parts.push(format!(
+            "{what} for every element {} (was {})",
+            is_every.unwrap_or("none"),
+            was_every.unwrap_or("none")
+        ));
+    }
+    fn own<'a>(arms: &[(&str, &'a str)], key: &str) -> Option<&'a str> {
+        arms.iter()
+            .find(|(element, _)| crate::canonicalize(element) == crate::canonicalize(key))
+            .map(|(_, text)| *text)
+    }
+    let mut keys: Vec<&str> = is_own.iter().map(|(key, _)| *key).collect();
+    keys.extend(
+        was_own
+            .iter()
+            .map(|(key, _)| *key)
+            .filter(|key| own(&is_own, key).is_none()),
+    );
+    for key in keys {
+        let element = spelled_element(key, was_dims, dimensions);
+        match (own(&was_own, key), own(&is_own, key)) {
+            (Some(was), Some(is)) if was != is => {
+                parts.push(format!("{element}: {is} (was {was})"));
+            }
+            (None, Some(is)) => parts.push(match was_every {
+                Some(every) => {
+                    format!("{element}: {is} (was the equation for every element, {every})")
+                }
+                None => format!("{element}: {is} (had none)"),
+            }),
+            (Some(was), None) => parts.push(match is_every {
+                Some(_) => format!("{element}: follows the equation for every element (was {was})"),
+                None => format!("{element}: none (was {was})"),
+            }),
+            _ => {}
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// An arrayed equation's dimensions, the equation every element follows,
+/// and each element's own equation by its key.
+type ElementArms<'a> = (&'a [String], Option<&'a str>, Vec<(&'a str, &'a str)>);
+
+/// An arrayed equation's arms; None for a scalar.
+fn element_arms(equation: &Equation) -> Option<ElementArms<'_>> {
+    match equation {
+        Equation::Scalar(_) => None,
+        Equation::ApplyToAll(dims, text) => Some((dims, Some(text.trim()), vec![])),
+        Equation::Arrayed(dims, elements, default, _) => Some((
+            dims,
+            default.as_deref().map(str::trim),
+            elements
+                .iter()
+                .map(|(element, text, _, _)| (element.as_str(), text.trim()))
+                .collect(),
+        )),
+    }
+}
+
+/// An element key (`north,young`) as the dimensions spell their elements:
+/// "North, Young".
+fn spelled_element(key: &str, dims: &[String], dimensions: &[datamodel::Dimension]) -> String {
+    key.split(',')
+        .enumerate()
+        .map(|(axis, part)| {
+            let part = part.trim();
+            dims.get(axis)
+                .and_then(|dim| {
+                    dimensions
+                        .iter()
+                        .find(|d| crate::canonicalize(d.name()) == crate::canonicalize(dim))
+                })
+                .and_then(|dimension| match &dimension.elements {
+                    datamodel::DimensionElements::Named(names) => names
+                        .iter()
+                        .find(|name| crate::canonicalize(name) == crate::canonicalize(part))
+                        .cloned(),
+                    datamodel::DimensionElements::Indexed(_) => None,
+                })
+                .unwrap_or_else(|| part.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]

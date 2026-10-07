@@ -4027,10 +4027,56 @@ fn an_equation_for_every_element_keeps_each_elements_own() {
         &mut session,
         operations(json!([{"op": "set_equation", "variable": "growth", "equation": "5"}])),
     );
-    let detail = output["changes"][0]["detail"].as_str().unwrap();
-    assert!(
-        detail.starts_with("equation north: 10; south: 20; others: 5 (was "),
-        "{detail}"
+    assert_eq!(
+        output["changes"][0]["detail"],
+        "equation for every element 5 (was none)"
+    );
+}
+
+/// An element edit's change line names the elements it changed, as their
+/// dimension spells them, and says what each was: written over the
+/// equation for every element, changed, or returned to it.
+#[test]
+fn an_element_edit_names_the_elements_it_changed() {
+    let project = TestProject::new("regions")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("Region", &["North", "South"])
+        .array_aux("growth[Region]", "0.1");
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    read(&mut host, &mut session);
+    let detail = |output: &Value| output["changes"][0]["detail"].as_str().unwrap().to_string();
+    let written = edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "set_equation", "variable": "growth", "element": "north", "equation": "0.5"}
+        ])),
+    );
+    assert_eq!(
+        detail(&written),
+        "North: 0.5 (was the equation for every element, 0.1)"
+    );
+    let changed = edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "set_equation", "variable": "growth", "element": "North", "equation": "0.6"},
+            {"op": "set_equation", "variable": "growth", "equation": "0.2"}
+        ])),
+    );
+    assert_eq!(
+        detail(&changed),
+        "equation for every element 0.2 (was 0.1); North: 0.6 (was 0.5)"
+    );
+    let cleared = edit(
+        &mut host,
+        &mut session,
+        operations(json!([{"op": "clear_element", "variable": "growth", "element": "north"}])),
+    );
+    assert_eq!(
+        detail(&cleared),
+        "North: follows the equation for every element (was 0.6)"
     );
 }
 
