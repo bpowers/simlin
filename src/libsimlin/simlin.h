@@ -181,6 +181,17 @@ typedef enum {
   SIMLIN_ERROR_SEVERITY_WARNING = 1,
 } SimlinErrorSeverity;
 
+// For a detail about a subscript that runs off a dimension, which end it
+// runs off: before the first element, or past the last. `None` for every
+// other detail. With `SimlinErrorDetail::read_past_dimension` and
+// `element_name`, a host says the problem in its model's own words ("there
+// is no Age before Young") rather than repeating `details`.
+typedef enum {
+  SIMLIN_READ_PAST_NONE = 0,
+  SIMLIN_READ_PAST_BEFORE_FIRST = 1,
+  SIMLIN_READ_PAST_AFTER_LAST = 2,
+} SimlinReadPast;
+
 // JSON format specifier for C API
 typedef enum {
   SIMLIN_JSON_FORMAT_NATIVE = 0,
@@ -546,6 +557,12 @@ typedef struct {
   // element follows. Appended additively: existing field offsets are
   // unchanged.
   const char *element_name;
+  // For a subscript that runs off a dimension, the dimension, by its
+  // canonical name; NULL for every other detail. Appended additively.
+  const char *read_past_dimension;
+  // Which end of `read_past_dimension` the subscript runs off;
+  // `SIMLIN_READ_PAST_NONE` for every other detail. Appended additively.
+  SimlinReadPast read_past;
 } SimlinErrorDetail;
 
 // Opaque project structure

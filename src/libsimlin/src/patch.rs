@@ -94,6 +94,7 @@ struct ErrorDetailBuilder {
     severity: crate::SimlinErrorSeverity,
     details: Option<String>,
     element_name: Option<String>,
+    read_past: Option<engine::common::ReadPast>,
 }
 
 impl ErrorDetailBuilder {
@@ -110,6 +111,7 @@ impl ErrorDetailBuilder {
             severity: crate::SimlinErrorSeverity::default(),
             details: None,
             element_name: None,
+            read_past: None,
         }
     }
 
@@ -159,6 +161,11 @@ impl ErrorDetailBuilder {
         self
     }
 
+    fn read_past(mut self, read_past: Option<engine::common::ReadPast>) -> Self {
+        self.read_past = read_past;
+        self
+    }
+
     fn build(self) -> ErrorDetailData {
         ErrorDetailData {
             code: self.code,
@@ -172,6 +179,12 @@ impl ErrorDetailBuilder {
             severity: self.severity,
             details: self.details,
             element_name: self.element_name,
+            read_past: match &self.read_past {
+                Some(read) if read.before_first => crate::SimlinReadPast::BeforeFirst,
+                Some(_) => crate::SimlinReadPast::AfterLast,
+                None => crate::SimlinReadPast::None,
+            },
+            read_past_dimension: self.read_past.map(|read| read.dimension),
         }
     }
 
@@ -204,7 +217,8 @@ impl ErrorDetailBuilder {
             .unit_error_kind(unit_error_kind)
             .severity(severity)
             .details(error.details)
-            .element_name(error.element);
+            .element_name(error.element)
+            .read_past(error.read_past);
         if let Some(message) = error.message {
             builder = builder.message(Some(message));
         }

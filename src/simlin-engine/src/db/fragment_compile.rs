@@ -366,12 +366,13 @@ fn report_out_of_range_reads(
         } else {
             "past the last"
         };
-        let axis = match input
+        let dimension = input
             .deps
             .get(&read.source)
             .and_then(|shape| shape.dims.get(read.axis))
-        {
-            Some(dim) => format!("{side} element of '{}'", dim.name()),
+            .map(|dim| dim.name().to_string());
+        let axis = match &dimension {
+            Some(dim) => format!("{side} element of '{dim}'"),
             None => format!("{side} element"),
         };
         let element = element_of(read.element_offset);
@@ -393,6 +394,10 @@ fn report_out_of_range_reads(
                 code: crate::common::ErrorCode::SubscriptOutOfRange,
                 details: Some(details),
                 element: element.map(|e| e.as_str().to_string()),
+                read_past: dimension.map(|dimension| crate::common::ReadPast {
+                    dimension,
+                    before_first: read.before_start,
+                }),
             }),
         }
         .accumulate(db);
@@ -900,6 +905,7 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                             code: err.code,
                             details: err.details,
                             element: err.element.or_else(|| own_arm_element.clone()),
+                            read_past: None,
                         }),
                     }
                     .accumulate(db),

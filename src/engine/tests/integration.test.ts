@@ -440,10 +440,12 @@ describe('WASM Integration Tests', () => {
       //   offset 28: severity (u32)
       //   offset 32: details (ptr)
       //   offset 36: element_name (ptr)
-      // Total size: 40 bytes
+      //   offset 40: read_past_dimension (ptr)
+      //   offset 44: read_past (u32)
+      // Total size: 48 bytes
 
       // Use the malloc/free from our memory module
-      const structPtr = malloc(40);
+      const structPtr = malloc(48);
       const memory = getMemory();
       const view = new DataView(memory.buffer);
 
@@ -459,6 +461,8 @@ describe('WASM Integration Tests', () => {
       view.setUint32(structPtr + 28, 1, true); // severity (Warning)
       view.setUint32(structPtr + 32, 0, true); // details (null)
       view.setUint32(structPtr + 36, 0, true); // element_name (null)
+      view.setUint32(structPtr + 40, 0, true); // read_past_dimension (null)
+      view.setUint32(structPtr + 44, 2, true); // read_past (AfterLast)
 
       // Read it back using our function
       const detail = readErrorDetail(structPtr);
@@ -474,14 +478,16 @@ describe('WASM Integration Tests', () => {
       expect(detail.severity).toBe(1);
       expect(detail.details).toBeNull();
       expect(detail.elementName).toBeNull();
+      expect(detail.readPastDimension).toBeNull();
+      expect(detail.readPast).toBe(2);
 
       free(structPtr);
     });
 
     it('should have SimlinErrorDetail size match Rust-reported size', () => {
-      // Verify the TypeScript size (40 bytes) matches what Rust reports
+      // Verify the TypeScript size (48 bytes) matches what Rust reports
       const rustSizes = getRustStructSizes();
-      expect(rustSizes.errorDetailSize).toBe(40);
+      expect(rustSizes.errorDetailSize).toBe(48);
     });
   });
 

@@ -130,6 +130,15 @@ impl DiagnosticError {
         }
     }
 
+    /// The dimension a subscript runs off, and which end, for a
+    /// `SubscriptOutOfRange` error ([`EquationError::read_past`]).
+    pub fn read_past(&self) -> Option<&crate::common::ReadPast> {
+        match self {
+            DiagnosticError::Equation(err) => err.read_past.as_ref(),
+            _ => None,
+        }
+    }
+
     /// The reason the raising site wrote, when the code and the span do not
     /// already carry it (a parse error's reason is its snippet).
     pub fn reason(&self) -> Option<&str> {
@@ -187,6 +196,12 @@ impl Diagnostic {
     /// ([`DiagnosticError::element`]).
     pub fn element(&self) -> Option<&str> {
         self.error.element()
+    }
+
+    /// The dimension a subscript runs off, and which end
+    /// ([`DiagnosticError::read_past`]).
+    pub fn read_past(&self) -> Option<&crate::common::ReadPast> {
+        self.error.read_past()
     }
 
     /// Whether this diagnostic is `code` raised on `category`'s surface.

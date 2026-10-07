@@ -415,6 +415,20 @@ pub enum SimlinErrorSeverity {
     Warning = 1,
 }
 
+/// For a detail about a subscript that runs off a dimension, which end it
+/// runs off: before the first element, or past the last. `None` for every
+/// other detail. With `SimlinErrorDetail::read_past_dimension` and
+/// `element_name`, a host says the problem in its model's own words ("there
+/// is no Age before Young") rather than repeating `details`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimlinReadPast {
+    #[default]
+    None = 0,
+    BeforeFirst = 1,
+    AfterLast = 2,
+}
+
 impl From<engine::db::DiagnosticSeverity> for SimlinErrorSeverity {
     fn from(severity: engine::db::DiagnosticSeverity) -> Self {
         match severity {
@@ -453,6 +467,12 @@ pub struct SimlinErrorDetail {
     /// element follows. Appended additively: existing field offsets are
     /// unchanged.
     pub element_name: *const c_char,
+    /// For a subscript that runs off a dimension, the dimension, by its
+    /// canonical name; NULL for every other detail. Appended additively.
+    pub read_past_dimension: *const c_char,
+    /// Which end of `read_past_dimension` the subscript runs off;
+    /// `SIMLIN_READ_PAST_NONE` for every other detail. Appended additively.
+    pub read_past: SimlinReadPast,
 }
 
 /// Opaque project structure

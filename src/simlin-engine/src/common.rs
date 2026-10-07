@@ -871,6 +871,17 @@ impl ErrorCode {
     }
 }
 
+/// A subscript that runs off one end of a dimension: the dimension, by its
+/// canonical name, and which end. A host says it in the model's own words
+/// ("there is no Age before Young") from these parts rather than from the
+/// error's sentence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReadPast {
+    pub dimension: String,
+    /// Before the first element, rather than past the last.
+    pub before_first: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EquationError {
     pub start: u16,
@@ -897,6 +908,9 @@ pub struct EquationError {
     /// own equation when it has one, and otherwise the equation every element
     /// follows.
     pub element: Option<String>,
+    /// For `SubscriptOutOfRange`, the dimension the read runs off and which
+    /// end; `None` for every other error.
+    pub read_past: Option<ReadPast>,
 }
 
 impl EquationError {
@@ -908,6 +922,7 @@ impl EquationError {
             code,
             details: None,
             element: None,
+            read_past: None,
         }
     }
 
@@ -919,6 +934,7 @@ impl EquationError {
             code,
             details: Some(details.into()),
             element: None,
+            read_past: None,
         }
     }
 
@@ -970,6 +986,7 @@ impl From<Error> for EquationError {
             end: 0,
             details: err.details,
             element: err.element,
+            read_past: None,
         }
     }
 }

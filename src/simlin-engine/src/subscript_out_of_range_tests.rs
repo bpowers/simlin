@@ -251,3 +251,36 @@ fn the_warning_has_a_code_and_a_plain_description() {
     let project = ages().array_aux("d[Age]", "c[Age - 1]");
     assert_eq!(project.error_diagnostics(), vec![]);
 }
+
+/// The warning carries what it says as parts, so a host says it in the
+/// model's own words: the dimension the read runs off, and which end.
+#[test]
+fn the_warning_names_the_dimension_and_the_end() {
+    let reads = |equation: &str| {
+        let project = ages().array_aux("d[Age]", equation);
+        project
+            .diagnostics_incremental()
+            .into_iter()
+            .filter_map(|d| match &d.error {
+                DiagnosticError::Equation(e) if e.code == ErrorCode::SubscriptOutOfRange => {
+                    Some((e.element.clone(), e.read_past.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let past = |before_first| {
+        Some(crate::common::ReadPast {
+            dimension: "age".to_string(),
+            before_first,
+        })
+    };
+    assert_eq!(
+        reads("c[Age - 1]"),
+        vec![(Some("young".to_string()), past(true))]
+    );
+    assert_eq!(
+        reads("c[Age + 1]"),
+        vec![(Some("old".to_string()), past(false))]
+    );
+}

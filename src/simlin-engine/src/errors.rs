@@ -76,6 +76,9 @@ pub struct FormattedError {
     /// `start_offset..end_offset` index that equation, and `message`'s
     /// snippet shows it.
     pub element: Option<String>,
+    /// For a read that runs off a dimension, the dimension and which end
+    /// (`Diagnostic::read_past`); `None` otherwise.
+    pub read_past: Option<crate::common::ReadPast>,
 }
 
 /// Collection of formatted errors plus bookkeeping flags that mirror previous CLI output
@@ -132,6 +135,7 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
         category: None,
         details: Some(error.reason().to_owned()),
         element: error.element.clone(),
+        read_past: None,
     }
 }
 
@@ -347,6 +351,7 @@ fn format_diagnostic_inner(diag: &db::Diagnostic, var: Option<&Variable>) -> For
         category: Some(diag.category()),
         details: Some(details.unwrap_or_else(|| code.description().to_owned())),
         element: element.map(str::to_owned),
+        read_past: diag.read_past().cloned(),
     }
 }
 

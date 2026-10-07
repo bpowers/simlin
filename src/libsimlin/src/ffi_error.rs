@@ -2,7 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::{SimlinErrorCode, SimlinErrorKind, SimlinErrorSeverity, SimlinUnitErrorKind};
+use crate::{
+    SimlinErrorCode, SimlinErrorKind, SimlinErrorSeverity, SimlinReadPast, SimlinUnitErrorKind,
+};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
@@ -36,6 +38,10 @@ pub struct ErrorDetail {
     pub details: Option<String>,
     /// The element the detail is about (see `SimlinErrorDetail::element_name`).
     pub element_name: Option<String>,
+    /// The dimension a subscript runs off, and which end (see
+    /// `SimlinErrorDetail::read_past_dimension`).
+    pub read_past_dimension: Option<String>,
+    pub read_past: SimlinReadPast,
 }
 
 impl ErrorDetail {
@@ -52,6 +58,8 @@ impl ErrorDetail {
             severity: SimlinErrorSeverity::default(),
             details: None,
             element_name: None,
+            read_past_dimension: None,
+            read_past: SimlinReadPast::None,
         }
     }
 }
@@ -69,6 +77,8 @@ struct OwnedDetail {
     severity: SimlinErrorSeverity,
     details: Option<CString>,
     element_name: Option<CString>,
+    read_past_dimension: Option<CString>,
+    read_past: SimlinReadPast,
 }
 
 impl OwnedDetail {
@@ -85,6 +95,8 @@ impl OwnedDetail {
             severity: detail.severity,
             details: detail.details.map(sanitize_for_c),
             element_name: detail.element_name.map(sanitize_for_c),
+            read_past_dimension: detail.read_past_dimension.map(sanitize_for_c),
+            read_past: detail.read_past,
         }
     }
 
@@ -116,6 +128,11 @@ impl OwnedDetail {
                 .element_name
                 .as_ref()
                 .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
+            read_past_dimension: self
+                .read_past_dimension
+                .as_ref()
+                .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
+            read_past: self.read_past,
         }
     }
 }

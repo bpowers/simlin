@@ -13,6 +13,7 @@ import {
   SimlinErrorKind,
   SimlinUnitErrorKind,
   SimlinErrorSeverity,
+  SimlinReadPast,
   ErrorDetail,
 } from './types';
 
@@ -101,9 +102,9 @@ export function simlin_error_get_detail(err: SimlinErrorPtr, index: number): Ptr
 // Size of SimlinErrorDetail struct in bytes (for wasm32)
 // code: u32, message: ptr, model_name: ptr, variable_name: ptr, start_offset: u16,
 // end_offset: u16, kind: u32, unit_error_kind: u32, severity: u32, details: ptr,
-// element_name: ptr
-// = 4 + 4 + 4 + 4 + 2 + 2 + 4 + 4 + 4 + 4 + 4 = 40 bytes
-// const ERROR_DETAIL_SIZE = 40;
+// element_name: ptr, read_past_dimension: ptr, read_past: u32
+// = 4 + 4 + 4 + 4 + 2 + 2 + 4 + 4 + 4 + 4 + 4 + 4 + 4 = 48 bytes
+// const ERROR_DETAIL_SIZE = 48;
 
 /**
  * Read an ErrorDetail struct from WASM memory.
@@ -125,6 +126,8 @@ export function readErrorDetail(ptr: Ptr): ErrorDetail {
   const severity = view.getUint32(ptr + 28, true) as SimlinErrorSeverity;
   const detailsPtr = view.getUint32(ptr + 32, true);
   const elementNamePtr = view.getUint32(ptr + 36, true);
+  const readPastDimensionPtr = view.getUint32(ptr + 40, true);
+  const readPast = view.getUint32(ptr + 44, true) as SimlinReadPast;
 
   return {
     code,
@@ -138,6 +141,8 @@ export function readErrorDetail(ptr: Ptr): ErrorDetail {
     severity,
     details: wasmToString(detailsPtr),
     elementName: wasmToString(elementNamePtr),
+    readPastDimension: wasmToString(readPastDimensionPtr),
+    readPast,
   };
 }
 
