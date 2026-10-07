@@ -71,6 +71,42 @@ fn an_except_equations_copies_follow_its_default() {
     assert_eq!(keys, ["young"]);
 }
 
+/// A number for every element but its exceptions is one equation, as the
+/// file writes it, though each element is a number: the elements that are
+/// that number follow it.
+#[test]
+fn a_number_for_every_element_keeps_its_followers() {
+    let project = open(&format!(
+        "{AGES}d[Age] :EXCEPT: [old] = 0.01 ~~|\nd[old] = 0.08 ~~|\n"
+    ));
+    let Equation::Arrayed(dims, arms, Some(default), true) = equation(&project, "d") else {
+        panic!("a default and an exception: {:?}", equation(&project, "d"));
+    };
+    assert_eq!(dims, ["Age"]);
+    assert_eq!(default, "0.01");
+    let arms: Vec<(&str, &str)> = arms.iter().map(|a| (a.0.as_str(), a.1.as_str())).collect();
+    assert_eq!(arms, [("old", "0.08")]);
+}
+
+/// An offset's first element, written out as `NaN` because it reads no
+/// element, follows the offset: both read not a number there.
+#[test]
+fn an_element_that_reads_no_element_follows_as_nan() {
+    let project = open(&format!(
+        "{AGES}d[young] = NaN ~~|\nd[adult] = c[young] ~~|\nd[old] = c[adult] ~~|\n"
+    ));
+    let (dims, arms, default) = match equation(&project, "d") {
+        Equation::ApplyToAll(dims, text) => (dims, Vec::new(), text),
+        Equation::Arrayed(dims, arms, Some(default), true) => (dims, arms, default),
+        other => panic!("one equation for every element: {other:?}"),
+    };
+    assert_eq!(dims, ["Age"]);
+    assert_eq!(default, "c[Age - 1]");
+    assert!(arms.is_empty(), "{arms:?}");
+    assert!(run(&project)["d[young]"].iter().all(|v| v.is_nan()));
+    assert_eq!(run(&project)["d[old]"], vec![20.0, 20.0, 20.0]);
+}
+
 #[test]
 fn what_cannot_be_read_as_one_equation_stays_per_element() {
     let rows = [

@@ -430,12 +430,19 @@ fn element_at(axes: &[Axis], key: &str) -> Option<Vec<usize>> {
 ///
 /// A variable is left as it is when an element has an initial or a lookup
 /// of its own, when every element is a number (a list of numbers is its own
-/// idiom), when an element's equation does not parse, or when an element it
-/// lists is none of its dimensions'. An applying default keeps the elements
-/// that read as it does as followers; otherwise a variable is collapsed only
-/// where every element has an equation of its own -- an element left out
-/// has no equation, and a default would give it one -- and a default that
-/// so fills no element is replaced by the equation most elements read.
+/// idiom) unless a default applies that some of them differ from, when an
+/// element's equation does not parse, or when an element it lists is none
+/// of its dimensions'. An applying default keeps the elements that read as
+/// it does as followers, numbers too: `d[Age] :EXCEPT: [old] = 0.01` is one
+/// number for every age but the old. Otherwise a variable is collapsed only where every element
+/// has an equation of its own -- an element left out has no equation, and a
+/// default would give it one -- and a default that so fills no element is
+/// replaced by the equation most elements read.
+///
+/// An element whose own equation is `NaN`, where the equation for every
+/// element reads no element (an offset past the dimension's end), follows
+/// it: both read not a number there. A writer that has no arithmetic in a
+/// subscript writes such an element so.
 pub(crate) fn compact_element_equations(project: &mut Project) {
     for m in 0..project.models.len() {
         let model = Model::of(project, &project.models[m]);
@@ -460,10 +467,10 @@ fn compacted(var: &Variable, model: &Model) -> Option<Variable> {
         || arms
             .iter()
             .any(|(_, _, initial, gf)| initial.is_some() || gf.is_some())
-        || arms.iter().all(|(_, text, ..)| is_number(text))
     {
         return None;
     }
+    let numbers = arms.iter().all(|(_, text, ..)| is_number(text));
     let axes = axes_of(model, dims)?;
 
     // Each element's equation read at the element, by its key: its place,
@@ -476,11 +483,15 @@ fn compacted(var: &Variable, model: &Model) -> Option<Variable> {
     }
     // Whether the element `i` computes what the equation for every element
     // `text` (of the form `form`) computes there: its equation reads the same
-    // at the element, or is that equation written out at it.
+    // at the element, or is that equation written out at it, or is `NaN`
+    // where that equation reads no element.
     let follows = |i: usize, text: &str, form: &str| {
         let (at, _, read_form, own_form) = &read[i];
         read_form == form
-            || written_at(text, model, &axes, at).is_some_and(|written| written == *own_form)
+            || match written_at(text, model, &axes, at) {
+                Some(written) => written == *own_form,
+                None => is_nan(&arms[i].1),
+            }
     };
 
     let total: usize = axes.iter().map(|a| a.elements.len()).product();
@@ -491,10 +502,14 @@ fn compacted(var: &Variable, model: &Model) -> Option<Variable> {
             .filter(|&i| !follows(i, default_text, &default_form))
             .map(|i| arms[i].clone())
             .collect();
-        if kept.len() != arms.len() {
+        // Numbers that all say the default are a list, as written.
+        if kept.len() != arms.len() && !(numbers && kept.is_empty()) {
             let compact = crate::patch_fields::arrayed(dims.clone(), kept, default.clone(), true);
             return with_equation(var, compact);
         }
+    }
+    if numbers {
+        return None;
     }
     // Otherwise, where every element has an equation of its own (so no
     // default fills one), the equation most elements follow, with the rest as
@@ -565,6 +580,14 @@ fn is_number(text: &str) -> bool {
         }
     }
     matches!(Expr0::new(text, LexerType::Equation), Ok(Some(expr)) if number(&expr))
+}
+
+/// Whether `text` is `NaN`, not a number.
+fn is_nan(text: &str) -> bool {
+    matches!(
+        Expr0::new(text, LexerType::Equation),
+        Ok(Some(Expr0::Const(_, n, _))) if n.value().is_nan()
+    )
 }
 
 fn canonical_form(text: &str) -> Option<String> {
