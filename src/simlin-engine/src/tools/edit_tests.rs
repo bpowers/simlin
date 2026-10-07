@@ -4231,7 +4231,7 @@ fn the_dimensions_are_edited_with_what_is_over_them() {
         &operations(json!([{"op": "delete_dimension", "dimension": "Area"}])).to_string(),
     );
     assert!(
-        refused.is_error && refused.json.contains("'growth' in model 'main'"),
+        refused.is_error && refused.json.contains("'growth' still uses it"),
         "{}",
         refused.json
     );

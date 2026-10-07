@@ -53,14 +53,25 @@ fn canonical_elements(dim: &datamodel::Dimension) -> Vec<String> {
 
 /// The first variable of any model named `name` (canonical), as
 /// `(model, variable)` display names.
-fn variable_named(project: &datamodel::Project, name: &str) -> Option<(String, String)> {
+fn variable_named(project: &datamodel::Project, name: &str) -> Option<String> {
     project.models.iter().find_map(|model| {
         model
             .variables
             .iter()
             .find(|var| canonical(var.get_ident()) == name)
-            .map(|var| (model.name.clone(), var.get_ident().to_string()))
+            .map(|var| quoted_in(project, model, var.get_ident()))
     })
+}
+
+/// A variable as a refusal names it: quoted, with its model where the
+/// project has more than one, since a host shows the refusal to a person
+/// who knows the one model as the model.
+fn quoted_in(project: &datamodel::Project, model: &datamodel::Model, ident: &str) -> String {
+    if project.models.len() > 1 {
+        format!("'{ident}' in model '{}'", model.name)
+    } else {
+        format!("'{ident}'")
+    }
 }
 
 /// The first dimension declaring an element named `name` (canonical), other
@@ -169,12 +180,12 @@ pub(crate) fn upsert_dimension(
             "a dimension needs a name".to_string(),
         ));
     }
-    if let Some((model, var)) = variable_named(project, &name) {
+    if let Some(var) = variable_named(project, &name) {
         return Err(refuse(
             ErrorCode::DuplicateVariable,
             format!(
-                "'{}' is the name of the variable '{var}' in model '{model}'; a dimension's \
-                 name must differ from every variable's",
+                "'{}' is the name of the variable {var}; a dimension's name must differ from \
+                 every variable's",
                 dimension.name()
             ),
         ));
@@ -204,14 +215,13 @@ pub(crate) fn upsert_dimension(
             ));
         }
         if !declared.contains(element)
-            && let Some((model, var)) = variable_named(project, element)
+            && let Some(var) = variable_named(project, element)
         {
             return Err(refuse(
                 ErrorCode::DuplicateVariable,
                 format!(
-                    "cannot add the element '{written}' to '{}': '{var}' in model '{model}' is \
-                     a variable of that name, so a subscript that writes it may mean the \
-                     variable or the element",
+                    "cannot add the element '{written}' to '{}': {var} is a variable of that \
+                     name, so a subscript that writes it may mean the variable or the element",
                     dimension.name()
                 ),
             ));
@@ -459,12 +469,12 @@ pub(crate) fn rename_dimension(
         ));
     }
     for name in [&old, &new] {
-        if let Some((model, var)) = variable_named(project, name) {
+        if let Some(var) = variable_named(project, name) {
             return Err(refuse(
                 ErrorCode::DuplicateVariable,
                 format!(
-                    "cannot rename '{from}' to '{to}': '{var}' in model '{model}' is a variable \
-                     of that name, so an equation that writes it may mean the variable or the \
+                    "cannot rename '{from}' to '{to}': {var} is a variable of that name, so an \
+                     equation that writes it may mean the variable or the \
                      dimension"
                 ),
             ));
@@ -635,12 +645,12 @@ pub(crate) fn rename_element(
         ));
     }
     for name in [&old, &new] {
-        if let Some((model, var)) = variable_named(project, name) {
+        if let Some(var) = variable_named(project, name) {
             return Err(refuse(
                 ErrorCode::DuplicateVariable,
                 format!(
-                    "cannot rename '{from}' to '{to}': '{var}' in model '{model}' is a variable \
-                     of that name, so a subscript that writes it may mean the variable or the \
+                    "cannot rename '{from}' to '{to}': {var} is a variable of that name, so a \
+                     subscript that writes it may mean the variable or the \
                      element"
                 ),
             ));
@@ -753,7 +763,7 @@ pub(crate) fn delete_dimension(project: &mut datamodel::Project, name: &str) -> 
                 })
             });
             if over || named {
-                users.push(format!("'{}' in model '{}'", var.get_ident(), model.name));
+                users.push(quoted_in(project, model, var.get_ident()));
             }
         }
     }
@@ -769,13 +779,14 @@ pub(crate) fn delete_dimension(project: &mut datamodel::Project, name: &str) -> 
     }
     if !users.is_empty() {
         let more = users.len().saturating_sub(3);
+        let verb = if users.len() == 1 { "uses" } else { "use" };
         let mut named = users.into_iter().take(3).collect::<Vec<_>>().join(", ");
         if more > 0 {
             named.push_str(&format!(" and {more} more"));
         }
         return Err(refuse(
             ErrorCode::BadDimensionName,
-            format!("cannot delete '{name}': {named} still use it"),
+            format!("cannot delete '{name}': {named} still {verb} it"),
         ));
     }
     project.dimensions.remove(at);

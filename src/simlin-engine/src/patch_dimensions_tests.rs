@@ -346,7 +346,7 @@ fn every_refusal_says_why_and_changes_nothing() {
             name: "Older".to_string(),
         }],
         ErrorCode::BadDimensionName,
-        "'before' in model 'main'",
+        "'before', 'total', the dimension 'Younger' still use it",
     );
     refused(
         vec![ProjectOperation::DeleteDimension {
@@ -388,10 +388,7 @@ fn every_refusal_says_why_and_changes_nothing() {
     )
     .expect_err("an element named as a variable");
     assert_eq!(got, ErrorCode::DuplicateVariable, "{details}");
-    assert!(
-        details.contains("'idx' in model 'main' is a variable"),
-        "{details}"
-    );
+    assert!(details.contains("'idx' is a variable"), "{details}");
     let (got, details) = apply(
         &with_idx,
         vec![ProjectOperation::UpsertDimension(named(

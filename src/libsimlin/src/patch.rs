@@ -376,8 +376,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
         if let Err(err) = engine::apply_patch(&mut datamodel_locked, patch) {
             store_error(
                 out_error,
-                SimlinError::new(SimlinErrorCode::from(err.code))
-                    .with_message(format!("failed to apply patch: {err}")),
+                SimlinError::new(SimlinErrorCode::from(err.code)).with_message(err.to_string()),
             );
         }
         return;
@@ -409,8 +408,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     if let Err(err) = engine::apply_patch(&mut staged_datamodel, patch) {
         store_error(
             out_error,
-            SimlinError::new(SimlinErrorCode::from(err.code))
-                .with_message(format!("failed to apply patch: {err}")),
+            SimlinError::new(SimlinErrorCode::from(err.code)).with_message(err.to_string()),
         );
         return;
     }
