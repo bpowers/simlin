@@ -4029,7 +4029,7 @@ fn an_equation_for_every_element_keeps_each_elements_own() {
     );
     assert_eq!(
         output["changes"][0]["detail"],
-        "equation for every element 5 (was none)"
+        "equation for Every region 5 (was none)"
     );
 }
 
@@ -4053,10 +4053,7 @@ fn an_element_edit_names_the_elements_it_changed() {
             {"op": "set_equation", "variable": "growth", "element": "north", "equation": "0.5"}
         ])),
     );
-    assert_eq!(
-        detail(&written),
-        "North: 0.5 (was the equation for every element, 0.1)"
-    );
+    assert_eq!(detail(&written), "North: 0.5 (followed Every Region, 0.1)");
     let changed = edit(
         &mut host,
         &mut session,
@@ -4067,17 +4064,14 @@ fn an_element_edit_names_the_elements_it_changed() {
     );
     assert_eq!(
         detail(&changed),
-        "equation for every element 0.2 (was 0.1); North: 0.6 (was 0.5)"
+        "equation for Every Region 0.2 (was 0.1); North: 0.6 (was 0.5)"
     );
     let cleared = edit(
         &mut host,
         &mut session,
         operations(json!([{"op": "clear_element", "variable": "growth", "element": "north"}])),
     );
-    assert_eq!(
-        detail(&cleared),
-        "North: follows the equation for every element (was 0.6)"
-    );
+    assert_eq!(detail(&cleared), "North: follows Every Region (was 0.6)");
 }
 
 /// An element's own equation, written and cleared through `edit_model`,

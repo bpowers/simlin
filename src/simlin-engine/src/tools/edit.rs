@@ -3751,8 +3751,10 @@ fn field_detail(
 /// An arrayed variable's equation change, said for what changed: the
 /// equation every element follows, then each element whose own equation was
 /// written, changed or cleared, spelled as its dimensions spell it, so a
-/// host shows which cells an edit changed. None unless the variable is
-/// arrayed over the same dimensions before and after.
+/// host shows which cells an edit changed. The equation every element
+/// follows is named for its dimensions, "Every Region and Age", as a host
+/// that lays the elements out names it. None unless the variable is arrayed
+/// over the same dimensions before and after.
 fn element_equations_detail(
     what: &str,
     was: &Variable,
@@ -3764,10 +3766,11 @@ fn element_equations_detail(
     if was_dims != is_dims {
         return None;
     }
+    let every = every_name(was_dims, dimensions);
     let mut parts = Vec::new();
     if was_every != is_every {
         parts.push(format!(
-            "{what} for every element {} (was {})",
+            "{what} for {every} {} (was {})",
             is_every.unwrap_or("none"),
             was_every.unwrap_or("none")
         ));
@@ -3791,19 +3794,37 @@ fn element_equations_detail(
                 parts.push(format!("{element}: {is} (was {was})"));
             }
             (None, Some(is)) => parts.push(match was_every {
-                Some(every) => {
-                    format!("{element}: {is} (was the equation for every element, {every})")
-                }
+                Some(was_every) => format!("{element}: {is} (followed {every}, {was_every})"),
                 None => format!("{element}: {is} (had none)"),
             }),
             (Some(was), None) => parts.push(match is_every {
-                Some(_) => format!("{element}: follows the equation for every element (was {was})"),
+                Some(_) => format!("{element}: follows {every} (was {was})"),
                 None => format!("{element}: none (was {was})"),
             }),
             _ => {}
         }
     }
     (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// The name of the equation every element of a variable over `dims`
+/// follows: "Every Region", "Every Region and Age", "Every Region, Age and
+/// Sex", each dimension as the project declares it.
+fn every_name(dims: &[String], dimensions: &[datamodel::Dimension]) -> String {
+    let names: Vec<&str> = dims
+        .iter()
+        .map(|dim| {
+            dimensions
+                .iter()
+                .find(|d| crate::canonicalize(d.name()) == crate::canonicalize(dim))
+                .map_or(dim.as_str(), |d| d.name())
+        })
+        .collect();
+    let joined = match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => names.join(""),
+    };
+    format!("Every {joined}")
 }
 
 /// An arrayed equation's dimensions, the equation every element follows,
