@@ -4874,6 +4874,13 @@
               "detail": {
                 "description": "What changes, in words.",
                 "type": "string"
+              },
+              "to": {
+                "description": "A renamed variable's name after the edit, spelled as `variable` is:\npresent exactly on a `renamed` line, so a reader takes the new name\nfrom here rather than from `detail`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -4892,6 +4899,42 @@
               "loop_named",
               "sim_specs",
               "dimension"
+            ]
+          },
+          "Renamed": {
+            "description": "A variable a patch renamed: in `model`, the variable whose canonical\nidentifier was `from` is now `to`.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model",
+              "from",
+              "to"
+            ]
+          },
+          "VariableRef": {
+            "description": "A variable of `model`, by canonical identifier.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "ident": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model",
+              "ident"
             ]
           },
           "EditDiagnostic": {
@@ -5006,6 +5049,27 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/ChangeLine"
+            }
+          },
+          "renamed": {
+            "description": "What the edit did to the identity of the variables it touched, by\ncanonical identifier, as a patch's report accounts for it\n(`PatchReport`): for a host that follows a variable through the edit.\nThe variables it renamed. A line's `to` says the same for a reader.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Renamed"
+            }
+          },
+          "deleted": {
+            "description": "The variables, by their names before the edit, that no longer exist.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/VariableRef"
+            }
+          },
+          "created": {
+            "description": "The variables, by their names after the edit, that did not exist\nbefore it.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/VariableRef"
             }
           },
           "omitted": {
@@ -5899,6 +5963,13 @@
           "detail": {
             "description": "What changes, in words.",
             "type": "string"
+          },
+          "to": {
+            "description": "A renamed variable's name after the edit, spelled as `variable` is:\npresent exactly on a `renamed` line, so a reader takes the new name\nfrom here rather than from `detail`.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [

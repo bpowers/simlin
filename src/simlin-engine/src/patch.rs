@@ -235,19 +235,194 @@ pub fn is_view_only_patch(project: &datamodel::Project, patch: &ProjectPatch) ->
     true
 }
 
+/// A variable a patch renamed: in `model`, the variable whose canonical
+/// identifier was `from` is now `to`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Renamed {
+    pub model: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// A variable of `model`, by canonical identifier.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct VariableRef {
+    pub model: String,
+    pub ident: String,
+}
+
+/// What a patch did to the identity of the variables it touched, which a
+/// host cannot read back from the project it leaves: a variable renamed, and
+/// one deleted while another took its name, leave the same names behind.
+/// Against the project before the patch and the project after it:
+///
+/// - **renamed**: the variable that was `from` before the patch is `to`
+///   after it. `from` named a variable before the patch and `to` names the
+///   same variable after it; a variable the patch created is never a `from`.
+/// - **deleted**: the variables, by their names before the patch, that no
+///   longer exist after it, whether deleted outright or renamed and then
+///   deleted.
+/// - **created**: the variables, by their names after the patch, that did
+///   not exist before it, however they came to have the name.
+///
+/// Every other variable is the same variable under the same name. A name
+/// deleted and then taken by another variable is both deleted and created,
+/// or deleted and renamed onto. A rename back to the same name, or a
+/// respelling (`students` to `Students`), keeps the identifier and is not
+/// listed; a variable created and deleted within the patch is not listed.
+/// No `from`, `to`, deleted or created name repeats within a model, and each
+/// list is sorted by model and name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PatchReport {
+    pub renamed: Vec<Renamed>,
+    pub deleted: Vec<VariableRef>,
+    pub created: Vec<VariableRef>,
+}
+
+/// What the variable holding a name partway through a patch was before it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Origin {
+    /// The variable that had this name before the patch.
+    Was(String),
+    /// A variable the patch created.
+    Created,
+    /// No variable has the name.
+    Absent,
+}
+
+/// The identities a patch, or an edit made as several patches, has moved so
+/// far, by `(model, canonical name)` as they stand: a name not held here is
+/// held by the variable that had it before.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Identities {
+    names: HashMap<(String, String), Origin>,
+    deleted: Vec<VariableRef>,
+}
+
+impl Identities {
+    fn origin(&self, model: &str, name: &str) -> Origin {
+        self.names
+            .get(&(model.to_owned(), name.to_owned()))
+            .cloned()
+            .unwrap_or_else(|| Origin::Was(name.to_owned()))
+    }
+
+    fn set(&mut self, model: &str, name: &str, origin: Origin) {
+        self.names
+            .insert((model.to_owned(), name.to_owned()), origin);
+    }
+
+    /// The variable named `from` is named `to` now.
+    fn rename(&mut self, model: &str, from: Ident<Canonical>, to: Ident<Canonical>) {
+        let origin = self.origin(model, from.as_str());
+        self.set(model, from.as_str(), Origin::Absent);
+        self.set(model, to.as_str(), origin);
+    }
+
+    /// The variable named `ident` is gone.
+    fn delete(&mut self, model: &str, ident: Ident<Canonical>) {
+        if let Origin::Was(name) = self.origin(model, ident.as_str()) {
+            self.deleted.push(VariableRef {
+                model: model.to_owned(),
+                ident: name,
+            });
+        }
+        self.set(model, ident.as_str(), Origin::Absent);
+    }
+
+    /// A new variable is named `ident`.
+    fn create(&mut self, model: &str, ident: Ident<Canonical>) {
+        self.set(model, ident.as_str(), Origin::Created);
+    }
+
+    /// The account of identity the patches applied so far give, of the
+    /// project they leave.
+    pub(crate) fn report(&self, project: &datamodel::Project) -> PatchReport {
+        let exists = |model: &str, name: &str| {
+            project
+                .get_model(model)
+                .is_some_and(|model| model.get_variable(name).is_some())
+        };
+        let mut report = PatchReport::default();
+        for ((model, name), origin) in &self.names {
+            if !exists(model, name) {
+                continue;
+            }
+            match origin {
+                Origin::Was(was) if was != name => report.renamed.push(Renamed {
+                    model: model.clone(),
+                    from: was.clone(),
+                    to: name.clone(),
+                }),
+                Origin::Created => report.created.push(VariableRef {
+                    model: model.clone(),
+                    ident: name.clone(),
+                }),
+                Origin::Was(_) | Origin::Absent => {}
+            }
+        }
+        report.deleted = self.deleted.clone();
+        report.renamed.sort();
+        report.created.sort();
+        report.deleted.sort();
+        report.deleted.dedup();
+        report
+    }
+}
+
 pub fn apply_patch(project: &mut datamodel::Project, patch: ProjectPatch) -> Result<()> {
+    apply_patch_reporting(project, patch).map(|_| ())
+}
+
+/// Applies `patch` as [`apply_patch`] does, and reports what it did that the
+/// project it leaves cannot say ([`PatchReport`]). A patch that fails leaves
+/// `project` as it was and reports nothing.
+pub fn apply_patch_reporting(
+    project: &mut datamodel::Project,
+    patch: ProjectPatch,
+) -> Result<PatchReport> {
+    let mut identities = Identities::default();
+    apply_patch_into(project, patch, &mut identities)?;
+    Ok(identities.report(project))
+}
+
+/// Applies `patch` to `project` as [`apply_patch`] does, following in
+/// `identities` what it does to its variables, which may hold an earlier
+/// patch's that this one carries on: a patch that fails leaves both as they
+/// were. A caller that applies an edit as several patches, and reads one
+/// account of them all, keeps one `identities` and reports it at the end.
+pub(crate) fn apply_patch_into(
+    project: &mut datamodel::Project,
+    patch: ProjectPatch,
+    identities: &mut Identities,
+) -> Result<()> {
     let mut staged = project.clone();
-    apply_patch_in_place(&mut staged, patch)?;
+    let mut followed = identities.clone();
+    apply_patch_noting(&mut staged, patch, &mut followed)?;
     *project = staged;
+    *identities = followed;
     Ok(())
 }
 
 /// Applies `patch` to `project` itself. A patch that fails leaves `project`
 /// holding the operations before the one that failed, so a caller that must
 /// keep the project as it was stages a copy, as [`apply_patch`] does.
+#[cfg(test)]
 pub(crate) fn apply_patch_in_place(
     project: &mut datamodel::Project,
     patch: ProjectPatch,
+) -> Result<()> {
+    apply_patch_noting(project, patch, &mut Identities::default())
+}
+
+/// Applies `patch` to `project` itself, as [`apply_patch_in_place`] does,
+/// following in `identities` what it does to its variables.
+fn apply_patch_noting(
+    project: &mut datamodel::Project,
+    patch: ProjectPatch,
+    identities: &mut Identities,
 ) -> Result<()> {
     // Apply project-level operations first
     for project_op in patch.project_ops {
@@ -286,7 +461,7 @@ pub(crate) fn apply_patch_in_place(
     // Then apply model-level operations
     for model_patch in patch.models {
         for op in model_patch.ops {
-            apply_model_operation(project, &model_patch.name, op)?;
+            apply_model_operation(project, &model_patch.name, op, identities)?;
         }
     }
 
@@ -297,11 +472,17 @@ fn apply_model_operation(
     project: &mut datamodel::Project,
     model_name: &str,
     op: ModelOperation,
+    identities: &mut Identities,
 ) -> Result<()> {
     // Renames reach every model's equations through the project, and a view
     // edit applies renames of its own, so both take the project.
     if let ModelOperation::RenameVariable { from, to } = &op {
-        return apply_rename_variable(project, model_name, from, to);
+        apply_rename_variable(project, model_name, from, to)?;
+        let (from, to) = (Ident::new(from), Ident::new(to));
+        if from != to {
+            identities.rename(model_name, from, to);
+        }
+        return Ok(());
     }
     if let ModelOperation::EditView {
         index,
@@ -309,7 +490,13 @@ fn apply_model_operation(
         remove,
     } = &op
     {
-        return apply_edit_view(project, model_name, *index, upsert, remove);
+        return apply_edit_view(project, model_name, *index, upsert, remove, identities);
+    }
+    if let ModelOperation::DeleteVariable { ident } = &op {
+        let deleted = Ident::new(ident);
+        apply_delete_variable(get_model_mut(project, model_name)?, ident)?;
+        identities.delete(model_name, deleted);
+        return Ok(());
     }
     // A field edit that names elements reads the project's dimensions.
     let project_dims = match &op {
@@ -319,6 +506,19 @@ fn apply_model_operation(
         _ => Vec::new(),
     };
     let model = get_model_mut(project, model_name)?;
+    // An upsert of a name no variable has makes a new variable.
+    let created = match &op {
+        ModelOperation::UpsertStock(stock) => Some(&stock.ident),
+        ModelOperation::UpsertFlow(flow) => Some(&flow.ident),
+        ModelOperation::UpsertAux(aux) => Some(&aux.ident),
+        ModelOperation::UpsertModule(module) => Some(&module.ident),
+        _ => None,
+    }
+    .map(|ident| Ident::<Canonical>::new(ident))
+    .filter(|ident| model.get_variable(ident.as_str()).is_none());
+    if let Some(created) = created {
+        identities.create(model_name, created);
+    }
     match op {
         ModelOperation::SetEquation { ident, equation } => {
             crate::patch_fields::set_equation(model, &ident, equation)?;
@@ -382,9 +582,6 @@ fn apply_model_operation(
             canonicalize_module_references(&mut module);
             upsert_variable(model, Variable::Module(module));
         }
-        ModelOperation::DeleteVariable { ident } => {
-            apply_delete_variable(model, &ident)?;
-        }
         ModelOperation::UpsertView { index, view } => {
             apply_upsert_view(model, index, view)?;
         }
@@ -405,8 +602,10 @@ fn apply_model_operation(
         } => {
             apply_set_loop_name(model, variables, name, description)?;
         }
-        ModelOperation::RenameVariable { .. } | ModelOperation::EditView { .. } => {
-            unreachable!("applied through the project above")
+        ModelOperation::RenameVariable { .. }
+        | ModelOperation::EditView { .. }
+        | ModelOperation::DeleteVariable { .. } => {
+            unreachable!("applied above, where their identities are followed")
         }
     }
     Ok(())
@@ -420,6 +619,7 @@ fn apply_edit_view(
     index: u32,
     upsert: &[datamodel::ViewElement],
     remove: &[i32],
+    identities: &mut Identities,
 ) -> Result<()> {
     let model = get_model_mut(project, model_name)?;
     let Some(datamodel::View::StockFlow(base)) = model.views.get(index as usize) else {
@@ -432,7 +632,7 @@ fn apply_edit_view(
     let next = crate::editing::edited_view(base, upsert, remove);
     let ops = crate::editing::derived_operations(model, base, &next)?;
     for op in ops {
-        apply_model_operation(project, model_name, op)?;
+        apply_model_operation(project, model_name, op, identities)?;
     }
     let model = get_model_mut(project, model_name)?;
     model.views[index as usize] = datamodel::View::StockFlow(next);

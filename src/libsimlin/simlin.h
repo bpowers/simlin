@@ -1514,6 +1514,58 @@ void simlin_project_apply_patch(SimlinProject *project,
                                 SimlinError **out_collected_errors,
                                 SimlinError **out_error);
 
+// Applies a JSON patch as `simlin_project_apply_patch` does, and writes what
+// the patch did that the project it leaves cannot say, as UTF-8 JSON to a
+// buffer the caller frees with `simlin_free`:
+//
+// ```json
+// {"renamed": [{"model": "main", "from": "birth_rate", "to": "fertility"}],
+//  "deleted": [{"model": "main", "ident": "deaths"}],
+//  "created": [{"model": "main", "ident": "births"}]}
+// ```
+//
+// The report accounts for the identity of the variables the patch touched,
+// against the project before the patch and the project after it. A variable
+// renamed, and one deleted while another took its name, leave the same
+// names behind, so a host that follows a variable through an edit (a
+// selection, a page that shows it, text being typed about it) reads here
+// what happened, rather than guessing from the names:
+//
+// - `renamed`: the variable that was `from` before the patch is `to` after
+//   it, by a `renameVariable` operation or a view edit that relabels its
+//   element. A variable the patch created is never a `from`.
+// - `deleted`: the variables, by their names before the patch, that no
+//   longer exist after it.
+// - `created`: the variables, by their names after the patch, that did not
+//   exist before it.
+//
+// Every other variable is the same variable under the same name, so a host
+// follows what it holds under a name through `renamed`, ends it if the name
+// is `deleted`, and otherwise keeps it. A name deleted and then taken by
+// another variable is in both `deleted` and `created` (or a `to`). A rename
+// back, or a respelling (`students` to `Students`), keeps the identifier and
+// is not listed; nor is a variable created and deleted within the patch. No
+// name repeats within a model's list, and each list is sorted by model and
+// name, canonical identifiers throughout. The report may gain keys; a reader
+// ignores those it does not know.
+//
+// A patch committed, or one a dry run would commit, writes its report; one
+// refused writes NULL with length 0 and sets `out_error` as
+// `simlin_project_apply_patch` does.
+//
+// # Safety
+// - As `simlin_project_apply_patch`, and `out_report` and `out_report_len`
+//   must be valid pointers.
+void simlin_project_apply_patch_reporting(SimlinProject *project,
+                                          const uint8_t *patch_data,
+                                          uintptr_t patch_len,
+                                          bool dry_run,
+                                          bool allow_errors,
+                                          uint8_t **out_report,
+                                          uintptr_t *out_report_len,
+                                          SimlinError **out_collected_errors,
+                                          SimlinError **out_error);
+
 // Open a project from binary protobuf data
 //
 // Deserializes a project from Simlin's native protobuf format. This is the

@@ -114,7 +114,7 @@ pub use layout::*;
 pub use memory::*;
 pub use model::*;
 pub use panic_hook::*;
-pub use patch::simlin_project_apply_patch;
+pub use patch::{simlin_project_apply_patch, simlin_project_apply_patch_reporting};
 pub use project::*;
 pub use results::*;
 pub use serialization::*;

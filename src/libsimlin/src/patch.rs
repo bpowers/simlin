@@ -19,7 +19,8 @@ pub use crate::ffi_error::ErrorDetail as ErrorDetailData;
 use crate::ffi_error::SimlinError;
 use crate::{
     build_simlin_error, clear_out_error, require_project, store_anyhow_error, store_error,
-    SimlinErrorCode, SimlinErrorKind, SimlinProject, SimlinUnitErrorKind,
+    write_bytes_to_ffi_output, SimlinErrorCode, SimlinErrorKind, SimlinProject,
+    SimlinUnitErrorKind,
 };
 
 #[cfg(test)]
@@ -347,6 +348,9 @@ fn has_operations(patch: &engine::ProjectPatch) -> bool {
 /// The datamodel lock is held for the entire operation to prevent
 /// concurrent patchers from snapshotting a stale datamodel between
 /// validation and commit (lost-update).
+/// Applies `patch` as `simlin_project_apply_patch` describes, and returns
+/// what it did that the project it leaves cannot say (`PatchReport`): for a
+/// patch committed, or one a dry run would commit; None for one refused.
 pub(crate) unsafe fn apply_project_patch_internal(
     project_ref: &SimlinProject,
     patch: engine::ProjectPatch,
@@ -354,7 +358,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     allow_errors: bool,
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
-) {
+) -> Option<engine::PatchReport> {
     // Hold the datamodel lock for the entire operation. This prevents
     // concurrent patchers from snapshotting a stale datamodel between
     // our validation and commit phases.
@@ -371,15 +375,18 @@ pub(crate) unsafe fn apply_project_patch_internal(
         // mutable borrow would advance the revision and copy a datamodel a
         // copy of the project shares.
         if !has_operations(&patch) {
-            return;
+            return Some(engine::PatchReport::default());
         }
-        if let Err(err) = engine::apply_patch(&mut datamodel_locked, patch) {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::from(err.code)).with_message(err.to_string()),
-            );
-        }
-        return;
+        return match engine::apply_patch_reporting(&mut datamodel_locked, patch) {
+            Ok(report) => Some(report),
+            Err(err) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::from(err.code)).with_message(err.to_string()),
+                );
+                None
+            }
+        };
     }
 
     // Snapshot the pre-patch warning baseline while holding the db lock.
@@ -405,13 +412,16 @@ pub(crate) unsafe fn apply_project_patch_internal(
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::SnapshotWhileProjectLocked, project_ref);
 
-    if let Err(err) = engine::apply_patch(&mut staged_datamodel, patch) {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::from(err.code)).with_message(err.to_string()),
-        );
-        return;
-    }
+    let report = match engine::apply_patch_reporting(&mut staged_datamodel, patch) {
+        Ok(report) => report,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::from(err.code)).with_message(err.to_string()),
+            );
+            return None;
+        }
+    };
 
     // Hold the db lock for the entire sync-evaluate-decide cycle so that
     // concurrent readers (simlin_sim_new, simlin_project_get_errors) never
@@ -504,7 +514,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
         // entry point re-derives them for the restored state, and are freed
         // then (the lock's drop releases whatever that entry point supersedes).
         db.restore(&original_datamodel, prev);
-        return;
+        return (!rejected).then_some(report);
     }
 
     // Commit: the staged state is already the db's current sync state from
@@ -512,6 +522,80 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // memos the staged diagnostics and compile superseded are freed when the
     // db lock drops (`DbLock`), inside this edit rather than the next.
     datamodel_locked.replace(std::sync::Arc::new(staged_datamodel));
+    Some(report)
+}
+
+/// A patch's report as JSON: `{"renamed": [{"model", "from", "to"}],
+/// "deleted": [{"model", "ident"}], "created": [{"model", "ident"}]}`.
+#[derive(serde::Serialize)]
+struct PatchReportJson<'a> {
+    renamed: &'a [engine::Renamed],
+    deleted: &'a [engine::VariableRef],
+    created: &'a [engine::VariableRef],
+}
+
+fn patch_report_json(report: &engine::PatchReport) -> Vec<u8> {
+    let json = PatchReportJson {
+        renamed: &report.renamed,
+        deleted: &report.deleted,
+        created: &report.created,
+    };
+    serde_json::to_vec(&json).expect("a patch report serializes")
+}
+
+/// The patch `patch_data` holds, as `simlin_project_apply_patch` reads it;
+/// None, with `out_error` set, when it holds none.
+unsafe fn read_patch(
+    patch_data: *const u8,
+    patch_len: usize,
+    out_error: *mut *mut SimlinError,
+) -> Option<engine::ProjectPatch> {
+    if patch_len > 0 && patch_data.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("patch_data pointer must not be NULL when patch_len > 0"),
+        );
+        return None;
+    }
+
+    let patch_slice = if patch_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(patch_data, patch_len)
+    };
+
+    let json_str = match std::str::from_utf8(patch_slice) {
+        Ok(s) => s,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("input JSON is not valid UTF-8: {err}")),
+            );
+            return None;
+        }
+    };
+
+    // Treat empty input as a valid no-op patch (maintains backwards compatibility
+    // with callers that pass NULL+0 for "no changes")
+    let json_str = if json_str.trim().is_empty() {
+        r#"{"projectOps":[],"models":[]}"#
+    } else {
+        json_str
+    };
+
+    match serde_json::from_str::<engine::json::ProjectPatch>(json_str) {
+        Ok(patch) => Some(engine::ProjectPatch::from(patch)),
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to parse JSON patch: {err}")),
+            );
+            None
+        }
+    }
 }
 
 // ── FFI entry point ────────────────────────────────────────────────────
@@ -595,56 +679,9 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
     if !out_collected_errors.is_null() {
         *out_collected_errors = ptr::null_mut();
     }
-
-    if patch_len > 0 && patch_data.is_null() {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message("patch_data pointer must not be NULL when patch_len > 0"),
-        );
+    let Some(patch) = read_patch(patch_data, patch_len, out_error) else {
         return;
-    }
-
-    let patch_slice = if patch_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(patch_data, patch_len)
     };
-
-    let json_str = match std::str::from_utf8(patch_slice) {
-        Ok(s) => s,
-        Err(err) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message(format!("input JSON is not valid UTF-8: {err}")),
-            );
-            return;
-        }
-    };
-
-    // Treat empty input as a valid no-op patch (maintains backwards compatibility
-    // with callers that pass NULL+0 for "no changes")
-    let json_str = if json_str.trim().is_empty() {
-        r#"{"projectOps":[],"models":[]}"#
-    } else {
-        json_str
-    };
-
-    let json_patch: engine::json::ProjectPatch = match serde_json::from_str(json_str) {
-        Ok(patch) => patch,
-        Err(err) => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic)
-                    .with_message(format!("failed to parse JSON patch: {err}")),
-            );
-            return;
-        }
-    };
-
-    let patch = engine::ProjectPatch::from(json_patch);
-
     let project_ref = match require_project(project) {
         Ok(p) => p,
         Err(err) => {
@@ -652,7 +689,6 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
             return;
         }
     };
-
     apply_project_patch_internal(
         project_ref,
         patch,
@@ -661,4 +697,100 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
         out_collected_errors,
         out_error,
     );
+}
+
+/// Applies a JSON patch as `simlin_project_apply_patch` does, and writes what
+/// the patch did that the project it leaves cannot say, as UTF-8 JSON to a
+/// buffer the caller frees with `simlin_free`:
+///
+/// ```json
+/// {"renamed": [{"model": "main", "from": "birth_rate", "to": "fertility"}],
+///  "deleted": [{"model": "main", "ident": "deaths"}],
+///  "created": [{"model": "main", "ident": "births"}]}
+/// ```
+///
+/// The report accounts for the identity of the variables the patch touched,
+/// against the project before the patch and the project after it. A variable
+/// renamed, and one deleted while another took its name, leave the same
+/// names behind, so a host that follows a variable through an edit (a
+/// selection, a page that shows it, text being typed about it) reads here
+/// what happened, rather than guessing from the names:
+///
+/// - `renamed`: the variable that was `from` before the patch is `to` after
+///   it, by a `renameVariable` operation or a view edit that relabels its
+///   element. A variable the patch created is never a `from`.
+/// - `deleted`: the variables, by their names before the patch, that no
+///   longer exist after it.
+/// - `created`: the variables, by their names after the patch, that did not
+///   exist before it.
+///
+/// Every other variable is the same variable under the same name, so a host
+/// follows what it holds under a name through `renamed`, ends it if the name
+/// is `deleted`, and otherwise keeps it. A name deleted and then taken by
+/// another variable is in both `deleted` and `created` (or a `to`). A rename
+/// back, or a respelling (`students` to `Students`), keeps the identifier and
+/// is not listed; nor is a variable created and deleted within the patch. No
+/// name repeats within a model's list, and each list is sorted by model and
+/// name, canonical identifiers throughout. The report may gain keys; a reader
+/// ignores those it does not know.
+///
+/// A patch committed, or one a dry run would commit, writes its report; one
+/// refused writes NULL with length 0 and sets `out_error` as
+/// `simlin_project_apply_patch` does.
+///
+/// # Safety
+/// - As `simlin_project_apply_patch`, and `out_report` and `out_report_len`
+///   must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_apply_patch_reporting(
+    project: *mut SimlinProject,
+    patch_data: *const u8,
+    patch_len: usize,
+    dry_run: bool,
+    allow_errors: bool,
+    out_report: *mut *mut u8,
+    out_report_len: *mut usize,
+    out_collected_errors: *mut *mut SimlinError,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if !out_collected_errors.is_null() {
+        *out_collected_errors = ptr::null_mut();
+    }
+    if out_report.is_null() || out_report_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+    *out_report = ptr::null_mut();
+    *out_report_len = 0;
+    let Some(patch) = read_patch(patch_data, patch_len, out_error) else {
+        return;
+    };
+    let project_ref = match require_project(project) {
+        Ok(p) => p,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return;
+        }
+    };
+    if let Some(report) = apply_project_patch_internal(
+        project_ref,
+        patch,
+        dry_run,
+        allow_errors,
+        out_collected_errors,
+        out_error,
+    ) {
+        write_bytes_to_ffi_output(
+            &patch_report_json(&report),
+            out_report,
+            out_report_len,
+            out_error,
+            "a patch report",
+        );
+    }
 }

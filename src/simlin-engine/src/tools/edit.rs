@@ -332,6 +332,19 @@ pub struct EditModelOutput {
     /// and for the sim specs and loop names. A line's detail is cut at 240
     /// characters.
     pub changes: Vec<ChangeLine>,
+    /// What the edit did to the identity of the variables it touched, by
+    /// canonical identifier, as a patch's report accounts for it
+    /// (`PatchReport`): for a host that follows a variable through the edit.
+    /// The variables it renamed. A line's `to` says the same for a reader.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub renamed: Vec<crate::patch::Renamed>,
+    /// The variables, by their names before the edit, that no longer exist.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deleted: Vec<crate::patch::VariableRef>,
+    /// The variables, by their names after the edit, that did not exist
+    /// before it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub created: Vec<crate::patch::VariableRef>,
     /// Lines left out to keep the answer within its budget.
     #[serde(skip_serializing_if = "is_zero")]
     pub omitted: usize,
@@ -435,6 +448,11 @@ pub struct ChangeLine {
     pub action: ChangeAction,
     /// What changes, in words.
     pub detail: String,
+    /// A renamed variable's name after the edit, spelled as `variable` is:
+    /// present exactly on a `renamed` line, so a reader takes the new name
+    /// from here rather than from `detail`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -812,6 +830,9 @@ pub(crate) fn edit_model(
             revision: ws.revision,
             summary: super::evidence::echo(&input.summary),
             changes: vec![],
+            renamed: vec![],
+            deleted: vec![],
+            created: vec![],
             omitted: 0,
             omitted_diagnostics: 0,
             unchanged: true,
@@ -872,6 +893,9 @@ pub(crate) fn edit_model(
             revision: ws.revision,
             summary: super::evidence::echo(&input.summary),
             changes: made.changes,
+            renamed: made.identities.renamed,
+            deleted: made.identities.deleted,
+            created: made.identities.created,
             omitted: 0,
             omitted_diagnostics: 0,
             unchanged: false,
@@ -968,6 +992,9 @@ fn fitted<T: Serialize>(
 struct Made {
     /// The project as the edit leaves it.
     working: datamodel::Project,
+    /// What the edit did to the identity of the variables it touched
+    /// ([`crate::patch::PatchReport`]).
+    identities: crate::patch::PatchReport,
     delta: Delta,
     changes: Vec<ChangeLine>,
     diagnostics: Vec<Found>,
@@ -1103,6 +1130,7 @@ impl<'a> Built<'a> {
                 .map(Found::by_the_gate),
         );
         Ok(Made {
+            identities: builder.identities.report(&builder.working),
             working: builder.working,
             delta,
             changes,
@@ -1267,6 +1295,9 @@ struct Builder<'a> {
     ops: Vec<ModelOperation>,
     /// Renames, `(from, to)` as written.
     renames: Vec<(String, String)>,
+    /// What the operations did to the identity of the variables they
+    /// touched, as the patches that made them follow it.
+    identities: crate::patch::Identities,
     /// The variables the operations name, by their canonical names as the
     /// edit leaves them: what provenance marks, and whose equations the gate
     /// holds the edit to.
@@ -1289,6 +1320,7 @@ impl<'a> Builder<'a> {
             evidence,
             ops: Vec::new(),
             renames: Vec::new(),
+            identities: crate::patch::Identities::default(),
             touched: BTreeMap::new(),
             pins: Vec::new(),
         }
@@ -1473,7 +1505,7 @@ impl<'a> Builder<'a> {
 
     /// Apply `ops` to the working copy, through the production patch path.
     fn apply(&mut self, ops: Vec<ModelOperation>) -> Result<(), ToolError> {
-        crate::apply_patch(
+        crate::patch::apply_patch_into(
             &mut self.working,
             ProjectPatch {
                 project_ops: vec![],
@@ -1482,6 +1514,7 @@ impl<'a> Builder<'a> {
                     ops: ops.clone(),
                 }],
             },
+            &mut self.identities,
         )
         .map_err(|err| ToolError::new(format!("it cannot apply: {err}")))?;
         self.ops.extend(ops);
@@ -3374,6 +3407,7 @@ fn change_lines(
                     variable: label(var),
                     action: ChangeAction::Added,
                     detail: added_detail(var, spelled_in),
+                    to: None,
                 });
             }
             continue;
@@ -3390,6 +3424,7 @@ fn change_lines(
                 variable: label(was),
                 action: ChangeAction::Deleted,
                 detail: format!("deleted {}", kind_name(was)),
+                to: None,
             });
             continue;
         };
@@ -3412,6 +3447,7 @@ fn change_lines(
                 ChangeAction::Changed
             },
             detail: details.join("; "),
+            to: new_name.map(|_| label(is)),
         });
         // A variable added under the name a rename left.
         if new_name.is_some()
@@ -3421,6 +3457,7 @@ fn change_lines(
                 variable: label(var),
                 action: ChangeAction::Added,
                 detail: added_detail(var, spelled_in),
+                to: None,
             });
         }
     }
@@ -3430,6 +3467,7 @@ fn change_lines(
                 variable: name.name.clone(),
                 action: ChangeAction::LoopNamed,
                 detail: format!("names the loop through {}", change.through.join(", ")),
+                to: None,
             });
         }
     }
@@ -3470,6 +3508,7 @@ fn change_lines(
                 variable: "sim specs".to_string(),
                 action: ChangeAction::SimSpecs,
                 detail: specs.join("; "),
+                to: None,
             });
         }
     }
@@ -3510,6 +3549,7 @@ fn dimension_lines(
             variable: dim.name().to_string(),
             action: ChangeAction::Dimension,
             detail,
+            to: None,
         });
     }
     for dim in before {
@@ -3518,6 +3558,7 @@ fn dimension_lines(
                 variable: dim.name().to_string(),
                 action: ChangeAction::Dimension,
                 detail: "deletes the dimension".to_string(),
+                to: None,
             });
         }
     }

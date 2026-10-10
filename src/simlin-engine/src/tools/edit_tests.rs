@@ -274,6 +274,40 @@ fn an_edit_before_a_read_or_of_a_variable_changed_since_is_refused() {
     edit(&mut host, &mut session, coverage);
 }
 
+/// An edit's answer accounts for identity as a patch's report does: a
+/// variable deleted and a new one of its name are both, by identifier.
+#[test]
+fn an_edit_that_remakes_a_variable_says_it_was_deleted_and_created() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    read(&mut host, &mut session);
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([{"op": "add_variable", "name": "Spare Time", "equation": "5"}])),
+    );
+    read(&mut host, &mut session);
+    let output = edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "delete", "variable": "spare_time"},
+            {"op": "add_stock", "name": "Spare Time", "initial": "100"}
+        ])),
+    );
+    assert_eq!(
+        output["deleted"],
+        json!([{"model": "main", "ident": "spare_time"}]),
+        "{output}"
+    );
+    assert_eq!(
+        output["created"],
+        json!([{"model": "main", "ident": "spare_time"}]),
+        "{output}"
+    );
+    assert!(output.get("renamed").is_none(), "{output}");
+}
+
 #[test]
 fn a_rename_rewrites_its_readers_and_the_answer_names_them() {
     let mut host = Host::from_test_project(&inventory());
@@ -286,8 +320,14 @@ fn a_rename_rewrites_its_readers_and_the_answer_names_them() {
     );
     let changes = output["changes"].as_array().unwrap();
     assert!(changes.contains(&json!({
-        "variable": "coverage", "action": "renamed", "detail": "renamed to inventory coverage"
+        "variable": "coverage", "action": "renamed", "detail": "renamed to inventory coverage",
+        "to": "inventory coverage"
     })));
+    assert_eq!(
+        output["renamed"],
+        json!([{"model": "main", "from": "coverage", "to": "inventory_coverage"}]),
+        "and names it by identifier for a host"
+    );
     assert!(changes.contains(&json!({
         "variable": "desired_inventory", "action": "changed",
         "detail": "equation orders * inventory_coverage (was orders * coverage)"
@@ -2799,7 +2839,7 @@ fn renames_in_a_row_are_one_rename() {
         output["changes"],
         json!([
             {"variable": "inflow", "action": "changed", "detail": "equation tempo (was rate)"},
-            {"variable": "rate", "action": "renamed", "detail": "renamed to tempo"}
+            {"variable": "rate", "action": "renamed", "detail": "renamed to tempo", "to": "tempo"}
         ])
     );
 }

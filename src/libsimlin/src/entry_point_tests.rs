@@ -716,6 +716,66 @@ unsafe fn patched(call: &Call, patch: &[u8], dry_run: bool, allow_errors: bool) 
     format!("{:?} / {:?}", take_error(collected), take_error(rejected))
 }
 
+/// `patch` applied through `simlin_project_apply_patch_reporting`, with its
+/// report.
+unsafe fn patched_reporting(call: &Call, patch: &[u8]) -> String {
+    let (mut collected, mut rejected) = (ptr::null_mut(), ptr::null_mut());
+    let (mut report, mut report_len) = (ptr::null_mut(), 0);
+    call.entry(|| {
+        simlin_project_apply_patch_reporting(
+            call.proj,
+            patch.as_ptr(),
+            patch.len(),
+            false,
+            false,
+            &mut report,
+            &mut report_len,
+            &mut collected,
+            &mut rejected,
+        )
+    });
+    let report = if report.is_null() {
+        None
+    } else {
+        let json = String::from_utf8(std::slice::from_raw_parts(report, report_len).to_vec());
+        crate::memory::simlin_free(report);
+        Some(json.expect("a report is UTF-8"))
+    };
+    format!(
+        "{:?} / {:?} / {report:?}",
+        take_error(collected),
+        take_error(rejected)
+    )
+}
+
+/// `rate`'s element relabeled, and moved, which renames the variable, as
+/// the report names.
+unsafe fn run_renaming_patch(call: &Call) -> String {
+    let patch = json!({"models": [{"name": "main", "ops": [
+        {"type": "editView", "payload": {"index": 0, "remove": [], "upsert": [
+            {"type": "aux", "uid": 4, "name": "pace", "x": 60.0, "y": 200.0}
+        ]}}
+    ]}]});
+    let answer = patched_reporting(call, &serde_json::to_vec(&patch).unwrap());
+    assert!(
+        answer.contains(r#"\"from\":\"rate\",\"to\":\"pace\""#),
+        "the report names the rename: {answer}"
+    );
+    answer
+}
+
+unsafe fn run_rejected_renaming_patch(call: &Call) -> String {
+    let patch = json!({"models": [{"name": "main", "ops": [
+        {"type": "upsertAux", "payload": {"aux": {"name": "rate", "equation": "rate +"}}}
+    ]}]});
+    let answer = patched_reporting(call, &serde_json::to_vec(&patch).unwrap());
+    assert!(
+        answer.ends_with("/ None"),
+        "a rejected patch reports nothing: {answer}"
+    );
+    answer
+}
+
 unsafe fn run_view_patch(call: &Call) -> String {
     patched(
         call,
@@ -1579,6 +1639,20 @@ pub(crate) const ALL: &[EntryPoint] = &[
         CONTENTS,
         Writes::Nothing,
         run_patch_of_a_model_with_no_operations,
+    ),
+    row(
+        "simlin_project_apply_patch_reporting",
+        "a rename",
+        with_db(Db::Writer),
+        Writes::Model,
+        run_renaming_patch,
+    ),
+    row(
+        "simlin_project_apply_patch_reporting",
+        "a rejected edit",
+        with_db(Db::Writer),
+        Writes::Nothing,
+        run_rejected_renaming_patch,
     ),
     row(
         "simlin_project_diagram_sync",

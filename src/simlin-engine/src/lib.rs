@@ -160,7 +160,8 @@ pub mod xmile;
 pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
 pub use self::import_losses::ImportWarning;
 pub use self::patch::{
-    ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch, is_view_only_patch,
+    ModelOperation, ModelPatch, PatchReport, ProjectOperation, ProjectPatch, Renamed, VariableRef,
+    apply_patch, apply_patch_reporting, is_view_only_patch,
 };
 pub use self::queue_compile::build_sim;
 pub use self::results::{Method, Results, Specs as SimSpecs};
