@@ -84,6 +84,8 @@ mod macro_expansion_tests;
 #[cfg(test)]
 mod mapped_reference_semantics_tests;
 pub mod mdl;
+#[cfg(test)]
+mod mismatched_read_tests;
 mod model;
 mod module_functions;
 mod parser;

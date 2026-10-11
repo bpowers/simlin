@@ -563,6 +563,20 @@ typedef struct {
   // Which end of `read_past_dimension` the subscript runs off;
   // `SIMLIN_READ_PAST_NONE` for every other detail. Appended additively.
   SimlinReadPast read_past;
+  // For a reference whose dimensions disagree with those of the variable
+  // reading it (`SIMLIN_ERROR_CODE_MISMATCHED_DIMENSIONS`), the variable
+  // the reference reads, by its canonical name; NULL for every other
+  // detail. `variable_name` is the reader, and `start_offset..end_offset`
+  // the reference in its equation (both 0 for a read no equation spells:
+  // a stock's flow, a module's input). Appended additively.
+  const char *mismatched_read_variable;
+  // The read variable's dimensions the reader has no element of, by their
+  // canonical names, comma-separated as `element_name` is: what splitting
+  // the reader would give it, or what reading one value from the variable
+  // would remove. NULL when the reference instead subscripts the variable
+  // on more dimensions than it has, and for every other detail. Appended
+  // additively.
+  const char *mismatched_read_dimensions;
 } SimlinErrorDetail;
 
 // Opaque project structure

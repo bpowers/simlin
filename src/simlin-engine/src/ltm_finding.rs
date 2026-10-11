@@ -3188,7 +3188,7 @@ pub(crate) fn discover_loops_with_deadlines(
                         link.from.as_str(),
                         link.to.as_str()
                     )),
-                    element: None,
+                    place: None,
                 })?;
             link_result_offsets.push(*offset);
         }

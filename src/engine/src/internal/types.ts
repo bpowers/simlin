@@ -148,6 +148,13 @@ export interface ErrorDetail {
   // and which end; null and None for every other detail.
   readPastDimension: string | null;
   readPast: SimlinReadPast;
+  // For a reference whose dimensions disagree with its reader's, the
+  // variable read (canonical) and the dimensions of it the reader has no
+  // element of (canonical, comma-separated; null when the reference
+  // subscripts the variable past its dimensions); null for every other
+  // detail.
+  mismatchedReadVariable: string | null;
+  mismatchedReadDimensions: string | null;
 }
 
 // Link structure - matches SimlinLink in simlin.h

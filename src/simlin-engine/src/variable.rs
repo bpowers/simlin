@@ -2216,7 +2216,7 @@ pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
         shapes: &Default::default(),
         model_name: "test",
     };
-    lower_ast(&scope, &ast.unwrap(), false).unwrap()
+    lower_ast(&scope, &ast.unwrap(), None).unwrap()
 }
 
 /// The same equation at the typed tier, as `db::variable_direct_dependencies`

@@ -1489,3 +1489,69 @@ fn a_read_past_a_dimension_names_the_dimension_and_the_end() {
         simlin_project_unref(proj);
     }
 }
+
+/// A read whose dimensions disagree with its reader's names the variable
+/// read and the dimensions the reader has no element of, on the reader, and
+/// is the only detail: no project-wide row repeats it.
+#[test]
+fn a_mismatched_read_names_the_variable_and_the_dimensions() {
+    let details_of = |datamodel: &simlin_engine::datamodel::Project| unsafe {
+        let proj = open_project_from_datamodel(datamodel);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(!all_errors.is_null());
+        let count = simlin_error_get_detail_count(all_errors);
+        let details = std::slice::from_raw_parts(simlin_error_get_details(all_errors), count);
+        let read = |p: *const std::os::raw::c_char| {
+            (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+        };
+        let rows: Vec<_> = details
+            .iter()
+            .map(|d| {
+                (
+                    d.code,
+                    read(d.variable_name),
+                    read(d.mismatched_read_variable),
+                    read(d.mismatched_read_dimensions),
+                )
+            })
+            .collect();
+        simlin_error_free(all_errors);
+        simlin_project_unref(proj);
+        rows
+    };
+    let regions = || {
+        TestProject::new("split")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("Region", &["North", "South"])
+    };
+
+    let split = regions()
+        .array_const("births[Region]", 1.0)
+        .scalar_aux("total", "births * 2")
+        .build_datamodel();
+    assert_eq!(
+        details_of(&split),
+        vec![(
+            SimlinErrorCode::MismatchedDimensions,
+            Some("total".to_string()),
+            Some("births".to_string()),
+            Some("region".to_string()),
+        )]
+    );
+
+    let unsplit = regions()
+        .scalar_const("births", 1.0)
+        .scalar_aux("north", "births[North]")
+        .build_datamodel();
+    assert_eq!(
+        details_of(&unsplit),
+        vec![(
+            SimlinErrorCode::MismatchedDimensions,
+            Some("north".to_string()),
+            Some("births".to_string()),
+            None,
+        )]
+    );
+}

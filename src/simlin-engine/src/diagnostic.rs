@@ -120,7 +120,7 @@ impl DiagnosticError {
     pub fn element(&self) -> Option<&str> {
         match self {
             DiagnosticError::Equation(err) => err.element.as_deref(),
-            DiagnosticError::Model(err) => err.element.as_deref(),
+            DiagnosticError::Model(err) => err.element(),
             DiagnosticError::Unit(UnitError::ConsistencyError(_, _, _, element)) => {
                 element.as_deref()
             }
@@ -135,6 +135,16 @@ impl DiagnosticError {
     pub fn read_past(&self) -> Option<&crate::common::ReadPast> {
         match self {
             DiagnosticError::Equation(err) => err.read_past.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The variable a reference reads and the dimensions that disagree, for
+    /// a `MismatchedDimensions` refusal of one reference
+    /// ([`EquationError::mismatched_read`]).
+    pub fn mismatched_read(&self) -> Option<&crate::common::MismatchedRead> {
+        match self {
+            DiagnosticError::Equation(err) => err.mismatched_read.as_deref(),
             _ => None,
         }
     }
@@ -202,6 +212,12 @@ impl Diagnostic {
     /// ([`DiagnosticError::read_past`]).
     pub fn read_past(&self) -> Option<&crate::common::ReadPast> {
         self.error.read_past()
+    }
+
+    /// The variable a refused reference reads and the dimensions that
+    /// disagree ([`DiagnosticError::mismatched_read`]).
+    pub fn mismatched_read(&self) -> Option<&crate::common::MismatchedRead> {
+        self.error.mismatched_read()
     }
 
     /// Whether this diagnostic is `code` raised on `category`'s surface.

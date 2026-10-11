@@ -768,8 +768,9 @@ impl<'a> BuiltinVisitor<'a> {
         // Argument-first: each argument that needs a helper is filed before
         // the instance, which is the order the implicit-var list keeps and the
         // order the salsa-cached vectors compare in.
-        let mut sources: Vec<String> = Vec::with_capacity(args.len());
+        let mut sources: Vec<(String, crate::builtins::Loc)> = Vec::with_capacity(args.len());
         for (i, arg) in args.into_iter().enumerate() {
+            let arg_loc = arg.get_loc();
             let src = match arg {
                 // A bare identifier wires straight to the port, unless it
                 // means one element's value under the active element.
@@ -782,7 +783,7 @@ impl<'a> BuiltinVisitor<'a> {
                     src
                 }
             };
-            sources.push(src);
+            sources.push((src, arg_loc));
         }
 
         let module = ImplicitModule::new(
@@ -793,7 +794,8 @@ impl<'a> BuiltinVisitor<'a> {
             descriptor.model_name.clone(),
             sources
                 .into_iter()
-                .zip(descriptor.parameter_ports.iter().map(String::as_str)),
+                .zip(descriptor.parameter_ports.iter().map(String::as_str))
+                .map(|((src, loc), port)| (src, port, loc)),
         );
         // U+00B7 (·) is the compile-time separator for a module's variable;
         // `primary_output` is `output` for every stdlib model.

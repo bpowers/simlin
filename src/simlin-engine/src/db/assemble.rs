@@ -307,10 +307,44 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
     base: &crate::compiler::ModuleCtx<'_>,
     exprs: &[crate::compiler::Expr],
 ) -> Result<crate::compiler::symbolic::PerVarBytecodes, String> {
+    compile_phase_or_refusal(base, exprs).map_err(|refusal| refusal.to_string())
+}
+
+/// Why a phase's lowered expressions did not emit.
+pub(crate) enum EmitRefusal {
+    /// Codegen refused a construct, which the error names: a
+    /// [`crate::common::MismatchedRead`] for a variable's view where one
+    /// value is consumed, which its reporter files as the reader's equation
+    /// error.
+    Codegen(crate::Error),
+    /// The phase is not one codegen can be handed: it lowered to nothing, or
+    /// its temps are not dense.
+    Malformed(String),
+}
+
+impl std::fmt::Display for EmitRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EmitRefusal::Codegen(err) => {
+                write!(f, "codegen rejected the lowered expressions: {err}")
+            }
+            EmitRefusal::Malformed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// [`compile_phase_to_per_var_bytecodes_reporting`], keeping codegen's error
+/// whole, so a refusal that names a read reaches its reporter as one.
+pub(crate) fn compile_phase_or_refusal(
+    base: &crate::compiler::ModuleCtx<'_>,
+    exprs: &[crate::compiler::Expr],
+) -> Result<crate::compiler::symbolic::PerVarBytecodes, EmitRefusal> {
     use crate::compiler::symbolic::PerVarBytecodes;
 
     if exprs.is_empty() {
-        return Err("nothing to emit: the phase lowered to zero expressions".to_string());
+        return Err(EmitRefusal::Malformed(
+            "nothing to emit: the phase lowered to zero expressions".to_string(),
+        ));
     }
 
     // Extract temp sizes from expressions. The table is indexed by id and
@@ -325,10 +359,10 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
     let mut temp_sizes: Vec<usize> = vec![0; temp_sizes_map.len()];
     for (id, size) in &temp_sizes_map {
         let slot = temp_sizes.get_mut(*id as usize).ok_or_else(|| {
-            format!(
+            EmitRefusal::Malformed(format!(
                 "temp ids are not dense: temp {id} is written but the fragment defines only {} temps",
                 temp_sizes_map.len()
-            )
+            ))
         })?;
         *slot = *size;
     }
@@ -342,9 +376,7 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
         ..*base
     };
 
-    let compiled = emit_ctx
-        .compile()
-        .map_err(|err| format!("codegen rejected the lowered expressions: {err}"))?;
+    let compiled = emit_ctx.compile().map_err(EmitRefusal::Codegen)?;
 
     Ok(PerVarBytecodes {
         symbolic: compiled.compiled_flows,

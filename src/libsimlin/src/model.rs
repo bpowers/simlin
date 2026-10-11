@@ -157,7 +157,7 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
                 kind: engine::ErrorKind::Simulation,
                 code: engine::ErrorCode::NotSimulatable,
                 details: Some("incremental compilation: no sync state available".to_string()),
-                element: None,
+                place: None,
             })
         }
     };

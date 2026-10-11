@@ -161,16 +161,24 @@ pub(crate) struct LoweringScope<'a> {
 struct ArrayContext<'a> {
     scope: &'a LoweringScope<'a>,
     is_array: bool,
+    /// The dimensions of the variable the equation is of: none for a
+    /// scalar's, and a per-element helper's parent's for one of those.
+    reader: Option<&'a [crate::dimensions::Dimension]>,
     /// When true, allows union of named dimensions (cross-product).
     /// Set inside array reduction builtins like SUM.
     allow_dimension_union: bool,
 }
 
 impl<'a> ArrayContext<'a> {
-    fn new(scope: &'a LoweringScope<'a>, is_array: bool) -> Self {
+    fn new(
+        scope: &'a LoweringScope<'a>,
+        is_array: bool,
+        reader: Option<&'a [crate::dimensions::Dimension]>,
+    ) -> Self {
         Self {
             scope,
             is_array,
+            reader,
             allow_dimension_union: false,
         }
     }
@@ -213,6 +221,10 @@ impl Expr2Context for ArrayContext<'_> {
         let prev = self.allow_dimension_union;
         self.allow_dimension_union = allow;
         prev
+    }
+
+    fn reader_dimensions(&self) -> Option<&[crate::dimensions::Dimension]> {
+        self.reader
     }
 
     fn has_mapping_to(&self, dim_name: &str, target: &str) -> bool {
@@ -330,17 +342,18 @@ fn arrayed<E>(
 /// Lower one equation's parsed AST to `Expr2`: [`typed_ast`], then the array
 /// bounds under `scope` ([`lower_typed_ast`]).
 ///
-/// `element_scoped` is true for a per-element helper's scalar equation
-/// (`variable::ElementScope`): its body was written inside an apply-to-all
-/// body, so it is lowered in the array context that body has, where a
+/// `element_scope` is, for a per-element helper's scalar equation
+/// (`variable::ElementScope`), the dimensions of the body it was written
+/// inside: it is lowered in the array context that body has, where a
 /// dimension name is a reference to be resolved rather than a name that
-/// cannot appear in a scalar equation.
+/// cannot appear in a scalar equation, and where those dimensions are the
+/// reader's. `None` for every other equation.
 pub(crate) fn lower_ast(
     scope: &LoweringScope,
     ast: &Ast<Expr0>,
-    element_scoped: bool,
+    element_scope: Option<&[crate::dimensions::Dimension]>,
 ) -> LoweringResult<Ast<Expr2>> {
-    lower_typed_ast(scope, typed_ast(ast, scope.dimensions)?, element_scoped)
+    lower_typed_ast(scope, typed_ast(ast, scope.dimensions)?, element_scope)
 }
 
 /// The array-bounds half of [`lower_ast`]: one equation at the typed tier
@@ -350,27 +363,35 @@ pub(crate) fn lower_ast(
 pub(crate) fn lower_typed_ast(
     scope: &LoweringScope,
     typed: Ast<Expr1>,
-    element_scoped: bool,
+    element_scope: Option<&[crate::dimensions::Dimension]>,
 ) -> LoweringResult<Ast<Expr2>> {
     match typed {
         Ast::Scalar(expr) => {
-            let mut ctx = ArrayContext::new(scope, element_scoped);
+            let mut ctx = ArrayContext::new(
+                scope,
+                element_scope.is_some(),
+                Some(element_scope.unwrap_or(&[])),
+            );
             Expr2::from(expr, &mut ctx)
                 .map(Ast::Scalar)
                 .map_err(|e| vec![e])
         }
         Ast::ApplyToAll(dims, expr) => {
-            let mut ctx = ArrayContext::new(scope, true);
-            Expr2::from(expr, &mut ctx)
+            let lowered = Expr2::from(expr, &mut ArrayContext::new(scope, true, Some(&dims)));
+            lowered
                 .map(|expr| Ast::ApplyToAll(dims, expr))
                 .map_err(|e| vec![e])
         }
         Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
-            let mut ctx = ArrayContext::new(scope, true);
-            let elements = lower_arrayed_arms(&dims, elements, |expr| Expr2::from(expr, &mut ctx));
-            let default_expr = default_expr
-                .map(|expr| Expr2::from(expr, &mut ctx))
-                .transpose();
+            let (elements, default_expr) = {
+                let mut ctx = ArrayContext::new(scope, true, Some(&dims));
+                let elements =
+                    lower_arrayed_arms(&dims, elements, |expr| Expr2::from(expr, &mut ctx));
+                let default_expr = default_expr
+                    .map(|expr| Expr2::from(expr, &mut ctx))
+                    .transpose();
+                (elements, default_expr)
+            };
             arrayed(dims, elements, default_expr, apply_default_to_missing)
         }
     }

@@ -23,6 +23,7 @@ use super::*;
 use crate::ast::LoweringScope;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
+use crate::db::assemble::EmitRefusal;
 use crate::db::var_fragment::{
     DeclaredName, ExplicitFragment, ResolvedHeads, explicit_fragment_input,
 };
@@ -162,6 +163,33 @@ pub fn compile_var_fragment<'db>(
     let is_module = var.kind(db) == SourceVariableKind::Module;
     let is_module_input = input.module_inputs.contains(&var_ident_canonical);
 
+    // Accumulate a diagnostic when a phase's lowering (`lower_fragment`)
+    // fails. Without this, errors like DoesNotExist (unknown dependency)
+    // are silently dropped and never appear in collect_all_diagnostics.
+    //
+    // `Equation`, not `Model`: `errors.rs` treats the two variants differently
+    // on purpose. The `Equation` arm produces `FormattedErrorKind::Variable`,
+    // names the variable in the summary, and -- via
+    // `format_diagnostic_with_datamodel` -> `format_equation_error` -- enriches
+    // the message with a source snippet from the equation text, where the
+    // `Model` arm drops the variable from the summary and gets no snippet
+    // (pinned by
+    // `db::diagnostic_tests::test_compile_var_fragment_per_phase_var_new_failure`).
+    // `EquationError::from` carries `err.details`, so the reason the lowering
+    // wrote -- the stock named by `compiler::check_stock_updates_are_emittable`,
+    // the identifier a `MismatchedDimensions` could not shape -- rides along
+    // with it. The error has no span, so the conversion leaves `0..0`.
+    let accumulate_var_compile_error = |err: &crate::Error| {
+        Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(var.ident(db).clone()),
+            owner: None,
+            severity: DiagnosticSeverity::Error,
+            error: DiagnosticError::Equation(err.clone().into()),
+        }
+        .accumulate(db);
+    };
+
     // Emit one phase, and make a CODEGEN rejection attributable.
     //
     // Lowering failures accumulate through `accumulate_var_compile_error`
@@ -212,13 +240,21 @@ pub fn compile_var_fragment<'db>(
     // `FormattedErrorKind::Simulation`, which `FormattedErrors::push` does not
     // count toward `has_model_errors`/`has_variable_errors`, so the CLI's
     // redundant-`NotSimulatable` suppression is unaffected either way.)
+    //
+    // A codegen refusal that names a read of one of the variable's own
+    // dependencies ([`refused_read`]) is the variable's equation error like a
+    // lowering failure, at the reference, rather than prose.
     let emit_ctx = input.emit_ctx();
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
         if exprs.is_empty() {
             return None;
         }
-        match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(&emit_ctx, exprs) {
+        match crate::db::assemble::compile_phase_or_refusal(&emit_ctx, exprs) {
             Ok(bytecodes) => Some(bytecodes),
+            Err(EmitRefusal::Codegen(err)) if refused_read(&input, &err) => {
+                accumulate_var_compile_error(&err);
+                None
+            }
             Err(reason) => {
                 let ident = var.ident(db);
                 Diagnostic {
@@ -234,33 +270,6 @@ pub fn compile_var_fragment<'db>(
                 None
             }
         }
-    };
-
-    // Accumulate a diagnostic when a phase's lowering (`lower_fragment`)
-    // fails. Without this, errors like DoesNotExist (unknown dependency)
-    // are silently dropped and never appear in collect_all_diagnostics.
-    //
-    // `Equation`, not `Model`: `errors.rs` treats the two variants differently
-    // on purpose. The `Equation` arm produces `FormattedErrorKind::Variable`,
-    // names the variable in the summary, and -- via
-    // `format_diagnostic_with_datamodel` -> `format_equation_error` -- enriches
-    // the message with a source snippet from the equation text, where the
-    // `Model` arm drops the variable from the summary and gets no snippet
-    // (pinned by
-    // `db::diagnostic_tests::test_compile_var_fragment_per_phase_var_new_failure`).
-    // `EquationError::from` carries `err.details`, so the reason the lowering
-    // wrote -- the stock named by `compiler::check_stock_updates_are_emittable`,
-    // the identifier a `MismatchedDimensions` could not shape -- rides along
-    // with it. The error has no span, so the conversion leaves `0..0`.
-    let accumulate_var_compile_error = |err: &crate::Error| {
-        Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(var.ident(db).clone()),
-            owner: None,
-            severity: DiagnosticSeverity::Error,
-            error: DiagnosticError::Equation(err.clone().into()),
-        }
-        .accumulate(db);
     };
 
     // Only the phases the variable's runlist membership admits are lowered; a
@@ -324,6 +333,20 @@ pub fn compile_var_fragment<'db>(
             stock_bytecodes,
         },
         flow_locally_invariant,
+    })
+}
+
+/// Whether `err` is the refusal of a read of a variable `input` depends on
+/// ([`crate::common::MismatchedRead`]). Codegen names the variable that owns
+/// the refused view's slots, which for a read of a module's output is the
+/// module instance; that refusal stays prose, since the read's own name is
+/// not the owner's.
+fn refused_read(input: &FragmentInput<'_>, err: &crate::Error) -> bool {
+    err.read().is_some_and(|(read, _)| {
+        input
+            .deps
+            .get(read.variable.as_str())
+            .is_some_and(|shape| !shape.is_module())
     })
 }
 
@@ -398,6 +421,7 @@ fn report_out_of_range_reads(
                     dimension,
                     before_first: read.before_start,
                 }),
+                mismatched_read: None,
             }),
         }
         .accumulate(db);
@@ -865,6 +889,34 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
             .collect();
         !parent_dims.is_empty() && parent_dims == helper_dims
     };
+    // A refused read ([`crate::common::MismatchedRead`]) is the parent's
+    // equation error at the reference. A subtree-bodied helper's reference is
+    // written in the parent's text, where the refusal's span already points;
+    // a module instance's is the argument the call wires to the port, which
+    // the instance keeps. Whichever phase refuses it, the read is the same
+    // and the drain collapses the repeats.
+    let report_read = |err: crate::Error| {
+        let mut error = crate::common::EquationError::from(err);
+        if (error.start, error.end) == (0, 0)
+            && let Some(read) = &error.mismatched_read
+            && let Some(loc) = meta
+                .find_in(parse_source_variable(db, meta.parent_source_var, project))
+                .and_then(|helper| helper.argument_span(&read.variable))
+        {
+            (error.start, error.end) = (loc.start, loc.end);
+        }
+        if error.element.is_none() {
+            error.element = own_arm_element.clone();
+        }
+        Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(meta.parent_source_var.ident(db).clone()),
+            owner: None,
+            severity: DiagnosticSeverity::Error,
+            error: DiagnosticError::Equation(error),
+        }
+        .accumulate(db);
+    };
     let phase = |is_initial: bool| -> Option<PerVarBytecodes> {
         match lower_fragment(&input, is_initial) {
             Ok(var) => {
@@ -882,15 +934,21 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                         })
                     },
                 );
-                match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
-                    &emit_ctx, &var.ast,
-                ) {
+                match crate::db::assemble::compile_phase_or_refusal(&emit_ctx, &var.ast) {
                     Ok(bytecodes) => Some(bytecodes),
+                    Err(EmitRefusal::Codegen(err)) if refused_read(&input, &err) => {
+                        report_read(err);
+                        None
+                    }
                     Err(reason) => {
-                        report(reason);
+                        report(reason.to_string());
                         None
                     }
                 }
+            }
+            Err(err) if err.read().is_some() => {
+                report_read(err);
+                None
             }
             Err(err) => {
                 match parent_argument_span() {
@@ -903,9 +961,13 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                             start: loc.start,
                             end: loc.end,
                             code: err.code,
+                            element: err
+                                .element()
+                                .map(str::to_owned)
+                                .or_else(|| own_arm_element.clone()),
                             details: err.details,
-                            element: err.element.or_else(|| own_arm_element.clone()),
                             read_past: None,
+                            mismatched_read: None,
                         }),
                     }
                     .accumulate(db),

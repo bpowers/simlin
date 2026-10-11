@@ -31,25 +31,30 @@ use crate::db::{
 use crate::test_common::TestProject;
 
 /// A scalar SMTH1 whose argument is an array slice: the hoisted helper
-/// `$⁚out⁚0⁚arg0` holds `vals[*]` in a SCALAR equation, which codegen rejects
-/// ("an array of shape [2] is used where a single value is required"). Two
-/// such calls, so the attribution is once per helper. (Under an apply-to-all
-/// parent the same argument is one element of the body and reads the active
-/// element, as the plain equation does, so it compiles.)
-/// The model does not compile -- the point of the fixture is what the
-/// diagnostics SAY about that.
+/// `$⁚out⁚0⁚arg0` holds `vals[*]` in a SCALAR equation, which codegen refuses
+/// as a read of `vals` where one value is needed. Two such calls, so the
+/// attribution is once per call. (Under an apply-to-all parent the same
+/// argument is one element of the body and reads the active element, as the
+/// plain equation does, so it compiles.) The model does not compile -- the
+/// point of the fixture is what the diagnostics SAY about that.
 fn failing_implicit_fixture() -> TestProject {
     TestProject::new("implicit_fail")
         .with_sim_time(0.0, 4.0, 1.0)
         .named_dimension("C", &["c1", "c2"])
         .array_with_ranges("vals[C]", vec![("c1", "s"), ("c2", "s * 2")])
-        .aux("out", "SMTH1(vals[*], 3) + SMTH1(vals[*], 5)", None)
+        .aux("out", OUT, None)
         .flow("g", "(out + 1) * 0.01", None)
         .stock("s", "10", &["g"], &[], None)
 }
 
-/// The failing helper is named, with the codegen reason, in
-/// `collect_all_diagnostics` -- not just in the assembly batch message.
+const OUT: &str = "SMTH1(vals[*], 3) + SMTH1(vals[*], 5)";
+
+/// A helper's codegen refusal of a read is the PARENT's equation error, at
+/// the reference in the parent's text, naming the read -- never an assembly
+/// row naming a helper the person did not write. A refusal that names no
+/// read keeps the assembly row, which names the helper and its parent in the
+/// message (`errors.rs`'s `Assembly` arm never renders the `variable`
+/// field).
 #[test]
 fn implicit_helper_codegen_failure_is_attributed() {
     let datamodel = failing_implicit_fixture().build_datamodel();
@@ -57,50 +62,33 @@ fn implicit_helper_codegen_failure_is_attributed() {
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
 
     let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
-    let attributed: Vec<&crate::db::Diagnostic> = diags
+    assert!(
+        !diags
+            .iter()
+            .any(|d| matches!(&d.error, DiagnosticError::Assembly(_))),
+        "no assembly row names a helper: {diags:?}"
+    );
+    let mut attributed: Vec<(u16, u16)> = diags
         .iter()
-        .filter(|d| match &d.error {
-            DiagnosticError::Assembly(msg) => {
-                msg.contains("$\u{205A}out\u{205A}")
-                    && msg.contains("\u{205A}arg0")
-                    && msg.contains("failed to compile")
+        .filter_map(|d| match &d.error {
+            DiagnosticError::Equation(error) if d.variable.as_deref() == Some("out") => {
+                assert_eq!(d.severity, DiagnosticSeverity::Error);
+                let read = error.mismatched_read.as_ref().expect("the read is named");
+                assert_eq!(
+                    (read.variable.as_str(), read.unpaired.as_slice()),
+                    ("vals", &["c".to_string()][..])
+                );
+                Some((error.start, error.end))
             }
-            _ => false,
+            _ => None,
         })
         .collect();
-    assert!(
-        !attributed.is_empty(),
-        "the failing implicit helper must be named in collect_all_diagnostics; got: {:?}",
-        diags
-            .iter()
-            .map(|d| format!("{:?}: {:?}", d.variable, d.error))
-            .collect::<Vec<_>>()
-    );
-    for d in &attributed {
-        // The name must be IN the message (errors.rs's Assembly arm never
-        // renders the `variable` field), and the codegen reason must ride
-        // along -- an unexplained failure is the #913 shape this closes.
-        let DiagnosticError::Assembly(msg) = &d.error else {
-            unreachable!()
-        };
-        assert!(
-            msg.contains("used where a single value is required") || msg.contains("codegen"),
-            "the refused construct must be named: {msg}"
-        );
-        assert!(
-            msg.contains("synthesized while parsing 'out'"),
-            "the PARENT the helper was synthesized for must be named: {msg}"
-        );
-        assert_eq!(d.severity, DiagnosticSeverity::Error);
-        assert!(d.variable.is_some(), "structured consumers read the field");
-    }
-    // One row per helper: the two failing phases (initial + flow) refuse the
-    // same construct, and identical reasons collapse rather than duplicate.
-    assert_eq!(
-        attributed.len(),
-        2,
-        "exactly one row per failing helper (the two calls' arg0): {attributed:#?}"
-    );
+    attributed.sort();
+    // One row per call, at its own `vals[*]`: the two failing phases
+    // (initial + flow) refuse the same read, and the drain collapses them.
+    let first = OUT.find("vals[*]").unwrap() as u16;
+    let second = OUT.rfind("vals[*]").unwrap() as u16;
+    assert_eq!(attributed, vec![(first, first + 7), (second, second + 7)]);
 }
 
 /// A helper whose BODY the compiler refuses is reported on the PARENT

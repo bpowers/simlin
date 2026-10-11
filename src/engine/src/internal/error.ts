@@ -102,9 +102,10 @@ export function simlin_error_get_detail(err: SimlinErrorPtr, index: number): Ptr
 // Size of SimlinErrorDetail struct in bytes (for wasm32)
 // code: u32, message: ptr, model_name: ptr, variable_name: ptr, start_offset: u16,
 // end_offset: u16, kind: u32, unit_error_kind: u32, severity: u32, details: ptr,
-// element_name: ptr, read_past_dimension: ptr, read_past: u32
-// = 4 + 4 + 4 + 4 + 2 + 2 + 4 + 4 + 4 + 4 + 4 + 4 + 4 = 48 bytes
-// const ERROR_DETAIL_SIZE = 48;
+// element_name: ptr, read_past_dimension: ptr, read_past: u32,
+// mismatched_read_variable: ptr, mismatched_read_dimensions: ptr
+// = 4 + 4 + 4 + 4 + 2 + 2 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 = 56 bytes
+// const ERROR_DETAIL_SIZE = 56;
 
 /**
  * Read an ErrorDetail struct from WASM memory.
@@ -128,6 +129,8 @@ export function readErrorDetail(ptr: Ptr): ErrorDetail {
   const elementNamePtr = view.getUint32(ptr + 36, true);
   const readPastDimensionPtr = view.getUint32(ptr + 40, true);
   const readPast = view.getUint32(ptr + 44, true) as SimlinReadPast;
+  const mismatchedReadVariablePtr = view.getUint32(ptr + 48, true);
+  const mismatchedReadDimensionsPtr = view.getUint32(ptr + 52, true);
 
   return {
     code,
@@ -143,6 +146,8 @@ export function readErrorDetail(ptr: Ptr): ErrorDetail {
     elementName: wasmToString(elementNamePtr),
     readPastDimension: wasmToString(readPastDimensionPtr),
     readPast,
+    mismatchedReadVariable: wasmToString(mismatchedReadVariablePtr),
+    mismatchedReadDimensions: wasmToString(mismatchedReadDimensionsPtr),
   };
 }
 

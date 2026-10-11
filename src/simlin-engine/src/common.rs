@@ -882,6 +882,52 @@ pub struct ReadPast {
     pub before_first: bool,
 }
 
+/// A reference whose dimensions do not agree with those of the variable
+/// reading it: the variable it reads, and which dimensions disagree. A host
+/// says it in the model's own words ("Total reads Births, which has a value
+/// for each Region") from these parts, and offers the edits that resolve it.
+///
+/// Two ways a read disagrees, told apart by `unpaired`:
+/// - the variable read has dimensions the reader has no element of, so the
+///   reference names many values where the reader takes one of each
+///   (`total = births` once `births` is arrayed over `Region`): `unpaired`
+///   holds those dimensions, in the order the variable declares them;
+/// - the reference subscripts the variable on more dimensions than it has
+///   (`births[North]` once `births` is not arrayed over `Region`):
+///   `unpaired` is empty.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MismatchedRead {
+    /// The variable read, by its canonical name.
+    pub variable: String,
+    /// The variable's dimensions the reader has no element of, by their
+    /// canonical names; empty for a reference subscripted past the
+    /// variable's dimensions.
+    pub unpaired: Vec<String>,
+}
+
+impl MismatchedRead {
+    /// The reason a refusal of this read gives, naming the variable and the
+    /// dimensions the reader has no element of.
+    fn reason(&self) -> String {
+        let quoted: Vec<String> = self.unpaired.iter().map(|d| format!("'{d}'")).collect();
+        match quoted.as_slice() {
+            [] => format!(
+                "'{}' is subscripted on more dimensions than it has",
+                self.variable
+            ),
+            [only] => format!(
+                "'{}' is arrayed over {only}, which the variable reading it is not",
+                self.variable
+            ),
+            [init @ .., last] => format!(
+                "'{}' is arrayed over {} and {last}, which the variable reading it is not",
+                self.variable,
+                init.join(", ")
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EquationError {
     pub start: u16,
@@ -911,6 +957,11 @@ pub struct EquationError {
     /// For `SubscriptOutOfRange`, the dimension the read runs off and which
     /// end; `None` for every other error.
     pub read_past: Option<ReadPast>,
+    /// For a `MismatchedDimensions` refusal of one reference, the variable it
+    /// reads and the dimensions that disagree, with `start..end` the
+    /// reference; `None` for every other error. Boxed, as every error of
+    /// every equation carries the field.
+    pub mismatched_read: Option<Box<MismatchedRead>>,
 }
 
 impl EquationError {
@@ -923,6 +974,7 @@ impl EquationError {
             details: None,
             element: None,
             read_past: None,
+            mismatched_read: None,
         }
     }
 
@@ -935,6 +987,21 @@ impl EquationError {
             details: Some(details.into()),
             element: None,
             read_past: None,
+            mismatched_read: None,
+        }
+    }
+
+    /// The refusal of the reference at `start..end`, which reads `read`
+    /// over dimensions that disagree with the reader's.
+    pub fn mismatched_read(start: u16, end: u16, read: MismatchedRead) -> Self {
+        EquationError {
+            start,
+            end,
+            code: ErrorCode::MismatchedDimensions,
+            details: Some(read.reason()),
+            element: None,
+            read_past: None,
+            mismatched_read: Some(Box::new(read)),
         }
     }
 
@@ -977,16 +1044,24 @@ impl fmt::Display for EquationError {
 }
 
 impl From<Error> for EquationError {
-    /// An `Error` has no span, so the result is span-less; its `details` is the
-    /// whole reason `Error` carries one and rides across unchanged.
+    /// An `Error` has no span of its own, so the result is span-less, except
+    /// for the refusal of one reference, which keeps the reference's span;
+    /// its `details` is the whole reason `Error` carries one and rides across
+    /// unchanged.
     fn from(err: Error) -> Self {
+        let ErrorPlace { element, read } = err.place.map(|place| *place).unwrap_or_default();
+        let (start, end, mismatched_read) = match read {
+            Some((read, loc)) => (loc.start, loc.end, Some(Box::new(read))),
+            None => (0, 0, None),
+        };
         EquationError {
             code: err.code,
-            start: 0,
-            end: 0,
+            start,
+            end,
             details: err.details,
-            element: err.element,
+            element,
             read_past: None,
+            mismatched_read,
         }
     }
 }
@@ -1009,22 +1084,41 @@ pub struct Error {
     /// unchanged, through [`Error::reason`] and, when the error becomes a
     /// diagnostic, `FormattedError::details`.
     pub details: Option<String>,
+    /// Where in the variable the error is, when it is somewhere in
+    /// particular ([`ErrorPlace`]).
+    ///
+    /// Boxed, and `None` for most errors: every `Result` the compiler
+    /// returns carries an `Error`'s size, and its recursive walks (a long
+    /// sum is one level per term) hold many of them in each frame, so the
+    /// type stays as small as it can be.
+    pub place: Option<Box<ErrorPlace>>,
+}
+
+/// Where in a variable an [`Error`] is: what its diagnostic carries besides
+/// the variable it is reported on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ErrorPlace {
     /// The element of an arrayed variable the error is about, as its
     /// canonical key (`CanonicalElementName::from_parts`); `None` when it is
     /// about the variable as a whole. Carried into an `EquationError` with
     /// the rest of the error, so a diagnostic names the element whichever
     /// kind it is.
     pub element: Option<String>,
+    /// For the `MismatchedDimensions` refusal of one reference, the read and
+    /// where the reference is written in the reader's equation: what
+    /// [`EquationError::mismatched_read`] and its span carry once the error
+    /// becomes a diagnostic. The span is empty for a read the reader's
+    /// equation does not spell (a stock's flow, a module's input wiring).
+    pub read: Option<(MismatchedRead, Loc)>,
 }
 
 impl From<Box<dyn std::error::Error>> for Error {
     fn from(err: Box<dyn std::error::Error>) -> Self {
-        Error {
-            kind: ErrorKind::Simulation,
-            code: ErrorCode::Generic,
-            details: Some(err.to_string()),
-            element: None,
-        }
+        Error::new(
+            ErrorKind::Simulation,
+            ErrorCode::Generic,
+            Some(err.to_string()),
+        )
     }
 }
 
@@ -1034,15 +1128,42 @@ impl Error {
             kind,
             code,
             details,
-            element: None,
+            place: None,
         }
     }
 
+    /// The refusal of the reference at `loc`, which reads `read` over
+    /// dimensions that disagree with the reader's.
+    pub fn refused_read(read: MismatchedRead, loc: Loc) -> Self {
+        Error {
+            kind: ErrorKind::Model,
+            code: ErrorCode::MismatchedDimensions,
+            details: Some(read.reason()),
+            place: Some(Box::new(ErrorPlace {
+                element: None,
+                read: Some((read, loc)),
+            })),
+        }
+    }
+
+    /// The element of an arrayed variable the error is about
+    /// ([`ErrorPlace::element`]).
+    pub fn element(&self) -> Option<&str> {
+        self.place.as_ref()?.element.as_deref()
+    }
+
+    /// The read a `MismatchedDimensions` refusal of one reference names, and
+    /// where the reference is written ([`ErrorPlace::read`]).
+    pub fn read(&self) -> Option<&(MismatchedRead, Loc)> {
+        self.place.as_ref()?.read.as_ref()
+    }
+
     /// This error, placed in one element of an arrayed variable (see
-    /// [`Error::element`]). An error already placed keeps its element.
+    /// [`ErrorPlace::element`]). An error already placed keeps its element.
     pub fn in_element(mut self, element: &CanonicalElementName) -> Self {
-        if self.element.is_none() {
-            self.element = Some(element.as_str().to_string());
+        let place = self.place.get_or_insert_default();
+        if place.element.is_none() {
+            place.element = Some(element.as_str().to_string());
         }
         self
     }

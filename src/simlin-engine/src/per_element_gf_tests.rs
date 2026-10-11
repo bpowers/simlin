@@ -1308,13 +1308,16 @@ fn bare_two_dim_table_under_a_reducer_sums_the_elements_own_row() {
 /// An array value in a position that consumes ONE value has no meaning and is
 /// REFUSED with a diagnostic attributed to the variable, never emitted.
 ///
-/// The rule has ONE owner and one message
-/// (`compiler::codegen::array_in_scalar_position`), reached by the two
-/// `Compiler::walk_expr` arms that can hold an array outside an iteration
-/// body: a `TempArray` (a view over a temp, which is what an array-valued
-/// per-element table apply becomes) and a `StaticSubscript` (a view over a
-/// variable's storage, `arr[*]`). Both are rowed, because a refusal split
-/// across two codes and two messages is what this replaced. Every operand site
+/// The rule has ONE owner (`compiler::codegen::array_in_scalar_position`),
+/// reached by the two `Compiler::walk_expr` arms that can hold an array
+/// outside an iteration body: a `TempArray` (a view over a temp, which is
+/// what an array-valued per-element table apply becomes), refused in its
+/// words, and a `StaticSubscript` (a view over a variable's storage,
+/// `arr[*]`), refused as the read of that variable
+/// (`codegen::view_in_scalar_position`, a `MismatchedRead`). Both are rowed.
+/// In a scalar equation the table apply is refused before either, as the read
+/// of the table (`compiler::Context::lower_builtin_expr3`), so a host is told
+/// which variable is read over which dimensions. Every operand site
 /// inherits the refusal through `?` (an `unwrap` on a missing stack value
 /// there is a process abort under `panic = abort`).
 ///
@@ -1371,17 +1374,23 @@ fn array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted() {
             .map(|d| format!("{:?} on {:?}", d.error, d.variable))
             .collect();
         // The refusal is the `TempArray` arm's, carried verbatim in the
-        // assembly diagnostic, and lands on the variable -- not some other
-        // error that happens to make the model fail to compile.
+        // assembly diagnostic, or the `StaticSubscript` arm's read of `arr`,
+        // and lands on the variable -- not some other error that happens to
+        // make the model fail to compile.
         assert!(
             diagnostics.iter().any(|d| {
                 d.severity == DiagnosticSeverity::Error
                     && d.variable.as_deref() == Some(var)
-                    && matches!(
-                        &d.error,
-                        DiagnosticError::Assembly(reason)
-                            if reason.contains("where a single value is required")
-                    )
+                    && match &d.error {
+                        DiagnosticError::Assembly(reason) => {
+                            reason.contains("where a single value is required")
+                        }
+                        DiagnosticError::Equation(error) => error
+                            .mismatched_read
+                            .as_ref()
+                            .is_some_and(|read| read.variable == "arr" || read.variable == "g"),
+                        _ => false,
+                    }
             }),
             "{var}: the refusal must be attributed to the variable; errors: {attributed:?}"
         );

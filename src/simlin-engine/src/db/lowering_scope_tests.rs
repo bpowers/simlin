@@ -565,7 +565,7 @@ fn a_helper_is_refused_where_the_plain_spelling_is() {
             "sm_prod",
             "SMTH1(sales + prices, 1)",
             "sales + prices",
-            "plain_a2a",
+            "plain_prod",
         ),
     ];
     let diags = TestProject::new("mismatched")
@@ -579,6 +579,7 @@ fn a_helper_is_refused_where_the_plain_spelling_is() {
         )
         .aux("plain", "sales + prices", None)
         .array_aux("plain_a2a[Cities]", "sales + prices")
+        .array_aux("plain_prod[Products]", "sales + prices")
         .aux("sm", "SMTH1(sales + prices, 1)", None)
         .array_aux("sm_a2a[Cities]", "SMTH1(sales + prices, 1)")
         .array_aux("pv_a2a[Cities]", "PREVIOUS(sales + prices, 0)")

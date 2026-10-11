@@ -6,12 +6,12 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
-use crate::ast::{ArrayView, BinaryOp};
+use crate::ast::{ArrayView, BinaryOp, Loc};
 use crate::bytecode::{
     BuiltinId, DimId, DimListId, DimensionInfo, GraphicalFunctionId, LookupMode, ModuleId,
     ModuleInputOffset, NameId, Op2, RuntimeSparseMapping, TempId, VariableOffset, ViewId,
 };
-use crate::common::{Canonical, ErrorCode, ErrorKind, Ident, Result, canonicalize};
+use crate::common::{Canonical, ErrorCode, ErrorKind, Ident, MismatchedRead, Result, canonicalize};
 use crate::dimensions::Dimension;
 use crate::sim_err;
 use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
@@ -273,6 +273,53 @@ fn array_in_scalar_position<T>(dims: &[usize]) -> Result<T> {
     sim_err!(
         NotSimulatable,
         format!("an array of shape {dims:?} is used where a single value is required")
+    )
+}
+
+/// The refusal of a variable's view, written at `loc`, in a position that
+/// consumes one value: a [`MismatchedRead`] of `base`'s variable over the
+/// view's axes, which the reader has no element of. A view whose axes are not
+/// all named (none of a variable's is unnamed) is refused as an array value
+/// in a scalar position, with no read to name.
+///
+/// `base` names the variable that OWNS the slots: a read of a module's output
+/// is owned by the module instance, which the fragment's caller, holding the
+/// dependency shapes, tells apart.
+///
+/// Out of line and returning the error itself, as [`snapshot_in_scalar_position`]
+/// does, so `Compiler::walk_expr` -- which recurses once per operand of a long
+/// expression -- holds no more than the call in its frame.
+#[inline(never)]
+fn view_in_scalar_position(base: &VarRef, view: &ArrayView, loc: Loc) -> crate::Error {
+    if view.dim_names.len() != view.dims.len() || view.dim_names.iter().any(String::is_empty) {
+        return array_in_scalar_position::<()>(&view.dims).unwrap_err();
+    }
+    crate::Error::refused_read(
+        MismatchedRead {
+            variable: base.name.as_str().to_string(),
+            unpaired: view.dim_names.clone(),
+        },
+        loc,
+    )
+}
+
+/// The refusal of an array-valued `PREVIOUS`/`INIT` in a position that
+/// consumes one value: the read of the variable whose view is its argument
+/// ([`view_in_scalar_position`]), or, for any other argument, an array value
+/// where one is consumed.
+#[inline(never)]
+fn snapshot_in_scalar_position(builtin: &BuiltinFn) -> crate::Error {
+    if let Some((Expr::StaticSubscript(base, view, loc), _)) = super::snapshot_view_arg(builtin) {
+        return view_in_scalar_position(base, view, *loc);
+    }
+    crate::Error::new(
+        ErrorKind::Simulation,
+        ErrorCode::NotSimulatable,
+        Some(
+            "an array-valued PREVIOUS/INIT is only meaningful where an array is expected, not \
+             as a scalar operand"
+                .to_string(),
+        ),
     )
 }
 
@@ -1026,7 +1073,7 @@ impl<'module> Compiler<'module> {
                 self.push(SymbolicOpcode::LoadSubscript { var: base.clone() });
                 Some(())
             }
-            Expr::StaticSubscript(base, view, _) => {
+            Expr::StaticSubscript(base, view, loc) => {
                 if self.in_iteration {
                     // In iteration context with optimized view hoisting
                     let static_view = self.array_view_to_static(base, view);
@@ -1051,7 +1098,7 @@ impl<'module> Compiler<'module> {
                     // a position that consumes one value: `s = arr[*] + 1`, or
                     // a per-element capture helper holding `vals[*]` in a
                     // scalar equation.
-                    return array_in_scalar_position(&view.dims);
+                    return Err(view_in_scalar_position(base, view, *loc));
                 }
             }
             Expr::TempArray(id, view, _) => {
@@ -1310,17 +1357,16 @@ impl<'module> Compiler<'module> {
                 // element like any other array operand. Outside an iteration
                 // there is no per-element context to load into, so that shape is
                 // reachable only through `walk_expr_as_view`.
+                // Outside an iteration an array-valued call has nowhere to
+                // go, whatever else its shape asks (a fallback the view
+                // cannot carry): that is the refusal, a read of many where
+                // one is consumed.
+                if !self.in_iteration && super::snapshot_view_arg(builtin).is_some() {
+                    return Err(snapshot_in_scalar_position(builtin));
+                }
                 if let Some(static_view) =
                     self.snapshot_static_view(builtin, SnapshotPosition::IterationBody)?
                 {
-                    if !self.in_iteration {
-                        return sim_err!(
-                            NotSimulatable,
-                            "an array-valued PREVIOUS/INIT is only meaningful where an \
-                             array is expected, not as a scalar operand"
-                                .to_string()
-                        );
-                    }
                     let offset = self.find_iter_view_offset(&static_view).unwrap_or_else(|| {
                         unreachable!(
                             "snapshot view not found in pre-pushed set - \

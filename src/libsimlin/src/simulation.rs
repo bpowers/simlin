@@ -168,7 +168,7 @@ pub unsafe extern "C" fn simlin_sim_new(
                     kind: engine::ErrorKind::Simulation,
                     code: engine::ErrorCode::NotSimulatable,
                     details: Some("incremental compilation: no sync state available".to_string()),
-                    element: None,
+                    place: None,
                 }),
                 engine::indexmap::IndexMap::new(),
                 HashMap::new(),
@@ -590,7 +590,7 @@ pub unsafe extern "C" fn simlin_sim_set_value(
                         "cannot set value of '{}': not a simple constant",
                         canon_name
                     )),
-                    element: None,
+                    place: None,
                 };
                 store_ffi_error(out_error, ffi_error_from_engine(&err));
                 return;
@@ -685,7 +685,7 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
                     "cannot set value of offset {}: not a simple constant",
                     offset
                 )),
-                element: None,
+                place: None,
             };
             store_ffi_error(out_error, ffi_error_from_engine(&err));
             return;

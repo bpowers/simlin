@@ -96,6 +96,7 @@ struct ErrorDetailBuilder {
     details: Option<String>,
     element_name: Option<String>,
     read_past: Option<engine::common::ReadPast>,
+    mismatched_read: Option<engine::common::MismatchedRead>,
 }
 
 impl ErrorDetailBuilder {
@@ -113,6 +114,7 @@ impl ErrorDetailBuilder {
             details: None,
             element_name: None,
             read_past: None,
+            mismatched_read: None,
         }
     }
 
@@ -167,6 +169,11 @@ impl ErrorDetailBuilder {
         self
     }
 
+    fn mismatched_read(mut self, read: Option<engine::common::MismatchedRead>) -> Self {
+        self.mismatched_read = read;
+        self
+    }
+
     fn build(self) -> ErrorDetailData {
         ErrorDetailData {
             code: self.code,
@@ -186,6 +193,12 @@ impl ErrorDetailBuilder {
                 None => crate::SimlinReadPast::None,
             },
             read_past_dimension: self.read_past.map(|read| read.dimension),
+            mismatched_read_dimensions: self
+                .mismatched_read
+                .as_ref()
+                .filter(|read| !read.unpaired.is_empty())
+                .map(|read| read.unpaired.join(",")),
+            mismatched_read_variable: self.mismatched_read.map(|read| read.variable),
         }
     }
 
@@ -219,7 +232,8 @@ impl ErrorDetailBuilder {
             .severity(severity)
             .details(error.details)
             .element_name(error.element)
-            .read_past(error.read_past);
+            .read_past(error.read_past)
+            .mismatched_read(error.mismatched_read);
         if let Some(message) = error.message {
             builder = builder.message(Some(message));
         }
@@ -263,7 +277,20 @@ pub(crate) fn gather_error_details_with_db(
         })
         .collect();
 
-    if let Some(error) = vm_error {
+    // A compile that failed because variables' fragments did not compile is
+    // `NotSimulatable`, naming them all in one project-wide row. Each of those
+    // fragments files the reason it failed as a diagnostic of its variable
+    // (`db::fragment_compile`), so once an Error-severity diagnostic is
+    // reported, that row only repeats them, as a second problem a host would
+    // list beside the real one. The command line drops it for the same reason
+    // (`simulation_error_is_redundant`). Any other build error is reported.
+    let explained = |error: &engine::Error| {
+        error.code == ErrorCode::NotSimulatable
+            && diags
+                .iter()
+                .any(|d| d.severity == engine::db::DiagnosticSeverity::Error)
+    };
+    if let Some(error) = vm_error.filter(|error| !explained(error)) {
         let formatted = errors::format_simulation_error("main", error);
         all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
     }

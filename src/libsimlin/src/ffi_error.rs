@@ -42,6 +42,10 @@ pub struct ErrorDetail {
     /// `SimlinErrorDetail::read_past_dimension`).
     pub read_past_dimension: Option<String>,
     pub read_past: SimlinReadPast,
+    /// The variable a refused reference reads, and the dimensions that
+    /// disagree (see `SimlinErrorDetail::mismatched_read_variable`).
+    pub mismatched_read_variable: Option<String>,
+    pub mismatched_read_dimensions: Option<String>,
 }
 
 impl ErrorDetail {
@@ -60,6 +64,8 @@ impl ErrorDetail {
             element_name: None,
             read_past_dimension: None,
             read_past: SimlinReadPast::None,
+            mismatched_read_variable: None,
+            mismatched_read_dimensions: None,
         }
     }
 }
@@ -79,6 +85,8 @@ struct OwnedDetail {
     element_name: Option<CString>,
     read_past_dimension: Option<CString>,
     read_past: SimlinReadPast,
+    mismatched_read_variable: Option<CString>,
+    mismatched_read_dimensions: Option<CString>,
 }
 
 impl OwnedDetail {
@@ -97,6 +105,8 @@ impl OwnedDetail {
             element_name: detail.element_name.map(sanitize_for_c),
             read_past_dimension: detail.read_past_dimension.map(sanitize_for_c),
             read_past: detail.read_past,
+            mismatched_read_variable: detail.mismatched_read_variable.map(sanitize_for_c),
+            mismatched_read_dimensions: detail.mismatched_read_dimensions.map(sanitize_for_c),
         }
     }
 
@@ -133,6 +143,14 @@ impl OwnedDetail {
                 .as_ref()
                 .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
             read_past: self.read_past,
+            mismatched_read_variable: self
+                .mismatched_read_variable
+                .as_ref()
+                .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
+            mismatched_read_dimensions: self
+                .mismatched_read_dimensions
+                .as_ref()
+                .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
         }
     }
 }

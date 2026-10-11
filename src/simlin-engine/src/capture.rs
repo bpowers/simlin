@@ -50,7 +50,7 @@
 
 use indexmap::IndexMap;
 
-use crate::ast::{Ast, Expr0};
+use crate::ast::{Ast, Expr0, Loc};
 use crate::common::{Canonical, EquationError, ErrorCode, Ident};
 use crate::datamodel;
 use crate::dimensions::DimensionsContext;
@@ -480,32 +480,51 @@ pub struct ImplicitModule {
     /// than the target model has ports (`SMTH1` without an initial value), and
     /// then only the leading ports are wired.
     pub(crate) references: Vec<datamodel::ModuleReference>,
+    /// Where each of `references`' arguments is written in the parent's
+    /// equation, in the same order: the span a refusal of the read that
+    /// feeds the port points at. Not part of the instance's definition
+    /// ([`Self::same_definition`]).
+    pub(crate) argument_locs: Vec<Loc>,
 }
 
 impl ImplicitModule {
     /// Mint the instance for the call of `call_name` that `parent`'s walk is at
-    /// counter `id`, wiring each `(src, port)` pair in call order.
+    /// counter `id`, wiring each `(src, port)` pair in call order, the
+    /// argument that names `src` written at its `Loc`.
     pub(crate) fn new<'p>(
         parent: &str,
         id: usize,
         call_name: &str,
         suffix: Option<&str>,
         model_name: String,
-        wiring: impl IntoIterator<Item = (String, &'p str)>,
+        wiring: impl IntoIterator<Item = (String, &'p str, Loc)>,
     ) -> Self {
         let ident = synthetic_ident(parent, id, call_name, suffix);
-        let references = wiring
+        let (references, argument_locs) = wiring
             .into_iter()
-            .map(|(src, port)| datamodel::ModuleReference {
-                src,
-                dst: format!("{ident}.{port}"),
+            .map(|(src, port, loc)| {
+                let reference = datamodel::ModuleReference {
+                    src,
+                    dst: format!("{ident}.{port}"),
+                };
+                (reference, loc)
             })
-            .collect();
+            .unzip();
         ImplicitModule {
             ident,
             model_name,
             references,
+            argument_locs,
         }
+    }
+
+    /// Do these two instances define the same module? Where the arguments
+    /// are written is excluded for the reason
+    /// [`Capture::merge_same_definition`] gives.
+    pub(crate) fn same_definition(&self, other: &Self) -> bool {
+        self.ident == other.ident
+            && self.model_name == other.model_name
+            && self.references == other.references
     }
 
     /// This instance as the parse-stage variable it stands for: the wiring as
@@ -585,6 +604,22 @@ impl ImplicitVar {
         }
     }
 
+    /// Where the argument feeding a module instance's port from `source` is
+    /// written in the parent's equation; `None` for a helper that is not a
+    /// module instance, or one no argument of which reads `source`.
+    pub fn argument_span(&self, source: &str) -> Option<Loc> {
+        let ImplicitVar::Module(module) = self else {
+            return None;
+        };
+        let source = crate::common::canonicalize(source);
+        module
+            .references
+            .iter()
+            .zip(&module.argument_locs)
+            .find(|(reference, _)| crate::common::canonicalize(&reference.src) == source)
+            .map(|(_, loc)| *loc)
+    }
+
     /// The dimension names this helper's STORAGE applies over, or `&[]` when
     /// it is one slot. An arrayed helper occupies one slot per element, so a
     /// consumer that lays it out or subscripts it reads this rather than
@@ -621,7 +656,7 @@ impl ImplicitVar {
         match (self, other) {
             (ImplicitVar::Capture(a), ImplicitVar::Capture(b)) => a.merge_same_definition(b),
             (ImplicitVar::HoistedArg(a), ImplicitVar::HoistedArg(b)) => a.same_definition(b),
-            (ImplicitVar::Module(a), ImplicitVar::Module(b)) => a == b,
+            (ImplicitVar::Module(a), ImplicitVar::Module(b)) => a.same_definition(b),
             _ => false,
         }
     }

@@ -1213,9 +1213,10 @@ fn a_codegen_refusal_names_the_expression_kind() {
 /// on every fresh database, not whichever order a `HashMap` iterated.
 #[test]
 fn every_failing_element_arm_is_reported_in_declared_order() {
-    // `sales + prices` mismatches over the whole 14-character expression and
-    // `1 + sales + prices` over all 18, so the span says which arm a row is
-    // for as well as its element does. The rows are the three arms of the
+    // `sales + prices` is refused at `prices`, which an element of Cities has
+    // no element of: characters 8..14 of it, and 12..18 of `1 + sales +
+    // prices`, so the span says which arm a row is for as well as its
+    // element does. The rows are the three arms of the
     // order (`ast::typed_ast`, `ast::lower_arrayed_arms`): several declared
     // arms failing, the default and an arm both failing, and failing arms
     // naming no declared element.
@@ -1245,7 +1246,7 @@ fn every_failing_element_arm_is_reported_in_declared_order() {
                     )
                     .build_datamodel()
             },
-            rows: &[(Some("boston"), (0, 14)), (Some("seattle"), (0, 18))],
+            rows: &[(Some("boston"), (8, 14)), (Some("seattle"), (12, 18))],
         },
         Arm {
             name: "the default's error, then a failing element arm's",
@@ -1258,7 +1259,7 @@ fn every_failing_element_arm_is_reported_in_declared_order() {
                     )
                     .build_datamodel()
             },
-            rows: &[(None, (0, 18)), (Some("boston"), (0, 14))],
+            rows: &[(None, (12, 18)), (Some("boston"), (8, 14))],
         },
         Arm {
             name: "arms naming no declared element, by key",
@@ -1270,7 +1271,7 @@ fn every_failing_element_arm_is_reported_in_declared_order() {
                     )
                     .build_datamodel()
             },
-            rows: &[(Some("bogus"), (0, 14)), (Some("zeta"), (0, 18))],
+            rows: &[(Some("bogus"), (8, 14)), (Some("zeta"), (12, 18))],
         },
     ];
     for arm in &arms {

@@ -162,6 +162,79 @@ impl IndexExpr2 {
     }
 }
 
+/// The refusal of two operands whose dimensions do not unify (`pop * rate`
+/// in `x[Age]`, once `rate` is arrayed over Region): when the reader's
+/// dimensions are known and one reference among the operands has an axis
+/// the reader has no element of, that reference's read
+/// ([`crate::common::MismatchedRead`]), the first in the text; otherwise
+/// `err`, the refusal of the operation as a whole. Out of line, so
+/// `Expr2::from`, which recurses once per operand, holds no more than the
+/// call.
+#[inline(never)]
+fn unreadable_operand<C: Expr2Context>(
+    ctx: &C,
+    operands: [&Expr2; 2],
+    err: crate::common::EquationError,
+) -> crate::common::EquationError {
+    let Some(reader) = ctx.reader_dimensions() else {
+        return err;
+    };
+    let reader_axes = crate::dimensions::axes_of(reader);
+    let mut references = Vec::new();
+    for operand in operands {
+        bounded_references(operand, &mut references);
+    }
+    references.sort_by_key(|(_, _, loc)| loc.start);
+    references
+        .into_iter()
+        .find_map(|(ident, bounds, loc)| {
+            let names = bounds.dim_names()?;
+            let axes = Expr2::bound_axes(ctx, names, bounds.dims());
+            let paired = match_axes_partial(&axes, &reader_axes, &Expr2Relations(ctx));
+            let unpaired: Vec<String> = axes
+                .iter()
+                .zip(paired)
+                .filter(|(_, pairing)| pairing.is_none())
+                .map(|(axis, _)| axis.name.to_string())
+                .collect();
+            (!unpaired.is_empty()).then(|| {
+                crate::common::EquationError::mismatched_read(
+                    loc.start,
+                    loc.end,
+                    crate::common::MismatchedRead {
+                        variable: ident.to_string(),
+                        unpaired,
+                    },
+                )
+            })
+        })
+        .unwrap_or(err)
+}
+
+/// Each reference in `expr` that carries array bounds -- a bare arrayed
+/// variable, or one subscripted to a slice -- outside the arguments of a
+/// builtin, whose own lowering reads them.
+fn bounded_references<'e>(
+    expr: &'e Expr2,
+    out: &mut Vec<(&'e Ident<Canonical>, &'e ArrayBounds, Loc)>,
+) {
+    match expr {
+        Expr2::Var(ident, Some(bounds), loc) | Expr2::Subscript(ident, _, Some(bounds), loc) => {
+            out.push((ident, bounds.as_ref(), *loc))
+        }
+        Expr2::Const(..) | Expr2::Var(..) | Expr2::Subscript(..) | Expr2::App(..) => {}
+        Expr2::Op1(_, operand, _, _) => bounded_references(operand, out),
+        Expr2::Op2(_, lhs, rhs, _, _) => {
+            bounded_references(lhs, out);
+            bounded_references(rhs, out);
+        }
+        Expr2::If(_, then_branch, else_branch, _, _) => {
+            bounded_references(then_branch, out);
+            bounded_references(else_branch, out);
+        }
+    }
+}
+
 /// Expr represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
 ///
@@ -218,6 +291,15 @@ pub trait Expr2Context {
     fn set_allow_dimension_union(&mut self, _allow: bool) -> bool {
         // Default implementation for contexts that don't support this
         false
+    }
+
+    /// The dimensions of the variable whose equation this is -- none for a
+    /// scalar's -- or `None` where the equation does not know its reader's
+    /// (a per-element helper's). What a refusal of two operands whose
+    /// dimensions disagree reads to tell which reference the reader has no
+    /// element of.
+    fn reader_dimensions(&self) -> Option<&[Dimension]> {
+        None
     }
 
     /// Whether `dim_name` declares a mapping onto `target`.
@@ -738,7 +820,8 @@ impl Expr2 {
                     l_expr.get_array_bounds(),
                     r_expr.get_array_bounds(),
                     loc,
-                )?;
+                )
+                .map_err(|err| unreadable_operand(ctx, [&l_expr, &r_expr], err))?;
 
                 Expr2::Op2(op, Box::new(l_expr), Box::new(r_expr), array_bounds, loc)
             }
@@ -754,7 +837,8 @@ impl Expr2 {
                     t_expr.get_array_bounds(),
                     f_expr.get_array_bounds(),
                     loc,
-                )?;
+                )
+                .map_err(|err| unreadable_operand(ctx, [&t_expr, &f_expr], err))?;
 
                 // If the branches are both scalar but the condition is
                 // array-valued, the IF expression should inherit the

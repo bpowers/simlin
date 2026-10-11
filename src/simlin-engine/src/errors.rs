@@ -79,6 +79,10 @@ pub struct FormattedError {
     /// For a read that runs off a dimension, the dimension and which end
     /// (`Diagnostic::read_past`); `None` otherwise.
     pub read_past: Option<crate::common::ReadPast>,
+    /// For a reference whose dimensions disagree with its reader's, the
+    /// variable read and the dimensions that disagree
+    /// (`Diagnostic::mismatched_read`); `None` otherwise.
+    pub mismatched_read: Option<crate::common::MismatchedRead>,
 }
 
 /// Collection of formatted errors plus bookkeeping flags that mirror previous CLI output
@@ -134,8 +138,9 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
         severity: DiagnosticSeverity::Error,
         category: None,
         details: Some(error.reason().to_owned()),
-        element: error.element.clone(),
+        element: error.element().map(str::to_owned),
         read_past: None,
+        mismatched_read: None,
     }
 }
 
@@ -352,6 +357,7 @@ fn format_diagnostic_inner(diag: &db::Diagnostic, var: Option<&Variable>) -> For
         details: Some(details.unwrap_or_else(|| code.description().to_owned())),
         element: element.map(str::to_owned),
         read_past: diag.read_past().cloned(),
+        mismatched_read: diag.mismatched_read().cloned(),
     }
 }
 
@@ -894,7 +900,7 @@ mod tests {
                 kind: ErrorKind::Model,
                 code: ErrorCode::ConveyorLtmDegraded,
                 details: Some("belt scores are advisory".to_string()),
-                element: None,
+                place: None,
             })),
             arm(DiagnosticError::Unit(UnitError::ConsistencyError(
                 ErrorCode::UnitMismatch,
@@ -1013,7 +1019,7 @@ mod tests {
                     kind: ErrorKind::Model,
                     code: ErrorCode::CircularDependency,
                     details: Some("a -> b -> a".to_string()),
-                    element: None,
+                    place: None,
                 }),
                 ErrorCode::CircularDependency,
                 FormattedErrorKind::Model,
@@ -1105,7 +1111,7 @@ mod tests {
                 kind: ErrorKind::Model,
                 code,
                 details: details.map(str::to_owned),
-                element: None,
+                place: None,
             })
         };
         // (label, error, expected details, expected summary tail)

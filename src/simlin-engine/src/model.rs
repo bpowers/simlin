@@ -55,7 +55,15 @@ pub(crate) fn lower_variable_from_typed(
     primary: Option<LoweringResult<Ast<Expr1>>>,
 ) -> Variable {
     let mut diagnostics = parsed.diagnostics.clone();
-    let element_scoped = parsed.element_scope().is_some();
+    let element_scope: Option<Vec<crate::dimensions::Dimension>> =
+        parsed.element_scope().map(|element_scope| {
+            element_scope
+                .dims
+                .iter()
+                .filter_map(|dim| scope.dimensions.get(dim).cloned())
+                .collect()
+        });
+    let element_scoped = element_scope.as_deref();
     let mut record = |lowered: LoweringResult<Ast<Expr2>>| -> Option<Ast<Expr2>> {
         match lowered {
             Ok(ast) => Some(ast),
