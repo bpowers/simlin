@@ -1639,3 +1639,32 @@ fn a_lookup_over_every_element_passes_over_an_element_with_no_table() {
     );
     assert_eq!(total_or_refusal(&project), Ok(-10.0));
 }
+
+/// A variable arrayed over a dimension with one graphical function applies
+/// that table at every element: an apply-to-all lookup, or a lookup split
+/// by a dimension. Read per element, each element reads the one table.
+#[test]
+fn one_table_applies_at_every_element() {
+    let gf = crate::datamodel::GraphicalFunction {
+        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 2.0]),
+        y_points: vec![0.0, 2.0],
+        x_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+    };
+    let mut project = crate::test_common::TestProject::new("one_table")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Region", &["north", "south"])
+        .aux_with_gf("g", "0", gf)
+        .array_aux("y[Region]", "LOOKUP(g, 1.5)")
+        .build_datamodel();
+    if let Some(crate::datamodel::Variable::Aux(aux)) = project.models[0].get_variable_mut("g") {
+        aux.equation =
+            crate::datamodel::Equation::ApplyToAll(vec!["Region".to_string()], "0".to_string());
+    }
+    let run = crate::test_common::TestProject::from_datamodel(project)
+        .run_vm()
+        .expect("it runs");
+    assert_eq!(run["y[north]"].last(), Some(&1.5));
+    assert_eq!(run["y[south]"].last(), Some(&1.5));
+}
