@@ -726,14 +726,14 @@ fn fixture_discriminates() {
 
 /// Control: with NO mapping declared at all, at equal cardinality.
 ///
-/// The point is that two of the four spellings do not require a mapping to
-/// exist. `IteratedDim` reaches the rule's LAST RESORT -- with no
-/// correspondence declared between the two dimensions the active element's
-/// ordinal indexes the source raw -- and `BareInEquation` falls back to a
-/// whole-array broadcast, so a cross-dimension read between two dimensions
-/// declared to have NOTHING to do with each other compiles and silently
-/// produces numbers. The two spellings that reach the mapping through a
-/// different route are refused.
+/// `IteratedDim` names the target dimension in the subscript, which asks for
+/// the element of the same position, and reads it. `BareInEquation` would
+/// reach the rule's last resort -- with no correspondence declared between
+/// the two dimensions, the active element's ordinal indexing the source --
+/// and a read between two dimensions declared to have nothing to do with
+/// each other would silently produce numbers, so it is refused, as a read
+/// paired by position alone (GH #1044). The two spellings that reach the
+/// mapping through a different route are refused too.
 #[test]
 fn no_mapping_equal_cardinality() {
     let dims = || {
@@ -754,9 +754,10 @@ fn no_mapping_equal_cardinality() {
     };
     let cases: [(Spelling, Expected); 4] = [
         (Spelling::IteratedDim, Expected::Reads(&[10.0, 20.0, 30.0])),
+        // Read by position alone, which would run wrong: refused (GH #1044).
         (
             Spelling::BareInEquation,
-            Expected::Reads(&[10.0, 20.0, 30.0]),
+            Expected::Refused(ErrorCode::MismatchedDimensions),
         ),
         (
             Spelling::SourceOwnDim,

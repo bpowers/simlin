@@ -102,6 +102,10 @@ pub(crate) struct Context<'a> {
     /// one plain apply-to-all or arrayed equation, which share a range
     /// (`TempAllocator::element_scopes`).
     pub(crate) temps: Rc<TempAllocator>,
+    /// The reads the fragment pairs with its element by position alone
+    /// (`resolve_iteration_element`'s last resort), shared as `temps` is, so
+    /// `compiler::Var::new` hands them to its reporter as warnings.
+    pub(crate) positional_reads: Rc<std::cell::RefCell<Vec<super::PositionalRead>>>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -147,6 +151,7 @@ impl Context<'_> {
             preserve_wildcards_for_iteration: false,
             promote_active_dim_ref: false,
             temps: Rc::new(TempAllocator::default()),
+            positional_reads: Rc::default(),
         }
     }
 
@@ -163,6 +168,7 @@ impl Context<'_> {
             preserve_wildcards_for_iteration: self.preserve_wildcards_for_iteration,
             promote_active_dim_ref: self.promote_active_dim_ref,
             temps: Rc::clone(&self.temps),
+            positional_reads: Rc::clone(&self.positional_reads),
         }
     }
 
@@ -1188,6 +1194,7 @@ impl Context<'_> {
             preserve_wildcards_for_iteration: true,
             promote_active_dim_ref: false,
             temps: Rc::clone(&self.temps),
+            positional_reads: Rc::clone(&self.positional_reads),
         }
     }
 
@@ -1205,6 +1212,7 @@ impl Context<'_> {
             preserve_wildcards_for_iteration: true,
             promote_active_dim_ref: true,
             temps: Rc::clone(&self.temps),
+            positional_reads: Rc::clone(&self.positional_reads),
         }
     }
 
@@ -2096,6 +2104,34 @@ impl Context<'_> {
             } else {
                 None
             };
+            // An axis nothing relates to the reader's -- no shared name, no
+            // declared mapping or subdimension -- read at the element of the
+            // same position in the reader's dimension: GH #1044's ordinal last
+            // resort, which Vensim refuses. The run reads it; the person is
+            // told, as a read whose dimensions disagree. A range written in
+            // the subscript asks for its positions.
+            // Two indexed dimensions of one length pair by size, as their
+            // declaration says (`AxisMatch::BySize`): no last resort there.
+            let by_size = matches!(axis_dim, Dimension::Indexed(..))
+                && matches!(target_dim, Dimension::Indexed(..));
+            if pairing.is_none()
+                && !by_size
+                && target_offset.is_some()
+                && !range_view_dims.contains(&view_idx)
+                && !self.preserve_wildcards_for_iteration
+                && !self.promote_active_dim_ref
+            {
+                self.positional_reads
+                    .borrow_mut()
+                    .push(super::PositionalRead {
+                        read: MismatchedRead {
+                            variable: id.as_str().to_string(),
+                            unpaired: vec![axis_dim.canonical_name().as_str().to_string()],
+                        },
+                        loc,
+                        element: CanonicalElementName::from_parts(active_subscripts),
+                    });
+            }
 
             let (abs_offset, offset_from_source) = if let Some(abs_offset) = source_offset {
                 (abs_offset, true)

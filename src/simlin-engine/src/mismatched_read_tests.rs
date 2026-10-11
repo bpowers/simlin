@@ -292,3 +292,82 @@ fn the_reason_names_the_variable_and_the_dimensions() {
         "'births' is subscripted on more dimensions than it has"
     );
 }
+
+/// A read the compiler could pair with its reader's element only by
+/// position -- an axis nothing relates to the reader's dimensions, read at
+/// the element of the same position in a dimension of the same length --
+/// runs wrong, so it is refused like any other read whose dimensions
+/// disagree, at the reference (GH #1044; Vensim refuses it too).
+#[test]
+fn a_read_paired_by_position_alone_is_refused() {
+    let pairs = || {
+        TestProject::new("positional")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("Region", &["north", "south"])
+            .named_dimension("Sex", &["female", "male"])
+            .array_with_ranges("v[Region]", vec![("north", "1"), ("south", "10")])
+    };
+
+    let every = pairs().array_aux("x[Sex]", "v * 2");
+    assert_eq!(rows(&every, "v * 2"), vec![row("x", "v", "v", &["region"])]);
+    assert!(every.run_vm().is_err(), "it does not run");
+
+    let own = pairs().array_with_ranges("x[Sex]", vec![("female", "v * 2"), ("male", "1")]);
+    assert_eq!(
+        rows(&own, "v * 2"),
+        vec![Row {
+            element: Some("female".to_string()),
+            ..row("x", "v", "v", &["region"])
+        }]
+    );
+
+    let diagonal = pairs()
+        .array_const("w[Region, Sex]", 1.0)
+        .array_aux("x[Region]", "w * 2");
+    assert_eq!(rows(&diagonal, "w * 2"), vec![row("x", "w", "w", &["sex"])]);
+
+    // A pairing the dimensions declare is no refusal.
+    let mapped = TestProject::new("mapped")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Region", &["north", "south"])
+        .named_dimension_with_mapping("Sex", &["female", "male"], "Region")
+        .array_const("v[Region]", 1.0)
+        .array_aux("x[Sex]", "v * 2");
+    assert_eq!(rows(&mapped, "v * 2"), vec![]);
+}
+
+/// How many corpus models read by position alone, and where: the count the
+/// decision on GH #1044's rule weighs. Prints each model's warnings.
+#[test]
+#[ignore = "compiles every corpus model; run under the gates profile"]
+fn the_corpus_reads_by_position_alone_in_these_models() {
+    let (mut models, mut warned) = (0, 0);
+    crate::patch_sharing_tests::for_each_corpus_project(|path, project| {
+        models += 1;
+        let rows: Vec<String> = TestProject::from_datamodel(project.clone())
+            .diagnostics_incremental()
+            .into_iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .filter_map(|d| {
+                let read = d.mismatched_read()?;
+                Some(format!(
+                    "{} reads {} over {:?}",
+                    d.variable.as_deref().unwrap_or(""),
+                    read.variable,
+                    read.unpaired
+                ))
+            })
+            .collect();
+        if !rows.is_empty() {
+            warned += 1;
+            eprintln!(
+                "{}: {} reads\n  {}",
+                path.display(),
+                rows.len(),
+                rows.join("\n  ")
+            );
+        }
+    });
+    eprintln!("{warned} of {models} corpus models read by position alone");
+    assert!(models > 100, "the corpus opens: {models} models");
+}

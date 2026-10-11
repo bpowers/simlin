@@ -275,11 +275,19 @@ pub fn compile_var_fragment<'db>(
     // Only the phases the variable's runlist membership admits are lowered; a
     // phase it is not a member of is never compiled, so its lowering outcome
     // is not a diagnostic either.
+    let source = var;
     let emit = |lowered: &Result<crate::compiler::Var, crate::Error>| match lowered {
         Ok(var) => {
             report_out_of_range_reads(db, model, &input, var, var.ident.as_str(), |offset| {
                 element_at(&input, offset)
             });
+            // A read paired by position alone is refused: the fragment is
+            // not emitted, and the refusal is the read's.
+            if report_positional_reads(db, model, var, var.ident.as_str(), |element| {
+                own_arm(source.equation(db), element)
+            }) {
+                return None;
+            }
             compile_phase(&var.ast)
         }
         Err(err) => {
@@ -426,6 +434,62 @@ fn report_out_of_range_reads(
         }
         .accumulate(db);
     }
+}
+
+/// The element `element` names when `equation` gives it an equation of its
+/// own, whose text a span in it indexes; `None` when it follows the equation
+/// every element follows.
+fn own_arm(
+    equation: &crate::datamodel::Equation,
+    element: &crate::common::CanonicalElementName,
+) -> Option<String> {
+    match equation {
+        crate::datamodel::Equation::Arrayed(_, arms, _, _)
+            if arms.iter().any(|(subscript, ..)| {
+                crate::common::CanonicalElementName::from_subscript(subscript) == *element
+            }) =>
+        {
+            Some(element.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Refuse each read in `var`'s equations that is paired with its reader's
+/// element by position alone (`compiler::Var::positional_reads`), on
+/// `reported_on`: an axis of the variable read that nothing relates to the
+/// reader's dimensions -- no shared name, no declared mapping or
+/// subdimension -- which the compiler could read only at the reader's
+/// element of the same position in another dimension of that length. Such a
+/// read runs wrong where it runs at all (each Region reading one Sex), so it
+/// is a `MismatchedRead` like any other refused read, at the reference, and
+/// a host offers the same checked fixes for it (GH #1044; Vensim refuses it
+/// too). `element_of` names the reader's element whose own equation holds
+/// it. Whether any was refused: the fragment is then not emitted.
+fn report_positional_reads(
+    db: &dyn Db,
+    model: SourceModel,
+    var: &crate::compiler::Var,
+    reported_on: &str,
+    element_of: impl Fn(&crate::common::CanonicalElementName) -> Option<String>,
+) -> bool {
+    for positional in &var.positional_reads {
+        let mut error = crate::common::EquationError::mismatched_read(
+            positional.loc.start,
+            positional.loc.end,
+            positional.read.clone(),
+        );
+        error.element = element_of(&positional.element);
+        Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(reported_on.to_string()),
+            owner: None,
+            severity: DiagnosticSeverity::Error,
+            error: DiagnosticError::Equation(error),
+        }
+        .accumulate(db);
+    }
+    !var.positional_reads.is_empty()
 }
 
 /// Why [`implicit_fragment_input`] produced no input.
@@ -934,6 +998,15 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                         })
                     },
                 );
+                if report_positional_reads(
+                    db,
+                    model,
+                    &var,
+                    meta.parent_source_var.ident(db),
+                    |_| own_arm_element.clone(),
+                ) {
+                    return None;
+                }
                 match crate::db::assemble::compile_phase_or_refusal(&emit_ctx, &var.ast) {
                     Ok(bytecodes) => Some(bytecodes),
                     Err(EmitRefusal::Codegen(err)) if refused_read(&input, &err) => {

@@ -74,6 +74,22 @@ pub(crate) type VarSizes = HashMap<VarRef, usize>;
 pub struct Var {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) ast: Vec<Expr>,
+    /// The reads its equations pair with their element by position alone:
+    /// an axis of the variable read that the reader has no element of, read
+    /// at the reader's element of the same position in another dimension of
+    /// that length (GH #1044's open rule). The run reads them, and the
+    /// fragment's reporter warns of each.
+    pub(crate) positional_reads: Vec<PositionalRead>,
+}
+
+/// A read paired with its reader's element by position alone ([`Var`]): the
+/// read, where it is written, and the reader's element that makes it.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub(crate) struct PositionalRead {
+    pub(crate) read: crate::common::MismatchedRead,
+    pub(crate) loc: Loc,
+    pub(crate) element: CanonicalElementName,
 }
 
 /// A `Context` over hand-built dependency shapes for the unit tests of
@@ -691,6 +707,7 @@ impl Var {
                             return Ok(Var {
                                 ident: Ident::new(var.ident()),
                                 ast: vec![],
+                                positional_reads: vec![],
                             });
                         }
                         let base = ctx.get_base_ref(&Ident::new(var.ident()))?;
@@ -799,9 +816,12 @@ impl Var {
             "temp ids defined by '{}' must be exactly the ids its allocator kept",
             var.ident()
         );
+        let mut positional_reads = ctx.positional_reads.take();
+        positional_reads.dedup();
         Ok(Var {
             ident: Ident::new(var.ident()),
             ast,
+            positional_reads,
         })
     }
 }

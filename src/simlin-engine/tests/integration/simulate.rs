@@ -1277,11 +1277,10 @@ fn a_repeated_active_dimension_pairs_each_occurrence_with_its_own_axis() {
 /// `out[DimA,DimX] = src[*,*]` over `src[DimB,DimC]` with `DimB -> DimA` and
 /// `DimC -> DimA`: both source axes match `DimA` through the mapping rung, and
 /// searching per source axis independently lets both claim it -- every element
-/// then read `src[b_i,c_i]`, the diagonal, and `out[a1,x2]` was 11. With the
-/// allocation one-to-one `DimB` takes `DimA` and `DimC` is left unpaired, so it
-/// is read POSITIONALLY against `DimX` (equal length, so the positional check
-/// passes) and resolves `x_j` through `DimX`'s own ordinal: `out[a_i,x_j]` is
-/// `src[b_i,c_j]`, and `src[b_i,c_j]` is `10i+j`.
+/// then read `src[b_i,c_i]`, the diagonal. With the allocation one-to-one
+/// `DimB` takes `DimA` and `DimC` is left unpaired: nothing relates it to
+/// `DimX`, so the read is refused as one paired by position alone (GH #1044),
+/// naming `DimC` and only `DimC`.
 #[test]
 fn two_mapped_source_axes_cannot_both_read_one_active_axis() {
     let datamodel = simlin_engine::test_common::TestProject::new("one_to_one")
@@ -1290,31 +1289,21 @@ fn two_mapped_source_axes_cannot_both_read_one_active_axis() {
         .named_dimension_with_mapping("DimB", &["b1", "b2", "b3"], "DimA")
         .named_dimension_with_mapping("DimC", &["c1", "c2", "c3"], "DimA")
         .named_dimension("DimX", &["x1", "x2", "x3"])
-        .array_with_ranges(
-            "src[DimB,DimC]",
-            vec![
-                ("b1,c1", "11"),
-                ("b1,c2", "12"),
-                ("b1,c3", "13"),
-                ("b2,c1", "21"),
-                ("b2,c2", "22"),
-                ("b2,c3", "23"),
-                ("b3,c1", "31"),
-                ("b3,c2", "32"),
-                ("b3,c3", "33"),
-            ],
-        )
+        .array_const("src[DimB,DimC]", 1.0)
         .array_aux("out[DimA,DimX]", "src[*, *]")
         .build_datamodel();
 
-    let row = vm_last_row(&datamodel);
-    for (name, value) in [
-        ("out[a1,x2]", 12.0),
-        ("out[a2,x3]", 23.0),
-        ("out[a3,x1]", 31.0),
-    ] {
-        assert_eq!(cell(&row, name), value, "{name} must be src[b_i,c_j]");
-    }
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    let reads: Vec<Vec<String>> = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .iter()
+    .filter_map(|d| d.mismatched_read().map(|read| read.unpaired.clone()))
+    .collect();
+    assert_eq!(reads, vec![vec!["dimc".to_string()]]);
 }
 
 /// Two axes that each declare a mapping onto a THIRD dimension pair through it,
