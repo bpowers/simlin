@@ -2342,6 +2342,11 @@ void simlin_project_render_png(SimlinProject *project,
 // `QueueLtmDegraded` `Warning` naming the offending stock, so the caller learns
 // why scores are absent instead of the request being silently dropped.
 //
+// A model that does not compile still gets a simulation: the failure is
+// kept and reported by the first call that runs it (`simlin_sim_run_to`,
+// `simlin_sim_run_to_end`), so `simlin_project_get_errors`, not a NULL
+// here, is how a host learns before running that a model cannot run.
+//
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
 SimlinSim *simlin_sim_new(SimlinModel *model, bool enable_ltm, SimlinError **out_error);
