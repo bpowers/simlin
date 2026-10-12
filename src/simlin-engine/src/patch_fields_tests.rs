@@ -589,3 +589,50 @@ fn what_the_field_edits_store_round_trips_through_every_format() {
         );
     }
 }
+
+/// An element's own initial is its own: collapsing to the element that has
+/// one keeps it as the scalar's initial, and removing a lookup the element
+/// does not have leaves the element, initial and all.
+#[test]
+fn an_elements_initial_is_kept() {
+    let base = ages()
+        .array_with_default_and_overrides("d[Age]", "2", vec![("Old", "20")])
+        .build_datamodel();
+    let mut base = base;
+    if let Some(datamodel::Variable::Aux(aux)) = base.models[0].get_variable_mut("d")
+        && let Equation::Arrayed(_, arms, ..) = &mut aux.equation
+    {
+        arms.push((
+            "Young".to_string(),
+            "2".to_string(),
+            Some("99".to_string()),
+            None,
+        ));
+        arms.iter_mut().find(|arm| arm.0 == "Old").unwrap().2 = Some("98".to_string());
+    }
+
+    let kept = edit(&base, set_dimensions("d", &[], Some(&["Old"]))).unwrap();
+    let datamodel::Variable::Aux(aux) = kept.models[0].get_variable("d").unwrap() else {
+        panic!("an aux")
+    };
+    assert_eq!(aux.equation, Equation::Scalar("20".to_string()));
+    assert_eq!(aux.compat.active_initial.as_deref(), Some("98"));
+
+    let unlooked = edit(
+        &base,
+        ModelOperation::SetLookup {
+            ident: "d".to_string(),
+            element: Some(strings(&["Young"])),
+            lookup: None,
+        },
+    )
+    .unwrap();
+    let Equation::Arrayed(_, arms, ..) = equation(&unlooked, "d") else {
+        panic!("still per element")
+    };
+    assert!(
+        arms.iter()
+            .any(|arm| arm.0 == "Young" && arm.2.as_deref() == Some("99")),
+        "{arms:?}"
+    );
+}

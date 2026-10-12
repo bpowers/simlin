@@ -347,10 +347,11 @@ pub(crate) fn set_lookup(
         match (at, lookup) {
             (Some(at), lookup) => {
                 arms[at].3 = lookup;
-                // An element left with no lookup and no equation but the one
-                // every element follows has nothing of its own.
+                // An element left with no lookup, no initial and no equation
+                // but the one every element follows has nothing of its own.
                 let text = arms[at].1.trim();
                 if arms[at].3.is_none()
+                    && arms[at].2.is_none()
                     && (text.is_empty() || every.as_deref().is_some_and(|e| e.trim() == text))
                 {
                     arms.remove(at);
@@ -579,18 +580,27 @@ pub(crate) fn set_dimensions(
             .map(|(key, text, gf_text, gf)| Ok((key, at_kept(&text)?, gf_text, gf)))
             .collect::<Result<_>>()?;
         if new.is_empty() {
-            let (text, gf) = match new_arms.pop() {
+            let (text, initial, gf) = match new_arms.pop() {
                 // An element with a lookup and no equation of its own reads
                 // the equation every element follows through it.
-                Some((_, text, _, gf)) if text.trim().is_empty() && gf.is_some() => {
-                    (default.unwrap_or_default(), gf)
+                Some((_, text, initial, gf)) if text.trim().is_empty() && gf.is_some() => {
+                    (default.unwrap_or_default(), initial, gf)
                 }
-                Some((_, text, _, gf)) => (text, gf),
-                None => (default.unwrap_or_default(), None),
+                Some((_, text, initial, gf)) => (text, initial, gf),
+                None => (default.unwrap_or_default(), None, None),
             };
             *equation = Equation::Scalar(text);
             if let Some(gf) = gf {
                 *gf_mut(&mut var)? = Some(gf);
+            }
+            // The kept element's initial is the scalar's.
+            if let Some(initial) = initial {
+                match &mut var {
+                    Variable::Stock(v) => v.compat.active_initial = Some(initial),
+                    Variable::Flow(v) => v.compat.active_initial = Some(initial),
+                    Variable::Aux(v) => v.compat.active_initial = Some(initial),
+                    Variable::Module(_) => {}
+                }
             }
             return Ok(var);
         }
