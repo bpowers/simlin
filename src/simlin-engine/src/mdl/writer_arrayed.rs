@@ -1264,7 +1264,9 @@ impl Element<'_> {
                         IndexExpr0::Expr(Expr0::Var(name, var_loc)) => {
                             match self.dimension(name.as_str()) {
                                 Some(k) => IndexExpr0::Expr(Expr0::Var(
-                                    crate::common::RawIdent::new(self.keys[k].clone()),
+                                    crate::common::RawIdent::new(
+                                        self.read_on(&source, position, k),
+                                    ),
                                     *var_loc,
                                 )),
                                 None => index.clone(),
@@ -1312,6 +1314,31 @@ impl Element<'_> {
     /// the axis `position` of the variable `source`: `Some(None)` where it
     /// comes to no element, and `None` where it cannot be computed here (it
     /// reads something the model computes) or the axis is unknown.
+    /// The element of `source`'s axis at `position` that this element's key
+    /// on its dimension `k` reads: the key itself, or the element a mapping
+    /// between the two dimensions gives it, by the compiler's own rule.
+    fn read_on(&self, source: &str, position: usize, k: usize) -> String {
+        let key = &self.keys[k];
+        let dims = &self.ctx.dims;
+        let axis = self
+            .ctx
+            .dim_at(source, position)
+            .and_then(|name| dims.get(&crate::common::CanonicalDimensionName::from_raw(name)));
+        let reader = dims.get(&crate::common::CanonicalDimensionName::from_raw(
+            &self.names[k],
+        ));
+        match (axis, reader) {
+            (Some(axis), Some(reader)) => dims
+                .resolve_mapped_read(
+                    axis,
+                    reader,
+                    &crate::common::CanonicalElementName::from_raw(key),
+                )
+                .map_or_else(|| key.clone(), |element| element.as_str().to_string()),
+            _ => key.clone(),
+        }
+    }
+
     fn element_at(&self, source: &str, position: usize, index: &Expr0) -> Option<Option<Expr0>> {
         let value = self.value(index)?;
         let dimension = self.ctx.dim_at(source, position)?;

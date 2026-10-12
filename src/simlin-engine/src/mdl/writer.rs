@@ -564,6 +564,9 @@ pub struct WriterContext {
     macros: HashSet<String>,
     /// The project's dimensions, in declared order.
     dimensions: Vec<datamodel::Dimension>,
+    /// The same dimensions as the compiler resolves them, for a read across
+    /// a mapping ([`crate::dimensions::DimensionsContext::resolve_mapped_read`]).
+    pub(super) dims: crate::dimensions::DimensionsContext,
     /// Each variable of the model, by canonical name, with the name as its
     /// definition is written ([`WriterContext::reference`]).
     written_names: HashMap<String, String>,
@@ -626,6 +629,7 @@ impl WriterContext {
             element_owners,
             macros: HashSet::new(),
             dimensions: dimensions.to_vec(),
+            dims: crate::dimensions::DimensionsContext::from(dimensions),
             // As a definition is written with no view to name it;
             // `with_written_names` gives each the name its view draws.
             written_names: model

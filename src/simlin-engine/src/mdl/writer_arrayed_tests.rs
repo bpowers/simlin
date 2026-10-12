@@ -442,6 +442,32 @@ fn an_offset_is_saved_to_mdl_as_each_elements_own_equation() {
     );
 }
 
+/// An offset's elements written one by one read a mapped variable through
+/// its mapping: with Group mapped onto Age, `x[Age]` at adult is `x[g2]`.
+#[test]
+fn an_offset_written_out_reads_a_mapped_variable_through_its_mapping() {
+    let project = crate::test_common::TestProject::new("mapped_offsets")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Age", &["young", "adult", "old"])
+        .named_dimension_with_mapping("Group", &["g1", "g2", "g3"], "Age")
+        .array_with_ranges(
+            "c[Age]",
+            vec![("young", "10"), ("adult", "20"), ("old", "30")],
+        )
+        .array_with_ranges("x[Group]", vec![("g1", "1"), ("g2", "2"), ("g3", "3")])
+        .array_aux("d[Age]", "x[Age] + c[Age - 1]")
+        .build_datamodel();
+    let save = crate::mdl::project_to_mdl(&project)
+        .expect("the model writes")
+        .replace("\r\n", "\n");
+    assert!(save.contains("x[g2]"), "{save}");
+    let back = crate::open_vensim(&save).expect("the save reads");
+    let (was, is) = (run_project(&project), run_project(&back));
+    for key in ["d[adult]", "d[old]"] {
+        assert_eq!(was[key], is[key], "{key}");
+    }
+}
+
 fn table() -> datamodel::GraphicalFunction {
     datamodel::GraphicalFunction {
         kind: datamodel::GraphicalFunctionKind::Continuous,
