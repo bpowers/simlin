@@ -14,11 +14,11 @@
 //! whose spelling changes and say nothing about an arm whose spelling is right
 //! and whose value is not.
 //!
-//! Two halves, and the split is about run time rather than about coverage: this
-//! file is the sub-second default-suite half, and
-//! `simulate_ltm::clearn_ltm_slot_maxima_digest` is the `#[ignore]`d C-LEARN
-//! half (~25 s release, well past the debug-build 3-minute cap in
-//! `docs/dev/rust.md`).
+//! Two halves, split by run time: this file holds each way a score is zeroed
+//! to its exact values on a fixture small enough for the default suite, and
+//! `ltm_discovery_large_models::clearn_leading_loops_keep_their_shares` is the
+//! `#[ignore]`d C-LEARN half, which holds the loops that lead a real model's
+//! run to a table of their shares.
 //!
 //! **A golden alone would not do this job**, and the reason is the standing
 //! constraint in the root `CLAUDE.md`: a golden that pins an artifact is blind

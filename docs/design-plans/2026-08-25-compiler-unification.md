@@ -1921,7 +1921,7 @@ the LTM causal graph), then 7.5c and 7.5d's eight.
    non-zero (the 21 scores and the 14 freeze slots). Pinned by
    `simulate_ltm_wasm::an_init_only_capture_is_no_ltm_node_and_every_key_matches_wasm`
    (no edge through the capture, VM == wasm on every results key under LTM),
-   `clearn_ltm_var_count_guardrail`, `clearn_ltm_slot_maxima_digest` and
+   `clearn_ltm_var_count_guardrail` and
    `clearn_with_ltm_simulates_model_vars_identically`.
 7. A hoisted module-call argument under an apply-to-all body reads what the
    plain equation reads: the eight cells the base read by ORDINAL (a subscript

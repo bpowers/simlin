@@ -111,6 +111,8 @@ The rules:
 - **Every ignored test passes in the gates job.** A test that records a known defect is not ignored: it asserts the defect (or lists it in an allowlist that fails when a listed entry stops reproducing) and runs in the default suite, so it fails when the defect is fixed.
   An ignored test that is expected to fail is a test nobody reads.
 - **A gate fails when its property breaks.** Check that the same way as any other test: make the obvious wrong change and see it fail under `scripts/gates.sh`.
+- **A gate compares numbers within a tolerance and names what moved.** A hash or a digest of floating-point results is red on another platform for no change (std documents the precision of `f64::powf` and its kin as varying by platform), and its failure says only that something moved.
+  Table the few values that carry the property and compare each at an epsilon (`clearn_leading_loops_keep_their_shares`), so a failure names the row.
 - **An instrument** -- an ignored test that prints a measurement or writes files for a person, and asserts nothing about them -- runs in the job too, so it has to run to completion; its reason string says it is one.
 - Where it is cheap, keep a small default-suite test beside a gate that exercises the same code on one or two models, so the hook sees a break before CI does.
 - `scripts/gates.sh` runs the ignored tests only, since the default suite runs the rest.

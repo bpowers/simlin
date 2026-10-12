@@ -94,6 +94,11 @@
 //!   fast, and it exercises the per-element (A2A) expansion path on a
 //!   model small enough to keep the assertion cheap even if World3's
 //!   fixture ever drifts.
+//! - `clearn_leading_loops_keep_their_shares` (`#[ignore]`d): the loops that
+//!   lead C-LEARN's run, as `analysis::analyze_model` reports them, against a
+//!   table of their shares. It is the test of loop analysis on a model of
+//!   this size: a change that zeroes a link score, loses a loop or reads the
+//!   wrong element moves a row.
 //! - `clearn_ltm_discovery_compiles` (`#[ignore]`d): asserts C-LEARN
 //!   compiles via the incremental path with LTM discovery enabled (a
 //!   clean `Ok`, no panic), re-verifying GH #363. It asserts only the
@@ -104,6 +109,7 @@
 
 use std::time::{Duration, Instant};
 
+use simlin_engine::analysis::{LoopSummary, analyze_model};
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::datamodel;
 use simlin_engine::db::{
@@ -129,6 +135,13 @@ const WORLD3_MDL: &str = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
 /// `clearn_ltm_discovery_compiles`: the panic does not reproduce on this
 /// path.
 const CLEARN_MDL: &str = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+
+/// C-LEARN as it opens.
+fn open_clearn() -> datamodel::Project {
+    let mdl = std::fs::read_to_string(CLEARN_MDL)
+        .unwrap_or_else(|e| panic!("failed to read {CLEARN_MDL}: {e}"));
+    open_vensim(&mdl).expect("open_vensim should parse C-LEARN v77 for Vensim.mdl")
+}
 
 /// Index of the first genuinely discoverable saved timestep.
 ///
@@ -511,13 +524,7 @@ fn discovery_contract_holds_on_tractable_arrayed_model() {
 #[test]
 #[ignore = "C-LEARN compiled in LTM discovery mode; run under the gates profile"]
 fn clearn_ltm_discovery_compiles() {
-    let mdl = match std::fs::read_to_string(CLEARN_MDL) {
-        Ok(contents) => contents,
-        Err(e) => panic!("failed to read {CLEARN_MDL}: {e}"),
-    };
-
-    let datamodel_project =
-        open_vensim(&mdl).expect("open_vensim should parse C-LEARN v77 for Vensim.mdl");
+    let datamodel_project = open_clearn();
 
     // Compile via the incremental path with LTM discovery enabled. NOT
     // wrapped in `catch_unwind`: per AC7.5 a panic here is a hard,
@@ -583,5 +590,171 @@ fn world3_full_run_enumeration_is_complete() {
         "a births -> population-aging loop (via maturation_14_to_15) must be \
          reported; the pre-enumeration sampler missed this family entirely \
          (peak 27% partition dominance -- see the 2026-08-10 audit)"
+    );
+}
+
+/// One of the loops that lead C-LEARN's run, and what loop analysis reports of
+/// it at each element of the climate-sensitivity dimension it runs over.
+struct LeadingLoop {
+    /// What the loop does, for a failure to say.
+    name: &'static str,
+    polarity: &'static str,
+    /// The variables it runs through, in order.
+    path: &'static [&'static str],
+    /// For each element: the largest share of its partition's loop scores the
+    /// loop reaches over the run, and its mean share.
+    shares: &'static [(&'static str, f64, f64)],
+}
+
+/// The three loops with the largest mean share of their partition, strongest
+/// first. C-LEARN runs its carbon cycle once per climate sensitivity, so each
+/// is one loop per element, in that element's partition.
+const CLEARN_LEADING_LOOPS: &[LeadingLoop] = &[
+    LeadingLoop {
+        name: "the mixed layer takes up carbon",
+        polarity: "balancing",
+        path: &[
+            "c_in_mixed_layer",
+            "flux_atm_to_ocean",
+            "c_in_mixed_layer_net_flow",
+        ],
+        shares: &[
+            ("deterministic", 0.7648, 0.2043),
+            ("high_2xco2_sensitivity", 0.7535, 0.2130),
+            ("low_2xco2_sensitivity", 0.7530, 0.2009),
+        ],
+    },
+    LeadingLoop {
+        name: "warming slows the biomass's uptake of carbon",
+        polarity: "balancing",
+        path: &[
+            "total_radiative_forcing",
+            "heat_in_atmosphere_and_upper_ocean_net_flow",
+            "heat_in_atmosphere_and_upper_ocean",
+            "temperature_change_from_preindustrial",
+            "effect_of_warming_on_c_flux_to_biomass",
+            "flux_atm_to_biomass",
+            "c_in_biomass",
+            "flux_biomass_to_humus",
+            "c_in_humus",
+            "flux_humus_to_atmosphere",
+            "c_in_atmosphere",
+            "co2_radiative_forcing",
+        ],
+        shares: &[
+            ("deterministic", 0.6706, 0.0866),
+            ("high_2xco2_sensitivity", 0.7127, 0.0877),
+            ("low_2xco2_sensitivity", 0.6288, 0.0799),
+        ],
+    },
+    LeadingLoop {
+        name: "carbon cycles through biomass and humus",
+        polarity: "reinforcing",
+        path: &[
+            "flux_biomass_to_humus",
+            "c_in_humus",
+            "flux_humus_to_atmosphere",
+            "c_in_atmosphere",
+            "flux_atm_to_biomass",
+            "c_in_biomass",
+        ],
+        shares: &[
+            ("deterministic", 0.6148, 0.0696),
+            ("high_2xco2_sensitivity", 0.5579, 0.0686),
+            ("low_2xco2_sensitivity", 0.4969, 0.0711),
+        ],
+    },
+];
+
+/// How far a share may sit from its row: a hundredth of it.
+///
+/// Loose on purpose. The test is for a change that breaks loop analysis -- a
+/// link score zeroed, a loop lost, a read of the wrong element -- and each
+/// moves a share by far more. A tight pin would also be one platform's: the
+/// scores run through `^` and `EXP`, and std documents the precision of
+/// `f64::powf` and its kin as varying by platform.
+const SHARE_TOLERANCE: f64 = 0.01;
+
+/// Whether two node sequences are one cycle, wherever each starts.
+fn same_cycle(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len()
+        && (0..a.len().max(1)).any(|k| a.iter().cycle().skip(k).take(a.len()).eq(b.iter()))
+}
+
+/// The largest share of its partition a reported loop reaches, and its mean
+/// share over the run's saved steps.
+fn peak_and_mean_share(summary: &LoopSummary) -> (f64, f64) {
+    let shares = || summary.importance.iter().map(|share| share.abs());
+    let peak = shares().fold(0.0, f64::max);
+    let mean = shares().sum::<f64>() / summary.importance.len() as f64;
+    (peak, mean)
+}
+
+/// The loops that lead C-LEARN's run are the ones the table lists, in its
+/// order, with the polarities and the shares it gives.
+///
+/// This is what holds loop analysis to a model of C-LEARN's size, through the
+/// entry point a host calls (`analysis::analyze_model`). A leading loop's share
+/// is its score against the scores of the 47 loops of its partition, so a row
+/// moves when a link score on any of them is lost or read from the wrong
+/// place. What it does not see is a change to scores on no loop of these
+/// three partitions; `db::ltm_value_gate_tests` holds the ways a score is
+/// zeroed on fixtures small enough for the default suite.
+///
+/// A failure lists every row that moved. To re-derive the table, run with
+/// `--nocapture` and read the shares the test prints:
+///     scripts/gates.sh --nocapture clearn_leading_loops_keep_their_shares
+#[test]
+#[ignore = "C-LEARN compiled, run and analyzed under LTM; run under the gates profile"]
+fn clearn_leading_loops_keep_their_shares() {
+    let project = open_clearn();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let analysis = analyze_model(&project, &mut db, sync.project, "main", None)
+        .expect("C-LEARN has a main model");
+    assert_eq!(analysis.analysis_error, None);
+    let loops = &analysis.loop_dominance;
+
+    let mut wrong = Vec::new();
+    for (rank, row) in CLEARN_LEADING_LOOPS.iter().enumerate() {
+        for &(element, want_peak, want_mean) in row.shares {
+            let at = format!("{} at {element}", row.name);
+            let nodes: Vec<String> = row.path.iter().map(|v| format!("{v}[{element}]")).collect();
+            let Some(found) = loops.iter().find(|l| same_cycle(&l.variables, &nodes)) else {
+                wrong.push(format!("{at}: not among the loops reported"));
+                continue;
+            };
+            let (peak, mean) = peak_and_mean_share(found);
+            println!(
+                "{at}: {} with peak share {peak:.4}, mean share {mean:.4}",
+                found.polarity
+            );
+            // The loops of its partition with a larger mean share are the
+            // rows above its own.
+            let stronger = loops
+                .iter()
+                .filter(|l| l.partition == found.partition && peak_and_mean_share(l).1 > mean)
+                .count();
+            if stronger != rank {
+                wrong.push(format!(
+                    "{at}: ranked {} in its partition, not {}",
+                    stronger + 1,
+                    rank + 1
+                ));
+            }
+            if found.polarity != row.polarity {
+                wrong.push(format!("{at}: {}, not {}", found.polarity, row.polarity));
+            }
+            for (what, got, want) in [("peak", peak, want_peak), ("mean", mean, want_mean)] {
+                if (got - want).abs() > SHARE_TOLERANCE * want {
+                    wrong.push(format!("{at}: {what} share {got:.4}, not {want}"));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "C-LEARN's leading loops are not the table's:\n  {}",
+        wrong.join("\n  ")
     );
 }
