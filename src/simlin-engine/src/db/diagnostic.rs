@@ -997,11 +997,17 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
         if parsed.variable.fatal_diagnostics().next().is_some() {
             continue;
         }
-        let tables = parsed.variable.tables();
-        let per_element_tables = crate::variable::has_per_element_tables(equation);
-        let missing = crate::variable::elements_without_an_arm(ast, |offset| {
-            per_element_tables && tables.get(offset).is_some_and(|t| !t.x.is_empty())
-        });
+        // An element's own table is an arm; the variable's, which fills the
+        // slots of elements without one, is not.
+        let own_tables: HashSet<CanonicalElementName> = match equation {
+            crate::datamodel::Equation::Arrayed(_, arms, _, _) => arms
+                .iter()
+                .filter(|(_, _, _, gf)| gf.is_some())
+                .map(|(subscript, ..)| CanonicalElementName::from_subscript(subscript))
+                .collect(),
+            _ => HashSet::new(),
+        };
+        let missing = crate::variable::elements_without_an_arm(ast, |key| own_tables.contains(key));
         for key in &missing {
             let msg = format!(
                 "array variable '{var_name}' has no equation for '{}': no element entry \

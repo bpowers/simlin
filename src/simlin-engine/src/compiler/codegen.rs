@@ -1292,13 +1292,28 @@ impl<'module> Compiler<'module> {
                     // A constant, in-range element offset is resolved here so
                     // no `LoadConstant` push is emitted for it (every scalar
                     // table takes this path, its offset being a literal 0).
-                    // A variable with one table applies it to every element
-                    // (an apply-to-all lookup, or a lookup split by a
-                    // dimension), so any element's offset reads that table.
-                    let one_table = (table_count == 1).then_some(0);
-                    if let Some(elem) = one_table
-                        .or_else(|| const_element_offset(&element_offset_expr, table_count))
-                    {
+                    // A variable with one table applies it at each of its
+                    // elements, so an offset within the variable reads that
+                    // table; one outside it is NaN, as for any other table.
+                    let elements = self
+                        .module
+                        .var_sizes
+                        .get(&VarRef {
+                            name: table_ident.clone(),
+                            element_offset: 0,
+                        })
+                        .copied()
+                        .unwrap_or(1);
+                    let elem = if table_count == 1 {
+                        const_element_offset(
+                            &element_offset_expr,
+                            u16::try_from(elements).unwrap_or(u16::MAX),
+                        )
+                        .map(|_| 0)
+                    } else {
+                        const_element_offset(&element_offset_expr, table_count)
+                    };
+                    if let Some(elem) = elem {
                         let mode = self.lookup_mode(builtin, &table_ident, Some(elem))?;
                         self.walk_expr(index)?.unwrap();
                         self.push(SymbolicOpcode::LookupDirect {

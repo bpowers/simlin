@@ -720,11 +720,11 @@ pub(crate) fn unfilled_arms(ast: &Ast<Expr0>) -> Option<UnfilledArms> {
 /// an arm even when its equation is empty -- the expansion wraps the table
 /// around the fabricated 0 input (`gf(0)`, pinned by
 /// `gf_only_element_without_default_evaluates_gf_of_fabricated_zero`) -- so
-/// `per_element_table_at(offset)`, the per-element table layout
-/// [`build_tables`] built ([`has_per_element_tables`]), counts as coverage.
+/// `has_own_table(key)`, an element whose entry carries its own gf, counts as
+/// coverage. The variable's own table, which fills the other slots, does not.
 pub(crate) fn elements_without_an_arm(
     ast: &Ast<Expr0>,
-    per_element_table_at: impl Fn(usize) -> bool,
+    has_own_table: impl Fn(&CanonicalElementName) -> bool,
 ) -> Vec<CanonicalElementName> {
     let Ast::Arrayed(dims, elements, default, apply_default_to_missing) = ast else {
         return vec![];
@@ -733,10 +733,8 @@ pub(crate) fn elements_without_an_arm(
         return vec![];
     }
     crate::dimensions::SubscriptIterator::new(dims)
-        .enumerate()
-        .map(|(offset, combination)| (offset, CanonicalElementName::from_parts(&combination)))
-        .filter(|(offset, key)| !elements.contains_key(key) && !per_element_table_at(*offset))
-        .map(|(_, key)| key)
+        .map(|combination| CanonicalElementName::from_parts(&combination))
+        .filter(|key| !elements.contains_key(key) && !has_own_table(key))
         .collect()
 }
 

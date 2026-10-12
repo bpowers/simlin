@@ -1668,3 +1668,66 @@ fn one_table_applies_at_every_element() {
     assert_eq!(run["y[north]"].last(), Some(&1.5));
     assert_eq!(run["y[south]"].last(), Some(&1.5));
 }
+
+/// The one table of an apply-to-all lookup is still read through the
+/// element's bounds: `LOOKUP(g[Age - 1], 1.5)` at the first Age reads
+/// before the first element, which is NaN, as any read past a dimension is.
+#[test]
+fn one_table_keeps_the_bounds_check() {
+    let gf = crate::datamodel::GraphicalFunction {
+        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 2.0]),
+        y_points: vec![0.0, 2.0],
+        x_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+    };
+    let mut project = crate::test_common::TestProject::new("one_table_bounds")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Age", &["young", "adult", "old"])
+        .aux_with_gf("g", "0", gf)
+        .array_aux("y[Age]", "LOOKUP(g[Age - 1], 1.5)")
+        .build_datamodel();
+    if let Some(crate::datamodel::Variable::Aux(aux)) = project.models[0].get_variable_mut("g") {
+        aux.equation =
+            crate::datamodel::Equation::ApplyToAll(vec!["Age".to_string()], "0".to_string());
+    }
+    let run = crate::test_common::TestProject::from_datamodel(project)
+        .run_vm()
+        .expect("it runs");
+    assert!(
+        run["y[young]"].last().unwrap().is_nan(),
+        "{:?}",
+        run["y[young]"]
+    );
+    assert_eq!(run["y[adult]"].last(), Some(&1.5));
+}
+
+/// An element with no arm of its own is reported as missing even where the
+/// variable has a lookup of its own beside its elements' tables: the
+/// variable's table is no arm for it.
+#[test]
+fn an_element_with_no_arm_is_missing_beside_a_variable_table() {
+    let mut project = arrayed_gf_project_with_mixed_eqns(
+        "Dim",
+        &["Z", "A", "B"],
+        vec![
+            ("Z", "time", Some(ramp_gf(0.0, 1000.0))),
+            ("A", "", Some(ramp_gf(100.0, 2000.0))),
+        ],
+    );
+    if let Some(datamodel::Variable::Aux(aux)) = project.models[0].get_variable_mut("g") {
+        aux.gf = Some(ramp_gf(0.0, 1.0));
+    }
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let missing: Vec<Option<String>> =
+        crate::db::collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
+            .iter()
+            .filter(|d| {
+                matches!(&d.error, crate::db::DiagnosticError::Model(e)
+                    if e.code == crate::common::ErrorCode::MissingElementEquation)
+            })
+            .map(|d| d.element().map(str::to_owned))
+            .collect();
+    assert_eq!(missing, vec![Some("b".to_string())]);
+}
