@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use crate::canonicalize;
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap};
 use crate::datamodel;
 
 // `BTreeSet` is imported for the root-mounted `#[cfg(test)]` test modules,
@@ -1039,7 +1039,7 @@ pub(crate) fn module_link_score_equation(
         match from_output {
             Some(output_ref) => {
                 let output_ident = Ident::<Canonical>::new(&output_ref);
-                let mut all_vars = HashMap::new();
+                let mut all_vars = IdentMap::default();
                 all_vars.insert(to_ident.clone(), std::sync::Arc::clone(to_var));
                 let dim_ctx = project_dimensions_context(db, project);
                 // The target's per-occurrence access-shape IR. The live source

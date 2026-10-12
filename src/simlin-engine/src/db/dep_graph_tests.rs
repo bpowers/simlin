@@ -8,6 +8,7 @@
 //! `db/tests.rs` under the per-file line cap.
 
 use super::*;
+use crate::common::IdentMap;
 use crate::datamodel;
 use crate::db::{SimlinDb, sync_from_datamodel};
 use crate::test_common::TestProject;
@@ -53,7 +54,7 @@ fn vi_for_test(is_stock: bool, is_module: bool, dt_deps: &[&str]) -> VarInfo {
 }
 
 /// Insert a `VarInfo` keyed by the interned canonical `name`.
-fn vi_insert(map: &mut FxHashMap<Ident<Canonical>, VarInfo>, name: &str, info: VarInfo) {
+fn vi_insert(map: &mut IdentMap<Ident<Canonical>, VarInfo>, name: &str, info: VarInfo) {
     map.insert(Ident::from_str_unchecked(name), info);
 }
 
@@ -66,7 +67,7 @@ fn succ_strs<'a>(succ: &[&'a Ident<Canonical>]) -> Vec<&'a str> {
 
 #[test]
 fn dt_walk_successors_stock_is_dt_sink() {
-    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let mut vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     vi_insert(&mut vinfo, "s", vi_for_test(true, false, &["a", "b"]));
     vi_insert(&mut vinfo, "a", vi_for_test(false, false, &[]));
     vi_insert(&mut vinfo, "b", vi_for_test(false, false, &[]));
@@ -77,7 +78,7 @@ fn dt_walk_successors_stock_is_dt_sink() {
 
 #[test]
 fn dt_walk_successors_module_has_no_cycle_successors() {
-    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let mut vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     vi_insert(&mut vinfo, "m", vi_for_test(false, true, &["a"]));
     vi_insert(&mut vinfo, "a", vi_for_test(false, false, &[]));
     // `closure_of` returns for a Module before marking it processing, so it
@@ -88,7 +89,7 @@ fn dt_walk_successors_module_has_no_cycle_successors() {
 
 #[test]
 fn dt_walk_successors_aux_filters_stock_and_unknown_keeps_module() {
-    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let mut vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     vi_insert(
         &mut vinfo,
         "x",
@@ -110,7 +111,7 @@ fn dt_walk_successors_aux_filters_stock_and_unknown_keeps_module() {
 
 #[test]
 fn dt_walk_successors_absent_name_is_empty() {
-    let vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     // A malformed/absent var_info entry must not panic; it yields no
     // successors.
     assert!(walk_successors(&vinfo, "nope", SccPhase::Dt).is_empty());
@@ -118,7 +119,7 @@ fn dt_walk_successors_absent_name_is_empty() {
 
 #[test]
 fn dt_walk_successors_order_is_btreeset_sorted() {
-    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let mut vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     vi_insert(
         &mut vinfo,
         "x",
@@ -174,7 +175,7 @@ fn vi_init_for_test(is_stock: bool, is_module: bool, initial_deps: &[&str]) -> V
 
 #[test]
 fn init_walk_successors_module_has_no_cycle_successors() {
-    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let mut vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     vi_insert(&mut vinfo, "m", vi_init_for_test(false, true, &["a"]));
     vi_insert(&mut vinfo, "a", vi_init_for_test(false, false, &[]));
     // The module early-return in `closure_of` fires before the node is
@@ -186,7 +187,7 @@ fn init_walk_successors_module_has_no_cycle_successors() {
 
 #[test]
 fn init_walk_successors_stock_is_not_an_init_sink() {
-    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let mut vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     vi_insert(&mut vinfo, "s", vi_init_for_test(true, false, &["s", "a"]));
     vi_insert(&mut vinfo, "a", vi_init_for_test(false, false, &[]));
     // A Stock is NOT an init-phase sink: the dt stock sink in
@@ -204,7 +205,7 @@ fn init_walk_successors_stock_is_not_an_init_sink() {
 
 #[test]
 fn init_walk_successors_keeps_stock_targeted_deps() {
-    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let mut vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     vi_insert(
         &mut vinfo,
         "x",
@@ -224,7 +225,7 @@ fn init_walk_successors_keeps_stock_targeted_deps() {
 
 #[test]
 fn init_walk_successors_filters_unknown_deps() {
-    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let mut vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     vi_insert(
         &mut vinfo,
         "x",
@@ -243,7 +244,7 @@ fn init_walk_successors_filters_unknown_deps() {
 
 #[test]
 fn init_walk_successors_absent_name_is_empty() {
-    let vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     // A malformed/absent var_info entry must not panic; it yields no
     // successors (mirrors the dt phase; the dense index numbers exactly
     // `var_info`'s keys, so `closure_of` never meets an unknown name).
@@ -252,7 +253,7 @@ fn init_walk_successors_absent_name_is_empty() {
 
 #[test]
 fn init_walk_successors_order_is_btreeset_sorted() {
-    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    let mut vinfo: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
     vi_insert(
         &mut vinfo,
         "x",
@@ -1780,8 +1781,8 @@ fn model_dep_graph_result_equality_observes_resolved_sccs() {
     use crate::db::{ModelDepGraphResult, ResolvedScc, SccPhase};
 
     let base = ModelDepGraphResult {
-        dt_dependencies: HashMap::new(),
-        initial_dependencies: HashMap::new(),
+        dt_dependencies: IdentMap::default(),
+        initial_dependencies: IdentMap::default(),
         runlist_initials: Vec::new(),
         runlist_flows: Vec::new(),
         runlist_stocks: Vec::new(),
@@ -3451,10 +3452,7 @@ fn initials_runlist_is_sorted_topological_order() {
     // order, not this helper.
     fn emit(
         name: &str,
-        deps: &std::collections::HashMap<
-            Ident<Canonical>,
-            std::collections::BTreeSet<Ident<Canonical>>,
-        >,
+        deps: &IdentMap<Ident<Canonical>, std::collections::BTreeSet<Ident<Canonical>>>,
         members: &std::collections::BTreeSet<String>,
         emitted: &mut std::collections::BTreeSet<String>,
         out: &mut Vec<String>,

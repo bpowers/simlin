@@ -20,6 +20,7 @@
 //! - The two `#`-signature stdlib-call encodings via
 //!   [`VdfFile::output_signatures`] and [`VdfFile::new_style_alias_signatures`].
 
+use crate::common::IdentMap;
 use std::collections::{HashMap, HashSet};
 use std::{error::Error, result::Result as StdResult};
 
@@ -714,7 +715,7 @@ impl VdfDatasetData {
     pub fn to_results(&self) -> Results {
         let step_count = self.time_values.len();
         let step_size = 1 + self.series_order.len();
-        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        let mut offsets: IdentMap<Ident<Canonical>, usize> = IdentMap::default();
         let mut data = vec![f64::NAN; step_count * step_size];
 
         offsets.insert(Ident::<Canonical>::from_str_unchecked("time"), 0);
@@ -2444,7 +2445,7 @@ impl VdfData {
         let step_count = self.time_values.len();
         let step_size = ordered.len();
         let mut step_data = vec![f64::NAN; step_count * step_size];
-        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        let mut offsets: IdentMap<Ident<Canonical>, usize> = IdentMap::default();
 
         for (col, (id, ot_idx)) in ordered.iter().enumerate() {
             offsets.insert(id.clone(), col);

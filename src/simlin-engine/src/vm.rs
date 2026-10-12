@@ -12,7 +12,7 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode, Op2,
     Opcode, RuntimeView, STACK_CAPACITY, TempId, ViewStorage,
 };
-use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, Result};
+use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, IdentMap, Result};
 use crate::dimensions::match_dimensions_two_pass;
 #[allow(unused_imports)]
 pub use crate::results::{Method, Results, Specs};
@@ -106,19 +106,19 @@ enum BytecodeLocation {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub struct CompiledSimulation {
-    pub(crate) modules: HashMap<ModuleKey, CompiledModule>,
+    pub(crate) modules: IdentMap<ModuleKey, CompiledModule>,
     pub(crate) specs: Specs,
     pub(crate) root: ModuleKey,
-    pub(crate) offsets: HashMap<Ident<Canonical>, usize>,
+    pub(crate) offsets: IdentMap<Ident<Canonical>, usize>,
     cached_constant_info: HashMap<usize, Vec<BytecodeLocation>>,
 }
 
 impl CompiledSimulation {
     pub(crate) fn new(
-        modules: HashMap<ModuleKey, CompiledModule>,
+        modules: IdentMap<ModuleKey, CompiledModule>,
         specs: Specs,
         root: ModuleKey,
-        offsets: HashMap<Ident<Canonical>, usize>,
+        offsets: IdentMap<Ident<Canonical>, usize>,
     ) -> Self {
         let cached_constant_info = collect_constant_info(&modules, &root, 0);
         CompiledSimulation {
@@ -271,7 +271,7 @@ struct CompiledSlicedSimulation {
     /// `ModuleKey` -> module index. Used only by the cold `set_value` /
     /// `clear_values` literal-override paths (which still address modules by
     /// key via `BytecodeLocation`); never consulted in the hot eval loop.
-    key_to_idx: HashMap<ModuleKey, u32>,
+    key_to_idx: IdentMap<ModuleKey, u32>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -564,13 +564,13 @@ impl CompiledSlicedSimulation {
     /// Build the indexed module table from the keyed `CompiledModule` map,
     /// resolving every module declaration's `(model_name, input_set)` key to a
     /// child index so the hot eval loop never reconstructs or hashes a key.
-    fn build(modules: &HashMap<ModuleKey, CompiledModule>, root: &ModuleKey) -> Self {
+    fn build(modules: &IdentMap<ModuleKey, CompiledModule>, root: &ModuleKey) -> Self {
         // Stable, deterministic ordering so module indices don't depend on
         // HashMap iteration order.
         let mut keys: Vec<&ModuleKey> = modules.keys().collect();
         keys.sort();
 
-        let key_to_idx: HashMap<ModuleKey, u32> = keys
+        let key_to_idx: IdentMap<ModuleKey, u32> = keys
             .iter()
             .enumerate()
             .map(|(idx, key)| ((*key).clone(), idx as u32))
@@ -638,7 +638,7 @@ impl CompiledSlicedSimulation {
 /// attached plans, so an override on one rejects rather than silently doing
 /// nothing (GH #871).
 fn collect_constant_info(
-    modules: &HashMap<ModuleKey, CompiledModule>,
+    modules: &IdentMap<ModuleKey, CompiledModule>,
     module_key: &ModuleKey,
     base_off: usize,
 ) -> HashMap<usize, Vec<BytecodeLocation>> {
@@ -724,7 +724,7 @@ fn collect_constant_info(
 /// bytecode. Recurses into child modules via `EvalModule` to capture
 /// submodule internals (SMOOTH/DELAY stocks).
 fn collect_stock_offsets(
-    modules: &HashMap<ModuleKey, CompiledModule>,
+    modules: &IdentMap<ModuleKey, CompiledModule>,
     key: &ModuleKey,
     base_off: usize,
 ) -> Vec<usize> {

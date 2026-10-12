@@ -8,7 +8,7 @@
 //! `#[path]` so `use super::*` still resolves the module's private items.
 
 use super::*;
-use crate::common::{CanonicalDimensionName, CanonicalElementName};
+use crate::common::{CanonicalDimensionName, CanonicalElementName, IdentMap, IdentSet};
 use crate::db::LtmEquation;
 use crate::db::ltm_ir::OccurrenceRef;
 use crate::dimensions::{Dimension, NamedDimension};
@@ -44,11 +44,11 @@ fn make_indexed_dimension(name: &str, size: u32) -> Dimension {
     Dimension::Indexed(CanonicalDimensionName::from_raw(name), size)
 }
 
-/// Build a `HashSet<Ident<Canonical>>` from string slices for use in
+/// Build a `IdentSet<Ident<Canonical>>` from string slices for use in
 /// per-shape partial-equation tests. Each input string is canonicalized
 /// via `Ident::new`, matching the wrapping path that
 /// `build_partial_equation_shaped` exercises.
-fn deps_set(idents: &[&str]) -> HashSet<Ident<Canonical>> {
+fn deps_set(idents: &[&str]) -> IdentSet<Ident<Canonical>> {
     idents.iter().map(|s| Ident::new(s)).collect()
 }
 
@@ -58,7 +58,7 @@ fn deps_set(idents: &[&str]) -> HashSet<Ident<Canonical>> {
 /// derives them from the dep's declaration
 /// (`crate::ltm_augment::dep_element_pins`), and the tests below pin what that
 /// derivation is obliged to produce.
-fn pin_table(pins: &[(&str, &[(&str, &str)])]) -> HashMap<Ident<Canonical>, DepElementPin> {
+fn pin_table(pins: &[(&str, &[(&str, &str)])]) -> IdentMap<Ident<Canonical>, DepElementPin> {
     pin_table_with_completeness(pins, true)
 }
 
@@ -69,7 +69,7 @@ fn pin_table(pins: &[(&str, &[(&str, &str)])]) -> HashMap<Ident<Canonical>, DepE
 fn pin_table_with_completeness(
     pins: &[(&str, &[(&str, &str)])],
     complete: bool,
-) -> HashMap<Ident<Canonical>, DepElementPin> {
+) -> IdentMap<Ident<Canonical>, DepElementPin> {
     pins.iter()
         .map(|(ident, axes)| {
             (
@@ -104,7 +104,7 @@ fn expr(text: &str) -> Expr0 {
 /// the result -- the test-side spelling of the typed pin the per-element
 /// generators apply. The parse lowercases call names, so a `PREVIOUS(..)`
 /// in `text` prints back as `previous(..)`.
-fn pin_text(text: &str, pins: &HashMap<Ident<Canonical>, DepElementPin>) -> String {
+fn pin_text(text: &str, pins: &IdentMap<Ident<Canonical>, DepElementPin>) -> String {
     print_eqn(&subscript_idents_in_expr0(expr(text), pins))
 }
 
@@ -3422,7 +3422,7 @@ fn generate_link_score_equation_for_link_empty_target_is_err() {
     let to_var = scalar_aux_from_text("target", "");
     let from_var = scalar_aux_from_text("source", "1");
 
-    let mut all_vars = HashMap::new();
+    let mut all_vars = IdentMap::default();
     all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
     all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
@@ -3456,7 +3456,7 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
     let from_var = scalar_aux_from_text("source", "1");
     let other_var = scalar_aux_from_text("other", "2");
 
-    let mut all_vars = HashMap::new();
+    let mut all_vars = IdentMap::default();
     all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
     all_vars.insert(
         Ident::<Canonical>::new("other"),
@@ -3619,7 +3619,7 @@ fn link_score_for_with_lookup_scalar_target_wraps_partial_in_lookup() {
     let from_var = scalar_aux_from_text("source", "1");
     let other_var = scalar_aux_from_text("other", "2");
 
-    let mut all_vars = HashMap::new();
+    let mut all_vars = IdentMap::default();
     all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
     all_vars.insert(
         Ident::<Canonical>::new("other"),
@@ -3666,7 +3666,7 @@ fn link_score_for_with_lookup_a2a_target_pins_shared_table() {
     let to_var = a2a_with_lookup_var("target", &dims, "source * 0.5", decreasing_dm_gf());
     let from_var = scalar_aux_from_text("source", "1");
 
-    let mut all_vars = HashMap::new();
+    let mut all_vars = IdentMap::default();
     all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
     all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
@@ -3715,7 +3715,7 @@ fn link_score_for_with_lookup_arrayed_target_wraps_per_slot() {
     );
     let from_var = scalar_aux_from_text("source", "1");
 
-    let mut all_vars = HashMap::new();
+    let mut all_vars = IdentMap::default();
     all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
     all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
@@ -5230,7 +5230,7 @@ fn test_body_aware_rank_keeps_delta_ratio() {
 #[allow(clippy::too_many_arguments)]
 fn sgft(
     equation_text: &str,
-    deps: &HashSet<Ident<Canonical>>,
+    deps: &IdentSet<Ident<Canonical>>,
     from: &Ident<Canonical>,
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],

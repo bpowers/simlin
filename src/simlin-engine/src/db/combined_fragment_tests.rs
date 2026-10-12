@@ -18,7 +18,7 @@
 //! the `ref.mdl` / `interleaved.mdl` simulation tests (Tasks 7/8).
 
 use super::combine_scc_fragment;
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::symbolic::{
     PerVarBytecodes, SymStaticViewBase, SymVarRef, SymbolicByteCode, SymbolicModuleDecl,
     SymbolicOpcode, SymbolicStaticView,
@@ -46,7 +46,7 @@ fn vref(name: &str, element_offset: usize) -> SymVarRef {
 /// graphical function, one module decl, one static view (base = a member
 /// variable, so it must survive verbatim), one temp, and one dim list, so
 /// the per-member resource renumbering is exercised.
-fn two_member_fragments() -> HashMap<Ident<Canonical>, PerVarBytecodes> {
+fn two_member_fragments() -> IdentMap<Ident<Canonical>, PerVarBytecodes> {
     // `ce`: ce[0] = const(lit 0); ce[1] = LoadVar(ecc[0]) (so it reads
     // member `ecc`'s element 0). Side-channels at fragment-local id 0.
     let ce = PerVarBytecodes {
@@ -122,7 +122,7 @@ fn two_member_fragments() -> HashMap<Ident<Canonical>, PerVarBytecodes> {
         dim_lists: vec![vec![2]],
     };
 
-    let mut m = HashMap::new();
+    let mut m = IdentMap::default();
     m.insert(id("ce"), ce);
     m.insert(id("ecc"), ecc);
     m
@@ -541,7 +541,7 @@ fn combined_fragment_trailing_non_write_opcodes_join_last_segment() {
 /// Splice a self-contained iteration loop into `ce`'s element-0 segment: the
 /// `BeginIter` and the backward jump that targets inside it both precede the
 /// element-0 write, so the whole loop moves as one unit.
-fn ce_with_contained_loop() -> HashMap<Ident<Canonical>, PerVarBytecodes> {
+fn ce_with_contained_loop() -> IdentMap<Ident<Canonical>, PerVarBytecodes> {
     let mut frags = two_member_fragments();
     let ce = frags.get_mut(&id("ce")).unwrap();
     ce.symbolic.code = vec![
@@ -958,10 +958,10 @@ fn fresh_resolved_scc_and_combined_fragment(
     // Mirror `assemble_module`'s `combine_scc_for_phase` exactly: each
     // member's production symbolic fragment for the SCC's phase, then the
     // per-element-granular interleave.
-    let mut member_fragments: HashMap<
+    let mut member_fragments: IdentMap<
         Ident<Canonical>,
         crate::compiler::symbolic::PerVarBytecodes,
-    > = HashMap::with_capacity(scc.members.len());
+    > = IdentMap::with_capacity_and_hasher(scc.members.len(), Default::default());
     for member in &scc.members {
         let frag = crate::db::var_phase_symbolic_fragment_prod(
             &db,
@@ -1066,7 +1066,7 @@ fn assembled_init_combined_fragment_is_byte_stable_across_fresh_dbs() {
 fn prologue_member_fragments(
     view_base: SymVarRef,
     readers: &[usize],
-) -> HashMap<Ident<Canonical>, PerVarBytecodes> {
+) -> IdentMap<Ident<Canonical>, PerVarBytecodes> {
     let mut code = vec![
         // PROLOGUE: one materialized array, written once.
         SymbolicOpcode::PushStaticView { view_id: 0 },
@@ -1110,7 +1110,7 @@ fn prologue_member_fragments(
         temp_sizes: vec![(0, 3)],
         dim_lists: vec![],
     };
-    let mut frags = HashMap::new();
+    let mut frags = IdentMap::default();
     frags.insert(id("m"), m);
     frags
 }
@@ -1300,7 +1300,7 @@ fn a_private_block_beside_a_shared_temp_stays_in_its_element() {
         temp_sizes: vec![(0, 3), (1, 3)],
         dim_lists: vec![],
     };
-    let mut frags = HashMap::new();
+    let mut frags = IdentMap::default();
     frags.insert(id("m"), m);
 
     // m[2] before m[0], as the private block's read requires; m[1] first,

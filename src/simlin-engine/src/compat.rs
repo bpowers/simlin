@@ -6,6 +6,8 @@ use std::io::BufRead;
 #[cfg(feature = "file_io")]
 use std::io::BufReader;
 
+#[cfg(feature = "file_io")]
+use crate::common::IdentMap;
 use crate::common::Result;
 use crate::datamodel::Project;
 
@@ -133,7 +135,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
         unprocessed
     };
 
-    let offsets: HashMap<Ident<Canonical>, usize> = unprocessed
+    let offsets: IdentMap<Ident<Canonical>, usize> = unprocessed
         .keys()
         .enumerate()
         .map(|(i, r)| (Ident::<Canonical>::from_str_unchecked(r.as_str()), i))
@@ -218,7 +220,7 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
         .from_path(file_path)?;
 
     let header = rdr.headers().unwrap();
-    let offsets: HashMap<Ident<Canonical>, usize> = header
+    let offsets: IdentMap<Ident<Canonical>, usize> = header
         .iter()
         .enumerate()
         .map(|(i, r)| {

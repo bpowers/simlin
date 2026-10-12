@@ -26,12 +26,11 @@
 //! is a bug in one of the readers, and the whole point of this harness is
 //! zero drift.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rayon::prelude::*;
-use simlin_engine::common::{Canonical, Ident};
+use simlin_engine::common::{Canonical, Ident, IdentMap};
 use simlin_engine::vdf::{VdfFile, VdfKind, probe_vdf_kind};
 
 /// Directories walked for parity fixtures. `test/` is always present; the
@@ -261,7 +260,7 @@ fn verify_fixture_against_payload(
 
         // Canonicalize the Python display names; a duplicate canonical key on
         // either side would silently collapse a column, so fail loudly.
-        let mut python_series: HashMap<Ident<Canonical>, (String, Vec<f64>)> = HashMap::new();
+        let mut python_series: IdentMap<Ident<Canonical>, (String, Vec<f64>)> = IdentMap::default();
         for entry in entries {
             let name = entry["name"]
                 .as_str()

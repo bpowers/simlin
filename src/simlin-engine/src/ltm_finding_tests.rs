@@ -14,6 +14,7 @@ use super::enum_tests::{
     discover_project, enum_flow, enum_results, enum_stock, survivor_node_sets,
 };
 use super::*;
+use crate::common::IdentMap;
 
 /// Helper to build stock list from names
 fn stock_list(names: &[&str]) -> Vec<Ident<Canonical>> {
@@ -175,7 +176,7 @@ fn collapse_folds_two_disagreeing_structural_paths_to_unknown() {
 fn test_parse_link_offsets() {
     // Test the link offset parsing from variable names.
     // Use Ident::new() directly to match how the VM stores keys.
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(Ident::new("$⁚ltm⁚link_score⁚population→births"), 0usize);
     offsets.insert(Ident::new("$⁚ltm⁚link_score⁚births→population"), 1usize);
     offsets.insert(Ident::new("population"), 2usize);
@@ -215,7 +216,7 @@ fn test_parse_link_offsets() {
 fn test_parse_link_offsets_a2a_expansion() {
     // An A2A link score `birth_rate->births` with dimension Region
     // (NYC, Boston, Chicago) should expand to 3 element-level entries.
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(Ident::new("$⁚ltm⁚link_score⁚birth_rate→births"), 10usize);
     // A scalar link score for comparison
     offsets.insert(Ident::new("$⁚ltm⁚link_score⁚scalar_a→scalar_b"), 20usize);
@@ -316,7 +317,7 @@ fn test_parse_link_offsets_a2a_expansion() {
 fn test_parse_link_offsets_cross_dim_passthrough() {
     // Cross-dimensional per-element scores (with `[` in the name)
     // should pass through directly without expansion.
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(
         Ident::new("$⁚ltm⁚link_score⁚population[nyc]→total_pop"),
         5usize,
@@ -352,7 +353,7 @@ fn test_parse_link_offsets_cross_dim_passthrough() {
 /// (parse_link_offsets does not read data values), so the data buffer
 /// is sized generously and zeroed.
 fn make_results_with_offsets(
-    offsets: HashMap<Ident<Canonical>, usize>,
+    offsets: IdentMap<Ident<Canonical>, usize>,
     step_size: usize,
 ) -> Results {
     Results {
@@ -380,7 +381,7 @@ fn make_results_with_offsets(
 /// graph spells, so loops through the scalar feeder become discoverable.
 #[test]
 fn test_parse_link_offsets_scalar_source_projects_to_bare() {
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(
         Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}growth"),
         10usize,
@@ -445,7 +446,7 @@ fn test_parse_link_offsets_scalar_source_projects_to_bare() {
 /// offset stays keyed on the target element's row-major position.
 #[test]
 fn test_parse_link_offsets_lower_dim_source_projects_and_broadcasts() {
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(
         Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}boost\u{2192}growth"),
         100usize,
@@ -521,7 +522,7 @@ fn test_parse_link_offsets_lower_dim_source_projects_and_broadcasts() {
 /// rel_pop[d])` at element `d`.
 #[test]
 fn test_parse_link_offsets_fixed_index_from_a2a_expansion() {
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(
         Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop"),
         100usize,
@@ -590,7 +591,7 @@ fn test_parse_link_offsets_fixed_index_from_a2a_expansion() {
 /// target side. It should yield a single LinkOffset with no expansion.
 #[test]
 fn test_parse_link_offsets_fixed_index_from_scalar() {
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(
         Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total"),
         42usize,
@@ -635,7 +636,7 @@ fn test_parse_link_offsets_fixed_index_from_scalar() {
 /// node from the reducer edges -- making the loop unreachable.
 #[test]
 fn test_parse_link_offsets_scalar_to_arrayed() {
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(
         Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}total_pop\u{2192}migration[nyc]"),
         0usize,
@@ -676,7 +677,7 @@ fn test_parse_link_offsets_scalar_to_arrayed() {
 /// shape would route through `expand_fixed_from_a2a_link_offsets`).
 #[test]
 fn test_parse_link_offsets_partial_reduce_passthrough() {
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(
         Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}matrix[a,x]\u{2192}agg[a]"),
         0usize,
@@ -717,7 +718,7 @@ fn test_parse_link_offsets_partial_reduce_passthrough() {
 /// insertion order over `results.offsets`.
 #[test]
 fn test_parse_link_offsets_dedupes_a2a_bare_over_fixed_index() {
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(
         Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share"),
         10usize,
@@ -1004,7 +1005,7 @@ fn make_found_loop_with_scores(
 /// Create a CyclePartitions where all given stocks are in a single partition.
 fn single_partition(stocks: &[&str]) -> CyclePartitions {
     let stock_idents: Vec<Ident<Canonical>> = stocks.iter().map(|s| Ident::new(s)).collect();
-    let stock_partition: HashMap<Ident<Canonical>, usize> =
+    let stock_partition: IdentMap<Ident<Canonical>, usize> =
         stock_idents.iter().map(|s| (s.clone(), 0)).collect();
     CyclePartitions {
         partitions: vec![stock_idents],
@@ -1154,7 +1155,7 @@ fn test_rank_and_filter_unpartitioned_loops_do_not_cross_normalize() {
     // loops' partitions resolve to `None`.
     let partitions = CyclePartitions {
         partitions: vec![],
-        stock_partition: HashMap::new(),
+        stock_partition: IdentMap::default(),
     };
     let meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
@@ -1364,7 +1365,7 @@ fn test_rank_and_filter_element_level_partitions() {
 fn two_partitions(a_stocks: &[&str], b_stocks: &[&str]) -> CyclePartitions {
     let a: Vec<Ident<Canonical>> = a_stocks.iter().map(|s| Ident::new(s)).collect();
     let b: Vec<Ident<Canonical>> = b_stocks.iter().map(|s| Ident::new(s)).collect();
-    let mut stock_partition: HashMap<Ident<Canonical>, usize> = HashMap::new();
+    let mut stock_partition: IdentMap<Ident<Canonical>, usize> = IdentMap::default();
     for s in &a {
         stock_partition.insert(s.clone(), 0);
     }
@@ -2454,7 +2455,7 @@ pub(super) fn synthetic_results(n_offsets: usize, step_count: usize, seed: u64) 
         }
     }
     Results {
-        offsets: HashMap::new(),
+        offsets: IdentMap::default(),
         data: data.into_boxed_slice(),
         step_size,
         step_count,
@@ -2526,7 +2527,7 @@ fn discovery_graph_stats_reports_structure_and_scores() {
     // a->b = 1.0 (unit), b->a = 0.5 (sub-unit), b->c = 0.0 (zero).
     // Scores at step 2: a->b = 3.0 (super-unit), b->a = 0.0 (zero,
     // breaking the cycle), b->c = 1.0.
-    let mut offsets = HashMap::new();
+    let mut offsets = IdentMap::default();
     offsets.insert(Ident::new("$⁚ltm⁚link_score⁚a→b"), 0usize);
     offsets.insert(Ident::new("$⁚ltm⁚link_score⁚b→a"), 1usize);
     offsets.insert(Ident::new("$⁚ltm⁚link_score⁚b→c"), 2usize);
@@ -2724,7 +2725,7 @@ fn discover_reducer_feedback(elems: &[&str], candidate_gen: CandidateGen) -> Dis
         &ltm.vars,
         dm_dims,
         &expansion,
-        &SubModelOutputPorts::new(),
+        &SubModelOutputPorts::default(),
         None,
         candidate_gen,
     )
@@ -2915,7 +2916,7 @@ fn discovery_no_agg_model_unaffected_by_stitching() {
         &ltm.vars,
         dm_dims,
         &expansion,
-        &SubModelOutputPorts::new(),
+        &SubModelOutputPorts::default(),
         None,
     )
     .unwrap();
@@ -4251,7 +4252,7 @@ fn discover_share_of_total_feedback(elems: &[&str]) -> DiscoveryResult {
         &ltm.vars,
         dm_dims,
         &expansion,
-        &SubModelOutputPorts::new(),
+        &SubModelOutputPorts::default(),
         None,
     )
     .unwrap()

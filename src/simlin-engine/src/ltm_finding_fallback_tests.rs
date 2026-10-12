@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use super::super::{LinkOffset, MemoryMeter, ScriptedClock, SystemClock};
 use super::*;
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap};
 use crate::results::{Method, Specs};
 
 // --- Fixture construction -------------------------------------------------
@@ -60,7 +60,7 @@ fn fixture(edges: &[FixtureEdge], stocks: &[&str]) -> (IndexedSearch, Results) {
     }
 
     let results = Results {
-        offsets: HashMap::new(),
+        offsets: IdentMap::default(),
         data: data.into_boxed_slice(),
         step_size,
         step_count,

@@ -7,7 +7,7 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
-use crate::common::{Canonical, ErrorCode, Ident, UnitError};
+use crate::common::{Canonical, ErrorCode, Ident, IdentMap, UnitError};
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 #[cfg(test)]
 use crate::db::sync_from_datamodel;
@@ -954,7 +954,7 @@ pub(crate) fn collect_results(results: &crate::Results) -> HashMap<String, Vec<f
     }
 
     type ArrayElement = (usize, String, Vec<f64>);
-    let mut array_results: HashMap<Ident<Canonical>, Vec<ArrayElement>> = HashMap::new();
+    let mut array_results: IdentMap<Ident<Canonical>, Vec<ArrayElement>> = IdentMap::default();
     for (name, values) in &output {
         if let Some(bracket_pos) = name.as_str().find('[') {
             let base_name = Ident::<Canonical>::from_str_unchecked(&name.as_str()[..bracket_pos]);

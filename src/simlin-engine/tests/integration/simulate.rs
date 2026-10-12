@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use simlin_engine::common::IdentMap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -602,7 +603,7 @@ fn synthetic_results(columns: &[(&str, Vec<f64>)]) -> Results {
     }
     let step_size = columns.len();
 
-    let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+    let mut offsets: IdentMap<Ident<Canonical>, usize> = IdentMap::default();
     let mut data = vec![0.0_f64; step_count * step_size];
     for (col, (name, series)) in columns.iter().enumerate() {
         offsets.insert(Ident::<Canonical>::new(name), col);

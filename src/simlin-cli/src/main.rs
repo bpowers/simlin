@@ -581,9 +581,13 @@ fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
 /// per loop. A stdlib template is left out. A model the project's module graph
 /// reaches a cycle from lists nothing, since `model_detected_loops` carries
 /// that gate; the cycle is the model error the diagnostics pass prints.
+/// Models are listed in name order: the project's model map is a hash map,
+/// whose own order differs from one run to the next.
 fn ltm_loop_report(db: &SimlinDb, source_project: SourceProject) -> Vec<String> {
     let mut lines = Vec::new();
-    for (model_name, source_model) in source_project.models(db).iter() {
+    let mut models: Vec<_> = source_project.models(db).iter().collect();
+    models.sort_unstable_by_key(|(model_name, _)| model_name.as_str());
+    for (model_name, source_model) in models {
         if model_name.starts_with("stdlib\u{205A}") {
             continue;
         }
@@ -1231,6 +1235,50 @@ mod diagnostic_reporting_tests {
   </variables></model>
 </xmile>"#;
         open_xmile(&mut std::io::BufReader::new(xml.as_bytes())).expect("parse the cyclic project")
+    }
+
+    /// The loop listing takes its models in name order: the project's model
+    /// map is a hash map, and a listing in its order differs run to run. Four
+    /// models with a loop each, so map order is name order once in 24.
+    #[test]
+    fn ltm_loop_report_lists_models_in_name_order() {
+        let model = |name: &str| {
+            format!(
+                r#"<model name="{name}"><variables>
+    <stock name="level"><eqn>1</eqn><inflow>growth</inflow></stock>
+    <flow name="growth"><eqn>level * 0.1</eqn></flow>
+  </variables></model>"#
+            )
+        };
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>loops</name><vendor>simlin</vendor><product version="1.0">simlin</product></header>
+  <sim_specs method="Euler" time_units="Month"><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+  {}{}{}{}
+</xmile>"#,
+            model("main"),
+            model("delta"),
+            model("alpha"),
+            model("zeta"),
+        );
+        let project =
+            open_xmile(&mut std::io::BufReader::new(xml.as_bytes())).expect("parse the project");
+        let mut db = SimlinDb::default();
+        let sync_state = sync_from_datamodel_incremental(&mut db, &project, None);
+        let headers: Vec<String> = ltm_loop_report(&db, sync_state.project)
+            .into_iter()
+            .filter(|line| line.starts_with('#'))
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                "# Loops in model 'alpha':",
+                "# Loops in model 'delta':",
+                "# Loops in model 'main':",
+                "# Loops in model 'zeta':",
+            ]
+        );
     }
 
     /// `simulate --ltm` on a module cycle, end to end: the loop listing has

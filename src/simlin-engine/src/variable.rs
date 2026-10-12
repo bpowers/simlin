@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 
 use indexmap::IndexMap;
 
@@ -18,7 +18,7 @@ use crate::builtins_visitor::{
 use crate::capture::{ImplicitVar, insert_implicit_var};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, DimensionName, EquationError,
-    EquationResult, Ident, canonicalize,
+    EquationResult, Ident, IdentMap, IdentSet, canonicalize,
 };
 use crate::datamodel;
 use crate::db::SourceVariableKind;
@@ -182,7 +182,7 @@ pub struct Variable<MI = ModuleInput, E = Expr2> {
 /// LTM describers read them: handles to the per-variable memos
 /// (`db::lowered_source_variable`, `db::lowered_implicit_variable`), never a
 /// second copy of a lowered tree. Built by `db::model_lowered_variables`.
-pub(crate) type LoweredVariableMap = HashMap<Ident<Canonical>, std::sync::Arc<Variable>>;
+pub(crate) type LoweredVariableMap = IdentMap<Ident<Canonical>, std::sync::Arc<Variable>>;
 
 impl<MI, E> Variable<MI, E> {
     pub fn ident(&self) -> &str {
@@ -414,7 +414,7 @@ pub(crate) fn parse_table(
 /// `tables[element_offset]` stays aligned (a lookup on an empty table is NaN).
 pub(crate) fn reorder_arrayed_element_tables<T>(
     dims: &[Dimension],
-    present: &HashMap<CanonicalElementName, T>,
+    present: &IdentMap<CanonicalElementName, T>,
     empty: impl Fn() -> T,
     clone_table: impl Fn(&T) -> T,
 ) -> Vec<T> {
@@ -475,7 +475,7 @@ fn build_tables(
             }
         };
         let placeholder = || shared.clone().unwrap_or_else(Table::empty);
-        let mut present: HashMap<CanonicalElementName, Table> = HashMap::new();
+        let mut present: IdentMap<CanonicalElementName, Table> = IdentMap::default();
         for (subscript, _, _, elem_gf) in elements {
             match parse_table(elem_gf.as_ref()) {
                 Ok(Some(table)) => {
@@ -1423,7 +1423,7 @@ fn parse_equation(
         datamodel::Equation::Arrayed(dimension_names, elements, default_eq, has_except_default) => {
             let mut errors: Vec<EquationError> = vec![];
             let apply_default_to_missing = *has_except_default;
-            let elements: HashMap<_, _> = elements
+            let elements: IdentMap<_, _> = elements
                 .iter()
                 .map(|(subscript, eqn, init_eqn, _gf)| {
                     let (ast, single_errors) = if is_initial && init_eqn.is_some() {
@@ -1872,7 +1872,7 @@ pub struct DepClassification {
 
 impl DepClassification {
     /// Every name read, whatever the lag.
-    pub fn names(&self) -> HashSet<Ident<Canonical>> {
+    pub fn names(&self) -> IdentSet<Ident<Canonical>> {
         self.occurrences
             .iter()
             .map(|occurrence| occurrence.ident.clone())
@@ -2181,7 +2181,7 @@ pub(crate) fn identifier_set<E: DepExpr>(
     ast: &Ast<E>,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-) -> HashSet<Ident<Canonical>> {
+) -> IdentSet<Ident<Canonical>> {
     classify_dependencies(ast, dimensions, module_inputs).names()
 }
 
@@ -2322,7 +2322,7 @@ fn test_classify_dependencies_matrix() {
             source: Source::Ast(Ast::Arrayed(
                 vec![dim1.clone()],
                 {
-                    let mut elements = HashMap::new();
+                    let mut elements = IdentMap::default();
                     elements.insert(CanonicalElementName::from_raw("e1"), var("a"));
                     elements
                 },

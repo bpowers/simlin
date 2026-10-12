@@ -299,7 +299,7 @@ pub fn shaped_link_score<'db>(
         .map(crate::ltm_augment::dimension_element_names)
         .collect();
 
-    let mut all_vars = HashMap::new();
+    let mut all_vars = IdentMap::default();
     if let Some(ref fv) = from_var {
         all_vars.insert(from_ident.clone(), fv.clone());
     }
@@ -585,7 +585,7 @@ struct LoweredLtmVariable {
     /// under.
     deps: IdentMap<Ident<Canonical>, DepShape>,
     /// The graphical-function tables of the lookup tables it calls.
-    tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
+    tables: IdentMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
 }
 
 /// Lower a parsed LTM variable -- a synthetic equation or a helper its parse
@@ -660,7 +660,7 @@ fn lower_ltm_variable(
     }
 
     let source_vars = model.variables(db);
-    let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
+    let mut tables: IdentMap<Ident<Canonical>, Vec<crate::compiler::Table>> = IdentMap::default();
     for table in &classified.referenced_tables {
         // A table is a variable of this model: a name the model does not
         // declare (a module-namespaced spelling included) has none.

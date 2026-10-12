@@ -2,7 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use indexmap::IndexMap;
@@ -14,8 +13,8 @@ use crate::capture::{
     insert_implicit_var,
 };
 use crate::common::{
-    Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
-    canonicalize,
+    Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, IdentMap,
+    IdentSet, RawIdent, canonicalize,
 };
 use crate::dimensions::{
     Axis, AxisIndexName, Dimension, DimensionsContext, DirectMappingsOnly, SubscriptIterator,
@@ -93,7 +92,7 @@ pub enum SnapshotIndexFacts<'a> {
         /// `dimension·element` spelling names.
         is_qualified_element: &'a dyn Fn(&str) -> bool,
     },
-    ModelNames(&'a HashSet<Ident<Canonical>>),
+    ModelNames(&'a IdentSet<Ident<Canonical>>),
     NoModel,
 }
 
@@ -319,7 +318,7 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
 /// position the map has no entry for, while a total order over the keys that
 /// are actually present needs none.
 fn elements_in_stable_order(
-    elements: HashMap<CanonicalElementName, Expr0>,
+    elements: IdentMap<CanonicalElementName, Expr0>,
 ) -> Vec<(CanonicalElementName, Expr0)> {
     let mut ordered: Vec<(CanonicalElementName, Expr0)> = elements.into_iter().collect();
     ordered.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -1060,7 +1059,7 @@ pub fn instantiate_implicit_modules(
         }
         Ast::ApplyToAll(dimensions, ast) => {
             if requirements(&ast) == PerElement::ModuleInstance && !dimensions.is_empty() {
-                let mut elements = HashMap::new();
+                let mut elements = IdentMap::default();
                 for subscript in SubscriptIterator::new(&dimensions) {
                     let subscript_key = CanonicalElementName::from_parts(&subscript);
                     let mut walker = visitor().with_active_element(&dimensions, &subscript);
@@ -1082,7 +1081,7 @@ pub fn instantiate_implicit_modules(
                 // each synthesized helper is handed out in this iteration
                 // order -- see `elements_in_stable_order`.
                 let mut walker = visitor();
-                let mut new_elements = HashMap::new();
+                let mut new_elements = IdentMap::default();
                 for (subscript_key, equation) in elements_in_stable_order(elements) {
                     new_elements.insert(subscript_key, walker.walk(equation)?);
                 }
@@ -1105,7 +1104,7 @@ pub fn instantiate_implicit_modules(
             // element: every helper it mints carries the slot's element, so
             // distinct slots never claim one name (PR #668), and an error in
             // it is about that element, whose text its span indexes.
-            let mut new_elements = HashMap::new();
+            let mut new_elements = IdentMap::default();
             for (subscript_key, equation) in elements_in_stable_order(elements) {
                 let subscript_parts: Vec<String> =
                     subscript_key.parts().map(str::to_string).collect();

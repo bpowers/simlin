@@ -45,7 +45,7 @@ use std::collections::HashMap;
 
 use crate::ast::{Expr0, IndexExpr0, print_eqn};
 use crate::builtins::UntypedBuiltinFn;
-use crate::common::{Canonical, Ident, RawIdent};
+use crate::common::{Canonical, Ident, IdentMap, RawIdent};
 
 use super::{DepElementPin, OccurrenceLookup, qualify_element_csv};
 use crate::db::ltm_ir::{OccurrenceAxis, OccurrenceSite};
@@ -277,7 +277,7 @@ pub(crate) fn dep_element_pins(
     target_dims: &[crate::dimensions::Dimension],
     target_elements: &[String],
     dim_ctx: &crate::dimensions::DimensionsContext,
-) -> HashMap<Ident<Canonical>, DepElementPin> {
+) -> IdentMap<Ident<Canonical>, DepElementPin> {
     use crate::common::CanonicalElementName;
     pinnable
         .iter()

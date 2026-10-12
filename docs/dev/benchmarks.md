@@ -208,6 +208,9 @@ callgrind_annotate callgrind.out
 kcachegrind callgrind.out
 ```
 
+A release build inlines small hot code into its callers, so a per-function listing has no row for "all hashing" or "all refcounting".
+`scripts/callgrind-by-file.py` sums a profile by the source file each instruction came from, which sees through inlining, and lists the functions paying for one file; its header has the commands for profiling one compile of a model with `examples/clearn_profile.rs`.
+
 ### Allocation profiling with DHAT (valgrind)
 
 DHAT tracks every allocation: size, lifetime, and access patterns.

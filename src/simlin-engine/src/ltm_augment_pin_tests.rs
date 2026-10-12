@@ -25,6 +25,7 @@
 //! the second by itself, which is where both defects on this branch landed.
 
 use super::*;
+use crate::common::{IdentMap, IdentSet};
 
 /// The per-element row pinning must descend into a subscript RANGE's endpoints,
 /// not just its plain expression indices.
@@ -256,7 +257,7 @@ fn dep_element_pins_projection_enumeration() {
         (Ident::new("doubly"), vec![dblx.clone(), dbly.clone()]),
     ];
 
-    let axes_of = |pins: &HashMap<Ident<Canonical>, crate::ltm_augment::DepElementPin>,
+    let axes_of = |pins: &IdentMap<Ident<Canonical>, crate::ltm_augment::DepElementPin>,
                    name: &str|
      -> Option<(AxisSpellings, bool)> {
         pins.get(&Ident::<Canonical>::new(name))
@@ -718,7 +719,7 @@ impl PinFixture {
         deps: &[&str],
     ) -> (
         Expr0,
-        HashSet<Ident<Canonical>>,
+        IdentSet<Ident<Canonical>>,
         Vec<crate::db::ltm_ir::OccurrenceSite>,
     ) {
         let deps = deps_set(deps);
@@ -751,7 +752,7 @@ impl PinFixture {
     fn generate(
         &self,
         ast: &Expr0,
-        deps: &HashSet<Ident<Canonical>>,
+        deps: &IdentSet<Ident<Canonical>>,
         occ: &OccurrenceLookup<'_>,
     ) -> Result<String, PartialEquationError> {
         generate_per_element_link_equation(
@@ -763,7 +764,7 @@ impl PinFixture {
             ast,
             deps,
             // Nothing to element-pin by name: the source's pinning is the wrap's job.
-            &HashMap::new(),
+            &IdentMap::default(),
             &self.from_dims,
             &self.target_elem_by_dim,
             &self.target_dims,

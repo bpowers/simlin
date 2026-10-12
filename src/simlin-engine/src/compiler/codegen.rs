@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
-
 use smallvec::SmallVec;
 
 use crate::ast::{ArrayView, BinaryOp, Loc};
@@ -11,7 +9,9 @@ use crate::bytecode::{
     BuiltinId, DimId, DimListId, DimensionInfo, GraphicalFunctionId, LookupMode, ModuleId,
     ModuleInputOffset, NameId, Op2, RuntimeSparseMapping, TempId, VariableOffset, ViewId,
 };
-use crate::common::{Canonical, ErrorCode, ErrorKind, Ident, MismatchedRead, Result, canonicalize};
+use crate::common::{
+    Canonical, ErrorCode, ErrorKind, Ident, IdentMap, MismatchedRead, Result, canonicalize,
+};
 use crate::dimensions::Dimension;
 use crate::sim_err;
 use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
@@ -65,7 +65,7 @@ pub(crate) struct ModuleCtx<'a> {
     /// reader is [`Compiler::full_source_len`]; the sole producer is
     /// `fragment::reference_extents`, shared with lowering.
     pub(crate) var_sizes: &'a VarSizes,
-    pub(crate) tables: &'a HashMap<Ident<Canonical>, Vec<Table>>,
+    pub(crate) tables: &'a IdentMap<Ident<Canonical>, Vec<Table>>,
     pub(crate) dimensions: &'a [Dimension],
 }
 
@@ -237,7 +237,7 @@ pub(super) struct Compiler<'module> {
     graphical_functions: Vec<Vec<(f64, f64)>>,
     /// Maps table variable names to their base index in graphical_functions.
     /// For subscripted lookups, the actual table is at base_id + element_offset.
-    table_base_ids: HashMap<Ident<Canonical>, GraphicalFunctionId>,
+    table_base_ids: IdentMap<Ident<Canonical>, GraphicalFunctionId>,
     curr_code: SymbolicByteCodeBuilder,
     // Array support fields
     pub(super) dimensions: Vec<DimensionInfo>,
@@ -353,7 +353,7 @@ impl<'module> Compiler<'module> {
         // `FragmentMerger::absorb_gf` dedups on block CONTENT, so #582's
         // cross-fragment GF dedup is order-insensitive by construction.
         let mut graphical_functions = Vec::new();
-        let mut table_base_ids = HashMap::new();
+        let mut table_base_ids = IdentMap::default();
 
         let mut table_idents: Vec<&Ident<Canonical>> = module.tables.keys().collect();
         table_idents.sort_unstable();
@@ -2116,7 +2116,6 @@ fn const_element_offset(expr: &Expr, table_count: u16) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::ast::Loc;
-    use std::collections::HashMap;
 
     /// Owner for the borrows a minimal, dimension-free [`ModuleCtx`] needs.
     /// The runlists are empty -- the tests call `walk_expr` directly, so the
@@ -2126,7 +2125,7 @@ mod tests {
         ident: Ident<Canonical>,
         inputs: std::collections::BTreeSet<Ident<Canonical>>,
         var_sizes: VarSizes,
-        tables: HashMap<Ident<Canonical>, Vec<Table>>,
+        tables: IdentMap<Ident<Canonical>, Vec<Table>>,
     }
 
     impl EmptyCtxOwner {
@@ -2134,8 +2133,8 @@ mod tests {
             EmptyCtxOwner {
                 ident: Ident::new("test"),
                 inputs: Default::default(),
-                var_sizes: HashMap::new(),
-                tables: HashMap::new(),
+                var_sizes: IdentMap::default(),
+                tables: IdentMap::default(),
             }
         }
 

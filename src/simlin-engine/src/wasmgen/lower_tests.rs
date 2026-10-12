@@ -8,6 +8,7 @@
 //! still resolves the lowering module's private items.
 
 use super::*;
+use crate::common::IdentMap;
 use checked::Store;
 use wasm::validate;
 use wasm_encoder::{
@@ -36,11 +37,9 @@ fn empty_ctx() -> &'static ByteCodeContext {
 /// tests build single root-only functions (0 module inputs) and never emit an
 /// `EvalModule`, so the map is never consulted. The whole-model `EvalModule` /
 /// `LoadModuleInput` parity is exercised end-to-end in `module.rs`'s tests.
-fn empty_module_fn_index()
--> &'static std::collections::HashMap<(crate::vm::ModuleKey, StepPart), u32> {
-    static EMPTY: OnceLock<std::collections::HashMap<(crate::vm::ModuleKey, StepPart), u32>> =
-        OnceLock::new();
-    EMPTY.get_or_init(std::collections::HashMap::new)
+fn empty_module_fn_index() -> &'static IdentMap<(crate::vm::ModuleKey, StepPart), u32> {
+    static EMPTY: OnceLock<IdentMap<(crate::vm::ModuleKey, StepPart), u32>> = OnceLock::new();
+    EMPTY.get_or_init(IdentMap::default)
 }
 
 /// A shared empty set of overridable constant offsets. These lowering unit

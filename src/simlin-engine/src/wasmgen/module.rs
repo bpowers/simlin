@@ -45,6 +45,7 @@
 //! conveyor construct [`super::belt::reject_unsupported`] refuses
 //! returns `WasmGenError::Unsupported`.
 
+use crate::common::IdentMap;
 use wasm_encoder::Instruction as I;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, Function,
@@ -715,7 +716,7 @@ fn compile_with_passes(
     // the directory at `instance_gf_directory_base + table_idx*8`, so each
     // instance's `EmitCtx` carries its own base. They are initialized at
     // instantiation by active `DataSection` segments.
-    let mut instance_gf: HashMap<ModuleKey, (u32, u32, Option<GfRegions>)> = HashMap::new();
+    let mut instance_gf: IdentMap<ModuleKey, (u32, u32, Option<GfRegions>)> = IdentMap::default();
     for key in &instance_order {
         let module = &sim.modules[key];
         let regions = build_gf_regions(&module.context.graphical_functions, total_bytes)?;
@@ -778,7 +779,7 @@ fn compile_with_passes(
     // otherwise clobber a shared slot the VM relies on not surviving), so giving
     // each instance its own region cannot diverge from the VM. The largest
     // per-instance `temp_total_size` also bounds the shared vector/alloc scratch.
-    let mut instance_temp_base: HashMap<ModuleKey, u32> = HashMap::new();
+    let mut instance_temp_base: IdentMap<ModuleKey, u32> = IdentMap::default();
     let mut max_temp_total_size = 0u32;
     for key in &instance_order {
         let module = &sim.modules[key];
@@ -1049,7 +1050,7 @@ fn compile_with_passes(
     // child's already-known function index (the instantiation graph is acyclic,
     // but the index map does not depend on emit order regardless).
     let mut instances: Vec<PerInstance> = Vec::with_capacity(instance_order.len());
-    let mut module_fn_index: HashMap<(ModuleKey, StepPart), u32> = HashMap::new();
+    let mut module_fn_index: IdentMap<(ModuleKey, StepPart), u32> = IdentMap::default();
     for (i, key) in instance_order.iter().enumerate() {
         let module = &sim.modules[key];
         let base = n_helpers + (i as u32) * FUNCS_PER_INSTANCE;
@@ -1329,8 +1330,8 @@ fn compile_with_passes(
 /// `module_inputs` to. All call sites for a given `(model, input_set)` key agree
 /// (the `input_set` is part of the key and `n_inputs == args.len()` at codegen,
 /// `codegen.rs:1094-1109`); first-seen wins, which is therefore unambiguous.
-fn collect_instance_input_counts(sim: &CompiledSimulation) -> HashMap<ModuleKey, u32> {
-    let mut counts: HashMap<ModuleKey, u32> = HashMap::new();
+fn collect_instance_input_counts(sim: &CompiledSimulation) -> IdentMap<ModuleKey, u32> {
+    let mut counts: IdentMap<ModuleKey, u32> = IdentMap::default();
     for module in sim.modules.values() {
         let programs: [&ByteCode; 2] = [&module.compiled_flows, &module.compiled_stocks];
         let initial_codes = module.compiled_initials.iter().map(|ci| &ci.bytecode);
@@ -1470,7 +1471,7 @@ fn new_opcode_fn(
 /// its slot at `base_off + off`). After each step these slots are copied `next ->
 /// curr`; the RK loops index `rk_scratch[saved/accum]` by their sorted position.
 fn collect_all_stock_offsets(
-    modules: &HashMap<ModuleKey, CompiledModule>,
+    modules: &IdentMap<ModuleKey, CompiledModule>,
     key: &ModuleKey,
     base_off: usize,
 ) -> Vec<usize> {
@@ -1535,7 +1536,7 @@ fn flows_const_offsets_for(module: &CompiledModule) -> std::collections::HashSet
 /// A shared module instantiated at two base offsets contributes both absolute
 /// offsets (one per instantiation), exactly as the VM's recursion does.
 fn collect_overridable_defaults(
-    modules: &HashMap<ModuleKey, CompiledModule>,
+    modules: &IdentMap<ModuleKey, CompiledModule>,
     key: &ModuleKey,
     base_off: usize,
 ) -> Vec<(usize, f64)> {

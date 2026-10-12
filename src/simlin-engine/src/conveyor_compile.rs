@@ -74,7 +74,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::{Canonical, DimensionName, ErrorCode, Ident, canonicalize};
+use crate::common::{Canonical, DimensionName, ErrorCode, Ident, IdentMap, canonicalize};
 use crate::conveyor::{
     ConveyorState, LeakConfig, PhaseAInputs, PhaseAResult, PhaseBInputs, Placement,
 };
@@ -2501,7 +2501,7 @@ pub(crate) fn n_elements(element_subscripts: &[String]) -> usize {
 /// both `resolve_plans` flattenings (whose per-element `eoff` closures wrap
 /// it) and the coupling resolution in [`crate::queue_compile`].
 pub(crate) fn element_offset(
-    offsets: &HashMap<Ident<Canonical>, usize>,
+    offsets: &IdentMap<Ident<Canonical>, usize>,
     element_subscripts: &[String],
     e: usize,
     name: &str,
@@ -2549,7 +2549,7 @@ pub(crate) fn resolve_container_plans(
 /// error (there is no non-conveyor fallback: the model has conveyors).
 pub fn resolve_plans(
     metas: &[ConveyorMeta],
-    offsets: &HashMap<Ident<Canonical>, usize>,
+    offsets: &IdentMap<Ident<Canonical>, usize>,
 ) -> Option<Vec<ConveyorPlan>> {
     // Stock-name -> (base flattened-plan index, belt count). Each meta's belts
     // are appended in order, so its range is [base, base + n_belts).

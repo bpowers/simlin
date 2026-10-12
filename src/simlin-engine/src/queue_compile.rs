@@ -68,7 +68,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::{Canonical, DimensionName, ErrorCode, Ident};
+use crate::common::{Canonical, DimensionName, ErrorCode, Ident, IdentMap};
 use crate::conveyor_compile::{
     ContainerMeta, ContainerNaming, ContainerPlan, ContainerVarSpec, canon,
     container_value_from_slice, element_offset, element_subscripts_for_dims, equation_dims,
@@ -611,7 +611,7 @@ pub fn expand_queues(
 /// [`crate::conveyor_compile::resolve_plans`].
 pub fn resolve_plans(
     metas: &[QueueMeta],
-    offsets: &HashMap<Ident<Canonical>, usize>,
+    offsets: &IdentMap<Ident<Canonical>, usize>,
 ) -> Option<Vec<QueuePlan>> {
     let total: usize = metas
         .iter()
@@ -1271,7 +1271,7 @@ fn apply_couplings(
     queue_metas: &[QueueMeta],
     conveyor_plans: &mut [crate::conveyor_compile::ConveyorPlan],
     queue_plans: &mut [QueuePlan],
-    offsets: &HashMap<Ident<Canonical>, usize>,
+    offsets: &IdentMap<Ident<Canonical>, usize>,
 ) -> Option<()> {
     // Every shared-flow element slot -> its batch rules. An arrayed queue's N
     // FIFOs each couple to belt `e` at the shared flow's element-`e` slot.

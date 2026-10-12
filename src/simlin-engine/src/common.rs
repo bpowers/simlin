@@ -196,10 +196,9 @@ impl Drop for Interned {
 ///
 /// We implement the comparison/hash traits deliberately and let the three
 /// public newtypes simply `#[derive(...)]` (which delegates to the impls here):
-/// - `Hash` is **value based** (`self.as_str().hash()`). This is required so
-///   `HashMap<Ident, _>` lookups via the `Borrow<str>` path stay sound: the map
-///   hashes the `&str` key with `str`'s hasher and must find the entry whose
-///   key hashes identically.
+/// - `Hash` is the hash of the STRING (`self.as_str().hash()`), never of the
+///   pointer or of any other per-handle number. See "Why the hash is the
+///   string's" below.
 /// - `PartialEq`/`Eq` use `Arc` pointer equality, which is value-correct
 ///   precisely because the interner de-duplicates (one payload per distinct
 ///   string), and is consistent with the value-based `Hash`.
@@ -210,6 +209,39 @@ impl Drop for Interned {
 /// - salsa: a re-executed query's memo is backdated purely by `PartialEq`
 ///   (`values_equal`), so the pointer-equality `PartialEq` above is what
 ///   decides whether a downstream query sees a change.
+///
+/// ## Why the hash is the string's
+///
+/// An identifier is a handle that is equal by pointer and hashed by content.
+/// Hashing it by its pointer or by an interned id would make a lookup by a
+/// handle a few instructions cheaper, and is not done, for three reasons that
+/// hold together:
+///
+/// - **A map is probed with a `&str` as well as with a handle.** The three
+///   newtypes implement `Borrow<str>`, and `Borrow` promises that the borrowed
+///   form hashes exactly as the owner does; std's `HashMap::get` relies on it
+///   and cannot check it, so a handle hashed any other way makes every `&str`
+///   probe miss, silently. The probes are the lookups whose caller holds text
+///   and no handle -- one segment of a `module·var` name, an element name out
+///   of a subscript, a name a host passed in -- and they would otherwise have
+///   to intern first: the same hash of the same bytes, plus a shard lock, a
+///   refcount round trip, and an allocation for a name nothing declares.
+/// - **Iteration order must not depend on where a string was allocated or
+///   when it was interned.** A pointer or an interning-order id differs run to
+///   run and with whatever the process compiled before, and a release build's
+///   map order is a function of its keys' hashes (see [`IdentBuildHasher`]).
+/// - **An identifier outlives every database.** Compiled simulations, results
+///   and diagnostics carry identifiers to hosts, and tests compare them across
+///   databases; `as_str`, `Display` and the lexicographic `Ord` need no
+///   context. An id interned in a salsa database is readable only through that
+///   database and reusable once the database collects it.
+///
+/// What the content hash costs is measured, not assumed: see "Identifier
+/// hashing" in `docs/design/engine-performance.md`. If a profile ever shows
+/// handle-keyed lookups worth optimizing further, the design that keeps all
+/// three properties is a content hash computed once at interning and stored in
+/// the payload, with `Borrow<str>` replaced by a `&str` probe type whose
+/// `Hash` writes the same number -- never a pointer hash.
 #[derive(Clone)]
 pub(crate) struct CanonicalStorage(std::sync::Arc<Interned>);
 
@@ -250,8 +282,9 @@ impl Eq for CanonicalStorage {}
 
 impl std::hash::Hash for CanonicalStorage {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Value-based, consistent with `str`'s Hash so `Borrow<str>` HashMap
-        // lookups work (see the type-level docs). Must NOT hash the pointer.
+        // The string's hash, exactly as `str` hashes it, so a `&str` probe of
+        // a map finds the handle (see "Why the hash is the string's" on the
+        // type). Must NOT hash the pointer.
         self.as_str().hash(state);
     }
 }
@@ -267,6 +300,84 @@ impl Ord for CanonicalStorage {
         // Lexicographic by string content: runlist determinism and BTree
         // ordering depend on this (NOT pointer address).
         self.as_str().cmp(other.as_str())
+    }
+}
+
+/// The engine's hash map keyed by an identifier.
+///
+/// Every map whose key is an interned identifier (`Ident<Canonical>`,
+/// `CanonicalElementName`, `CanonicalDimensionName`), a reference to one, or
+/// a key made of them (a tuple, `compiler::VarRef`, `vm::ModuleKey`) is an
+/// `IdentMap`, and every such set an [`IdentSet`]: never `HashMap`, `HashSet`
+/// or the `Fx` aliases. One spelling is what keeps the hasher a decision made
+/// once ([`IdentBuildHasher`]); `scripts/lint-project.sh` refuses the others
+/// wherever the key type is written down. The engine's working maps keyed by a
+/// canonical name held as a `String` or a `&str` (the compiler's name table,
+/// the dependency graph's) are spelled with the alias too, so that the
+/// `rustc_hash` types are named here and nowhere else in the compiler.
+///
+/// Probe one with a handle or with a `&str` of the canonical name; both find
+/// the same entry.
+///
+/// The cost, stated because it is the reason this is not every map's hasher:
+/// FxHash is not keyed, so an adversary who chooses the KEYS can force
+/// collisions, and the keys here are variable names out of a model file. Every
+/// engine entry point today compiles a model on behalf of the person who
+/// supplied it -- the CLI, the local MCP and viewer servers, pysimlin, and the
+/// browser's wasm bundle -- so a collision attack costs the attacker their own
+/// compile. Do not extend this alias to a map keyed by input from a party other
+/// than the one paying for the work.
+pub type IdentMap<K, V> = std::collections::HashMap<K, V, IdentBuildHasher>;
+
+/// The set twin of [`IdentMap`]: the engine's hash set of identifiers, under
+/// the same hasher and the same rule.
+pub type IdentSet<K> = std::collections::HashSet<K, IdentBuildHasher>;
+
+/// How [`IdentMap`] and [`IdentSet`] hash: FxHash in a release build, std's
+/// randomly keyed SipHash in a build with debug assertions.
+///
+/// **Release: FxHash.** Identifier lookups are the compiler's densest
+/// operation -- a name resolution per AST node, per element, per fragment --
+/// and SipHash over a short string costs several times what FxHash does. It
+/// is unkeyed, so a map's iteration order is a function of its keys and the
+/// order they were inserted in, the same in every process.
+///
+/// **Debug assertions on (tests, the `gates` profile): a fresh random key per
+/// map.** A value salsa caches must not depend on a map's iteration order
+/// (sort first), and what holds the engine to that is the determinism suites
+/// (`db::fragment_determinism_tests`, `db::diagnostic_determinism_tests`,
+/// `tests/integration/build_determinism.rs`), which build the same thing
+/// repeatedly and compare. They detect an order that leaked only if the order
+/// actually differs from one build to the next, and under an unkeyed hasher it
+/// does not: `multi_table_fragment_is_stable_across_fresh_databases` passes
+/// with the sort it pins deleted. So the builds the tests run in keep the
+/// random key, and the builds users run keep the speed and an order that
+/// cannot vary even where a sort is missing.
+///
+/// A named type rather than a `cfg`-switched alias of the two std/rustc-hash
+/// states, so that `IdentMap` is one type in every build: a `HashMap::new()`
+/// or an `FxHashMap` handed where an `IdentMap` is expected is a compile
+/// error under both configurations, not under one of them.
+#[derive(Clone, Default)]
+pub struct IdentBuildHasher {
+    #[cfg(debug_assertions)]
+    random: std::hash::RandomState,
+}
+
+impl std::hash::BuildHasher for IdentBuildHasher {
+    #[cfg(debug_assertions)]
+    type Hasher = std::hash::DefaultHasher;
+    #[cfg(not(debug_assertions))]
+    type Hasher = rustc_hash::FxHasher;
+
+    #[cfg(debug_assertions)]
+    fn build_hasher(&self) -> Self::Hasher {
+        self.random.build_hasher()
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn build_hasher(&self) -> Self::Hasher {
+        rustc_hash::FxHasher::default()
     }
 }
 
@@ -1287,34 +1398,6 @@ fn is_canonical(name: &str) -> bool {
     true
 }
 
-/// Canonicalize a variable/model name into a normalized form.
-///
-/// Returns `Cow::Borrowed` when the input is already canonical (avoiding
-/// allocation), or `Cow::Owned` when transformations were needed.
-///
-/// Note: the borrowed slice may be a sub-slice of the input when there is
-/// leading/trailing whitespace but the trimmed content is already canonical.
-/// The returned `Cow` borrows from the input `&str` in all borrowed cases.
-/// The engine's hash map for identifier-keyed lookups.
-///
-/// `FxHashMap`, not `std::collections::HashMap`. Identifier lookups are the
-/// compiler's densest operation -- a name resolution per AST node, per element,
-/// per fragment -- and SipHash over a short string was measured at 4-6% of a
-/// large model's compile cycles. FxHash's fixed seed additionally makes
-/// iteration order reproducible across processes, which is the direction this
-/// crate already wants (GH #595): a salsa-cached value built by iterating a map
-/// must not differ run to run.
-///
-/// The cost, stated because it is the reason this is not the default
-/// everywhere: a fixed seed means an adversary who chooses the KEYS can force
-/// collisions, and the keys here are variable names out of a model file. Every
-/// engine entry point today compiles a model on behalf of the person who
-/// supplied it -- the CLI, the local MCP and viewer servers, pysimlin, and the
-/// browser's wasm bundle -- so a collision attack costs the attacker their own
-/// compile. Do not extend this alias to a map keyed by input from a party other
-/// than the one paying for the work.
-pub(crate) type IdentMap<K, V> = std::collections::HashMap<K, V, rustc_hash::FxBuildHasher>;
-
 /// Whether `to_lowercase` would change `c`, i.e. Unicode's
 /// `Changes_When_Lowercased`.
 ///
@@ -1421,6 +1504,14 @@ fn is_canonical_needing_no_trim(name: &str) -> bool {
     true
 }
 
+/// Canonicalize a variable/model name into a normalized form.
+///
+/// Returns `Cow::Borrowed` when the input is already canonical (avoiding
+/// allocation), or `Cow::Owned` when transformations were needed.
+///
+/// Note: the borrowed slice may be a sub-slice of the input when there is
+/// leading/trailing whitespace but the trimmed content is already canonical.
+/// The returned `Cow` borrows from the input `&str` in all borrowed cases.
 pub fn canonicalize(name: &str) -> Cow<'_, str> {
     // Fastest path: one scan proving the name is already canonical AND needs
     // no trimming. This is the overwhelmingly common case -- every already-canonical
@@ -2299,7 +2390,7 @@ fn test_fmt_display_implementations() {
 #[cfg(test)]
 mod interned_identifier_tests {
     use super::*;
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
 
     /// The data pointer behind a canonical `&str`. Two interned handles that
     /// dedup to the same string share this pointer; two independent `String`
@@ -2457,34 +2548,72 @@ mod interned_identifier_tests {
 
     // ----- Constraint 3: Hash consistent with Eq AND the Borrow<str> path -----
 
+    /// One row per interned identifier type: a map and a set keyed by it are
+    /// probed by an independently built handle and by the canonical `&str`,
+    /// and both find the entry. This is the `Borrow<str>` contract the
+    /// string-valued `Hash` exists for, under the hasher every identifier
+    /// map uses.
     #[test]
-    fn hashmap_lookup_by_value_and_by_borrowed_str() {
-        let mut map: HashMap<Ident<Canonical>, i32> = HashMap::new();
-        map.insert(Ident::new("Population"), 42);
+    fn ident_maps_and_sets_are_probed_by_handle_and_by_str() {
+        fn check<K>(make: impl Fn(&str) -> K)
+        where
+            K: std::hash::Hash + Eq + std::borrow::Borrow<str>,
+        {
+            let mut map: IdentMap<K, i32> = IdentMap::default();
+            map.insert(make("Population"), 42);
+            assert_eq!(map.get::<K>(&make("population")), Some(&42));
+            assert_eq!(map.get::<str>("population"), Some(&42));
+            assert_eq!(map.get::<str>("nonexistent"), None);
 
-        // Look up with an independently-constructed equal key (value path).
-        assert_eq!(map.get(&Ident::new("population")), Some(&42));
-
-        // Look up via Borrow<str> with the canonical string slice.
-        assert_eq!(map.get("population"), Some(&42));
-
-        // A non-present key.
-        assert_eq!(map.get("nonexistent"), None);
+            let set: IdentSet<K> = [make("Net Flow"), make("net_flow")].into_iter().collect();
+            assert_eq!(set.len(), 1, "one canonical name is one member");
+            assert!(set.contains::<K>(&make("NET FLOW")));
+            assert!(set.contains::<str>("net_flow"));
+            assert!(!set.contains::<str>("nonexistent"));
+        }
+        check(Ident::<Canonical>::new);
+        check(CanonicalElementName::from_raw);
+        check(CanonicalDimensionName::from_raw);
     }
 
+    /// The contract itself, apart from any one map: each identifier type
+    /// hashes exactly as its canonical `&str` does, under std's keyed hasher
+    /// and under an unkeyed one alike (the two a build can put behind
+    /// `IdentBuildHasher`).
     #[test]
-    fn hash_is_value_based_consistent_with_str() {
+    fn every_identifier_type_hashes_as_its_str() {
         use std::hash::{BuildHasher, RandomState};
-        let state = RandomState::new();
-        let ident = Ident::new("hello world");
-        // Hashing the Ident must equal hashing its canonical &str, otherwise
-        // the Borrow<str> HashMap lookup path is unsound.
-        let h_ident = state.hash_one(&ident);
-        let h_str = state.hash_one(ident.as_str());
-        assert_eq!(
-            h_ident, h_str,
-            "Ident Hash must be value-based and match str Hash"
-        );
+        fn check<S: BuildHasher>(state: &S) {
+            let ident = Ident::<Canonical>::new("hello world");
+            let element = CanonicalElementName::from_raw("New York");
+            let dimension = CanonicalDimensionName::from_raw("Age Group");
+            assert_eq!(state.hash_one(&ident), state.hash_one(ident.as_str()));
+            assert_eq!(state.hash_one(&element), state.hash_one(element.as_str()));
+            assert_eq!(
+                state.hash_one(&dimension),
+                state.hash_one(dimension.as_str())
+            );
+        }
+        check(&RandomState::new());
+        check(&rustc_hash::FxBuildHasher);
+        check(&IdentBuildHasher::default());
+    }
+
+    /// With debug assertions on, each map draws its own random key, so two
+    /// maps holding the same keys iterate in different orders: the property
+    /// the determinism suites need in order to see an iteration order that
+    /// reached a cached value. Without them the hasher is unkeyed and the two
+    /// orders are the same. 64 keys leave two independent random orders equal
+    /// with probability 1/64!.
+    #[test]
+    fn ident_map_order_is_random_per_map_exactly_under_debug_assertions() {
+        let order = || {
+            let map: IdentMap<Ident<Canonical>, ()> = (0..64)
+                .map(|i| (Ident::new(&format!("order_probe_{i}")), ()))
+                .collect();
+            map.keys().cloned().collect::<Vec<_>>()
+        };
+        assert_eq!(order() != order(), cfg!(debug_assertions));
     }
 
     // ----- Constraint 1: idempotency, sentinel, round-trip preserved -----
@@ -3073,12 +3202,12 @@ impl AsRef<str> for Ident<Canonical> {
     }
 }
 
-// Implement Borrow for HashMap lookups.
+// Implement Borrow for map lookups.
 //
 // NB: this is what makes the value-based `Hash` on `CanonicalStorage`
-// mandatory -- a `HashMap<Ident<Canonical>, V>` can be probed with a `&str`
-// key, which is hashed with `str`'s hasher; the stored key's hash (delegated
-// through the derive to `CanonicalStorage::hash`) must match it.
+// mandatory -- an `IdentMap` keyed by `Ident<Canonical>` can be probed with a
+// `&str` key, which is hashed as `str` hashes; the stored key's hash
+// (delegated through the derive to `CanonicalStorage::hash`) must match it.
 impl std::borrow::Borrow<str> for Ident<Canonical> {
     fn borrow(&self) -> &str {
         self.inner.as_str()

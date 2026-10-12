@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use crate::canonicalize;
 use crate::capture::CaptureKind;
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::datamodel;
 
 use super::{
@@ -1403,9 +1403,7 @@ pub struct CyclePartitionsResult {
 /// Variables and module_graphs are empty -- suitable for graph algorithms
 /// (circuit finding, SCC computation) but not for polarity analysis.
 pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::CausalGraph {
-    use std::collections::HashSet;
-
-    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = result
+    let edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = result
         .edges
         .iter()
         .map(|(from, tos)| {
@@ -1415,7 +1413,7 @@ pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::Causal
             )
         })
         .collect();
-    let stocks: HashSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
+    let stocks: IdentSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
 
     crate::ltm::CausalGraph::new(edges, stocks)
 }
@@ -1446,7 +1444,7 @@ pub(crate) fn causal_graph_with_modules(
 type CausalGraphModuleData = (
     Arc<crate::variable::LoweredVariableMap>,
     Arc<ModuleOutputsRead>,
-    HashMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>>,
+    IdentMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>>,
 );
 
 /// Build the maps a CausalGraph needs for polarity analysis, stock
@@ -1484,7 +1482,8 @@ fn model_variables_and_module_graphs(
     let edges_result = model_causal_edges(db, model, project);
     let variables = model_lowered_variables(db, model, project);
 
-    let mut module_graphs: HashMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>> = HashMap::new();
+    let mut module_graphs: IdentMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>> =
+        IdentMap::default();
     let reaches_a_cycle = crate::db::project_module_graph(db, project)
         .cycle_error_from(model.name(db))
         .is_some();
@@ -3174,9 +3173,8 @@ pub fn causal_graph_from_element_edges(
     result: &ElementCausalEdgesResult,
 ) -> crate::ltm::CausalGraph {
     use crate::common::{Canonical, Ident};
-    use std::collections::HashSet;
 
-    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = result
+    let edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = result
         .edges
         .iter()
         .map(|(from, tos)| {
@@ -3186,7 +3184,7 @@ pub fn causal_graph_from_element_edges(
             )
         })
         .collect();
-    let stocks: HashSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
+    let stocks: IdentSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
 
     crate::ltm::CausalGraph::new(edges, stocks)
 }
@@ -3484,14 +3482,13 @@ pub fn model_loop_circuits_tiered(
         // Stocks restricted to slow-path variables. Same projection rule:
         // keep an element-stock node only if its variable name is in
         // the slow-path set. (Agg nodes are never stocks.)
-        let sub_stocks: std::collections::HashSet<crate::common::Ident<crate::common::Canonical>> =
-            element_edges
-                .stocks
-                .iter()
-                .filter(|s| slow_path_var_nodes.contains(strip_element_subscript(s.as_str())))
-                .map(|s| crate::common::Ident::new(s))
-                .collect();
-        let sub_edge_idents: HashMap<
+        let sub_stocks: IdentSet<crate::common::Ident<crate::common::Canonical>> = element_edges
+            .stocks
+            .iter()
+            .filter(|s| slow_path_var_nodes.contains(strip_element_subscript(s.as_str())))
+            .map(|s| crate::common::Ident::new(s))
+            .collect();
+        let sub_edge_idents: IdentMap<
             crate::common::Ident<crate::common::Canonical>,
             Vec<crate::common::Ident<crate::common::Canonical>>,
         > = sub_edges
@@ -3707,7 +3704,7 @@ pub(crate) fn model_written_variables(
 ) -> std::sync::Arc<crate::variable::LoweredVariableMap> {
     use crate::common::{Canonical, Ident};
 
-    let mut variables: crate::variable::LoweredVariableMap = HashMap::new();
+    let mut variables: crate::variable::LoweredVariableMap = IdentMap::default();
     for (name, source_var) in model.variables(db) {
         variables.insert(
             Ident::new(name),

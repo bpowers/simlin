@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentSet};
 
 use crate::db::{
     Db, LtmArm, LtmEquation, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject,
@@ -81,7 +81,7 @@ fn pinnable_arrayed_deps(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-    deps: &HashSet<Ident<Canonical>>,
+    deps: &IdentSet<Ident<Canonical>>,
     tables: &std::collections::BTreeSet<Ident<Canonical>>,
     keep: impl Fn(&Ident<Canonical>) -> bool,
 ) -> Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> {
@@ -89,7 +89,7 @@ fn pinnable_arrayed_deps(
         .iter()
         .chain(tables.iter())
         .cloned()
-        .collect::<HashSet<_>>()
+        .collect::<IdentSet<_>>()
         .iter()
         .filter(|d| keep(d))
         .filter_map(|d| {
@@ -1063,7 +1063,7 @@ fn freeze_dep_dims(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-    deps: &HashSet<Ident<Canonical>>,
+    deps: &IdentSet<Ident<Canonical>>,
 ) -> HashMap<String, Vec<crate::dimensions::Dimension>> {
     deps.iter()
         .filter_map(|dep| {
@@ -1220,7 +1220,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                         )
                     }
                     // A hole at this element: no sensitivity, score 0.
-                    None => (None, HashSet::new(), Default::default()),
+                    None => (None, IdentSet::default(), Default::default()),
                 }
             }
             Ast::Scalar(_) => unreachable!("target is arrayed"),
@@ -1670,7 +1670,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // absent from the dep set by construction but still needs its index pinned
     // -- see `pinnable_arrayed_deps`.
     let pinnable_deps =
-        |deps: &HashSet<Ident<Canonical>>,
+        |deps: &IdentSet<Ident<Canonical>>,
          tables: &std::collections::BTreeSet<Ident<Canonical>>| {
             pinnable_arrayed_deps(db, model, project, deps, tables, |_| true)
         };
@@ -1712,7 +1712,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // hole), scored 0, and is distinct from a failure.
     let mut build_var = |element: &str,
                          elem_eqn: Option<&crate::ast::Expr0>,
-                         elem_deps: &HashSet<Ident<Canonical>>,
+                         elem_deps: &IdentSet<Ident<Canonical>>,
                          pinnable: &[(Ident<Canonical>, Vec<crate::dimensions::Dimension>)],
                          freeze_out: &mut Vec<LtmSyntheticVar>|
      -> Option<LtmSyntheticVar> {
@@ -1881,7 +1881,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 #[allow(clippy::type_complexity)]
                 let (elem_eqn, elem_deps, elem_tables): (
                     Option<crate::ast::Expr0>,
-                    HashSet<Ident<Canonical>>,
+                    IdentSet<Ident<Canonical>>,
                     std::collections::BTreeSet<Ident<Canonical>>,
                 ) = match slot {
                     Some(expr) => {
@@ -1901,7 +1901,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                     // link-score value (no sensitivity), matching the
                     // historical placeholder behaviour for un-derivable
                     // partials.
-                    None => (None, HashSet::new(), Default::default()),
+                    None => (None, IdentSet::default(), Default::default()),
                 };
                 let pinnable = pinnable_deps(&elem_deps, &elem_tables);
                 match build_var(
@@ -2887,7 +2887,7 @@ fn emit_per_element_link_scores(
     /// arrayed deps to element-pin with their declared dimensions).
     type ElemEqnParts = (
         crate::ast::Expr0,
-        HashSet<Ident<Canonical>>,
+        IdentSet<Ident<Canonical>>,
         Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)>,
     );
 
@@ -2940,7 +2940,7 @@ fn emit_per_element_link_scores(
     // `try_scalar_to_arrayed_link_scores`); the source itself is excluded --
     // its occurrences are pinned per-row by the wrap's own row lowering.
     let pinnable_deps =
-        |deps: &HashSet<Ident<Canonical>>,
+        |deps: &IdentSet<Ident<Canonical>>,
          tables: &std::collections::BTreeSet<Ident<Canonical>>| {
             pinnable_arrayed_deps(db, model, project, deps, tables, |d| d.as_str() != from)
         };
@@ -2979,7 +2979,7 @@ fn emit_per_element_link_scores(
         != to_dims
             .iter()
             .map(|d| d.canonical_name())
-            .collect::<HashSet<_>>()
+            .collect::<IdentSet<_>>()
             .len()
     {
         if warnings

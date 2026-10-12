@@ -37,11 +37,11 @@
 //! per-file line cap (`scripts/lint-project.sh` rule 2);
 //! `db::model_all_diagnostics` reaches it via `crate::db::units::...`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use salsa::Accumulator;
 
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::datamodel;
 use crate::db::var_fragment::{helper_dimensions, source_dimensions};
 use crate::db::{
@@ -78,7 +78,7 @@ use crate::units_check::UnitModel;
 /// we have no basis for unit equivalence.
 fn init_value_equivalence_group(
     ast: &crate::ast::Ast<crate::ast::Expr2>,
-) -> HashSet<Ident<Canonical>> {
+) -> IdentSet<Ident<Canonical>> {
     use crate::ast::{Ast, Expr2};
     use crate::builtins::BuiltinFn;
 
@@ -89,7 +89,7 @@ fn init_value_equivalence_group(
     /// builtin call, subscript, nested conditional, etc.) means the
     /// identifier is playing a different role and should be left out of
     /// the equivalence group.
-    fn try_insert_bare_var(expr: &Expr2, out: &mut HashSet<Ident<Canonical>>) {
+    fn try_insert_bare_var(expr: &Expr2, out: &mut IdentSet<Ident<Canonical>>) {
         if let Expr2::Var(id, _, _) = expr {
             out.insert(id.clone());
         }
@@ -101,7 +101,7 @@ fn init_value_equivalence_group(
     /// subtree -- stdlib modules use this pattern at most once per init
     /// equation, and a second isModuleInput inside a branch would
     /// indicate a different constraint we do not want to collapse.
-    fn find_value_branches(expr: &Expr2, out: &mut HashSet<Ident<Canonical>>) -> bool {
+    fn find_value_branches(expr: &Expr2, out: &mut IdentSet<Ident<Canonical>>) -> bool {
         match expr {
             Expr2::If(cond, t, f, _, _) => {
                 if let Expr2::App(BuiltinFn::IsModuleInput(_, _), _, _) = cond.as_ref() {
@@ -141,7 +141,7 @@ fn init_value_equivalence_group(
         }
     }
 
-    let mut out = HashSet::new();
+    let mut out = IdentSet::default();
     match ast {
         Ast::Scalar(expr) => {
             find_value_branches(expr, &mut out);
@@ -308,7 +308,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     //     to check;
     //   - if a DIFFERENT handle occupies the name, the map holds that other
     //     model's view and `target_model` is that model, not this one.
-    let models: HashMap<Ident<Canonical>, UnitModel> = model_scope_models(db, model, project)
+    let models: IdentMap<Ident<Canonical>, UnitModel> = model_scope_models(db, model, project)
         .values()
         .map(|src_model| {
             let view = unit_model(db, *src_model, project);
@@ -423,7 +423,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                 // (see `init_value_equivalence_group`); the simple textual
                 // `identifier_set` would also return `delay_time`, which is what
                 // produced the spurious delay3 mismatches in World3.
-                let stock_init_deps: Vec<HashSet<Ident<Canonical>>> = submodel
+                let stock_init_deps: Vec<IdentSet<Ident<Canonical>>> = submodel
                     .variables
                     .values()
                     .filter_map(|sv| {
@@ -572,7 +572,7 @@ fn check_conveyor_param_units(
     model_name: &str,
     target_model: &UnitModel,
     units_ctx: &crate::units::Context,
-    inferred_units: &HashMap<Ident<Canonical>, crate::datamodel::UnitMap>,
+    inferred_units: &IdentMap<Ident<Canonical>, crate::datamodel::UnitMap>,
 ) {
     use crate::ast::Ast;
     use crate::common::{ErrorCode, UnitError};
@@ -592,7 +592,7 @@ fn check_conveyor_param_units(
     // Index the source variables by canonical ident so we can resolve a
     // conveyor stock's declared units and follow its outflow names to the leak
     // flows carrying leak fractions. Salsa inputs are Copy.
-    let src_by_canon: HashMap<Ident<Canonical>, SourceVariable> = model
+    let src_by_canon: IdentMap<Ident<Canonical>, SourceVariable> = model
         .variables(db)
         .values()
         .map(|v| (Ident::new(v.ident(db)), *v))

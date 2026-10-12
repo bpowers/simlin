@@ -15,7 +15,7 @@ use super::types::{
     normalize_module_ref,
 };
 use crate::ast::BinaryOp;
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::datamodel::Dimension;
 use crate::db::{
     DetectedLoop, DetectedLoopPolarity, SimlinDb, causal_graph_with_modules,
@@ -311,7 +311,7 @@ fn test_link_polarity_detection() {
         crate::ast::Loc::default(),
     );
     let ast = Ast::Scalar(expr);
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
     let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
     assert_eq!(polarity, LinkPolarity::Positive);
 
@@ -364,7 +364,7 @@ fn test_polarity_mul_both_operands_referencing_source_is_unknown() {
     let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     // z = x * (1 - x): d/dx = 1 - 2x, sign-indefinite.
     let expr = op2(
@@ -404,7 +404,7 @@ fn test_polarity_div_numerator_value_sign_guards_denominator_flip() {
     let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     // z = 5 / y: d/dy = -5/y^2 < 0 -> Negative.
     let expr = op2(BinaryOp::Div, cnst(5.0), var("y"));
@@ -446,7 +446,7 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
     let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     // z = x / 5 -> Positive.
     let expr = op2(BinaryOp::Div, var("x"), cnst(5.0));
@@ -492,7 +492,7 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
             element_scope: None,
         },
     };
-    let mut vars = HashMap::new();
+    let mut vars = IdentMap::default();
     vars.insert(ttc.clone(), std::sync::Arc::new(ttc_variable));
     let expr = op2(BinaryOp::Div, var("x"), var("ttc"));
     assert_eq!(
@@ -517,7 +517,7 @@ fn test_polarity_div_both_sides_referencing_source_is_unknown() {
     let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     let expr = op2(
         BinaryOp::Div,
@@ -1004,7 +1004,7 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
     // Boston's increasing table -> Positive, confirming the literal resolves
     // to the right element.
     let one_dim_curve = |tables: Vec<Table>| {
-        let mut vars = HashMap::new();
+        let mut vars = IdentMap::default();
         vars.insert(
             Ident::new("curve"),
             std::sync::Arc::new(gf_var_for_test("curve", vec![region.clone()], tables)),
@@ -1044,7 +1044,7 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
     // need row-major flattening of the per-element table list, which the LTM
     // polarity cases don't require, so the arm bails to Unknown even when both
     // indices are literal elements that would individually resolve.
-    let mut multi_dim_vars = HashMap::new();
+    let mut multi_dim_vars = IdentMap::default();
     multi_dim_vars.insert(
         Ident::new("curve"),
         std::sync::Arc::new(gf_var_for_test(
@@ -1396,7 +1396,7 @@ fn test_loop_polarity_from_runtime_scores_neg_inf_with_finite_balancing() {
 #[test]
 fn test_calculate_polarity_all_unknown_links() {
     // When all links have Unknown polarity, the loop should be Undetermined
-    let graph = CausalGraph::new(HashMap::new(), HashSet::new());
+    let graph = CausalGraph::new(IdentMap::default(), IdentSet::default());
 
     let links = vec![
         Link {
@@ -1422,7 +1422,7 @@ fn test_calculate_polarity_all_unknown_links() {
 #[test]
 fn test_calculate_polarity_mixed_unknown_and_known() {
     // Conservative approach: if ANY link is unknown, the loop is Undetermined
-    let graph = CausalGraph::new(HashMap::new(), HashSet::new());
+    let graph = CausalGraph::new(IdentMap::default(), IdentSet::default());
 
     // One negative link, one unknown -> should be Undetermined
     let links_one_negative = vec![
@@ -1475,7 +1475,7 @@ fn test_calculate_polarity_mixed_unknown_and_known() {
 #[test]
 fn test_calculate_polarity_all_known_links() {
     // When all links have known polarity, count negative links
-    let graph = CausalGraph::new(HashMap::new(), HashSet::new());
+    let graph = CausalGraph::new(IdentMap::default(), IdentSet::default());
 
     // All positive links -> Reinforcing (even number of negatives: 0)
     let links_all_positive = vec![
@@ -1619,7 +1619,7 @@ fn test_builtin_polarity_monotone_increasing() {
 
     let x_var = Ident::new("x");
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     // Every arm of polarity.rs's non-decreasing single-arg builtin group:
     // Exp, Ln, Log10, Sqrt, Arctan, Int, Trunc (Vensim's INTEGER) and Round
@@ -1663,7 +1663,7 @@ fn test_builtin_polarity_monotone_negative_inner() {
             Loc::default(),
         ))
     };
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     let expr = Expr2::App(BuiltinFn::Exp(neg_x()), None, Loc::default());
     let ast = Ast::Scalar(expr);
@@ -1682,7 +1682,7 @@ fn test_builtin_polarity_non_monotone_returns_unknown() {
 
     let x_var = Ident::new("x");
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     let non_monotone: Vec<(&str, BuiltinFn<Expr2>)> = vec![
         ("Abs", BuiltinFn::Abs(x_expr())),
@@ -1717,7 +1717,7 @@ fn test_builtin_polarity_max_min_scalar() {
             Loc::default(),
         ))
     };
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     // Max(x, 5): only x depends on from_var -> propagate x's polarity
     let expr = Expr2::App(
@@ -1854,7 +1854,7 @@ fn test_max_min_polarity_with_non_monotone_arg() {
             Loc::default(),
         ))
     };
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     // MAX(ABS(x), x): ABS(x) is non-monotonically dependent on x,
     // so overall polarity is unknown
@@ -1954,7 +1954,7 @@ fn test_variadic_mean_polarity_with_non_monotone_arg() {
     let x_expr = || Expr2::Var(x_var.clone(), None, Loc::default());
     let abs_x = || Expr2::App(BuiltinFn::Abs(Box::new(x_expr())), None, Loc::default());
     let neg_x = || Expr2::Op1(UnaryOp::Negative, Box::new(x_expr()), None, Loc::default());
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     // MEAN(ABS(x), x) -- ABS(x) is non-monotone in x. The mean of a
     // non-monotone term and a monotone term is itself non-monotone.
@@ -2025,7 +2025,7 @@ fn test_add_sub_div_polarity_with_non_monotone_arg() {
             Loc::default(),
         ))
     };
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     // x + ABS(x): ABS(x) non-monotonically depends on x → Unknown
     let expr = Expr2::Op2(BinaryOp::Add, x_expr(), abs_x(), None, Loc::default());
@@ -2541,7 +2541,7 @@ fn test_cycle_partitions_partition_for_loop() {
 /// The `partitions` outer Vec is filled out enough to be self-consistent
 /// (it isn't read by `partition_for_loop`, only `stock_partition` is).
 fn cycle_partitions_from(pairs: &[(&str, usize)]) -> CyclePartitions {
-    let stock_partition: HashMap<Ident<Canonical>, usize> = pairs
+    let stock_partition: IdentMap<Ident<Canonical>, usize> = pairs
         .iter()
         .map(|(name, p)| (Ident::new(name), *p))
         .collect();
@@ -3047,11 +3047,11 @@ fn test_internal_module_loops_not_in_parent() {
 #[test]
 fn test_enumerate_pathways_to_outputs_non_standard_output() {
     // Module graph with output named "result" instead of "output"
-    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     edges.insert(Ident::new("input_val"), vec![Ident::new("intermediate")]);
     edges.insert(Ident::new("intermediate"), vec![Ident::new("result")]);
 
-    let graph = CausalGraph::new(edges, HashSet::new());
+    let graph = CausalGraph::new(edges, IdentSet::default());
 
     // enumerate_module_pathways with hard-coded "output" finds nothing
     let pathways_old = graph.enumerate_module_pathways(&Ident::new("output"));
@@ -3082,10 +3082,10 @@ fn test_enumerate_pathways_to_outputs_non_standard_output() {
 #[test]
 fn test_enumerate_pathways_to_outputs_standard_output() {
     // Module graph with output named "output" (standard case)
-    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     edges.insert(Ident::new("input"), vec![Ident::new("output")]);
 
-    let graph = CausalGraph::new(edges, HashSet::new());
+    let graph = CausalGraph::new(edges, IdentSet::default());
 
     // Auto-detection: "output" node is a sink, so it's found automatically
     let pathways = graph.enumerate_pathways_to_outputs(&[]);
@@ -3108,7 +3108,7 @@ fn test_enumerate_module_pathways_deeper_than_legacy_cap() {
     // time budget.
     const INTERMEDIATE_NODES: usize = 20;
 
-    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
 
     // input -> n0
     edges.insert(Ident::new("input"), vec![Ident::new("n0")]);
@@ -3125,7 +3125,7 @@ fn test_enumerate_module_pathways_deeper_than_legacy_cap() {
         vec![Ident::new("output")],
     );
 
-    let graph = CausalGraph::new(edges, HashSet::new());
+    let graph = CausalGraph::new(edges, IdentSet::default());
 
     let pathways = graph.enumerate_module_pathways(&Ident::new("output"));
     let from_input = pathways.get(&Ident::new("input")).expect(
@@ -3160,7 +3160,7 @@ fn test_enumerate_module_pathways_deeper_than_legacy_cap() {
 /// neighbor lists are sorted before DFS, so the kept set must be identical
 /// regardless of the order edges were inserted).
 fn diamond_chain_graph(n: usize, permute: bool) -> CausalGraph {
-    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     let mid = |i: usize| Ident::new(&format!("m{i}"));
     // input is the first "midpoint" node, output the last.
     edges.insert(Ident::new("input"), vec![mid(0)]);
@@ -3183,7 +3183,7 @@ fn diamond_chain_graph(n: usize, permute: bool) -> CausalGraph {
         edges.insert(b, vec![next.clone()]);
         prev = next;
     }
-    CausalGraph::new(edges, HashSet::new())
+    CausalGraph::new(edges, IdentSet::default())
 }
 
 /// Render a single pathway's node sequence as a stable string key so two
@@ -3327,7 +3327,7 @@ fn module_pathways_work_bounded_on_dead_end_frontier() {
     const BUDGET: usize = 8;
     let _guard = super::graph::ModulePathwayBudgetGuard::new(BUDGET);
 
-    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     let mid = |i: usize| Ident::new(&format!("m{i}"));
     edges.insert(Ident::new("input"), vec![mid(0)]);
     let mut prev = mid(0);
@@ -3344,7 +3344,7 @@ fn module_pathways_work_bounded_on_dead_end_frontier() {
         edges.insert(b, vec![next.clone()]);
         prev = next;
     }
-    let graph = CausalGraph::new(edges, HashSet::new());
+    let graph = CausalGraph::new(edges, IdentSet::default());
 
     // No pathway completes (target "output" is unreachable), but the call
     // must return promptly because the work bound caps node expansions.
@@ -3374,7 +3374,7 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
     // enrichment must NOT collect from only the kept prefix (which would miss
     // `late_stock`); it must degrade to the conservative "all module-internal
     // stocks" fallback so no stock is silently lost (GH #649 point 5).
-    let mut sub_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut sub_edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     // input branches to `early` (lex-first, kept) and `late` (lex-last).
     sub_edges.insert(
         Ident::new("input"),
@@ -3384,7 +3384,7 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
     sub_edges.insert(Ident::new("early_stock"), vec![Ident::new("output")]);
     sub_edges.insert(Ident::new("late"), vec![Ident::new("late_stock")]);
     sub_edges.insert(Ident::new("late_stock"), vec![Ident::new("output")]);
-    let mut sub_stocks = HashSet::new();
+    let mut sub_stocks = IdentSet::default();
     sub_stocks.insert(Ident::new("early_stock"));
     sub_stocks.insert(Ident::new("late_stock"));
     let sub_graph = CausalGraph::new(sub_edges, sub_stocks);
@@ -3404,11 +3404,11 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
             }],
         },
     };
-    let mut parent_variables = HashMap::new();
+    let mut parent_variables = IdentMap::default();
     parent_variables.insert(Ident::new("mod_node"), std::sync::Arc::new(module_var));
-    let mut module_graphs = HashMap::new();
+    let mut module_graphs = IdentMap::default();
     module_graphs.insert(Ident::new("mod_node"), Box::new(sub_graph));
-    let mut parent = CausalGraph::new(HashMap::new(), HashSet::new());
+    let mut parent = CausalGraph::new(IdentMap::default(), IdentSet::default());
     parent.variables = std::sync::Arc::new(parent_variables);
     parent.module_graphs = module_graphs;
 
@@ -3450,11 +3450,11 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
 /// elementary circuit, so a budget of zero MUST trip and a budget of
 /// one MUST succeed.
 fn tiny_cycle_graph() -> CausalGraph {
-    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     edges.insert(Ident::new("a"), vec![Ident::new("b")]);
     edges.insert(Ident::new("b"), vec![Ident::new("c")]);
     edges.insert(Ident::new("c"), vec![Ident::new("a")]);
-    CausalGraph::new(edges, HashSet::new())
+    CausalGraph::new(edges, IdentSet::default())
 }
 
 #[test]
@@ -3485,7 +3485,7 @@ fn find_loops_bails_out_past_budget() {
 
 // --- IndexedGraph + SCC-restricted enumeration tests ---
 //
-// These validate the refactor from `HashSet<Ident>` to integer-indexed
+// These validate the refactor from `IdentSet<Ident>` to integer-indexed
 // DFS, at the level the `johnson_*` block below cannot reach: (1) the
 // node-ordering round-trip and (2) SCC decomposition behavior, asserted
 // on `IndexedGraph`/`tarjan_scc` directly.  The circuit-level invariants
@@ -3494,14 +3494,14 @@ fn find_loops_bails_out_past_budget() {
 // `find_circuit_node_lists_with_limit` entry point.
 
 fn build_causal_graph(edges: &[(&str, &[&str])]) -> CausalGraph {
-    let mut map: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut map: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     for (from, tos) in edges {
         let from_id = Ident::new(from);
         map.entry(from_id)
             .or_default()
             .extend(tos.iter().map(|t| Ident::new(t)));
     }
-    CausalGraph::new(map, HashSet::new())
+    CausalGraph::new(map, IdentSet::default())
 }
 
 fn circuits_as_sorted_name_sets(circuits: &[Vec<Ident<Canonical>>]) -> Vec<Vec<String>> {
@@ -3519,13 +3519,13 @@ fn circuits_as_sorted_name_sets(circuits: &[Vec<Ident<Canonical>>]) -> Vec<Vec<S
 
 #[test]
 fn indexed_graph_empty_round_trip() {
-    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     let graph = IndexedGraph::from_edges(&edges);
     assert_eq!(graph.len(), 0);
     assert!(graph.nodes.is_empty());
     assert!(graph.succ.is_empty());
 
-    let cg = CausalGraph::new(edges, HashSet::new());
+    let cg = CausalGraph::new(edges, IdentSet::default());
     let circuits = cg
         .find_circuit_node_lists_with_limit(usize::MAX)
         .expect("empty graph must not trip the budget");
@@ -3701,7 +3701,7 @@ fn assert_johnson_matches_tiernan(cg: &CausalGraph) {
 
 #[test]
 fn johnson_empty_graph_no_circuits() {
-    let cg = CausalGraph::new(HashMap::new(), HashSet::new());
+    let cg = CausalGraph::new(IdentMap::default(), IdentSet::default());
     let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
     assert!(circuits.is_empty(), "empty graph must have zero circuits");
 }
@@ -4583,16 +4583,16 @@ fn johnson_matches_tiernan_on_fixture_corpus() {
 /// `(from, to)` ident-name pairs). Stocks/variables/modules are empty --
 /// `order_variable_cycle` consults only `self.edges`.
 fn graph_from_edges(edges: &[(&str, &str)]) -> CausalGraph {
-    let mut map: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut map: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     for (from, to) in edges {
         map.entry(Ident::new(from))
             .or_default()
             .push(Ident::new(to));
     }
-    CausalGraph::new(map, HashSet::new())
+    CausalGraph::new(map, IdentSet::default())
 }
 
-fn var_set(names: &[&str]) -> HashSet<Ident<Canonical>> {
+fn var_set(names: &[&str]) -> IdentSet<Ident<Canonical>> {
     names.iter().map(|n| Ident::new(n)).collect()
 }
 
@@ -4723,14 +4723,14 @@ fn build_graph_from_pairs(n: usize, pairs: &[(u8, u8)]) -> CausalGraph {
     }
     // Deduplicate: HashMap::entry will overwrite but we need to
     // aggregate the adjacency list instead.
-    let mut map: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut map: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     let mut seen: HashSet<(String, String)> = HashSet::new();
     for (f, t) in edge_pairs {
         if seen.insert((f.clone(), t.clone())) {
             map.entry(Ident::new(&f)).or_default().push(Ident::new(&t));
         }
     }
-    CausalGraph::new(map, HashSet::new())
+    CausalGraph::new(map, IdentSet::default())
 }
 
 proptest! {
@@ -4783,7 +4783,7 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
     // `ltm_agg::AggNode::reducer` (GH #983) -- an aggregate node's equation is
     // one reducer application, so there is no enclosing `Ast` to supply.
     let sum = |arg: Expr2| crate::builtins::BuiltinFn::Sum(Box::new(arg));
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
 
     // SUM(pop[*] * scale): the co-factor is a bare arrayed reference,
     // positive by the SD labeling convention -> Positive.

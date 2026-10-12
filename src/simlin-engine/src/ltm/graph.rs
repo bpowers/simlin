@@ -18,9 +18,9 @@
 //! Callers interact with this type to find loops, compute cycle partitions,
 //! materialize per-link polarities, and traverse module pathways.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::variable::{VarKind, Variable};
 
 use super::indexed::{IndexedCircuits, IndexedGraph, TruncatedByBudgetInternal};
@@ -35,7 +35,7 @@ use super::types::{
 
 /// Internal module pathways keyed by input port: each port maps to its list of
 /// open `input -> ... -> output` link-paths.
-pub(crate) type ModulePathways = HashMap<Ident<Canonical>, Vec<Vec<Link>>>;
+pub(crate) type ModulePathways = IdentMap<Ident<Canonical>, Vec<Vec<Link>>>;
 
 /// [`ModulePathways`] paired with the (sorted) input ports whose enumeration hit
 /// the per-port pathway budget (GH #649) and so hold only a deterministic prefix.
@@ -132,9 +132,9 @@ impl std::fmt::Debug for CausalGraph {
 
 pub struct CausalGraph {
     /// Adjacency list representation
-    pub(crate) edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+    pub(crate) edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
     /// Set of stocks in the model
-    pub(crate) stocks: HashSet<Ident<Canonical>>,
+    pub(crate) stocks: IdentSet<Ident<Canonical>>,
     /// Variables in the model for polarity analysis.
     ///
     /// Shared rather than owned: the map is the salsa-cached
@@ -149,7 +149,7 @@ pub struct CausalGraph {
     /// for the same reason `variables` is.
     pub(crate) module_outputs_read: std::sync::Arc<crate::db::ModuleOutputsRead>,
     /// Module instances and their internal graphs
-    pub(crate) module_graphs: HashMap<Ident<Canonical>, Box<CausalGraph>>,
+    pub(crate) module_graphs: IdentMap<Ident<Canonical>, Box<CausalGraph>>,
 }
 
 impl CausalGraph {
@@ -157,15 +157,15 @@ impl CausalGraph {
     /// module graphs -- what circuit finding and SCC computation need, and
     /// what an enriched constructor fills in afterwards.
     pub(crate) fn new(
-        edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
-        stocks: HashSet<Ident<Canonical>>,
+        edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+        stocks: IdentSet<Ident<Canonical>>,
     ) -> Self {
         CausalGraph {
             edges,
             stocks,
             variables: Default::default(),
             module_outputs_read: Default::default(),
-            module_graphs: HashMap::new(),
+            module_graphs: IdentMap::default(),
         }
     }
 
@@ -181,12 +181,12 @@ impl CausalGraph {
         crate::db::unique_module_output(&self.module_outputs_read, reader.as_str(), module)
     }
     /// Read-only access to the adjacency list (for benchmarks / debugging).
-    pub fn edges(&self) -> &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> {
+    pub fn edges(&self) -> &IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> {
         &self.edges
     }
 
     /// Read-only access to the stock set (for benchmarks / debugging).
-    pub fn stocks(&self) -> &HashSet<Ident<Canonical>> {
+    pub fn stocks(&self) -> &IdentSet<Ident<Canonical>> {
         &self.stocks
     }
 
@@ -598,7 +598,7 @@ impl CausalGraph {
     ) -> (Vec<Vec<Ident<Canonical>>>, bool) {
         let mut paths = Vec::new();
         let mut current_path = vec![from.clone()];
-        let mut visited = HashSet::new();
+        let mut visited = IdentSet::default();
         visited.insert(from.clone());
         // Bound the DFS WORK, not just the result count. A cap on completed
         // paths alone leaves the pathological case where the walk explores an
@@ -669,7 +669,7 @@ impl CausalGraph {
         current: &Ident<Canonical>,
         target: &Ident<Canonical>,
         path: &mut Vec<Ident<Canonical>>,
-        visited: &mut HashSet<Ident<Canonical>>,
+        visited: &mut IdentSet<Ident<Canonical>>,
         paths: &mut Vec<Vec<Ident<Canonical>>>,
         max_depth: usize,
         budget: usize,
@@ -765,12 +765,12 @@ impl CausalGraph {
         &self,
         output_name: &Ident<Canonical>,
     ) -> ModulePathwaysWithTruncation {
-        let mut result: HashMap<Ident<Canonical>, Vec<Vec<Link>>> = HashMap::new();
+        let mut result: IdentMap<Ident<Canonical>, Vec<Vec<Link>>> = IdentMap::default();
         let mut truncated_ports: Vec<Ident<Canonical>> = Vec::new();
 
         // Compute which nodes have incoming edges within the module.
         // True input ports have no incoming edges -- they're fed from outside.
-        let mut has_incoming: HashSet<Ident<Canonical>> = HashSet::new();
+        let mut has_incoming: IdentSet<Ident<Canonical>> = IdentSet::default();
         for targets in self.edges.values() {
             for target in targets {
                 has_incoming.insert(target.clone());
@@ -861,8 +861,8 @@ impl CausalGraph {
             output_ports.to_vec()
         };
 
-        let mut combined: HashMap<Ident<Canonical>, Vec<Vec<Link>>> = HashMap::new();
-        let mut truncated_ports: HashSet<Ident<Canonical>> = HashSet::new();
+        let mut combined: IdentMap<Ident<Canonical>, Vec<Vec<Link>>> = IdentMap::default();
+        let mut truncated_ports: IdentSet<Ident<Canonical>> = IdentSet::default();
         for output_port in &ports {
             let (pathways, truncated) = self.enumerate_module_pathways_with_truncation(output_port);
             for (input_port, paths) in pathways {
@@ -880,13 +880,13 @@ impl CausalGraph {
     /// Tries graph sinks (no outgoing edges) first, then falls back to
     /// the stdlib "output" convention.
     fn detect_output_ports(&self) -> Vec<Ident<Canonical>> {
-        let all_nodes: HashSet<&Ident<Canonical>> = self
+        let all_nodes: IdentSet<&Ident<Canonical>> = self
             .edges
             .keys()
             .chain(self.edges.values().flat_map(|tos| tos.iter()))
             .collect();
 
-        let has_outgoing: HashSet<&Ident<Canonical>> = self
+        let has_outgoing: IdentSet<&Ident<Canonical>> = self
             .edges
             .iter()
             .filter(|(_, tos)| !tos.is_empty())
@@ -961,7 +961,7 @@ impl CausalGraph {
     /// module boundary is not currently supported (it resolves to `None`).
     pub fn order_variable_cycle(
         &self,
-        vars: &HashSet<Ident<Canonical>>,
+        vars: &IdentSet<Ident<Canonical>>,
     ) -> Option<Vec<Ident<Canonical>>> {
         if vars.len() < 2 {
             // A self-loop (single variable referencing itself) is not a
@@ -978,7 +978,7 @@ impl CausalGraph {
         let start = members[0].clone();
 
         let mut path: Vec<Ident<Canonical>> = vec![start.clone()];
-        let mut visited: HashSet<Ident<Canonical>> = HashSet::new();
+        let mut visited: IdentSet<Ident<Canonical>> = IdentSet::default();
         visited.insert(start.clone());
 
         if self.dfs_order_cycle(&start, vars, &mut path, &mut visited) {
@@ -994,9 +994,9 @@ impl CausalGraph {
     fn dfs_order_cycle(
         &self,
         start: &Ident<Canonical>,
-        vars: &HashSet<Ident<Canonical>>,
+        vars: &IdentSet<Ident<Canonical>>,
         path: &mut Vec<Ident<Canonical>>,
-        visited: &mut HashSet<Ident<Canonical>>,
+        visited: &mut IdentSet<Ident<Canonical>>,
     ) -> bool {
         let current = path.last().cloned().expect("path is never empty");
         let Some(neighbors) = self.edges.get(&current) else {
@@ -1082,7 +1082,7 @@ impl CausalGraph {
             .collect();
         partitions.sort_by(|a, b| a[0].as_str().cmp(b[0].as_str()));
 
-        let mut stock_partition = HashMap::new();
+        let mut stock_partition = IdentMap::default();
         for (idx, partition) in partitions.iter().enumerate() {
             for stock in partition {
                 stock_partition.insert(stock.clone(), idx);
@@ -1098,11 +1098,12 @@ impl CausalGraph {
     /// BFS from each stock through the full causal graph to find which other
     /// stocks are reachable. Continues past intermediate stocks so that
     /// transitive reachability is captured.
-    fn build_stock_reachability(&self) -> HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>> {
-        let mut reachability: HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>> = HashMap::new();
+    fn build_stock_reachability(&self) -> IdentMap<Ident<Canonical>, IdentSet<Ident<Canonical>>> {
+        let mut reachability: IdentMap<Ident<Canonical>, IdentSet<Ident<Canonical>>> =
+            IdentMap::default();
 
         for stock in &self.stocks {
-            let mut visited = HashSet::new();
+            let mut visited = IdentSet::default();
             let mut queue = VecDeque::new();
 
             visited.insert(stock.clone());
@@ -1118,7 +1119,7 @@ impl CausalGraph {
                 }
             }
 
-            let reachable_stocks: HashSet<Ident<Canonical>> = visited
+            let reachable_stocks: IdentSet<Ident<Canonical>> = visited
                 .into_iter()
                 .filter(|node| self.stocks.contains(node) && node != stock)
                 .collect();
@@ -1554,7 +1555,8 @@ pub(crate) fn assign_loop_ids(loops: &mut [Loop]) {
 /// builds compile the call out via `debug_assert!`'s no-op expansion.
 #[cfg(test)]
 fn loops_have_unique_canonical_rotations(loops: &[Loop]) -> bool {
-    let mut seen: HashSet<Vec<&str>> = HashSet::with_capacity(loops.len());
+    let mut seen: std::collections::HashSet<Vec<&str>> =
+        std::collections::HashSet::with_capacity(loops.len());
     for loop_item in loops {
         let path: Vec<&str> = loop_item.links.iter().map(|l| l.from.as_str()).collect();
         let key = super::canonical_rotation(&path);

@@ -3,7 +3,6 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 pub use crate::builtins::Loc;
-use std::collections::HashMap;
 
 use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
 use crate::common::{
@@ -39,7 +38,7 @@ pub enum Ast<Expr> {
     ApplyToAll(Vec<Dimension>, Expr),
     Arrayed(
         Vec<Dimension>,
-        HashMap<CanonicalElementName, Expr>,
+        IdentMap<CanonicalElementName, Expr>,
         Option<Expr>,
         bool,
     ),
@@ -251,9 +250,10 @@ fn lower_arrayed_arms<A, B>(
     dims: &[crate::dimensions::Dimension],
     elements: impl IntoIterator<Item = (CanonicalElementName, A)>,
     mut lower: impl FnMut(A) -> EquationResult<B>,
-) -> LoweringResult<HashMap<CanonicalElementName, B>> {
+) -> LoweringResult<IdentMap<CanonicalElementName, B>> {
     let elements = elements.into_iter();
-    let mut lowered = HashMap::with_capacity(elements.size_hint().0);
+    let mut lowered =
+        IdentMap::with_capacity_and_hasher(elements.size_hint().0, Default::default());
     let mut failures = Vec::new();
     for (id, arm) in elements {
         match lower(arm) {
@@ -320,7 +320,7 @@ pub(crate) fn typed_ast(
 /// either raised: the default's first.
 fn arrayed<E>(
     dims: Vec<crate::dimensions::Dimension>,
-    elements: LoweringResult<HashMap<CanonicalElementName, E>>,
+    elements: LoweringResult<IdentMap<CanonicalElementName, E>>,
     default_expr: EquationResult<Option<E>>,
     apply_default_to_missing: bool,
 ) -> LoweringResult<Ast<E>> {

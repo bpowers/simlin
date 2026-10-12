@@ -21,7 +21,9 @@ use crate::ast::{ArrayView, Ast, BinaryOp, Loc};
 use crate::builtins::ResultKind;
 #[cfg(test)]
 use crate::common::ErrorCode;
-use crate::common::{Canonical, CanonicalDimensionName, CanonicalElementName, Ident, Result};
+use crate::common::{
+    Canonical, CanonicalDimensionName, CanonicalElementName, Ident, IdentMap, Result,
+};
 use crate::dimensions::{
     Axis, Dimension, DimensionsContext, NoAxisRelations, SubscriptIterator, match_axes_partial,
 };
@@ -67,7 +69,7 @@ pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
 /// unit tests hand-build a table instead, in order to state the lookup's
 /// contract against inputs of their own choosing; they exercise the reader,
 /// not the rule.)
-pub(crate) type VarSizes = HashMap<VarRef, usize>;
+pub(crate) type VarSizes = IdentMap<VarRef, usize>;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Clone)]
@@ -439,7 +441,7 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
     let dim = Dimension::from(&datamodel_dim);
     let dims = vec![dim.clone()];
 
-    let mut elements = HashMap::new();
+    let mut elements = IdentMap::default();
     elements.insert(
         CanonicalElementName::from_raw("a"),
         crate::ast::Expr2::Const(
@@ -634,7 +636,7 @@ impl Var {
                                         ctx,
                                         dims,
                                         &base,
-                                        &HashMap::new(),
+                                        &IdentMap::default(),
                                         Some(ast),
                                         true,
                                     )?,
@@ -753,7 +755,7 @@ impl Var {
                                     ctx,
                                     dims,
                                     &base,
-                                    &HashMap::new(),
+                                    &IdentMap::default(),
                                     Some(ast),
                                     true,
                                 )?,
@@ -1553,7 +1555,7 @@ fn array_view_from_dims(dims: &[Dimension]) -> ArrayView {
 /// The equation element `key` evaluates -- its own explicit arm, or the EXCEPT
 /// default -- or `None` when the element has neither.
 fn arrayed_arm<'e>(
-    elements: &'e HashMap<CanonicalElementName, crate::ast::Expr2>,
+    elements: &'e IdentMap<CanonicalElementName, crate::ast::Expr2>,
     default_ast: Option<&'e crate::ast::Expr2>,
     apply_default_for_missing: bool,
     key: &CanonicalElementName,
@@ -1611,7 +1613,7 @@ fn expand_per_element(
     ctx: &Context,
     dims: &[Dimension],
     base: &VarRef,
-    elements: &HashMap<CanonicalElementName, crate::ast::Expr2>,
+    elements: &IdentMap<CanonicalElementName, crate::ast::Expr2>,
     default_ast: Option<&crate::ast::Expr2>,
     apply_default_for_missing: bool,
 ) -> Result<Vec<Expr>> {

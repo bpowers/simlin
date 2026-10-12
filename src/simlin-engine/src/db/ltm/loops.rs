@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentSet};
 use crate::ltm::strip_subscript;
 
 use super::endpoint_dimensions;
@@ -50,7 +50,7 @@ pub(super) fn find_model_output_ports(
     let project_models = project.models(db);
     // The input-agnostic dependency sets, shared with `model_causal_edges`.
     let empty_inputs = ModuleInputSet::empty(db);
-    let mut output_ports: HashSet<Ident<Canonical>> = HashSet::new();
+    let mut output_ports: IdentSet<Ident<Canonical>> = IdentSet::default();
 
     for other_model in project_models.values() {
         if other_model == &model {

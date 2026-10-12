@@ -76,6 +76,7 @@
 //! deliberate exception: it hand-builds a non-dense expression list that no
 //! lowering produces, to pin the emitter's loud refusal of one.
 
+use crate::common::IdentMap;
 use std::collections::BTreeSet;
 
 use super::var_fragment::{ExplicitFragment, explicit_fragment_input};
@@ -847,8 +848,8 @@ fn emitter_refuses_a_non_dense_temp_id() {
 
     let model_name = Ident::new("main");
     let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-    let var_sizes = crate::compiler::VarSizes::new();
-    let tables = std::collections::HashMap::new();
+    let var_sizes = crate::compiler::VarSizes::default();
+    let tables = IdentMap::default();
     let dimensions: Vec<crate::dimensions::Dimension> = Vec::new();
     // The phase-invariant context `FragmentInput::emit_ctx` builds, spelled out
     // because this input has no `FragmentInput` -- it is the shape no lowering

@@ -15,7 +15,7 @@
 //! line-count lint; included via `#[path]`, so `super::*` resolves the parent's
 //! private items.
 
-use std::collections::HashSet;
+use crate::common::IdentSet;
 
 use crate::variable::{VarKind, Variable};
 
@@ -249,7 +249,7 @@ enum SlotRefKind {
     /// is shared by elements carrying different tables (a documented residual).
     PerElement {
         quoted: String,
-        with_table: HashSet<crate::common::CanonicalElementName>,
+        with_table: IdentSet<crate::common::CanonicalElementName>,
     },
 }
 
@@ -299,7 +299,7 @@ impl WithLookupSlotRefs {
         }
         // Per-element tables: walk the row-major element enumeration once,
         // keeping the elements whose table slot actually carries a gf.
-        let with_table: HashSet<crate::common::CanonicalElementName> =
+        let with_table: IdentSet<crate::common::CanonicalElementName> =
             crate::dimensions::SubscriptIterator::new(target_ast_dims)
                 .enumerate()
                 .filter(|(offset, _)| tables.get(*offset).is_some_and(|t| !t.x.is_empty()))

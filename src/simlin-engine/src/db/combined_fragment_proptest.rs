@@ -41,7 +41,7 @@ use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 
 use super::combine_scc_fragment;
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::symbolic::{
     PerVarBytecodes, SymStaticViewBase, SymVarRef, SymbolicByteCode, SymbolicModuleDecl,
     SymbolicOpcode, SymbolicStaticView,
@@ -243,7 +243,7 @@ fn build_member(spec: &MemberSpec) -> PerVarBytecodes {
     }
 }
 
-fn build_members(specs: &[MemberSpec]) -> HashMap<Ident<Canonical>, PerVarBytecodes> {
+fn build_members(specs: &[MemberSpec]) -> IdentMap<Ident<Canonical>, PerVarBytecodes> {
     specs
         .iter()
         .map(|spec| (member_name(spec.index), build_member(spec)))
@@ -345,7 +345,7 @@ fn temp_uses(code: &[SymbolicOpcode], views: &[SymbolicStaticView]) -> Vec<(usiz
 fn owner_per_opcode(
     combined: &PerVarBytecodes,
     order: &[(Ident<Canonical>, usize)],
-    members: &HashMap<Ident<Canonical>, PerVarBytecodes>,
+    members: &IdentMap<Ident<Canonical>, PerVarBytecodes>,
 ) -> Vec<Ident<Canonical>> {
     // Segment lengths, recomputed from each member's own fragment the same way
     // the combiner cuts them: up to and including that element's write, with

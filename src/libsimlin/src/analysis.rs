@@ -7,7 +7,7 @@
 //! Functions for extracting feedback loops, causal links with LTM scores,
 //! and relative loop scores from a simulation.
 
-use simlin_engine::common::{Canonical, Ident};
+use simlin_engine::common::{Canonical, Ident, IdentMap};
 use simlin_engine::db::{SourceModel, SourceProject};
 use simlin_engine::{self as engine, canonicalize};
 use std::collections::HashMap;
@@ -1298,7 +1298,7 @@ pub(crate) fn results_from_layout_and_slab(
     }
     let step_count = slab.len() / layout.n_slots;
 
-    let offsets: HashMap<Ident<Canonical>, usize> = layout
+    let offsets: IdentMap<Ident<Canonical>, usize> = layout
         .var_offsets
         .iter()
         .map(|(name, off)| (Ident::<Canonical>::new(name), *off))

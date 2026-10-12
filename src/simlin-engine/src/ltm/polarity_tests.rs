@@ -12,6 +12,7 @@
 //! lint; included via `#[path]` as a child of it, so `use super::*` resolves
 //! that file's imports and private helpers.
 
+use crate::common::IdentMap;
 use std::sync::Arc;
 
 use super::*;
@@ -104,7 +105,7 @@ fn test_provable_value_sign() {
     // parsed `-5` is a negation of the literal 5. The end-to-end twin
     // (`test_mul_negative_constant_valued_cofactor_flips`, which goes
     // through the real parse) is what pins that correspondence.
-    let mut variables: crate::variable::LoweredVariableMap = HashMap::new();
+    let mut variables: crate::variable::LoweredVariableMap = IdentMap::default();
     variables.insert(
         Ident::new("k_neg"),
         Arc::new(scalar_var("k_neg", neg(cnst(5.0)))),
@@ -162,12 +163,11 @@ fn test_analyze_link_polarity_arrayed() {
     // Test analyze_link_polarity with Arrayed AST (covers lines 935-947)
     use crate::ast::{Ast, Expr2, Loc};
     use crate::common::CanonicalElementName;
-    use std::collections::HashMap;
 
     let x_var = Ident::new("x");
 
     // Create arrayed AST with consistent positive polarity
-    let mut elements = HashMap::new();
+    let mut elements = IdentMap::default();
     elements.insert(
         CanonicalElementName::from_raw("dim1"),
         Expr2::Op2(
@@ -198,7 +198,7 @@ fn test_analyze_link_polarity_arrayed() {
     );
 
     let ast = Ast::Arrayed(vec![], elements, None, false);
-    let empty_vars = HashMap::new();
+    let empty_vars = IdentMap::default();
     let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
     assert_eq!(
         polarity,
@@ -207,7 +207,7 @@ fn test_analyze_link_polarity_arrayed() {
     );
 
     // Test with mixed polarities
-    let mut mixed_elements = HashMap::new();
+    let mut mixed_elements = IdentMap::default();
     mixed_elements.insert(
         CanonicalElementName::from_raw("dim1"),
         Expr2::Var(x_var.clone(), None, Loc::default()),

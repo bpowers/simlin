@@ -15,10 +15,10 @@
 //! fixture that hand-built a `datamodel::Equation::Scalar("NAN")` would prove
 //! nothing about that.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use crate::ast::{Ast, Expr0};
-use crate::common::{CanonicalElementName, ErrorCode};
+use crate::common::{CanonicalElementName, ErrorCode, IdentMap};
 use crate::datamodel;
 use crate::db::{
     Diagnostic, DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
@@ -145,7 +145,7 @@ fn arrayed_ast(
     default: Option<&str>,
     apply_default_to_missing: bool,
 ) -> Ast<Expr0> {
-    let elements: HashMap<CanonicalElementName, Expr0> = arms
+    let elements: IdentMap<CanonicalElementName, Expr0> = arms
         .iter()
         .filter_map(|(subscript, text)| {
             expr(text).map(|e| (CanonicalElementName::from_raw(subscript), e))

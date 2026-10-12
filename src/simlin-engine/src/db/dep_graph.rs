@@ -36,14 +36,12 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use rustc_hash::{FxHashMap, FxHashSet};
-
 use crate::canonicalize;
 use crate::capture::CaptureKind;
 // `Canonical`/`Ident` are used in production by the element-cycle
 // refinement (`resolve_recurrence_sccs` and friends), not only by the
 // `#[cfg(test)]` SCC accessors.
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::db::{
     Db, DepPhase, DepRefs, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
     SourceVariableKind, project_module_graph, variable_direct_dependencies,
@@ -93,11 +91,11 @@ pub(crate) struct VarInfo {
 /// salsa backdates by.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelVarInfo {
-    pub(crate) vars: FxHashMap<Ident<Canonical>, VarInfo>,
+    pub(crate) vars: IdentMap<Ident<Canonical>, VarInfo>,
     /// Every local node some live definition reads through `INIT`, explicit
     /// or synthesized: the initialization roots the frozen snapshot holds,
     /// which seed the initials runlist.
-    pub(crate) init_referenced: FxHashSet<Ident<Canonical>>,
+    pub(crate) init_referenced: IdentSet<Ident<Canonical>>,
 }
 
 /// The cycle-successor set of `name` for the given `phase`: exactly the
@@ -160,7 +158,7 @@ pub(crate) struct ModelVarInfo {
 /// order, so the relation is byte-stable across runs, and
 /// `DenseIndex::successors` maps each one to its index through `index_of`.
 pub(crate) fn walk_successors<'a>(
-    var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>,
+    var_info: &'a IdentMap<Ident<Canonical>, VarInfo>,
     name: &str,
     phase: SccPhase,
 ) -> Vec<&'a Ident<Canonical>> {
@@ -205,8 +203,8 @@ pub(crate) fn build_var_info(
     // `isModuleInput` branch is selected for an uninstantiated model.
     let module_inputs = ModuleInputSet::from_names(db, module_input_names);
 
-    let mut var_info: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
-    let mut all_init_referenced: FxHashSet<Ident<Canonical>> = FxHashSet::default();
+    let mut var_info: IdentMap<Ident<Canonical>, VarInfo> = IdentMap::default();
+    let mut all_init_referenced: IdentSet<Ident<Canonical>> = IdentSet::default();
 
     for (name, source_var) in source_vars {
         // Per-variable deps, computed once and reused (salsa-cached).
@@ -385,7 +383,7 @@ pub(crate) struct PhaseCycleSccs {
 /// self-loop rule or on the subsumption above while its cross-checks kept
 /// passing against a relation the engine no longer uses.
 pub(crate) fn phase_cycle_sccs(
-    vars: &FxHashMap<Ident<Canonical>, VarInfo>,
+    vars: &IdentMap<Ident<Canonical>, VarInfo>,
     phase: SccPhase,
 ) -> PhaseCycleSccs {
     let index = DenseIndex::new(vars);
@@ -912,7 +910,7 @@ fn symbolic_phase_element_order(
     // reads nothing of the prologue may run first, and must when the prologue
     // reads it. Any member whose symbolic fragment cannot be sourced or
     // segmented => not element-sourceable => unresolved (loud-safe).
-    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     let mut self_loop = false;
     // Every member is segmented before any edge is wired, so a read of an
     // element computed as the model runs (`ANY_ELEMENT`) can be wired from
@@ -974,7 +972,7 @@ fn symbolic_phase_element_order(
                 .or_default();
         }
 
-        let wire = |edges: &mut HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+        let wire = |edges: &mut IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
                     self_loop: &mut bool,
                     reads: &BTreeSet<(Ident<Canonical>, usize)>,
                     targets: &[usize]| {
@@ -1048,7 +1046,7 @@ fn symbolic_phase_element_order(
     // Kahn's algorithm, tie-broken by (member canonical name, element
     // index) so the order is byte-stable across runs.
     let all_nodes: BTreeSet<Ident<Canonical>> = edges.keys().cloned().collect();
-    let mut indegree: HashMap<Ident<Canonical>, usize> =
+    let mut indegree: IdentMap<Ident<Canonical>, usize> =
         all_nodes.iter().map(|n| (n.clone(), 0usize)).collect();
     for succs in edges.values() {
         for s in succs {
@@ -1630,15 +1628,13 @@ pub struct DependencyCycle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelDepGraphResult {
-    /// Interned-ident-keyed dependency maps, on the std `HashMap` (default
-    /// hasher) -- only the hot internal working maps in
-    /// `model_dependency_graph_impl` use FxHash.
+    /// Interned-ident-keyed dependency maps.
     /// `Ident<Canonical>` keys/values are cheap Arc-refcount clones and the
     /// `BTreeSet`s iterate in the same lexicographic order the former
     /// `BTreeSet<String>` did, so a consumer probing by `&str` (via
     /// `Borrow<str>`) sees byte-identical behavior.
-    pub dt_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
-    pub initial_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+    pub dt_dependencies: IdentMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+    pub initial_dependencies: IdentMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
     pub runlist_initials: Vec<String>,
     pub runlist_flows: Vec<String>,
     pub runlist_stocks: Vec<String>,
@@ -1845,11 +1841,11 @@ impl SccIndex {
 pub(crate) struct DenseIndex<'a> {
     /// Node index to name.
     pub(crate) ordered: Vec<&'a Ident<Canonical>>,
-    pub(crate) index_of: FxHashMap<&'a Ident<Canonical>, u32>,
+    pub(crate) index_of: IdentMap<&'a Ident<Canonical>, u32>,
 }
 
 impl<'a> DenseIndex<'a> {
-    pub(crate) fn new(var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>) -> Self {
+    pub(crate) fn new(var_info: &'a IdentMap<Ident<Canonical>, VarInfo>) -> Self {
         let mut ordered: Vec<&'a Ident<Canonical>> = var_info.keys().collect();
         ordered.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
         let index_of = ordered
@@ -1864,7 +1860,7 @@ impl<'a> DenseIndex<'a> {
     /// `walk_successors`' (lexicographic) order.
     pub(crate) fn successors(
         &self,
-        var_info: &FxHashMap<Ident<Canonical>, VarInfo>,
+        var_info: &IdentMap<Ident<Canonical>, VarInfo>,
         phase: SccPhase,
     ) -> Vec<Vec<u32>> {
         self.ordered
@@ -1944,7 +1940,7 @@ enum Closed {
 struct ClosureWalk<'a> {
     /// Node index to name.
     ordered: &'a [&'a Ident<Canonical>],
-    var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>,
+    var_info: &'a IdentMap<Ident<Canonical>, VarInfo>,
     /// Per node, its successors in this phase's cycle relation
     /// (`walk_successors`), in the dense index.
     succ: &'a [Vec<u32>],
@@ -2186,13 +2182,10 @@ pub(crate) fn model_dependency_graph_impl(
     // in lexicographic order of their names, so a set's ascending indices
     // are its names in `BTreeSet` order and each closed set materializes
     // into the `BTreeSet<Ident>` its readers iterate from an already-sorted
-    // sequence. The traversal order below stays `var_info`'s key order,
-    // exactly as before, because it decides which member of a genuine cycle
-    // is the one reported. Each phase's successor lists are computed once:
-    // the dt gate may walk its relation twice and the init gate twice, and
-    // only the SCC map changes between walks, never the relation.
+    // sequence. Each phase's successor lists are computed once: the dt gate
+    // may walk its relation twice and the init gate twice, and only the SCC
+    // map changes between walks, never the relation.
     let index = DenseIndex::new(var_info);
-    let visit_order: Vec<u32> = var_info.keys().map(|name| index.index_of[name]).collect();
     let succ_dt = index.successors(var_info, SccPhase::Dt);
     let succ_init = index.successors(var_info, SccPhase::Initial);
 
@@ -2238,7 +2231,7 @@ pub(crate) fn model_dependency_graph_impl(
     let compute_transitive =
         |is_initial: bool,
          scc: &SccIndex|
-         -> Result<HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>, BackEdge> {
+         -> Result<IdentMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>, BackEdge> {
             let n = index.ordered.len();
             let mut walk = ClosureWalk {
                 ordered: &index.ordered,
@@ -2251,15 +2244,18 @@ pub(crate) fn model_dependency_graph_impl(
                 stack: Vec::new(),
             };
 
-            // Iterate every node once, in `var_info`'s key order.
-            for &node in &visit_order {
+            // Every node once, in name order (the index's), each node's
+            // successors in name order too: the walk decides which of a
+            // model's cycles is the one reported, and where on it, so its
+            // order has to be a fact of the model. `var_info`'s own key order
+            // is a hash map's.
+            for node in 0..n as u32 {
                 closure_of(&mut walk, node)?;
             }
 
-            // Materialize the std `HashMap` (default hasher) the salsa return
-            // type uses; its iteration order is irrelevant (each value is a
-            // `BTreeSet`, and downstream consumers either probe by key or
-            // re-sort).
+            // Materialize the map the salsa return type uses; its iteration
+            // order is irrelevant (each value is a `BTreeSet`, and downstream
+            // consumers either probe by key or re-sort).
             Ok(walk
                 .closed
                 .into_iter()
@@ -2333,7 +2329,7 @@ pub(crate) fn model_dependency_graph_impl(
             if dt_scc.is_empty() {
                 // Unresolved: keep the conservative `CircularDependency`.
                 cycles.push(cycle(first_cycle, false));
-                HashMap::new()
+                IdentMap::default()
             } else {
                 // Re-run with every resolved SCC treated as one collapsed
                 // node (intra-SCC edges -- N=1 self-edge and N>=2 cross-
@@ -2342,7 +2338,7 @@ pub(crate) fn model_dependency_graph_impl(
                 compute_transitive(false, &dt_scc).unwrap_or_else(|found| {
                     resolved_sccs.clear();
                     cycles.push(cycle(found, false));
-                    HashMap::new()
+                    IdentMap::default()
                 })
             }
         }
@@ -2406,7 +2402,7 @@ pub(crate) fn model_dependency_graph_impl(
                 // gate still errs (a genuine residual cycle). Loud-safe:
                 // keep the conservative `CircularDependency`.
                 cycles.push(cycle(first_init_cycle, true));
-                HashMap::new()
+                IdentMap::default()
             } else {
                 // Break the init-only resolved SCCs' intra edges too (in
                 // ADDITION to the dt-resolved SCCs'), then re-run. The
@@ -2427,7 +2423,7 @@ pub(crate) fn model_dependency_graph_impl(
                     Err(found) => {
                         resolved_sccs.clear();
                         cycles.push(cycle(found, true));
-                        HashMap::new()
+                        IdentMap::default()
                     }
                 }
             }
@@ -2464,9 +2460,9 @@ pub(crate) fn model_dependency_graph_impl(
     // equations AND an `Initial`-phase SCC obviously recurs, so BOTH
     // phases are grouped for the initials runlist.
     let build_scc_grouping =
-        |only_dt: bool| -> (FxHashMap<&str, usize>, FxHashMap<usize, Vec<&str>>) {
-            let mut scc_of: FxHashMap<&str, usize> = FxHashMap::default();
-            let mut scc_members: FxHashMap<usize, Vec<&str>> = FxHashMap::default();
+        |only_dt: bool| -> (IdentMap<&str, usize>, IdentMap<usize, Vec<&str>>) {
+            let mut scc_of: IdentMap<&str, usize> = IdentMap::default();
+            let mut scc_members: IdentMap<usize, Vec<&str>> = IdentMap::default();
             for (idx, scc) in resolved_sccs.iter().enumerate() {
                 if only_dt && scc.phase != SccPhase::Dt {
                     continue;
@@ -2485,16 +2481,16 @@ pub(crate) fn model_dependency_graph_impl(
     let (init_scc_of, init_scc_members) = build_scc_grouping(false);
 
     let topo_sort_str = |names: Vec<&String>,
-                         deps: &HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
-                         scc_of: &FxHashMap<&str, usize>,
-                         scc_members: &FxHashMap<usize, Vec<&str>>|
+                         deps: &IdentMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+                         scc_of: &IdentMap<&str, usize>,
+                         scc_members: &IdentMap<usize, Vec<&str>>|
      -> Vec<String> {
         // Build the allowed set: only variables in the filtered input list
         // should appear in the output. Dependencies are used solely for
         // ordering, not for expanding the set.
-        let allowed: FxHashSet<&str> = names.iter().map(|n| n.as_str()).collect();
+        let allowed: IdentSet<&str> = names.iter().map(|n| n.as_str()).collect();
         let mut result: Vec<String> = Vec::new();
-        let mut used: FxHashSet<String> = FxHashSet::default();
+        let mut used: IdentSet<String> = IdentSet::default();
 
         // `deps` is now interned-keyed, but this sort still works in `&str`
         // space: probes go through `Borrow<str>` and each dep-set iteration
@@ -2502,12 +2498,12 @@ pub(crate) fn model_dependency_graph_impl(
         // the former `String`-keyed map (same visit order over a pre-sorted
         // `names`, same `BTreeSet` dep order).
         fn add(
-            deps: &HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
-            allowed: &FxHashSet<&str>,
-            scc_of: &FxHashMap<&str, usize>,
-            scc_members: &FxHashMap<usize, Vec<&str>>,
+            deps: &IdentMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+            allowed: &IdentSet<&str>,
+            scc_of: &IdentMap<&str, usize>,
+            scc_members: &IdentMap<usize, Vec<&str>>,
             result: &mut Vec<String>,
-            used: &mut FxHashSet<String>,
+            used: &mut IdentSet<String>,
             name: &str,
         ) {
             if used.contains(name) {
@@ -2690,8 +2686,8 @@ pub(crate) fn model_dependency_graph_impl(
             }
             init_set.extend(additional);
         }
-        // `init_set` is a `HashSet`, so its iteration order is a function of
-        // the per-process HashMap RandomState seed, not of the model. Sort
+        // `init_set` is a hash set, so its iteration order is no function of
+        // the model. Sort
         // before handing it to `topo_sort_str`, which emits `names` in visit
         // order and breaks ties (variables with no ordering dependency between
         // them -- independent constants, stocks, `INITIAL()`/`PREVIOUS()`
@@ -2751,7 +2747,7 @@ pub(crate) fn model_dependency_graph_impl(
         // a definition that runs there by kind -- and a read from another
         // INIT-only capture promotes nothing, since that reader is not one.
         // Only such captures can be promoted, so only they are collected.
-        let current_reads: FxHashSet<&str> = var_names
+        let current_reads: IdentSet<&str> = var_names
             .iter()
             .filter(|n| per_step(n))
             .flat_map(|n| dt_dependencies.get(n.as_str()))

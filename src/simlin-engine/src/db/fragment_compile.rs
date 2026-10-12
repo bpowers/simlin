@@ -15,7 +15,7 @@
 //! LTM emitters in `db/ltm/compile.rs` are the same shape over their own two
 //! constructors.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use salsa::Accumulator;
 
@@ -726,7 +726,7 @@ pub(crate) fn implicit_fragment_input<'db>(
     // A synthesized helper carries no graphical function of its own
     // (`ImplicitVar::parsed_variable` builds it with no tables); only the
     // tables of the dependencies it reads through `LOOKUP(dep, x)` are needed.
-    let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
+    let mut tables: IdentMap<Ident<Canonical>, Vec<crate::compiler::Table>> = IdentMap::default();
     for (ident, declared) in heads {
         let DeclaredName::Source(dep_sv) = declared else {
             continue;

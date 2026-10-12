@@ -2,11 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
-
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
-use crate::common::{Canonical, EquationError, ErrorCode, Ident, UnitError, UnitResult};
+use crate::common::{
+    Canonical, EquationError, ErrorCode, Ident, IdentMap, IdentSet, UnitError, UnitResult,
+};
 use crate::datamodel::UnitMap;
 use crate::units::{Context, UnitOp, Units, combine};
 use crate::variable::{LoweredVariableMap, VarKind, Variable};
@@ -52,7 +52,7 @@ pub(crate) fn literal_exponent(expr: &Expr2) -> Option<f64> {
 
 struct UnitEvaluator<'a> {
     model: &'a UnitModel,
-    inferred_units: &'a HashMap<Ident<Canonical>, UnitMap>,
+    inferred_units: &'a IdentMap<Ident<Canonical>, UnitMap>,
     // units for module inputs
     time: Variable,
 }
@@ -534,7 +534,7 @@ fn time_variable(ctx: &Context) -> Variable {
 /// unknown ones are not an error).
 pub fn evaluate_expr_units(
     ctx: &Context,
-    inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
+    inferred_units: &IdentMap<Ident<Canonical>, UnitMap>,
     model: &UnitModel,
     expr: &Expr2,
 ) -> UnitResult<Units> {
@@ -564,7 +564,7 @@ fn in_element(err: UnitError, element: &crate::common::CanonicalElementName) -> 
 /// with its declared units.
 pub fn check(
     ctx: &Context,
-    inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
+    inferred_units: &IdentMap<Ident<Canonical>, UnitMap>,
     model: &UnitModel,
 ) -> UnitErrorList {
     use UnitError::{ConsistencyError, DefinitionError};
@@ -801,7 +801,7 @@ pub fn check(
             }
         }
     };
-    let mut seen: HashSet<(Ident<Canonical>, (u32, String))> = HashSet::new();
+    let mut seen: IdentSet<(Ident<Canonical>, (u32, String))> = IdentSet::default();
     errors.retain(|(ident, err)| seen.insert((ident.clone(), dedup_key(err))));
 
     // units checking uses the model's equations and variable's
