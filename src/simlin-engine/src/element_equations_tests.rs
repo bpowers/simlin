@@ -88,23 +88,32 @@ fn a_number_for_every_element_keeps_its_followers() {
     assert_eq!(arms, [("old", "0.08")]);
 }
 
-/// An offset's first element, written out as `NaN` because it reads no
-/// element, follows the offset: both read not a number there.
+/// An element whose own equation is `NaN` keeps it, though the equation for
+/// every other element reads no element there: whether that equation is NaN
+/// there is not plain from the text. `IF THEN ELSE(switch, c[Age - 1], 5)`
+/// is 5 at the first age when `switch` is 0, not NaN.
 #[test]
-fn an_element_that_reads_no_element_follows_as_nan() {
+fn an_element_whose_equation_is_nan_keeps_it() {
+    let switch = "switch = 0 ~~|\n";
     let project = open(&format!(
+        "{AGES}{switch}d[young] = NaN ~~|\nd[adult] = IF THEN ELSE(switch, c[young], 5) ~~|\n\
+         d[old] = IF THEN ELSE(switch, c[adult], 5) ~~|\n"
+    ));
+    assert!(run(&project)["d[young]"].iter().all(|v| v.is_nan()));
+    assert_eq!(run(&project)["d[old]"], vec![5.0, 5.0, 5.0]);
+
+    let plain = open(&format!(
         "{AGES}d[young] = NaN ~~|\nd[adult] = c[young] ~~|\nd[old] = c[adult] ~~|\n"
     ));
-    let (dims, arms, default) = match equation(&project, "d") {
-        Equation::ApplyToAll(dims, text) => (dims, Vec::new(), text),
-        Equation::Arrayed(dims, arms, Some(default), true) => (dims, arms, default),
-        other => panic!("one equation for every element: {other:?}"),
+    let Equation::Arrayed(dims, arms, Some(default), true) = equation(&plain, "d") else {
+        panic!("a default and an exception: {:?}", equation(&plain, "d"));
     };
     assert_eq!(dims, ["Age"]);
     assert_eq!(default, "c[Age - 1]");
-    assert!(arms.is_empty(), "{arms:?}");
-    assert!(run(&project)["d[young]"].iter().all(|v| v.is_nan()));
-    assert_eq!(run(&project)["d[old]"], vec![20.0, 20.0, 20.0]);
+    let arms: Vec<(&str, &str)> = arms.iter().map(|a| (a.0.as_str(), a.1.as_str())).collect();
+    assert_eq!(arms, [("young", "NaN")]);
+    assert!(run(&plain)["d[young]"].iter().all(|v| v.is_nan()));
+    assert_eq!(run(&plain)["d[old]"], vec![20.0, 20.0, 20.0]);
 }
 
 #[test]

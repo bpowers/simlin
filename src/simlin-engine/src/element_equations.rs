@@ -440,9 +440,8 @@ fn element_at(axes: &[Axis], key: &str) -> Option<Vec<usize>> {
 /// replaced by the equation most elements read.
 ///
 /// An element whose own equation is `NaN`, where the equation for every
-/// element reads no element (an offset past the dimension's end), follows
-/// it: both read not a number there. A writer that has no arithmetic in a
-/// subscript writes such an element so.
+/// element reads no element (an offset past the dimension's end), keeps its
+/// own: whether that equation is NaN there is not plain from its text.
 pub(crate) fn compact_element_equations(project: &mut Project) {
     for m in 0..project.models.len() {
         let model = Model::of(project, &project.models[m]);
@@ -483,15 +482,10 @@ fn compacted(var: &Variable, model: &Model) -> Option<Variable> {
     }
     // Whether the element `i` computes what the equation for every element
     // `text` (of the form `form`) computes there: its equation reads the same
-    // at the element, or is that equation written out at it, or is `NaN`
-    // where that equation reads no element.
+    // at the element, or is that equation written out at it.
     let follows = |i: usize, text: &str, form: &str| {
         let (at, _, read_form, own_form) = &read[i];
-        read_form == form
-            || match written_at(text, model, &axes, at) {
-                Some(written) => written == *own_form,
-                None => is_nan(&arms[i].1),
-            }
+        read_form == form || written_at(text, model, &axes, at).is_some_and(|w| w == *own_form)
     };
 
     let total: usize = axes.iter().map(|a| a.elements.len()).product();
@@ -580,14 +574,6 @@ fn is_number(text: &str) -> bool {
         }
     }
     matches!(Expr0::new(text, LexerType::Equation), Ok(Some(expr)) if number(&expr))
-}
-
-/// Whether `text` is `NaN`, not a number.
-fn is_nan(text: &str) -> bool {
-    matches!(
-        Expr0::new(text, LexerType::Equation),
-        Ok(Some(Expr0::Const(_, n, _))) if n.value().is_nan()
-    )
 }
 
 fn canonical_form(text: &str) -> Option<String> {
