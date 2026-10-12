@@ -1277,11 +1277,10 @@ fn a_repeated_active_dimension_pairs_each_occurrence_with_its_own_axis() {
 /// `out[DimA,DimX] = src[*,*]` over `src[DimB,DimC]` with `DimB -> DimA` and
 /// `DimC -> DimA`: both source axes match `DimA` through the mapping rung, and
 /// searching per source axis independently lets both claim it -- every element
-/// then read `src[b_i,c_i]`, the diagonal, and `out[a1,x2]` was 11. With the
-/// allocation one-to-one `DimB` takes `DimA` and `DimC` is left unpaired, so it
-/// is read POSITIONALLY against `DimX` (equal length, so the positional check
-/// passes) and resolves `x_j` through `DimX`'s own ordinal: `out[a_i,x_j]` is
-/// `src[b_i,c_j]`, and `src[b_i,c_j]` is `10i+j`.
+/// then read `src[b_i,c_i]`, the diagonal. With the allocation one-to-one
+/// `DimB` takes `DimA` and `DimC` is left unpaired: nothing relates it to
+/// `DimX`, so the read is refused as one paired by position alone (GH #1044),
+/// naming `DimC` and only `DimC`.
 #[test]
 fn two_mapped_source_axes_cannot_both_read_one_active_axis() {
     let datamodel = simlin_engine::test_common::TestProject::new("one_to_one")
@@ -1290,31 +1289,21 @@ fn two_mapped_source_axes_cannot_both_read_one_active_axis() {
         .named_dimension_with_mapping("DimB", &["b1", "b2", "b3"], "DimA")
         .named_dimension_with_mapping("DimC", &["c1", "c2", "c3"], "DimA")
         .named_dimension("DimX", &["x1", "x2", "x3"])
-        .array_with_ranges(
-            "src[DimB,DimC]",
-            vec![
-                ("b1,c1", "11"),
-                ("b1,c2", "12"),
-                ("b1,c3", "13"),
-                ("b2,c1", "21"),
-                ("b2,c2", "22"),
-                ("b2,c3", "23"),
-                ("b3,c1", "31"),
-                ("b3,c2", "32"),
-                ("b3,c3", "33"),
-            ],
-        )
+        .array_const("src[DimB,DimC]", 1.0)
         .array_aux("out[DimA,DimX]", "src[*, *]")
         .build_datamodel();
 
-    let row = vm_last_row(&datamodel);
-    for (name, value) in [
-        ("out[a1,x2]", 12.0),
-        ("out[a2,x3]", 23.0),
-        ("out[a3,x1]", 31.0),
-    ] {
-        assert_eq!(cell(&row, name), value, "{name} must be src[b_i,c_j]");
-    }
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    let reads: Vec<Vec<String>> = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .iter()
+    .filter_map(|d| d.mismatched_read().map(|read| read.unpaired.clone()))
+    .collect();
+    assert_eq!(reads, vec![vec!["dimc".to_string()]]);
 }
 
 /// Two axes that each declare a mapping onto a THIRD dimension pair through it,
@@ -1452,9 +1441,10 @@ fn a_common_mapping_target_resolves_through_its_element_maps() {
 ///
 /// Three spellings, because the axis name is what changed and each reaches it
 /// differently: the plain read, the transposed one, and a target axis that
-/// reaches `Parent` through a declared mapping rather than by name. The
-/// mapped-onto-`Sub` spelling is refused on both sides of the change and is
-/// rowed so the refusal is not read as covering more than it does.
+/// reaches `Parent` through a declared mapping rather than by name. A target
+/// axis mapped onto `Sub` itself is the control: it pairs with the range's
+/// axis through that mapping, and each of its elements reads the `Sub` row
+/// the mapping gives it (`m1` row `A`, `m2` row `C`).
 #[test]
 fn a_star_range_over_a_subdimension_is_refused_by_a_parent_target() {
     fn project(name: &str) -> simlin_engine::test_common::TestProject {
@@ -1511,11 +1501,17 @@ fn a_star_range_over_a_subdimension_is_refused_by_a_parent_target() {
     let mapped_to_sub = project("star_sub_mapped")
         .named_dimension_with_mapping("DimM", &["m1", "m2"], "Sub")
         .array_aux("out[DimM,Other]", "arr[*:Sub, *]");
-    assert_eq!(
-        mapped_to_sub.error_diagnostics(),
-        vec![("main.out".to_string(), ErrorCode::MismatchedDimensions)],
-        "the mapped-onto-Sub spelling is refused on both sides of the change"
-    );
+    let results = mapped_to_sub
+        .run_vm()
+        .expect("a target axis mapped onto Sub reads Sub's rows");
+    for (cell, want) in [
+        ("out[m1,x]", 11.0),
+        ("out[m1,z]", 13.0),
+        ("out[m2,x]", 31.0),
+        ("out[m2,z]", 33.0),
+    ] {
+        assert_eq!(results[cell].last(), Some(&want), "{cell}");
+    }
 }
 
 /// Two operands' bounds unify through a declared MAPPING, not by name alone.
@@ -2594,7 +2590,7 @@ TIME STEP = 1 ~~|
         (get("h[a3]") - 0.0).abs() < 1e-10,
         "h[A3] is Simlin's fabricated 0 (Vensim has no such element)"
     );
-    // ... and the warning names those two elements on h.
+    // ... and the warning names those two elements on h, one row each.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
     let diagnostics = simlin_engine::db::collect_all_diagnostics(
@@ -2602,23 +2598,29 @@ TIME STEP = 1 ~~|
         sync.project,
         simlin_engine::db::LtmOverlay::Off,
     );
-    let h_missing: Vec<String> = diagnostics
+    let h_missing: Vec<(Option<&str>, String)> = diagnostics
         .iter()
         .filter_map(|d| match &d.error {
             simlin_engine::db::DiagnosticError::Model(e)
                 if e.code == simlin_engine::common::ErrorCode::MissingElementEquation
                     && d.variable.as_deref() == Some("h") =>
             {
-                e.get_details()
+                Some((d.element(), e.get_details().unwrap_or_default()))
             }
             _ => None,
         })
         .collect();
-    assert_eq!(h_missing.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        h_missing.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+        vec![Some("a2"), Some("a3")],
+        "{diagnostics:?}"
+    );
     assert!(
-        h_missing[0].starts_with("array variable 'h' has no equation for 'a2', 'a3'"),
-        "{}",
         h_missing[0]
+            .1
+            .starts_with("array variable 'h' has no equation for 'a2'"),
+        "{}",
+        h_missing[0].1
     );
 
     // p[DimA] :EXCEPT: [A1] = 2, p[A1] = 5
@@ -7197,6 +7199,28 @@ fn corpus_clearn_macros_import() {
 /// 6,199 variables and 34,365 slots (34,393 with the 28 scores), 31,171 free
 /// against the 65,536-slot ceiling.
 ///
+/// Opening an MDL file keeps one equation where a variable's elements say one
+/// thing (`element_equations`): eleven of C-LEARN's variables the reader wrote
+/// out once per element are one equation over their dimensions again. Their
+/// link scores are arrayed over the dimensions rather than one scalar per
+/// element, so the count is 6,155 (44 under) and the width 34,083 slots (282
+/// under), 31,453 free; the link scores the model declines, and every LTM
+/// diagnostic it files, are the same 23 as before.
+///
+/// An offset is stored too, and loop analysis describes a variable whose
+/// elements read a position they compute -- an offset, a condition on the
+/// element (`IF Target = 1`), a reducer whose axes the element fixes -- as the
+/// equations of its elements, each such read pinned to the element it comes
+/// to (`FragmentInput::elementwise_target`). Twenty-nine of C-LEARN's
+/// variables are described so: the deep ocean's layers, which read the layer
+/// above or below, and the emission targets over `Target - 1`. A link into one
+/// of them is scored for the element pair the run reads
+/// (`emissions_with_cumulative_constraints[oecd_us,t1] ->
+/// previous_intensity_vs_rs`), and a read by the dimensions the equation
+/// iterates (`gdp[COP]`) stays one score over them. The count is 6,061 and
+/// the width 30,896 slots, 34,640 free; the declined scores and the LTM
+/// diagnostics are the same 23.
+///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
 #[test]
@@ -7221,7 +7245,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6199,
+        total, 6061,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"
@@ -8152,8 +8176,8 @@ fn a_private_materialization_beside_a_shared_one_stays_in_its_element() {
 }
 
 /// A temp axis the target does not NAME is read through the declared
-/// correspondence -- the element's own name on the temp's axis, then the
-/// declared mapping -- and refused when there is none.
+/// correspondence -- the declared mapping, then the element's own name on the
+/// temp's axis -- and refused when there is none.
 ///
 /// `out[D] = VECTOR SORT ORDER(w[E], 1)` sorts a `[E]`-shaped array into a
 /// `[E]`-shaped temp that `out[D]` reads back one element at a time.

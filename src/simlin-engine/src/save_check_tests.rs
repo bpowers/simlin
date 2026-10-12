@@ -772,8 +772,8 @@ fn a_model_that_does_not_simulate_changes_when_its_errors_do() {
             "'demands' is defined over dim2, not dim",
             "'demands' gains elements 'd' and 'e'",
             "'stock' has an error in the save that the model does not: \
-             mismatched_dimensions -- the dimensions of 'demands' do not match \
-             the dimensions of the equation that uses it",
+             mismatched_dimensions -- 'demands' is arrayed over 'dim2', which the variable \
+             reading it is not",
         ],
         "{changes:?}"
     );

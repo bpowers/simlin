@@ -516,6 +516,86 @@ fn test_project_apply_patch_rename_variable() {
     }
 }
 
+/// The report of a patch: what it renamed, by canonical identifier; for a
+/// dry run what it would rename; and for a refused patch nothing.
+#[test]
+fn test_project_apply_patch_reporting_names_what_it_renamed() {
+    let datamodel = TestProject::new("json_patch_report")
+        .aux("Birth Rate", "0.1", None)
+        .aux("other", "1", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    let rename = |from: &str, to: &str| {
+        format!(
+            r#"{{"models": [{{"name": "main", "ops": [{{"type": "renameVariable", "payload": {{"from": "{from}", "to": "{to}"}}}}]}}]}}"#
+        )
+    };
+    let apply = |patch: &str, dry_run: bool| -> (Option<String>, bool) {
+        unsafe {
+            let mut report: *mut u8 = ptr::null_mut();
+            let mut report_len: usize = 0;
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch_reporting(
+                proj,
+                patch.as_ptr(),
+                patch.len(),
+                dry_run,
+                true,
+                &mut report,
+                &mut report_len,
+                &mut collected_errors,
+                &mut out_error,
+            );
+            let refused = !out_error.is_null();
+            if refused {
+                simlin_error_free(out_error);
+            }
+            if !collected_errors.is_null() {
+                simlin_error_free(collected_errors);
+            }
+            if report.is_null() {
+                return (None, refused);
+            }
+            let json = String::from_utf8(std::slice::from_raw_parts(report, report_len).to_vec())
+                .expect("the report is UTF-8");
+            simlin_free(report);
+            (Some(json), refused)
+        }
+    };
+
+    let (report, refused) = apply(&rename("Birth Rate", "Fertility"), true);
+    assert!(!refused);
+    assert_eq!(
+        report.as_deref(),
+        Some(
+            r#"{"renamed":[{"model":"main","from":"birth_rate","to":"fertility"}],"deleted":[],"created":[]}"#
+        ),
+        "a dry run reports what it would rename"
+    );
+    let (report, refused) = apply(&rename("Birth Rate", "Fertility"), false);
+    assert!(!refused);
+    assert_eq!(
+        report.as_deref(),
+        Some(
+            r#"{"renamed":[{"model":"main","from":"birth_rate","to":"fertility"}],"deleted":[],"created":[]}"#
+        )
+    );
+    let (report, refused) = apply(&rename("other", "fertility"), false);
+    assert!(refused, "a rename onto another variable is refused");
+    assert_eq!(report, None, "and reports nothing");
+    let (report, refused) = apply(r#"{"models": []}"#, false);
+    assert!(!refused);
+    assert_eq!(
+        report.as_deref(),
+        Some(r#"{"renamed":[],"deleted":[],"created":[]}"#)
+    );
+
+    unsafe {
+        simlin_project_unref(proj);
+    }
+}
+
 #[test]
 fn test_project_apply_patch_upsert_view() {
     let datamodel = TestProject::new("json_patch_view").build_datamodel();

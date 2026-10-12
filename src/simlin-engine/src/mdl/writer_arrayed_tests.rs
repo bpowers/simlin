@@ -309,3 +309,251 @@ fn an_except_default_naming_a_mapped_range_is_written_as_element_equations() {
         .collect();
     assert_eq!(results, Vec::<String>::new());
 }
+
+#[test]
+fn an_elements_table_under_an_except_default_reads_the_default() {
+    // An element with a table of its own and no equation, under a default
+    // every other element follows, computes its table of the default (an
+    // XMILE graphical function arrayed with one shared equation reads this
+    // way). Written beside an :EXCEPT: equation, the element is the default
+    // fed through its table, `WITH LOOKUP`; written as a table alone it would
+    // be, to Vensim, a lookup definition with no value.
+    let gf = datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 10.0]),
+        y_points: vec![0.0, 100.0],
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 10.0,
+        },
+        y_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 100.0,
+        },
+    };
+    let mut project = crate::test_common::TestProject::new("gf_arm")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("Cities", &["Boston", "Seattle", "Tulsa"])
+        .aux("input", "2", None)
+        .build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "y".to_string(),
+            equation: Equation::Arrayed(
+                vec!["Cities".to_string()],
+                vec![
+                    ("Boston".to_string(), String::new(), None, Some(gf)),
+                    ("Seattle".to_string(), "7".to_string(), None, None),
+                ],
+                Some("input".to_string()),
+                true,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    let changes: Vec<String> = check_save(&project, SaveFormat::Mdl)
+        .expect("the check runs")
+        .into_iter()
+        .map(|c| c.reason)
+        .collect();
+    let save = project_to_mdl(&project).expect("the model writes");
+    assert!(save.contains(":EXCEPT:"), "{save}");
+    let save = save.replace("\r\n", "\n");
+    let boston = save
+        .split('|')
+        .find(|entry| entry.contains("y[Boston]"))
+        .expect("Boston is written");
+    assert!(
+        boston.contains("WITH LOOKUP") && boston.contains("input"),
+        "Boston is the default through its table, not a table alone: {boston}"
+    );
+    assert_eq!(changes, Vec::<String>::new(), "{save}");
+}
+
+fn run_project(project: &datamodel::Project) -> std::collections::HashMap<String, Vec<f64>> {
+    crate::test_common::TestProject::from_datamodel(project.clone())
+        .run_vm()
+        .expect("the model runs")
+}
+
+/// An equation for every element that reads an element a fixed number of
+/// places along is written to MDL once per element, each computed index the
+/// element it comes to, and one that comes to no element `NaN`; the save reads
+/// back as the same model and runs the same.
+#[test]
+fn an_offset_is_saved_to_mdl_as_each_elements_own_equation() {
+    let project = crate::test_common::TestProject::new("offsets")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("Age", &["young", "adult", "old"])
+        .array_with_ranges(
+            "c[Age]",
+            vec![("young", "10"), ("adult", "20"), ("old", "30")],
+        )
+        .array_aux("d[Age]", "c[Age - 1] + c[Age]")
+        .array_with_default_and_overrides("e[Age]", "c[Age + 1]", vec![("old", "0")])
+        .build_datamodel();
+    let save = crate::mdl::project_to_mdl(&project)
+        .expect("the model writes")
+        .replace("\r\n", "\n");
+    assert!(
+        !save.contains("Age - 1") && !save.contains("Age + 1"),
+        "{save}"
+    );
+    assert!(save.contains("d[adult]"), "{save}");
+    assert!(save.contains("NaN"), "{save}");
+    let back = crate::open_vensim(&save).expect("the save reads");
+    assert_eq!(
+        crate::mdl::subscript_rule::ranges_not_on_the_left(&save, &back),
+        Vec::<String>::new()
+    );
+    let (was, is) = (run_project(&project), run_project(&back));
+    for key in ["d[young]", "d[adult]", "d[old]", "e[young]", "e[old]"] {
+        let (a, b) = (&was[key], &is[key]);
+        assert!(
+            a.iter()
+                .zip(b)
+                .all(|(a, b)| a == b || (a.is_nan() && b.is_nan())),
+            "{key}: {a:?} then {b:?}"
+        );
+    }
+    // What the save changes is how the model is written, never what it
+    // computes: the element that reads no element is written `NaN`, and the
+    // equation the elements followed is written into each of them.
+    let changes = check_save(&project, SaveFormat::Mdl).expect("the check runs");
+    assert!(
+        changes
+            .iter()
+            .all(|c| c.kind == crate::save_check::ChangeKind::Structure),
+        "{:?}",
+        changes.iter().map(|c| &c.reason).collect::<Vec<_>>()
+    );
+    let (_, warnings) = crate::mdl::project_to_mdl_with_warnings(&project).expect("writes");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.message.contains("'d'") && w.message.contains("at young")),
+        "{:?}",
+        warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
+/// An offset's elements written one by one read a mapped variable through
+/// its mapping: with Group mapped onto Age, `x[Age]` at adult is `x[g2]`.
+#[test]
+fn an_offset_written_out_reads_a_mapped_variable_through_its_mapping() {
+    let project = crate::test_common::TestProject::new("mapped_offsets")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Age", &["young", "adult", "old"])
+        .named_dimension_with_mapping("Group", &["g1", "g2", "g3"], "Age")
+        .array_with_ranges(
+            "c[Age]",
+            vec![("young", "10"), ("adult", "20"), ("old", "30")],
+        )
+        .array_with_ranges("x[Group]", vec![("g1", "1"), ("g2", "2"), ("g3", "3")])
+        .array_aux("d[Age]", "x[Age] + c[Age - 1]")
+        .build_datamodel();
+    let save = crate::mdl::project_to_mdl(&project)
+        .expect("the model writes")
+        .replace("\r\n", "\n");
+    assert!(save.contains("x[g2]"), "{save}");
+    let back = crate::open_vensim(&save).expect("the save reads");
+    let (was, is) = (run_project(&project), run_project(&back));
+    for key in ["d[adult]", "d[old]"] {
+        assert_eq!(was[key], is[key], "{key}");
+    }
+}
+
+fn table() -> datamodel::GraphicalFunction {
+    datamodel::GraphicalFunction {
+        kind: datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some(vec![0.0, 100.0]),
+        y_points: vec![0.0, 50.0],
+        x_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 100.0,
+        },
+        y_scale: datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: 50.0,
+        },
+    }
+}
+
+/// What the save of `project` changes in what it computes: every change
+/// that is not only how the model is written.
+fn computed_changes(project: &datamodel::Project) -> Vec<String> {
+    check_save(project, SaveFormat::Mdl)
+        .expect("the check runs")
+        .into_iter()
+        .filter(|c| c.kind != crate::save_check::ChangeKind::Structure)
+        .map(|c| c.reason)
+        .collect()
+}
+
+fn ages_with(equation: Equation, gf: Option<datamodel::GraphicalFunction>) -> datamodel::Project {
+    let mut project = crate::test_common::TestProject::new("tables")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("Age", &["young", "adult", "old"])
+        .array_with_ranges(
+            "c[Age]",
+            vec![("young", "10"), ("adult", "20"), ("old", "30")],
+        )
+        .build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "d".to_string(),
+            equation,
+            documentation: String::new(),
+            units: None,
+            gf,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    project
+}
+
+#[test]
+fn an_elements_table_under_an_offset_default_reads_the_default_at_the_element() {
+    // The default reads an offset, so the elements are written out one by
+    // one; the element with a table and no equation is still the default --
+    // at that element -- through its table.
+    let project = ages_with(
+        Equation::Arrayed(
+            vec!["Age".to_string()],
+            vec![
+                ("young".to_string(), "5".to_string(), None, None),
+                ("old".to_string(), String::new(), None, Some(table())),
+            ],
+            Some("c[Age - 1]".to_string()),
+            true,
+        ),
+        None,
+    );
+    assert_eq!(computed_changes(&project), Vec::<String>::new());
+    let save = project_to_mdl(&project).expect("the model writes");
+    assert!(save.contains("WITH LOOKUP"), "{save}");
+}
+
+#[test]
+fn a_variables_table_is_written_into_each_element_that_reads_through_it() {
+    // A variable with a table of its own and one element with an equation of
+    // its own: every element reads through the variable's table, which MDL
+    // gives to element equations, so each is written `WITH LOOKUP`.
+    let project = ages_with(
+        Equation::Arrayed(
+            vec!["Age".to_string()],
+            vec![("old".to_string(), "TIME * 2".to_string(), None, None)],
+            Some("TIME".to_string()),
+            true,
+        ),
+        Some(table()),
+    );
+    assert_eq!(computed_changes(&project), Vec::<String>::new());
+}

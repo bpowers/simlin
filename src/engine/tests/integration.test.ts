@@ -439,10 +439,15 @@ describe('WASM Integration Tests', () => {
       //   offset 24: unit_error_kind (u32)
       //   offset 28: severity (u32)
       //   offset 32: details (ptr)
-      // Total size: 36 bytes
+      //   offset 36: element_name (ptr)
+      //   offset 40: read_past_dimension (ptr)
+      //   offset 44: read_past (u32)
+      //   offset 48: mismatched_read_variable (ptr)
+      //   offset 52: mismatched_read_dimensions (ptr)
+      // Total size: 56 bytes
 
       // Use the malloc/free from our memory module
-      const structPtr = malloc(36);
+      const structPtr = malloc(56);
       const memory = getMemory();
       const view = new DataView(memory.buffer);
 
@@ -457,6 +462,11 @@ describe('WASM Integration Tests', () => {
       view.setUint32(structPtr + 24, 1, true); // unit_error_kind (Definition)
       view.setUint32(structPtr + 28, 1, true); // severity (Warning)
       view.setUint32(structPtr + 32, 0, true); // details (null)
+      view.setUint32(structPtr + 36, 0, true); // element_name (null)
+      view.setUint32(structPtr + 40, 0, true); // read_past_dimension (null)
+      view.setUint32(structPtr + 44, 2, true); // read_past (AfterLast)
+      view.setUint32(structPtr + 48, 0, true); // mismatched_read_variable (null)
+      view.setUint32(structPtr + 52, 0, true); // mismatched_read_dimensions (null)
 
       // Read it back using our function
       const detail = readErrorDetail(structPtr);
@@ -471,14 +481,19 @@ describe('WASM Integration Tests', () => {
       expect(detail.unitErrorKind).toBe(1);
       expect(detail.severity).toBe(1);
       expect(detail.details).toBeNull();
+      expect(detail.elementName).toBeNull();
+      expect(detail.readPastDimension).toBeNull();
+      expect(detail.readPast).toBe(2);
+      expect(detail.mismatchedReadVariable).toBeNull();
+      expect(detail.mismatchedReadDimensions).toBeNull();
 
       free(structPtr);
     });
 
     it('should have SimlinErrorDetail size match Rust-reported size', () => {
-      // Verify the TypeScript size (36 bytes) matches what Rust reports
+      // Verify the TypeScript size (56 bytes) matches what Rust reports
       const rustSizes = getRustStructSizes();
-      expect(rustSizes.errorDetailSize).toBe(36);
+      expect(rustSizes.errorDetailSize).toBe(56);
     });
   });
 

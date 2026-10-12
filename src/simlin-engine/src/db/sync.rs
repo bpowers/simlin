@@ -651,8 +651,14 @@ mod flow_list_tests;
 /// different simulations the same, and may call the same simulation different.
 /// Telling a respelling from a change takes a parse of every equation, which a
 /// key taken at every revision does not pay for the run it would save.
-#[cfg(feature = "agent_tools")]
-pub(crate) fn simulation_key(project: &datamodel::Project) -> u64 {
+///
+/// The number compares contents within one build of the engine: the hasher
+/// is the standard library's, whose output a later toolchain may change, so
+/// a key is never stored to be compared after a restart.
+///
+/// A host compares it before it simulates again (`simlin_project_get_simulation_key`)
+/// and the agent tools keep a run fresh by it (`tools::runs::RunStore`).
+pub fn simulation_key(project: &datamodel::Project) -> u64 {
     let mut key = KeyHasher::default();
 
     let SourceProjectFields {
@@ -744,11 +750,9 @@ pub(crate) fn simulation_key(project: &datamodel::Project) -> u64 {
 /// The hasher [`simulation_key`] feeds: one method per type it takes apart,
 /// each naming every field of its type, so a field added to one of them does
 /// not compile until it is hashed or left out here.
-#[cfg(feature = "agent_tools")]
 #[derive(Default)]
 struct KeyHasher(std::collections::hash_map::DefaultHasher);
 
-#[cfg(feature = "agent_tools")]
 impl KeyHasher {
     fn finish(self) -> u64 {
         std::hash::Hasher::finish(&self.0)
@@ -1063,7 +1067,7 @@ impl KeyHasher {
     }
 }
 
-#[cfg(all(test, feature = "agent_tools"))]
+#[cfg(test)]
 #[path = "simulation_key_tests.rs"]
 mod simulation_key_tests;
 

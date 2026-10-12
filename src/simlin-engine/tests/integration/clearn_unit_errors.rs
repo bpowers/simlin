@@ -26,7 +26,7 @@ fn load_clearn() -> simlin_engine::datamodel::Project {
 
 fn diag_details(d: &Diagnostic) -> String {
     match &d.error {
-        DiagnosticError::Unit(UnitError::ConsistencyError(_, _, Some(s))) => s.clone(),
+        DiagnosticError::Unit(UnitError::ConsistencyError(_, _, Some(s), _)) => s.clone(),
         DiagnosticError::Unit(UnitError::InferenceError {
             details: Some(s), ..
         }) => s.clone(),

@@ -427,8 +427,9 @@ pub(crate) fn reorder_arrayed_element_tables<T>(
 }
 
 /// Whether an equation's graphical-function tables are laid out PER ELEMENT
-/// -- one slot per declared combination in row-major order, an empty
-/// placeholder where the element has no gf (`reorder_arrayed_element_tables`)
+/// -- one slot per declared combination in row-major order, the variable's
+/// own table or an empty placeholder where the element has no gf
+/// (`reorder_arrayed_element_tables`)
 /// -- rather than one variable-level table. The layout [`build_tables`]
 /// chooses when any entry of an arrayed equation carries its own gf; the one
 /// rule, read by the missing-element advisory to tell a gf-only element's
@@ -463,7 +464,17 @@ fn build_tables(
     {
         // Parse each element's table, keyed by the element's canonical
         // (comma-joined) subscript name. Elements without a GF are simply
-        // absent from the map and get an empty placeholder at their slot.
+        // absent from the map and get the variable's own table at their slot,
+        // as an element that has none of its own reads through it -- or an
+        // empty placeholder where the variable has none.
+        let shared = match parse_table(gf) {
+            Ok(table) => table,
+            Err(err) => {
+                errors.push(err);
+                None
+            }
+        };
+        let placeholder = || shared.clone().unwrap_or_else(Table::empty);
         let mut present: HashMap<CanonicalElementName, Table> = HashMap::new();
         for (subscript, _, _, elem_gf) in elements {
             match parse_table(elem_gf.as_ref()) {
@@ -489,7 +500,7 @@ fn build_tables(
         // Vec-positional layout rather than dropping tables.
         let tables = match get_dimensions(dimensions, dim_names) {
             Ok(dims) => {
-                reorder_arrayed_element_tables(&dims, &present, Table::empty, |t: &Table| t.clone())
+                reorder_arrayed_element_tables(&dims, &present, placeholder, |t: &Table| t.clone())
             }
             Err(_) => elements
                 .iter()
@@ -497,7 +508,7 @@ fn build_tables(
                     present
                         .get(&CanonicalElementName::from_subscript(subscript))
                         .cloned()
-                        .unwrap_or_else(Table::empty)
+                        .unwrap_or_else(placeholder)
                 })
                 .collect(),
         };
@@ -709,11 +720,11 @@ pub(crate) fn unfilled_arms(ast: &Ast<Expr0>) -> Option<UnfilledArms> {
 /// an arm even when its equation is empty -- the expansion wraps the table
 /// around the fabricated 0 input (`gf(0)`, pinned by
 /// `gf_only_element_without_default_evaluates_gf_of_fabricated_zero`) -- so
-/// `per_element_table_at(offset)`, the per-element table layout
-/// [`build_tables`] built ([`has_per_element_tables`]), counts as coverage.
+/// `has_own_table(key)`, an element whose entry carries its own gf, counts as
+/// coverage. The variable's own table, which fills the other slots, does not.
 pub(crate) fn elements_without_an_arm(
     ast: &Ast<Expr0>,
-    per_element_table_at: impl Fn(usize) -> bool,
+    has_own_table: impl Fn(&CanonicalElementName) -> bool,
 ) -> Vec<CanonicalElementName> {
     let Ast::Arrayed(dims, elements, default, apply_default_to_missing) = ast else {
         return vec![];
@@ -722,10 +733,8 @@ pub(crate) fn elements_without_an_arm(
         return vec![];
     }
     crate::dimensions::SubscriptIterator::new(dims)
-        .enumerate()
-        .map(|(offset, combination)| (offset, CanonicalElementName::from_parts(&combination)))
-        .filter(|(offset, key)| !elements.contains_key(key) && !per_element_table_at(*offset))
-        .map(|(_, key)| key)
+        .map(|combination| CanonicalElementName::from_parts(&combination))
+        .filter(|key| !elements.contains_key(key) && !has_own_table(key))
         .collect()
 }
 
@@ -1422,8 +1431,11 @@ fn parse_equation(
                     } else {
                         parse_inner(eqn)
                     };
-                    errors.extend(single_errors);
-                    (CanonicalElementName::from_subscript(subscript), ast)
+                    // Each element's own equation is a text of its own, so
+                    // its errors name the element their spans index.
+                    let element = CanonicalElementName::from_subscript(subscript);
+                    errors.extend(single_errors.into_iter().map(|e| e.in_element(&element)));
+                    (element, ast)
                 })
                 .filter(|(_, ast)| ast.is_some())
                 .map(|(subscript, ast)| (subscript, ast.unwrap()))
@@ -2202,7 +2214,7 @@ pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
         shapes: &Default::default(),
         model_name: "test",
     };
-    lower_ast(&scope, &ast.unwrap(), false).unwrap()
+    lower_ast(&scope, &ast.unwrap(), None).unwrap()
 }
 
 /// The same equation at the typed tier, as `db::variable_direct_dependencies`

@@ -186,6 +186,19 @@ pub(crate) const MAIN_MODEL_EXPECT: &str = "main_model: callers must run after t
 ///
 /// This is the main entry point for MDL parsing. It takes the MDL source as a
 /// string and converts it to the internal datamodel representation.
+/// [`parse_mdl`] with each variable the reader writes out once per element
+/// left so: what the compaction pass is compared against.
+#[cfg(test)]
+pub(crate) fn parse_mdl_per_element(source: &str) -> Result<Project> {
+    convert::convert_mdl_per_element(source).map_err(|e| {
+        Error::new(
+            ErrorKind::Import,
+            ErrorCode::Generic,
+            Some(format!("Failed to parse MDL: {}", e)),
+        )
+    })
+}
+
 pub fn parse_mdl(source: &str) -> Result<Project> {
     parse_mdl_with_data(source, None)
 }

@@ -629,6 +629,9 @@ mod tests {
             severity: DiagnosticSeverity::Error,
             category: None,
             details: None,
+            element: None,
+            read_past: None,
+            mismatched_read: None,
         };
         let output = ErrorOutput::from(&fe);
         assert_eq!(output.code, "unknown_dependency");
@@ -694,6 +697,9 @@ mod tests {
                 severity: DiagnosticSeverity::Error,
                 category: None,
                 details: None,
+                element: None,
+                read_past: None,
+                mismatched_read: None,
             };
             let output = ErrorOutput::from(&fe);
             assert_eq!(

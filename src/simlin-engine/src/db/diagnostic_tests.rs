@@ -956,21 +956,24 @@ fn test_compile_var_fragment_per_phase_var_new_failure() {
     );
 
     let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
+    // `x` has no dimensions for `x[*]` to range over: the read of it,
+    // refused at the reference.
     let has_per_phase_failure = diags.iter().any(|d| {
         d.variable.as_deref() == Some("y")
             && d.severity == DiagnosticSeverity::Error
             && matches!(
                 &d.error,
                 DiagnosticError::Equation(crate::common::EquationError {
-                    start: 0,
-                    end: 0,
+                    start: 4,
+                    end: 8,
+                    mismatched_read: Some(_),
                     ..
                 })
             )
     });
     assert!(
         has_per_phase_failure,
-        "expected a per-phase Var::new Equation diagnostic (span 0..0) for 'y'; got: {diags:?}"
+        "expected a per-phase Var::new Equation diagnostic for 'y' at `x[*]`; got: {diags:?}"
     );
 }
 
@@ -3317,7 +3320,7 @@ fn diagnostic_code(d: &Diagnostic) -> crate::common::ErrorCode {
         DiagnosticError::Model(e) => e.code,
         DiagnosticError::Unit(u) => match u {
             crate::common::UnitError::DefinitionError(e) => e.code,
-            crate::common::UnitError::ConsistencyError(code, _, _) => *code,
+            crate::common::UnitError::ConsistencyError(code, _, _, _) => *code,
             crate::common::UnitError::InferenceError { code, .. } => *code,
         },
         DiagnosticError::Assembly(_) => crate::common::ErrorCode::NotSimulatable,
@@ -3335,7 +3338,7 @@ fn diagnostic_reason(d: &Diagnostic) -> Option<String> {
         DiagnosticError::Model(e) => e.details.clone(),
         DiagnosticError::Unit(u) => match u {
             crate::common::UnitError::DefinitionError(e) => e.details.clone(),
-            crate::common::UnitError::ConsistencyError(_, _, d) => d.clone(),
+            crate::common::UnitError::ConsistencyError(_, _, d, _) => d.clone(),
             crate::common::UnitError::InferenceError { details, .. } => details.clone(),
         },
         DiagnosticError::Assembly(msg) => Some(msg.clone()),
@@ -3457,7 +3460,7 @@ fn every_diagnostic_stage_keeps_its_message() {
             // An apply-to-all over `e` reading an array declared over `d`:
             // every whole-variable gate passes, and `lower_fragment` refuses
             // while allocating the reference's implicit axes
-            // (`Context::get_implicit_subscripts`), naming the variable whose
+            // (`Context::get_implicit_axes`), naming the variable whose
             // axes it could not match.
             project: TestProject::new("incomparable_axes")
                 .named_dimension("d", &["e1", "e2"])
@@ -3571,7 +3574,7 @@ fn a_lowering_rejection_never_renders_its_span_as_prose() {
         // Two subscripts against a one-dimensional array.
         ("toomany", "arr[e1, e2]", ErrorCode::MismatchedDimensions),
         // A wildcard against a variable that has no dimensions to range over.
-        ("wild", "s[*]", ErrorCode::CantSubscriptScalar),
+        ("wild", "s[*]", ErrorCode::MismatchedDimensions),
     ];
 
     for (var, equation, code) in rows {

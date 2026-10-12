@@ -735,7 +735,7 @@ struct VariableMeaning {
 /// One defined element: its key, equation, own initial and own table.
 struct DefinedElement<'a> {
     key: String,
-    equation: &'a str,
+    equation: std::borrow::Cow<'a, str>,
     initial: Option<&'a str>,
     table: Option<&'a GraphicalFunction>,
 }
@@ -746,7 +746,7 @@ impl DefinedElement<'_> {
     fn whole(key: String, equation: &str) -> DefinedElement<'_> {
         DefinedElement {
             key,
-            equation,
+            equation: std::borrow::Cow::Borrowed(equation),
             initial: None,
             table: None,
         }
@@ -790,6 +790,7 @@ impl VariableMeaning {
         var: &Variable,
         dimensions: &BTreeMap<String, DimensionMeaning>,
         macros: &BTreeSet<String>,
+        elements_reader: &crate::element_equations::ElementReader,
     ) -> VariableMeaning {
         // What each kind of variable holds. Documentation, units, the AI
         // provenance mark and the diagram's uid describe a variable; none of
@@ -915,13 +916,29 @@ impl VariableMeaning {
             }
             Some(Equation::Arrayed(dims, elements, default, applies_default)) => {
                 meaning.dims = canonical_dims(dims);
+                let applied_default = default.as_deref().filter(|_| *applies_default);
                 let mut keys = BTreeSet::new();
-                for (key, text, initial, table) in elements {
-                    let key = element_key(key);
+                for (written_key, text, initial, table) in elements {
+                    let key = element_key(written_key);
                     keys.insert(key.clone());
+                    // An empty element equation is no equation to the
+                    // compiler, which fills the element from the default
+                    // where it applies: a table with no input of its own
+                    // reads the default.
+                    let text = match applied_default {
+                        Some(default) if text.trim().is_empty() => default,
+                        _ => text.as_str(),
+                    };
+                    // An element's equation is read with the element as
+                    // "this element", so `a[A1] * 2` at `A1` is the
+                    // `a[DimA] * 2` every element of a default computes.
+                    let equation = match elements_reader.read(text, dims, written_key) {
+                        Some(read) => std::borrow::Cow::Owned(read),
+                        None => std::borrow::Cow::Borrowed(text),
+                    };
                     defined.push(DefinedElement {
                         key,
-                        equation: text,
+                        equation,
                         initial: initial.as_deref(),
                         table: table.as_ref(),
                     });
@@ -957,7 +974,7 @@ impl VariableMeaning {
             let equation = if table_only {
                 EquationMeaning::none()
             } else {
-                EquationMeaning::of(element.equation, macros)
+                EquationMeaning::of(&element.equation, macros)
             };
             meaning.equations.insert(element.key.clone(), equation);
             let initial = element
@@ -1022,6 +1039,7 @@ impl ModelMeaning {
         model: &Model,
         dimensions: &BTreeMap<String, DimensionMeaning>,
         macros: &BTreeSet<String>,
+        elements: &crate::element_equations::ElementReader,
     ) -> ModelMeaning {
         let Model {
             name,
@@ -1058,7 +1076,7 @@ impl ModelMeaning {
                 .map(|var| {
                     (
                         canonicalize(var.get_ident()).into_owned(),
-                        VariableMeaning::of(var, dimensions, macros),
+                        VariableMeaning::of(var, dimensions, macros, elements),
                     )
                 })
                 .collect(),
@@ -1120,7 +1138,12 @@ impl Meaning {
                 .map(|model| {
                     (
                         canonicalize(&model.name).into_owned(),
-                        ModelMeaning::of(model, &dimensions, &macros),
+                        ModelMeaning::of(
+                            model,
+                            &dimensions,
+                            &macros,
+                            &crate::element_equations::ElementReader::new(project, model),
+                        ),
                     )
                 })
                 .collect(),

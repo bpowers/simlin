@@ -90,6 +90,14 @@ export enum SimlinErrorSeverity {
   Warning = 1,
 }
 
+// For a detail about a subscript that runs off a dimension, which end it runs
+// off - matches SimlinReadPast in simlin.h.
+export enum SimlinReadPast {
+  None = 0,
+  BeforeFirst = 1,
+  AfterLast = 2,
+}
+
 // JSON format specifier
 export enum SimlinJsonFormat {
   Native = 0,
@@ -131,6 +139,22 @@ export interface ErrorDetail {
   // 'person'"). Null when the error has no
   // separate reason string.
   details: string | null;
+  // The element of an arrayed variable the error is about, as its canonical
+  // key ("young", "nyc,young"), or null when it is about the variable as a
+  // whole. When the element has an equation of its own, startOffset and
+  // endOffset index that equation's text.
+  elementName: string | null;
+  // For a subscript that runs off a dimension, the dimension's canonical name
+  // and which end; null and None for every other detail.
+  readPastDimension: string | null;
+  readPast: SimlinReadPast;
+  // For a reference whose dimensions disagree with its reader's, the
+  // variable read (canonical) and the dimensions of it the reader has no
+  // element of (canonical, comma-separated; null when the reference
+  // subscripts the variable past its dimensions); null for every other
+  // detail.
+  mismatchedReadVariable: string | null;
+  mismatchedReadDimensions: string | null;
 }
 
 // Link structure - matches SimlinLink in simlin.h

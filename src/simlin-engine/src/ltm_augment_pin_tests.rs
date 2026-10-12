@@ -413,7 +413,7 @@ fn dep_element_pins_projection_enumeration() {
         ],
         "a `mapped[State, Age]` subscript FOLLOWS the declared element map: the \
          index survives to `IndexOp::ActiveDimRef` and `build_view_from_ops` \
-         resolves it name-first, then through the map"
+         resolves it through the map"
     );
     assert_eq!(
         mapped_pin.bare_row,
@@ -430,7 +430,7 @@ fn dep_element_pins_projection_enumeration() {
     // `nonrenewable` iteration -- FREE6's `Fraction Exploited[Renewable] =
     // Normal Production[Renewable] / Reference Resource[Renewable]`). No
     // declared relation pairs the two lists, so a BARE `ref` does not lower
-    // there and the bare row is absent; the subscript resolves name-first
+    // there and the bare row is absent; the subscript resolves by name
     // (`coal` is an element of `source`), and that spelling is the one entry.
     let source = make_named_dimension("source", &["coal", "oilgas", "hn", "new"]);
     let nonrenewable = make_named_dimension("nonrenewable", &["coal", "oilgas"]);

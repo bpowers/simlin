@@ -2347,6 +2347,29 @@ pub enum ProjectOperation {
     AddModel {
         name: String,
     },
+    /// Adds a dimension, or sets the elements, mappings and parent of the
+    /// declared dimension of its name. An element removed takes with it the
+    /// variables' own equations there; renaming an element is
+    /// `renameElement`.
+    UpsertDimension {
+        dimension: Dimension,
+    },
+    /// Renames a dimension, and every variable and equation that names it.
+    RenameDimension {
+        from: String,
+        to: String,
+    },
+    /// Renames one element of a dimension, and every key and subscript that
+    /// names it.
+    RenameElement {
+        dimension: String,
+        from: String,
+        to: String,
+    },
+    /// Deletes a dimension no variable, equation or dimension uses.
+    DeleteDimension {
+        name: String,
+    },
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -2407,6 +2430,50 @@ pub enum ModelOperation {
         #[serde(default)]
         remove: Vec<i32>,
     },
+    /// A scalar's equation (a stock's initial value), or the equation every
+    /// element of an arrayed variable follows; elements with equations of
+    /// their own keep them.
+    SetEquation {
+        ident: String,
+        equation: String,
+    },
+    /// One element's own equation, the element named on each of the
+    /// variable's dimensions in order; `null` returns the element to
+    /// following the equation every element follows.
+    SetElementEquation {
+        ident: String,
+        element: Vec<String>,
+        #[serde(default)]
+        equation: Option<String>,
+    },
+    /// The variable's units; `null` or empty clears them.
+    SetUnits {
+        ident: String,
+        #[serde(default)]
+        units: Option<String>,
+    },
+    /// The variable's documentation; empty clears it.
+    SetNotes {
+        ident: String,
+        notes: String,
+    },
+    /// The variable's lookup table, or with `element` one element's; `null`
+    /// removes it.
+    SetLookup {
+        ident: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        element: Option<Vec<String>>,
+        #[serde(default)]
+        lookup: Option<GraphicalFunction>,
+    },
+    /// The dimensions the variable is arrayed over, in order; none makes it
+    /// a scalar. `keep` names the element kept on each dimension removed.
+    SetDimensions {
+        ident: String,
+        dimensions: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep: Option<Vec<String>>,
+    },
 }
 
 impl From<ProjectPatch> for crate::patch::ProjectPatch {
@@ -2421,6 +2488,24 @@ impl From<ProjectPatch> for crate::patch::ProjectPatch {
                     }
                     ProjectOperation::AddModel { name } => {
                         crate::patch::ProjectOperation::AddModel { name }
+                    }
+                    ProjectOperation::UpsertDimension { dimension } => {
+                        crate::patch::ProjectOperation::UpsertDimension(dimension.into())
+                    }
+                    ProjectOperation::RenameDimension { from, to } => {
+                        crate::patch::ProjectOperation::RenameDimension { from, to }
+                    }
+                    ProjectOperation::RenameElement {
+                        dimension,
+                        from,
+                        to,
+                    } => crate::patch::ProjectOperation::RenameElement {
+                        dimension,
+                        from,
+                        to,
+                    },
+                    ProjectOperation::DeleteDimension { name } => {
+                        crate::patch::ProjectOperation::DeleteDimension { name }
                     }
                 })
                 .collect(),
@@ -2478,6 +2563,36 @@ impl From<ModelOperation> for crate::patch::ModelOperation {
                 upsert: upsert.into_iter().map(Into::into).collect(),
                 remove,
             },
+            ModelOperation::SetEquation { ident, equation } => Op::SetEquation { ident, equation },
+            ModelOperation::SetElementEquation {
+                ident,
+                element,
+                equation,
+            } => Op::SetElementEquation {
+                ident,
+                element,
+                equation,
+            },
+            ModelOperation::SetUnits { ident, units } => Op::SetUnits { ident, units },
+            ModelOperation::SetNotes { ident, notes } => Op::SetNotes { ident, notes },
+            ModelOperation::SetLookup {
+                ident,
+                element,
+                lookup,
+            } => Op::SetLookup {
+                ident,
+                element,
+                lookup: lookup.map(Into::into),
+            },
+            ModelOperation::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            } => Op::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            },
         }
     }
 }
@@ -2502,6 +2617,26 @@ impl TryFrom<crate::patch::ProjectPatch> for ProjectPatch {
                 }
                 crate::patch::ProjectOperation::SetSource(_) => {
                     Err("a change of the project's source has no JSON form".to_string())
+                }
+                crate::patch::ProjectOperation::UpsertDimension(dimension) => {
+                    Ok(ProjectOperation::UpsertDimension {
+                        dimension: dimension.into(),
+                    })
+                }
+                crate::patch::ProjectOperation::RenameDimension { from, to } => {
+                    Ok(ProjectOperation::RenameDimension { from, to })
+                }
+                crate::patch::ProjectOperation::RenameElement {
+                    dimension,
+                    from,
+                    to,
+                } => Ok(ProjectOperation::RenameElement {
+                    dimension,
+                    from,
+                    to,
+                }),
+                crate::patch::ProjectOperation::DeleteDimension { name } => {
+                    Ok(ProjectOperation::DeleteDimension { name })
                 }
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -2566,6 +2701,36 @@ impl From<crate::patch::ModelOperation> for ModelOperation {
                 upsert: upsert.into_iter().map(Into::into).collect(),
                 remove,
             },
+            Op::SetEquation { ident, equation } => ModelOperation::SetEquation { ident, equation },
+            Op::SetElementEquation {
+                ident,
+                element,
+                equation,
+            } => ModelOperation::SetElementEquation {
+                ident,
+                element,
+                equation,
+            },
+            Op::SetUnits { ident, units } => ModelOperation::SetUnits { ident, units },
+            Op::SetNotes { ident, notes } => ModelOperation::SetNotes { ident, notes },
+            Op::SetLookup {
+                ident,
+                element,
+                lookup,
+            } => ModelOperation::SetLookup {
+                ident,
+                element,
+                lookup: lookup.map(Into::into),
+            },
+            Op::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            } => ModelOperation::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            },
         }
     }
 }
@@ -2586,6 +2751,8 @@ mod tests {
             .flow("inflow", "rate", None)
             .aux("rate", "1", None)
             .aux("spare", "2", None)
+            .named_dimension("Region", &["North", "South"])
+            .array_aux("share[Region]", "1")
             .build_datamodel();
         let aux = |name: &str, eqn: &str| datamodel::Aux {
             ident: name.to_string(),
@@ -2600,7 +2767,29 @@ mod tests {
         let mut specs = base.sim_specs.clone();
         specs.stop = 20.0;
         let patch = crate::patch::ProjectPatch {
-            project_ops: vec![PO::SetSimSpecs(specs)],
+            project_ops: vec![
+                PO::SetSimSpecs(specs),
+                PO::UpsertDimension(datamodel::Dimension::named(
+                    "Size".to_string(),
+                    vec!["Small".to_string(), "Big".to_string()],
+                )),
+                PO::RenameElement {
+                    dimension: "Size".to_string(),
+                    from: "Big".to_string(),
+                    to: "Large".to_string(),
+                },
+                PO::RenameDimension {
+                    from: "Size".to_string(),
+                    to: "Scale".to_string(),
+                },
+                PO::DeleteDimension {
+                    name: "Scale".to_string(),
+                },
+                PO::RenameDimension {
+                    from: "Region".to_string(),
+                    to: "Area".to_string(),
+                },
+            ],
             models: vec![MP {
                 name: "main".to_string(),
                 ops: vec![
@@ -2643,6 +2832,33 @@ mod tests {
                         name: "draining".to_string(),
                         description: Some("the level empties".to_string()),
                     },
+                    Op::SetEquation {
+                        ident: "level".to_string(),
+                        equation: "11".to_string(),
+                    },
+                    Op::SetUnits {
+                        ident: "rate".to_string(),
+                        units: Some("1/month".to_string()),
+                    },
+                    Op::SetNotes {
+                        ident: "rate".to_string(),
+                        notes: "how fast".to_string(),
+                    },
+                    Op::SetLookup {
+                        ident: "rate".to_string(),
+                        element: None,
+                        lookup: None,
+                    },
+                    Op::SetElementEquation {
+                        ident: "share".to_string(),
+                        element: vec!["North".to_string()],
+                        equation: Some("2".to_string()),
+                    },
+                    Op::SetDimensions {
+                        ident: "share".to_string(),
+                        dimensions: vec![],
+                        keep: Some(vec!["North".to_string()]),
+                    },
                     Op::UpsertView {
                         index: 0,
                         view: datamodel::View::StockFlow(datamodel::StockFlow {
@@ -2673,6 +2889,14 @@ mod tests {
         let text = serde_json::to_string(&json).unwrap();
         let wire: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(wire["projectOps"][0]["type"], "setSimSpecs");
+        assert_eq!(wire["projectOps"][1]["type"], "upsertDimension");
+        assert_eq!(
+            wire["projectOps"][1]["payload"]["dimension"]["elements"][1],
+            "Big"
+        );
+        assert_eq!(wire["projectOps"][2]["type"], "renameElement");
+        assert_eq!(wire["projectOps"][3]["payload"]["to"], "Scale");
+        assert_eq!(wire["projectOps"][4]["type"], "deleteDimension");
         assert_eq!(wire["models"][0]["ops"][0]["type"], "upsertAux");
         assert_eq!(
             wire["models"][0]["ops"][0]["payload"]["aux"]["name"],
@@ -2686,6 +2910,14 @@ mod tests {
         crate::apply_patch(&mut through_json, back.into()).unwrap();
         assert!(direct == through_json, "the same project either way");
         assert!(direct.models[0].get_variable("bonus").is_some());
+        assert_eq!(
+            direct.models[0]
+                .get_variable("share")
+                .unwrap()
+                .get_equation(),
+            Some(&datamodel::Equation::Scalar("2".to_string())),
+            "the field edits land through JSON as directly"
+        );
     }
 
     #[test]

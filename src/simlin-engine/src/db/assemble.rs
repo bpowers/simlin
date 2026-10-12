@@ -54,8 +54,10 @@ pub(crate) fn variable_tables(
     // table is laid out at the element's flat declared dimension index (not
     // its `elems` Vec position), because the runtime selects a per-element
     // table by the row-major dimension offset (vm.rs Lookup/LookupArray); see
-    // `crate::variable::reorder_arrayed_element_tables`. Elements without a GF
-    // get an empty placeholder so that table[element_offset] stays aligned.
+    // `crate::variable::reorder_arrayed_element_tables`. An element without a
+    // GF gets the variable's own table, which it reads through, or an empty
+    // placeholder where there is none, so that table[element_offset] stays
+    // aligned.
     if let datamodel::Equation::Arrayed(_, elements, _, _) = eq {
         // The per-element gf is the 4th tuple field
         // `(subscript, equation, gf_equation, gf)`.
@@ -81,6 +83,13 @@ pub(crate) fn variable_tables(
             // element name to its row-major declared-order flat offset. If the
             // dimensions cannot be resolved, fall back to the original
             // Vec-positional layout rather than dropping tables.
+            let shared = source_var.gf(db).as_ref().and_then(|gf| {
+                crate::variable::parse_table(Some(gf))
+                    .ok()
+                    .flatten()
+                    .and_then(|vt| crate::compiler::Table::new(ident, &vt).ok())
+            });
+            let placeholder = || shared.clone().unwrap_or_else(crate::compiler::Table::empty);
             let dims = variable_dimensions(db, *source_var, project);
             if dims.is_empty() {
                 return elements
@@ -89,14 +98,14 @@ pub(crate) fn variable_tables(
                         present
                             .get(&crate::common::CanonicalElementName::from_raw(subscript))
                             .cloned()
-                            .unwrap_or_else(crate::compiler::Table::empty)
+                            .unwrap_or_else(placeholder)
                     })
                     .collect();
             }
             return crate::variable::reorder_arrayed_element_tables(
                 dims,
                 &present,
-                crate::compiler::Table::empty,
+                placeholder,
                 |t: &crate::compiler::Table| t.clone(),
             );
         }
@@ -298,10 +307,44 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
     base: &crate::compiler::ModuleCtx<'_>,
     exprs: &[crate::compiler::Expr],
 ) -> Result<crate::compiler::symbolic::PerVarBytecodes, String> {
+    compile_phase_or_refusal(base, exprs).map_err(|refusal| refusal.to_string())
+}
+
+/// Why a phase's lowered expressions did not emit.
+pub(crate) enum EmitRefusal {
+    /// Codegen refused a construct, which the error names: a
+    /// [`crate::common::MismatchedRead`] for a variable's view where one
+    /// value is consumed, which its reporter files as the reader's equation
+    /// error.
+    Codegen(crate::Error),
+    /// The phase is not one codegen can be handed: it lowered to nothing, or
+    /// its temps are not dense.
+    Malformed(String),
+}
+
+impl std::fmt::Display for EmitRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EmitRefusal::Codegen(err) => {
+                write!(f, "codegen rejected the lowered expressions: {err}")
+            }
+            EmitRefusal::Malformed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// [`compile_phase_to_per_var_bytecodes_reporting`], keeping codegen's error
+/// whole, so a refusal that names a read reaches its reporter as one.
+pub(crate) fn compile_phase_or_refusal(
+    base: &crate::compiler::ModuleCtx<'_>,
+    exprs: &[crate::compiler::Expr],
+) -> Result<crate::compiler::symbolic::PerVarBytecodes, EmitRefusal> {
     use crate::compiler::symbolic::PerVarBytecodes;
 
     if exprs.is_empty() {
-        return Err("nothing to emit: the phase lowered to zero expressions".to_string());
+        return Err(EmitRefusal::Malformed(
+            "nothing to emit: the phase lowered to zero expressions".to_string(),
+        ));
     }
 
     // Extract temp sizes from expressions. The table is indexed by id and
@@ -316,10 +359,10 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
     let mut temp_sizes: Vec<usize> = vec![0; temp_sizes_map.len()];
     for (id, size) in &temp_sizes_map {
         let slot = temp_sizes.get_mut(*id as usize).ok_or_else(|| {
-            format!(
+            EmitRefusal::Malformed(format!(
                 "temp ids are not dense: temp {id} is written but the fragment defines only {} temps",
                 temp_sizes_map.len()
-            )
+            ))
         })?;
         *slot = *size;
     }
@@ -333,9 +376,7 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
         ..*base
     };
 
-    let compiled = emit_ctx
-        .compile()
-        .map_err(|err| format!("codegen rejected the lowered expressions: {err}"))?;
+    let compiled = emit_ctx.compile().map_err(EmitRefusal::Codegen)?;
 
     Ok(PerVarBytecodes {
         symbolic: compiled.compiled_flows,
@@ -1124,10 +1165,20 @@ pub(crate) fn combine_scc_fragment(
                 if !scc.members.contains(name) {
                     continue;
                 }
-                let read_at = scc
-                    .element_order
-                    .iter()
-                    .position(|(m, e)| m == name && e == elem);
+                // A read computed as the model runs can be any element of the
+                // member, so every one of them must come first.
+                let read_at = if *elem == crate::db::dep_graph::ANY_ELEMENT {
+                    scc.element_order
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (m, _))| m == name)
+                        .map(|(at, _)| at)
+                        .max()
+                } else {
+                    scc.element_order
+                        .iter()
+                        .position(|(m, e)| m == name && e == elem)
+                };
                 if read_at.is_none_or(|at| at >= first_reader) {
                     return Err(format!(
                         "SCC member `{}`'s prologue reads `{}`[{}], which element_order does not evaluate before the prologue's first reader; keeping CircularDependency",

@@ -621,8 +621,14 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
     sccs
 }
 
+/// The element of a read that can be any element of its variable: a load
+/// whose subscript is computed as the model runs. A reader expands it to
+/// every element of the variable, or declines.
+pub(crate) const ANY_ELEMENT: usize = usize::MAX;
+
 /// Every CURRENT-(phase-)timestep read `op` makes, as `(variable, element)`
-/// pairs, appended to `out`. `false` means the fragment is malformed (a static
+/// pairs, appended to `out`; [`ANY_ELEMENT`] for a read of an element
+/// computed as the model runs. `false` means the fragment is malformed (a static
 /// view id outside `static_views`) and the caller must decline.
 ///
 /// This is the ONE statement of which reads a per-element ordering has to
@@ -644,10 +650,14 @@ pub(crate) fn ordering_reads(
 ) -> bool {
     use crate::compiler::symbolic::{SymStaticViewBase as ViewBase, SymbolicOpcode};
     match op {
-        SymbolicOpcode::LoadVar { var }
-        | SymbolicOpcode::LoadSubscript { var }
-        | SymbolicOpcode::PushVarViewDirect { var, .. } => {
+        SymbolicOpcode::LoadVar { var } => {
             out.insert((var.name.clone(), var.element_offset));
+        }
+        // A load whose element is computed as the model runs, and a view of
+        // the whole variable that a computed subscript may then narrow, can
+        // read any of its elements.
+        SymbolicOpcode::LoadSubscript { var } | SymbolicOpcode::PushVarViewDirect { var, .. } => {
+            out.insert((var.name.clone(), ANY_ELEMENT));
         }
         SymbolicOpcode::SymLoadPrev { .. } => {}
         SymbolicOpcode::SymLoadInitial { var } => {
@@ -890,11 +900,6 @@ fn symbolic_phase_element_order(
     members: &BTreeSet<Ident<Canonical>>,
     phase: crate::db::SccPhase,
 ) -> Option<Vec<(Ident<Canonical>, usize)>> {
-    // The set of member canonical names, for the "is this read an in-SCC
-    // member?" test. `SymVarRef.name` is the canonical variable name
-    // (an `Ident<Canonical>`), so a member's `as_str()` compares directly.
-    let member_names: BTreeSet<&str> = members.iter().map(|m| m.as_str()).collect();
-
     // Build the induced element graph from the SAME segmentation the combined
     // fragment is assembled with (`db::assemble::segment_member_by_element`):
     // a member's PROLOGUE plus one slice per element. For each member element
@@ -909,8 +914,13 @@ fn symbolic_phase_element_order(
     // segmented => not element-sourceable => unresolved (loud-safe).
     let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
     let mut self_loop = false;
+    // Every member is segmented before any edge is wired, so a read of an
+    // element computed as the model runs (`ANY_ELEMENT`) can be wired from
+    // every element of the member it reads.
+    //
     // `members` is a BTreeSet, so this iterates in sorted member order;
     // combined with the sorted Kahn below the result is byte-stable.
+    let mut segmented = Vec::with_capacity(members.len());
     for member in members {
         // The plain overlay serves both modes, which keeps this graph
         // overlay-independent. It can, because the element graph is built
@@ -930,9 +940,8 @@ fn symbolic_phase_element_order(
             phase,
             crate::db::LtmOverlay::Off,
         )?;
-        let member_name = member.as_str();
         let seg = crate::db::assemble::segment_member_by_element(
-            member_name,
+            member.as_str(),
             &frag.symbolic.code,
             &frag.static_views,
         )
@@ -946,7 +955,20 @@ fn symbolic_phase_element_order(
             // per-element shape this refinement assumes (loud-safe).
             return None;
         }
-        for elem in &elements {
+        segmented.push((member, frag, seg, elements));
+    }
+    // Each member's elements by its canonical name: the "is this read an
+    // in-SCC member?" test, and what a read of `ANY_ELEMENT` of it reads.
+    // `SymVarRef.name` is the canonical variable name, so a member's
+    // `as_str()` compares directly.
+    let member_elements: HashMap<&str, &[usize]> = segmented
+        .iter()
+        .map(|(member, _, _, elements)| (member.as_str(), elements.as_slice()))
+        .collect();
+
+    for (member, frag, seg, elements) in &segmented {
+        let member_name = member.as_str();
+        for elem in elements {
             edges
                 .entry(element_node_key(member_name, *elem))
                 .or_default();
@@ -960,7 +982,16 @@ fn symbolic_phase_element_order(
             // by the read node's encoded key.
             let mut preds: BTreeSet<Ident<Canonical>> = BTreeSet::new();
             for (rname, relem) in reads {
-                if member_names.contains(rname.as_str()) {
+                let Some(read_elements) = member_elements.get(rname.as_str()) else {
+                    continue;
+                };
+                if *relem == ANY_ELEMENT {
+                    preds.extend(
+                        read_elements
+                            .iter()
+                            .map(|e| element_node_key(rname.as_str(), *e)),
+                    );
+                } else {
                     preds.insert(element_node_key(rname.as_str(), *relem));
                 }
             }
@@ -988,7 +1019,7 @@ fn symbolic_phase_element_order(
         let readers: Vec<usize> = seg.prologue_readers.iter().copied().collect();
         wire(&mut edges, &mut self_loop, &prologue_reads, &readers);
 
-        for elem in &elements {
+        for elem in elements {
             let mut reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
             for op in &seg.segments[elem] {
                 if !ordering_reads(op, &frag.static_views, &phase, &mut reads) {
@@ -1067,6 +1098,43 @@ fn symbolic_phase_element_order(
         return None;
     }
     Some(order)
+}
+
+/// A read in `members` of one of them through an index computed as the model
+/// runs (`y[idx[T]]`), as `(reader, read)`: the read that leaves a recurrence
+/// through `members` unordered, since the element it reads is known only at
+/// run time ([`ANY_ELEMENT`]). `None` where no member reads another so, or a
+/// member's code cannot be read.
+pub(crate) fn computed_index_read(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    members: &BTreeSet<Ident<Canonical>>,
+    phase: crate::db::SccPhase,
+) -> Option<(String, String)> {
+    for member in members {
+        let frag = crate::db::var_phase_symbolic_fragment_prod(
+            db,
+            model,
+            project,
+            member.as_str(),
+            phase,
+            crate::db::LtmOverlay::Off,
+        )?;
+        let mut reads = BTreeSet::new();
+        for op in &frag.symbolic.code {
+            if !ordering_reads(op, &frag.static_views, &phase, &mut reads) {
+                return None;
+            }
+        }
+        if let Some((read, _)) = reads
+            .iter()
+            .find(|(name, elem)| *elem == ANY_ELEMENT && members.contains(name))
+        {
+            return Some((member.as_str().to_string(), read.as_str().to_string()));
+        }
+    }
+    None
 }
 
 /// Refine one offending SCC (`members`) for the given `phase` into its

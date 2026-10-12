@@ -17,8 +17,9 @@
 //! - model_element_loop_circuits, model_element_cycle_partitions
 //!   (element-level loop and partition analysis)
 //! - model_detected_loops (matches LTM augmentation loop IDs)
-//! - model_lowered_variables, lowered_variable_by_name (the lowered variables
-//!   the causal and polarity graphs read, as handles to the per-variable memos)
+//! - model_written_variables (the lowered variables as written, as handles to
+//!   the per-variable memos), model_lowered_variables and
+//!   lowered_variable_by_name (as the causal and polarity graphs read them)
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -1732,6 +1733,8 @@ pub fn model_causal_edges(
         }
     }
 
+    prune_unread_edges(db, model, project, &mut edges);
+
     CausalEdgesResult {
         edges,
         stocks,
@@ -1739,6 +1742,66 @@ pub fn model_causal_edges(
         module_outputs_read: Arc::new(module_outputs_read),
         start_only_inputs,
     }
+}
+
+/// Drop the edges into a variable that the describers see it not read.
+///
+/// The edges are the variables' dependency sets, taken from each equation as
+/// written. Loop analysis describes an arrayed variable as the equations of
+/// its elements with every read pinned to the element it reads, and a
+/// per-element helper by its element's body
+/// (`model_lowered_variables`); pinned, a branch the element's position
+/// decides is the branch it takes (`IF Age = 1`), and a read that comes to no
+/// element reads nothing. A name such a body does not read is no influence
+/// on the variable -- the compiled element does not read it either -- and an
+/// edge for it would ask for a link score of a read that is not there. Only a
+/// variable the describers see otherwise than as written is pruned.
+fn prune_unread_edges(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    edges: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    let lowered = model_lowered_variables(db, model, project);
+    let dims = super::project_converted_dimensions(db, project);
+    let source_vars = model.variables(db);
+    let mut reads_of: HashMap<String, HashSet<String>> = HashMap::new();
+    for (name, view) in lowered.iter() {
+        let written: Option<std::sync::Arc<crate::variable::Variable>> =
+            match source_vars.get(name.as_str()) {
+                Some(source_var) => Some(std::sync::Arc::clone(
+                    &lowered_source_variable(db, *source_var, model, project).variable,
+                )),
+                None => lowered_implicit_variable(db, model, project, name.as_str().to_string())
+                    .as_ref()
+                    .map(|memo| std::sync::Arc::clone(&memo.variable)),
+            };
+        let is_view = written.is_some_and(|written| !std::sync::Arc::ptr_eq(&written, view));
+        if !is_view || !matches!(view.kind, crate::variable::VarKind::Aux { .. }) {
+            continue;
+        }
+        let mut reads = HashSet::new();
+        for ast in [view.ast(), view.init_ast()].into_iter().flatten() {
+            for ident in crate::variable::identifier_set(ast, dims, None) {
+                let head = ident
+                    .as_str()
+                    .split('\u{00B7}')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                reads.insert(head);
+            }
+        }
+        reads_of.insert(name.as_str().to_string(), reads);
+    }
+    for (from, readers) in edges.iter_mut() {
+        readers.retain(|reader| {
+            reads_of
+                .get(reader)
+                .is_none_or(|reads| reads.contains(from.as_str()))
+        });
+    }
+    edges.retain(|_, readers| !readers.is_empty());
 }
 
 /// The input sources of the module instance `instance` of `model`, each by the
@@ -3612,9 +3675,10 @@ pub fn model_element_cycle_partitions(
 /// handles to the per-variable memos, never a second copy of a lowered tree.
 ///
 /// The one map builder for every whole-model consumer -- the unit pass
-/// (`db::units::unit_model`), the causal graphs, the LTM reference-site IR and
-/// aggregate-node enumeration, and the rename patch -- so that they cannot
-/// disagree about what a name resolves to. Each explicit variable's entry is
+/// (`db::units::unit_model`) reads it as it is, and the causal graphs, the LTM
+/// reference-site IR and aggregate-node enumeration read it through
+/// [`model_lowered_variables`] -- so that they cannot disagree about what a
+/// name resolves to. Each explicit variable's entry is
 /// its `lowered_source_variable` memo's `Arc`; each helper's is its
 /// `lowered_implicit_variable` memo's, except an element-scoped helper (a
 /// per-element hoisted argument), whose entry is the memo's element-pinned
@@ -3636,7 +3700,7 @@ pub fn model_element_cycle_partitions(
 /// what it caches is a map of handles, so a memo backdated by an unrelated
 /// edit leaves every reader's map equal.
 #[salsa::tracked(returns(clone))]
-pub(crate) fn model_lowered_variables(
+pub(crate) fn model_written_variables(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
@@ -3652,7 +3716,6 @@ pub(crate) fn model_lowered_variables(
             ),
         );
     }
-
     // The pinned projection is the helper's FRAGMENT input with its element
     // resolved (`FragmentInput::element_pinned_target`), and a fragment input
     // resolves every head to the compiler's shape -- a subscripted module-output
@@ -3699,6 +3762,66 @@ pub(crate) fn model_lowered_variables(
         variables.insert(ident, entry);
     }
 
+    std::sync::Arc::new(variables)
+}
+
+/// Every variable of a model as loop analysis describes it: the variables as
+/// written ([`model_written_variables`]), except an arrayed variable whose
+/// elements read one variable in more than one spelling, or read a position
+/// the element computes (`c[Age - 1]`, `IF Age = 1`), which is described as
+/// the equations of its elements with every read pinned to the element its
+/// slot reads (`FragmentInput::elementwise_target`). The causal graphs, the
+/// reference-site IR and the aggregate-node enumeration all read this map,
+/// so loop analysis follows the reads the run makes and scores such a
+/// variable as the same variable written element by element.
+///
+/// Taken only where the project's module graph is acyclic from this model,
+/// as the helpers' pinned projection is. Where nothing is described
+/// otherwise than as written, the map is the written one, handle for handle.
+#[salsa::tracked(returns(clone))]
+pub(crate) fn model_lowered_variables(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> std::sync::Arc<crate::variable::LoweredVariableMap> {
+    use crate::common::Ident;
+
+    let written = model_written_variables(db, model, project);
+    if crate::db::project_module_graph(db, project)
+        .cycle_error_from(model.name(db))
+        .is_some()
+    {
+        return written;
+    }
+    let mut views = Vec::new();
+    for (name, source_var) in model.variables(db) {
+        let ident = Ident::new(name);
+        let arrayed = written.get(&ident).is_some_and(|var| {
+            [var.ast(), var.init_ast()]
+                .into_iter()
+                .flatten()
+                .any(|ast| !matches!(ast, crate::ast::Ast::Scalar(_)))
+        });
+        if !arrayed {
+            continue;
+        }
+        let fragment = crate::db::var_fragment::explicit_fragment_input(
+            db,
+            *source_var,
+            model,
+            project,
+            &[],
+            crate::db::LtmOverlay::Off,
+        );
+        if let Some(view) = fragment.input.and_then(|input| input.elementwise_target()) {
+            views.push((ident, std::sync::Arc::new(view)));
+        }
+    }
+    if views.is_empty() {
+        return written;
+    }
+    let mut variables = (*written).clone();
+    variables.extend(views);
     std::sync::Arc::new(variables)
 }
 

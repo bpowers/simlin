@@ -320,6 +320,121 @@ pub unsafe extern "C" fn simlin_project_get_revision(
     *out_revision = datamodel_locked.revision();
 }
 
+/// Gets the project's simulation key: a number that is equal for two
+/// contents whose simulations are the same, read from the contents alone,
+/// with nothing compiled and nothing run.
+///
+/// A host keeps the key its last run was made at and compares it after an
+/// edit lands: an equal key means the run still describes the model, so a
+/// diagram edit, a note or a unit needs no new run. Equations, the
+/// simulation specs, dimensions, flows and everything else the compiler
+/// reads are in the key; units are not, since they are checked and never
+/// simulated.
+///
+/// The key never calls two different simulations the same (but for a hash
+/// collision), and may call one simulation by two keys: an equation
+/// respelled, or a variable renamed in case only, has another key. It
+/// compares contents within one build of the library and is not to be
+/// stored across launches. A tool session's runs are kept fresh by the same
+/// key, so its `"current"` run is always of the contents at this key.
+///
+/// The key hashes the project's contents, which takes a few milliseconds
+/// for the largest models in a debug build. The project's lock is held only
+/// to take the contents, so the call waits for no compile and holds up no
+/// edit.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `out_key` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_get_simulation_key(
+    project: *mut SimlinProject,
+    out_key: *mut u64,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_key.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("out_key pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let project_ref = ffi_try!(out_error, require_project(project));
+    let contents = project_ref.datamodel.lock().unwrap().shared();
+    *out_key = engine::db::simulation_key(&contents);
+}
+
+/// Writes the project's dimensions as UTF-8 JSON to a buffer the caller frees
+/// with `simlin_free`: an array in declaration order, each dimension in the
+/// shape the native project JSON gives it --
+/// `{"name", "elements": [...]}` for named elements in their declared order,
+/// `{"name", "size": n}` for an indexed dimension, with `"parent"` for an
+/// indexed subdimension, `"mapsTo"` for a positional mapping and
+/// `"mappings": [{"target", "elementMap": [{"source", "target"}]}]` for the
+/// rest. Names are spelled as the model writes them. A host reads here the
+/// dimensions it lists and the order of an arrayed variable's elements,
+/// without serializing the whole project.
+///
+/// The project's lock is held only to take the contents.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `out_buffer` and `out_len` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_get_dimensions(
+    project: *mut SimlinProject,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let project_ref = ffi_try!(out_error, require_project(project));
+    let contents = project_ref.datamodel.lock().unwrap().shared();
+    let dimensions: Vec<engine::json::Dimension> = contents
+        .dimensions
+        .iter()
+        .cloned()
+        .map(engine::json::Dimension::from)
+        .collect();
+    let bytes = match serde_json::to_vec(&dimensions) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to encode the dimensions: {err}")),
+            );
+            return;
+        }
+    };
+    let buf = crate::memory::simlin_malloc(bytes.len());
+    if buf.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("allocation failed while writing the dimensions"),
+        );
+        return;
+    }
+    ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+    *out_buffer = buf;
+    *out_len = bytes.len();
+}
+
 /// Gets the list of model names in the project
 ///
 /// # Safety

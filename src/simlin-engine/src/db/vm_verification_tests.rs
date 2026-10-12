@@ -1712,10 +1712,12 @@ fn test_with_lookup_per_element_source_read_link_score_sign_matches_polarity() {
 /// equations' un-hoisted reducer reads still have no per-slot derivation), so
 /// `decline_unhoisted_reducer_edge` must win over the with-lookup decline.
 ///
-/// `SUM(matrix[Region,*])` inside an `Ast::Arrayed` slot reads `matrix` through a
-/// DIM-NAMED index, which `enumerate_agg_nodes` refuses to hoist (each slot pins
-/// the dim to its own element), so no aggregate node exists and the edge lands on
-/// the cartesian arm of `try_cross_dimensional_link_scores`.
+/// `SUM(matrix[pick,*])` inside an `Ast::Arrayed` slot reads `matrix` through a
+/// DYNAMIC index, which `enumerate_agg_nodes` refuses to hoist, so no aggregate
+/// node exists and the edge lands on the cartesian arm of
+/// `try_cross_dimensional_link_scores`. (A dim-named index, `matrix[Region,*]`,
+/// is no such read: loop analysis describes each slot with the dimension pinned
+/// to its element, as the run reads it.)
 #[test]
 fn test_with_lookup_per_element_owner_declines_naming_the_unhoisted_reducer() {
     use crate::test_common::TestProject;
@@ -1726,7 +1728,8 @@ fn test_with_lookup_per_element_owner_declines_naming_the_unhoisted_reducer() {
         .named_dimension("Region", &["r1", "r2"])
         .named_dimension("Sector", &["s1", "s2"])
         .array_stock("matrix[Region,Sector]", "0", &["grow"], &[], None)
-        .array_flow("grow[Region,Sector]", "1", None);
+        .array_flow("grow[Region,Sector]", "1", None)
+        .scalar_aux("pick", "1");
     let mut project = tp.build_datamodel();
     project.models[0]
         .variables
@@ -1736,11 +1739,11 @@ fn test_with_lookup_per_element_owner_declines_naming_the_unhoisted_reducer() {
                 vec!["Region".to_string()],
                 vec![(
                     "r1".to_string(),
-                    "SUM(matrix[Region,*])".to_string(),
+                    "SUM(matrix[pick,*])".to_string(),
                     None,
                     Some(shallow_decreasing_gf(20.0)),
                 )],
-                Some("SUM(matrix[Region,*])".to_string()),
+                Some("SUM(matrix[pick,*])".to_string()),
                 true,
             ),
             documentation: String::new(),

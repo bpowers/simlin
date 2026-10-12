@@ -1206,21 +1206,24 @@ fn a_codegen_refusal_names_the_expression_kind() {
     );
 }
 
-/// When several arms of an arrayed equation fail, the arm reported is the
-/// first in the dimension's declared element order -- the first arm the
-/// compiler would have compiled -- on every fresh database, not whichever a
-/// `HashMap` happened to iterate first.
+/// When several arms of an arrayed equation fail, each is reported, named by
+/// its element, in the dimension's declared element order -- the order the
+/// compiler compiles them in -- after the default's error, and arms naming
+/// no declared element after those, by key: the same rows in the same order
+/// on every fresh database, not whichever order a `HashMap` iterated.
 #[test]
-fn the_first_failing_element_arm_in_declared_order_is_reported() {
-    // `sales + prices` mismatches over the whole 14-character expression and
-    // `1 + sales + prices` over all 18, so the span says which arm was
-    // reported. The rows are the three arms of the choice (`ast::typed_ast`,
-    // `ast::lower_arrayed_arms`): several declared arms failing, the default
-    // and an arm both failing, and failing arms naming no declared element.
+fn every_failing_element_arm_is_reported_in_declared_order() {
+    // `sales + prices` is refused at `prices`, which an element of Cities has
+    // no element of: characters 8..14 of it, and 12..18 of `1 + sales +
+    // prices`, so the span says which arm a row is for as well as its
+    // element does. The rows are the three arms of the
+    // order (`ast::typed_ast`, `ast::lower_arrayed_arms`): several declared
+    // arms failing, the default and an arm both failing, and failing arms
+    // naming no declared element.
     struct Arm {
         name: &'static str,
         project: fn() -> datamodel::Project,
-        span: (u16, u16),
+        rows: &'static [(Option<&'static str>, (u16, u16))],
     }
     fn cities() -> TestProject {
         TestProject::new("arms")
@@ -1231,22 +1234,22 @@ fn the_first_failing_element_arm_in_declared_order_is_reported() {
     }
     let arms = [
         Arm {
-            name: "Boston, the first declared element, over Seattle",
+            name: "Boston, the first declared element, then Seattle",
             project: || {
                 cities()
                     .array_with_ranges(
                         "y[Cities]",
                         vec![
-                            ("Boston", "sales + prices"),
                             ("Seattle", "1 + sales + prices"),
+                            ("Boston", "sales + prices"),
                         ],
                     )
                     .build_datamodel()
             },
-            span: (0, 14),
+            rows: &[(Some("boston"), (8, 14)), (Some("seattle"), (12, 18))],
         },
         Arm {
-            name: "the default's error over a failing element arm's",
+            name: "the default's error, then a failing element arm's",
             project: || {
                 cities()
                     .array_with_default_and_overrides(
@@ -1256,10 +1259,10 @@ fn the_first_failing_element_arm_in_declared_order_is_reported() {
                     )
                     .build_datamodel()
             },
-            span: (0, 18),
+            rows: &[(None, (12, 18)), (Some("boston"), (8, 14))],
         },
         Arm {
-            name: "the smallest key among arms naming no declared element",
+            name: "arms naming no declared element, by key",
             project: || {
                 cities()
                     .array_with_ranges(
@@ -1268,44 +1271,234 @@ fn the_first_failing_element_arm_in_declared_order_is_reported() {
                     )
                     .build_datamodel()
             },
-            span: (0, 14),
+            rows: &[(Some("bogus"), (8, 14)), (Some("zeta"), (12, 18))],
         },
     ];
     for arm in &arms {
         let project = (arm.project)();
         for run in 0..16 {
             let diagnostics = all_diagnostics(&project, false);
-            let rows: Vec<&Diagnostic> = diagnostics
+            let rows: Vec<(Option<&str>, (u16, u16))> = diagnostics
                 .iter()
                 .filter(|d| {
                     d.variable.as_deref() == Some("y")
-                        && d.category() == DiagnosticCategory::Equation
+                        && d.is(
+                            DiagnosticCategory::Equation,
+                            ErrorCode::MismatchedDimensions,
+                        )
+                })
+                .map(|d| {
+                    let span = d.location().expect("a lowering error carries its span");
+                    (d.element(), (span.start, span.end))
                 })
                 .collect();
-            assert_eq!(
-                rows.len(),
-                1,
-                "{} (run {run}): one row for `y`: {rows:?}",
-                arm.name
-            );
+            assert_eq!(rows, arm.rows, "{} (run {run})", arm.name);
+        }
+    }
+}
+
+/// An element's own equation is a text of its own, and an error in it names
+/// the element at each stage that can raise one -- the parse, the lowering
+/// to array bounds, the compile -- so a span is read against the right text
+/// and a host shows the error beside that element. An error in the equation
+/// every element follows names none, and the formatted message's snippet is
+/// cut from the text the span indexes.
+#[test]
+fn an_error_in_an_elements_own_equation_names_the_element() {
+    fn cities() -> TestProject {
+        TestProject::new("own")
+            .named_dimension("Cities", &["Boston", "Seattle"])
+            .named_dimension("Products", &["Widgets", "Gadgets"])
+            .array_aux("sales[Cities]", "1")
+            .array_aux("prices[Products]", "1")
+    }
+    // (what fails, the project, the code, the element, the text the span cuts)
+    let rows: [(&str, datamodel::Project, ErrorCode, Option<&str>, &str); 10] = [
+        (
+            "an unknown name in Seattle's own equation",
+            cities()
+                .array_with_ranges(
+                    "y[Cities]",
+                    vec![("Boston", "1"), ("Seattle", "nosuch + 1")],
+                )
+                .build_datamodel(),
+            ErrorCode::UnknownDependency,
+            Some("seattle"),
+            "nosuch + 1",
+        ),
+        (
+            "an unknown name in Boston's own equation, beside a default",
+            cities()
+                .array_with_default_and_overrides("y[Cities]", "2", vec![("Boston", "1 + nosuch")])
+                .build_datamodel(),
+            ErrorCode::UnknownDependency,
+            Some("boston"),
+            "1 + nosuch",
+        ),
+        (
+            "an unknown name in the default",
+            cities()
+                .array_with_default_and_overrides("y[Cities]", "nosuch * 2", vec![("Boston", "1")])
+                .build_datamodel(),
+            ErrorCode::UnknownDependency,
+            None,
+            "nosuch * 2",
+        ),
+        (
+            "a subscript naming nothing in Seattle's own equation",
+            cities()
+                .array_with_ranges(
+                    "y[Cities]",
+                    vec![("Boston", "1"), ("Seattle", "sales[nosuch]")],
+                )
+                .build_datamodel(),
+            ErrorCode::UnknownDependency,
+            Some("seattle"),
+            "sales[nosuch]",
+        ),
+        (
+            "too many arguments to a builtin in Seattle's own equation",
+            cities()
+                .array_with_ranges(
+                    "y[Cities]",
+                    vec![("Boston", "1"), ("Seattle", "SMTH1(1, 1, 1, 1)")],
+                )
+                .build_datamodel(),
+            ErrorCode::BadBuiltinArgs,
+            Some("seattle"),
+            "SMTH1(1, 1, 1, 1)",
+        ),
+        (
+            "a parse error in Seattle's own equation",
+            cities()
+                .array_with_ranges("y[Cities]", vec![("Boston", "1"), ("Seattle", "2 +")])
+                .build_datamodel(),
+            ErrorCode::UnrecognizedEof,
+            Some("seattle"),
+            "2 +",
+        ),
+        (
+            "array bounds that do not fit in Boston's own equation",
+            cities()
+                .array_with_ranges(
+                    "y[Cities]",
+                    vec![("Boston", "sales + prices"), ("Seattle", "2")],
+                )
+                .build_datamodel(),
+            ErrorCode::MismatchedDimensions,
+            Some("boston"),
+            "sales + prices",
+        ),
+        (
+            "a compile error in Boston's own equation",
+            cities()
+                .array_with_ranges("y[Cities]", vec![("Boston", "sales[3]"), ("Seattle", "2")])
+                .build_datamodel(),
+            ErrorCode::Generic,
+            Some("boston"),
+            "",
+        ),
+        (
+            "a compile error in the equation every element follows",
+            cities()
+                .array_aux("y[Cities]", "sales[3]")
+                .build_datamodel(),
+            ErrorCode::Generic,
+            None,
+            "",
+        ),
+        (
+            "an error in a scalar equation",
+            cities().aux("y", "1 +", None).build_datamodel(),
+            ErrorCode::UnrecognizedEof,
+            None,
+            "1 +",
+        ),
+    ];
+    for (what, project, code, element, text) in rows {
+        let diagnostics = all_diagnostics(&project, false);
+        let row = diagnostics
+            .iter()
+            .find(|d| d.variable.as_deref() == Some("y") && d.code() == code)
+            .unwrap_or_else(|| panic!("{what}: no {code:?} row on y: {diagnostics:#?}"));
+        assert_eq!(row.element(), element, "{what}");
+        let formatted = crate::errors::format_diagnostic_with_datamodel(row, &project);
+        assert_eq!(formatted.element.as_deref(), element, "{what}");
+        if !text.is_empty() {
+            let message = formatted.message.unwrap_or_default();
             assert!(
-                rows[0].is(
-                    DiagnosticCategory::Equation,
-                    ErrorCode::MismatchedDimensions
-                ),
-                "{} (run {run}): {rows:?}",
-                arm.name
-            );
-            let span = rows[0]
-                .location()
-                .expect("a lowering error carries its span");
-            assert_eq!(
-                (span.start, span.end),
-                arm.span,
-                "{} (run {run}): the reported arm",
-                arm.name
+                message.contains(&format!("    {text}\n")),
+                "{what}: the snippet is cut from the element's own text: {message}"
             );
         }
+    }
+}
+
+/// A unit mismatch in an element's own equation names the element, and the
+/// message shows that element's text; one in the default names none.
+#[test]
+fn a_unit_error_in_an_elements_own_equation_names_the_element() {
+    let project = |default: Option<&str>, arms: &[(&str, &str)]| {
+        let mut project = TestProject::new("units")
+            .named_dimension("Cities", &["Boston", "Seattle"])
+            .unit("widget", None)
+            .unit("person", None)
+            .aux_with_units("w", "1", Some("widget"))
+            .aux_with_units("p", "1", Some("person"));
+        project
+            .variables
+            .push(datamodel::Variable::Aux(datamodel::Aux {
+                ident: "y".to_string(),
+                equation: datamodel::Equation::Arrayed(
+                    vec!["Cities".to_string()],
+                    arms.iter()
+                        .map(|(element, text)| (element.to_string(), text.to_string(), None, None))
+                        .collect(),
+                    default.map(str::to_string),
+                    default.is_some(),
+                ),
+                documentation: String::new(),
+                units: Some("widget".to_string()),
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }));
+        project.build_datamodel()
+    };
+    let rows = |project: &datamodel::Project| -> Vec<(Option<String>, String)> {
+        all_diagnostics(project, false)
+            .iter()
+            .filter(|d| {
+                d.variable.as_deref() == Some("y")
+                    && d.is(DiagnosticCategory::UnitConsistency, ErrorCode::UnitMismatch)
+            })
+            .map(|d| {
+                let formatted = crate::errors::format_diagnostic_with_datamodel(d, project);
+                (formatted.element, formatted.message.unwrap_or_default())
+            })
+            .collect()
+    };
+
+    let own = rows(&project(Some("w"), &[("Seattle", "0 + 0 + p")]));
+    assert!(!own.is_empty());
+    for (element, message) in &own {
+        // The default's own row is about the default; every other row is
+        // about Seattle's text.
+        if message.contains("array default expression") {
+            assert_eq!(element.as_deref(), None, "{message}");
+            assert!(message.contains("    w\n"), "{message}");
+        } else {
+            assert_eq!(element.as_deref(), Some("seattle"), "{message}");
+            assert!(message.contains("    0 + 0 + p\n"), "{message}");
+        }
+    }
+
+    let default = rows(&project(Some("0 + 0 + p"), &[("Boston", "w")]));
+    assert!(!default.is_empty());
+    for (element, message) in &default {
+        assert_eq!(element.as_deref(), None, "{message}");
+        assert!(message.contains("    0 + 0 + p\n"), "{message}");
     }
 }
 
@@ -1417,6 +1610,7 @@ fn the_projections_read_every_arm() {
                 ErrorCode::UnitMismatch,
                 Loc::new(3, 9),
                 Some("kg vs m".to_string()),
+                None,
             )),
             ErrorCode::UnitMismatch,
             DiagnosticCategory::UnitConsistency,

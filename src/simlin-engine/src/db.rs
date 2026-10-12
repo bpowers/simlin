@@ -92,8 +92,7 @@ pub(crate) use query::{
 };
 
 mod sync;
-#[cfg(feature = "agent_tools")]
-pub(crate) use sync::simulation_key;
+pub use sync::simulation_key;
 pub use sync::{
     PersistentModelState, PersistentSyncState, PersistentVariableState, SyncResult, SyncedModel,
     SyncedVariable, sync_from_datamodel, sync_from_datamodel_incremental,
@@ -181,9 +180,9 @@ pub use analysis::RefShape;
 pub use analysis::causal_graph_from_element_edges;
 pub use analysis::causal_graph_from_element_edges_with_modules;
 pub(crate) use analysis::loop_node_sequence;
-pub(crate) use analysis::model_lowered_variables;
 pub(crate) use analysis::unique_module_output;
 pub use analysis::{ModuleOutputsRead, causal_graph_from_edges};
+pub(crate) use analysis::{model_lowered_variables, model_written_variables};
 // The variable-level graph with module sub-graphs, for tests outside `db` that
 // pin edge normalization and polarity on the production graph constructor.
 pub(crate) use analysis::causal_graph_with_modules;

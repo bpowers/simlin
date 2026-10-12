@@ -768,8 +768,9 @@ impl<'a> BuiltinVisitor<'a> {
         // Argument-first: each argument that needs a helper is filed before
         // the instance, which is the order the implicit-var list keeps and the
         // order the salsa-cached vectors compare in.
-        let mut sources: Vec<String> = Vec::with_capacity(args.len());
+        let mut sources: Vec<(String, crate::builtins::Loc)> = Vec::with_capacity(args.len());
         for (i, arg) in args.into_iter().enumerate() {
+            let arg_loc = arg.get_loc();
             let src = match arg {
                 // A bare identifier wires straight to the port, unless it
                 // means one element's value under the active element.
@@ -782,7 +783,7 @@ impl<'a> BuiltinVisitor<'a> {
                     src
                 }
             };
-            sources.push(src);
+            sources.push((src, arg_loc));
         }
 
         let module = ImplicitModule::new(
@@ -793,7 +794,8 @@ impl<'a> BuiltinVisitor<'a> {
             descriptor.model_name.clone(),
             sources
                 .into_iter()
-                .zip(descriptor.parameter_ports.iter().map(String::as_str)),
+                .zip(descriptor.parameter_ports.iter().map(String::as_str))
+                .map(|((src, loc), port)| (src, port, loc)),
         );
         // U+00B7 (·) is the compile-time separator for a module's variable;
         // `primary_output` is `output` for every stdlib model.
@@ -1101,13 +1103,16 @@ pub fn instantiate_implicit_modules(
             }
             // An explicit slot is one element's own equation, walked for that
             // element: every helper it mints carries the slot's element, so
-            // distinct slots never claim one name (PR #668).
+            // distinct slots never claim one name (PR #668), and an error in
+            // it is about that element, whose text its span indexes.
             let mut new_elements = HashMap::new();
             for (subscript_key, equation) in elements_in_stable_order(elements) {
                 let subscript_parts: Vec<String> =
                     subscript_key.parts().map(str::to_string).collect();
                 let mut walker = visitor().with_active_element(&dimensions, &subscript_parts);
-                let transformed = walker.walk(equation)?;
+                let transformed = walker
+                    .walk(equation)
+                    .map_err(|err| err.in_element(&subscript_key))?;
                 collect(walker)?;
                 new_elements.insert(subscript_key, transformed);
             }

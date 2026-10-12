@@ -344,6 +344,16 @@ impl ReadSnapshot {
         self.specs = specs.clone();
     }
 
+    /// The project's dimensions as the read gave them.
+    pub(crate) fn dimensions(&self) -> &[datamodel::Dimension] {
+        &self.dimensions
+    }
+
+    /// Hold `dimensions` as the project's dimensions the read gave.
+    pub(crate) fn absorb_dimensions(&mut self, dimensions: &[datamodel::Dimension]) {
+        self.dimensions = dimensions.to_vec();
+    }
+
     /// Hold `entry` (none: unnamed) as the name the read gave the loop whose
     /// variables have the uids `uids` (sorted).
     pub(crate) fn absorb_loop(&mut self, uids: &[i32], entry: Option<&datamodel::LoopMetadata>) {

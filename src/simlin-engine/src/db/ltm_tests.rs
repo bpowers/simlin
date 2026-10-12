@@ -2051,8 +2051,8 @@ fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
 /// recover: `target[cop]` reads `aggregated[agg]` -- the source's OWN dimension
 /// name as the subscript -- with `agg` mapping onto `cop` through a declared
 /// element map. `mapped_reference_semantics_tests`' `SourceOwnDim` row measures
-/// that spelling against the VM: it resolves name-first and then through the
-/// map, at every cardinality. Before #997 one correspondence served this
+/// that spelling against the VM: it resolves through the map, at every
+/// cardinality. Before #997 one correspondence served this
 /// spelling and the positional one alike, declined both, and every such edge
 /// took the loud unprojectable-dep skip -- 13 of them on C-LEARN.
 ///

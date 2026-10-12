@@ -114,7 +114,7 @@ pub use layout::*;
 pub use memory::*;
 pub use model::*;
 pub use panic_hook::*;
-pub use patch::simlin_project_apply_patch;
+pub use patch::{simlin_project_apply_patch, simlin_project_apply_patch_reporting};
 pub use project::*;
 pub use results::*;
 pub use serialization::*;
@@ -368,6 +368,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             // A save step off the step grid likewise collapses to the wire
             // Generic code; the message says what the saved rows are.
             engine::ErrorCode::SaveStepOffTheStepGrid => SimlinErrorCode::Generic,
+            engine::ErrorCode::SubscriptOutOfRange => SimlinErrorCode::Generic,
         }
     }
 }
@@ -414,6 +415,20 @@ pub enum SimlinErrorSeverity {
     Warning = 1,
 }
 
+/// For a detail about a subscript that runs off a dimension, which end it
+/// runs off: before the first element, or past the last. `None` for every
+/// other detail. With `SimlinErrorDetail::read_past_dimension` and
+/// `element_name`, a host says the problem in its model's own words ("there
+/// is no Age before Young") rather than repeating `details`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimlinReadPast {
+    #[default]
+    None = 0,
+    BeforeFirst = 1,
+    AfterLast = 2,
+}
+
 impl From<engine::db::DiagnosticSeverity> for SimlinErrorSeverity {
     fn from(severity: engine::db::DiagnosticSeverity) -> Self {
         match severity {
@@ -444,6 +459,34 @@ pub struct SimlinErrorDetail {
     /// the code means. Appended additively: existing field offsets are
     /// unchanged.
     pub details: *const c_char,
+    /// The element of an arrayed variable the detail is about, as its
+    /// canonical key (`young`; `nyc,young` for an element of two
+    /// dimensions), or NULL when it is about the variable as a whole. When
+    /// the element has an equation of its own, `start_offset..end_offset`
+    /// index that equation's text; otherwise they index the equation every
+    /// element follows. Appended additively: existing field offsets are
+    /// unchanged.
+    pub element_name: *const c_char,
+    /// For a subscript that runs off a dimension, the dimension, by its
+    /// canonical name; NULL for every other detail. Appended additively.
+    pub read_past_dimension: *const c_char,
+    /// Which end of `read_past_dimension` the subscript runs off;
+    /// `SIMLIN_READ_PAST_NONE` for every other detail. Appended additively.
+    pub read_past: SimlinReadPast,
+    /// For a reference whose dimensions disagree with those of the variable
+    /// reading it (`SIMLIN_ERROR_CODE_MISMATCHED_DIMENSIONS`), the variable
+    /// the reference reads, by its canonical name; NULL for every other
+    /// detail. `variable_name` is the reader, and `start_offset..end_offset`
+    /// the reference in its equation (both 0 for a read no equation spells:
+    /// a stock's flow, a module's input). Appended additively.
+    pub mismatched_read_variable: *const c_char,
+    /// The read variable's dimensions the reader has no element of, by their
+    /// canonical names, comma-separated as `element_name` is: what splitting
+    /// the reader would give it, or what reading one value from the variable
+    /// would remove. NULL when the reference instead subscripts the variable
+    /// on more dimensions than it has, and for every other detail. Appended
+    /// additively.
+    pub mismatched_read_dimensions: *const c_char,
 }
 
 /// Opaque project structure

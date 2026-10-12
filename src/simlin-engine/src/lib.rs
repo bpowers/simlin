@@ -51,6 +51,8 @@ mod diagnostic;
 pub mod diagram;
 mod dimensions;
 pub mod editing;
+mod element_equations;
+pub mod equation_view;
 pub mod errors;
 pub mod float;
 mod import_losses;
@@ -71,17 +73,25 @@ pub mod ltm;
 pub mod ltm_agg;
 pub mod ltm_augment;
 pub mod ltm_dominance;
+#[cfg(test)]
+mod ltm_elementwise_tests;
 pub mod ltm_finding;
+#[cfg(test)]
+mod ltm_loop_scores_test_support;
 pub mod ltm_post;
 #[cfg(test)]
 mod macro_expansion_tests;
 #[cfg(test)]
 mod mapped_reference_semantics_tests;
 pub mod mdl;
+#[cfg(test)]
+mod mismatched_read_tests;
 mod model;
 mod module_functions;
 mod parser;
 mod patch;
+mod patch_dimensions;
+mod patch_fields;
 #[cfg(test)]
 mod patch_sharing_tests;
 #[cfg(test)]
@@ -112,6 +122,8 @@ mod shared_vec;
 mod snapshot_arg;
 #[path = "stdlib.gen.rs"]
 mod stdlib;
+#[cfg(test)]
+mod subscript_out_of_range_tests;
 pub mod systems;
 #[cfg(test)]
 #[path = "systems_stdlib_tests.rs"]
@@ -150,7 +162,8 @@ pub mod xmile;
 pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
 pub use self::import_losses::ImportWarning;
 pub use self::patch::{
-    ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch, is_view_only_patch,
+    ModelOperation, ModelPatch, PatchReport, ProjectOperation, ProjectPatch, Renamed, VariableRef,
+    apply_patch, apply_patch_reporting, is_view_only_patch,
 };
 pub use self::queue_compile::build_sim;
 pub use self::results::{Method, Results, Specs as SimSpecs};

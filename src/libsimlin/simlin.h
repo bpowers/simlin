@@ -181,6 +181,17 @@ typedef enum {
   SIMLIN_ERROR_SEVERITY_WARNING = 1,
 } SimlinErrorSeverity;
 
+// For a detail about a subscript that runs off a dimension, which end it
+// runs off: before the first element, or past the last. `None` for every
+// other detail. With `SimlinErrorDetail::read_past_dimension` and
+// `element_name`, a host says the problem in its model's own words ("there
+// is no Age before Young") rather than repeating `details`.
+typedef enum {
+  SIMLIN_READ_PAST_NONE = 0,
+  SIMLIN_READ_PAST_BEFORE_FIRST = 1,
+  SIMLIN_READ_PAST_AFTER_LAST = 2,
+} SimlinReadPast;
+
 // JSON format specifier for C API
 typedef enum {
   SIMLIN_JSON_FORMAT_NATIVE = 0,
@@ -538,6 +549,34 @@ typedef struct {
   // the code means. Appended additively: existing field offsets are
   // unchanged.
   const char *details;
+  // The element of an arrayed variable the detail is about, as its
+  // canonical key (`young`; `nyc,young` for an element of two
+  // dimensions), or NULL when it is about the variable as a whole. When
+  // the element has an equation of its own, `start_offset..end_offset`
+  // index that equation's text; otherwise they index the equation every
+  // element follows. Appended additively: existing field offsets are
+  // unchanged.
+  const char *element_name;
+  // For a subscript that runs off a dimension, the dimension, by its
+  // canonical name; NULL for every other detail. Appended additively.
+  const char *read_past_dimension;
+  // Which end of `read_past_dimension` the subscript runs off;
+  // `SIMLIN_READ_PAST_NONE` for every other detail. Appended additively.
+  SimlinReadPast read_past;
+  // For a reference whose dimensions disagree with those of the variable
+  // reading it (`SIMLIN_ERROR_CODE_MISMATCHED_DIMENSIONS`), the variable
+  // the reference reads, by its canonical name; NULL for every other
+  // detail. `variable_name` is the reader, and `start_offset..end_offset`
+  // the reference in its equation (both 0 for a read no equation spells:
+  // a stock's flow, a module's input). Appended additively.
+  const char *mismatched_read_variable;
+  // The read variable's dimensions the reader has no element of, by their
+  // canonical names, comma-separated as `element_name` is: what splitting
+  // the reader would give it, or what reading one value from the variable
+  // would remove. NULL when the reference instead subscripts the variable
+  // on more dimensions than it has, and for every other detail. Appended
+  // additively.
+  const char *mismatched_read_dimensions;
 } SimlinErrorDetail;
 
 // Opaque project structure
@@ -1326,6 +1365,49 @@ char *simlin_model_get_latex_equation(SimlinModel *model,
                                       const char *ident,
                                       SimlinError **out_error);
 
+// Writes a variable's equations as UTF-8 JSON to a buffer the caller frees
+// with `simlin_free`: each text with its parse tree, and an arrayed
+// variable as the equation every element follows plus one cell per
+// element, in its dimensions' declared order (`engine::equation_view`).
+//
+// ```json
+// {"kind": "aux", "dimensions": [{"name": "Age", "elements": ["Young", "Adult"]}],
+//  "every": {"text": "c[Age - 1]", "tree": {...}},
+//  "cells": [{"element": ["Young"], "key": "young", "state": "own",
+//             "own": {"text": "inflow", "tree": {...}}},
+//            {"element": ["Adult"], "key": "adult", "state": "follows"}]}
+// ```
+//
+// A scalar has no dimensions and no cells, its equation being `every`. A
+// stock's equation is its initial value. A cell's `state` is `own` (it has
+// an equation, or a lookup, of its own), `follows` (it reads `every`) or
+// `missing` (it has neither); its `key` is the canonical element key a
+// diagnostic's `element_name` names. A tree node has a `kind` -- `number`,
+// `ref` (with `ident`, `name` as the model spells the variable, `known`,
+// and an `index` per subscript: `element`, `dimension`, `all`, `subrange`,
+// `range`, `position` or `expr`), `dimension`, `op`, `unary`, `if`, `call`,
+// or `group` where the grouping rule needs parentheses -- and a `span`.
+// A text that does not parse has a null `tree` and an `error`.
+//
+// Every span is a pair of UTF-8 BYTE offsets into its own `text`,
+// `[start, end)`. A host whose strings are indexed in UTF-16 code units
+// converts them; they differ wherever the text holds a character outside
+// ASCII.
+//
+// `DoesNotExist` when the model has no such variable. Reads the contents
+// alone (the project's lock is held only to take them), so it waits for no
+// compile.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `ident` must be a valid C string
+// - `out_buffer` and `out_len` must be valid pointers
+void simlin_model_get_equation(SimlinModel *model,
+                               const char *ident,
+                               uint8_t **out_buffer,
+                               uintptr_t *out_len,
+                               SimlinError **out_error);
+
 // Gets a single variable from the model as tagged JSON.
 //
 // Returns JSON with a `"type"` discriminator (`"stock"`, `"flow"`, `"aux"`, `"module"`).
@@ -1375,6 +1457,38 @@ void simlin_clear_panic_message(void);
 
 // Applies a JSON patch to the project datamodel.
 //
+// A model operation that edits one field of one variable leaves the rest of
+// it as it is, where an upsert replaces the variable whole:
+// - `setEquation {ident, equation}`: a scalar's equation -- a STOCK's is
+//   its initial value; its flows are `updateStockFlows` -- or the equation
+//   every element of an arrayed variable follows, each element keeping an
+//   equation of its own;
+// - `setElementEquation {ident, element, equation}`: one element's own
+//   equation, `element` naming it on each of the variable's dimensions in
+//   order; a null `equation` returns the element to following the
+//   equation every element follows;
+// - `setUnits {ident, units}` and `setNotes {ident, notes}`;
+// - `setLookup {ident, element?, lookup}`: the variable's lookup or one
+//   element's, null removing it;
+// - `setDimensions {ident, dimensions, keep?}`: the dimensions it is
+//   arrayed over, in order; one added repeats it along the dimension, one
+//   removed keeps the element of `keep` on it or is refused where its
+//   elements differ.
+//
+// A project operation edits the project's dimensions, and carries the edit
+// through every variable and equation over them:
+// - `upsertDimension {dimension}`: adds a dimension, in the shape
+//   `simlin_project_get_dimensions` gives it, or sets the elements, their
+//   order, the mappings and the parent of the one of its name; an element
+//   removed takes the variables' own equations there with it, and one added
+//   follows the equation every element follows;
+// - `renameDimension {from, to}` and `renameElement {dimension, from, to}`:
+//   rename, rewriting every variable's dimensions, its own elements' keys
+//   and every equation that names it, refused where a name in a subscript
+//   could then mean two things;
+// - `deleteDimension {name}`: refused while anything uses the dimension,
+//   naming what does.
+//
 // # Safety
 // - `project` must point to a valid `SimlinProject`.
 // - `patch_data` must either be null with `patch_len == 0` or reference at
@@ -1413,6 +1527,58 @@ void simlin_project_apply_patch(SimlinProject *project,
                                 bool allow_errors,
                                 SimlinError **out_collected_errors,
                                 SimlinError **out_error);
+
+// Applies a JSON patch as `simlin_project_apply_patch` does, and writes what
+// the patch did that the project it leaves cannot say, as UTF-8 JSON to a
+// buffer the caller frees with `simlin_free`:
+//
+// ```json
+// {"renamed": [{"model": "main", "from": "birth_rate", "to": "fertility"}],
+//  "deleted": [{"model": "main", "ident": "deaths"}],
+//  "created": [{"model": "main", "ident": "births"}]}
+// ```
+//
+// The report accounts for the identity of the variables the patch touched,
+// against the project before the patch and the project after it. A variable
+// renamed, and one deleted while another took its name, leave the same
+// names behind, so a host that follows a variable through an edit (a
+// selection, a page that shows it, text being typed about it) reads here
+// what happened, rather than guessing from the names:
+//
+// - `renamed`: the variable that was `from` before the patch is `to` after
+//   it, by a `renameVariable` operation or a view edit that relabels its
+//   element. A variable the patch created is never a `from`.
+// - `deleted`: the variables, by their names before the patch, that no
+//   longer exist after it.
+// - `created`: the variables, by their names after the patch, that did not
+//   exist before it.
+//
+// Every other variable is the same variable under the same name, so a host
+// follows what it holds under a name through `renamed`, ends it if the name
+// is `deleted`, and otherwise keeps it. A name deleted and then taken by
+// another variable is in both `deleted` and `created` (or a `to`). A rename
+// back, or a respelling (`students` to `Students`), keeps the identifier and
+// is not listed; nor is a variable created and deleted within the patch. No
+// name repeats within a model's list, and each list is sorted by model and
+// name, canonical identifiers throughout. The report may gain keys; a reader
+// ignores those it does not know.
+//
+// A patch committed, or one a dry run would commit, writes its report; one
+// refused writes NULL with length 0 and sets `out_error` as
+// `simlin_project_apply_patch` does.
+//
+// # Safety
+// - As `simlin_project_apply_patch`, and `out_report` and `out_report_len`
+//   must be valid pointers.
+void simlin_project_apply_patch_reporting(SimlinProject *project,
+                                          const uint8_t *patch_data,
+                                          uintptr_t patch_len,
+                                          bool dry_run,
+                                          bool allow_errors,
+                                          uint8_t **out_report,
+                                          uintptr_t *out_report_len,
+                                          SimlinError **out_collected_errors,
+                                          SimlinError **out_error);
 
 // Open a project from binary protobuf data
 //
@@ -1506,6 +1672,57 @@ void simlin_project_get_model_count(SimlinProject *project,
 void simlin_project_get_revision(SimlinProject *project,
                                  uint64_t *out_revision,
                                  SimlinError **out_error);
+
+// Gets the project's simulation key: a number that is equal for two
+// contents whose simulations are the same, read from the contents alone,
+// with nothing compiled and nothing run.
+//
+// A host keeps the key its last run was made at and compares it after an
+// edit lands: an equal key means the run still describes the model, so a
+// diagram edit, a note or a unit needs no new run. Equations, the
+// simulation specs, dimensions, flows and everything else the compiler
+// reads are in the key; units are not, since they are checked and never
+// simulated.
+//
+// The key never calls two different simulations the same (but for a hash
+// collision), and may call one simulation by two keys: an equation
+// respelled, or a variable renamed in case only, has another key. It
+// compares contents within one build of the library and is not to be
+// stored across launches. A tool session's runs are kept fresh by the same
+// key, so its `"current"` run is always of the contents at this key.
+//
+// The key hashes the project's contents, which takes a few milliseconds
+// for the largest models in a debug build. The project's lock is held only
+// to take the contents, so the call waits for no compile and holds up no
+// edit.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `out_key` must be a valid pointer
+void simlin_project_get_simulation_key(SimlinProject *project,
+                                       uint64_t *out_key,
+                                       SimlinError **out_error);
+
+// Writes the project's dimensions as UTF-8 JSON to a buffer the caller frees
+// with `simlin_free`: an array in declaration order, each dimension in the
+// shape the native project JSON gives it --
+// `{"name", "elements": [...]}` for named elements in their declared order,
+// `{"name", "size": n}` for an indexed dimension, with `"parent"` for an
+// indexed subdimension, `"mapsTo"` for a positional mapping and
+// `"mappings": [{"target", "elementMap": [{"source", "target"}]}]` for the
+// rest. Names are spelled as the model writes them. A host reads here the
+// dimensions it lists and the order of an arrayed variable's elements,
+// without serializing the whole project.
+//
+// The project's lock is held only to take the contents.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `out_buffer` and `out_len` must be valid pointers
+void simlin_project_get_dimensions(SimlinProject *project,
+                                   uint8_t **out_buffer,
+                                   uintptr_t *out_len,
+                                   SimlinError **out_error);
 
 // Gets the list of model names in the project
 //
@@ -2124,6 +2341,11 @@ void simlin_project_render_png(SimlinProject *project,
 // `simlin_project_get_errors` will surface a `ConveyorLtmDegraded` /
 // `QueueLtmDegraded` `Warning` naming the offending stock, so the caller learns
 // why scores are absent instead of the request being silently dropped.
+//
+// A model that does not compile still gets a simulation: the failure is
+// kept and reported by the first call that runs it (`simlin_sim_run_to`,
+// `simlin_sim_run_to_end`), so `simlin_project_get_errors`, not a NULL
+// here, is how a host learns before running that a model cannot run.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel

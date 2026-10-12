@@ -274,6 +274,40 @@ fn an_edit_before_a_read_or_of_a_variable_changed_since_is_refused() {
     edit(&mut host, &mut session, coverage);
 }
 
+/// An edit's answer accounts for identity as a patch's report does: a
+/// variable deleted and a new one of its name are both, by identifier.
+#[test]
+fn an_edit_that_remakes_a_variable_says_it_was_deleted_and_created() {
+    let mut host = Host::from_test_project(&inventory());
+    let mut session = Session::new("main");
+    read(&mut host, &mut session);
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([{"op": "add_variable", "name": "Spare Time", "equation": "5"}])),
+    );
+    read(&mut host, &mut session);
+    let output = edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "delete", "variable": "spare_time"},
+            {"op": "add_stock", "name": "Spare Time", "initial": "100"}
+        ])),
+    );
+    assert_eq!(
+        output["deleted"],
+        json!([{"model": "main", "ident": "spare_time"}]),
+        "{output}"
+    );
+    assert_eq!(
+        output["created"],
+        json!([{"model": "main", "ident": "spare_time"}]),
+        "{output}"
+    );
+    assert!(output.get("renamed").is_none(), "{output}");
+}
+
 #[test]
 fn a_rename_rewrites_its_readers_and_the_answer_names_them() {
     let mut host = Host::from_test_project(&inventory());
@@ -286,8 +320,14 @@ fn a_rename_rewrites_its_readers_and_the_answer_names_them() {
     );
     let changes = output["changes"].as_array().unwrap();
     assert!(changes.contains(&json!({
-        "variable": "coverage", "action": "renamed", "detail": "renamed to inventory coverage"
+        "variable": "coverage", "action": "renamed", "detail": "renamed to inventory coverage",
+        "to": "inventory coverage"
     })));
+    assert_eq!(
+        output["renamed"],
+        json!([{"model": "main", "from": "coverage", "to": "inventory_coverage"}]),
+        "and names it by identifier for a host"
+    );
     assert!(changes.contains(&json!({
         "variable": "desired_inventory", "action": "changed",
         "detail": "equation orders * inventory_coverage (was orders * coverage)"
@@ -1196,8 +1236,8 @@ fn shape(equation: &Equation) -> &'static str {
 
 /// `set_equation` on each shape of equation, for one element and for all:
 /// what it sets is set, and everything else the equation holds stays -- the
-/// other elements' equations, the `:EXCEPT:` default and the flag that
-/// applies it to the elements with no arm of their own.
+/// other elements' equations, the equation every element follows, and each
+/// element's own equation when the one every element follows is set.
 #[test]
 fn set_equation_keeps_what_it_does_not_set_for_every_shape_of_equation() {
     let project = TestProject::new("regions")
@@ -1238,22 +1278,30 @@ fn set_equation_keeps_what_it_does_not_set_for_every_shape_of_equation() {
             Ok(Equation::ApplyToAll(region(), "7".to_string())),
             vec![("all[north]", 7.0), ("all[south]", 7.0)],
         ),
+        // The element gets an equation of its own; the rest still follow the
+        // one every element follows.
         (
             "all",
             Some("South"),
             Ok(Equation::Arrayed(
                 region(),
-                vec![arm("north", "0.1"), arm("south", "7"), arm("east", "0.1")],
-                None,
-                false,
+                vec![arm("south", "7")],
+                Some("0.1".to_string()),
+                true,
             )),
             vec![("all[north]", 0.1), ("all[south]", 7.0), ("all[east]", 0.1)],
         ),
+        // The equation every element follows; north keeps its own.
         (
             "partial",
             None,
-            Ok(Equation::ApplyToAll(region(), "7".to_string())),
-            vec![("partial[north]", 7.0), ("partial[east]", 7.0)],
+            Ok(Equation::Arrayed(
+                region(),
+                vec![arm("north", "0.5")],
+                Some("7".to_string()),
+                true,
+            )),
+            vec![("partial[north]", 0.5), ("partial[east]", 7.0)],
         ),
         // An arm the equation has: the default still applies to the rest.
         (
@@ -2093,6 +2141,13 @@ fn operation_row(op: &EditOperation) -> usize {
         EditOperation::Delete { .. } => 9,
         EditOperation::NameLoop { .. } => 10,
         EditOperation::SetSimSpecs { .. } => 11,
+        EditOperation::ClearElement { .. } => 12,
+        EditOperation::SetDimensions { .. } => 13,
+        EditOperation::AddDimension { .. } => 14,
+        EditOperation::ChangeDimension { .. } => 15,
+        EditOperation::RenameDimension { .. } => 16,
+        EditOperation::RenameElement { .. } => 17,
+        EditOperation::DeleteDimension { .. } => 18,
     }
 }
 
@@ -2402,6 +2457,75 @@ fn every_operation_on_every_kind_of_variable() {
                 Made(|p, _| assert_eq!(p.sim_specs.stop, 8.0)),
             ],
         ),
+        (
+            // None of the four is arrayed (an arrayed one:
+            // `an_element_edit_keeps_the_equation_every_element_follows`).
+            |t| json!({"op": "clear_element", "variable": t, "element": "north"}),
+            [
+                Rejected("it is not arrayed"),
+                Rejected("it is not arrayed"),
+                Rejected("it is not arrayed"),
+                Rejected("it is not arrayed"),
+            ],
+        ),
+        (
+            // The model declares no dimensions (a split by one:
+            // `a_variable_is_split_by_a_dimension_and_back`).
+            |t| json!({"op": "set_dimensions", "variable": t, "dimensions": ["Region"]}),
+            [
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+            ],
+        ),
+        // The dimension edits name no variable (each on a model with
+        // dimensions: `the_dimensions_are_edited_with_what_is_over_them`).
+        (
+            |_| json!({"op": "add_dimension", "name": "Region", "elements": ["north", "south"]}),
+            [
+                Made(|p, _| assert_eq!(p.dimensions[0].name, "Region")),
+                Made(|p, _| assert_eq!(p.dimensions[0].name, "Region")),
+                Made(|p, _| assert_eq!(p.dimensions[0].name, "Region")),
+                Made(|p, _| assert_eq!(p.dimensions[0].name, "Region")),
+            ],
+        ),
+        (
+            |_| json!({"op": "change_dimension", "dimension": "Region", "elements": ["north"]}),
+            [
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+            ],
+        ),
+        (
+            |_| json!({"op": "rename_dimension", "dimension": "Region", "to": "Area"}),
+            [
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+            ],
+        ),
+        (
+            |_| json!({"op": "rename_element", "dimension": "Region", "element": "north", "to": "n"}),
+            [
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+            ],
+        ),
+        (
+            |_| json!({"op": "delete_dimension", "dimension": "Region"}),
+            [
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+                Rejected("is not a declared dimension"),
+            ],
+        ),
     ];
     for (row, (operation, comes)) in rows.into_iter().enumerate() {
         for (target, comes) in targets.iter().zip(comes) {
@@ -2441,7 +2565,10 @@ fn every_operation_on_every_kind_of_variable() {
                     assert!(output.edited.is_none() && host.project == before, "{op}");
                 }
                 Made(check) => {
-                    assert!(output.edited.as_ref() == Some(&host.project), "{op}");
+                    assert!(
+                        output.edited.as_ref() == Some(&host.project),
+                        "{op}: {answer}"
+                    );
                     check(&host.project, target);
                 }
             }
@@ -2712,7 +2839,7 @@ fn renames_in_a_row_are_one_rename() {
         output["changes"],
         json!([
             {"variable": "inflow", "action": "changed", "detail": "equation tempo (was rate)"},
-            {"variable": "rate", "action": "renamed", "detail": "renamed to tempo"}
+            {"variable": "rate", "action": "renamed", "detail": "renamed to tempo", "to": "tempo"}
         ])
     );
 }
@@ -3924,10 +4051,11 @@ fn a_model_brought_back_to_life_names_its_undefined_series() {
     );
 }
 
-/// One equation written over per-element ones says it now holds for every
-/// element.
+/// An equation for every element written over per-element ones is the one
+/// the elements with no equation of their own would follow; each element
+/// keeps its own, and the change line says both.
 #[test]
-fn one_equation_over_per_element_ones_says_every_element() {
+fn an_equation_for_every_element_keeps_each_elements_own() {
     let project = TestProject::new("regions")
         .named_dimension("region", &["north", "south"])
         .array_with_ranges("growth[region]", vec![("north", "10"), ("south", "20")]);
@@ -3939,9 +4067,206 @@ fn one_equation_over_per_element_ones_says_every_element() {
         &mut session,
         operations(json!([{"op": "set_equation", "variable": "growth", "equation": "5"}])),
     );
-    let detail = output["changes"][0]["detail"].as_str().unwrap();
+    assert_eq!(
+        output["changes"][0]["detail"],
+        "equation for Every region 5 (was none)"
+    );
+}
+
+/// An element edit's change line names the elements it changed, as their
+/// dimension spells them, and says what each was: written over the
+/// equation for every element, changed, or returned to it.
+#[test]
+fn an_element_edit_names_the_elements_it_changed() {
+    let project = TestProject::new("regions")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("Region", &["North", "South"])
+        .array_aux("growth[Region]", "0.1");
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    read(&mut host, &mut session);
+    let detail = |output: &Value| output["changes"][0]["detail"].as_str().unwrap().to_string();
+    let written = edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "set_equation", "variable": "growth", "element": "north", "equation": "0.5"}
+        ])),
+    );
+    assert_eq!(detail(&written), "North: 0.5 (followed Every Region, 0.1)");
+    let changed = edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "set_equation", "variable": "growth", "element": "North", "equation": "0.6"},
+            {"op": "set_equation", "variable": "growth", "equation": "0.2"}
+        ])),
+    );
+    assert_eq!(
+        detail(&changed),
+        "equation for Every Region 0.2 (was 0.1); North: 0.6 (was 0.5)"
+    );
+    let cleared = edit(
+        &mut host,
+        &mut session,
+        operations(json!([{"op": "clear_element", "variable": "growth", "element": "north"}])),
+    );
+    assert_eq!(detail(&cleared), "North: follows Every Region (was 0.6)");
+}
+
+/// An element's own equation, written and cleared through `edit_model`,
+/// leaves the equation every element follows as it was.
+#[test]
+fn an_element_edit_keeps_the_equation_every_element_follows() {
+    let project = TestProject::new("regions")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_aux("growth[region]", "0.1");
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    read(&mut host, &mut session);
+    let equation = |host: &Host| {
+        host.project.models[0]
+            .get_variable("growth")
+            .unwrap()
+            .get_equation()
+            .unwrap()
+            .clone()
+    };
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "set_equation", "variable": "growth", "element": "North", "equation": "0.5"}
+        ])),
+    );
+    assert_eq!(
+        equation(&host),
+        Equation::Arrayed(
+            vec!["region".to_string()],
+            vec![("north".to_string(), "0.5".to_string(), None, None)],
+            Some("0.1".to_string()),
+            true
+        )
+    );
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "clear_element", "variable": "growth", "element": "north"}
+        ])),
+    );
+    assert_eq!(
+        equation(&host),
+        Equation::ApplyToAll(vec!["region".to_string()], "0.1".to_string())
+    );
+}
+
+/// `set_dimensions` splits a variable by a dimension, and removing it again,
+/// with the element whose equation stays, makes it a scalar.
+#[test]
+fn a_variable_is_split_by_a_dimension_and_back() {
+    let project = TestProject::new("regions")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .aux("growth", "0.1", None);
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    read(&mut host, &mut session);
+    let equation = |host: &Host| {
+        host.project.models[0]
+            .get_variable("growth")
+            .unwrap()
+            .get_equation()
+            .unwrap()
+            .clone()
+    };
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "set_dimensions", "variable": "growth", "dimensions": ["region"]},
+            {"op": "set_equation", "variable": "growth", "element": "south", "equation": "0.2"}
+        ])),
+    );
+    assert_eq!(
+        equation(&host),
+        Equation::Arrayed(
+            vec!["region".to_string()],
+            vec![("south".to_string(), "0.2".to_string(), None, None)],
+            Some("0.1".to_string()),
+            true
+        )
+    );
+    let refused = host.call_raw(
+        &mut session,
+        "edit_model",
+        &operations(json!([
+            {"op": "set_dimensions", "variable": "growth", "dimensions": []}
+        ]))
+        .to_string(),
+    );
+    assert!(refused.is_error, "north and south differ: {}", refused.json);
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "set_dimensions", "variable": "growth", "dimensions": [], "keep": "south"}
+        ])),
+    );
+    assert_eq!(equation(&host), Equation::Scalar("0.2".to_string()));
+}
+
+/// The agent makes and changes dimensions as a person does, and what is over
+/// a dimension follows each edit.
+#[test]
+fn the_dimensions_are_edited_with_what_is_over_them() {
+    let project = TestProject::new("regions")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .aux("growth", "0.1", None);
+    let mut host = Host::from_test_project(&project);
+    let mut session = Session::new("main");
+    read(&mut host, &mut session);
+    edit(
+        &mut host,
+        &mut session,
+        operations(json!([
+            {"op": "add_dimension", "name": "Region", "elements": ["north", " south "]},
+            {"op": "set_dimensions", "variable": "growth", "dimensions": ["Region"]},
+            {"op": "set_equation", "variable": "growth", "element": "south", "equation": "0.2"},
+            {"op": "rename_element", "dimension": "Region", "element": "south", "to": "lower"},
+            {"op": "rename_dimension", "dimension": "Region", "to": "Area"},
+            {"op": "change_dimension", "dimension": "Area", "elements": ["lower", "north", "east"]}
+        ])),
+    );
+    assert_eq!(
+        host.project.dimensions[0],
+        crate::datamodel::Dimension::named(
+            "Area".to_string(),
+            vec!["lower".to_string(), "north".to_string(), "east".to_string()]
+        )
+    );
+    assert_eq!(
+        host.project.models[0]
+            .get_variable("growth")
+            .unwrap()
+            .get_equation()
+            .unwrap(),
+        &Equation::Arrayed(
+            vec!["Area".to_string()],
+            vec![("lower".to_string(), "0.2".to_string(), None, None)],
+            Some("0.1".to_string()),
+            true
+        )
+    );
+    let refused = host.call_raw(
+        &mut session,
+        "edit_model",
+        &operations(json!([{"op": "delete_dimension", "dimension": "Area"}])).to_string(),
+    );
     assert!(
-        detail.starts_with("equation 5 for every element (was "),
-        "{detail}"
+        refused.is_error && refused.json.contains("'growth' still uses it"),
+        "{}",
+        refused.json
     );
 }

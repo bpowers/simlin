@@ -2263,17 +2263,19 @@ fn element_graph_permuted_mapped_read_follows_the_map_not_the_ordinal() {
     assert_no_edge(&result, "aggregated[a2]", "target[c2]");
 }
 
-/// NAME identity beats the declared element map.
+/// The declared element map beats NAME identity.
 ///
 /// `agg` and `cop` declare the same element names in a different order, and the
 /// map is a third permutation, so all three candidate answers are distinct.
-/// `build_view_from_ops` looks the active element's own name up on the source
-/// axis BEFORE consulting any mapping, so `target[e1]` reads `aggregated[e1]`
+/// `aggregated[agg]` names the source's own dimension, which the equation does
+/// not iterate, so execution reads through the declared mapping before any name
+/// the two share (`DimensionsContext::resolve_dimension_subscript`), and
+/// `target[e1]` reads `aggregated[e2]`, the `agg` element the map pairs with it
 /// -- pinned against the VM by `mapped_reference_semantics_tests`'
-/// `SharedElementNames` row. Vensim's Example 3 subrange idiom makes this an
-/// ordinary shape rather than an oddity.
+/// `SharedElementNames` row. The graph describes it through
+/// `DimensionsContext::mapped_read_correspondence`.
 #[test]
-fn element_graph_mapped_read_resolves_shared_element_names_by_name() {
+fn element_graph_mapped_read_follows_the_element_map_over_shared_names() {
     let project = TestProject::new("class_d_shared_names")
         .named_dimension("cop", &["e1", "e2", "e3"])
         .named_dimension_with_element_mapping(
@@ -2287,16 +2289,18 @@ fn element_graph_mapped_read_resolves_shared_element_names_by_name() {
 
     let result = element_edges(&project);
 
+    assert_edge(&result, "aggregated[e3]", "target[e2]");
+    assert_edge(&result, "aggregated[e1]", "target[e3]");
+    assert_edge(&result, "aggregated[e2]", "target[e1]");
+    // Name identity (e1 -> e1) and the positional read (cop's first element
+    // from agg's first, e3) are both wrong here.
     for e in ["e1", "e2", "e3"] {
-        assert_edge(
+        assert_no_edge(
             &result,
             &format!("aggregated[{e}]"),
             &format!("target[{e}]"),
         );
     }
-    // The map's own diagonal (e1 -> e3) and the positional one (cop's first
-    // element -> agg's first, e3) are both wrong here.
-    assert_no_edge(&result, "aggregated[e1]", "target[e3]");
     assert_no_edge(&result, "aggregated[e3]", "target[e1]");
 }
 
@@ -2583,8 +2587,10 @@ fn bare_axis_pairing_enumeration() {
             reads: elems(&["a", "a", "b"])
         }]
     );
-    // MAPPED, shared element names in a different order: NAME identity beats
-    // the ordinal the positional mapping would suggest.
+    // MAPPED, shared element names in a different order: a bare reference
+    // names no dimension on the right, and every `State` element is a `Region`
+    // one, so NAME identity beats the ordinal the positional mapping would
+    // suggest.
     let mut shared = named("State", &["b", "a"]);
     shared.set_maps_to("Region".to_string());
     assert_eq!(

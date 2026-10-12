@@ -44,6 +44,11 @@ fn is_internal_var(name: &str) -> bool {
 /// `QueueLtmDegraded` `Warning` naming the offending stock, so the caller learns
 /// why scores are absent instead of the request being silently dropped.
 ///
+/// A model that does not compile still gets a simulation: the failure is
+/// kept and reported by the first call that runs it (`simlin_sim_run_to`,
+/// `simlin_sim_run_to_end`), so `simlin_project_get_errors`, not a NULL
+/// here, is how a host learns before running that a model cannot run.
+///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
 #[no_mangle]
@@ -168,6 +173,7 @@ pub unsafe extern "C" fn simlin_sim_new(
                     kind: engine::ErrorKind::Simulation,
                     code: engine::ErrorCode::NotSimulatable,
                     details: Some("incremental compilation: no sync state available".to_string()),
+                    place: None,
                 }),
                 engine::indexmap::IndexMap::new(),
                 HashMap::new(),
@@ -589,6 +595,7 @@ pub unsafe extern "C" fn simlin_sim_set_value(
                         "cannot set value of '{}': not a simple constant",
                         canon_name
                     )),
+                    place: None,
                 };
                 store_ffi_error(out_error, ffi_error_from_engine(&err));
                 return;
@@ -683,6 +690,7 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
                     "cannot set value of offset {}: not a simple constant",
                     offset
                 )),
+                place: None,
             };
             store_ffi_error(out_error, ffi_error_from_engine(&err));
             return;

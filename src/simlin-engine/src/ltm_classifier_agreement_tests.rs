@@ -1316,9 +1316,9 @@ fn agree_mapped_dim_reverse_declaration_is_bare() {
 #[test]
 fn agree_element_mapped_iterated_dim_is_bare() {
     // An EXPLICIT element map on the ITERATED spelling: `pop[State]` names the
-    // dimension the equation iterates and is resolved name-first, then through
-    // the map (GH #997); the declared lists reproduce that pairing (a mapped
-    // pair), so both families classify Bare.
+    // dimension the equation iterates and is resolved through the map (GH
+    // #997); the declared lists reproduce that pairing (a mapped pair), so both
+    // families classify Bare.
     let tp = TestProject::new("main")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("Region", &["r1", "r2"])
@@ -1337,8 +1337,8 @@ fn agree_element_mapped_iterated_dim_is_bare() {
 fn agree_element_mapped_source_own_dim_is_per_element() {
     // GH #997's class-D shape, the OTHER spelling of the fixture above:
     // `pop[Region]` names the SOURCE's own dimension inside a `State`-iterating
-    // equation, which execution resolves name-first then through the element
-    // map. Both families must classify it `PerElement` with a `MappedRead`
+    // equation, which execution resolves through the element map. Both
+    // families must classify it `PerElement` with a `MappedRead`
     // axis -- the Expr0 mirror gains the same arm, so the agreement gate is
     // what keeps the test-support classifier from drifting.
     let tp = TestProject::new("main")

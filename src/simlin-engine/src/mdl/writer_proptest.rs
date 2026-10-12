@@ -812,6 +812,12 @@ fn reads_back_as_generated(
 /// with what differs.
 fn first_save_is_a_fixed_point(project: &Project) -> std::result::Result<(), String> {
     use crate::mdl::save_roundtrip_tests::{first_difference, normalized};
+    // The reader keeps one equation where a variable's elements say one
+    // thing (`element_equations`), so the generated model is taken in the
+    // form an open of it gives: the save of that form is the fixed point.
+    let mut project = project.clone();
+    crate::element_equations::compact_element_equations(&mut project);
+    let project = &project;
     let (save1, warnings) =
         project_to_mdl_with_warnings(project).map_err(|e| format!("first write: {e}"))?;
     let read1 = parse_mdl(&save1).map_err(|e| format!("first read: {e}\n{save1}"))?;

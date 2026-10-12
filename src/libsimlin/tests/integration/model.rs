@@ -1329,3 +1329,136 @@ fn test_model_get_links_collapses_macro_internals() {
         simlin_project_unref(proj);
     }
 }
+
+unsafe fn equation_json(model: *mut SimlinModel, ident: &str) -> Result<Value, SimlinErrorCode> {
+    let ident = CString::new(ident).unwrap();
+    let (mut buf, mut len, mut err) = (ptr::null_mut(), 0, ptr::null_mut());
+    simlin_model_get_equation(model, ident.as_ptr(), &mut buf, &mut len, &mut err);
+    if !err.is_null() {
+        let code = simlin_error_get_code(err);
+        simlin_error_free(err);
+        return Err(code);
+    }
+    let value = serde_json::from_slice(std::slice::from_raw_parts(buf, len)).unwrap();
+    simlin_free(buf);
+    Ok(value)
+}
+
+/// A variable's equations reach a host as JSON: an arrayed variable as its
+/// top row and a cell per element, and a variable the model lacks as
+/// `DoesNotExist`.
+#[test]
+fn an_equation_is_read_as_its_tree_and_cells() {
+    let datamodel = TestProject::new("equations")
+        .named_dimension("Age", &["Young", "Old"])
+        .aux("inflow", "1", None)
+        .array_with_default_and_overrides("pop[Age]", "inflow * 2", vec![("Young", "inflow")])
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let mut err = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        expect_no_error(err, "getting the model");
+
+        let pop = equation_json(model, "pop").expect("pop's equations");
+        assert_eq!(pop["every"]["text"], "inflow * 2");
+        assert_eq!(pop["every"]["tree"]["kind"], "op");
+        assert_eq!(pop["cells"][0]["state"], "own");
+        assert_eq!(pop["cells"][0]["own"]["tree"]["kind"], "ref");
+        assert_eq!(pop["cells"][1]["state"], "follows");
+
+        assert_eq!(
+            equation_json(model, "nothing_here"),
+            Err(SimlinErrorCode::DoesNotExist)
+        );
+
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A field edit through the patch reaches what a host reads back: an
+/// element given its own equation is `own` and the rest still follow.
+#[test]
+fn a_field_edit_lands_through_the_patch() {
+    let datamodel = TestProject::new("fields")
+        .named_dimension("Age", &["Young", "Old"])
+        .array_aux("pop[Age]", "2")
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let patch = serde_json::json!({"models": [{"name": "main", "ops": [
+            {"type": "setElementEquation",
+             "payload": {"ident": "pop", "element": ["old"], "equation": "3"}}
+        ]}]});
+        let bytes = serde_json::to_vec(&patch).unwrap();
+        let (mut collected, mut err) = (ptr::null_mut(), ptr::null_mut());
+        simlin_project_apply_patch(
+            proj,
+            bytes.as_ptr(),
+            bytes.len(),
+            false,
+            false,
+            &mut collected,
+            &mut err,
+        );
+        expect_no_error(err, "the field edit");
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        let mut err = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        expect_no_error(err, "getting the model");
+        let pop = equation_json(model, "pop").expect("pop's equations");
+        assert_eq!(pop["every"]["text"], "2");
+        assert_eq!(pop["cells"][0]["state"], "follows");
+        assert_eq!(pop["cells"][1]["state"], "own");
+        assert_eq!(pop["cells"][1]["own"]["text"], "3");
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A dimension edit through the patch reaches what a host reads back: a
+/// renamed element keys the element's own equation, and the renamed
+/// dimension is the one the variable is over.
+#[test]
+fn a_dimension_edit_lands_through_the_patch() {
+    let datamodel = TestProject::new("dimensions")
+        .named_dimension("Age", &["Young", "Old"])
+        .array_with_default_and_overrides("pop[Age]", "2", vec![("Old", "pop[Young] + 1")])
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let patch = serde_json::json!({"projectOps": [
+            {"type": "renameElement",
+             "payload": {"dimension": "Age", "from": "Young", "to": "Child"}},
+            {"type": "renameDimension", "payload": {"from": "Age", "to": "Cohort"}}
+        ]});
+        let bytes = serde_json::to_vec(&patch).unwrap();
+        let (mut collected, mut err) = (ptr::null_mut(), ptr::null_mut());
+        simlin_project_apply_patch(
+            proj,
+            bytes.as_ptr(),
+            bytes.len(),
+            false,
+            false,
+            &mut collected,
+            &mut err,
+        );
+        expect_no_error(err, "the dimension edit");
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        let mut err = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        expect_no_error(err, "getting the model");
+        let pop = equation_json(model, "pop").expect("pop's equations");
+        assert_eq!(pop["dimensions"][0]["name"], "Cohort");
+        assert_eq!(pop["dimensions"][0]["elements"][0], "Child");
+        assert_eq!(pop["cells"][1]["state"], "own");
+        assert_eq!(pop["cells"][1]["own"]["text"], "pop[Child] + 1");
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

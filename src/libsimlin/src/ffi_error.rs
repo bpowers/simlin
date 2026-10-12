@@ -2,7 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::{SimlinErrorCode, SimlinErrorKind, SimlinErrorSeverity, SimlinUnitErrorKind};
+use crate::{
+    SimlinErrorCode, SimlinErrorKind, SimlinErrorSeverity, SimlinReadPast, SimlinUnitErrorKind,
+};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
@@ -34,6 +36,16 @@ pub struct ErrorDetail {
     /// Bare reason string without snippet/summary formatting (see
     /// `SimlinErrorDetail::details`).
     pub details: Option<String>,
+    /// The element the detail is about (see `SimlinErrorDetail::element_name`).
+    pub element_name: Option<String>,
+    /// The dimension a subscript runs off, and which end (see
+    /// `SimlinErrorDetail::read_past_dimension`).
+    pub read_past_dimension: Option<String>,
+    pub read_past: SimlinReadPast,
+    /// The variable a refused reference reads, and the dimensions that
+    /// disagree (see `SimlinErrorDetail::mismatched_read_variable`).
+    pub mismatched_read_variable: Option<String>,
+    pub mismatched_read_dimensions: Option<String>,
 }
 
 impl ErrorDetail {
@@ -49,6 +61,11 @@ impl ErrorDetail {
             unit_error_kind: SimlinUnitErrorKind::default(),
             severity: SimlinErrorSeverity::default(),
             details: None,
+            element_name: None,
+            read_past_dimension: None,
+            read_past: SimlinReadPast::None,
+            mismatched_read_variable: None,
+            mismatched_read_dimensions: None,
         }
     }
 }
@@ -65,6 +82,11 @@ struct OwnedDetail {
     unit_error_kind: SimlinUnitErrorKind,
     severity: SimlinErrorSeverity,
     details: Option<CString>,
+    element_name: Option<CString>,
+    read_past_dimension: Option<CString>,
+    read_past: SimlinReadPast,
+    mismatched_read_variable: Option<CString>,
+    mismatched_read_dimensions: Option<CString>,
 }
 
 impl OwnedDetail {
@@ -80,6 +102,11 @@ impl OwnedDetail {
             unit_error_kind: detail.unit_error_kind,
             severity: detail.severity,
             details: detail.details.map(sanitize_for_c),
+            element_name: detail.element_name.map(sanitize_for_c),
+            read_past_dimension: detail.read_past_dimension.map(sanitize_for_c),
+            read_past: detail.read_past,
+            mismatched_read_variable: detail.mismatched_read_variable.map(sanitize_for_c),
+            mismatched_read_dimensions: detail.mismatched_read_dimensions.map(sanitize_for_c),
         }
     }
 
@@ -105,6 +132,23 @@ impl OwnedDetail {
             severity: self.severity,
             details: self
                 .details
+                .as_ref()
+                .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
+            element_name: self
+                .element_name
+                .as_ref()
+                .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
+            read_past_dimension: self
+                .read_past_dimension
+                .as_ref()
+                .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
+            read_past: self.read_past,
+            mismatched_read_variable: self
+                .mismatched_read_variable
+                .as_ref()
+                .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
+            mismatched_read_dimensions: self
+                .mismatched_read_dimensions
                 .as_ref()
                 .map_or(ptr::null(), |v| v.as_ptr() as *const c_char),
         }

@@ -133,6 +133,9 @@ pub(super) fn ltm_warning(model: &str, variable: Option<&str>, message: String) 
 pub(super) struct LtmWarnings {
     model: String,
     pub(super) unscoreable_edges: HashSet<(String, String)>,
+    /// The edges scored as a read of any element of their source, each
+    /// warned of once (`warn_of_a_computed_index`).
+    pub(super) approximate_edges: HashSet<(String, String)>,
     pub(super) diagnostics: Vec<Diagnostic>,
 }
 
@@ -141,6 +144,7 @@ impl LtmWarnings {
         LtmWarnings {
             model,
             unscoreable_edges: HashSet::new(),
+            approximate_edges: HashSet::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -149,6 +153,28 @@ impl LtmWarnings {
     pub(super) fn warn(&mut self, variable: Option<&str>, message: String) {
         self.diagnostics
             .push(ltm_warning(&self.model, variable, message));
+    }
+
+    /// Say, once per edge, that `to` reads `from` at an element computed as
+    /// the model runs (`from[idx[D]]`): loop analysis cannot know which
+    /// element that is before the run, so it scores the edge, and the loops
+    /// through it, as a read of any element of `from` -- a score it cannot
+    /// stand behind element by element.
+    pub(super) fn warn_of_a_computed_index(&mut self, from: &str, to: &str) {
+        if self
+            .approximate_edges
+            .insert((from.to_string(), to.to_string()))
+        {
+            self.warn(
+                Some(to),
+                format!(
+                    "LTM link score for edge {from} -> {to} is not exact: {to} reads {from} at \
+                     an element computed as the model runs, which loop analysis cannot follow \
+                     element by element, so the edge and the loops through it are scored as a \
+                     read of any element of {from}"
+                ),
+            );
+        }
     }
 }
 

@@ -2329,7 +2329,15 @@ pub fn incremental_layout(
                 crate::patch::ModelOperation::UpsertModule(m) => &m.ident,
                 crate::patch::ModelOperation::RenameVariable { to, .. } => to,
                 crate::patch::ModelOperation::UpdateStockFlows { ident, .. } => ident,
-                crate::patch::ModelOperation::DeleteVariable { .. }
+                // A field edit that can change what the variable reads names it,
+                // as an upsert does; units and notes change no reads.
+                crate::patch::ModelOperation::SetEquation { ident, .. }
+                | crate::patch::ModelOperation::SetElementEquation { ident, .. }
+                | crate::patch::ModelOperation::SetLookup { ident, .. }
+                | crate::patch::ModelOperation::SetDimensions { ident, .. } => ident,
+                crate::patch::ModelOperation::SetUnits { .. }
+                | crate::patch::ModelOperation::SetNotes { .. }
+                | crate::patch::ModelOperation::DeleteVariable { .. }
                 | crate::patch::ModelOperation::UpsertView { .. }
                 | crate::patch::ModelOperation::DeleteView { .. }
                 | crate::patch::ModelOperation::SetLoopName { .. }

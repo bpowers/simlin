@@ -4703,8 +4703,10 @@ fn a_row_sum_and_a_column_sum_of_one_text_get_their_own_nodes() {
 ///
 /// The slot's own read -- `a[north] = SUM(pop) * 0.5` is `pop[north] * 0.5` on
 /// the VM, the ROW the slot's element pins -- is not what the whole-array node
-/// holds, so `pop -> a` is declined loudly and no `agg -> a[e]` score exists
-/// (`a_per_element_slots_bare_reducer_argument_is_declined_not_scored`).
+/// holds; loop analysis describes the slot as that row
+/// (`FragmentInput::elementwise_target`), so `pop -> a` is scored as the slots
+/// written `SUM(pop[north]) * 0.5` are, never against the whole-array node
+/// (`ltm_elementwise_tests` in the library compares the two loop by loop).
 #[test]
 fn a_per_element_owner_beside_an_a2a_owner_of_one_text_keeps_the_a2a_node() {
     let project = TestProject::new("dedup_arrayed_owner")
@@ -4736,17 +4738,8 @@ fn a_per_element_owner_beside_an_a2a_owner_of_one_text_keeps_the_a2a_node() {
         "got: {warnings:?}"
     );
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("LTM link score for edge pop -> a could not be computed")),
-        "the slot's edge through the whole-array node is declined loudly; got: {warnings:?}"
-    );
-    assert!(
-        !ltm_names(&ltm_vars)
-            .iter()
-            .any(|n| n.contains("\u{2192}a[")),
-        "no agg -> a[e] score; got: {:?}",
-        ltm_names(&ltm_vars)
+        !warnings.iter().any(|w| w.contains("could not be computed")),
+        "the slot's edge is scored as the row it reads; got: {warnings:?}"
     );
     let base = offset_of(&results, node);
     for (slot, e) in ["north", "south"].into_iter().enumerate() {
@@ -5075,16 +5068,15 @@ fn a_live_wildcard_argument_of_an_unhoisted_reducer_stays_live() {
 /// ROW the slot's element pins -- `slot[a] = SUM(m) * 0.001` is `m[a,*]`'s sum
 /// on the VM -- while the only node its identity `sum(m)` mints is the whole
 /// array, shared with the scalar owner `z = SUM(m) * 0.0001` (which reads
-/// exactly that). The per-element-owner rule (GH #792,
-/// `unhoisted_reducer_source_read`'s `Ast::Arrayed` arm) sees the bare
-/// argument whether or not a node was hoisted for it, so `m -> slot` is
-/// declined loudly -- one warning, no `agg -> slot[e]` score, the loops
-/// through `slot` dropped -- instead of scored against the node (2050.5 for
-/// `slot[a]`, V9b-6). `z`'s `agg -> z` and `row[d1] = SUM(m) * 0.004`'s own
-/// row node are untouched. The exact per-slot description is a tracked
-/// follow-up.
+/// exactly that). Loop analysis describes each slot as the row it reads
+/// (`FragmentInput::elementwise_target`: `slot[a]` as `SUM(m[a, *]) *
+/// 0.001`), so each slot is scored through its own row's node, never against
+/// the whole-array node (which scored `slot[a]` at 2050.5, V9b-6), and with no
+/// decline; `ltm_elementwise_tests` in the library compares the loops with
+/// the slots written out row by row. `z`'s `agg -> z` and
+/// `row[d1] = SUM(m) * 0.004`'s own row node are untouched.
 #[test]
-fn a_per_element_slots_bare_reducer_argument_is_declined_not_scored() {
+fn a_per_element_slots_bare_reducer_argument_is_scored_as_the_row_it_reads() {
     let project = TestProject::new("per_element_slot_bare_argument")
         .with_sim_time(0.0, 4.0, 1.0)
         .named_dimension("d1", &["a", "b", "c"])
@@ -5112,35 +5104,41 @@ fn a_per_element_slots_bare_reducer_argument_is_declined_not_scored() {
         .iter()
         .find(|(_, d)| d == &["d1".to_string()])
         .expect("row's node");
-    let (whole_node, _) = aggs.iter().find(|(_, d)| d.is_empty()).expect("z's node");
-
-    assert!(
-        !names.iter().any(|n| n.contains("\u{2192}slot[")),
-        "no score into a slot of the per-element owner; got: {names:?}"
-    );
-    let warnings = ltm_warning_texts(&project);
-    let declines = warnings
+    // Each slot's row is a scalar node too; z's is the one z reads.
+    let (whole_node, _) = aggs
         .iter()
-        .filter(|w| w.contains("LTM link score for edge m -> slot could not be computed"))
-        .count();
-    assert_eq!(
-        declines, 1,
-        "one loud decline for the slot's edge; got: {warnings:?}"
+        .find(|(n, d)| {
+            d.is_empty()
+                && names
+                    .iter()
+                    .any(|name| name.ends_with(&format!("{n}\u{2192}z")))
+        })
+        .expect("z's node");
+
+    for e in ["a", "b", "c"] {
+        assert!(
+            names
+                .iter()
+                .any(|n| n.ends_with(&format!("\u{2192}slot[{e}]"))),
+            "slot[{e}] is scored; got: {names:?}"
+        );
+    }
+    let warnings = ltm_warning_texts(&project);
+    assert!(
+        !warnings.iter().any(|w| w.contains("could not be computed")),
+        "no decline; got: {warnings:?}"
     );
     assert!(
         !warnings.iter().any(|w| w.contains("failed to compile")),
         "got: {warnings:?}"
     );
-    for loop_var in ltm_vars
-        .iter()
-        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
-    {
-        assert!(
-            !loop_var.equation.source_text().contains("\u{2192}slot"),
-            "a loop through the declined edge is dropped, not scored: {}",
-            loop_var.name
-        );
-    }
+    assert!(
+        ltm_vars
+            .iter()
+            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+            .any(|v| v.equation.source_text().contains("\u{2192}slot")),
+        "the loops through the slots are scored"
+    );
 
     let m = |r: &str, c: &str| series_at(&results, offset_of(&results, &format!("m[{r},{c}]")));
     let z = series_at(&results, offset_of(&results, "z"));
@@ -5559,7 +5557,7 @@ fn declined_sliced_reducer_edge_skips_loudly() {
 ///
 /// `SUM(matrix[State,*])` names the dimension the equation ITERATES; the index
 /// survives to `IndexOp::ActiveDimRef` and `build_view_from_ops` resolves it
-/// name-first, then through the declared map
+/// through the declared map
 /// (`mapped_reference_semantics_tests`' `(Permuted, IteratedDim)` cell,
 /// measured against the VM). The map here is the reverse permutation
 /// (CA -> east) and the two regions start apart, so the value and the
@@ -5663,7 +5661,7 @@ fn element_mapped_sliced_reducer_hoists_and_scores_its_loops() {
 /// with the `State`/`Region` correspondence supplied by the caller.
 ///
 /// `target[State] = x[State] * w` reads the ITERATED spelling, which resolves
-/// name-first, then through the declared map; `w = 1 + TIME / 100` is a
+/// through the declared map; `w = 1 + TIME / 100` is a
 /// varying scalar the `x -> target` partial freezes, so that partial's value
 /// depends on WHICH element of `x` it reads. `x[Region] = level[Region] * 0.5`
 /// and a stock close the loop, so every element edge of the mapped pair sits
@@ -13043,4 +13041,91 @@ fn scalar_feeder_of_broadcast_reduce_scores_via_agg_arm() {
             );
         }
     }
+}
+
+/// A diffusion chain written with offsets -- each layer's flux reads the
+/// layer above (`c[L - 1]`), each net flow the layer below (`flux[L + 1]`),
+/// the ends as exceptions -- is described element by element, as the same
+/// chain written as each element's own equation is: the same loops, with the
+/// same scores, and every link score compiled. Read as a computed index, each
+/// offset fed every element of the variable it reads to every element of the
+/// one reading it: 39 loops where there are 5, their link scores 0 and one
+/// loop score near 3e14, with no diagnostic.
+#[test]
+fn an_offset_chain_scores_the_loops_of_its_elements_equations() {
+    use datamodel::Equation;
+    let base = || {
+        TestProject::new("diffusion")
+            .with_sim_time(0.0, 6.0, 1.0)
+            .named_dimension("L", &["l1", "l2", "l3"])
+            .array_stock("c[L]", "10 * L", &["net"], &[], None)
+    };
+    let by_element = base()
+        .array_flow_with_ranges(
+            "net[L]",
+            vec![
+                ("l1", "flux[l1] - flux[l2]"),
+                ("l2", "flux[l2] - flux[l3]"),
+                ("l3", "flux[l3]"),
+            ],
+        )
+        .array_with_ranges(
+            "flux[L]",
+            vec![
+                ("l1", "0 * c[l1]"),
+                ("l2", "(c[l1] - c[l2]) * 0.1"),
+                ("l3", "(c[l2] - c[l3]) * 0.1"),
+            ],
+        )
+        .build_datamodel();
+    let mut by_offset = base()
+        .array_flow_with_ranges("net[L]", vec![("l3", "flux[l3]")])
+        .array_with_default_and_overrides(
+            "flux[L]",
+            "(c[L - 1] - c[L]) * 0.1",
+            vec![("l1", "0 * c[l1]")],
+        )
+        .build_datamodel();
+    let net = by_offset.models[0]
+        .variables
+        .iter()
+        .position(|v| v.get_ident() == "net")
+        .unwrap();
+    if let Some(datamodel::Variable::Flow(flow)) = by_offset.models[0].variables.get_mut(net) {
+        flow.equation = Equation::Arrayed(
+            vec!["L".to_string()],
+            vec![("l3".to_string(), "flux[l3]".to_string(), None, None)],
+            Some("flux[L] - flux[L + 1]".to_string()),
+            true,
+        );
+    }
+
+    let loops = |project: &datamodel::Project| {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, project, None);
+        let ltm_failures: Vec<String> =
+            collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On)
+                .iter()
+                .map(|d| format!("{:?}", d.error))
+                .filter(|m| m.contains("LTM"))
+                .collect();
+        assert_eq!(ltm_failures, Vec::<String>::new());
+        let (results, _) = run_ltm(project);
+        let mut scores: Vec<Vec<u64>> = ltm_score_var_names(&results)
+            .into_iter()
+            .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+            .map(|n| {
+                series_at(&results, offset_of(&results, &n))
+                    .into_iter()
+                    .skip(STARTUP_STEPS + 1)
+                    .map(|v| if v == 0.0 { 0 } else { v.to_bits() })
+                    .collect()
+            })
+            .collect();
+        scores.sort();
+        scores
+    };
+    let (element, offset) = (loops(&by_element), loops(&by_offset));
+    assert_eq!(element.len(), 5);
+    assert_eq!(offset, element);
 }

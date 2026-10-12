@@ -140,7 +140,7 @@ fn arrayed_source_feeds_only_the_helper_that_captured_it() {
 ///
 /// `Other` declares the same two element NAMES as `Region` in the opposite
 /// ORDER, with no mapping between them. Execution resolves `stock[Region]`
-/// name-first (`DimensionsContext::resolve_mapped_read`): the north slot of
+/// by name (`DimensionsContext::resolve_mapped_read`): the north slot of
 /// `plain[Region] = stock[Region]` reads the element NAMED north, 20, and so
 /// does the north helper of `out[Region] = SMTH1(stock[Region], 1)`. The VM
 /// assertions are the oracle for both spellings, and the element graph must

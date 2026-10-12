@@ -26,7 +26,7 @@ use crate::dimensions::{
 /// self-reference plus module input wiring. That is why the GH #996 hazard
 /// fixture in `crate::mapped_reference_semantics_tests` is built from a
 /// two-axis FLOW under a stock: a fixture built from an aux equation exercises
-/// nothing. See `compiler::context`'s `get_implicit_subscripts` for the rest
+/// nothing. See `compiler::context`'s `get_implicit_axes` for the rest
 /// of that measurement.
 ///
 /// The LTM describers ask the same matcher through `db::bare_axis_pairing`,

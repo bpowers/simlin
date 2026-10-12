@@ -3161,10 +3161,9 @@ g[A1] = 10
                             .unwrap_or_else(|| panic!("Should have key {}", key))
                     };
 
-                    assert_eq!(elements.len(), 3);
+                    // A2 and A3 follow the default, as the file writes them.
+                    assert_eq!(elements.len(), 1);
                     assert_eq!(find_eq("a1"), "10");
-                    assert_eq!(find_eq("a2"), "7");
-                    assert_eq!(find_eq("a3"), "7");
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }
@@ -3346,9 +3345,10 @@ s[SubA] :EXCEPT: [A3] = 14
                             .unwrap_or_else(|| panic!("Should have key {}", key))
                     };
 
-                    // s[A3] = 13 (explicit override), s[A2] = 14 (from EXCEPT default)
+                    // s[A3] = 13 (explicit override); s[A2] follows the
+                    // EXCEPT default, 14.
                     assert_eq!(find_eq("a3"), "13");
-                    assert_eq!(find_eq("a2"), "14");
+                    assert_eq!(elements.len(), 1);
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }

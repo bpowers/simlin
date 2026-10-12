@@ -3635,6 +3635,140 @@ fn an_init_view_is_an_init_phase_element_edge() {
     );
 }
 
+/// A recurrence through two variables that each element reads by an offset
+/// (`x[T] = y[T - 1] + 1`, `y[T] = x[T] * 2`) is ordered element by element,
+/// as the same recurrence spelled with each element's own equation is: the
+/// offset is a constant at each element, and reads that element. Read as a
+/// computed load it named only `y`'s first element to the element graph, so
+/// `x[t3]` ran before `y[t2]` and read its value from the step before.
+#[test]
+fn a_recurrence_through_an_offset_is_ordered_by_element() {
+    let base = || {
+        TestProject::new("offset_recurrence")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("T", &["t1", "t2", "t3"])
+            .array_aux("y[T]", "x[T] * 2")
+    };
+    let by_offset = base()
+        .array_aux("x[T]", "IF T = 1 THEN 1 ELSE y[T - 1] + 1")
+        .run_vm()
+        .expect("the offset recurrence runs");
+    let by_element = base()
+        .array_with_ranges(
+            "x[T]",
+            vec![("t1", "1"), ("t2", "y[t1] + 1"), ("t3", "y[t2] + 1")],
+        )
+        .run_vm()
+        .expect("the per-element recurrence runs");
+    for key in ["x[t1]", "x[t2]", "x[t3]", "y[t3]"] {
+        assert_eq!(by_offset[key], by_element[key], "{key}");
+    }
+    assert_eq!(by_offset["x[t3]"], vec![7.0, 7.0]);
+}
+
+/// An offset read by an array-producing builtin in whole
+/// (`VECTOR ELM MAP(arr[T - 1], off[T])`) is the element it comes to read as
+/// the start of the whole variable, as the element written out is: the map
+/// reads on along the variable from there. Read as that one element alone,
+/// the map ran off its end -- 30 where the file gives 20, and not a number
+/// where it gives 30.
+#[test]
+fn an_offset_mapped_over_by_vector_elm_map_reads_on_along_the_variable() {
+    let base = |source: &str| {
+        TestProject::new("elm_map_offset")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("T", &["t1", "t2", "t3"])
+            .array_with_ranges("arr[T]", vec![("t1", "10"), ("t2", "20"), ("t3", "30")])
+            .array_with_ranges("off[T]", vec![("t1", "0"), ("t2", "1"), ("t3", "1")])
+            .array_aux(
+                "v[T]",
+                &format!("IF T = 1 THEN 0 ELSE VECTOR ELM MAP({source}, off[T])"),
+            )
+            .run_vm()
+            .expect("the model runs")
+    };
+    let by_element = TestProject::new("elm_map_by_element")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("T", &["t1", "t2", "t3"])
+        .array_with_ranges("arr[T]", vec![("t1", "10"), ("t2", "20"), ("t3", "30")])
+        .array_with_ranges("off[T]", vec![("t1", "0"), ("t2", "1"), ("t3", "1")])
+        .array_with_ranges(
+            "v[T]",
+            vec![
+                ("t1", "0"),
+                ("t2", "VECTOR ELM MAP(arr[t1], off[t2])"),
+                ("t3", "VECTOR ELM MAP(arr[t2], off[t3])"),
+            ],
+        )
+        .run_vm()
+        .expect("the model runs");
+    assert_eq!(by_element["v[t2]"], vec![20.0, 20.0]);
+    assert_eq!(by_element["v[t3]"], vec![30.0, 30.0]);
+    for source in ["arr[T - 1]", "arr[(T - 1) * 1]", "arr[T - 1 + 0]"] {
+        let by_offset = base(source);
+        for key in ["v[t2]", "v[t3]"] {
+            assert_eq!(by_offset[key], by_element[key], "{source}: {key}");
+        }
+    }
+}
+
+/// A recurrence through an index the model computes as it runs
+/// (`x[T] = y[idx[T]] + 1`, `y[T] = x[T] * 2`) cannot be ordered element by
+/// element before the run: the element read is whatever `idx` holds. It is
+/// refused as a cycle, never run in an order that reads a value from the step
+/// before, and the refusal says the computed index is why -- element by
+/// element there may be no circle at all, as there is none here. The computed
+/// load named only `y`'s first element to the element graph, which then
+/// ordered `x[t3]` before `y[t2]`: `x[t3]` was 1 where the recurrence it
+/// states gives 7, with no diagnostic. A recurrence of one variable through
+/// its own computed index (`x[idx[T]]`) is refused the same way; one whose
+/// index is fixed at each element runs (`a_recurrence_through_an_offset_is_ordered_by_element`).
+#[test]
+fn a_recurrence_through_a_computed_index_is_refused_not_misordered() {
+    let refusal = |project: &TestProject, expected: &str| match project.run_vm() {
+        Ok(results) => assert_eq!(
+            results["x[t3]"],
+            vec![expected.parse::<f64>().unwrap(); 2],
+            "a run must compute the recurrence it states"
+        ),
+        Err(_) => {
+            let datamodel = project.build_datamodel();
+            let db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &datamodel);
+            let diags =
+                crate::db::collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
+            let reason = diags
+                .iter()
+                .find_map(|d| match &d.error {
+                    crate::db::DiagnosticError::Model(e)
+                        if e.code == crate::common::ErrorCode::CircularDependency =>
+                    {
+                        e.details.clone()
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("refused as a cycle: {diags:?}"));
+            assert!(
+                reason.contains("at an element computed as the model runs"),
+                "the refusal names the computed index: {reason}"
+            );
+        }
+    };
+    let two = TestProject::new("computed_recurrence")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("T", &["t1", "t2", "t3"])
+        .array_aux("idx[T]", "T - 1")
+        .array_aux("x[T]", "IF T = 1 THEN 1 ELSE y[idx[T]] + 1")
+        .array_aux("y[T]", "x[T] * 2");
+    refusal(&two, "7");
+    let one = TestProject::new("computed_self_recurrence")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("T", &["t1", "t2", "t3"])
+        .array_aux("idx[T]", "T - 1")
+        .array_aux("x[T]", "IF T = 1 THEN 1 ELSE x[idx[T]] + 1");
+    refusal(&one, "3");
+}
+
 /// A member prologue that reads an SCC member is an edge into EVERY element
 /// of that member, so a recurrence whose HOISTED operand reads the recurrence
 /// itself is refused.

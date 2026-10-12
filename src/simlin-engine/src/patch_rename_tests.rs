@@ -28,6 +28,193 @@ fn rename_in(model: &str, from: &str, to: &str) -> ProjectPatch {
     }
 }
 
+/// A patch reports each variable it renamed once, from its name before the
+/// patch to its name after it, by canonical identifier; a variable renamed
+/// back, or only respelled, keeps its identifier and is not reported, and a
+/// refused patch reports nothing.
+#[test]
+fn a_patch_reports_the_variables_it_renamed() {
+    let base = project(vec![model(
+        "main",
+        vec![
+            aux("Birth Rate", "0.1"),
+            aux("deaths", "birth_rate * 2"),
+            aux("other", "1"),
+        ],
+    )]);
+    let renamed = |from: &str, to: &str| Renamed {
+        model: "main".to_string(),
+        from: from.to_string(),
+        to: to.to_string(),
+    };
+    let renaming = |pairs: &[(&str, &str)]| ProjectPatch {
+        project_ops: vec![],
+        models: vec![ModelPatch {
+            name: "main".to_string(),
+            ops: pairs
+                .iter()
+                .map(|(from, to)| ModelOperation::RenameVariable {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                })
+                .collect(),
+        }],
+    };
+    type Row<'a> = (&'a str, Vec<(&'a str, &'a str)>, Vec<Renamed>);
+    let rows: [Row; 5] = [
+        (
+            "one rename",
+            vec![("Birth Rate", "Fertility")],
+            vec![renamed("birth_rate", "fertility")],
+        ),
+        (
+            "a rename of a rename, reported from first to last",
+            vec![("birth_rate", "Fertility"), ("fertility", "Fecundity")],
+            vec![renamed("birth_rate", "fecundity")],
+        ),
+        (
+            "a rename and its name taken back",
+            vec![("birth_rate", "Fertility"), ("fertility", "Birth Rate")],
+            vec![],
+        ),
+        ("a respelling", vec![("birth_rate", "BIRTH RATE")], vec![]),
+        (
+            "two variables, sorted by their names before",
+            vec![("other", "Another"), ("deaths", "Mortality")],
+            vec![renamed("deaths", "mortality"), renamed("other", "another")],
+        ),
+    ];
+    for (name, pairs, expected) in rows {
+        let mut project = base.clone();
+        let report = apply_patch_reporting(&mut project, renaming(&pairs))
+            .unwrap_or_else(|err| panic!("{name}: {err}"));
+        assert_eq!(report.renamed, expected, "{name}");
+    }
+
+    let mut project = base.clone();
+    let refused = apply_patch_reporting(&mut project, renaming(&[("birth_rate", "deaths")]));
+    assert!(
+        refused.is_err(),
+        "a rename onto another variable is refused"
+    );
+    assert!(project == base, "and changes nothing");
+}
+
+/// The report accounts for each variable's identity: renamed, deleted or
+/// created, against the project before the patch and after it. A variable
+/// renamed and then deleted is deleted, by its name before; a name it freed,
+/// which a later rename or a new variable took, is that variable's; and a
+/// variable the patch created is never renamed, whatever it is called later.
+#[test]
+fn a_patch_accounts_for_each_variables_identity() {
+    let base = project(vec![model(
+        "main",
+        vec![aux("spare", "5"), aux("other", "7"), aux("third", "9")],
+    )]);
+    let patch = |ops: Vec<ModelOperation>| ProjectPatch {
+        project_ops: vec![],
+        models: vec![ModelPatch {
+            name: "main".to_string(),
+            ops,
+        }],
+    };
+    let rename = |from: &str, to: &str| ModelOperation::RenameVariable {
+        from: from.to_string(),
+        to: to.to_string(),
+    };
+    let delete = |ident: &str| ModelOperation::DeleteVariable {
+        ident: ident.to_string(),
+    };
+    let create = |ident: &str| {
+        let Variable::Aux(created) = aux(ident, "1") else {
+            unreachable!()
+        };
+        ModelOperation::UpsertAux(created)
+    };
+    let names = |idents: &[&str]| {
+        idents
+            .iter()
+            .map(|ident| VariableRef {
+                model: "main".to_string(),
+                ident: ident.to_string(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let renamed = |from: &str, to: &str| Renamed {
+        model: "main".to_string(),
+        from: from.to_string(),
+        to: to.to_string(),
+    };
+    let reported = |ops: Vec<ModelOperation>| {
+        let mut project = base.clone();
+        apply_patch_reporting(&mut project, patch(ops)).expect("applies")
+    };
+    let expect = |report: PatchReport,
+                  renames: Vec<Renamed>,
+                  deleted: &[&str],
+                  created: &[&str],
+                  why: &str| {
+        assert_eq!(report.renamed, renames, "{why}: renamed");
+        assert_eq!(report.deleted, names(deleted), "{why}: deleted");
+        assert_eq!(report.created, names(created), "{why}: created");
+    };
+
+    expect(
+        reported(vec![rename("spare", "extra"), delete("extra")]),
+        vec![],
+        &["spare"],
+        &[],
+        "renamed, then deleted",
+    );
+    expect(
+        reported(vec![
+            rename("spare", "extra"),
+            delete("extra"),
+            rename("other", "extra"),
+        ]),
+        vec![renamed("other", "extra")],
+        &["spare"],
+        &[],
+        "a name freed and taken by a rename",
+    );
+    expect(
+        reported(vec![
+            rename("spare", "extra"),
+            delete("extra"),
+            create("extra"),
+        ]),
+        vec![],
+        &["spare"],
+        &["extra"],
+        "a name freed and taken by a new variable",
+    );
+    expect(
+        reported(vec![
+            delete("spare"),
+            create("spare"),
+            rename("spare", "fresh"),
+        ]),
+        vec![],
+        &["spare"],
+        &["fresh"],
+        "a created variable renamed is created, never renamed",
+    );
+    expect(
+        reported(vec![delete("other"), rename("spare", "other")]),
+        vec![renamed("spare", "other")],
+        &["other"],
+        &[],
+        "a name deleted and taken is both",
+    );
+    expect(
+        reported(vec![create("fourth"), delete("fourth")]),
+        vec![],
+        &[],
+        &[],
+        "made and gone within the patch",
+    );
+}
+
 fn delete_in(model: &str, ident: &str) -> ProjectPatch {
     ProjectPatch {
         project_ops: vec![],
@@ -1940,8 +2127,12 @@ fn a_rename_to_and_from_a_name_with_a_period_keeps_the_model_the_same() {
     assert_eq!(series(&project)["reader"], before["reader"]);
 }
 
+/// A respelling of the variable `target`: a star range names a dimension,
+/// never a variable, so it is left.
 fn to(new: &'static str) -> impl Fn(Site, &Ident<Canonical>) -> Respelled {
-    move |_, reference| Ok((reference.as_str() == "target").then(|| Ident::new(new)))
+    move |site, reference| {
+        Ok((site != Site::StarRange && reference.as_str() == "target").then(|| Ident::new(new)))
+    }
 }
 
 /// The text `renamed` respells, for a respelling that finds nothing
@@ -1953,7 +2144,9 @@ fn spliced(text: &str, renamed: &Respelling<'_>) -> Option<String> {
 /// The tree the one walk gives `expr` under `renamed`.
 fn renamed_tree(expr: &Expr0, renamed: &Respelling<'_>) -> Expr0 {
     Walk {
+        text: "",
         renamed,
+        spell: &|name| crate::ast::print_ident(name.as_str()),
         splices: Vec::new(),
         ambiguity: None,
     }
@@ -2039,6 +2232,7 @@ fn the_walk_reads_each_reference_at_its_site() {
         Site::Value => "value",
         Site::Subscripted => "subscripted",
         Site::Index => "index",
+        Site::StarRange => "star range",
     };
     let rows: &[(&str, &[(&str, &str)])] = &[
         (
@@ -2054,6 +2248,16 @@ fn the_walk_reads_each_reference_at_its_site() {
                 ("d", "index"),
                 ("e", "value"),
                 ("f", "value"),
+                ("g", "star range"),
+            ],
+        ),
+        (
+            "x[Sub.*] + y[ *:Other]",
+            &[
+                ("x", "subscripted"),
+                ("sub", "star range"),
+                ("y", "subscripted"),
+                ("other", "star range"),
             ],
         ),
         (

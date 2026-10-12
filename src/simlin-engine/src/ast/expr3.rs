@@ -7,10 +7,10 @@ use crate::ast::expr2::{ArrayBounds, Expr2, IndexExpr2, NodeBounds};
 use crate::ast::literal::Literal;
 use crate::builtins::{ArgKind, BuiltinFn, Loc};
 use crate::common::{
-    Canonical, CanonicalDimensionName, CanonicalElementName, EquationResult, Ident,
+    Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, EquationResult, Ident,
+    MismatchedRead,
 };
 use crate::dimensions::Dimension;
-use crate::eqn_err;
 use std::cell::Cell;
 
 /// Index expression for Expr3 subscripts.
@@ -281,6 +281,33 @@ impl IndexExpr3 {
     }
 }
 
+/// The refusal of `id[args]` at `loc` when it has more subscripts than `id`
+/// has `dims` -- a wildcard on a scalar among them -- as a read subscripted
+/// past its dimensions. Out of line, so `Expr3::from_expr2`, which recurses
+/// once per operand of a long expression, holds no more than the call.
+#[inline(never)]
+fn oversubscribed(
+    id: &str,
+    dims: Option<&[Dimension]>,
+    args: &[IndexExpr2],
+    loc: Loc,
+) -> Option<EquationError> {
+    let rank = dims.map_or(0, <[Dimension]>::len);
+    let wildcard = args
+        .iter()
+        .any(|index| matches!(index, IndexExpr2::Wildcard(_)));
+    (args.len() > rank && (rank > 0 || wildcard)).then(|| {
+        EquationError::mismatched_read(
+            loc.start,
+            loc.end,
+            MismatchedRead {
+                variable: id.to_string(),
+                unpaired: vec![],
+            },
+        )
+    })
+}
+
 impl Expr3 {
     /// Lower an Expr2 to Expr3, performing pass 0 transformations:
     /// - Resolve wildcards to explicit star ranges
@@ -326,27 +353,13 @@ impl Expr3 {
                 // Get dimensions for this variable to resolve wildcards
                 let dims = ctx.get_dimensions(id.as_str());
 
-                // Check if subscripting a scalar (no dimensions or empty dimensions)
-                let is_scalar = dims.as_ref().is_none_or(|d| d.is_empty());
-                if is_scalar {
-                    // Subscripting a scalar - check if any wildcards
-                    for arg in args {
-                        if let IndexExpr2::Wildcard(wloc) = arg {
-                            return eqn_err!(CantSubscriptScalar, wloc.start, wloc.end);
-                        }
-                    }
-                }
-
-                // Validate subscript count matches dimension count.
-                // This catches cases like arr[*, *, *] on a 2D array before
-                // we hit misleading errors in individual subscript lowering.
-                if let Some(d) = dims
-                    && args.len() > d.len()
-                {
-                    // Find the first out-of-bounds subscript for error location
-                    let first_extra = &args[d.len()];
-                    let extra_loc = first_extra.get_loc();
-                    return eqn_err!(MismatchedDimensions, extra_loc.start, extra_loc.end);
+                // A reference with more subscripts than the variable has
+                // dimensions -- any on a scalar -- reads axes it does not
+                // have. Caught here, before the lowering of one subscript
+                // fails on an axis that is not there with a misleading error
+                // of its own.
+                if let Some(refusal) = oversubscribed(id.as_str(), dims, args, *loc) {
+                    return Err(refusal);
                 }
 
                 let lowered_args: EquationResult<Vec<IndexExpr3>> = args
@@ -743,10 +756,18 @@ mod tests {
         let result = Expr3::from_expr2(&expr2, &ctx);
         assert!(result.is_err());
 
+        // A read subscripted past the dimensions it has, at the whole
+        // reference.
         let err = result.unwrap_err();
-        assert_eq!(err.code, crate::common::ErrorCode::CantSubscriptScalar);
-        assert_eq!(err.start, 7);
-        assert_eq!(err.end, 8);
+        assert_eq!(err.code, crate::common::ErrorCode::MismatchedDimensions);
+        assert_eq!((err.start, err.end), (0, 9));
+        assert_eq!(
+            err.mismatched_read.as_deref(),
+            Some(&MismatchedRead {
+                variable: "scalar".to_string(),
+                unpaired: vec![],
+            })
+        );
     }
 
     #[test]
@@ -949,12 +970,18 @@ mod tests {
         let result = Expr3::from_expr2(&expr2, &ctx);
         assert!(result.is_err());
 
+        // A read subscripted past the dimensions it has, at the whole
+        // reference.
         let err = result.unwrap_err();
-        // Should be MismatchedDimensions, not CantSubscriptScalar
         assert_eq!(err.code, crate::common::ErrorCode::MismatchedDimensions);
-        // Error location should point to the first out-of-bounds subscript
-        assert_eq!(err.start, 13);
-        assert_eq!(err.end, 14);
+        assert_eq!((err.start, err.end), (0, 15));
+        assert_eq!(
+            err.mismatched_read.as_deref(),
+            Some(&MismatchedRead {
+                variable: "matrix".to_string(),
+                unpaired: vec![],
+            })
+        );
     }
 
     #[test]

@@ -205,8 +205,9 @@ fn a_subscript_naming_no_element_is_reported_on_the_variable() {
     );
 }
 
-/// Every `MissingElementEquation` advisory, as `(variable, the quoted
-/// element list the message names)`.
+/// Every `MissingElementEquation` advisory, one per element, as `(variable,
+/// the quoted element it names)`: the element the diagnostic carries, which
+/// its message names too.
 fn missing_element_findings(
     diagnostics: &[simlin_engine::db::Diagnostic],
 ) -> Vec<(String, String)> {
@@ -215,14 +216,16 @@ fn missing_element_findings(
         .filter_map(|d| match &d.error {
             DiagnosticError::Model(e) if e.code == ErrorCode::MissingElementEquation => {
                 assert_eq!(d.severity, simlin_engine::db::DiagnosticSeverity::Warning);
-                let details = e.get_details().unwrap_or_default().to_string();
-                let elements = details
-                    .split(" has no equation for ")
-                    .nth(1)
-                    .and_then(|rest| rest.split(": no element entry").next())
-                    .unwrap_or_else(|| panic!("the warning names the elements: {details}"))
-                    .to_string();
-                Some((d.variable.clone().unwrap_or_default(), elements))
+                let element = d.element().expect("the warning names its element");
+                let details = e.get_details().unwrap_or_default();
+                assert!(
+                    details.contains(&format!("has no equation for '{element}'")),
+                    "the message names the element: {details}"
+                );
+                Some((
+                    d.variable.clone().unwrap_or_default(),
+                    format!("'{element}'"),
+                ))
             }
             _ => None,
         })

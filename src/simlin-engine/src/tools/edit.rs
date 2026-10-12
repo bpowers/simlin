@@ -133,23 +133,42 @@ pub enum EditOperation {
         notes: Option<String>,
     },
     /// Replace a variable's equation (a stock's: its initial value). For an
-    /// arrayed variable, the equation applies to every element, or to the
-    /// one `element` names (`north`; `north, young` for an element of several
-    /// dimensions).
+    /// arrayed variable, the equation every element follows -- elements with
+    /// equations of their own keep them -- or, with `element`, that one
+    /// element's own equation (`north`; `north, young` for an element of
+    /// several dimensions).
     SetEquation {
         variable: String,
         equation: String,
         #[serde(default)]
         element: Option<String>,
     },
+    /// Return one element of an arrayed variable to the equation every
+    /// element follows: it loses its own equation and lookup.
+    ClearElement { variable: String, element: String },
+    /// Set the dimensions a variable is arrayed over, in order. A dimension
+    /// added splits the variable by it: each element starts from what the
+    /// variable said before. A dimension removed keeps what every element
+    /// along it says, or the element `keep` names on the removed dimensions
+    /// (`north`; `north, young` for two); none makes the variable a scalar.
+    SetDimensions {
+        variable: String,
+        dimensions: Vec<String>,
+        #[serde(default)]
+        keep: Option<String>,
+    },
     /// Set a variable's units; empty clears them.
     SetUnits { variable: String, units: String },
     /// Set a variable's documentation; empty clears it.
     SetNotes { variable: String, notes: String },
     /// Make a variable a lookup of its equation: `points` are `[x, y]` pairs,
-    /// x never decreasing (two points at one x are a vertical step).
+    /// x never decreasing (two points at one x are a vertical step). With
+    /// `element`, that one element of an arrayed variable is a lookup of its
+    /// equation.
     SetLookup {
         variable: String,
+        #[serde(default)]
+        element: Option<String>,
         points: Vec<[f64; 2]>,
         /// How it reads between and past its points: continuous (the
         /// default: interpolated, held at the ends), extrapolate, or
@@ -195,6 +214,29 @@ pub enum EditOperation {
         #[serde(default)]
         method: Option<IntegrationMethod>,
     },
+    /// Add a dimension with its elements, in order.
+    AddDimension { name: String, elements: Vec<String> },
+    /// Set a dimension's elements and their order. An element left out
+    /// takes with it every variable's own equation there; an element added
+    /// follows the equation every element follows. To rename an element,
+    /// use rename_element, which keeps what is there.
+    ChangeDimension {
+        dimension: String,
+        elements: Vec<String>,
+    },
+    /// Rename a dimension; every variable over it and every equation that
+    /// names it is rewritten.
+    RenameDimension { dimension: String, to: String },
+    /// Rename one element of a dimension; every element's own equation and
+    /// every subscript that names it is rewritten.
+    RenameElement {
+        dimension: String,
+        element: String,
+        to: String,
+    },
+    /// Delete a dimension that no variable, equation or other dimension
+    /// uses.
+    DeleteDimension { dimension: String },
 }
 
 impl EditOperation {
@@ -204,6 +246,8 @@ impl EditOperation {
             EditOperation::AddFlow { .. } => "add_flow",
             EditOperation::AddVariable { .. } => "add_variable",
             EditOperation::SetEquation { .. } => "set_equation",
+            EditOperation::ClearElement { .. } => "clear_element",
+            EditOperation::SetDimensions { .. } => "set_dimensions",
             EditOperation::SetUnits { .. } => "set_units",
             EditOperation::SetNotes { .. } => "set_notes",
             EditOperation::SetLookup { .. } => "set_lookup",
@@ -212,6 +256,11 @@ impl EditOperation {
             EditOperation::Delete { .. } => "delete",
             EditOperation::NameLoop { .. } => "name_loop",
             EditOperation::SetSimSpecs { .. } => "set_sim_specs",
+            EditOperation::AddDimension { .. } => "add_dimension",
+            EditOperation::ChangeDimension { .. } => "change_dimension",
+            EditOperation::RenameDimension { .. } => "rename_dimension",
+            EditOperation::RenameElement { .. } => "rename_element",
+            EditOperation::DeleteDimension { .. } => "delete_dimension",
         }
     }
 
@@ -226,11 +275,18 @@ impl EditOperation {
             EditOperation::SetUnits { .. }
             | EditOperation::SetNotes { .. }
             | EditOperation::SetLookup { .. }
+            | EditOperation::ClearElement { .. }
+            | EditOperation::SetDimensions { .. }
             | EditOperation::ConnectFlow { .. }
             | EditOperation::Rename { .. }
             | EditOperation::Delete { .. }
             | EditOperation::NameLoop { .. }
-            | EditOperation::SetSimSpecs { .. } => None,
+            | EditOperation::SetSimSpecs { .. }
+            | EditOperation::AddDimension { .. }
+            | EditOperation::ChangeDimension { .. }
+            | EditOperation::RenameDimension { .. }
+            | EditOperation::RenameElement { .. }
+            | EditOperation::DeleteDimension { .. } => None,
         }
     }
 
@@ -242,6 +298,11 @@ impl EditOperation {
                 | EditOperation::SetNotes { .. }
                 | EditOperation::NameLoop { .. }
                 | EditOperation::SetSimSpecs { .. }
+                | EditOperation::AddDimension { .. }
+                | EditOperation::ChangeDimension { .. }
+                | EditOperation::RenameDimension { .. }
+                | EditOperation::RenameElement { .. }
+                | EditOperation::DeleteDimension { .. }
         )
     }
 }
@@ -271,6 +332,19 @@ pub struct EditModelOutput {
     /// and for the sim specs and loop names. A line's detail is cut at 240
     /// characters.
     pub changes: Vec<ChangeLine>,
+    /// What the edit did to the identity of the variables it touched, by
+    /// canonical identifier, as a patch's report accounts for it
+    /// (`PatchReport`): for a host that follows a variable through the edit.
+    /// The variables it renamed. A line's `to` says the same for a reader.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub renamed: Vec<crate::patch::Renamed>,
+    /// The variables, by their names before the edit, that no longer exist.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deleted: Vec<crate::patch::VariableRef>,
+    /// The variables, by their names after the edit, that did not exist
+    /// before it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub created: Vec<crate::patch::VariableRef>,
     /// Lines left out to keep the answer within its budget.
     #[serde(skip_serializing_if = "is_zero")]
     pub omitted: usize,
@@ -368,11 +442,17 @@ impl GateRule {
 #[serde(rename_all = "camelCase")]
 pub struct ChangeLine {
     /// The variable, as the model names it (before a rename; with its model
-    /// when it is another model's), a loop's name, or "sim specs".
+    /// when it is another model's), a loop's name, "sim specs", or a
+    /// dimension's name.
     pub variable: String,
     pub action: ChangeAction,
     /// What changes, in words.
     pub detail: String,
+    /// A renamed variable's name after the edit, spelled as `variable` is:
+    /// present exactly on a `renamed` line, so a reader takes the new name
+    /// from here rather than from `detail`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -386,6 +466,7 @@ pub enum ChangeAction {
     Deleted,
     LoopNamed,
     SimSpecs,
+    Dimension,
 }
 
 /// A diagnostic the edit adds or leaves, or would.
@@ -474,7 +555,8 @@ struct LoopChange {
 /// It holds every variable whose record the edit changes, in any model, by
 /// its model's name and its canonical name, with the record before and
 /// after (a rename is the old name gone and the new one there); the
-/// project's sim specs as they were, when the edit changes them; and every
+/// project's sim specs and its dimensions as they were, when the edit
+/// changes them; and every
 /// loop name it changes, by its model and its variables' uids. The answer's
 /// lines are this in words (`change_lines`). Records compare by
 /// `changes::same_record`. Views and groups are no part of it: a diagram is
@@ -483,6 +565,7 @@ struct LoopChange {
 pub(crate) struct Delta {
     variables: BTreeMap<(String, String), VariableChange>,
     specs: Option<datamodel::SimSpecs>,
+    dimensions: Option<Vec<datamodel::Dimension>>,
     loops: BTreeMap<(String, Vec<i32>), LoopChange>,
 }
 
@@ -510,9 +593,12 @@ fn loop_names(model: &datamodel::Model) -> BTreeMap<Vec<i32>, LoopName> {
 
 impl Delta {
     /// Whether the edit changes nothing an agent reads: no record, no sim
-    /// specs, no loop name.
+    /// specs, no dimension, no loop name.
     fn is_empty(&self) -> bool {
-        self.variables.is_empty() && self.specs.is_none() && self.loops.is_empty()
+        self.variables.is_empty()
+            && self.specs.is_none()
+            && self.dimensions.is_none()
+            && self.loops.is_empty()
     }
 
     /// The variables the edit leaves out of the project, deleted or renamed
@@ -593,6 +679,9 @@ impl Delta {
         if before.sim_specs != after.sim_specs {
             delta.specs = Some(before.sim_specs.clone());
         }
+        if before.dimensions != after.dimensions {
+            delta.dimensions = Some(before.dimensions.clone());
+        }
         delta
     }
 
@@ -614,6 +703,11 @@ impl Delta {
             && before != snapshot.specs()
         {
             stale.push("the sim specs".to_string());
+        }
+        if let Some(before) = &self.dimensions
+            && before.as_slice() != snapshot.dimensions()
+        {
+            stale.push("the dimensions".to_string());
         }
         for ((model, uids), change) in &self.loops {
             // A read holds the loop names of the session's model alone, the
@@ -646,6 +740,9 @@ impl Delta {
             && let Some(model) = edited.models.iter().find(|m| m.name == session_model)
         {
             snapshot.absorb_specs(effective_specs(edited, model));
+        }
+        if self.dimensions.is_some() {
+            snapshot.absorb_dimensions(&edited.dimensions);
         }
         for (model, uids) in self.loops.keys() {
             if model == session_model
@@ -733,6 +830,9 @@ pub(crate) fn edit_model(
             revision: ws.revision,
             summary: super::evidence::echo(&input.summary),
             changes: vec![],
+            renamed: vec![],
+            deleted: vec![],
+            created: vec![],
             omitted: 0,
             omitted_diagnostics: 0,
             unchanged: true,
@@ -793,6 +893,9 @@ pub(crate) fn edit_model(
             revision: ws.revision,
             summary: super::evidence::echo(&input.summary),
             changes: made.changes,
+            renamed: made.identities.renamed,
+            deleted: made.identities.deleted,
+            created: made.identities.created,
             omitted: 0,
             omitted_diagnostics: 0,
             unchanged: false,
@@ -889,6 +992,9 @@ fn fitted<T: Serialize>(
 struct Made {
     /// The project as the edit leaves it.
     working: datamodel::Project,
+    /// What the edit did to the identity of the variables it touched
+    /// ([`crate::patch::PatchReport`]).
+    identities: crate::patch::PatchReport,
     delta: Delta,
     changes: Vec<ChangeLine>,
     diagnostics: Vec<Found>,
@@ -1024,6 +1130,7 @@ impl<'a> Built<'a> {
                 .map(Found::by_the_gate),
         );
         Ok(Made {
+            identities: builder.identities.report(&builder.working),
             working: builder.working,
             delta,
             changes,
@@ -1188,6 +1295,9 @@ struct Builder<'a> {
     ops: Vec<ModelOperation>,
     /// Renames, `(from, to)` as written.
     renames: Vec<(String, String)>,
+    /// What the operations did to the identity of the variables they
+    /// touched, as the patches that made them follow it.
+    identities: crate::patch::Identities,
     /// The variables the operations name, by their canonical names as the
     /// edit leaves them: what provenance marks, and whose equations the gate
     /// holds the edit to.
@@ -1210,6 +1320,7 @@ impl<'a> Builder<'a> {
             evidence,
             ops: Vec::new(),
             renames: Vec::new(),
+            identities: crate::patch::Identities::default(),
             touched: BTreeMap::new(),
             pins: Vec::new(),
         }
@@ -1394,7 +1505,7 @@ impl<'a> Builder<'a> {
 
     /// Apply `ops` to the working copy, through the production patch path.
     fn apply(&mut self, ops: Vec<ModelOperation>) -> Result<(), ToolError> {
-        crate::apply_patch(
+        crate::patch::apply_patch_into(
             &mut self.working,
             ProjectPatch {
                 project_ops: vec![],
@@ -1403,6 +1514,7 @@ impl<'a> Builder<'a> {
                     ops: ops.clone(),
                 }],
             },
+            &mut self.identities,
         )
         .map_err(|err| ToolError::new(format!("it cannot apply: {err}")))?;
         self.ops.extend(ops);
@@ -1514,69 +1626,134 @@ impl<'a> Builder<'a> {
                 equation,
                 element,
             } => {
-                let mut var = self.existing(&variable)?;
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
                 if equation.trim().is_empty() {
                     return Err(ToolError::new(format!(
-                        "give '{}' an equation that is not empty",
-                        var.get_ident()
+                        "give '{ident}' an equation that is not empty"
                     )));
                 }
-                let (new, element) = self.equation(&var, &equation, element.as_deref())?;
-                match &mut var {
-                    Variable::Stock(stock) => stock.equation = new,
-                    Variable::Flow(flow) => flow.equation = new,
-                    Variable::Aux(aux) => aux.equation = new,
-                    Variable::Module(_) => {
-                        return Err(ToolError::new(format!(
-                            "'{}' is a module, which has no equation",
-                            var.get_ident()
-                        )));
+                if let Variable::Module(_) = var {
+                    return Err(ToolError::new(format!(
+                        "'{ident}' is a module, which has no equation"
+                    )));
+                }
+                match element {
+                    None => {
+                        self.authors(&ident, None);
+                        self.field(
+                            &ident,
+                            ModelOperation::SetEquation {
+                                ident: ident.clone(),
+                                equation,
+                            },
+                        )
+                    }
+                    Some(element) => {
+                        let (parts, key) = self.element(&var, &element)?;
+                        self.authors(&ident, Some(key));
+                        self.field(
+                            &ident,
+                            ModelOperation::SetElementEquation {
+                                ident: ident.clone(),
+                                element: parts,
+                                equation: Some(equation),
+                            },
+                        )
                     }
                 }
-                self.authors(var.get_ident(), element);
-                self.upsert(var)
+            }
+            EditOperation::ClearElement { variable, element } => {
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
+                let (parts, key) = self.element(&var, &element)?;
+                self.authors(&ident, Some(key));
+                self.field(
+                    &ident,
+                    ModelOperation::SetElementEquation {
+                        ident: ident.clone(),
+                        element: parts,
+                        equation: None,
+                    },
+                )
+            }
+            EditOperation::SetDimensions {
+                variable,
+                dimensions,
+                keep,
+            } => {
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
+                let keep = keep.map(|keep| {
+                    keep.split(',')
+                        .map(|part| part.trim().to_string())
+                        .collect::<Vec<_>>()
+                });
+                self.authors(&ident, None);
+                self.field(
+                    &ident,
+                    ModelOperation::SetDimensions {
+                        ident: ident.clone(),
+                        dimensions,
+                        keep,
+                    },
+                )
             }
             EditOperation::SetUnits { variable, units } => {
-                let mut var = self.existing(&variable)?;
-                let units = Some(units.trim().to_string()).filter(|u| !u.is_empty());
-                match &mut var {
-                    Variable::Stock(stock) => stock.units = units,
-                    Variable::Flow(flow) => flow.units = units,
-                    Variable::Aux(aux) => aux.units = units,
-                    Variable::Module(module) => module.units = units,
-                }
-                self.upsert(var)
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
+                self.field(
+                    &ident,
+                    ModelOperation::SetUnits {
+                        ident: ident.clone(),
+                        units: Some(units),
+                    },
+                )
             }
             EditOperation::SetNotes { variable, notes } => {
-                let mut var = self.existing(&variable)?;
-                let notes = notes.trim().to_string();
-                match &mut var {
-                    Variable::Stock(stock) => stock.documentation = notes,
-                    Variable::Flow(flow) => flow.documentation = notes,
-                    Variable::Aux(aux) => aux.documentation = notes,
-                    Variable::Module(module) => module.documentation = notes,
-                }
-                self.upsert(var)
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
+                self.field(
+                    &ident,
+                    ModelOperation::SetNotes {
+                        ident: ident.clone(),
+                        notes: notes.trim().to_string(),
+                    },
+                )
             }
             EditOperation::SetLookup {
                 variable,
+                element,
                 points,
                 kind,
             } => {
-                let mut var = self.existing(&variable)?;
-                let gf = lookup(var.get_ident(), &points, kind)?;
-                match &mut var {
-                    Variable::Flow(flow) => flow.gf = Some(gf),
-                    Variable::Aux(aux) => aux.gf = Some(gf),
-                    Variable::Stock(_) | Variable::Module(_) => {
-                        return Err(ToolError::new(format!(
-                            "'{}' cannot be a lookup: only an auxiliary or a flow can",
-                            var.get_ident()
-                        )));
-                    }
+                let var = self.existing(&variable)?;
+                let ident = var.get_ident().to_string();
+                if let Variable::Stock(_) | Variable::Module(_) = var {
+                    return Err(ToolError::new(format!(
+                        "'{ident}' cannot be a lookup: only an auxiliary or a flow can"
+                    )));
                 }
-                self.authors(var.get_ident(), None);
-                self.upsert(var)
+                let gf = lookup(&ident, &points, kind)?;
+                let element = match element {
+                    None => {
+                        self.authors(&ident, None);
+                        None
+                    }
+                    Some(element) => {
+                        let (parts, key) = self.element(&var, &element)?;
+                        self.authors(&ident, Some(key));
+                        Some(parts)
+                    }
+                };
+                self.field(
+                    &ident,
+                    ModelOperation::SetLookup {
+                        ident: ident.clone(),
+                        element,
+                        lookup: Some(gf),
+                    },
+                )
             }
             EditOperation::ConnectFlow { flow, from, to } => {
                 let flow = match self.existing(&flow)? {
@@ -1659,19 +1836,74 @@ impl<'a> Builder<'a> {
                 dt,
                 method,
             } => self.sim_specs(start, stop, dt, method),
+            EditOperation::AddDimension { name, elements } => {
+                if self.dimension(&name).is_some() {
+                    return Err(ToolError::new(format!(
+                        "the project already has a dimension named '{name}'"
+                    )));
+                }
+                self.dimension_edit(ProjectOperation::UpsertDimension(
+                    datamodel::Dimension::named(name.trim().to_string(), trimmed(elements)),
+                ))
+            }
+            EditOperation::ChangeDimension {
+                dimension,
+                elements,
+            } => {
+                let Some(mut changed) = self.dimension(&dimension) else {
+                    return Err(ToolError::new(format!(
+                        "'{dimension}' is not a declared dimension"
+                    )));
+                };
+                changed.elements = datamodel::DimensionElements::Named(trimmed(elements));
+                self.dimension_edit(ProjectOperation::UpsertDimension(changed))
+            }
+            EditOperation::RenameDimension { dimension, to } => {
+                self.dimension_edit(ProjectOperation::RenameDimension {
+                    from: dimension,
+                    to: to.trim().to_string(),
+                })
+            }
+            EditOperation::RenameElement {
+                dimension,
+                element,
+                to,
+            } => self.dimension_edit(ProjectOperation::RenameElement {
+                dimension,
+                from: element,
+                to: to.trim().to_string(),
+            }),
+            EditOperation::DeleteDimension { dimension } => {
+                self.dimension_edit(ProjectOperation::DeleteDimension { name: dimension })
+            }
         }
     }
 
-    /// Upsert `var`, which the edit names.
-    fn upsert(&mut self, var: Variable) -> Result<(), ToolError> {
-        self.touch(var.get_ident());
-        let op = match var {
-            Variable::Stock(stock) => ModelOperation::UpsertStock(stock),
-            Variable::Flow(flow) => ModelOperation::UpsertFlow(flow),
-            Variable::Aux(aux) => ModelOperation::UpsertAux(aux),
-            Variable::Module(module) => ModelOperation::UpsertModule(module),
-        };
-        self.apply(vec![op])
+    /// The project's dimension `name`, by canonical name.
+    fn dimension(&self, name: &str) -> Option<datamodel::Dimension> {
+        let canonical = crate::canonicalize(name.trim());
+        self.working
+            .dimensions
+            .iter()
+            .find(|d| crate::canonicalize(d.name()) == canonical)
+            .cloned()
+    }
+
+    /// Apply one edit of the project's dimensions (`patch_dimensions`).
+    fn dimension_edit(&mut self, op: ProjectOperation) -> Result<(), ToolError> {
+        crate::apply_patch(
+            &mut self.working,
+            ProjectPatch {
+                project_ops: vec![op],
+                models: vec![],
+            },
+        )
+        .map_err(|err| {
+            ToolError::new(format!(
+                "it cannot apply: {}",
+                err.details.unwrap_or_else(|| err.code.to_string())
+            ))
+        })
     }
 
     /// The stocks that list the flow `ident` among their flows.
@@ -1754,37 +1986,21 @@ impl<'a> Builder<'a> {
         self.apply(ops)
     }
 
-    /// `var`'s equation with `text` in place: of every element, or of the
-    /// one `element` names, which is returned as the model's arms name it.
-    ///
-    /// An element is named as the read tools name one
-    /// (`names::resolve_element`), and an arm is matched as the engine
-    /// matches one (`CanonicalElementName::from_subscript`).
-    fn equation(
+    /// Make the field edit `op` of the variable named `ident`.
+    fn field(&mut self, ident: &str, op: ModelOperation) -> Result<(), ToolError> {
+        self.touch(ident);
+        self.apply(vec![op])
+    }
+
+    /// The element of `var` that `element` names (`north`; `north, young`
+    /// for an element of several dimensions): each part as its dimension
+    /// spells it, and its canonical key.
+    fn element(
         &self,
         var: &Variable,
-        text: &str,
-        element: Option<&str>,
-    ) -> Result<(Equation, Option<CanonicalElementName>), ToolError> {
-        let Some(old) = var.get_equation() else {
-            return Err(ToolError::new(format!(
-                "'{}' has no equation",
-                var.get_ident()
-            )));
-        };
-        let text = text.to_string();
-        let Some(element) = element else {
-            return Ok((
-                match old {
-                    Equation::Scalar(_) => Equation::Scalar(text),
-                    Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, ..) => {
-                        Equation::ApplyToAll(dims.clone(), text)
-                    }
-                },
-                None,
-            ));
-        };
-        let dims = dimensions(old);
+        element: &str,
+    ) -> Result<(Vec<String>, CanonicalElementName), ToolError> {
+        let dims = var.get_equation().map(dimensions).unwrap_or_default();
         let subscripts: Vec<&str> = element.split(',').map(str::trim).collect();
         let name = names::resolve_element(&self.working, &dims, &subscripts).map_err(|why| {
             ToolError::new(format!(
@@ -1802,40 +2018,11 @@ impl<'a> Builder<'a> {
             )
         })?;
         let key = CanonicalElementName::from_subscript(&name);
-        // An apply-to-all equation becomes an arm per element; an arrayed
-        // one keeps its arms, its default and whether the default applies to
-        // the elements with no arm.
-        let (mut elements, default, applies_default) = match old {
-            Equation::Scalar(_) => {
-                return Err(ToolError::new(format!(
-                    "'{}' is not arrayed, so it has no element '{}'",
-                    var.get_ident(),
-                    super::evidence::echo(element)
-                )));
-            }
-            Equation::ApplyToAll(dims, all) => (
-                element_names(&self.working, dims)
-                    .into_iter()
-                    .map(|e| (e, all.clone(), None, None))
-                    .collect::<Vec<_>>(),
-                None,
-                false,
-            ),
-            Equation::Arrayed(_, elements, default, applies_default) => {
-                (elements.clone(), default.clone(), *applies_default)
-            }
-        };
-        match elements
-            .iter_mut()
-            .find(|(e, ..)| CanonicalElementName::from_subscript(e) == key)
-        {
-            Some(entry) => entry.1 = text,
-            None => elements.push((name, text, None, None)),
-        }
-        Ok((
-            Equation::Arrayed(dims, elements, default, applies_default),
-            Some(key),
-        ))
+        let parts = name
+            .split(',')
+            .map(|part| part.trim().to_string())
+            .collect();
+        Ok((parts, key))
     }
 
     /// The variables of the loop this session calls `id`, as the model
@@ -1954,6 +2141,11 @@ impl<'a> Builder<'a> {
         }])
         .map_err(|err| err.error)
     }
+}
+
+/// Element names as given, trimmed.
+fn trimmed(elements: Vec<String>) -> Vec<String> {
+    elements.into_iter().map(|e| e.trim().to_string()).collect()
 }
 
 /// The element names of dimensions `dims`, joined by commas across
@@ -3215,6 +3407,7 @@ fn change_lines(
                     variable: label(var),
                     action: ChangeAction::Added,
                     detail: added_detail(var, spelled_in),
+                    to: None,
                 });
             }
             continue;
@@ -3231,6 +3424,7 @@ fn change_lines(
                 variable: label(was),
                 action: ChangeAction::Deleted,
                 detail: format!("deleted {}", kind_name(was)),
+                to: None,
             });
             continue;
         };
@@ -3243,7 +3437,7 @@ fn change_lines(
                 .into_iter()
                 // A rename says so itself.
                 .filter(|field| !(*field == ChangedField::Name && new_name.is_some()))
-                .map(|field| field_detail(field, was, is, spelled_in)),
+                .map(|field| field_detail(field, was, is, spelled_in, &after.dimensions)),
         );
         changes.push(ChangeLine {
             variable: label(was),
@@ -3253,6 +3447,7 @@ fn change_lines(
                 ChangeAction::Changed
             },
             detail: details.join("; "),
+            to: new_name.map(|_| label(is)),
         });
         // A variable added under the name a rename left.
         if new_name.is_some()
@@ -3262,6 +3457,7 @@ fn change_lines(
                 variable: label(var),
                 action: ChangeAction::Added,
                 detail: added_detail(var, spelled_in),
+                to: None,
             });
         }
     }
@@ -3271,6 +3467,7 @@ fn change_lines(
                 variable: name.name.clone(),
                 action: ChangeAction::LoopNamed,
                 detail: format!("names the loop through {}", change.through.join(", ")),
+                to: None,
             });
         }
     }
@@ -3311,10 +3508,61 @@ fn change_lines(
                 variable: "sim specs".to_string(),
                 action: ChangeAction::SimSpecs,
                 detail: specs.join("; "),
+                to: None,
             });
         }
     }
+    if let Some(old_dimensions) = &delta.dimensions {
+        changes.extend(dimension_lines(old_dimensions, &after.dimensions));
+    }
     changes
+}
+
+/// One line per dimension an edit adds, deletes or changes, in the order
+/// the project declares them, the deleted ones last. A renamed dimension is
+/// the old one deleted and the new one added.
+fn dimension_lines(
+    before: &[datamodel::Dimension],
+    after: &[datamodel::Dimension],
+) -> Vec<ChangeLine> {
+    let find = |dims: &[datamodel::Dimension], name: &str| {
+        let canonical = crate::canonicalize(name);
+        dims.iter()
+            .find(|d| crate::canonicalize(d.name()) == canonical)
+            .cloned()
+    };
+    let listed = |dim: &datamodel::Dimension| match &dim.elements {
+        datamodel::DimensionElements::Named(names) => names.join(", "),
+        datamodel::DimensionElements::Indexed(size) => format!("1 to {size}"),
+    };
+    let mut lines = Vec::new();
+    for dim in after {
+        let detail = match find(before, dim.name()) {
+            None => format!("adds the dimension, its elements {}", listed(dim)),
+            Some(was) if was == *dim => continue,
+            Some(was) if listed(&was) != listed(dim) => {
+                format!("its elements {} (were {})", listed(dim), listed(&was))
+            }
+            Some(_) => "its mappings or its name's spelling".to_string(),
+        };
+        lines.push(ChangeLine {
+            variable: dim.name().to_string(),
+            action: ChangeAction::Dimension,
+            detail,
+            to: None,
+        });
+    }
+    for dim in before {
+        if find(after, dim.name()).is_none() {
+            lines.push(ChangeLine {
+                variable: dim.name().to_string(),
+                action: ChangeAction::Dimension,
+                detail: "deletes the dimension".to_string(),
+                to: None,
+            });
+        }
+    }
+    lines
 }
 
 fn method_name(method: datamodel::SimMethod) -> &'static str {
@@ -3462,6 +3710,7 @@ fn field_detail(
     was: &Variable,
     is: &Variable,
     model: Option<&datamodel::Model>,
+    dimensions: &[datamodel::Dimension],
 ) -> String {
     let flows = |var: &Variable, inflows: bool| match var {
         Variable::Stock(stock) => flow_list(
@@ -3495,6 +3744,9 @@ fn field_detail(
             equation_of(was)
         ),
         ChangedField::Equation => {
+            if let Some(detail) = element_equations_detail(what(is), was, is, dimensions) {
+                return detail;
+            }
             // One equation in place of per-element ones applies to them all.
             let every = matches!(was.get_equation(), Some(Equation::Arrayed(..)))
                 && matches!(is.get_equation(), Some(Equation::ApplyToAll(..)));
@@ -3535,6 +3787,131 @@ fn field_detail(
         ChangedField::Name => format!("written {} (was {})", is.get_ident(), was.get_ident()),
         ChangedField::Other => "other settings".to_string(),
     }
+}
+
+/// An arrayed variable's equation change, said for what changed: the
+/// equation every element follows, then each element whose own equation was
+/// written, changed or cleared, spelled as its dimensions spell it, so a
+/// host shows which cells an edit changed. The equation every element
+/// follows is named for its dimensions, "Every Region and Age", as a host
+/// that lays the elements out names it. None unless the variable is arrayed
+/// over the same dimensions before and after.
+fn element_equations_detail(
+    what: &str,
+    was: &Variable,
+    is: &Variable,
+    dimensions: &[datamodel::Dimension],
+) -> Option<String> {
+    let (was_dims, was_every, was_own) = element_arms(was.get_equation()?)?;
+    let (is_dims, is_every, is_own) = element_arms(is.get_equation()?)?;
+    if was_dims != is_dims {
+        return None;
+    }
+    let every = every_name(was_dims, dimensions);
+    let mut parts = Vec::new();
+    if was_every != is_every {
+        parts.push(format!(
+            "{what} for {every} {} (was {})",
+            is_every.unwrap_or("none"),
+            was_every.unwrap_or("none")
+        ));
+    }
+    fn own<'a>(arms: &[(&str, &'a str)], key: &str) -> Option<&'a str> {
+        arms.iter()
+            .find(|(element, _)| crate::canonicalize(element) == crate::canonicalize(key))
+            .map(|(_, text)| *text)
+    }
+    let mut keys: Vec<&str> = is_own.iter().map(|(key, _)| *key).collect();
+    keys.extend(
+        was_own
+            .iter()
+            .map(|(key, _)| *key)
+            .filter(|key| own(&is_own, key).is_none()),
+    );
+    for key in keys {
+        let element = spelled_element(key, was_dims, dimensions);
+        match (own(&was_own, key), own(&is_own, key)) {
+            (Some(was), Some(is)) if was != is => {
+                parts.push(format!("{element}: {is} (was {was})"));
+            }
+            (None, Some(is)) => parts.push(match was_every {
+                Some(was_every) => format!("{element}: {is} (followed {every}, {was_every})"),
+                None => format!("{element}: {is} (had none)"),
+            }),
+            (Some(was), None) => parts.push(match is_every {
+                Some(_) => format!("{element}: follows {every} (was {was})"),
+                None => format!("{element}: none (was {was})"),
+            }),
+            _ => {}
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// The name of the equation every element of a variable over `dims`
+/// follows: "Every Region", "Every Region and Age", "Every Region, Age and
+/// Sex", each dimension as the project declares it.
+fn every_name(dims: &[String], dimensions: &[datamodel::Dimension]) -> String {
+    let names: Vec<&str> = dims
+        .iter()
+        .map(|dim| {
+            dimensions
+                .iter()
+                .find(|d| crate::canonicalize(d.name()) == crate::canonicalize(dim))
+                .map_or(dim.as_str(), |d| d.name())
+        })
+        .collect();
+    let joined = match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => names.join(""),
+    };
+    format!("Every {joined}")
+}
+
+/// An arrayed equation's dimensions, the equation every element follows,
+/// and each element's own equation by its key.
+type ElementArms<'a> = (&'a [String], Option<&'a str>, Vec<(&'a str, &'a str)>);
+
+/// An arrayed equation's arms; None for a scalar.
+fn element_arms(equation: &Equation) -> Option<ElementArms<'_>> {
+    match equation {
+        Equation::Scalar(_) => None,
+        Equation::ApplyToAll(dims, text) => Some((dims, Some(text.trim()), vec![])),
+        Equation::Arrayed(dims, elements, default, _) => Some((
+            dims,
+            default.as_deref().map(str::trim),
+            elements
+                .iter()
+                .map(|(element, text, _, _)| (element.as_str(), text.trim()))
+                .collect(),
+        )),
+    }
+}
+
+/// An element key (`north,young`) as the dimensions spell their elements:
+/// "North, Young".
+fn spelled_element(key: &str, dims: &[String], dimensions: &[datamodel::Dimension]) -> String {
+    key.split(',')
+        .enumerate()
+        .map(|(axis, part)| {
+            let part = part.trim();
+            dims.get(axis)
+                .and_then(|dim| {
+                    dimensions
+                        .iter()
+                        .find(|d| crate::canonicalize(d.name()) == crate::canonicalize(dim))
+                })
+                .and_then(|dimension| match &dimension.elements {
+                    datamodel::DimensionElements::Named(names) => names
+                        .iter()
+                        .find(|name| crate::canonicalize(name) == crate::canonicalize(part))
+                        .cloned(),
+                    datamodel::DimensionElements::Indexed(_) => None,
+                })
+                .unwrap_or_else(|| part.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]

@@ -1377,3 +1377,181 @@ fn refused_edits_and_runs_say_why() {
         simlin_project_unref(proj);
     }
 }
+
+/// A detail about one element of an arrayed variable names it in
+/// `element_name`, its span indexing that element's own equation; a detail
+/// about a variable as a whole leaves it NULL.
+#[test]
+fn a_detail_names_the_element_it_is_about() {
+    let datamodel = TestProject::new("elements")
+        .named_dimension("Cities", &["Boston", "Seattle"])
+        .array_with_ranges("y[Cities]", vec![("Boston", "1"), ("Seattle", "2 +")])
+        .array_with_ranges("z[Cities]", vec![("Boston", "1")])
+        .aux("w", "unknown_name", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(!all_errors.is_null());
+        let count = simlin_error_get_detail_count(all_errors);
+        let details = std::slice::from_raw_parts(simlin_error_get_details(all_errors), count);
+        let read = |p: *const std::os::raw::c_char| {
+            (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+        };
+        let rows: Vec<(Option<String>, Option<String>, u16, u16)> = details
+            .iter()
+            .map(|d| {
+                (
+                    read(d.variable_name),
+                    read(d.element_name),
+                    d.start_offset,
+                    d.end_offset,
+                )
+            })
+            .collect();
+        assert!(
+            rows.contains(&(Some("y".into()), Some("seattle".into()), 3, 4)),
+            "the parse error in Seattle's own equation names Seattle: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|(v, e, ..)| v.as_deref() == Some("z") && e.as_deref() == Some("seattle")),
+            "the element with no equation is named: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|(v, e, ..)| v.as_deref() == Some("w") && e.is_none()),
+            "a scalar's error names no element: {rows:?}"
+        );
+        assert_eq!(
+            simlin_sizeof_error_detail(),
+            std::mem::size_of::<SimlinErrorDetail>()
+        );
+
+        simlin_error_free(all_errors);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A subscript that runs off a dimension says which dimension and which end,
+/// beside the element it is about, so a host words it from the parts.
+#[test]
+fn a_read_past_a_dimension_names_the_dimension_and_the_end() {
+    let datamodel = TestProject::new("chain")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Age", &["Young", "Adult", "Old"])
+        .array_with_ranges("c[Age]", vec![("Young", "1"), ("Adult", "2"), ("Old", "3")])
+        .array_aux("d[Age]", "c[Age - 1]")
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(!all_errors.is_null());
+        let count = simlin_error_get_detail_count(all_errors);
+        let details = std::slice::from_raw_parts(simlin_error_get_details(all_errors), count);
+        let read = |p: *const std::os::raw::c_char| {
+            (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+        };
+        let past: Vec<_> = details
+            .iter()
+            .filter(|d| d.read_past != SimlinReadPast::None)
+            .map(|d| {
+                (
+                    read(d.element_name),
+                    read(d.read_past_dimension),
+                    d.read_past,
+                )
+            })
+            .collect();
+        assert_eq!(
+            past,
+            vec![(
+                Some("young".to_string()),
+                Some("age".to_string()),
+                SimlinReadPast::BeforeFirst
+            )]
+        );
+        assert!(
+            details
+                .iter()
+                .filter(|d| d.read_past == SimlinReadPast::None)
+                .all(|d| d.read_past_dimension.is_null()),
+            "every other detail names no dimension"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A read whose dimensions disagree with its reader's names the variable
+/// read and the dimensions the reader has no element of, on the reader, and
+/// is the only detail: no project-wide row repeats it.
+#[test]
+fn a_mismatched_read_names_the_variable_and_the_dimensions() {
+    let details_of = |datamodel: &simlin_engine::datamodel::Project| unsafe {
+        let proj = open_project_from_datamodel(datamodel);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(!all_errors.is_null());
+        let count = simlin_error_get_detail_count(all_errors);
+        let details = std::slice::from_raw_parts(simlin_error_get_details(all_errors), count);
+        let read = |p: *const std::os::raw::c_char| {
+            (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+        };
+        let rows: Vec<_> = details
+            .iter()
+            .map(|d| {
+                (
+                    d.code,
+                    read(d.variable_name),
+                    read(d.mismatched_read_variable),
+                    read(d.mismatched_read_dimensions),
+                )
+            })
+            .collect();
+        simlin_error_free(all_errors);
+        simlin_project_unref(proj);
+        rows
+    };
+    let regions = || {
+        TestProject::new("split")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("Region", &["North", "South"])
+    };
+
+    let split = regions()
+        .array_const("births[Region]", 1.0)
+        .scalar_aux("total", "births * 2")
+        .build_datamodel();
+    assert_eq!(
+        details_of(&split),
+        vec![(
+            SimlinErrorCode::MismatchedDimensions,
+            Some("total".to_string()),
+            Some("births".to_string()),
+            Some("region".to_string()),
+        )]
+    );
+
+    let unsplit = regions()
+        .scalar_const("births", 1.0)
+        .scalar_aux("north", "births[North]")
+        .build_datamodel();
+    assert_eq!(
+        details_of(&unsplit),
+        vec![(
+            SimlinErrorCode::MismatchedDimensions,
+            Some("north".to_string()),
+            Some("births".to_string()),
+            None,
+        )]
+    );
+}

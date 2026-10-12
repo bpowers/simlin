@@ -54,6 +54,12 @@ fn describe(op: &ModelOperation) -> String {
         ModelOperation::DeleteView { .. } => "delete view".to_string(),
         ModelOperation::SetLoopName { .. } => "set loop name".to_string(),
         ModelOperation::EditView { .. } => "edit view".to_string(),
+        ModelOperation::SetEquation { ident, equation } => format!("{ident} = {equation}"),
+        ModelOperation::SetElementEquation { ident, .. } => format!("{ident} element"),
+        ModelOperation::SetUnits { ident, .. } => format!("{ident} units"),
+        ModelOperation::SetNotes { ident, .. } => format!("{ident} notes"),
+        ModelOperation::SetLookup { ident, .. } => format!("{ident} lookup"),
+        ModelOperation::SetDimensions { ident, .. } => format!("{ident} dimensions"),
     }
 }
 
@@ -169,6 +175,44 @@ fn a_relabeled_element_renames_its_variable() {
 
     // A variable with no element on the view has nothing to relabel.
     assert!(plan_rename(stock_flow_of(&scene()), "no_such_variable", "x").is_empty());
+}
+
+/// A relabeled element renames its variable, and the patch reports the
+/// rename, by canonical identifier, as an explicit rename's is reported.
+#[test]
+fn a_relabel_is_reported_as_a_rename() {
+    let mut project = scene();
+    let edit = plan_rename(stock_flow_of(&project), "a7", "Growth Rate");
+    let report = crate::patch::apply_patch_reporting(&mut project, edit_patch(&edit))
+        .expect("the rename applies");
+    assert_eq!(
+        report.renamed,
+        vec![crate::patch::Renamed {
+            model: "main".to_string(),
+            from: "a7".to_string(),
+            to: "growth_rate".to_string(),
+        }]
+    );
+
+    // A move renames nothing.
+    let mut element = stock_flow_of(&project)
+        .elements
+        .iter()
+        .find(|e| e.get_uid() == 1)
+        .expect("the scene has stock 1")
+        .clone();
+    if let datamodel::ViewElement::Stock(stock) = &mut element {
+        stock.x += 10.0;
+    }
+    let report = crate::patch::apply_patch_reporting(
+        &mut project,
+        edit_patch(&ViewEdit {
+            upsert: vec![element],
+            remove: Vec::new(),
+        }),
+    )
+    .expect("the move applies");
+    assert_eq!(report.renamed, Vec::new());
 }
 
 #[test]

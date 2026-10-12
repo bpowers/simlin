@@ -74,6 +74,22 @@ pub(crate) type VarSizes = HashMap<VarRef, usize>;
 pub struct Var {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) ast: Vec<Expr>,
+    /// The reads its equations pair with their element by position alone:
+    /// an axis of the variable read that the reader has no element of, read
+    /// at the reader's element of the same position in another dimension of
+    /// that length (GH #1044's open rule). The run reads them, and the
+    /// fragment's reporter warns of each.
+    pub(crate) positional_reads: Vec<PositionalRead>,
+}
+
+/// A read paired with its reader's element by position alone ([`Var`]): the
+/// read, where it is written, and the reader's element that makes it.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub(crate) struct PositionalRead {
+    pub(crate) read: crate::common::MismatchedRead,
+    pub(crate) loc: Loc,
+    pub(crate) element: CanonicalElementName,
 }
 
 /// A `Context` over hand-built dependency shapes for the unit tests of
@@ -691,6 +707,7 @@ impl Var {
                             return Ok(Var {
                                 ident: Ident::new(var.ident()),
                                 ast: vec![],
+                                positional_reads: vec![],
                             });
                         }
                         let base = ctx.get_base_ref(&Ident::new(var.ident()))?;
@@ -799,9 +816,12 @@ impl Var {
             "temp ids defined by '{}' must be exactly the ids its allocator kept",
             var.ident()
         );
+        let mut positional_reads = ctx.positional_reads.take();
+        positional_reads.dedup();
         Ok(Var {
             ident: Ident::new(var.ident()),
             ast,
+            positional_reads,
         })
     }
 }
@@ -869,6 +889,144 @@ fn check_stock_updates_are_emittable(ast: &[Expr], ident: &str) -> Result<()> {
     Ok(())
 }
 
+/// A read of one element of a variable whose subscript is the same number at
+/// every step and names no element: before the first or past the last
+/// element of the axis it indexes. Found by [`out_of_range_reads`].
+pub(crate) struct OutOfRangeRead {
+    /// The element of the variable being lowered whose equation makes the
+    /// read, as the offset of the slot it assigns.
+    pub(crate) element_offset: usize,
+    /// The variable read.
+    pub(crate) source: Ident<Canonical>,
+    /// Which of the source's axes the subscript misses.
+    pub(crate) axis: usize,
+    /// Before the first element, rather than past the last.
+    pub(crate) before_start: bool,
+    /// The reference in the equation's text.
+    pub(crate) loc: Loc,
+}
+
+/// Every read in `var`'s lowered equations whose subscript is a constant the
+/// run reads as no element: a not-a-number value at every step, which no
+/// diagnostic would otherwise report. The typical one is an offset in an
+/// equation for every element -- `c[Age - 1]` -- at the element it runs off:
+/// lowering gives each element's dimension name its position, and folding
+/// leaves the index a constant.
+///
+/// The test is the VM's own (`Opcode::PushSubscriptIndex`): the index is
+/// floored and narrowed to `u16`, and an index of 0 or past the axis is no
+/// element. It reads the folded tree, after a conditional on a constant has
+/// dropped its untaken branch, so a read guarded by the element's own
+/// position (`IF Age > 1 THEN c[Age - 1] ELSE 0`) is not one, nor is one
+/// whose guard joins that position to a test of the model with `AND`. A read
+/// under a condition that varies as the model runs still is: it reads no
+/// element whenever the condition holds.
+///
+/// Reads are attributed to the slot the enclosing assignment writes; a
+/// temp's body, shared by several elements, is not attributed to any.
+pub(crate) fn out_of_range_reads(var: &Var) -> Vec<OutOfRangeRead> {
+    fn walk(expr: &Expr, element_offset: usize, reads: &mut Vec<OutOfRangeRead>) {
+        match expr {
+            Expr::Subscript(base, indices, bounds, loc) => {
+                for (axis, (idx, bound)) in indices.iter().zip(bounds).enumerate() {
+                    match idx {
+                        SubscriptIndex::Single(Expr::Const(value, _)) => {
+                            let index = value.floor() as u16;
+                            if index == 0 || index as usize > *bound {
+                                reads.push(OutOfRangeRead {
+                                    element_offset,
+                                    source: base.name.clone(),
+                                    axis,
+                                    before_start: index == 0,
+                                    loc: *loc,
+                                });
+                            }
+                        }
+                        SubscriptIndex::Single(e) => walk(e, element_offset, reads),
+                        SubscriptIndex::Range(start, end) => {
+                            walk(start, element_offset, reads);
+                            walk(end, element_offset, reads);
+                        }
+                    }
+                }
+            }
+            Expr::Const(_, _)
+            | Expr::Var(_, _)
+            | Expr::Dt(_)
+            | Expr::StaticSubscript(_, _, _)
+            | Expr::TempArray(_, _, _)
+            | Expr::TempArrayElement(_, _, _, _)
+            | Expr::ModuleInput(_, _)
+            | Expr::AssignTemp(_, _, _) => {}
+            Expr::App(builtin, _) => {
+                for arg in builtin.args() {
+                    walk(arg, element_offset, reads);
+                }
+            }
+            Expr::EvalModule(_, _, _, args) => {
+                for arg in args {
+                    walk(arg, element_offset, reads);
+                }
+            }
+            Expr::Op2(_, left, right, _) => {
+                walk(left, element_offset, reads);
+                walk(right, element_offset, reads);
+            }
+            Expr::Op1(_, inner, _) => walk(inner, element_offset, reads),
+            Expr::If(cond, t, f, _) => {
+                walk(cond, element_offset, reads);
+                let truth = constant_truth(cond);
+                if truth != Some(false) {
+                    walk(t, element_offset, reads);
+                }
+                if truth != Some(true) {
+                    walk(f, element_offset, reads);
+                }
+            }
+            Expr::AssignCurr(dst, inner) | Expr::AssignNext(dst, inner) => {
+                walk(inner, dst.element_offset, reads)
+            }
+        }
+    }
+    /// What a condition is at every step, where its constant parts decide it
+    /// whatever the rest computes: `0 AND x` is false and `1 OR x` true. The
+    /// fold leaves those standing, since `x` is computed, so an element's own
+    /// position beside a test of the model (`IF Age > 1 AND switch = 1`)
+    /// still guards the read.
+    fn constant_truth(expr: &Expr) -> Option<bool> {
+        match expr {
+            Expr::Const(value, _) => Some(crate::vm::is_truthy(*value)),
+            Expr::Op1(self::dimensions::UnaryOp::Not, inner, _) => {
+                constant_truth(inner).map(|truth| !truth)
+            }
+            Expr::Op2(BinaryOp::And, left, right, _) => {
+                match (constant_truth(left), constant_truth(right)) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                }
+            }
+            Expr::Op2(BinaryOp::Or, left, right, _) => {
+                match (constant_truth(left), constant_truth(right)) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), Some(false)) => Some(false),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    let mut reads = Vec::new();
+    for expr in &var.ast {
+        if let Expr::AssignCurr(dst, _) | Expr::AssignNext(dst, _) = expr
+            && dst.name == var.ident
+        {
+            walk(expr, dst.element_offset, &mut reads);
+        }
+    }
+    reads
+}
+
 /// Implicit WITH LOOKUP application (GH #909): rewrite each per-element
 /// assignment of a tables-bearing, value-bearing variable so the element's
 /// input equation is fed through the variable's graphical function, matching
@@ -879,9 +1037,11 @@ fn check_stock_updates_are_emittable(ast: &[Expr], ident: &str) -> Result<()> {
 /// - non-A2A PER-ELEMENT gfs: `tables` holds one table per element at the
 ///   element's row-major declared-dimension index (`variable::build_tables` /
 ///   `reorder_arrayed_element_tables`), so element `i` looks up table `i`. An
-///   element WITHOUT a gf carries an empty placeholder table and keeps its raw
-///   input equation -- Stella has nothing to apply there (wrapping would turn
-///   its value into NaN, the empty-table lookup result).
+///   element WITHOUT a gf of its own carries the variable's table, which it
+///   reads through; where the variable has none either, an empty placeholder
+///   table, and it keeps its raw input equation -- Stella has nothing to apply
+///   there (wrapping would turn its value into NaN, the empty-table lookup
+///   result).
 ///
 /// A table with NO points is deliberately treated as ABSENT for every shape,
 /// scalars included: the variable evaluates its raw input equation rather
@@ -1467,7 +1627,17 @@ fn expand_per_element(
             continue;
         };
         let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-        let main_expr = lower_element(ctx, &elem_ctx, ast)?;
+        // An element whose own equation does not compile names itself. One
+        // that follows the equation every element follows does not: the
+        // error is that equation's, and the first element to meet it is no
+        // more at fault than the rest.
+        let main_expr = lower_element(ctx, &elem_ctx, ast).map_err(|e| {
+            if elements.contains_key(&key) {
+                e.in_element(&key)
+            } else {
+                e
+            }
+        })?;
         exprs.push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
     }
     Ok(exprs)

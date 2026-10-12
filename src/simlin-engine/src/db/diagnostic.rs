@@ -368,11 +368,36 @@ pub(crate) fn model_cycle_diagnostics(db: &dyn Db, model: SourceModel, project: 
             .collect();
         let var = path.first().copied().unwrap_or(cycle.variable.as_str());
         let path = path.join(" → ");
-        let reason = if cycle.initial {
+        let mut reason = if cycle.initial {
             format!("the initial value of '{var}' depends on itself: {path}")
         } else {
             format!("'{var}' depends on itself: {path}")
         };
+        // A recurrence whose elements read one another through an index the
+        // model computes as it runs may be no circle at all, element by
+        // element; it is refused because no order can be fixed before the
+        // run, and the index is what the modeller can change.
+        let members: std::collections::BTreeSet<crate::common::Ident<crate::common::Canonical>> =
+            cycle
+                .path
+                .iter()
+                .map(|name| crate::common::Ident::new(name))
+                .collect();
+        let phase = if cycle.initial {
+            crate::db::SccPhase::Initial
+        } else {
+            crate::db::SccPhase::Dt
+        };
+        if let Some((reader, read)) =
+            crate::db::dep_graph::computed_index_read(db, model, project, &members, phase)
+        {
+            reason.push_str(&format!(
+                "; '{reader}' reads '{read}' at an element computed as the model runs, \
+                 so its elements cannot be put in an order before the run, as they \
+                 can where the index is fixed at each element (an element, or an \
+                 offset of the dimension)"
+            ));
+        }
         Diagnostic {
             model: model.name(db).clone(),
             variable: Some(var.to_string()),
@@ -864,10 +889,10 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
 /// consumer does with it.
 ///
 /// The complementary GH #905 shape is the second advisory: one Warning-
-/// severity [`crate::common::ErrorCode::MissingElementEquation`] per variable
-/// naming, in row-major order, every declared element combination no arm
-/// covers -- the elements `compiler::expand_per_element` assigns a fabricated
-/// 0. Coverage is `variable::elements_without_an_arm` over the PARSED
+/// severity [`crate::common::ErrorCode::MissingElementEquation`] per declared
+/// element combination no arm covers, in row-major order, each naming its
+/// element (`Error::element`) -- the elements `compiler::expand_per_element`
+/// assigns a fabricated 0. Coverage is `variable::elements_without_an_arm` over the PARSED
 /// equation the compiler expands, not the entry list: an entry with an empty
 /// equation is no arm, an empty EXCEPT default covers nothing, and a gf-only
 /// entry is an arm. A variable carrying a fatal diagnostic (an arm that does
@@ -930,7 +955,7 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
             if combination_keys.contains(&key) {
                 continue;
             }
-            if !warned.insert(key) {
+            if !warned.insert(key.clone()) {
                 continue;
             }
             let dims_display = dim_names.join(", ");
@@ -944,11 +969,14 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
                 variable: Some(var_name.clone()),
                 owner: None,
                 severity: DiagnosticSeverity::Warning,
-                error: DiagnosticError::Model(Error::new(
-                    ErrorKind::Model,
-                    ErrorCode::UnknownElementSubscript,
-                    Some(msg),
-                )),
+                error: DiagnosticError::Model(
+                    Error::new(
+                        ErrorKind::Model,
+                        ErrorCode::UnknownElementSubscript,
+                        Some(msg),
+                    )
+                    .in_element(&key),
+                ),
             }
             .accumulate(db);
         }
@@ -956,9 +984,8 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
         // The declared elements no arm covers: `compiler::arrayed_arm` gives
         // each of these the fabricated 0. Read off the parsed equation (a memo
         // read, see `parsed_equation_ast`) and the per-element table layout,
-        // the two shapes the compiler expands. One Warning per variable,
-        // elements in row-major order, so a run reports the same text every
-        // time.
+        // the two shapes the compiler expands. One Warning per element, in
+        // row-major order, so a run reports the same rows every time.
         let parsed = parse_source_variable(db, *svar, project);
         let Some(ast) = parsed.variable.ast() else {
             continue;
@@ -970,40 +997,39 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
         if parsed.variable.fatal_diagnostics().next().is_some() {
             continue;
         }
-        let tables = parsed.variable.tables();
-        let per_element_tables = crate::variable::has_per_element_tables(equation);
-        let missing: Vec<String> = crate::variable::elements_without_an_arm(ast, |offset| {
-            per_element_tables && tables.get(offset).is_some_and(|t| !t.x.is_empty())
-        })
-        .iter()
-        .map(|key| format!("'{}'", key.as_str()))
-        .collect();
-        if missing.is_empty() {
-            continue;
+        // An element's own table is an arm; the variable's, which fills the
+        // slots of elements without one, is not.
+        let own_tables: HashSet<CanonicalElementName> = match equation {
+            crate::datamodel::Equation::Arrayed(_, arms, _, _) => arms
+                .iter()
+                .filter(|(_, _, _, gf)| gf.is_some())
+                .map(|(subscript, ..)| CanonicalElementName::from_subscript(subscript))
+                .collect(),
+            _ => HashSet::new(),
+        };
+        let missing = crate::variable::elements_without_an_arm(ast, |key| own_tables.contains(key));
+        for key in &missing {
+            let msg = format!(
+                "array variable '{var_name}' has no equation for '{}': no element entry \
+                 names it and no default equation applies, so it evaluates to 0",
+                key.as_str()
+            );
+            Diagnostic {
+                model: model_name.clone(),
+                variable: Some(var_name.clone()),
+                owner: None,
+                severity: DiagnosticSeverity::Warning,
+                error: DiagnosticError::Model(
+                    Error::new(
+                        ErrorKind::Model,
+                        ErrorCode::MissingElementEquation,
+                        Some(msg),
+                    )
+                    .in_element(key),
+                ),
+            }
+            .accumulate(db);
         }
-        let msg = format!(
-            "array variable '{var_name}' has no equation for {}: no element entry names \
-             {} and no default equation applies, so {} to 0",
-            missing.join(", "),
-            if missing.len() == 1 { "it" } else { "them" },
-            if missing.len() == 1 {
-                "it evaluates"
-            } else {
-                "they evaluate"
-            },
-        );
-        Diagnostic {
-            model: model_name.clone(),
-            variable: Some(var_name.clone()),
-            owner: None,
-            severity: DiagnosticSeverity::Warning,
-            error: DiagnosticError::Model(Error::new(
-                ErrorKind::Model,
-                ErrorCode::MissingElementEquation,
-                Some(msg),
-            )),
-        }
-        .accumulate(db);
     }
 }
 

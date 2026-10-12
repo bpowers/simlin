@@ -3961,7 +3961,7 @@ pub(crate) fn flow_to_stock_wiring<'a>(
 /// into `level[suba]`, `dimb -> dima` with `suba` inside `dima`) is bare
 /// because under the iteration over the stock's dimensions the compiler
 /// resolves a bare arrayed name through its implicit subscripts
-/// (`get_implicit_subscripts`, the pairing the wiring itself uses to fold
+/// (`get_implicit_axes`, the pairing the wiring itself uses to fold
 /// the flow into the stock), where `inflow[dimb]` names an axis that
 /// iteration does not carry and does not lower. A scalar flow into an
 /// arrayed stock is bare too: it broadcasts into every element's net flow.
@@ -4856,8 +4856,8 @@ pub(crate) struct ReducerBodyCtx<'a> {
 /// - a `Var` naming the axis's own dimension (`row_dim_names[j]`), or a
 ///   dimension that MAPS to it (`has_mapping_to`, the GH #534 gate) -- an
 ///   iterated axis (moves).
-/// - a `Var`/`Const` literal element equal to the row's element at `j` -- a
-///   pinned axis (fixed; re-pinned to the qualified form so
+/// - a `Var` literal element, or a `Const` position, naming the row's element
+///   at `j` -- a pinned axis (fixed; re-pinned to the qualified form so
 ///   `PREVIOUS(...)` of the reference compiles to a direct `LoadPrev`).
 fn pin_body_index(
     idx: &IndexExpr0,
@@ -4897,11 +4897,24 @@ fn pin_body_index(
             }
             (n.as_ref() == row_element).then(|| pinned(false))
         }
-        IndexExpr0::Expr(Expr0::Const(s, _, _)) => {
-            // An indexed-dim ordinal; canonicalize via parse-then-format so
-            // `pop[01]` matches the row part `"1"`.
-            let n = s.parse::<u32>().ok()?;
-            (n.to_string() == row_parts[j]).then(|| pinned(false))
+        IndexExpr0::Expr(Expr0::Const(s, value, _)) => {
+            // A number is a position on the axis, which names an element of
+            // a named dimension as it does an indexed dimension's ordinal
+            // (`dimensions::resolve_axis_index_position`, the compiler's
+            // reading); with no context to name it, an indexed-dim ordinal
+            // still matches through parse-then-format, so `pop[01]` matches
+            // the row part `"1"`.
+            let named = ctx.dims_ctx.and_then(|dc| {
+                let dim = dc.get(&CanonicalDimensionName::from_raw(
+                    ctx.row_dim_names[j].as_str(),
+                ))?;
+                crate::dimensions::resolve_axis_index_position(value.value(), dim)
+            });
+            let element = match named {
+                Some(element) => element,
+                None => s.parse::<u32>().ok()?.to_string(),
+            };
+            (element == row_element).then(|| pinned(false))
         }
         _ => None,
     }

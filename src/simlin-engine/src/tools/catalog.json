@@ -4365,7 +4365,7 @@
                 ]
               },
               {
-                "description": "Replace a variable's equation (a stock's: its initial value). For an\narrayed variable, the equation applies to every element, or to the\none `element` names (`north`; `north, young` for an element of several\ndimensions).",
+                "description": "Replace a variable's equation (a stock's: its initial value). For an\narrayed variable, the equation every element follows -- elements with\nequations of their own keep them -- or, with `element`, that one\nelement's own equation (`north`; `north, young` for an element of\nseveral dimensions).",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -4391,6 +4391,60 @@
                   "op",
                   "variable",
                   "equation"
+                ]
+              },
+              {
+                "description": "Return one element of an arrayed variable to the equation every\nelement follows: it loses its own equation and lookup.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "clear_element"
+                  },
+                  "variable": {
+                    "type": "string"
+                  },
+                  "element": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "variable",
+                  "element"
+                ]
+              },
+              {
+                "description": "Set the dimensions a variable is arrayed over, in order. A dimension\nadded splits the variable by it: each element starts from what the\nvariable said before. A dimension removed keeps what every element\nalong it says, or the element `keep` names on the removed dimensions\n(`north`; `north, young` for two); none makes the variable a scalar.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_dimensions"
+                  },
+                  "variable": {
+                    "type": "string"
+                  },
+                  "dimensions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "keep": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "variable",
+                  "dimensions"
                 ]
               },
               {
@@ -4438,7 +4492,7 @@
                 ]
               },
               {
-                "description": "Make a variable a lookup of its equation: `points` are `[x, y]` pairs,\nx never decreasing (two points at one x are a vertical step).",
+                "description": "Make a variable a lookup of its equation: `points` are `[x, y]` pairs,\nx never decreasing (two points at one x are a vertical step). With\n`element`, that one element of an arrayed variable is a lookup of its\nequation.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -4447,6 +4501,13 @@
                   },
                   "variable": {
                     "type": "string"
+                  },
+                  "element": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
                   },
                   "points": {
                     "type": "array",
@@ -4638,6 +4699,122 @@
                 "required": [
                   "op"
                 ]
+              },
+              {
+                "description": "Add a dimension with its elements, in order.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "add_dimension"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "elements": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "name",
+                  "elements"
+                ]
+              },
+              {
+                "description": "Set a dimension's elements and their order. An element left out\ntakes with it every variable's own equation there; an element added\nfollows the equation every element follows. To rename an element,\nuse rename_element, which keeps what is there.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "change_dimension"
+                  },
+                  "dimension": {
+                    "type": "string"
+                  },
+                  "elements": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "dimension",
+                  "elements"
+                ]
+              },
+              {
+                "description": "Rename a dimension; every variable over it and every equation that\nnames it is rewritten.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "rename_dimension"
+                  },
+                  "dimension": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "dimension",
+                  "to"
+                ]
+              },
+              {
+                "description": "Rename one element of a dimension; every element's own equation and\nevery subscript that names it is rewritten.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "rename_element"
+                  },
+                  "dimension": {
+                    "type": "string"
+                  },
+                  "element": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "dimension",
+                  "element",
+                  "to"
+                ]
+              },
+              {
+                "description": "Delete a dimension that no variable, equation or other dimension\nuses.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "delete_dimension"
+                  },
+                  "dimension": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "dimension"
+                ]
               }
             ]
           },
@@ -4688,7 +4865,7 @@
             "type": "object",
             "properties": {
               "variable": {
-                "description": "The variable, as the model names it (before a rename; with its model\nwhen it is another model's), a loop's name, or \"sim specs\".",
+                "description": "The variable, as the model names it (before a rename; with its model\nwhen it is another model's), a loop's name, \"sim specs\", or a\ndimension's name.",
                 "type": "string"
               },
               "action": {
@@ -4697,6 +4874,13 @@
               "detail": {
                 "description": "What changes, in words.",
                 "type": "string"
+              },
+              "to": {
+                "description": "A renamed variable's name after the edit, spelled as `variable` is:\npresent exactly on a `renamed` line, so a reader takes the new name\nfrom here rather than from `detail`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -4713,7 +4897,44 @@
               "renamed",
               "deleted",
               "loop_named",
-              "sim_specs"
+              "sim_specs",
+              "dimension"
+            ]
+          },
+          "Renamed": {
+            "description": "A variable a patch renamed: in `model`, the variable whose canonical\nidentifier was `from` is now `to`.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model",
+              "from",
+              "to"
+            ]
+          },
+          "VariableRef": {
+            "description": "A variable of `model`, by canonical identifier.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "ident": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model",
+              "ident"
             ]
           },
           "EditDiagnostic": {
@@ -4828,6 +5049,27 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/ChangeLine"
+            }
+          },
+          "renamed": {
+            "description": "What the edit did to the identity of the variables it touched, by\ncanonical identifier, as a patch's report accounts for it\n(`PatchReport`): for a host that follows a variable through the edit.\nThe variables it renamed. A line's `to` says the same for a reader.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Renamed"
+            }
+          },
+          "deleted": {
+            "description": "The variables, by their names before the edit, that no longer exist.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/VariableRef"
+            }
+          },
+          "created": {
+            "description": "The variables, by their names after the edit, that did not exist\nbefore it.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/VariableRef"
             }
           },
           "omitted": {
@@ -5712,7 +5954,7 @@
         "type": "object",
         "properties": {
           "variable": {
-            "description": "The variable, as the model names it (before a rename; with its model\nwhen it is another model's), a loop's name, or \"sim specs\".",
+            "description": "The variable, as the model names it (before a rename; with its model\nwhen it is another model's), a loop's name, \"sim specs\", or a\ndimension's name.",
             "type": "string"
           },
           "action": {
@@ -5721,6 +5963,13 @@
           "detail": {
             "description": "What changes, in words.",
             "type": "string"
+          },
+          "to": {
+            "description": "A renamed variable's name after the edit, spelled as `variable` is:\npresent exactly on a `renamed` line, so a reader takes the new name\nfrom here rather than from `detail`.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -5737,7 +5986,8 @@
           "renamed",
           "deleted",
           "loop_named",
-          "sim_specs"
+          "sim_specs",
+          "dimension"
         ]
       },
       "EditDiagnostic": {

@@ -564,6 +564,9 @@ pub struct WriterContext {
     macros: HashSet<String>,
     /// The project's dimensions, in declared order.
     dimensions: Vec<datamodel::Dimension>,
+    /// The same dimensions as the compiler resolves them, for a read across
+    /// a mapping ([`crate::dimensions::DimensionsContext::resolve_mapped_read`]).
+    pub(super) dims: crate::dimensions::DimensionsContext,
     /// Each variable of the model, by canonical name, with the name as its
     /// definition is written ([`WriterContext::reference`]).
     written_names: HashMap<String, String>,
@@ -626,6 +629,7 @@ impl WriterContext {
             element_owners,
             macros: HashSet::new(),
             dimensions: dimensions.to_vec(),
+            dims: crate::dimensions::DimensionsContext::from(dimensions),
             // As a definition is written with no view to name it;
             // `with_written_names` gives each the name its view draws.
             written_names: model
@@ -2065,7 +2069,14 @@ fn write_variable_entry_ctx_warn(
     let data_source_eqn = compat_get_direct_equation(compat);
     let effective_gf = if data_source_eqn.is_some() { None } else { gf };
 
-    match equation {
+    let per_element = arrayed::per_element_for_vensim(equation, &name, ctx, warnings);
+    let per_element = match (effective_gf, per_element.as_ref().unwrap_or(equation)) {
+        (Some(gf), arrayed @ Equation::Arrayed(..)) => {
+            arrayed::with_the_variables_table(arrayed, gf, ctx).or(per_element)
+        }
+        _ => per_element,
+    };
+    match per_element.as_ref().unwrap_or(equation) {
         Equation::Scalar(eqn) => {
             let effective_eqn = data_source_eqn
                 .clone()
@@ -2439,7 +2450,8 @@ fn write_stock_variable(
         equation_to_mdl(&initial_src, &name, ctx, warnings)
     };
 
-    match &stock.equation {
+    let per_element = arrayed::per_element_for_vensim(&stock.equation, &name, ctx, warnings);
+    match per_element.as_ref().unwrap_or(&stock.equation) {
         Equation::Scalar(eqn) => {
             let initial = stock_initial(eqn, warnings);
             write_stock_entry(

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
 use crate::common::{
-    Canonical, CanonicalElementName, EquationResult, Ident, IdentMap, canonicalize,
+    Canonical, CanonicalElementName, EquationError, EquationResult, Ident, IdentMap, canonicalize,
 };
 use crate::compiler::fragment::DepShape;
 use crate::dimensions::{Dimension, DimensionsContext};
@@ -46,19 +46,31 @@ pub enum Ast<Expr> {
 }
 
 impl Ast<Expr0> {
-    /// Returns the source location of the first reference to the given
-    /// canonical identifier, or None if not referenced.
-    pub(crate) fn get_var_loc(&self, canonical_ident: &str) -> Option<Loc> {
+    /// The first reference to the given canonical identifier: its location,
+    /// and the element whose own equation holds it, `None` for an equation
+    /// every element follows. An arrayed equation's default is searched
+    /// first, then each element's own equation in its dimensions' declared
+    /// order, so the answer does not depend on how the arms are stored.
+    pub(crate) fn locate_var(
+        &self,
+        canonical_ident: &str,
+    ) -> Option<(Option<CanonicalElementName>, Loc)> {
         match self {
-            Ast::Scalar(expr) => expr.get_var_loc(canonical_ident),
-            Ast::ApplyToAll(_, expr) => expr.get_var_loc(canonical_ident),
-            Ast::Arrayed(_, subscripts, ..) => {
-                for expr in subscripts.values() {
-                    if let Some(loc) = expr.get_var_loc(canonical_ident) {
-                        return Some(loc);
-                    }
+            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
+                expr.get_var_loc(canonical_ident).map(|loc| (None, loc))
+            }
+            Ast::Arrayed(dims, arms, default, _) => {
+                if let Some(loc) = default
+                    .as_ref()
+                    .and_then(|expr| expr.get_var_loc(canonical_ident))
+                {
+                    return Some((None, loc));
                 }
-                None
+                crate::dimensions::SubscriptIterator::new(dims).find_map(|subscripts| {
+                    let element = CanonicalElementName::from_parts(&subscripts);
+                    let loc = arms.get(&element)?.get_var_loc(canonical_ident)?;
+                    Some((Some(element), loc))
+                })
             }
         }
     }
@@ -149,16 +161,24 @@ pub(crate) struct LoweringScope<'a> {
 struct ArrayContext<'a> {
     scope: &'a LoweringScope<'a>,
     is_array: bool,
+    /// The dimensions of the variable the equation is of: none for a
+    /// scalar's, and a per-element helper's parent's for one of those.
+    reader: Option<&'a [crate::dimensions::Dimension]>,
     /// When true, allows union of named dimensions (cross-product).
     /// Set inside array reduction builtins like SUM.
     allow_dimension_union: bool,
 }
 
 impl<'a> ArrayContext<'a> {
-    fn new(scope: &'a LoweringScope<'a>, is_array: bool) -> Self {
+    fn new(
+        scope: &'a LoweringScope<'a>,
+        is_array: bool,
+        reader: Option<&'a [crate::dimensions::Dimension]>,
+    ) -> Self {
         Self {
             scope,
             is_array,
+            reader,
             allow_dimension_union: false,
         }
     }
@@ -203,6 +223,10 @@ impl Expr2Context for ArrayContext<'_> {
         prev
     }
 
+    fn reader_dimensions(&self) -> Option<&[crate::dimensions::Dimension]> {
+        self.reader
+    }
+
     fn has_mapping_to(&self, dim_name: &str, target: &str) -> bool {
         let dim_canonical = crate::common::CanonicalDimensionName::from_raw(dim_name);
         let target_canonical = crate::common::CanonicalDimensionName::from_raw(target);
@@ -212,17 +236,22 @@ impl Expr2Context for ArrayContext<'_> {
     }
 }
 
-/// Lower every element arm of an arrayed equation and, when several fail,
-/// report the first in the dimensions' declared element order (the product
-/// `compiler::expand_per_element` walks, so the arm the compiler would have
-/// compiled first) -- or, for arms naming no declared element, the smallest
-/// key. `elements` is a `HashMap`, whose iteration order would otherwise pick
-/// the arm at random; only the failure path walks the product.
+/// The errors one equation's lowering raised: one for a scalar or
+/// apply-to-all equation, and one for each element of an arrayed equation
+/// whose own equation fails, each naming its element.
+pub(crate) type LoweringResult<T> = Result<T, Vec<EquationError>>;
+
+/// Lower every element arm of an arrayed equation and, when some fail,
+/// report each, named by its element, in the dimensions' declared element
+/// order (the product `compiler::expand_per_element` walks), then the arms
+/// naming no declared element by key. `elements` is a `HashMap`, whose
+/// iteration order would otherwise order the errors at random; only the
+/// failure path walks the product.
 fn lower_arrayed_arms<A, B>(
     dims: &[crate::dimensions::Dimension],
     elements: impl IntoIterator<Item = (CanonicalElementName, A)>,
     mut lower: impl FnMut(A) -> EquationResult<B>,
-) -> EquationResult<HashMap<CanonicalElementName, B>> {
+) -> LoweringResult<HashMap<CanonicalElementName, B>> {
     let elements = elements.into_iter();
     let mut lowered = HashMap::with_capacity(elements.size_hint().0);
     let mut failures = Vec::new();
@@ -237,14 +266,19 @@ fn lower_arrayed_arms<A, B>(
     if failures.is_empty() {
         return Ok(lowered);
     }
+    let mut ordered = Vec::with_capacity(failures.len());
     for combination in crate::dimensions::SubscriptIterator::new(dims) {
         let key = CanonicalElementName::from_parts(&combination);
-        if let Some(first) = failures.iter().position(|(id, _)| *id == key) {
-            return Err(failures.swap_remove(first).1);
+        if let Some(at) = failures.iter().position(|(id, _)| *id == key) {
+            ordered.push(failures.swap_remove(at));
         }
     }
     failures.sort_by(|(a, _), (b, _)| a.cmp(b));
-    Err(failures.swap_remove(0).1)
+    ordered.extend(failures);
+    Err(ordered
+        .into_iter()
+        .map(|(id, err)| err.in_element(&id))
+        .collect())
 }
 
 /// One equation's parsed AST at the typed tier: every call resolved against
@@ -252,31 +286,55 @@ fn lower_arrayed_arms<A, B>(
 /// its constant. What the dependency classification walks
 /// (`db::variable_direct_dependencies`), and the first half of [`lower_ast`].
 ///
-/// An arrayed equation's element arms are lowered before the default, and
-/// the default's error takes precedence over a failing arm's
-/// ([`lower_arrayed_arms`]: the first in declared order) -- the order the
+/// An arrayed equation's errors are the default's, then each failing
+/// element arm's ([`lower_arrayed_arms`], in declared order) -- the order the
 /// `Expr2` stage keeps as well.
 pub(crate) fn typed_ast(
     ast: &Ast<Expr0>,
     dimensions: &DimensionsContext,
-) -> EquationResult<Ast<Expr1>> {
+) -> LoweringResult<Ast<Expr1>> {
     let typed = |expr: &Expr0| Expr1::from(expr).map(|expr| expr.constify_dimensions(dimensions));
     match ast {
-        Ast::Scalar(expr) => typed(expr).map(Ast::Scalar),
-        Ast::ApplyToAll(dims, expr) => typed(expr).map(|expr| Ast::ApplyToAll(dims.clone(), expr)),
+        Ast::Scalar(expr) => typed(expr).map(Ast::Scalar).map_err(|e| vec![e]),
+        Ast::ApplyToAll(dims, expr) => typed(expr)
+            .map(|expr| Ast::ApplyToAll(dims.clone(), expr))
+            .map_err(|e| vec![e]),
         Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
             let elements = lower_arrayed_arms(
                 dims,
                 elements.iter().map(|(id, expr)| (id.clone(), expr)),
                 typed,
             );
-            let default_expr = default_expr.as_ref().map(typed).transpose()?;
-            Ok(Ast::Arrayed(
+            let default_expr = default_expr.as_ref().map(typed).transpose();
+            arrayed(
                 dims.clone(),
-                elements?,
+                elements,
                 default_expr,
                 *apply_default_to_missing,
-            ))
+            )
+        }
+    }
+}
+
+/// An arrayed equation from its lowered arms and default, or every error
+/// either raised: the default's first.
+fn arrayed<E>(
+    dims: Vec<crate::dimensions::Dimension>,
+    elements: LoweringResult<HashMap<CanonicalElementName, E>>,
+    default_expr: EquationResult<Option<E>>,
+    apply_default_to_missing: bool,
+) -> LoweringResult<Ast<E>> {
+    match (elements, default_expr) {
+        (Ok(elements), Ok(default_expr)) => Ok(Ast::Arrayed(
+            dims,
+            elements,
+            default_expr,
+            apply_default_to_missing,
+        )),
+        (elements, default_expr) => {
+            let mut errors: Vec<EquationError> = default_expr.err().into_iter().collect();
+            errors.extend(elements.err().unwrap_or_default());
+            Err(errors)
         }
     }
 }
@@ -284,17 +342,18 @@ pub(crate) fn typed_ast(
 /// Lower one equation's parsed AST to `Expr2`: [`typed_ast`], then the array
 /// bounds under `scope` ([`lower_typed_ast`]).
 ///
-/// `element_scoped` is true for a per-element helper's scalar equation
-/// (`variable::ElementScope`): its body was written inside an apply-to-all
-/// body, so it is lowered in the array context that body has, where a
+/// `element_scope` is, for a per-element helper's scalar equation
+/// (`variable::ElementScope`), the dimensions of the body it was written
+/// inside: it is lowered in the array context that body has, where a
 /// dimension name is a reference to be resolved rather than a name that
-/// cannot appear in a scalar equation.
+/// cannot appear in a scalar equation, and where those dimensions are the
+/// reader's. `None` for every other equation.
 pub(crate) fn lower_ast(
     scope: &LoweringScope,
     ast: &Ast<Expr0>,
-    element_scoped: bool,
-) -> EquationResult<Ast<Expr2>> {
-    lower_typed_ast(scope, typed_ast(ast, scope.dimensions)?, element_scoped)
+    element_scope: Option<&[crate::dimensions::Dimension]>,
+) -> LoweringResult<Ast<Expr2>> {
+    lower_typed_ast(scope, typed_ast(ast, scope.dimensions)?, element_scope)
 }
 
 /// The array-bounds half of [`lower_ast`]: one equation at the typed tier
@@ -304,29 +363,36 @@ pub(crate) fn lower_ast(
 pub(crate) fn lower_typed_ast(
     scope: &LoweringScope,
     typed: Ast<Expr1>,
-    element_scoped: bool,
-) -> EquationResult<Ast<Expr2>> {
+    element_scope: Option<&[crate::dimensions::Dimension]>,
+) -> LoweringResult<Ast<Expr2>> {
     match typed {
         Ast::Scalar(expr) => {
-            let mut ctx = ArrayContext::new(scope, element_scoped);
-            Expr2::from(expr, &mut ctx).map(Ast::Scalar)
+            let mut ctx = ArrayContext::new(
+                scope,
+                element_scope.is_some(),
+                Some(element_scope.unwrap_or(&[])),
+            );
+            Expr2::from(expr, &mut ctx)
+                .map(Ast::Scalar)
+                .map_err(|e| vec![e])
         }
         Ast::ApplyToAll(dims, expr) => {
-            let mut ctx = ArrayContext::new(scope, true);
-            Expr2::from(expr, &mut ctx).map(|expr| Ast::ApplyToAll(dims, expr))
+            let lowered = Expr2::from(expr, &mut ArrayContext::new(scope, true, Some(&dims)));
+            lowered
+                .map(|expr| Ast::ApplyToAll(dims, expr))
+                .map_err(|e| vec![e])
         }
         Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
-            let mut ctx = ArrayContext::new(scope, true);
-            let elements = lower_arrayed_arms(&dims, elements, |expr| Expr2::from(expr, &mut ctx));
-            let default_expr = default_expr
-                .map(|expr| Expr2::from(expr, &mut ctx))
-                .transpose()?;
-            Ok(Ast::Arrayed(
-                dims,
-                elements?,
-                default_expr,
-                apply_default_to_missing,
-            ))
+            let (elements, default_expr) = {
+                let mut ctx = ArrayContext::new(scope, true, Some(&dims));
+                let elements =
+                    lower_arrayed_arms(&dims, elements, |expr| Expr2::from(expr, &mut ctx));
+                let default_expr = default_expr
+                    .map(|expr| Expr2::from(expr, &mut ctx))
+                    .transpose();
+                (elements, default_expr)
+            };
+            arrayed(dims, elements, default_expr, apply_default_to_missing)
         }
     }
 }
@@ -431,7 +497,18 @@ pub(crate) fn paren_if_necessary(
     is_right_child: bool,
     eqn: String,
 ) -> String {
-    let needs = match parent {
+    if needs_parens(parent, child, is_right_child) {
+        format!("({eqn})")
+    } else {
+        eqn
+    }
+}
+
+/// Whether `child`, written under `parent` (on its right when
+/// `is_right_child`), needs parentheses: the grouping rule every printer
+/// applies, and what `equation_view` draws as a group.
+pub(crate) fn needs_parens(parent: NodeShape, child: NodeShape, is_right_child: bool) -> bool {
+    match parent {
         NodeShape::Atom | NodeShape::Call | NodeShape::If => false,
         NodeShape::Op1(UnaryOp::Transpose) => child != NodeShape::Atom,
         NodeShape::Op1(_) => matches!(child, NodeShape::Op2(_) | NodeShape::If),
@@ -445,8 +522,7 @@ pub(crate) fn paren_if_necessary(
             NodeShape::If => true,
             NodeShape::Atom | NodeShape::Call => false,
         },
-    };
-    if needs { format!("({eqn})") } else { eqn }
+    }
 }
 
 impl Expr0 {

@@ -106,13 +106,13 @@ pub(super) fn qualify_axis_element(elem: &str, dim: &crate::dimensions::Dimensio
 /// mid-edit inconsistency; callers degrade conservatively) -- and for any
 /// `Reduced` axis, which the `PerElement` invariant excludes.
 ///
-/// Both projected axes read the one executed correspondence
-/// (`DimensionsContext::executed_read_correspondence`, indexed by TARGET
-/// element position and yielding the source element the executed simulation
-/// reads for it): an `Iterated` index and a `MappedRead` index differ only in
-/// which target dimension they are driven by, and every dimension-named
-/// subscript survives to `IndexOp::ActiveDimRef` and is resolved name-first,
-/// then through the declared element map (GH #997).
+/// Each projected axis reads the executed correspondence for its spelling,
+/// indexed by TARGET element position and yielding the source element the
+/// executed simulation reads for it: an `Iterated` index names the iterated
+/// dimension (`DimensionsContext::executed_read_correspondence`), and a
+/// `MappedRead` index names a non-active one, on the right of the equation
+/// alone, and reads through the declared mapping
+/// (`DimensionsContext::mapped_read_correspondence`, GH #997).
 ///
 /// This is the SINGLE row derivation for the `PerElement` family's
 /// emission: the link-score NAME's row (computed by
@@ -129,12 +129,20 @@ pub(crate) fn per_element_row_for_target(
     axes.iter()
         .map(|ax| match ax {
             AxisRead::Pinned(e) => Some(e.clone()),
-            AxisRead::Iterated { dim, source_dim } | AxisRead::MappedRead { dim, source_dim } => {
+            AxisRead::Iterated { dim, source_dim } => {
                 let (elem, idx) = target_elem_by_dim.get(dim)?;
                 if dim == source_dim {
                     return Some(elem.clone());
                 }
                 let corr = dim_ctx.executed_read_correspondence(
+                    &CanonicalDimensionName::from_raw(dim),
+                    &CanonicalDimensionName::from_raw(source_dim),
+                )?;
+                corr.get(*idx).map(|e| e.as_str().to_string())
+            }
+            AxisRead::MappedRead { dim, source_dim } => {
+                let (_, idx) = target_elem_by_dim.get(dim)?;
+                let corr = dim_ctx.mapped_read_correspondence(
                     &CanonicalDimensionName::from_raw(dim),
                     &CanonicalDimensionName::from_raw(source_dim),
                 )?;
@@ -234,8 +242,8 @@ pub(crate) fn dep_row_for_target(
 ///
 /// - the axis's own dimension -- `dep[Region]` over a `Region` axis, or
 ///   `mapped[State]` over a `State` axis the target reads through a declared
-///   map (`IndexOp::ActiveDimRef` resolves it name-first, then through the
-///   map, GH #997) -- reads the element of the bare row, since a bare `dep` is
+///   map (`IndexOp::ActiveDimRef` resolves it through the map, GH #997) --
+///   reads the element of the bare row, since a bare `dep` is
 ///   what pass 0 rewrites into exactly this spelling;
 /// - every dimension the target iterates that reads this axis --
 ///   `energy[nonrenewable]` over a `source` axis, `w[Region]` over a `State`
@@ -556,11 +564,11 @@ fn mapped_read_axis(
     use crate::common::CanonicalDimensionName;
     let target_iterated: Vec<String> = ctx.target_elem_by_dim.keys().cloned().collect();
     let index_canon = CanonicalDimensionName::from_raw(index_dim);
-    let partner = ctx
-        .dim_ctx
-        .mapped_read_partner_dim(&index_canon, &target_iterated)?;
-    ctx.dim_ctx
-        .executed_read_correspondence(&partner, axis_dim.canonical_name())?;
+    let partner = ctx.dim_ctx.mapped_read_partner(
+        &index_canon,
+        &target_iterated,
+        axis_dim.canonical_name(),
+    )?;
     Some(crate::ltm_agg::AxisRead::MappedRead {
         dim: partner.as_str().to_string(),
         source_dim: axis_dim.name().to_string(),
@@ -615,7 +623,7 @@ fn mapped_read_axis(
 ///   with one of the target's iterated dims (`effect[Aggregated Regions, ..]`
 ///   under a `COP`-iterating target -- C-LEARN's shape, GH #997) is replaced the
 ///   same way, through an [`crate::ltm_agg::AxisRead::MappedRead`] so the row
-///   derivation applies the name-first-then-element-map rule THIS spelling gets.
+///   derivation applies the declared mapping THIS spelling is read through.
 ///   The pairing and its gate are `DimensionsContext::mapped_read_partner_dim` /
 ///   `executed_read_correspondence`, the same two questions
 ///   `ltm_agg::classify_axis_access` asks, so this rule accepts exactly the

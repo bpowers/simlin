@@ -11,7 +11,7 @@ use crate::ast::{
 };
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Ident, IdentMap,
-    Result, canonicalize,
+    MismatchedRead, Result, canonicalize,
 };
 use crate::dimensions::{
     Axis, AxisMatch, Dimension, DimensionsContext, DirectMappingsOnly, SubdimensionRelations,
@@ -35,10 +35,42 @@ fn dimensions_do_not_match(ident: &str) -> String {
     format!("the dimensions of '{ident}' do not match the dimensions of the equation that uses it")
 }
 
-/// The reason a reference is refused `ArrayReferenceNeedsExplicitSubscripts`:
-/// an array read where there is no element to take it at.
-fn needs_subscripts(ident: &str) -> String {
-    format!("'{ident}' is an array, so it needs subscripts where it is used here")
+/// The refusal of a reference to `ident` at `loc` whose `unpaired` axes the
+/// reader has no element of: a [`MismatchedRead`].
+fn unpaired_read<'d>(
+    ident: &str,
+    unpaired: impl Iterator<Item = &'d Dimension>,
+    loc: Loc,
+) -> Error {
+    unpaired_axes_read(
+        ident,
+        unpaired.map(|dim| dim.canonical_name().as_str().to_string()),
+        loc,
+    )
+}
+
+/// [`unpaired_read`] over axes known by their canonical names, as a view's
+/// are.
+fn unpaired_axes_read(ident: &str, unpaired: impl Iterator<Item = String>, loc: Loc) -> Error {
+    Error::refused_read(
+        MismatchedRead {
+            variable: ident.to_string(),
+            unpaired: unpaired.collect(),
+        },
+        loc,
+    )
+}
+
+/// The refusal of a reference to `ident` at `loc` that subscripts it on more
+/// dimensions than it has: a [`MismatchedRead`] with nothing unpaired.
+fn oversubscribed_read(ident: &str, loc: Loc) -> Error {
+    Error::refused_read(
+        MismatchedRead {
+            variable: ident.to_string(),
+            unpaired: vec![],
+        },
+        loc,
+    )
 }
 
 /// The reason a `@N` position subscript on `ident` is refused: the dimension
@@ -70,6 +102,10 @@ pub(crate) struct Context<'a> {
     /// one plain apply-to-all or arrayed equation, which share a range
     /// (`TempAllocator::element_scopes`).
     pub(crate) temps: Rc<TempAllocator>,
+    /// The reads the fragment pairs with its element by position alone
+    /// (`resolve_iteration_element`'s last resort), shared as `temps` is, so
+    /// `compiler::Var::new` hands them to its reporter as warnings.
+    pub(crate) positional_reads: Rc<std::cell::RefCell<Vec<super::PositionalRead>>>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -89,12 +125,9 @@ pub(crate) struct ContextCore<'a> {
 }
 
 /// What a name denotes from inside a fragment (see [`Context::resolve`]):
-/// `'d` is the dependency shapes' lifetime, `'n` the resolved name's.
-struct Resolved<'d, 'n> {
+/// `'d` is the dependency shapes' lifetime.
+struct Resolved<'d> {
     shape: &'d DepShape,
-    /// The last segment of the name -- the variable itself, as diagnostics
-    /// spell it.
-    leaf: &'n str,
     /// For a cross-module name, the module instance it relocates through and
     /// the slot its variable's block starts at inside that instance.
     instance: Option<(Ident<Canonical>, usize)>,
@@ -118,6 +151,7 @@ impl Context<'_> {
             preserve_wildcards_for_iteration: false,
             promote_active_dim_ref: false,
             temps: Rc::new(TempAllocator::default()),
+            positional_reads: Rc::default(),
         }
     }
 
@@ -134,6 +168,7 @@ impl Context<'_> {
             preserve_wildcards_for_iteration: self.preserve_wildcards_for_iteration,
             promote_active_dim_ref: self.promote_active_dim_ref,
             temps: Rc::clone(&self.temps),
+            positional_reads: Rc::clone(&self.positional_reads),
         }
     }
 
@@ -218,9 +253,24 @@ impl Context<'_> {
     /// written; the compile of the same body refuses it or lowers it
     /// dynamically, and the describer's conservative reading of the spelling
     /// is the right one for it.
+    ///
+    /// An active dimension's name read as a value is the active element's
+    /// position, which is what it computes at the element: so an offset
+    /// (`x[PM - 1]`) is an index of numbers, which the compiler resolves to
+    /// one element, rather than a dimension in a scalar body.
     pub(crate) fn pin_element_reads(&self, expr: &ast::Expr2) -> ast::Expr2 {
         use ast::Expr2;
         match expr {
+            Expr2::Var(id, _, loc) if self.dims_of(id).is_none() => {
+                match self.active_position(id) {
+                    Some(position) => Expr2::Const(
+                        position.to_string(),
+                        ast::Literal::new(position as f64),
+                        *loc,
+                    ),
+                    None => expr.clone(),
+                }
+            }
             Expr2::Var(id, _, loc) if self.dims_of(id).is_some() => {
                 // What `lower_pass0` spells a bare arrayed reference as: the
                 // reference's bounds are the variable's own axes. The axes are
@@ -273,14 +323,48 @@ impl Context<'_> {
                 bounds.clone(),
                 *loc,
             ),
-            Expr2::If(c, t, f, bounds, loc) => Expr2::If(
-                Box::new(self.pin_element_reads(c)),
-                Box::new(self.pin_element_reads(t)),
-                Box::new(self.pin_element_reads(f)),
-                bounds.clone(),
-                *loc,
-            ),
+            Expr2::If(c, t, f, bounds, loc) => {
+                // A condition the element decides (`IF Age = 1`) is decided:
+                // the element's slot computes the branch it takes, and the
+                // other reads nothing there.
+                let cond = self.pin_element_reads(c);
+                match constant_value(&cond).map(crate::vm::is_truthy) {
+                    Some(true) => self.pin_element_reads(t),
+                    Some(false) => self.pin_element_reads(f),
+                    None => Expr2::If(
+                        Box::new(cond),
+                        Box::new(self.pin_element_reads(t)),
+                        Box::new(self.pin_element_reads(f)),
+                        bounds.clone(),
+                        *loc,
+                    ),
+                }
+            }
         }
+    }
+
+    /// Whether `id`, read as a value, is an active dimension: the active
+    /// element's position.
+    pub(crate) fn is_active_dimension(&self, id: &Ident<Canonical>) -> bool {
+        self.dims_of(id).is_none() && self.active_position(id).is_some()
+    }
+
+    /// The branch a condition takes at the active element, where the element
+    /// alone decides it (`Age = 1`): `None` where it reads anything else.
+    pub(crate) fn decided_branch(&self, cond: &ast::Expr2) -> Option<bool> {
+        constant_value(&self.pin_element_reads(cond)).map(crate::vm::is_truthy)
+    }
+
+    /// The 1-based position of the active element on the active dimension
+    /// named `id`, or `None` where `id` names none.
+    fn active_position(&self, id: &Ident<Canonical>) -> Option<usize> {
+        let dims = self.active_dimension.as_ref()?;
+        let elements = self.active_subscript.as_ref()?;
+        dims.iter().zip(elements).find_map(|(dim, element)| {
+            (dim.canonical_name().as_str() == id.as_str())
+                .then(|| dim.get_offset(element).map(|offset| offset + 1))
+                .flatten()
+        })
     }
 
     /// [`Self::pin_element_reads`] for one subscript: the nested index
@@ -294,18 +378,66 @@ impl Context<'_> {
         loc: Loc,
     ) -> ast::Expr2 {
         use ast::{Expr2, IndexExpr2};
-        let indices: Vec<IndexExpr2> = indices
+        // Each index, with whether it is a number only once pinned: an index
+        // the element computes, which the compiler reads as the run does.
+        let (indices, computed): (Vec<IndexExpr2>, Vec<bool>) = indices
             .into_iter()
             .map(|idx| match idx {
-                IndexExpr2::Expr(e) => IndexExpr2::Expr(self.pin_element_reads(&e)),
-                IndexExpr2::Range(l, r, range_loc) => IndexExpr2::Range(
-                    self.pin_element_reads(&l),
-                    self.pin_element_reads(&r),
-                    range_loc,
+                // A dimension's name alone in brackets is the axis it names,
+                // which the active element resolves below; inside an index
+                // expression it is the element's position.
+                IndexExpr2::Expr(Expr2::Var(ref id, ..)) if self.active_position(id).is_some() => {
+                    (idx, false)
+                }
+                IndexExpr2::Expr(Expr2::Const(..)) => (idx, false),
+                IndexExpr2::Expr(e) => {
+                    let pinned = self.pin_element_reads(&e);
+                    // An index of numbers is the number it computes, which is
+                    // how the compiler reads it (`compiler::fold`).
+                    match constant_value(&pinned) {
+                        Some(value) => (
+                            IndexExpr2::Expr(Expr2::Const(
+                                value.to_string(),
+                                ast::Literal::new(value),
+                                pinned.get_loc(),
+                            )),
+                            true,
+                        ),
+                        None => (IndexExpr2::Expr(pinned), false),
+                    }
+                }
+                IndexExpr2::Range(l, r, range_loc) => (
+                    IndexExpr2::Range(
+                        self.pin_element_reads(&l),
+                        self.pin_element_reads(&r),
+                        range_loc,
+                    ),
+                    false,
                 ),
-                other => other,
+                other => (other, false),
             })
-            .collect();
+            .unzip();
+        // A computed index that comes to no element is a read of no element,
+        // by the VM's index rule (floored, 1-based), which reads not a number
+        // (`compiler::fold::constant_element`). A number written as the index
+        // is resolved where the equation is lowered, which reads the first
+        // element for a position below one.
+        if let Ok(dims) = self.subscript_dims(id, loc)
+            && indices.len() == dims.len()
+            && indices
+                .iter()
+                .zip(&computed)
+                .zip(dims)
+                .any(|((idx, computed), dim)| match idx {
+                    IndexExpr2::Expr(Expr2::Const(_, value, _)) if *computed => {
+                        let index = value.value().floor() as u16;
+                        index == 0 || index as usize > dim.len()
+                    }
+                    _ => false,
+                })
+        {
+            return Expr2::Const("NaN".to_string(), ast::Literal::new(f64::NAN), loc);
+        }
         let indices = match self.static_element_indices(id, &indices) {
             Some(resolved) => indices
                 .into_iter()
@@ -332,7 +464,7 @@ impl Context<'_> {
         id: &Ident<Canonical>,
         indices: &[ast::IndexExpr2],
     ) -> Option<Vec<Option<usize>>> {
-        let dims = self.subscript_dims(id).ok()?;
+        let dims = self.subscript_dims(id, Loc::default()).ok()?;
         if indices.len() != dims.len() {
             return None;
         }
@@ -380,8 +512,8 @@ impl Context<'_> {
         self.shape_of(ident).ok().and_then(DepShape::dimensions)
     }
 
-    /// The active subscript each of `dims` reads, for a subscript-less arrayed
-    /// reference inside an apply-to-all body.
+    /// The active axis each of `dims` is paired with, for a subscript-less
+    /// arrayed reference inside an apply-to-all body.
     ///
     /// The axis ALLOCATION -- which active axis supplies which of `dims` -- is
     /// `dimensions::allocate_implicit_axes`, shared with the LTM per-element
@@ -414,78 +546,73 @@ impl Context<'_> {
     /// `test_get_implicit_subscript_off_translates_through_mapping_parent`,
     /// which invokes [`Self::get_implicit_subscript_off`] directly.
     ///
-    /// That split is why the flow reference and the bare in-equation one are
-    /// two rules: the flow pairs axes under the full context (a mapping onto a
-    /// parent dimension included) and resolves the paired element through
-    /// `translate_via_mapping`, though only when the source dimension does not
-    /// already contain an element of the same NAME; the in-equation one is
-    /// rewritten by pass 0 under `DirectMappingsOnly` and resolves its
-    /// dimension-named subscript name-first, then through the map
+    /// That split is why the flow reference and the bare in-equation one take
+    /// two routes to one rule: the flow pairs axes under the full context (a
+    /// mapping onto a parent dimension included) and resolves the paired
+    /// element through `DimensionsContext::resolve_mapped_read`; the
+    /// in-equation one is rewritten by pass 0 under `DirectMappingsOnly` and
+    /// resolves its dimension-named subscript through the same rule
     /// (`build_view_from_ops`). Both halves are pinned in
     /// `crate::mapped_reference_semantics_tests`. It is also why the GH #996
     /// hazard fixture there is built from a two-axis FLOW under a stock: no
     /// ordinary expression can reach this allocation at all.
-    fn get_implicit_subscripts(&self, dims: &[Dimension], ident: &str) -> Result<Vec<&str>> {
-        if self.active_dimension.is_none() {
-            return sim_err!(
-                ArrayReferenceNeedsExplicitSubscripts,
-                needs_subscripts(ident)
-            );
-        }
-        let active_dims = self.active_dimension.as_ref().unwrap();
-        let active_subscripts = self.active_subscript.as_ref().unwrap();
-        assert_eq!(active_dims.len(), active_subscripts.len());
+    ///
+    /// The answer is the active POSITION each of `dims` is paired with, not
+    /// its element: two active dimensions can declare one element name (two
+    /// overlapping subranges of one dimension), and only the position says
+    /// which of them the axis was paired with.
+    ///
+    /// A reference whose axes no allocation pairs completely -- every axis
+    /// in a scalar context, the axes no active one supplies in an
+    /// apply-to-all -- is refused as a [`MismatchedRead`] naming the axes
+    /// left over. Neither caller spells the read in an equation (a flow list,
+    /// an input wiring), so the refusal has no span.
+    fn get_implicit_axes(&self, dims: &[Dimension], ident: &str) -> Result<Vec<usize>> {
+        let Some(active_dims) = self.active_dimension.as_ref() else {
+            return Err(unpaired_read(ident, dims.iter(), Loc::default()));
+        };
 
         match allocate_implicit_axes(dims, active_dims, self.dimensions_ctx) {
-            Some(alloc) => Ok(alloc
-                .into_iter()
-                .map(|i| active_subscripts[i].as_str())
-                .collect()),
-            None => sim_err!(MismatchedDimensions, dimensions_do_not_match(ident)),
+            Some(alloc) => Ok(alloc),
+            None => {
+                let paired =
+                    match_axes_partial(&axes_of(dims), &axes_of(active_dims), self.dimensions_ctx);
+                let unpaired = dims
+                    .iter()
+                    .zip(&paired)
+                    .filter(|(_, pairing)| pairing.is_none())
+                    .map(|(dim, _)| dim);
+                Err(unpaired_read(ident, unpaired, Loc::default()))
+            }
         }
     }
 
     fn get_implicit_subscript_off(&self, dims: &[Dimension], ident: &str) -> Result<usize> {
-        let subscripts = self.get_implicit_subscripts(dims, ident)?;
+        let active_positions = self.get_implicit_axes(dims, ident)?;
         let active_dims = self.active_dimension.as_ref().unwrap();
+        let active_subscripts = self.active_subscript.as_ref().unwrap();
+        assert_eq!(active_dims.len(), active_subscripts.len());
 
         let mut off = 0_usize;
-        for (dim, subscript) in dims.iter().zip(subscripts) {
-            let element = CanonicalElementName::from_raw(subscript);
-            // The subscript comes from an active dimension; which element of
-            // THIS source axis it selects is
-            // `DimensionsContext::resolve_mapped_read` (GH #997) -- name
-            // first, then the declared mapping, then a mapped parent of the
-            // active subdimension.
-            //
-            // The `get_offset` guard is the SEARCH half and stays here: with
-            // several active dimensions, only the one that owns this element
-            // can supply it, and the shared rule is per (source axis, active
-            // dimension) pair rather than a search over candidates. At least
-            // one active dimension always passes it -- `get_implicit_subscripts`
-            // returns active SUBSCRIPTS, each an element of its own active
-            // dimension -- so the shared rule's name-first arm is reached for
-            // every element.
-            //
-            // A translation that resolves to an element this axis does not
-            // declare (a malformed element map) falls through to the remaining
-            // active dimensions rather than aborting the whole resolution;
-            // that can only resolve a reference that would otherwise fail to
-            // compile.
-            let element_off = active_dims.iter().find_map(|active_dim| {
-                active_dim.get_offset(&element)?;
-                let resolved = self
-                    .dimensions_ctx
-                    .resolve_mapped_read(dim, active_dim, &element)?;
-                dim.get_offset(&resolved)
-            });
+        for (dim, active_idx) in dims.iter().zip(active_positions) {
+            let active_dim = &active_dims[active_idx];
+            let element = &active_subscripts[active_idx];
+            // Which element of THIS source axis the active element selects is
+            // `DimensionsContext::resolve_mapped_read` (GH #997): the element's
+            // own name where this axis declares every active element, and
+            // otherwise the declared mapping, then the name, then a mapped
+            // parent of the active subdimension.
+            let element_off = self
+                .dimensions_ctx
+                .resolve_mapped_read(dim, active_dim, element)
+                .and_then(|resolved| dim.get_offset(&resolved));
             let element_off = element_off.ok_or_else(|| {
                 crate::Error::new(
                     ErrorKind::Model,
                     ErrorCode::MismatchedDimensions,
                     Some(format!(
                         "cannot resolve subscript '{}' for dimension '{}' on variable '{}'",
-                        subscript,
+                        element.as_str(),
                         dim.name(),
                         ident
                     )),
@@ -533,7 +660,7 @@ impl Context<'_> {
     /// deleted while dependent equations still reference `module.output`), a
     /// segment names no sub-model variable -- is a loud `DoesNotExist`, never a
     /// silent slot 0.
-    fn resolve<'d, 'n>(&'d self, ident: &'n Ident<Canonical>) -> Result<Resolved<'d, 'n>> {
+    fn resolve<'d>(&'d self, ident: &Ident<Canonical>) -> Result<Resolved<'d>> {
         let does_not_exist = || {
             Error::new(
                 ErrorKind::Simulation,
@@ -549,7 +676,6 @@ impl Context<'_> {
             let shape = self.deps.get(ident).ok_or_else(does_not_exist)?;
             return Ok(Resolved {
                 shape,
-                leaf: ident_str,
                 instance: None,
             });
         };
@@ -572,7 +698,6 @@ impl Context<'_> {
                 None => {
                     return Ok(Resolved {
                         shape: &entry.shape,
-                        leaf: segment,
                         instance: Some((Ident::from_str_unchecked(head), base)),
                     });
                 }
@@ -612,7 +737,7 @@ impl Context<'_> {
         }
         match resolved.shape.dimensions() {
             Some(dims) => {
-                let off = self.get_implicit_subscript_off(dims, resolved.leaf)?;
+                let off = self.get_implicit_subscript_off(dims, ident.as_str())?;
                 Ok(VarRef::new(name, base + off))
             }
             None => Ok(VarRef::new(name, base)),
@@ -824,13 +949,29 @@ impl Context<'_> {
         let normalized = self.lower_pass0(expr);
 
         // Expr3: wildcard resolution and dimension detection.
-        // Carry the reason across, never the span: an `Error` renders its
-        // `details` to the user as prose, and a span rendered as prose ("Error
-        // at 8:10") displaces the sentence the raising site wrote.
-        let expr3 = Expr3::from_expr2(&normalized, self).map_err(|e| Error {
-            kind: ErrorKind::Model,
-            code: e.code,
-            details: e.details,
+        // Carry the reason across, never the span as prose: an `Error` renders
+        // its `details` to the user, and a span rendered there ("Error at
+        // 8:10") displaces the sentence the raising site wrote. The refusal of
+        // one reference keeps its span beside the read it names.
+        let expr3 = Expr3::from_expr2(&normalized, self).map_err(|e| {
+            let read = e.mismatched_read.map(|read| {
+                let loc = Loc {
+                    start: e.start,
+                    end: e.end,
+                };
+                (*read, loc)
+            });
+            Error {
+                kind: ErrorKind::Model,
+                code: e.code,
+                details: e.details,
+                place: (e.element.is_some() || read.is_some()).then(|| {
+                    Box::new(crate::common::ErrorPlace {
+                        element: e.element,
+                        read,
+                    })
+                }),
+            }
         })?;
 
         self.lower_from_expr3(&expr3)
@@ -1053,6 +1194,7 @@ impl Context<'_> {
             preserve_wildcards_for_iteration: true,
             promote_active_dim_ref: false,
             temps: Rc::clone(&self.temps),
+            positional_reads: Rc::clone(&self.positional_reads),
         }
     }
 
@@ -1070,6 +1212,7 @@ impl Context<'_> {
             preserve_wildcards_for_iteration: true,
             promote_active_dim_ref: true,
             temps: Rc::clone(&self.temps),
+            positional_reads: Rc::clone(&self.positional_reads),
         }
     }
 
@@ -1153,13 +1296,13 @@ impl Context<'_> {
                         }
                     } else {
                         // We're in a scalar context but trying to use a dimension name
-                        return Err(Error {
-                            kind: ErrorKind::Model,
-                            code: ErrorCode::DimensionInScalarContext,
-                            details: Some(format!(
+                        return Err(Error::new(
+                            ErrorKind::Model,
+                            ErrorCode::DimensionInScalarContext,
+                            Some(format!(
                                 "Dimension '{id}' cannot be used in a scalar equation"
                             )),
-                        });
+                        ));
                     }
                 }
 
@@ -1177,9 +1320,11 @@ impl Context<'_> {
                 match self.get_ref(id) {
                     Ok(var) => Ok(Expr::Var(var, *loc)),
                     Err(err) => {
-                        // If get_offset fails because it's an array without implicit subscripts,
-                        // try to create a full array view
-                        if matches!(err.code, ErrorCode::ArrayReferenceNeedsExplicitSubscripts)
+                        // If get_offset fails because it's an array read
+                        // where no element is active, try to create a full
+                        // array view
+                        if self.active_dimension.is_none()
+                            && err.read().is_some()
                             && let Some(source_dims) = self.dims_of(id)
                         {
                             // This is an array variable - check if we need dimension reordering
@@ -1425,18 +1570,13 @@ impl Context<'_> {
         strides
     }
 
-    /// The declared dimensions of the variable a subscript expression reads.
-    fn subscript_dims(&self, id: &Ident<Canonical>) -> Result<&[Dimension]> {
-        self.shape_of(id)?.dimensions().ok_or_else(|| {
-            Error::new(
-                ErrorKind::Model,
-                ErrorCode::Generic,
-                Some(format!(
-                    "expected array variable '{}' to have dimensions",
-                    id.as_str()
-                )),
-            )
-        })
+    /// The declared dimensions of the variable `id[..]` at `loc` reads; a
+    /// subscripted variable with none is a read subscripted past its
+    /// dimensions.
+    fn subscript_dims(&self, id: &Ident<Canonical>, loc: Loc) -> Result<&[Dimension]> {
+        self.shape_of(id)?
+            .dimensions()
+            .ok_or_else(|| oversubscribed_read(id.as_str(), loc))
     }
 
     /// `id[indices]` lowered.
@@ -1455,18 +1595,20 @@ impl Context<'_> {
         loc: Loc,
     ) -> Result<Expr> {
         let base = self.get_base_ref(id)?;
-        let dims = self.subscript_dims(id)?;
+        let dims = self.subscript_dims(id, loc)?;
 
-        if indices.len() != dims.len() {
-            return sim_err!(
-                MismatchedDimensions,
-                format!(
-                    "'{}' has {} dimension(s) but is subscripted with {}",
-                    id.as_str(),
-                    dims.len(),
-                    indices.len()
-                )
-            );
+        // Subscripts pair with axes by position, so too few leave the
+        // trailing axes with no element, and too many name axes the variable
+        // does not have.
+        if indices.len() < dims.len() {
+            return Err(unpaired_read(
+                id.as_str(),
+                dims[indices.len()..].iter(),
+                loc,
+            ));
+        }
+        if indices.len() > dims.len() {
+            return Err(oversubscribed_read(id.as_str(), loc));
         }
 
         // An ARRAY-valued index (`a[b[*]]`) has no meaning: an index selects
@@ -1712,12 +1854,18 @@ impl Context<'_> {
     /// lengths to agree -- except for a range-derived axis, which is allowed
     /// to be shorter and produces NaN past its end.
     ///
-    /// WHICH ELEMENT of the source axis that active subscript selects is the
-    /// source axis's own name first, then the declared mapping in either
-    /// direction, then a mapped parent of the active subdimension, then the
-    /// dimension both axes map onto ([`Self::common_mapping_target`]). Those
-    /// last three arms answer the same three relations the pairing ran on, so
-    /// a reference resolves its element through the rung that paired its axes
+    /// WHICH ELEMENT of the source axis that active subscript selects follows
+    /// `DimensionsContext::resolve_mapped_read`. An axis over the source's
+    /// own dimension, where that dimension declares every element of the
+    /// active one, reads the element's own name. Otherwise, asked of the
+    /// dimension the view axis ranges over (a star range's subdimension, else
+    /// the source's own): the declared mapping in either direction, then the
+    /// element's own name on the source axis, then a mapped parent of the
+    /// active subdimension, then the dimension both axes map onto
+    /// ([`Self::common_mapping_target`]). An element outside a star range's
+    /// subdimension that no mapping pairs reads NaN, past the range. The
+    /// mapping arms answer the same relations the pairing ran on, so a
+    /// reference resolves its element through the rung that paired its axes
     /// rather than through a second, weaker guess. A mapping that EXISTS but
     /// cannot translate is an error rather than a fallback onto the target
     /// axis: falling back hides a misconfigured element map (a size mismatch,
@@ -1754,11 +1902,22 @@ impl Context<'_> {
         // mismatch is expected: the source array lives in a different dimension
         // space than the output (`d[DimA,B1]` partially collapses to DimA only,
         // which differs from a DimA x DimB output).
+        let unpaired_at = |axes: &dyn Fn(usize) -> bool| {
+            unpaired_axes_read(
+                id.as_str(),
+                view.dim_names
+                    .iter()
+                    .enumerate()
+                    .filter(|(view_idx, _)| axes(*view_idx))
+                    .map(|(_, name)| name.clone()),
+                loc,
+            )
+        };
         if !every_axis_paired
             && !self.promote_active_dim_ref
             && view.dims.len() != active_dims.len()
         {
-            return sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()));
+            return Err(unpaired_at(&|view_idx| supplied_by[view_idx].is_none()));
         }
 
         // Which view axes came from a Range, so a size mismatch is allowed and
@@ -1793,7 +1952,7 @@ impl Context<'_> {
                     && !range_view_dims.contains(&view_idx)
                     && view_dim != active_dims[view_idx].len()
                 {
-                    return sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()));
+                    return Err(unpaired_at(&|axis| axis == view_idx));
                 }
             }
         }
@@ -1808,7 +1967,7 @@ impl Context<'_> {
                     (view_idx, &active_subscripts[view_idx], None)
                 }
                 None => {
-                    return sim_err!(MismatchedDimensions, dimensions_do_not_match(id.as_str()));
+                    return Err(unpaired_at(&|axis| axis == view_idx));
                 }
             };
 
@@ -1823,38 +1982,69 @@ impl Context<'_> {
             let target_dim = &active_dims[active_idx];
             let is_sparse = view.sparse.iter().any(|s| s.dim_index == view_idx);
 
-            let prefer_source = source_dim.name() == target_dim.name()
-                || matches!(source_dim, Dimension::Named(_, _));
-            let mut source_offset = if prefer_source {
-                source_dim.get_offset(subscript)
+            // The dimension the view axis ranges over: a star range over a
+            // subdimension (`x[*:Younger]`) names its own, and that is the
+            // dimension the matcher paired with the active one, so its
+            // mapping is the one that decides the element. Every other axis
+            // ranges over the source's own dimension.
+            let axis_dim = self
+                .dimensions_ctx
+                .get(&CanonicalDimensionName::from_raw(
+                    view.dim_names[view_idx].as_str(),
+                ))
+                .filter(|dim| {
+                    dim.canonical_name() != source_dim.canonical_name()
+                        && self
+                            .dimensions_ctx
+                            .is_subdimension_of(dim.canonical_name(), source_dim.canonical_name())
+                })
+                .unwrap_or(source_dim);
+            let source_dim_name = axis_dim.canonical_name();
+            let target_dim_name = target_dim.canonical_name();
+            let has_direct_or_reverse_mapping = self
+                .dimensions_ctx
+                .has_mapping_to(source_dim_name, target_dim_name)
+                || self
+                    .dimensions_ctx
+                    .has_mapping_to(target_dim_name, source_dim_name);
+
+            // An axis over the source's own dimension, which declares every
+            // element of the target's, reads each element by name
+            // (`DimensionsContext::resolve_mapped_read`). Any other axis
+            // paired through a declared mapping reads through it, before any
+            // element name the two dimensions share: a star range over a
+            // subrange mapped to the iterated dimension, or a target that is
+            // not a subrange of the source.
+            let by_name = axis_dim.canonical_name() == source_dim.canonical_name()
+                && self
+                    .dimensions_ctx
+                    .declares_every_element_of(source_dim, target_dim);
+            let mut source_offset = if has_direct_or_reverse_mapping && !by_name {
+                self.dimensions_ctx
+                    .translate_via_mapping(source_dim_name, target_dim_name, subscript)
+                    .and_then(|translated| source_dim.get_offset(&translated))
             } else {
                 None
             };
+
+            // The element's own name, on the source axis. An element outside
+            // a star range's subdimension resolves here too, and lands outside
+            // the range, where it reads NaN below rather than a neighbour.
+            let prefer_source = source_dim.name() == target_dim.name()
+                || matches!(source_dim, Dimension::Named(_, _));
+            if source_offset.is_none() && prefer_source {
+                source_offset = source_dim.get_offset(subscript);
+            }
 
             // A mapping that exists but cannot translate is authoritative:
             // `mapping_failed` suppresses the target-axis fallback below.
             let mut mapping_failed = false;
             if source_offset.is_none() {
-                let source_dim_name = source_dim.canonical_name();
-                let target_dim_name = target_dim.canonical_name();
-
-                let has_direct_or_reverse_mapping = self
-                    .dimensions_ctx
-                    .has_mapping_to(source_dim_name, target_dim_name)
-                    || self
-                        .dimensions_ctx
-                        .has_mapping_to(target_dim_name, source_dim_name);
                 let has_parent_mapping = self
                     .dimensions_ctx
                     .has_mapping_to_parent_of(source_dim_name, target_dim_name);
 
-                if let Some(translated) = self.dimensions_ctx.translate_via_mapping(
-                    source_dim_name,
-                    target_dim_name,
-                    subscript,
-                ) {
-                    source_offset = source_dim.get_offset(&translated);
-                } else if has_parent_mapping {
+                if has_parent_mapping {
                     // The source maps onto a PARENT of the target: translate
                     // through that specific parent rather than the first
                     // mapping target.
@@ -1870,8 +2060,7 @@ impl Context<'_> {
                     } else {
                         mapping_failed = true;
                     }
-                } else if let Some(via) =
-                    Self::common_mapping_target(pairing, source_dim, target_dim)
+                } else if let Some(via) = Self::common_mapping_target(pairing, axis_dim, target_dim)
                 {
                     // The COMMON-MAPPING-TARGET rung: neither axis maps onto
                     // the other, but both declare a mapping onto `via`, so the
@@ -1915,6 +2104,34 @@ impl Context<'_> {
             } else {
                 None
             };
+            // An axis nothing relates to the reader's -- no shared name, no
+            // declared mapping or subdimension -- read at the element of the
+            // same position in the reader's dimension: GH #1044's ordinal last
+            // resort, which Vensim refuses. The run reads it; the person is
+            // told, as a read whose dimensions disagree. A range written in
+            // the subscript asks for its positions.
+            // Two indexed dimensions of one length pair by size, as their
+            // declaration says (`AxisMatch::BySize`): no last resort there.
+            let by_size = matches!(axis_dim, Dimension::Indexed(..))
+                && matches!(target_dim, Dimension::Indexed(..));
+            if pairing.is_none()
+                && !by_size
+                && target_offset.is_some()
+                && !range_view_dims.contains(&view_idx)
+                && !self.preserve_wildcards_for_iteration
+                && !self.promote_active_dim_ref
+            {
+                self.positional_reads
+                    .borrow_mut()
+                    .push(super::PositionalRead {
+                        read: MismatchedRead {
+                            variable: id.as_str().to_string(),
+                            unpaired: vec![axis_dim.canonical_name().as_str().to_string()],
+                        },
+                        loc,
+                        element: CanonicalElementName::from_parts(active_subscripts),
+                    });
+            }
 
             let (abs_offset, offset_from_source) = if let Some(abs_offset) = source_offset {
                 (abs_offset, true)
@@ -1927,7 +2144,7 @@ impl Context<'_> {
                         "{}: dimension mapping from {} to {} failed for subscript '{}' \
                          (check that both dimensions have the same number of elements)",
                         id.as_str(),
-                        source_dim.name(),
+                        axis_dim.name(),
                         target_dim.name(),
                         subscript.as_str()
                     )
@@ -2169,6 +2386,22 @@ impl Context<'_> {
             ArgKind::Table => self.lower_from_expr3(arg),
             ArgKind::Ident => unreachable!("an identifier payload is not an expression argument"),
         })?;
+        // A lookup of a table arrayed over dimensions a scalar reader has no
+        // element of, outside an array operand, applies each element's table
+        // where one value is consumed: the read of the table refused, as a
+        // bare read of it would be (`LOOKUP(tbl, x)` once `tbl` is split).
+        if self.active_dimension.is_none()
+            && !self.preserve_wildcards_for_iteration
+            && let Some((Expr::StaticSubscript(base, view, loc), _)) = lowered.lookup_args()
+            && view.dims.iter().product::<usize>() > 1
+            && view.dim_names.len() == view.dims.len()
+        {
+            return Err(unpaired_axes_read(
+                base.name.as_str(),
+                view.dim_names.iter().cloned(),
+                *loc,
+            ));
+        }
         if let Some((var, loc)) = snapshot_slot
             && let BuiltinFn::Previous(arg, _) | BuiltinFn::Init(arg) = &mut lowered
         {
@@ -2246,16 +2479,13 @@ impl Context<'_> {
         i: usize,
         dims: &[Dimension],
         _orig_dims: &[usize],
-        _loc: Loc,
+        loc: Loc,
     ) -> Result<SubscriptIndex> {
         match idx {
             IndexExpr3::StarRange(subdim_name, star_loc) => {
                 // StarRange in dynamic context - need to resolve the current element
                 if self.active_dimension.is_none() {
-                    return sim_err!(
-                        ArrayReferenceNeedsExplicitSubscripts,
-                        needs_subscripts(id.as_str())
-                    );
+                    return Err(unpaired_read(id.as_str(), std::iter::once(&dims[i]), loc));
                 }
                 let active_dims = self.active_dimension.as_ref().unwrap();
                 let active_subscripts = self.active_subscript.as_ref().unwrap();
@@ -2414,10 +2644,7 @@ impl Context<'_> {
 
                     if is_dim_name {
                         if self.active_dimension.is_none() {
-                            return sim_err!(
-                                ArrayReferenceNeedsExplicitSubscripts,
-                                needs_subscripts(id.as_str())
-                            );
+                            return Err(unpaired_read(id.as_str(), std::iter::once(&dims[i]), loc));
                         }
                         let active_dims = self.active_dimension.as_ref().unwrap();
                         let active_subscripts = self.active_subscript.as_ref().unwrap();
@@ -2465,10 +2692,7 @@ impl Context<'_> {
 
                 // A2A dimension reference in dynamic context
                 if self.active_dimension.is_none() {
-                    return sim_err!(
-                        ArrayReferenceNeedsExplicitSubscripts,
-                        needs_subscripts(id.as_str())
-                    );
+                    return Err(unpaired_read(id.as_str(), std::iter::once(&dims[i]), loc));
                 }
                 let active_dims = self.active_dimension.as_ref().unwrap();
                 let active_subscripts = self.active_subscript.as_ref().unwrap();
@@ -2890,4 +3114,46 @@ fn rank_sliced_view_inside_reducer_in_arrayed_equation_runs() {
         );
 
     project.assert_vm_result("share", &[3.0, 3.0]);
+}
+
+/// The value of an expression of numbers alone -- arithmetic, comparisons
+/// and logic on them -- as the VM computes it (`vm::eval_op2`, as
+/// `compiler::fold` folds): `None` where it reads anything else, or takes a
+/// power, which the fold leaves to the run.
+fn constant_value(expr: &ast::Expr2) -> Option<f64> {
+    use crate::bytecode::Op2;
+    use ast::{BinaryOp, Expr2};
+    match expr {
+        Expr2::Const(_, value, _) => Some(value.value()),
+        Expr2::Op1(ast::UnaryOp::Positive, inner, ..) => constant_value(inner),
+        Expr2::Op1(ast::UnaryOp::Negative, inner, ..) => constant_value(inner).map(|v| -v),
+        Expr2::Op1(ast::UnaryOp::Not, inner, ..) => {
+            constant_value(inner).map(|v| (!crate::vm::is_truthy(v)) as i8 as f64)
+        }
+        Expr2::Op2(op, l, r, ..) => {
+            let (l, r) = (constant_value(l)?, constant_value(r)?);
+            let op = match op {
+                BinaryOp::Add => Op2::Add,
+                BinaryOp::Sub => Op2::Sub,
+                BinaryOp::Mul => Op2::Mul,
+                BinaryOp::Div => Op2::Div,
+                BinaryOp::Mod => Op2::Mod,
+                BinaryOp::Gt => Op2::Gt,
+                BinaryOp::Gte => Op2::Gte,
+                BinaryOp::Lt => Op2::Lt,
+                BinaryOp::Lte => Op2::Lte,
+                BinaryOp::Eq => Op2::Eq,
+                BinaryOp::And => Op2::And,
+                BinaryOp::Or => Op2::Or,
+                BinaryOp::Neq => {
+                    return Some(
+                        (!crate::vm::is_truthy(crate::vm::eval_op2(Op2::Eq, l, r))) as i8 as f64,
+                    );
+                }
+                BinaryOp::Exp => return None,
+            };
+            Some(crate::vm::eval_op2(op, l, r))
+        }
+        _ => None,
+    }
 }

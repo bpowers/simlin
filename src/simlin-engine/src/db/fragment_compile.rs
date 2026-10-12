@@ -23,6 +23,7 @@ use super::*;
 use crate::ast::LoweringScope;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
+use crate::db::assemble::EmitRefusal;
 use crate::db::var_fragment::{
     DeclaredName, ExplicitFragment, ResolvedHeads, explicit_fragment_input,
 };
@@ -162,6 +163,33 @@ pub fn compile_var_fragment<'db>(
     let is_module = var.kind(db) == SourceVariableKind::Module;
     let is_module_input = input.module_inputs.contains(&var_ident_canonical);
 
+    // Accumulate a diagnostic when a phase's lowering (`lower_fragment`)
+    // fails. Without this, errors like DoesNotExist (unknown dependency)
+    // are silently dropped and never appear in collect_all_diagnostics.
+    //
+    // `Equation`, not `Model`: `errors.rs` treats the two variants differently
+    // on purpose. The `Equation` arm produces `FormattedErrorKind::Variable`,
+    // names the variable in the summary, and -- via
+    // `format_diagnostic_with_datamodel` -> `format_equation_error` -- enriches
+    // the message with a source snippet from the equation text, where the
+    // `Model` arm drops the variable from the summary and gets no snippet
+    // (pinned by
+    // `db::diagnostic_tests::test_compile_var_fragment_per_phase_var_new_failure`).
+    // `EquationError::from` carries `err.details`, so the reason the lowering
+    // wrote -- the stock named by `compiler::check_stock_updates_are_emittable`,
+    // the identifier a `MismatchedDimensions` could not shape -- rides along
+    // with it. The error has no span, so the conversion leaves `0..0`.
+    let accumulate_var_compile_error = |err: &crate::Error| {
+        Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(var.ident(db).clone()),
+            owner: None,
+            severity: DiagnosticSeverity::Error,
+            error: DiagnosticError::Equation(err.clone().into()),
+        }
+        .accumulate(db);
+    };
+
     // Emit one phase, and make a CODEGEN rejection attributable.
     //
     // Lowering failures accumulate through `accumulate_var_compile_error`
@@ -212,13 +240,21 @@ pub fn compile_var_fragment<'db>(
     // `FormattedErrorKind::Simulation`, which `FormattedErrors::push` does not
     // count toward `has_model_errors`/`has_variable_errors`, so the CLI's
     // redundant-`NotSimulatable` suppression is unaffected either way.)
+    //
+    // A codegen refusal that names a read of one of the variable's own
+    // dependencies ([`refused_read`]) is the variable's equation error like a
+    // lowering failure, at the reference, rather than prose.
     let emit_ctx = input.emit_ctx();
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
         if exprs.is_empty() {
             return None;
         }
-        match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(&emit_ctx, exprs) {
+        match crate::db::assemble::compile_phase_or_refusal(&emit_ctx, exprs) {
             Ok(bytecodes) => Some(bytecodes),
+            Err(EmitRefusal::Codegen(err)) if refused_read(&input, &err) => {
+                accumulate_var_compile_error(&err);
+                None
+            }
             Err(reason) => {
                 let ident = var.ident(db);
                 Diagnostic {
@@ -236,38 +272,24 @@ pub fn compile_var_fragment<'db>(
         }
     };
 
-    // Accumulate a diagnostic when a phase's lowering (`lower_fragment`)
-    // fails. Without this, errors like DoesNotExist (unknown dependency)
-    // are silently dropped and never appear in collect_all_diagnostics.
-    //
-    // `Equation`, not `Model`: `errors.rs` treats the two variants differently
-    // on purpose. The `Equation` arm produces `FormattedErrorKind::Variable`,
-    // names the variable in the summary, and -- via
-    // `format_diagnostic_with_datamodel` -> `format_equation_error` -- enriches
-    // the message with a source snippet from the equation text, where the
-    // `Model` arm drops the variable from the summary and gets no snippet
-    // (pinned by
-    // `db::diagnostic_tests::test_compile_var_fragment_per_phase_var_new_failure`).
-    // `EquationError::from` carries `err.details`, so the reason the lowering
-    // wrote -- the stock named by `compiler::check_stock_updates_are_emittable`,
-    // the identifier a `MismatchedDimensions` could not shape -- rides along
-    // with it. The error has no span, so the conversion leaves `0..0`.
-    let accumulate_var_compile_error = |err: &crate::Error| {
-        Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(var.ident(db).clone()),
-            owner: None,
-            severity: DiagnosticSeverity::Error,
-            error: DiagnosticError::Equation(err.clone().into()),
-        }
-        .accumulate(db);
-    };
-
     // Only the phases the variable's runlist membership admits are lowered; a
     // phase it is not a member of is never compiled, so its lowering outcome
     // is not a diagnostic either.
+    let source = var;
     let emit = |lowered: &Result<crate::compiler::Var, crate::Error>| match lowered {
-        Ok(var) => compile_phase(&var.ast),
+        Ok(var) => {
+            report_out_of_range_reads(db, model, &input, var, var.ident.as_str(), |offset| {
+                element_at(&input, offset)
+            });
+            // A read paired by position alone is refused: the fragment is
+            // not emitted, and the refusal is the read's.
+            if report_positional_reads(db, model, var, var.ident.as_str(), |element| {
+                own_arm(source.equation(db), element)
+            }) {
+                return None;
+            }
+            compile_phase(&var.ast)
+        }
         Err(err) => {
             accumulate_var_compile_error(err);
             None
@@ -320,6 +342,154 @@ pub fn compile_var_fragment<'db>(
         },
         flow_locally_invariant,
     })
+}
+
+/// Whether `err` is the refusal of a read of a variable `input` depends on
+/// ([`crate::common::MismatchedRead`]). Codegen names the variable that owns
+/// the refused view's slots, which for a read of a module's output is the
+/// module instance; that refusal stays prose, since the read's own name is
+/// not the owner's.
+fn refused_read(input: &FragmentInput<'_>, err: &crate::Error) -> bool {
+    err.read().is_some_and(|(read, _)| {
+        input
+            .deps
+            .get(read.variable.as_str())
+            .is_some_and(|shape| !shape.is_module())
+    })
+}
+
+/// The element of the variable `input` lowers that the slot at `offset`
+/// holds, or `None` for a scalar.
+fn element_at(
+    input: &FragmentInput<'_>,
+    offset: usize,
+) -> Option<crate::common::CanonicalElementName> {
+    let dims = input.target.get_dimensions()?;
+    if dims.is_empty() {
+        return None;
+    }
+    crate::dimensions::SubscriptIterator::new(dims)
+        .nth(offset)
+        .map(|element| crate::common::CanonicalElementName::from_parts(&element))
+}
+
+/// File one `SubscriptOutOfRange` warning, on `reported_on`, for each read
+/// in `var`'s lowered equations that reads no element at every step
+/// (`compiler::out_of_range_reads`), naming the element that makes the read
+/// (`element_of` its slot offset; `None` for a scalar) and pointing at the
+/// reference in the equation's text.
+///
+/// One row per element and reference, so a host can show each beside its
+/// element. Both phases of one variable lower the same equation, and the
+/// drain collapses their identical rows.
+fn report_out_of_range_reads(
+    db: &dyn Db,
+    model: SourceModel,
+    input: &FragmentInput<'_>,
+    var: &crate::compiler::Var,
+    reported_on: &str,
+    element_of: impl Fn(usize) -> Option<crate::common::CanonicalElementName>,
+) {
+    for read in crate::compiler::out_of_range_reads(var) {
+        let source = read.source.as_str();
+        let side = if read.before_start {
+            "before the first"
+        } else {
+            "past the last"
+        };
+        let dimension = input
+            .deps
+            .get(&read.source)
+            .and_then(|shape| shape.dims.get(read.axis))
+            .map(|dim| dim.name().to_string());
+        let axis = match &dimension {
+            Some(dim) => format!("{side} element of '{dim}'"),
+            None => format!("{side} element"),
+        };
+        let element = element_of(read.element_offset);
+        let details = match &element {
+            Some(element) => format!(
+                "the equation for '{}' reads '{source}' {axis}, which is not a number",
+                element.as_str()
+            ),
+            None => format!("the equation reads '{source}' {axis}, which is not a number"),
+        };
+        Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(reported_on.to_string()),
+            owner: None,
+            severity: DiagnosticSeverity::Warning,
+            error: DiagnosticError::Equation(crate::common::EquationError {
+                start: read.loc.start,
+                end: read.loc.end,
+                code: crate::common::ErrorCode::SubscriptOutOfRange,
+                details: Some(details),
+                element: element.map(|e| e.as_str().to_string()),
+                read_past: dimension.map(|dimension| crate::common::ReadPast {
+                    dimension,
+                    before_first: read.before_start,
+                }),
+                mismatched_read: None,
+            }),
+        }
+        .accumulate(db);
+    }
+}
+
+/// The element `element` names when `equation` gives it an equation of its
+/// own, whose text a span in it indexes; `None` when it follows the equation
+/// every element follows.
+fn own_arm(
+    equation: &crate::datamodel::Equation,
+    element: &crate::common::CanonicalElementName,
+) -> Option<String> {
+    match equation {
+        crate::datamodel::Equation::Arrayed(_, arms, _, _)
+            if arms.iter().any(|(subscript, ..)| {
+                crate::common::CanonicalElementName::from_subscript(subscript) == *element
+            }) =>
+        {
+            Some(element.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Refuse each read in `var`'s equations that is paired with its reader's
+/// element by position alone (`compiler::Var::positional_reads`), on
+/// `reported_on`: an axis of the variable read that nothing relates to the
+/// reader's dimensions -- no shared name, no declared mapping or
+/// subdimension -- which the compiler could read only at the reader's
+/// element of the same position in another dimension of that length. Such a
+/// read runs wrong where it runs at all (each Region reading one Sex), so it
+/// is a `MismatchedRead` like any other refused read, at the reference, and
+/// a host offers the same checked fixes for it (GH #1044; Vensim refuses it
+/// too). `element_of` names the reader's element whose own equation holds
+/// it. Whether any was refused: the fragment is then not emitted.
+fn report_positional_reads(
+    db: &dyn Db,
+    model: SourceModel,
+    var: &crate::compiler::Var,
+    reported_on: &str,
+    element_of: impl Fn(&crate::common::CanonicalElementName) -> Option<String>,
+) -> bool {
+    for positional in &var.positional_reads {
+        let mut error = crate::common::EquationError::mismatched_read(
+            positional.loc.start,
+            positional.loc.end,
+            positional.read.clone(),
+        );
+        error.element = element_of(&positional.element);
+        Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(reported_on.to_string()),
+            owner: None,
+            severity: DiagnosticSeverity::Error,
+            error: DiagnosticError::Equation(error),
+        }
+        .accumulate(db);
+    }
+    !var.positional_reads.is_empty()
 }
 
 /// Why [`implicit_fragment_input`] produced no input.
@@ -736,18 +906,122 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
             .map(|arg| arg.get_loc())
     };
     let emit_ctx = input.emit_ctx();
+    // A per-element helper is one element of its parent's body, and what is
+    // reported of it is reported on the parent; a helper of a scalar body is
+    // at no element. One that iterates its parent's own dimensions (an
+    // apply-to-all argument a `PREVIOUS` or an `INIT` captures) writes, at
+    // each slot, the parent's element of that name.
+    let helper_element = input.target.element_scope().map(|scope| {
+        crate::common::CanonicalElementName::from_parts(
+            &scope.element.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+        )
+    });
+    // A helper's lowering error is in the parent's equation text: the
+    // element's own equation when it has one (so the error names the
+    // element, whose text its span indexes), else the equation every
+    // element follows, whose error every element meets and none is named by.
+    let own_arm_element = helper_element
+        .as_ref()
+        .filter(|element| {
+            matches!(
+                meta.parent_source_var.equation(db),
+                crate::datamodel::Equation::Arrayed(_, arms, _, _)
+                    if arms.iter().any(|(subscript, ..)| {
+                        crate::common::CanonicalElementName::from_subscript(subscript) == **element
+                    })
+            )
+        })
+        .map(|element| element.as_str().to_string());
+    // Whether the helper iterates its parent's own dimensions, asked only of a
+    // read that runs off its axis: the answer reads the parent's equation, and
+    // a helper's fragment must not depend on it otherwise, or every edit of
+    // the parent would recompile every helper.
+    let iterates_parent_dims = || {
+        let parent_dims: Vec<String> = match meta.parent_source_var.equation(db) {
+            crate::datamodel::Equation::ApplyToAll(dims, ..)
+            | crate::datamodel::Equation::Arrayed(dims, ..) => {
+                dims.iter().map(|d| canonicalize(d).into_owned()).collect()
+            }
+            crate::datamodel::Equation::Scalar(..) => vec![],
+        };
+        let helper_dims: Vec<String> = input
+            .target
+            .get_dimensions()
+            .unwrap_or_default()
+            .iter()
+            .map(|d| d.canonical_name().as_str().to_string())
+            .collect();
+        !parent_dims.is_empty() && parent_dims == helper_dims
+    };
+    // A refused read ([`crate::common::MismatchedRead`]) is the parent's
+    // equation error at the reference. A subtree-bodied helper's reference is
+    // written in the parent's text, where the refusal's span already points;
+    // a module instance's is the argument the call wires to the port, which
+    // the instance keeps. Whichever phase refuses it, the read is the same
+    // and the drain collapses the repeats.
+    let report_read = |err: crate::Error| {
+        let mut error = crate::common::EquationError::from(err);
+        if (error.start, error.end) == (0, 0)
+            && let Some(read) = &error.mismatched_read
+            && let Some(loc) = meta
+                .find_in(parse_source_variable(db, meta.parent_source_var, project))
+                .and_then(|helper| helper.argument_span(&read.variable))
+        {
+            (error.start, error.end) = (loc.start, loc.end);
+        }
+        if error.element.is_none() {
+            error.element = own_arm_element.clone();
+        }
+        Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(meta.parent_source_var.ident(db).clone()),
+            owner: None,
+            severity: DiagnosticSeverity::Error,
+            error: DiagnosticError::Equation(error),
+        }
+        .accumulate(db);
+    };
     let phase = |is_initial: bool| -> Option<PerVarBytecodes> {
         match lower_fragment(&input, is_initial) {
             Ok(var) => {
-                match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
-                    &emit_ctx, &var.ast,
+                report_out_of_range_reads(
+                    db,
+                    model,
+                    &input,
+                    &var,
+                    meta.parent_source_var.ident(db),
+                    |offset| {
+                        helper_element.clone().or_else(|| {
+                            iterates_parent_dims()
+                                .then(|| element_at(&input, offset))
+                                .flatten()
+                        })
+                    },
+                );
+                if report_positional_reads(
+                    db,
+                    model,
+                    &var,
+                    meta.parent_source_var.ident(db),
+                    |_| own_arm_element.clone(),
                 ) {
+                    return None;
+                }
+                match crate::db::assemble::compile_phase_or_refusal(&emit_ctx, &var.ast) {
                     Ok(bytecodes) => Some(bytecodes),
+                    Err(EmitRefusal::Codegen(err)) if refused_read(&input, &err) => {
+                        report_read(err);
+                        None
+                    }
                     Err(reason) => {
-                        report(reason);
+                        report(reason.to_string());
                         None
                     }
                 }
+            }
+            Err(err) if err.read().is_some() => {
+                report_read(err);
+                None
             }
             Err(err) => {
                 match parent_argument_span() {
@@ -760,7 +1034,13 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                             start: loc.start,
                             end: loc.end,
                             code: err.code,
+                            element: err
+                                .element()
+                                .map(str::to_owned)
+                                .or_else(|| own_arm_element.clone()),
                             details: err.details,
+                            read_past: None,
+                            mismatched_read: None,
                         }),
                     }
                     .accumulate(db),

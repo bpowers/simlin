@@ -173,13 +173,23 @@ impl Expr0 {
                     return Some(*loc);
                 }
                 for idx in indices {
-                    if let IndexExpr0::Range(l, r, _) = idx {
-                        if let Some(loc) = l.get_var_loc(canonical_ident) {
-                            return Some(loc);
+                    match idx {
+                        IndexExpr0::Range(l, r, _) => {
+                            if let Some(loc) = l.get_var_loc(canonical_ident) {
+                                return Some(loc);
+                            }
+                            if let Some(loc) = r.get_var_loc(canonical_ident) {
+                                return Some(loc);
+                            }
                         }
-                        if let Some(loc) = r.get_var_loc(canonical_ident) {
-                            return Some(loc);
+                        IndexExpr0::Expr(e) => {
+                            if let Some(loc) = e.get_var_loc(canonical_ident) {
+                                return Some(loc);
+                            }
                         }
+                        IndexExpr0::Wildcard(_)
+                        | IndexExpr0::StarRange(..)
+                        | IndexExpr0::DimPosition(..) => {}
                     }
                 }
                 None

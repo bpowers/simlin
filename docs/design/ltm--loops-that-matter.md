@@ -1675,8 +1675,10 @@ dimension, and the full context for a stock's flows (`BareSpelling::StockFlow`,
 the wiring's relations, which is how a flow declared over other dimensions than
 its stock's is integrated).
 Each axis is resolved as the compiler resolves it
-(`DimensionsContext::executed_read_correspondence`: the element's name first,
-then the declared element map, in either declaration direction).
+(`DimensionsContext::executed_read_correspondence`: the element's own name
+where the source dimension declares every iterated element, and otherwise the
+declared mapping, in either declaration direction, then the element's own
+name).
 A `Bare`
 reference reads the *same* `Region` element of `row_sum` per iterated tuple,
 so `emit_edges_for_reference` projects it via `expand_same_element`
@@ -1706,8 +1708,9 @@ is remapped to the slot of the target element that reads it
 (`iterated_axis_slot_elements` -- the preimage of
 `DimensionsContext::executed_read_correspondence`: `matrix[State, *]` names
 the dimension the equation ITERATES, the index survives to
-`IndexOp::ActiveDimRef`, and `build_view_from_ops` resolves it name-first,
-then through the declared element map, GH #997; a source element no target
+`IndexOp::ActiveDimRef`, and `build_view_from_ops` resolves it by name where
+the source declares every iterated element and through the declared element
+map otherwise, GH #997; a source element no target
 element reads -- a superset source read through a subrange -- is no row).
 A BARE arrayed argument reads what pass 0 spells for it (its axes paired with
 the enclosing iteration by `match_axes_partial` under `DirectMappingsOnly`,
