@@ -54,7 +54,7 @@
 use salsa::Accumulator;
 
 use super::*;
-use crate::common::{Error, UnitError};
+use crate::common::{Error, IdentSet, UnitError};
 
 /// Per-model tracked function that triggers diagnostic accumulation from
 /// all compilation stages. The salsa accumulator is the sole error source
@@ -345,16 +345,18 @@ pub(crate) fn model_cycle_diagnostics(db: &dyn Db, model: SourceModel, project: 
     };
     for cycle in &dep_graph.cycles {
         // A loop no stock breaks closes in both phases' walks; the time
-        // step's report covers it. Each walk reads a node's dependencies in
-        // hash order, so the two may meet the loop at different members:
-        // the loop is the same one when its members are.
+        // step's report covers it. The two phases walk different relations,
+        // so they may meet the loop at different members: the loop is the
+        // same one when its members are.
         let reported = |c: &crate::db::DependencyCycle| !c.initial && members(c) == members(cycle);
         if cycle.initial && dep_graph.cycles.iter().any(reported) {
             continue;
         }
         // Filed under its least member, the path read from there: where a
-        // walk met the loop is hash order, and a report that moves between
-        // members reads as a new problem each time it moves.
+        // walk met the loop depends on what else the model holds (the walk
+        // is in name order, so a variable added ahead of the loop can move
+        // it), and a report that moves between members reads as a new
+        // problem each time it moves.
         let ring = &cycle.path[1..];
         let start = ring
             .iter()
@@ -917,7 +919,6 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
 /// accumulation is deterministic.
 fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: SourceProject) {
     use crate::common::{CanonicalElementName, ErrorCode, ErrorKind};
-    use std::collections::HashSet;
 
     let source_vars = model.variables(db);
     let mut var_names: Vec<&String> = source_vars.keys().collect();
@@ -945,12 +946,12 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
         // The declared combinations' keys -- the same keys
         // `compiler::expand_per_element` expands the arms against --
         // materialized once per arrayed variable.
-        let combination_keys: HashSet<CanonicalElementName> =
+        let combination_keys: IdentSet<CanonicalElementName> =
             crate::dimensions::SubscriptIterator::new(&dims)
                 .map(|combination| CanonicalElementName::from_parts(&combination))
                 .collect();
 
-        let mut warned: HashSet<CanonicalElementName> = HashSet::new();
+        let mut warned: IdentSet<CanonicalElementName> = IdentSet::default();
         for (subscript, _, _, _) in elements {
             let key = CanonicalElementName::from_subscript(subscript);
             if combination_keys.contains(&key) {
@@ -1000,13 +1001,13 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
         }
         // An element's own table is an arm; the variable's, which fills the
         // slots of elements without one, is not.
-        let own_tables: HashSet<CanonicalElementName> = match equation {
+        let own_tables: IdentSet<CanonicalElementName> = match equation {
             crate::datamodel::Equation::Arrayed(_, arms, _, _) => arms
                 .iter()
                 .filter(|(_, _, _, gf)| gf.is_some())
                 .map(|(subscript, ..)| CanonicalElementName::from_subscript(subscript))
                 .collect(),
-            _ => HashSet::new(),
+            _ => IdentSet::default(),
         };
         let missing = crate::variable::elements_without_an_arm(ast, |key| own_tables.contains(key));
         for key in &missing {

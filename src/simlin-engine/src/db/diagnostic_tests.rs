@@ -3833,9 +3833,9 @@ fn models_with_distinct_names_and_one_named_for_a_stdlib_model_are_not_duplicate
 }
 
 /// A loop no stock breaks closes in both phases' walks, and the walks may
-/// meet it at different members (each walks a node's reads in hash order):
+/// meet it at different members (the two phases walk different relations):
 /// the loop is reported once, under its least member, whatever member either
-/// walk found it at. Each fresh database hashes anew, so many are tried.
+/// walk found it at, and the same on every fresh database.
 #[test]
 fn a_loop_both_phases_close_is_reported_once_wherever_the_walks_meet_it() {
     let project = crate::test_common::TestProject::new("main")

@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::result::Result as StdResult;
 
-use simlin_engine::common::{Canonical, Ident};
+use simlin_engine::common::{Canonical, Ident, IdentMap};
 // `model_element_loop_circuits` is `#[deprecated]` for new LTM callers;
 // the integration tests below drive it directly to compare the legacy
 // element-Johnson surface against the tiered enumerator's output. The
@@ -9508,7 +9508,7 @@ fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
             &ltm.vars,
             dm_dims,
             &expansion,
-            &ltm_finding::SubModelOutputPorts::new(),
+            &ltm_finding::SubModelOutputPorts::default(),
             None,
         )
         .expect("discovery")
@@ -10445,7 +10445,7 @@ fn exhaustive_never_active_loop_keeps_structural_polarity() {
     // branch that must leave the structural classification untouched.
     let step_count = 4;
     let step_size = detected.loops.len();
-    let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+    let mut offsets: IdentMap<Ident<Canonical>, usize> = IdentMap::default();
     for (i, loop_item) in detected.loops.iter().enumerate() {
         let name = format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{}", loop_item.id);
         offsets.insert(Ident::<Canonical>::from_unchecked(name), i);

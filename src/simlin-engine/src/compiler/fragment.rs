@@ -26,10 +26,10 @@
 //! through the chain of shapes.
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::common::{Canonical, Ident, IdentMap, Result};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet, Result};
 use crate::dimensions::{Dimension, DimensionsContext};
 use crate::variable::Variable;
 
@@ -138,7 +138,7 @@ pub(crate) struct FragmentInput<'a> {
     pub deps: IdentMap<Ident<Canonical>, DepShape>,
     /// Graphical-function tables, keyed by the variable that declares them:
     /// the target's own and those of the lookup tables it calls.
-    pub tables: HashMap<Ident<Canonical>, Vec<Table>>,
+    pub tables: IdentMap<Ident<Canonical>, Vec<Table>>,
     /// The module instance's input ports (empty for a root model): a name in
     /// this set lowers to a `ModuleInput` read instead of a slot read.
     pub module_inputs: BTreeSet<Ident<Canonical>>,
@@ -156,7 +156,7 @@ impl<'a> FragmentInput<'a> {
     pub(crate) fn new(
         target: Cow<'a, Variable>,
         deps: IdentMap<Ident<Canonical>, DepShape>,
-        tables: HashMap<Ident<Canonical>, Vec<Table>>,
+        tables: IdentMap<Ident<Canonical>, Vec<Table>>,
         module_inputs: BTreeSet<Ident<Canonical>>,
         model_name: Ident<Canonical>,
         dimensions: &'a [Dimension],
@@ -258,7 +258,7 @@ impl FragmentInput<'_> {
             for body in bodies() {
                 reads.collect(body, &names, false);
             }
-            let mut elements = std::collections::HashMap::new();
+            let mut elements = IdentMap::default();
             for parts in crate::dimensions::SubscriptIterator::new(dims) {
                 let key = crate::common::CanonicalElementName::from_parts(&parts);
                 let Some(expr) = arms.and_then(|arms| arms.get(&key)).or(default) else {
@@ -367,7 +367,7 @@ pub(crate) fn lower_fragment(input: &FragmentInput<'_>, is_initial: bool) -> Res
 /// had: the extent of one element of a bigger array is not the array's extent,
 /// so the reader falls back to what the lowered view says.
 pub(crate) fn reference_extents(deps: &IdentMap<Ident<Canonical>, DepShape>) -> VarSizes {
-    let mut extents = VarSizes::new();
+    let mut extents = VarSizes::default();
     for (name, shape) in deps {
         match &shape.kind {
             DepKind::Module { shape } => collect_instance_extents(shape, name, 0, &mut extents),
@@ -421,7 +421,7 @@ fn collect_instance_extents(
 /// reconcile wrongly (`c[Age]` beside `c[l1]`).
 #[derive(Default)]
 struct ReadSpellings {
-    pinned: std::collections::HashSet<Ident<Canonical>>,
+    pinned: IdentSet<Ident<Canonical>>,
 }
 
 impl ReadSpellings {
@@ -485,7 +485,7 @@ impl ReadSpellings {
 fn describe_at_element(
     ctx: &Context,
     expr: &crate::ast::Expr2,
-    pinned: &std::collections::HashSet<Ident<Canonical>>,
+    pinned: &IdentSet<Ident<Canonical>>,
 ) -> crate::ast::Expr2 {
     use crate::ast::Expr2;
     use crate::builtins::ArgKind;

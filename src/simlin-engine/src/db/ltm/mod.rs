@@ -19,6 +19,7 @@
 //! * `link_scores` -- the per-edge / per-shape / through-aggregate link-score
 //!   emitters (lifted verbatim out of `model_ltm_variables`).
 
+use crate::common::{IdentMap, IdentSet};
 use std::collections::{HashMap, HashSet};
 
 use crate::canonicalize;
@@ -365,7 +366,7 @@ pub(super) fn ltm_model_var_names(
     db: &dyn Db,
     model: SourceModel,
     _project: SourceProject,
-) -> HashSet<Ident<Canonical>> {
+) -> IdentSet<Ident<Canonical>> {
     model
         .variables(db)
         .keys()
@@ -981,7 +982,7 @@ pub fn model_ltm_variables(
     // feedback, so the predicate's module leg lets it through (GH #748).
     let output_ports = sub_model_output_ports(db, model, project);
     let (pathways, truncated_pathway_ports) = if output_ports.is_empty() {
-        (HashMap::new(), Vec::new())
+        (IdentMap::default(), Vec::new())
     } else {
         module_input_pathways_from_edges(edges_result, &output_ports)
     };

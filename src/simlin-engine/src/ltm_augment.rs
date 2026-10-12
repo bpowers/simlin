@@ -13,7 +13,7 @@
 use crate::ast::{Expr0, IndexExpr0, print_eqn};
 use crate::builtins::{BuiltinSig, Invariance, UntypedBuiltinFn};
 use crate::canonicalize;
-use crate::common::{Canonical, Ident, RawIdent};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet, RawIdent};
 use crate::datamodel::{self, Equation};
 #[cfg(test)]
 use crate::lexer::LexerType;
@@ -251,7 +251,7 @@ struct WrapCtx<'a> {
     live_reducer_text: Option<&'a str>,
     /// Canonical idents of the non-`live_source` deps that must be wrapped;
     /// names outside this set (and not `live_source`) are left alone.
-    other_deps: &'a HashSet<Ident<Canonical>>,
+    other_deps: &'a IdentSet<Ident<Canonical>>,
     /// GH #511 iterated-dimension context (`None` for a scalar live source).
     iter_ctx: Option<&'a IteratedDimCtx<'a>>,
     /// Project dims context for [`qualify_element_index`] (GH #587).
@@ -1074,7 +1074,7 @@ fn freeze_lookup_table_indices(
     }
     // Every ident under these indices is a read the wrap must be able to freeze,
     // whether or not the dependency extractor knows about it (see the rustdoc).
-    let mut index_deps: HashSet<Ident<Canonical>> = ctx.other_deps.clone();
+    let mut index_deps: IdentSet<Ident<Canonical>> = ctx.other_deps.clone();
     for idx in &indices {
         let mut add = |e: &Expr0| {
             index_deps.extend(expr_reference_idents(e).into_iter().map(|n| Ident::new(&n)));
@@ -1160,7 +1160,7 @@ pub(crate) use partial_error::{PartialEquationError, PartialEquationErrorKind};
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_partial_equation_shaped(
     equation_text: &str,
-    deps: &HashSet<Ident<Canonical>>,
+    deps: &IdentSet<Ident<Canonical>>,
     live_source: &Ident<Canonical>,
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
@@ -1211,7 +1211,7 @@ pub(crate) fn build_partial_equation_shaped(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_partial_equation_shaped_with_live_ref(
     equation_text: &str,
-    deps: &HashSet<Ident<Canonical>>,
+    deps: &IdentSet<Ident<Canonical>>,
     live_source: &Ident<Canonical>,
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
@@ -1301,7 +1301,7 @@ pub(crate) use wrap_test_support::{
 #[allow(clippy::too_many_arguments)]
 fn wrap_changed_first_ast(
     target_expr: &Expr0,
-    deps: &HashSet<Ident<Canonical>>,
+    deps: &IdentSet<Ident<Canonical>>,
     live_source: &Ident<Canonical>,
     live_shape: &RefShape,
     live_reducer_text: Option<&str>,
@@ -1310,7 +1310,7 @@ fn wrap_changed_first_ast(
     occ: &OccurrenceLookup<'_>,
     pin: Option<&PerElementRefCtx<'_>>,
 ) -> (Expr0, WrapOutcome) {
-    let other_deps: HashSet<Ident<Canonical>> = deps
+    let other_deps: IdentSet<Ident<Canonical>> = deps
         .iter()
         .filter(|d| *d != live_source && normalize_module_ref(d) != *live_source)
         .cloned()
@@ -1668,7 +1668,7 @@ fn wrap_live_shaped_in_previous(
 #[allow(clippy::too_many_arguments)] // threads the link-score generation context
 fn shaped_guard_form_text(
     target_expr: &Expr0,
-    deps: &HashSet<Ident<Canonical>>,
+    deps: &IdentSet<Ident<Canonical>>,
     from: &Ident<Canonical>,
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
@@ -2263,7 +2263,7 @@ fn pin_index(elem: &str) -> IndexExpr0 {
 
 fn subscript_idents_in_expr0(
     expr: Expr0,
-    pins: &HashMap<Ident<Canonical>, DepElementPin>,
+    pins: &IdentMap<Ident<Canonical>, DepElementPin>,
 ) -> Expr0 {
     match expr {
         Expr0::Const(..) => expr,
@@ -2421,8 +2421,8 @@ pub(crate) fn generate_scalar_to_element_equation(
     element: &str,
     to_elem_eqn: &Expr0,
     reducer_subst: &HashMap<String, String>,
-    to_deps: &HashSet<Ident<Canonical>>,
-    to_deps_to_subscript: &HashMap<Ident<Canonical>, DepElementPin>,
+    to_deps: &IdentSet<Ident<Canonical>>,
+    to_deps_to_subscript: &IdentMap<Ident<Canonical>, DepElementPin>,
     source_ref_override: Option<&str>,
     source_pins: &[(Ident<Canonical>, DepElementPin)],
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
@@ -2518,7 +2518,7 @@ pub(crate) fn generate_scalar_to_element_equation(
     // and has none). The passes touch disjoint idents, so application order is
     // irrelevant.
     for (ident, pin) in source_pins {
-        let one: HashMap<Ident<Canonical>, DepElementPin> =
+        let one: IdentMap<Ident<Canonical>, DepElementPin> =
             std::iter::once((ident.clone(), pin.clone())).collect();
         pinned = subscript_idents_in_expr0(pinned, &one);
     }
@@ -2588,8 +2588,8 @@ pub(crate) fn generate_per_element_link_equation(
     row_parts_bare: &[String],
     element_qualified: &str,
     to_elem_eqn: &Expr0,
-    to_deps: &HashSet<Ident<Canonical>>,
-    to_deps_to_subscript: &HashMap<Ident<Canonical>, DepElementPin>,
+    to_deps: &IdentSet<Ident<Canonical>>,
+    to_deps_to_subscript: &IdentMap<Ident<Canonical>, DepElementPin>,
     from_dims: &[crate::dimensions::Dimension],
     target_elem_by_dim: &HashMap<String, (String, usize)>,
     target_dims: &[crate::dimensions::Dimension],
@@ -2736,7 +2736,7 @@ pub(crate) fn generate_agg_to_scalar_target_equation(
     to_name: &str,
     to_own_eqn: &Expr0,
     reducer_subst: &HashMap<String, String>,
-    to_deps: &HashSet<Ident<Canonical>>,
+    to_deps: &IdentSet<Ident<Canonical>>,
     dims_ctx: Option<&crate::dimensions::DimensionsContext>,
     gf_table_ref: Option<&str>,
     occ: &OccurrenceLookup<'_>,
@@ -3467,7 +3467,7 @@ fn build_arrayed_link_score_equation(
     source_dim_names: &[String],
     target_dim_names: Vec<String>,
     target_ast_dims: &[crate::dimensions::Dimension],
-    per_elem: &HashMap<crate::common::CanonicalElementName, crate::ast::Expr2>,
+    per_elem: &IdentMap<crate::common::CanonicalElementName, crate::ast::Expr2>,
     default_expr: Option<&crate::ast::Expr2>,
     apply_default_to_missing: bool,
     target_ref: &str,
@@ -3542,7 +3542,7 @@ fn build_arrayed_link_score_equation(
             target_ast_dims,
             None,
         );
-        let deps_e: HashSet<Ident<Canonical>> = classified
+        let deps_e: IdentSet<Ident<Canonical>> = classified
             .names()
             .into_iter()
             .filter(|d| !source_dim_token_set.contains(d.as_str()))
@@ -3675,10 +3675,10 @@ fn scalar_or_a2a_target_deps(
     to_var: &Variable,
     source_dim_elements: &[Vec<String>],
     source_dim_names: &[String],
-) -> HashSet<Ident<Canonical>> {
+) -> IdentSet<Ident<Canonical>> {
     use crate::ast::Ast;
     let Some(ast) = to_var.ast() else {
-        return HashSet::new();
+        return IdentSet::default();
     };
     let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
         Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,

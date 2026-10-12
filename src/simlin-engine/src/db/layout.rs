@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::capture::CaptureKind;
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap};
 
 #[salsa::tracked(returns(ref))]
 pub fn compute_layout(
@@ -183,8 +183,8 @@ pub(crate) fn flattened_offsets(
     project: SourceProject,
     root: SourceModel,
     overlay: LtmOverlay,
-) -> HashMap<Ident<Canonical>, usize> {
-    let mut offsets = HashMap::new();
+) -> IdentMap<Ident<Canonical>, usize> {
+    let mut offsets = IdentMap::default();
     let layout = compute_layout(db, root, project, overlay).root_shifted();
     flatten_model(db, project, root, &layout, 0, None, overlay, &mut offsets);
     offsets
@@ -218,7 +218,7 @@ fn flatten_model(
     base: usize,
     prefix: Option<&Ident<Canonical>>,
     overlay: LtmOverlay,
-    offsets: &mut HashMap<Ident<Canonical>, usize>,
+    offsets: &mut IdentMap<Ident<Canonical>, usize>,
 ) {
     let project_models = project.models(db);
     let source_vars = model.variables(db);

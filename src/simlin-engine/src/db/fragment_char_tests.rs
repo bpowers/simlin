@@ -69,7 +69,8 @@
 //! which was direct evidence that a fragment really was independent of the
 //! offsets it was being handed.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use crate::common::IdentMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::compiler::symbolic::{
@@ -854,7 +855,7 @@ fn render_resolved_scc(
     );
     let scc = &dep_graph.resolved_sccs[0];
 
-    let mut member_fragments: HashMap<Ident<Canonical>, PerVarBytecodes> = HashMap::new();
+    let mut member_fragments: IdentMap<Ident<Canonical>, PerVarBytecodes> = IdentMap::default();
     for member in &scc.members {
         let frag = var_phase_symbolic_fragment_prod(
             db,

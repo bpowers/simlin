@@ -11,6 +11,7 @@
 
 use super::tests::{solo_group_loop, synthetic_results};
 use super::*;
+use crate::common::IdentMap;
 
 /// Helper to build stock list from names (duplicated from
 /// `ltm_finding_tests.rs`'s identically-named helper -- trivial enough that a
@@ -54,7 +55,7 @@ fn make_found_loop_with_scores(
 /// Create a CyclePartitions where all given stocks are in a single partition.
 fn single_partition(stocks: &[&str]) -> CyclePartitions {
     let stock_idents: Vec<Ident<Canonical>> = stocks.iter().map(|s| Ident::new(s)).collect();
-    let stock_partition: HashMap<Ident<Canonical>, usize> =
+    let stock_partition: IdentMap<Ident<Canonical>, usize> =
         stock_idents.iter().map(|s| (s.clone(), 0)).collect();
     CyclePartitions {
         partitions: vec![stock_idents],
@@ -210,7 +211,7 @@ fn discover_with(
         &ctx.ltm_vars,
         &ctx.dims,
         &ctx.expansion,
-        &SubModelOutputPorts::new(),
+        &SubModelOutputPorts::default(),
         None,
         candidate_gen,
     )
@@ -795,7 +796,7 @@ fn an_expired_enumeration_deadline_still_yields_the_fallbacks_loops() {
             &ctx.ltm_vars,
             &ctx.dims,
             &ctx.expansion,
-            &SubModelOutputPorts::new(),
+            &SubModelOutputPorts::default(),
             deadlines,
             CandidateGen::Auto,
             clock,
@@ -925,7 +926,7 @@ pub(super) fn enum_results(n_offsets: usize, step_count: usize, data: Vec<f64>) 
         "fixture data is row-major"
     );
     Results {
-        offsets: HashMap::new(),
+        offsets: IdentMap::default(),
         data: data.into_boxed_slice(),
         step_size: n_offsets,
         step_count,
@@ -2258,7 +2259,7 @@ fn no_recorded_link_scores_is_unknown_unless_the_graph_has_no_edges() {
             &[],
             &[],
             &LinkExpansionContext::default(),
-            &SubModelOutputPorts::new(),
+            &SubModelOutputPorts::default(),
             None,
             candidate_gen,
         )
@@ -2399,7 +2400,7 @@ fn the_attach_pass_runs_under_the_callers_deadline_not_the_enumerations_share() 
         &[],
         &[],
         &LinkExpansionContext::default(),
-        &SubModelOutputPorts::new(),
+        &SubModelOutputPorts::default(),
         Deadlines {
             enumeration: Some(spent),
             fallback: Some(live),
@@ -2443,7 +2444,7 @@ fn an_attach_pass_that_exhausts_the_deadline_yields_an_empty_truncated_report() 
         &[],
         &[],
         &LinkExpansionContext::default(),
-        &SubModelOutputPorts::new(),
+        &SubModelOutputPorts::default(),
         Deadlines {
             enumeration: Some(live),
             fallback: Some(live),

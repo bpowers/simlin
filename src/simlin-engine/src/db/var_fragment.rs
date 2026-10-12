@@ -45,7 +45,7 @@
 //!   phases still compile; the caller reports it per phase.
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::ast::LoweringScope;
@@ -869,7 +869,7 @@ pub(crate) fn explicit_fragment_input<'db>(
     // lookups read the wrong table at runtime) and those of the tables it calls
     // through `LOOKUP(dep, x)`, which codegen needs to emit the `Lookup`.
     let self_ident: Ident<Canonical> = Ident::new(&var_ident);
-    let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
+    let mut tables: IdentMap<Ident<Canonical>, Vec<crate::compiler::Table>> = IdentMap::default();
     let gf_tables = lowered.tables();
     if !gf_tables.is_empty() {
         match gf_tables

@@ -98,6 +98,25 @@ run_line_check "copyright header" python3 scripts/check-copyright.py
 run_line_check "workflow paths" python3 scripts/check-workflow-paths.py
 rm -f "$PATHS_OUTPUT"
 
+# Rule 5: a map or set keyed by an interned canonical identifier is spelled
+# `IdentMap` / `IdentSet` (simlin_engine::common), never `HashMap`, `HashSet`
+# or their `Fx` twins. The aliases are the one statement of how such a key is
+# hashed, so a second spelling is a second answer. The pattern reads the FIRST
+# type parameter, through a reference, a lifetime, a path prefix or a tuple,
+# and across a line break; the key types are the three interned identifier
+# types and the engine's keys built from them. It sees only a type that is
+# written down: a map whose key type is inferred is caught where it meets an
+# IdentMap in a signature (the hasher is part of the type), or not at all.
+IDENT_KEYED_PATTERN='\b(Fx)?Hash(Map|Set)<\s*\(?\s*&?\s*('"'"'\w+\s+)?((crate::|simlin_engine::)?common::)?(Ident|CanonicalElementName|CanonicalDimensionName|VarRef|ModuleKey|ModuleEdgeKey)\b'
+IDENT_KEYED=$(rg -U -n --glob '*.rs' --glob '!*.gen.rs' "$IDENT_KEYED_PATTERN" src/ || true)
+if [ -n "$IDENT_KEYED" ]; then
+    echo "ERROR: std/Fx hash collections keyed by a canonical identifier:"
+    echo "$IDENT_KEYED"
+    echo "  Fix: use simlin_engine::common::IdentMap / IdentSet."
+    echo "  See the rustdoc on IdentMap for why there is one spelling."
+    ERRORS=$((ERRORS + 1))
+fi
+
 if [ "$ERRORS" -gt 0 ]; then
     echo ""
     echo "Project lint check failed with $ERRORS error(s)."

@@ -696,6 +696,8 @@ worth keeping because the profile invites the wrong conclusion.
 
 **(b) interning is done.** `Ident<Canonical>` is a 64-shard-interned `Arc`
 (`common.rs`): `Clone` is a refcount bump and `PartialEq` is pointer equality.
+How it is hashed, and why that is the long-term design, is "Identifier
+hashing" below.
 
 **(a) an ASCII fast path exists and already carries almost all traffic.**
 `is_canonical_needing_no_trim` is a single-pass byte-table scan returning
@@ -712,6 +714,56 @@ The residual worth having is narrower still: `changes_when_lowercased` is asked
 about the separators the engine itself mints (`·` in every `submodel·var`
 ident), which is answered from a three-character list rather than the Unicode
 case tables.
+
+### Identifier hashing: hashed by content, under one hasher
+
+An identifier (`Ident<Canonical>`, `CanonicalElementName`, `CanonicalDimensionName`) is an interned handle: equal by pointer, cloned by a refcount bump, ordered and hashed by its string.
+Every map or set keyed by one is an `IdentMap` or `IdentSet` (`common.rs`), whose hasher is `IdentBuildHasher`: FxHash in a release build, std's randomly keyed SipHash in a build with debug assertions.
+`scripts/lint-project.sh` refuses any other spelling of such a map.
+
+**The content hash is the long-term design, and the measurement is why.**
+A cold compile under callgrind, costs attributed by source file so that inlined hashing is counted (`scripts/callgrind-by-file.py --idents`, whose header has the commands):
+
+| share of a cold C-LEARN compile's instructions | |
+|---|---:|
+| FxHash, all of it (1.34% on WORLD3) | 2.32% |
+| of which the compiler's `String`-keyed name table (C5) | 0.81% |
+| of which the interner hashing a string it is asked to intern | 0.48% |
+| of which `&str`-keyed maps and `&str` probes of identifier maps | 0.55% |
+| of which everything else, an upper bound on lookups by a handle | 0.45% |
+| refcount traffic of every `Arc` in the compile, identifiers included | 0.39% |
+
+Hashing a handle by its pointer or by an interned id could remove at most that 0.45%, and a `Copy` id at most the 0.39%.
+Against that, each would cost one of three things the engine relies on:
+
+- **`&str` probes.**
+  Thirty production call sites look a name up by `&str` without holding a handle: one segment of a `module·var` path, an element name inside a subscript, a name a host passed in.
+  They work because the handle hashes exactly as its string does (the `Borrow<str>` contract, which std cannot check: a handle hashed any other way makes every such probe miss silently).
+  Under a pointer or id hash each probe must intern first, which is the same content hash plus a shard lock and a refcount round trip, so the lookups that are already the larger share get slower to make the smaller share faster.
+- **An iteration order that is a function of the keys.**
+  A pointer differs run to run and an interning-order id differs with what the process compiled before; a release build's `IdentMap` order depends on neither.
+- **Identifiers that need no database.**
+  Fifty of the eighty engine source files that name an identifier type never see a salsa database, some ninety `BTreeMap` and `BTreeSet` types order identifiers lexicographically, and compiled simulations, results and diagnostics carry them to hosts and across databases.
+  A `salsa::interned` id is readable only through its database, means nothing beside an id from another database, and is reclaimed and reused once unused for three revisions, which is why no memoized value may hold one (the engine's `CLAUDE.md`, "Salsa layer").
+
+If handle-keyed lookups ever do show up, the design that keeps all three is a content hash computed once at interning and stored in the payload, with `Borrow<str>` replaced by a `&str` probe type whose `Hash` writes the same number.
+
+**The debug-build hasher is random on purpose.**
+The determinism suites (`db::fragment_determinism_tests`, `db::diagnostic_determinism_tests`, `tests/integration/build_determinism.rs`) detect an iteration order that reached a cached value by building twice and comparing, which only works if the order differs between builds.
+Under an unkeyed hasher it does not: `multi_table_fragment_is_stable_across_fresh_databases` passes with the sort it pins deleted.
+So builds with debug assertions (the test suite, the `gates` profile) key each map randomly, and a release build keeps FxHash and an order that cannot vary run to run even where a sort is missing.
+Never make a test-visible `IdentMap` unkeyed to "fix" a flaky test: the flake is the detector working, and the fix is a sort.
+
+**What is left of SipHash is not keyed by identifier types.**
+With every identifier-keyed map on `IdentBuildHasher`, std's SipHash is 5.8% of a cold C-LEARN compile (6.2% of WORLD3), from maps the rule does not reach:
+
+| remaining SipHash, C-LEARN | share |
+|---|---:|
+| names held as `String`: the layout (`VariableLayout`, probed once per `VarRef` by `resolve_var_ref`), the sync state, the fragment maps, `expand_maps_to_chains` | ~3.0% |
+| graphical-function dedup by content (`FragmentMerger::absorb`) | 1.3% |
+| small integer keys (literal interning, constant info) | 0.4% |
+
+The first row is the next lever on this axis, and the way to take it is to key those maps by the identifier they already name rather than to give `String` keys a faster hasher: the lint then holds them, and a lookup by a handle compares pointers instead of bytes.
 
 ### Compile round 3: the salsa pipeline's own keying
 

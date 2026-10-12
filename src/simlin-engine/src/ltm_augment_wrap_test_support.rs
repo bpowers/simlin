@@ -17,6 +17,7 @@
 //! resolves the parent's private items.
 
 use super::*;
+use crate::common::IdentSet;
 use crate::db::ltm_ir::OccurrenceRef;
 
 /// Reconstruct the occurrence-IR stream ([`OccurrenceSite`]s) for one target
@@ -36,7 +37,7 @@ use crate::db::ltm_ir::OccurrenceRef;
 pub(crate) fn build_wrap_test_occurrences(
     ast: &Expr0,
     live_source: &Ident<Canonical>,
-    deps: &HashSet<Ident<Canonical>>,
+    deps: &IdentSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
@@ -74,7 +75,7 @@ pub(crate) fn test_occurrences_for_var(
     source_dim_elements: &[Vec<String>],
 ) -> Vec<OccurrenceSite> {
     use crate::ast::Ast;
-    let recorded: HashSet<Ident<Canonical>> = std::iter::once(from.clone()).collect();
+    let recorded: IdentSet<Ident<Canonical>> = std::iter::once(from.clone()).collect();
     let mut out = Vec::new();
     let Some(ast) = to_var.ast() else {
         return out;
@@ -211,7 +212,7 @@ fn test_occurrence(
 fn walk_wrap_test_occurrences(
     expr: &Expr0,
     live_source: &Ident<Canonical>,
-    recorded: &HashSet<Ident<Canonical>>,
+    recorded: &IdentSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
-use crate::common::{Canonical, ErrorCode, Ident, UnitError, canonicalize};
+use crate::common::{Canonical, ErrorCode, Ident, IdentMap, UnitError, canonicalize};
 use crate::datamodel::UnitMap;
 #[cfg(test)]
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
@@ -100,13 +100,13 @@ impl LocatedConstraint {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Default)]
 pub(crate) struct InferenceResult {
-    pub resolved: HashMap<Ident<Canonical>, UnitMap>,
+    pub resolved: IdentMap<Ident<Canonical>, UnitMap>,
     pub conflicts: Vec<UnitError>,
 }
 
 struct UnitInferer<'a> {
     ctx: &'a Context,
-    models: &'a HashMap<Ident<Canonical>, UnitModel>,
+    models: &'a IdentMap<Ident<Canonical>, UnitModel>,
     // units for module inputs
     time: Variable,
 }
@@ -1242,8 +1242,8 @@ impl UnitInferer<'_> {
     fn unify(
         &self,
         constraints: Vec<LocatedConstraint>,
-    ) -> (HashMap<Ident<Canonical>, UnitMap>, Vec<LocatedConstraint>) {
-        let mut resolved_fvs: HashMap<Ident<Canonical>, UnitMap> = HashMap::new();
+    ) -> (IdentMap<Ident<Canonical>, UnitMap>, Vec<LocatedConstraint>) {
+        let mut resolved_fvs: IdentMap<Ident<Canonical>, UnitMap> = IdentMap::default();
         let mut pending = ConstraintSet::from_vec(constraints);
         let mut finalized = ConstraintSet::default();
 
@@ -1848,7 +1848,7 @@ fn test_macro_mixed_param_and_base_units_infer_cleanly() {
 }
 
 pub(crate) fn infer(
-    models: &HashMap<Ident<Canonical>, UnitModel>,
+    models: &IdentMap<Ident<Canonical>, UnitModel>,
     units_ctx: &Context,
     model: &UnitModel,
 ) -> InferenceResult {
@@ -1900,7 +1900,7 @@ fn infer_project(
 ) -> InferenceResult {
     let db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel(&db, project_datamodel);
-    let models: HashMap<Ident<Canonical>, UnitModel> = sync
+    let models: IdentMap<Ident<Canonical>, UnitModel> = sync
         .project
         .models(&db)
         .values()

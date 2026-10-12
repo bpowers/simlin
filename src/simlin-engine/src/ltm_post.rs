@@ -763,6 +763,7 @@ pub fn rel_link_group_sizes(links: &[RelLinkInput<'_>]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::IdentMap;
     use crate::datamodel::{Dt, SimMethod, SimSpecs};
     use crate::results::Specs;
     use proptest::prelude::*;
@@ -782,7 +783,7 @@ mod tests {
         }
         let step_size = pairs.len() + 1;
         let mut data = vec![0.0_f64; step_count * step_size];
-        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        let mut offsets: IdentMap<Ident<Canonical>, usize> = IdentMap::default();
         offsets.insert(Ident::new("time"), 0);
         for (i, (id, _)) in pairs.iter().enumerate() {
             offsets.insert(loop_score_ident(id), i + 1);
@@ -849,7 +850,7 @@ mod tests {
         let total_slots: usize = slots_per_loop.iter().sum();
         let step_size = 1 + total_slots;
         let mut data = vec![0.0_f64; step_count * step_size];
-        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        let mut offsets: IdentMap<Ident<Canonical>, usize> = IdentMap::default();
         offsets.insert(Ident::new("time"), 0);
         let mut cursor = 1;
         let mut loop_offsets = Vec::with_capacity(loop_ids.len());
@@ -2066,7 +2067,7 @@ mod tests {
         let step_count = slots[0].len();
         let step_size = slots.len() + 1;
         let mut data = vec![0.0_f64; step_count * step_size];
-        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        let mut offsets: IdentMap<Ident<Canonical>, usize> = IdentMap::default();
         offsets.insert(Ident::new("time"), 0);
         offsets.insert(loop_score_ident(id), 1);
         for (step, row) in data.chunks_mut(step_size).enumerate() {

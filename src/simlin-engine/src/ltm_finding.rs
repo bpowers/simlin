@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::common::{Canonical, Ident, Result};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet, Result};
 use crate::datamodel;
 use crate::db::LtmSyntheticVar;
 use crate::ltm::{CausalGraph, CyclePartitions, Link, LinkPolarity, Loop, LoopPolarity};
@@ -65,7 +65,7 @@ pub use fallback::{
 type LinkOffset = ((Ident<Canonical>, Ident<Canonical>), usize);
 
 /// HashMap for O(1) link offset lookup by (from, to) key.
-type LinkOffsetMap = HashMap<(Ident<Canonical>, Ident<Canonical>), usize>;
+type LinkOffsetMap = IdentMap<(Ident<Canonical>, Ident<Canonical>), usize>;
 
 /// Memoized per-exit-port module-input recompute, within one discovery call.
 ///
@@ -83,7 +83,7 @@ type LinkOffsetMap = HashMap<(Ident<Canonical>, Ident<Canonical>), usize>;
 /// module-traversing circuit's scoring range by it instead of the full
 /// saved-step range.
 type ModuleSeriesCache =
-    HashMap<(Ident<Canonical>, Ident<Canonical>, Ident<Canonical>), ModuleOverrideEntry>;
+    IdentMap<(Ident<Canonical>, Ident<Canonical>, Ident<Canonical>), ModuleOverrideEntry>;
 
 /// One [`ModuleOverrideCache`] lookup's answer: the override series (shared
 /// via `Rc`) and its own `[lo, hi)` active window, or `None` when no single
@@ -116,7 +116,7 @@ impl OverrideLookup {
 /// it to enumerate pathway indices against the SAME sorted port set the
 /// sub-model emitted its `$⁚ltm⁚path⁚{port}⁚{idx}` vars against -- see
 /// `recompute_module_input_edge_series` and `discover_loops_with_graph`.
-pub type SubModelOutputPorts = HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>;
+pub type SubModelOutputPorts = IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>>;
 
 /// Per-variable metadata `parse_link_offsets` needs to spell the per-element
 /// FROM-node of a Bare A2A link score in lockstep with the element graph.
@@ -146,13 +146,13 @@ pub struct LinkExpansionContext {
     /// Canonical variable name -> declared dimensions, in declared order.
     /// Holds BOTH endpoints of every Bare A2A edge (the from-side projection
     /// reads the from-var's dims, the to-side offset map reads the to-var's).
-    pub declared_dims: HashMap<Ident<Canonical>, Vec<crate::dimensions::Dimension>>,
+    pub declared_dims: IdentMap<Ident<Canonical>, Vec<crate::dimensions::Dimension>>,
     /// Dimension-mapping element correspondence for the mapped (#527) leg.
     pub dim_ctx: crate::dimensions::DimensionsContext,
     /// The structural `(flow, stock)` edges: a flow feeds its stock through
     /// the wiring's axis pairing (`db::BareSpelling::StockFlow`), every other
     /// Bare link through the equation's.
-    pub flow_to_stock: HashSet<(Ident<Canonical>, Ident<Canonical>)>,
+    pub flow_to_stock: IdentSet<(Ident<Canonical>, Ident<Canonical>)>,
 }
 
 // --- Constants (from the paper) ---
@@ -618,7 +618,7 @@ pub fn link_activity_series(
     // `IndexedSearch::build` keeps each node's edges in `link_offsets` order
     // and interns nodes in first-seen order, so walking the offsets and
     // looking each edge up by (from, to) reproduces the input order exactly.
-    let id_of: HashMap<&Ident<Canonical>, usize> = search
+    let id_of: IdentMap<&Ident<Canonical>, usize> = search
         .idents
         .iter()
         .enumerate()
@@ -751,8 +751,8 @@ fn parse_link_offsets(
     // Same-rank ties (e.g., two Bare A2A entries that somehow produce
     // the same expanded key, which shouldn't happen but defends
     // against future emitter changes) are broken by smaller offset.
-    let mut by_key: HashMap<(Ident<Canonical>, Ident<Canonical>), (ShapeRank, usize)> =
-        HashMap::with_capacity(tagged.len());
+    let mut by_key: IdentMap<(Ident<Canonical>, Ident<Canonical>), (ShapeRank, usize)> =
+        IdentMap::with_capacity_and_hasher(tagged.len(), Default::default());
     for ((key, offset), rank) in tagged {
         by_key
             .entry(key)
@@ -836,7 +836,8 @@ fn expand_a2a_link_offsets(
     // The target-element node -> its result offset, by row-major position in
     // the score's (== target's) dims. This is the layout slot the runtime
     // wrote the score into, regardless of how the source projects onto it.
-    let mut to_node_offset: HashMap<Ident<Canonical>, usize> = HashMap::with_capacity(tuples.len());
+    let mut to_node_offset: IdentMap<Ident<Canonical>, usize> =
+        IdentMap::with_capacity_and_hasher(tuples.len(), Default::default());
     for (idx, elems) in tuples.iter().enumerate() {
         let to_node = Ident::new(&format!("{to_var}[{}]", subscript_from_elements(elems)));
         to_node_offset.insert(to_node, base_offset + idx);
@@ -1571,12 +1572,14 @@ impl IndexedSearch {
     /// since every lookup is id-keyed and the output is reconstructed from
     /// `idents`.
     fn build(link_offsets: &[LinkOffset], stocks: &[Ident<Canonical>]) -> Self {
-        let mut id_of: HashMap<Ident<Canonical>, u32> =
-            HashMap::with_capacity(link_offsets.len() * 2 + stocks.len());
+        let mut id_of: IdentMap<Ident<Canonical>, u32> = IdentMap::with_capacity_and_hasher(
+            link_offsets.len() * 2 + stocks.len(),
+            Default::default(),
+        );
         let mut idents: Vec<Ident<Canonical>> = Vec::new();
 
         let intern = |ident: &Ident<Canonical>,
-                      id_of: &mut HashMap<Ident<Canonical>, u32>,
+                      id_of: &mut IdentMap<Ident<Canonical>, u32>,
                       idents: &mut Vec<Ident<Canonical>>|
          -> u32 {
             if let Some(&id) = id_of.get(ident) {
@@ -2240,7 +2243,7 @@ pub(crate) struct ModuleOverrideCache<'a> {
     cache: ModuleSeriesCache,
     /// `(from, module)` -> every pathway slot behind that module-input edge,
     /// regardless of exit port (see [`Self::pathway_offsets`]).
-    pathway_cache: HashMap<ModuleEdgeKey, Rc<[usize]>>,
+    pathway_cache: IdentMap<ModuleEdgeKey, Rc<[usize]>>,
     /// The discovery-wide memory bound the retained series and pathway slots
     /// are charged to; a series that does not fit is returned but not
     /// retained (recomputation instead of growth).
@@ -2260,8 +2263,8 @@ impl<'a> ModuleOverrideCache<'a> {
             results,
             sub_model_output_ports,
             step_count,
-            cache: HashMap::new(),
-            pathway_cache: HashMap::new(),
+            cache: IdentMap::default(),
+            pathway_cache: IdentMap::default(),
             meter,
         }
     }

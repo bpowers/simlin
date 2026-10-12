@@ -2,10 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
 use std::io::Write;
 
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap};
 use crate::datamodel::{Dt, SimMethod, SimSpecs};
 
 /// The slot of a results row that holds its time: the VM's own.
@@ -256,7 +255,7 @@ pub(crate) fn written_rows(rows: usize) -> String {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct Results {
-    pub offsets: HashMap<Ident<Canonical>, usize>,
+    pub offsets: IdentMap<Ident<Canonical>, usize>,
     /// The rows, step-major, in one allocation. It may be longer than the
     /// rows saved (a VM's buffer holds its working rows after them); `iter`
     /// is the saved rows.
@@ -555,7 +554,7 @@ mod tests {
         .into_boxed_slice();
 
         let results = Results {
-            offsets: HashMap::new(),
+            offsets: IdentMap::default(),
             data,
             step_size: 2,
             step_count: 3,

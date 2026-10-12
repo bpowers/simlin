@@ -66,7 +66,7 @@
 //! corresponding body in [`build_helpers`]; no helper index is hard-coded
 //! elsewhere, so the per-program offset adjusts automatically.
 
-use std::collections::HashMap;
+use crate::common::IdentMap;
 
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 
@@ -260,7 +260,7 @@ pub(crate) struct EmitCtx<'a> {
     /// `module.rs` before any program function is emitted (the module
     /// instantiation graph is acyclic, so every child index exists by the time its
     /// caller is emitted). Empty for a single-module (no-submodule) program.
-    pub module_fn_index: &'a HashMap<(crate::vm::ModuleKey, StepPart), u32>,
+    pub module_fn_index: &'a IdentMap<(crate::vm::ModuleKey, StepPart), u32>,
     /// The module instance's `ByteCodeContext`, holding the compile-time array
     /// tables the view opcodes reference by index (`static_views`, `dim_lists`,
     /// `dimensions`, `temp_offsets`) *and* the `modules`

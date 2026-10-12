@@ -17,12 +17,10 @@
 //! itself (`scalarize`, `retarget_dims`, `dimensions`); the thin wrappers below
 //! keep the call sites' free-function spelling.
 
-use std::collections::HashSet;
-
 use crate::builtins_visitor::{
     SnapshotIndexFacts, empty_macro_registry, instantiate_implicit_modules,
 };
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentSet};
 use crate::dimensions::DimensionsContext;
 
 use crate::db::ParsedVariableResult;
@@ -53,7 +51,7 @@ pub(super) fn parse_ltm_equation(
     var_name: &str,
     equation: &LtmEquation,
     dims: &DimensionsContext,
-    model_var_names: &HashSet<Ident<Canonical>>,
+    model_var_names: &IdentSet<Ident<Canonical>>,
 ) -> ParsedVariableResult {
     let (flow_ast, mut errors) = equation.to_flow_ast(dims);
 

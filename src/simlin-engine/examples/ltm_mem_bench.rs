@@ -39,7 +39,7 @@ use std::fs;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use simlin_engine::common::{Canonical, Ident};
+use simlin_engine::common::{Canonical, Ident, IdentMap, IdentSet};
 use simlin_engine::db::{
     CausalEdgesResult, SimlinDb, causal_graph_from_edges, model_causal_edges, sync_from_datamodel,
 };
@@ -105,12 +105,11 @@ fn print_mem(label: &str) {
 }
 
 fn scc_stats(
-    edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+    edges: &IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
 ) -> (usize, Vec<usize>, Vec<Vec<Ident<Canonical>>>) {
     // Tarjan's SCC iteratively, so we don't blow the stack on big graphs.
     // Returns (num_sccs, sorted_desc_sizes, non_trivial_sccs).
-    let mut all_nodes: std::collections::HashSet<&Ident<Canonical>> =
-        std::collections::HashSet::new();
+    let mut all_nodes: IdentSet<&Ident<Canonical>> = IdentSet::default();
     for (from, tos) in edges {
         all_nodes.insert(from);
         for to in tos {
@@ -119,7 +118,7 @@ fn scc_stats(
     }
     let mut nodes: Vec<&Ident<Canonical>> = all_nodes.into_iter().collect();
     nodes.sort_by_key(|n| n.as_str());
-    let index_of: HashMap<&Ident<Canonical>, usize> =
+    let index_of: IdentMap<&Ident<Canonical>, usize> =
         nodes.iter().enumerate().map(|(i, n)| (*n, i)).collect();
 
     // Build per-index successor lists
@@ -221,10 +220,10 @@ fn scc_stats(
 }
 
 fn connected_component_stats(
-    edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+    edges: &IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
 ) -> (usize, Vec<usize>) {
     // Undirected connected components: for quick structural sanity check.
-    let mut undir: HashMap<&Ident<Canonical>, Vec<&Ident<Canonical>>> = HashMap::new();
+    let mut undir: IdentMap<&Ident<Canonical>, Vec<&Ident<Canonical>>> = IdentMap::default();
     for (from, tos) in edges {
         undir.entry(from).or_default();
         for to in tos {
@@ -232,8 +231,8 @@ fn connected_component_stats(
             undir.entry(to).or_default().push(from);
         }
     }
-    let all_nodes: std::collections::HashSet<&Ident<Canonical>> = undir.keys().copied().collect();
-    let mut seen: std::collections::HashSet<&Ident<Canonical>> = std::collections::HashSet::new();
+    let all_nodes: IdentSet<&Ident<Canonical>> = undir.keys().copied().collect();
+    let mut seen: IdentSet<&Ident<Canonical>> = IdentSet::default();
     let mut sizes = Vec::new();
     for start in &all_nodes {
         if seen.contains(start) {

@@ -26,12 +26,10 @@
 //! inspect its own arm (the per-element emitters' completeness guard) reads the
 //! arm's tree and moves the arm into the equation rather than parsing again.
 
-use std::collections::HashMap;
-
 use std::sync::Arc;
 
 use crate::ast::{Ast, Expr0, print_eqn};
-use crate::common::{CanonicalElementName, EquationError};
+use crate::common::{CanonicalElementName, EquationError, IdentMap};
 use crate::lexer::LexerType;
 
 /// One equation arm: the authoritative parsed AST plus its diagnostic text.
@@ -397,7 +395,7 @@ impl LtmEquation {
                 // Mirror `parse_equation`'s Arrayed arm: drop element slots with
                 // no expr. Reaching here means no arm FAILED to parse, so a
                 // missing expr is an empty body only.
-                let map: HashMap<CanonicalElementName, Expr0> = elements
+                let map: IdentMap<CanonicalElementName, Expr0> = elements
                     .iter()
                     .filter_map(|(subscript, arm)| {
                         arm.expr

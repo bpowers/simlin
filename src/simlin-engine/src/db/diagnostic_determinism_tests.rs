@@ -17,8 +17,9 @@
 //! observable.
 //!
 //! The tests build the same model on independent fresh databases repeatedly
-//! (each fresh `HashMap` draws new hash keys, so ~half of two-entry maps
-//! iterate in the other order -- the `fragment_determinism_tests` recipe) and
+//! (each fresh `HashMap`, and in a build with debug assertions each fresh
+//! `IdentMap`, draws new hash keys, so ~half of two-entry maps iterate in the
+//! other order -- the `fragment_determinism_tests` recipe) and
 //! assert the FORMATTED diagnostic sets are byte-identical.
 
 use crate::db::{SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental};
@@ -181,6 +182,41 @@ fn arrayed_and_multi_model_diagnostics_are_reproducible() {
                 "run {run} produced a different diagnostic set than run 0"
             ),
         }
+    }
+}
+
+/// The engine reports one cycle of a model. With several, the one it
+/// reports is the first a walk of the variables in name order meets -- a
+/// fact of the model -- and not whichever the variable map's iteration
+/// happened to start in. Four disjoint cycles, so a walk rooted in map order
+/// names the same one on all 16 fresh databases about once in 4^15 runs.
+#[test]
+fn the_cycle_reported_among_several_is_a_function_of_the_model() {
+    let datamodel = TestProject::new("cycles")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .aux("a", "b + 1", None)
+        .aux("b", "a + 1", None)
+        .aux("m", "n + 1", None)
+        .aux("n", "m + 1", None)
+        .aux("s", "s + 1", None)
+        .aux("y", "z + 1", None)
+        .aux("z", "y + 1", None)
+        .build_datamodel();
+
+    for run in 0..16 {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let cycles: Vec<String> =
+            collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
+                .iter()
+                .filter(|d| d.code() == crate::common::ErrorCode::CircularDependency)
+                .map(|d| format!("{:?}: {:?}", d.variable, d.reason()))
+                .collect();
+        assert_eq!(
+            cycles,
+            ["Some(\"a\"): Some(\"'a' depends on itself: a \u{2192} b \u{2192} a\")"],
+            "run {run} reported a cycle other than the first in name order"
+        );
     }
 }
 

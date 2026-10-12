@@ -16,7 +16,8 @@
 //! Repetition rather than a single comparison, because these are probabilistic
 //! detectors: Rust's `RandomState` draws a fresh key per `HashMap`, so a
 //! two-entry map comes out in the "right" order about half the time. `REPEATS`
-//! runs make a miss `2^-(REPEATS-1)`.
+//! runs make a miss `2^-(REPEATS-1)`. An `IdentMap` draws one too in a build
+//! with debug assertions, for exactly these tests (`common::IdentBuildHasher`).
 //!
 //! Deliberately independent of `db::fragment_char_tests`: these pin the
 //! determinism *fixes*, the characterization suite pins *behavior*, and the two

@@ -8,16 +8,16 @@
 //! The Tiernan 1970 enumerator survives under `cfg(test)` as the oracle for
 //! the Johnson-vs-Tiernan equivalence tests in `tests.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 
 /// Compact integer-indexed view of an adjacency list used to accelerate the
 /// core DFS circuit enumeration.  Swapping `Ident<Canonical>` (heap-allocated
 /// `String`) for a `u32` index slashes per-visit cost in three places:
 ///
 /// * `visited` becomes a `Vec<bool>` of length `nodes.len()` instead of a
-///   `HashSet<Ident<Canonical>>`.
+///   `IdentSet<Ident<Canonical>>`.
 /// * `path` becomes a `Vec<u32>` instead of `Vec<Ident<Canonical>>`, so each
 ///   push/pop is a trivial `u32` copy rather than a `String` clone/drop.
 /// * Circuit dedup keys are `Vec<u32>` sorted, not joined strings.
@@ -201,7 +201,7 @@ fn hash_u32_slice(vals: &[u32]) -> u64 {
 /// SCCs in the first place is already dense and goes through
 /// [`scc_components_of`].
 pub(crate) fn scc_components(
-    edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+    edges: &IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
 ) -> Vec<Vec<Ident<Canonical>>> {
     scc_components_of(&IndexedGraph::from_edges(edges))
 }
@@ -236,8 +236,8 @@ impl IndexedGraph {
     /// Every node referenced as either an edge source or target is assigned
     /// an index.  Successor indices are de-duplicated and sorted so the DFS
     /// can early-exit on the first out-of-range neighbor when needed.
-    pub(super) fn from_edges(edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>) -> Self {
-        let mut node_set: HashSet<&Ident<Canonical>> = HashSet::new();
+    pub(super) fn from_edges(edges: &IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>>) -> Self {
+        let mut node_set: IdentSet<&Ident<Canonical>> = IdentSet::default();
         for (from, tos) in edges {
             node_set.insert(from);
             for to in tos {
@@ -249,7 +249,7 @@ impl IndexedGraph {
 
         // The name-to-index map lives only as long as the edge translation:
         // nothing reads a graph by name once it is built.
-        let node_to_idx: HashMap<&Ident<Canonical>, u32> = nodes
+        let node_to_idx: IdentMap<&Ident<Canonical>, u32> = nodes
             .iter()
             .enumerate()
             .map(|(i, n)| (n, i as u32))

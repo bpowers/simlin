@@ -25,7 +25,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use indexmap::IndexSet;
 
 use super::*;
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::symbolic::Phase;
 use crate::db::var_fragment::{fragment_overlay, implicit_fragment_overlay};
 
@@ -65,8 +65,8 @@ pub(crate) fn variable_tables(
         if has_element_gfs {
             // Parse present element tables, keyed by canonical (comma-joined)
             // subscript name.
-            let mut present: HashMap<crate::common::CanonicalElementName, crate::compiler::Table> =
-                HashMap::new();
+            let mut present: IdentMap<crate::common::CanonicalElementName, crate::compiler::Table> =
+                IdentMap::default();
             for (subscript, _, _, gf) in elements {
                 if let Some(gf) = gf.as_ref()
                     && let Some(var_table) = crate::variable::parse_table(Some(gf)).ok().flatten()
@@ -1062,7 +1062,7 @@ pub(crate) fn segment_member_by_element(
 /// synthetic-ident `SymbolicCompiledInitial`).
 pub(crate) fn combine_scc_fragment(
     scc: &ResolvedScc,
-    member_fragments: &HashMap<Ident<Canonical>, crate::compiler::symbolic::PerVarBytecodes>,
+    member_fragments: &IdentMap<Ident<Canonical>, crate::compiler::symbolic::PerVarBytecodes>,
 ) -> Result<crate::compiler::symbolic::PerVarBytecodes, String> {
     use crate::compiler::symbolic::{
         FragmentMerger, FragmentResourceOffsets, SymbolicOpcode, TempStrategy, renumber_opcode,
@@ -1076,11 +1076,11 @@ pub(crate) fn combine_scc_fragment(
     // merger -- exactly as a per-variable fragment is. The members' segments
     // are interleaved, so their temps must not share slots (`Sum`, M5).
     let mut merger = FragmentMerger::new(TempStrategy::Sum);
-    let mut absorbed: HashMap<Ident<Canonical>, FragmentResourceOffsets> = HashMap::new();
+    let mut absorbed: IdentMap<Ident<Canonical>, FragmentResourceOffsets> = IdentMap::default();
     // Per-member, per-element renumbered segments. Keyed by the same
     // `(member, element)` identity `element_order` carries.
-    let mut renumbered_segments: HashMap<(Ident<Canonical>, usize), Vec<SymbolicOpcode>> =
-        HashMap::new();
+    let mut renumbered_segments: IdentMap<(Ident<Canonical>, usize), Vec<SymbolicOpcode>> =
+        IdentMap::default();
     // Per-member prologues, keyed by the `element_order` index they are emitted
     // immediately before: the member's first READER of the prologue's temps.
     // Two members' first readers are two different entries, so the keys never
@@ -1379,7 +1379,8 @@ fn combine_resolved_sccs(
     overlay: LtmOverlay,
 ) -> Result<SccFragments, String> {
     let combine = |scc: &ResolvedScc, phase: SccPhase| {
-        let mut member_fragments = HashMap::with_capacity(scc.members.len());
+        let mut member_fragments =
+            IdentMap::with_capacity_and_hasher(scc.members.len(), Default::default());
         for member in &scc.members {
             let frag = var_phase_symbolic_fragment_prod(
                 db,
@@ -1815,8 +1816,8 @@ pub fn assemble_simulation(
     let root_input_set: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     let root_key: crate::vm::ModuleKey = (main_ident.clone(), root_input_set);
 
-    let mut compiled_modules: HashMap<crate::vm::ModuleKey, crate::bytecode::CompiledModule> =
-        HashMap::new();
+    let mut compiled_modules: IdentMap<crate::vm::ModuleKey, crate::bytecode::CompiledModule> =
+        IdentMap::default();
 
     for name in &sorted_names {
         let distinct_inputs = &module_instances[*name];
@@ -1871,7 +1872,7 @@ pub fn assemble_simulation(
 /// empty set), with the distinct bound-port sets it is instantiated under:
 /// [`enumerate_module_instances`]'s result, the universe `assemble_simulation`
 /// compiles one `CompiledModule` per entry of.
-pub type ModuleInstanceMap = HashMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canonical>>>>;
+pub type ModuleInstanceMap = IdentMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canonical>>>>;
 
 /// The input sets one model is instantiated with, as PRODUCTION enumerates
 /// them (`#[cfg(test)]` accessor only, mirroring `db::dep_graph`'s
@@ -1916,7 +1917,7 @@ pub fn enumerate_module_instances(
 
     let main_ident = Ident::<Canonical>::new(main_model_name);
 
-    let mut modules: ModuleInstanceMap = HashMap::new();
+    let mut modules: ModuleInstanceMap = IdentMap::default();
 
     // Main model with no inputs
     let no_inputs = BTreeSet::new();

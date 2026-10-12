@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::db::{
     CycleClass, Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
     SourceVariableKind, causal_graph_with_modules, classify_cycle, model_edge_shapes,
@@ -167,7 +167,7 @@ pub(crate) fn model_pinned_loops(
             continue;
         }
 
-        let vars: HashSet<Ident<Canonical>> =
+        let vars: IdentSet<Ident<Canonical>> =
             spec.variables.iter().map(|v| Ident::new(v)).collect();
 
         let Some(cycle) = graph.order_variable_cycle(&vars) else {
@@ -416,7 +416,7 @@ fn expand_pin_on_element_graph(
     let keep_node = |name: &str| -> bool {
         pin_var_set.contains(strip_subscript(name)) || crate::ltm_agg::is_synthetic_agg_name(name)
     };
-    let mut sub_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mut sub_edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = IdentMap::default();
     for (from, tos) in &element_edges.edges {
         if !keep_node(from) {
             continue;
@@ -430,7 +430,7 @@ fn expand_pin_on_element_graph(
             sub_edges.insert(Ident::new(from), filtered);
         }
     }
-    let sub_stocks: HashSet<Ident<Canonical>> = element_edges
+    let sub_stocks: IdentSet<Ident<Canonical>> = element_edges
         .stocks
         .iter()
         .filter(|s| pin_var_set.contains(strip_subscript(s.as_str())))

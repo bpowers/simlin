@@ -6,9 +6,7 @@
 //! stock graph. Used by relative-loop-score normalization to bucket loops
 //! into the strongly-connected component of stocks they participate in.
 
-use std::collections::{HashMap, HashSet};
-
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 
 use super::types::Loop;
 
@@ -24,7 +22,7 @@ pub struct CyclePartitions {
     /// Outer Vec is sorted by the lexicographically smallest stock in each partition.
     pub partitions: Vec<Vec<Ident<Canonical>>>,
     /// Stock -> partition index (into `partitions`).
-    pub stock_partition: HashMap<Ident<Canonical>, usize>,
+    pub stock_partition: IdentMap<Ident<Canonical>, usize>,
 }
 
 /// Extract the subscript content of an element-level node name.
@@ -222,20 +220,20 @@ impl CyclePartitions {
 /// map, returns strongly connected components.
 pub(super) fn tarjan_scc(
     nodes: &[Ident<Canonical>],
-    reachability: &HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>>,
+    reachability: &IdentMap<Ident<Canonical>, IdentSet<Ident<Canonical>>>,
 ) -> Vec<Vec<Ident<Canonical>>> {
     struct TarjanState {
         index_counter: usize,
         stack: Vec<Ident<Canonical>>,
-        on_stack: HashSet<Ident<Canonical>>,
-        indices: HashMap<Ident<Canonical>, usize>,
-        lowlinks: HashMap<Ident<Canonical>, usize>,
+        on_stack: IdentSet<Ident<Canonical>>,
+        indices: IdentMap<Ident<Canonical>, usize>,
+        lowlinks: IdentMap<Ident<Canonical>, usize>,
         sccs: Vec<Vec<Ident<Canonical>>>,
     }
 
     fn strongconnect(
         v: &Ident<Canonical>,
-        reachability: &HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>>,
+        reachability: &IdentMap<Ident<Canonical>, IdentSet<Ident<Canonical>>>,
         state: &mut TarjanState,
     ) {
         state.indices.insert(v.clone(), state.index_counter);
@@ -283,9 +281,9 @@ pub(super) fn tarjan_scc(
     let mut state = TarjanState {
         index_counter: 0,
         stack: Vec::new(),
-        on_stack: HashSet::new(),
-        indices: HashMap::new(),
-        lowlinks: HashMap::new(),
+        on_stack: IdentSet::default(),
+        indices: IdentMap::default(),
+        lowlinks: IdentMap::default(),
         sccs: Vec::new(),
     };
 
