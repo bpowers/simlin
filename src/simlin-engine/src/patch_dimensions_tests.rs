@@ -492,3 +492,34 @@ fn elements_named(dim: &Dimension) -> Vec<String> {
         datamodel::DimensionElements::Indexed(_) => Vec::new(),
     }
 }
+
+/// A dimension may not be named like an element of another, nor gain an
+/// element named like a dimension: a subscript that writes the name could
+/// mean either. The rename edits refuse the same.
+#[test]
+fn a_dimension_and_an_element_may_not_share_a_name() {
+    let before = ages();
+    let element = before.dimensions[0].clone();
+    let taken = match &element.elements {
+        datamodel::DimensionElements::Named(names) => names[0].clone(),
+        _ => panic!("named"),
+    };
+    let (code, why) = apply(
+        &before,
+        vec![ProjectOperation::UpsertDimension(named(
+            &taken,
+            &["p", "q"],
+        ))],
+    )
+    .expect_err("a dimension named like an element");
+    assert_eq!(code, ErrorCode::DuplicateVariable, "{why}");
+    let (code, why) = apply(
+        &before,
+        vec![ProjectOperation::UpsertDimension(named(
+            "Size",
+            &["s", &element.name],
+        ))],
+    )
+    .expect_err("an element named like a dimension");
+    assert_eq!(code, ErrorCode::DuplicateVariable, "{why}");
+}

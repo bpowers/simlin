@@ -163,7 +163,8 @@ fn positions_of(dims: &[String], dimension: &str) -> Vec<usize> {
 ///
 /// Refused when the dimension would share its name with a variable (XMILE
 /// 1.0 section 3.7.1: dimension names "must be distinct from model variables
-/// names"), when it names an element twice, or when an element it no longer
+/// names") or a new dimension with an element, when an element it adds is
+/// named like a dimension, when it names an element twice, or when an element it no longer
 /// has is still named by another dimension -- a subrange that declares it
 /// and no other dimension does, or an element map -- which the edit does not
 /// change. Renaming an element
@@ -190,6 +191,19 @@ pub(crate) fn upsert_dimension(
             ),
         ));
     }
+    if dimension_index(project, &name).is_err()
+        && let Some(dim) = dimension_with_element(project, &name, |_| false)
+    {
+        return Err(refuse(
+            ErrorCode::DuplicateVariable,
+            format!(
+                "'{}' is also an element of '{}', so a subscript that writes it may mean the \
+                 element or the dimension",
+                dimension.name(),
+                dim.name()
+            ),
+        ));
+    }
     let new_elements = canonical_elements(&dimension);
     // The elements the dimension declares already, which this edit does not
     // add: a clash one of them has with a variable is the model's as it was.
@@ -212,6 +226,22 @@ pub(crate) fn upsert_dimension(
             return Err(refuse(
                 ErrorCode::BadDimensionName,
                 format!("'{}' names the element '{written}' twice", dimension.name()),
+            ));
+        }
+        if !declared.contains(element)
+            && (*element == name
+                || project
+                    .dimensions
+                    .iter()
+                    .any(|d| canonical(d.name()) == *element))
+        {
+            return Err(refuse(
+                ErrorCode::DuplicateVariable,
+                format!(
+                    "cannot add the element '{written}' to '{}': it is a dimension's name, so a \
+                     subscript that writes it may mean the dimension or the element",
+                    dimension.name()
+                ),
             ));
         }
         if !declared.contains(element)
