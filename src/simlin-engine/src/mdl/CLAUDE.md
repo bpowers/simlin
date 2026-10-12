@@ -19,7 +19,9 @@ For the design and the Vensim format notes, see [docs/design/mdl-parser.md](/doc
 - `settings.rs` -- Post-equation settings section parser (integration type, unit equivalences), and the names of the custom graphs, tables and reports a file defines between its sketch and its settings
 
 ### Conversion (`convert/`)
-- `mod.rs` -- Main conversion orchestration, group building, `DataProvider` threading
+- `mod.rs` -- Main conversion orchestration, group building, `DataProvider` threading.
+  Its last pass (`element_equations::compact_element_equations`) takes back the per-element copies the reader made of a variable where they say nothing the one equation does not: every element has a copy and all read the same, or they follow the `:EXCEPT:` default the file wrote.
+  It infers nothing else, so a file's element equations open as element equations.
 - `control.rs` -- The control variables, folded to the sim specs' numbers where their equations are constants
 - `variables.rs` -- Variable type detection (stock/flow/aux) and building; EXCEPT default_equation handling, GET DIRECT resolution.
   - **Element keys are canonical** (`canonical_element_key`, over `CanonicalElementName::from_subscript`, as every reader of a datamodel stores them); the spelling of an element is its dimension's, which is what the writer writes.
@@ -116,6 +118,8 @@ Tests: `import_loss_tests.rs` (a sketch holding one of each) and [tests/integrat
   Each key part is written as its dimension spells the element (`WriterContext::declared_element`), entries in canonical key order (`order_arrayed_entries`).
   A variable defining only some elements of its dimensions is read back over the dimensions of exactly those elements (the reader's rule above), and the writer warns.
   Residual, a limit of the format: elements that differ, over a dimension sharing its elements with one declared earlier, read back over the earlier one (`writer_arrayed_tests`).
+  An equation that computes a subscript (`aging[Age - 1]`) is written once per element, each computed index the element it comes to (`per_element_for_vensim`): Vensim "does not allow the use of numeric subscripts" (Reference Guide, VECTOR ELM MAP, vensim.com/documentation/22095.html).
+  The save then opens with an equation for each element, and the writer warns of each such variable; an index that comes to no element is written `NaN`, which Vensim does not read, and the warning names the element.
 - **Free-text sanitization choke point** (`sanitize_free_text`, #849).
   Every modeler-authored free-text sink (variable units/documentation, group name/doc, `22:` unit-equivalence tokens) routes through one function, so a structural character cannot terminate a construct early and re-parse the remainder as phantom variables.
   It maps `|` -> `/` (non-whitespace, so a field-final `|` cannot become a trim-sensitive trailing space), the four section-terminator runs -> space, and per-field separators (`~` in units, `,` in a `22:` token) -> space.
@@ -124,7 +128,7 @@ Tests: `import_loss_tests.rs` (a sketch holding one of each) and [tests/integrat
 - **Export warnings** (#856).
   `project_to_mdl_with_warnings` returns `(String, Vec<ExportWarning>)`; warnings never change the emitted text.
   `Err` is reserved for structural impossibilities (>1 non-macro model, an ordinary non-macro `Module` variable, an unreconstructable macro-invocation cluster).
-  The warning arms are listed on `project_to_mdl_with_warnings`: an unparseable equation (written as raw text, #912), the transpose operator (#913), a function Vensim does not have, a floored modulus forced to MODULO, a dropped `non_negative`, conveyor/queue markers (#887), Discrete and unmarkable Extrapolate tables (#854), a one-to-many element mapping no dimension names, an arrayed variable defining only some elements, an `:EXCEPT:` default that cannot be written, multi-word group names and group docs, and loop metadata.
+  The warning arms are listed on `project_to_mdl_with_warnings`: an unparseable equation (written as raw text, #912), the transpose operator (#913), a function Vensim does not have, a floored modulus forced to MODULO, a dropped `non_negative`, conveyor/queue markers (#887), Discrete and unmarkable Extrapolate tables (#854), a one-to-many element mapping no dimension names, an arrayed variable defining only some elements, an `:EXCEPT:` default that cannot be written, an equation that computes a subscript (written once per element), multi-word group names and group docs, and loop metadata.
   The CLI prints them to STDERR.
 - **Values Vensim cannot hold**: a NaN (the reader's form of `A FUNCTION OF`) is written as `NaN`, and an ACTIVE INITIAL anywhere but the top of an equation (Vensim: it "must appear first on the right of the = sign", fn_active_initial.html) as itself; each with a warning.
 - **External data** placeholders (`{GET DIRECT ...}`, `is_external_data_placeholder`) are written verbatim, without a warning: they are opaque by design.

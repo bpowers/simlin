@@ -1440,7 +1440,7 @@ stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
         let Variable::Flow(f) = net_flow else {
             panic!("expected the synthetic net-flow to be a Flow");
         };
-        let Equation::Arrayed(_dims, elements, default, _) = &f.equation else {
+        let Equation::Arrayed(_dims, elements, None, false) = &f.equation else {
             panic!(
                 "expected an Arrayed synthetic net-flow equation, got {:?}",
                 f.equation
@@ -1449,14 +1449,10 @@ stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
 
         // The raw rate carried unresolved subrange dimension names
         // (`upper`/`lower`). Per-element resolution must replace them with
-        // concrete elements -- NO rate may still contain the subrange tokens
-        // (pre-fix every `upper` slot is the verbatim `dflux[scenario, upper]
-        // - dflux[scenario, lower]`).
-        let rates = elements
-            .iter()
-            .map(|(key, rate, _, _)| (key.as_str(), rate.as_str()))
-            .chain(default.iter().map(|rate| ("the default", rate.as_str())));
-        for (key, rate) in rates {
+        // concrete elements -- NO element rate may still contain the
+        // subrange tokens (pre-fix every `upper` slot is the verbatim
+        // `dflux[scenario, upper] - dflux[scenario, lower]`).
+        for (key, rate, _, _) in elements {
             for tok in ["upper", "lower"] {
                 assert!(
                     !rate
@@ -1468,16 +1464,23 @@ stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
                 );
             }
         }
-        // Per-element resolution makes each `upper`-subrange element read the
-        // layer below its own, so the three say one thing as an offset
-        // (`element_equations`), and the bottom layer, which reads its own
-        // flux, keeps an equation of its own.
+        // Per-element resolution makes each `upper`-subrange element read its
+        // own layer's flux less the flux of the layer below, and the bottom
+        // layer its own.
+        let rates: Vec<(&str, &str)> = elements
+            .iter()
+            .filter(|(key, ..)| key.starts_with("s1,"))
+            .map(|(key, rate, ..)| (key.as_str(), rate.as_str()))
+            .collect();
         assert_eq!(
-            default.as_deref(),
-            Some("dflux[scenario, layers] - dflux[scenario, layers + 1]")
+            rates,
+            [
+                ("s1,l1", "dflux[s1, L1] - dflux[s1, L2]"),
+                ("s1,l2", "dflux[s1, L2] - dflux[s1, L3]"),
+                ("s1,l3", "dflux[s1, L3] - dflux[s1, L4]"),
+                ("s1,l4", "dflux[s1, L4]"),
+            ]
         );
-        let own: Vec<&str> = elements.iter().map(|(k, ..)| k.as_str()).collect();
-        assert_eq!(own, ["s1,l4", "s2,l4"]);
     }
 
     /// Issue #908: a stock defined PIECEWISE over subranges of a parent

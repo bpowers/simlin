@@ -98,7 +98,9 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
 ///     some elements of its dimensions (read back over the dimensions of
 ///     exactly the elements it defines); an `:EXCEPT:` default that could not
 ///     be written (its dimensions' elements unknown, external data, an
-///     equation that does not parse, or one that defines every element);
+///     equation that does not parse, or one that defines every element); an
+///     equation that computes a subscript (`x[Age - 1]`), which Vensim does
+///     not allow (written once per element, and read back so);
 ///   - groups: a multi-word group name (the reader truncates the banner at the
 ///     first whitespace) and a group's documentation (dropped on re-import);
 ///   - `loop_metadata`: every entry (named loop, described unnamed loop,

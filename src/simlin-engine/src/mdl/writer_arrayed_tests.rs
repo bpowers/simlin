@@ -383,8 +383,9 @@ fn run_project(project: &datamodel::Project) -> std::collections::HashMap<String
 
 /// An equation for every element that reads an element a fixed number of
 /// places along is written to MDL once per element, each computed index the
-/// element it comes to, and one that comes to no element `NaN`; the save reads
-/// back as the same model and runs the same.
+/// element it comes to, and one that comes to no element `NaN`. The save
+/// opens with those element equations, runs the same, and the writer says
+/// of each variable that it was written so.
 #[test]
 fn an_offset_is_saved_to_mdl_as_each_elements_own_equation() {
     let project = crate::test_common::TestProject::new("offsets")
@@ -397,19 +398,48 @@ fn an_offset_is_saved_to_mdl_as_each_elements_own_equation() {
         .array_aux("d[Age]", "c[Age - 1] + c[Age]")
         .array_with_default_and_overrides("e[Age]", "c[Age + 1]", vec![("old", "0")])
         .build_datamodel();
-    let save = crate::mdl::project_to_mdl(&project)
-        .expect("the model writes")
-        .replace("\r\n", "\n");
+    let (save, warnings) =
+        crate::mdl::project_to_mdl_with_warnings(&project).expect("the model writes");
+    let save = save.replace("\r\n", "\n");
     assert!(
         !save.contains("Age - 1") && !save.contains("Age + 1"),
         "{save}"
     );
-    assert!(save.contains("d[adult]"), "{save}");
-    assert!(save.contains("NaN"), "{save}");
     let back = crate::open_vensim(&save).expect("the save reads");
     assert_eq!(
         crate::mdl::subscript_rule::ranges_not_on_the_left(&save, &back),
         Vec::<String>::new()
+    );
+    // The save opens as it is written, an equation for each element: the
+    // reader makes no offset of them.
+    let arms = |name: &str| -> Vec<(String, String)> {
+        match back.models[0]
+            .get_variable(name)
+            .and_then(|v| v.get_equation())
+        {
+            Some(Equation::Arrayed(_, arms, None, false)) => arms
+                .iter()
+                .map(|(key, text, ..)| (key.clone(), text.clone()))
+                .collect(),
+            other => panic!("{name} opens as {other:?}"),
+        }
+    };
+    let own = |rows: &[(&str, &str)]| -> Vec<(String, String)> {
+        rows.iter()
+            .map(|(key, text)| (key.to_string(), text.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        arms("d"),
+        own(&[
+            ("adult", "c[young] + c[adult]"),
+            ("old", "c[adult] + c[old]"),
+            ("young", "NaN + c[young]"),
+        ])
+    );
+    assert_eq!(
+        arms("e"),
+        own(&[("adult", "c[old]"), ("old", "0"), ("young", "c[adult]")])
     );
     let (was, is) = (run_project(&project), run_project(&back));
     for key in ["d[young]", "d[adult]", "d[old]", "e[young]", "e[old]"] {
@@ -422,8 +452,9 @@ fn an_offset_is_saved_to_mdl_as_each_elements_own_equation() {
         );
     }
     // What the save changes is how the model is written, never what it
-    // computes: the element that reads no element is written `NaN`, and the
-    // equation the elements followed is written into each of them.
+    // computes, and the check says which: `d`'s element that reads no element
+    // is written `NaN`, and `e` no longer has the default its elements
+    // followed.
     let changes = check_save(&project, SaveFormat::Mdl).expect("the check runs");
     assert!(
         changes
@@ -432,13 +463,27 @@ fn an_offset_is_saved_to_mdl_as_each_elements_own_equation() {
         "{:?}",
         changes.iter().map(|c| &c.reason).collect::<Vec<_>>()
     );
-    let (_, warnings) = crate::mdl::project_to_mdl_with_warnings(&project).expect("writes");
+    let reasons: Vec<&str> = changes.iter().map(|c| c.reason.as_str()).collect();
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.message.contains("'d'") && w.message.contains("at young")),
-        "{:?}",
-        warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
+        reasons.contains(&"'e' no longer has its :EXCEPT: default 'c[age + 1]'"),
+        "{reasons:?}"
+    );
+    // The writer tells the person of every variable it writes out so.
+    let told: Vec<&str> = warnings
+        .iter()
+        .map(|w| w.message.as_str())
+        .filter(|m| m.contains("computes a subscript"))
+        .collect();
+    assert_eq!(
+        told,
+        [
+            "'d' computes a subscript, which Vensim does not allow, so its equation is written \
+             once per element, and the file opens with an equation for each element; at young \
+             the subscript comes to no element, which reads not a number and is written NaN, \
+             which Vensim does not read",
+            "'e' computes a subscript, which Vensim does not allow, so its equation is written \
+             once per element, and the file opens with an equation for each element",
+        ]
     );
 }
 

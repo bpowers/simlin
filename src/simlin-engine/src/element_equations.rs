@@ -2,48 +2,33 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! One equation where an arrayed variable's elements say one thing.
+//! One equation where an MDL file's copies of it say one thing.
 //!
-//! An importer can write a variable out once per element, each element's
-//! names substituted into its copy: Vensim's reader does this for a variable
-//! defined by more than one equation (`POPULATION[INFANT]` and
-//! `POPULATION[ALL BUT YOUNGEST]`) and for an `:EXCEPT:` equation. A host
-//! then shows a row of near-identical element equations where the file
-//! wrote one. [`compact_element_equations`] stores such a variable as the
-//! equation every element follows, plus the elements whose equations say
-//! something else, the form an edit by field stores (`patch_fields`).
+//! The MDL reader writes a variable out once per element, each element's
+//! names substituted into its copy, when more than one equation defines it
+//! (`POPULATION[INFANT]` and `POPULATION[ALL BUT YOUNGEST]`) or an `:EXCEPT:`
+//! equation does. A host then shows a row of near-identical element
+//! equations where the file wrote one. [`compact_element_equations`] takes
+//! the copies back in the two cases where they say nothing the one equation
+//! does not:
 //!
-//! Each element's equation is read with its own element as "this element":
-//! a subscript naming the element on a dimension the variable is over reads
-//! that dimension's name (`x[CHILD]` at `CHILD` is `x[AGE]`), and one naming
-//! the element a fixed number of places along the same dimension, on a
-//! variable over that very dimension, reads an offset (`aging[INFANT]` at
-//! `CHILD` is `aging[AGE - 1]`). Each rewrite reads at that element exactly
-//! what the element read before:
+//! - every element has a copy and the copies all read the same, so the
+//!   variable is that one equation over its dimensions;
+//! - the file wrote an `:EXCEPT:` equation, so an element whose copy reads
+//!   as that equation follows it, and only the others keep one of their own.
 //!
-//! - a dimension's name in brackets, on an axis that declares every element
-//!   of the dimension, reads the active element by name
-//!   (`DimensionsContext::resolve_mapped_read`);
-//! - an offset is a position, `AGE - 1` the position before the element's
-//!   own, and it is read only where the axis it indexes is the dimension it
-//!   counts along.
+//! A copy is read with its own element as "this element": a subscript naming
+//! the element, on a dimension the variable is over, reads that dimension's
+//! name (`x[CHILD]` at `CHILD` is `x[AGE]`). That is what the element read
+//! before, because a dimension's name in brackets, on an axis that declares
+//! every element of the dimension, reads the active element by name
+//! (`DimensionsContext::resolve_mapped_read`). Anything else in a subscript
+//! -- another element, a range, a name of no element -- is left as written.
 //!
-//! So where every element's equation reads the same once rewritten, that
-//! one equation computes every element as its own did, and the variable
-//! simulates as before. Anything else in a subscript -- another element, a
-//! range, a name of no element -- is left as written, and an element whose
-//! equation then reads differently keeps it as its own.
-//!
-//! An element that names another element as written (`c[Age] / c[young]`)
-//! follows an equation for every element where that equation, written out at
-//! the element, is its own: the element is substituted into the equation
-//! rather than read out of the copy, which cannot tell a fixed element from
-//! an offset that happens to land on it.
-//!
-//! Loop analysis describes a variable that reads an offset as the equations
-//! of its elements (`compiler::fragment::FragmentInput::elementwise_target`),
-//! so a chain stored with offsets is scored as its elements' own equations
-//! were.
+//! Nothing else is read into the copies. Elements most of which agree, or
+//! that each read the element before their own, stay as the file wrote them:
+//! an equation for every element also defines the elements the dimension
+//! gains later, and only the file can say that of a variable.
 
 use std::collections::HashMap;
 
@@ -135,25 +120,11 @@ fn spelled(name: &str) -> String {
 /// text with each rewritten subscript spliced in, and the canonical form two
 /// such texts compare by. `None` for a text that does not parse.
 fn read_at(text: &str, model: &Model, axes: &[Axis], at: &[usize]) -> Option<(String, String)> {
-    read_at_with(text, model, axes, at, true)
-}
-
-/// [`read_at`], reading another element of a dimension as an offset only
-/// where `offsets` says so: without, a subscript naming the element itself
-/// is the only one rewritten (`c[young]` stays as written at `adult`).
-fn read_at_with(
-    text: &str,
-    model: &Model,
-    axes: &[Axis],
-    at: &[usize],
-    offsets: bool,
-) -> Option<(String, String)> {
     let expr = Expr0::new(text, LexerType::Equation).ok()??;
     let mut reading = Reading {
         model,
         axes,
         at,
-        offsets,
         splices: Vec::new(),
     };
     reading.expr(&expr);
@@ -182,8 +153,6 @@ struct Reading<'a> {
     model: &'a Model,
     axes: &'a [Axis],
     at: &'a [usize],
-    /// Whether another element of a dimension is read as an offset.
-    offsets: bool,
     splices: Vec<(usize, usize, String)>,
 }
 
@@ -232,11 +201,10 @@ impl Reading<'_> {
     }
 
     /// What the index `name`, on an axis over `source_dim`, reads as at the
-    /// element: the dimension's name where it names the element on an axis
-    /// that declares every element of the dimension, an offset where it
-    /// names another element of the dimension the axis is over, and `None`
-    /// -- left as written -- otherwise, or where it names an element of more
-    /// than one of the variable's dimensions.
+    /// element: the dimension's name where it names the element itself on an
+    /// axis that declares every element of the dimension, and `None` -- left
+    /// as written -- otherwise, or where it names an element of more than one
+    /// of the variable's dimensions.
     fn this_element(&self, name: &RawIdent, source_dim: Option<&String>) -> Option<String> {
         let source_dim = source_dim?;
         let element = canonical(name.as_str());
@@ -252,115 +220,9 @@ impl Reading<'_> {
         }
         let (k, place) = found?;
         let axis = &self.axes[k];
-        let own = self.at[k];
-        let dim = spelled(&axis.written);
-        if place == own {
-            return self
-                .model
-                .declares_every_element_of(source_dim, axis)
-                .then_some(dim);
-        }
-        if !self.offsets || *source_dim != axis.canonical {
-            return None;
-        }
-        Some(if place > own {
-            format!("{dim} + {}", place - own)
-        } else {
-            format!("{dim} - {}", own - place)
-        })
+        (place == self.at[k] && self.model.declares_every_element_of(source_dim, axis))
+            .then(|| spelled(&axis.written))
     }
-}
-
-/// `text`, an equation for every element, written out at the element `at`:
-/// each subscript that reads "this element" by the name of one of `axes`
-/// (`c[Age]`), or a fixed number of places along it (`c[Age - 1]`), on a
-/// variable over that very dimension, names the element it reads there. The
-/// canonical form of the text so written, which an element's own equation is
-/// compared with: the two read the same element everywhere, so they compute
-/// the same. `None` where a subscript comes to no element, or the text does
-/// not parse.
-fn written_at(text: &str, model: &Model, axes: &[Axis], at: &[usize]) -> Option<String> {
-    fn index(
-        e: &Expr0,
-        source_dim: Option<&String>,
-        axes: &[Axis],
-        at: &[usize],
-    ) -> Option<Option<String>> {
-        let (name, step) = match e {
-            Expr0::Var(name, _) => (name, 0i64),
-            Expr0::Op2(op, l, r, _) => {
-                let (Expr0::Var(name, _), Expr0::Const(_, n, _)) = (l.as_ref(), r.as_ref()) else {
-                    return Some(None);
-                };
-                let n = n.value();
-                if n.fract() != 0.0 {
-                    return Some(None);
-                }
-                match op {
-                    crate::ast::BinaryOp::Add => (name, n as i64),
-                    crate::ast::BinaryOp::Sub => (name, -(n as i64)),
-                    _ => return Some(None),
-                }
-            }
-            _ => return Some(None),
-        };
-        let name = canonical(name.as_str());
-        let Some(k) = axes.iter().position(|a| a.canonical == name) else {
-            return Some(None);
-        };
-        if source_dim != Some(&axes[k].canonical) {
-            return Some(None);
-        }
-        let place = at[k] as i64 + step;
-        let element = axes[k].elements.get(usize::try_from(place).ok()?)?;
-        Some(Some(element.clone()))
-    }
-    fn walk(expr: &Expr0, model: &Model, axes: &[Axis], at: &[usize]) -> Option<Expr0> {
-        let recur = |e: &Expr0| walk(e, model, axes, at);
-        Some(match expr {
-            Expr0::Const(..) | Expr0::Var(..) => expr.clone(),
-            Expr0::App(UntypedBuiltinFn(name, args), loc) => Expr0::App(
-                UntypedBuiltinFn(name.clone(), args.iter().map(recur).collect::<Option<_>>()?),
-                *loc,
-            ),
-            Expr0::Subscript(ident, indexes, loc) => {
-                let source = model.variables.get(&canonical(ident.as_str()));
-                let mut written = Vec::with_capacity(indexes.len());
-                for (position, idx) in indexes.iter().enumerate() {
-                    written.push(match idx {
-                        IndexExpr0::Expr(e) => {
-                            match index(e, source.and_then(|d| d.get(position)), axes, at)? {
-                                Some(element) => IndexExpr0::Expr(Expr0::Var(
-                                    RawIdent::new(element),
-                                    e.get_loc(),
-                                )),
-                                None => IndexExpr0::Expr(recur(e)?),
-                            }
-                        }
-                        IndexExpr0::Range(lo, hi, range_loc) => IndexExpr0::Range(
-                            Box::new(recur(lo)?),
-                            Box::new(recur(hi)?),
-                            *range_loc,
-                        ),
-                        other => other.clone(),
-                    });
-                }
-                Expr0::Subscript(ident.clone(), written.into(), *loc)
-            }
-            Expr0::Op1(op, inner, loc) => Expr0::Op1(*op, Box::new(recur(inner)?), *loc),
-            Expr0::Op2(op, l, r, loc) => {
-                Expr0::Op2(*op, Box::new(recur(l)?), Box::new(recur(r)?), *loc)
-            }
-            Expr0::If(c, t, f, loc) => Expr0::If(
-                Box::new(recur(c)?),
-                Box::new(recur(t)?),
-                Box::new(recur(f)?),
-                *loc,
-            ),
-        })
-    }
-    let expr = Expr0::new(text, LexerType::Equation).ok()??;
-    Some(print_eqn(&walk(&expr, model, axes, at)?))
 }
 
 /// Reads one element's equation of a variable of one model with the element
@@ -425,23 +287,15 @@ fn element_at(axes: &[Axis], key: &str) -> Option<Vec<usize>> {
 }
 
 /// Store each arrayed variable of `project`'s models whose elements say one
-/// thing as that one equation, and the rest as exceptions to it (see the
-/// module docs).
+/// thing as that one equation, and one whose elements follow the `:EXCEPT:`
+/// default the file wrote as that default and its exceptions (see the module
+/// docs).
 ///
 /// A variable is left as it is when an element has an initial or a lookup
-/// of its own, when every element is a number (a list of numbers is its own
-/// idiom) unless a default applies that some of them differ from, when an
-/// element's equation does not parse, or when an element it lists is none
-/// of its dimensions'. An applying default keeps the elements that read as
-/// it does as followers, numbers too: `d[Age] :EXCEPT: [old] = 0.01` is one
-/// number for every age but the old. Otherwise a variable is collapsed only where every element
-/// has an equation of its own -- an element left out has no equation, and a
-/// default would give it one -- and a default that so fills no element is
-/// replaced by the equation most elements read.
-///
-/// An element whose own equation is `NaN`, where the equation for every
-/// element reads no element (an offset past the dimension's end), keeps its
-/// own: whether that equation is NaN there is not plain from its text.
+/// of its own, when an element's equation does not parse, or when an element
+/// it lists is none of its dimensions'. A list of numbers is its own idiom
+/// and stays one, unless a default applies that some of them differ from:
+/// `d[Age] :EXCEPT: [old] = 0.01` is one number for every age but the old.
 pub(crate) fn compact_element_equations(project: &mut Project) {
     for m in 0..project.models.len() {
         let model = Model::of(project, &project.models[m]);
@@ -472,82 +326,50 @@ fn compacted(var: &Variable, model: &Model) -> Option<Variable> {
     let numbers = arms.iter().all(|(_, text, ..)| is_number(text));
     let axes = axes_of(model, dims)?;
 
-    // Each element's equation read at the element, by its key: its place,
-    // its text read so, that reading's form, and its own form.
-    let mut read: Vec<(Vec<usize>, String, String, String)> = Vec::with_capacity(arms.len());
+    // Each element's place, and its equation read at the element: the text
+    // read so, and the form two readings compare by.
+    let mut read: Vec<(Vec<usize>, String, String)> = Vec::with_capacity(arms.len());
     for (key, text, ..) in arms {
         let at = element_at(&axes, key)?;
         let (rewritten, form) = read_at(text, model, &axes, &at)?;
-        read.push((at, rewritten, form, canonical_form(text)?));
+        read.push((at, rewritten, form));
     }
-    // Whether the element `i` computes what the equation for every element
-    // `text` (of the form `form`) computes there: its equation reads the same
-    // at the element, or is that equation written out at it.
-    let follows = |i: usize, text: &str, form: &str| {
-        let (at, _, read_form, own_form) = &read[i];
-        read_form == form || written_at(text, model, &axes, at).is_some_and(|w| w == *own_form)
-    };
 
-    let total: usize = axes.iter().map(|a| a.elements.len()).product();
-    // The elements that read as an applying default follow it.
+    // The file wrote a default: the elements that read as it follow it.
     if let Some(default_text) = default.as_deref().filter(|_| *applies) {
         let default_form = canonical_form(default_text)?;
-        let kept: Vec<_> = (0..arms.len())
-            .filter(|&i| !follows(i, default_text, &default_form))
-            .map(|i| arms[i].clone())
+        let kept: Vec<_> = arms
+            .iter()
+            .zip(&read)
+            .filter(|(_, (_, _, form))| *form != default_form)
+            .map(|(arm, _)| arm.clone())
             .collect();
         // Numbers that all say the default are a list, as written.
-        if kept.len() != arms.len() && !(numbers && kept.is_empty()) {
-            let compact = crate::patch_fields::arrayed(dims.clone(), kept, default.clone(), true);
-            return with_equation(var, compact);
+        if kept.len() == arms.len() || (numbers && kept.is_empty()) {
+            return None;
         }
+        let compact = crate::patch_fields::arrayed(dims.clone(), kept, default.clone(), true);
+        return with_equation(var, compact);
     }
     if numbers {
         return None;
     }
-    // Otherwise, where every element has an equation of its own (so no
-    // default fills one), the equation most elements follow, with the rest as
-    // exceptions. The candidates are each element's equation read at it, with
-    // other elements read as offsets and without (`c[Age] / c[young]` names a
-    // fixed element as written, where an offset would move with the element);
-    // the first in the elements' order of those most followed is taken.
-    let mut seen = read.iter().map(|(at, ..)| at).collect::<Vec<_>>();
-    seen.sort_unstable();
-    seen.dedup();
-    if seen.len() != total || read.len() != total {
+    // Otherwise the variable is one equation only where every element has a
+    // copy -- an element left out has no equation, and one equation over the
+    // dimensions would give it one -- and the copies all read the same. The
+    // text kept is the first element's, in the dimensions' order.
+    let total: usize = axes.iter().map(|a| a.elements.len()).product();
+    let mut places: Vec<&Vec<usize>> = read.iter().map(|(at, ..)| at).collect();
+    places.sort_unstable();
+    places.dedup();
+    if places.len() != total || read.len() != total {
         return None;
     }
-    let mut ordered: Vec<usize> = (0..read.len()).collect();
-    ordered.sort_by_key(|&i| read[i].0.clone());
-    let mut candidates: Vec<(String, String)> = Vec::new();
-    for &i in &ordered {
-        let (at, rewritten, form, _) = &read[i];
-        let fixed = read_at_with(&arms[i].1, model, &axes, at, false)?;
-        for candidate in [(rewritten.clone(), form.clone()), fixed] {
-            if !candidates.iter().any(|(_, f)| *f == candidate.1) {
-                candidates.push(candidate);
-            }
-        }
-    }
-    let (top, followed) = candidates
-        .iter()
-        .enumerate()
-        .map(|(place, (text, form))| {
-            let followers = (0..read.len()).filter(|&i| follows(i, text, form)).count();
-            (place, followers)
-        })
-        .max_by_key(|&(place, followers)| (followers, std::cmp::Reverse(place)))?;
-    if followed < 2 || followed * 2 <= total {
+    let (_, text, form) = read.iter().min_by_key(|(at, ..)| at)?;
+    if read.iter().any(|(_, _, other)| other != form) {
         return None;
     }
-    let (top_text, top_form) = &candidates[top];
-    let kept: Vec<_> = ordered
-        .iter()
-        .filter(|&&i| !follows(i, top_text, top_form))
-        .map(|&i| arms[i].clone())
-        .collect();
-    let compact = crate::patch_fields::arrayed(dims.clone(), kept, Some(top_text.clone()), true);
-    with_equation(var, compact)
+    with_equation(var, Equation::ApplyToAll(dims.clone(), text.clone()))
 }
 
 /// `var` with `equation` for its own.

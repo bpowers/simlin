@@ -974,18 +974,25 @@ mod tests;
 /// `equation` written out once per element where Vensim cannot read it as
 /// it is, or `None` where it can.
 ///
-/// Vensim has no arithmetic inside a subscript's brackets, so an equation
-/// for every element that reads an element a fixed number of places along
-/// (`aging[AGE - 1]`) is written as each element's own, with the element's
-/// names in place: each bracketed dimension name the element itself, each
-/// computed index the element it comes to on the axis it indexes, and each
-/// dimension's name as a value (which Vensim reads as the element's number)
-/// the element's position.
-/// An index that comes to no element is a read of no element, which reads
+/// A subscript in Vensim is a name, never a number to compute with: "Vensim
+/// does not allow the use of numeric subscripts", and the previous element of
+/// a range is reached with `VECTOR ELM MAP` or a mapping (Vensim Reference
+/// Guide, The Vensim Modeling Language, Subscripts, VECTOR ELM MAP:
+/// vensim.com/documentation/22095.html). So an equation for every element
+/// that reads an element a fixed number of places along (`aging[AGE - 1]`)
+/// is written as each element's own, with the element's names in place: each
+/// bracketed dimension name the element itself, each computed index the
+/// element it comes to on the axis it indexes, and each dimension's name as
+/// a value (which Vensim reads as the element's number) the element's
+/// position. A `:EXCEPT:` default the elements follow is written into each
+/// element it fills; one that names no dimension so is kept.
+///
+/// The file then says what the model computes and not how it was written:
+/// it opens with an equation for each element, and nothing reads the one
+/// equation back out of them. A warning says so for each variable, and names
+/// each element whose index comes to no element: a read of no element reads
 /// not a number, and is written as `NaN`, which this reader reads and Vensim
-/// does not; a warning names each such element. A `:EXCEPT:` default the
-/// elements follow is written into each element it fills; one that names no
-/// dimension so is kept.
+/// does not.
 pub(super) fn per_element_for_vensim(
     equation: &datamodel::Equation,
     name: &str,
@@ -1089,14 +1096,18 @@ pub(super) fn per_element_for_vensim(
     }
     let applies = applies && kept_default.is_some();
     let reads_nothing = reads_nothing.into_inner();
+    let mut message = format!(
+        "'{name}' computes a subscript, which Vensim does not allow, so its equation is \
+         written once per element, and the file opens with an equation for each element"
+    );
     if !reads_nothing.is_empty() {
-        warnings.push(ExportWarning::new(format!(
-            "'{name}' is written once per element, as Vensim has no arithmetic in a \
-             subscript; at {} a subscript comes to no element, which reads not a number \
-             and is written NaN, which Vensim does not read",
+        message.push_str(&format!(
+            "; at {} the subscript comes to no element, which reads not a number and is \
+             written NaN, which Vensim does not read",
             reads_nothing.join("; ")
-        )));
+        ));
     }
+    warnings.push(ExportWarning::new(message));
     Some(Equation::Arrayed(
         dims.clone(),
         slots,

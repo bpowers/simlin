@@ -7199,27 +7199,12 @@ fn corpus_clearn_macros_import() {
 /// 6,199 variables and 34,365 slots (34,393 with the 28 scores), 31,171 free
 /// against the 65,536-slot ceiling.
 ///
-/// Opening an MDL file keeps one equation where a variable's elements say one
-/// thing (`element_equations`): eleven of C-LEARN's variables the reader wrote
-/// out once per element are one equation over their dimensions again. Their
-/// link scores are arrayed over the dimensions rather than one scalar per
-/// element, so the count is 6,155 (44 under) and the width 34,083 slots (282
-/// under), 31,453 free; the link scores the model declines, and every LTM
-/// diagnostic it files, are the same 23 as before.
-///
-/// An offset is stored too, and loop analysis describes a variable whose
-/// elements read a position they compute -- an offset, a condition on the
-/// element (`IF Target = 1`), a reducer whose axes the element fixes -- as the
-/// equations of its elements, each such read pinned to the element it comes
-/// to (`FragmentInput::elementwise_target`). Twenty-nine of C-LEARN's
-/// variables are described so: the deep ocean's layers, which read the layer
-/// above or below, and the emission targets over `Target - 1`. A link into one
-/// of them is scored for the element pair the run reads
-/// (`emissions_with_cumulative_constraints[oecd_us,t1] ->
-/// previous_intensity_vs_rs`), and a read by the dimensions the equation
-/// iterates (`gdp[COP]`) stays one score over them. The count is 6,061 and
-/// the width 30,896 slots, 34,640 free; the declined scores and the LTM
-/// diagnostics are the same 23.
+/// Opening an MDL file keeps one equation where the reader's per-element
+/// copies of a variable all say one thing, or follow the `:EXCEPT:` default the
+/// file wrote (`element_equations`). A link into such a variable has one score
+/// arrayed over its dimensions rather than one scalar per element, which
+/// `examples/ltm_slot_width.rs` measures as 6,155 variables and 34,083 slots,
+/// 31,453 free against the 65,536-slot ceiling.
 ///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
@@ -7245,7 +7230,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 6061,
+        total, 6155,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"
