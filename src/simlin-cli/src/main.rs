@@ -354,14 +354,11 @@ fn print_filtered_tsv(results: &Results, visible: &VisibleStocks) {
         .map(|(k, v)| (k.as_str(), *v))
         .collect();
 
-    // Time is always at offset 0 in the engine's results layout.
-    // Skip any visible stock whose canonical ident is "time" to avoid
-    // duplicate headers (the time axis is always the first column).
+    // Time is always at offset 0 in the engine's results layout. No visible
+    // stock shares its header: the systems reader refuses a stock named for
+    // one of the run's clock names.
     let mut columns: Vec<(&str, usize)> = vec![("time", 0)];
     for (original_name, canonical_ident) in visible {
-        if canonical_ident == "time" {
-            continue;
-        }
         if let Some(&offset) = ident_to_offset.get(canonical_ident.as_str()) {
             columns.push((original_name.as_str(), offset));
         }
@@ -398,7 +395,8 @@ fn print_filtered_tsv_comparison(results: &Results, reference: &Results, visible
     use simlin_engine::common::{Canonical, Ident};
 
     // Build columns: (display_name, sim_offset, ref_offset) triples.
-    // Time is always at offset 0 in the engine's results layout.
+    // Time is always at offset 0 in the engine's results layout, and no
+    // visible stock shares its header (see `print_filtered_tsv`).
     struct Col<'a> {
         name: &'a str,
         sim_off: usize,
@@ -411,9 +409,6 @@ fn print_filtered_tsv_comparison(results: &Results, reference: &Results, visible
         ref_off: reference.offsets.get(&time_ident).copied(),
     }];
     for (original_name, canonical_ident) in visible {
-        if canonical_ident == "time" {
-            continue;
-        }
         let ident = Ident::<Canonical>::from_str_unchecked(canonical_ident);
         if let Some(&sim_off) = results.offsets.get(&ident) {
             let ref_off = reference.offsets.get(&ident).copied();

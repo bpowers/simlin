@@ -63,9 +63,7 @@ mod macro_registry;
 // views (`units::unit_model`) the salsa pass builds.
 pub(crate) mod units;
 mod var_fragment;
-#[cfg(test)]
-pub(crate) use var_fragment::IMPLICIT_GLOBALS;
-pub(crate) use var_fragment::{is_implicit_global, lowered_source_variable};
+pub(crate) use var_fragment::{IMPLICIT_GLOBALS, is_implicit_global, lowered_source_variable};
 
 mod diagnostic;
 pub use crate::diagnostic::{Diagnostic, DiagnosticCategory, DiagnosticError, DiagnosticSeverity};

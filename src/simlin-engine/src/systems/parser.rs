@@ -901,6 +901,50 @@ mod tests {
         );
     }
 
+    /// A stock is not given one of the run's clock names
+    /// (`db::IMPLICIT_GLOBALS`): one row per name, in each spelling the format
+    /// allows, at every place a line names a stock, each refused with the
+    /// stock as written and its line. A name that only contains a clock name
+    /// is a name like any other. Which builtin names stay legal is
+    /// `translate::tests::a_stock_named_like_a_builtin_is_read_as_the_stock`.
+    #[test]
+    fn a_stock_named_for_the_clock_is_refused() {
+        let places = [
+            "{}",
+            "{}(5)",
+            "[{}]",
+            "{}(5, 9) > B @ 1",
+            "A(5) > {} @ 1",
+            "[A] > {}(0, 5) @ 2",
+            "A > {}",
+        ];
+        for clock in crate::db::IMPLICIT_GLOBALS {
+            let mut title = clock.to_string();
+            title[..1].make_ascii_uppercase();
+            for name in [clock.to_string(), clock.to_uppercase(), title] {
+                for place in places {
+                    let line = place.replace("{}", &name);
+                    let input = format!("# a model\nX(1) > Y @ 1\n{line}\n");
+                    let reason = parse(&input)
+                        .err()
+                        .and_then(|err| err.details)
+                        .unwrap_or_default();
+                    assert!(
+                        reason.starts_with("line 3: ") && reason.contains(&format!("'{name}'")),
+                        "{line:?}: {reason:?}"
+                    );
+                    assert!(reason.contains("clock"), "{line:?}: {reason:?}");
+                }
+                for contains in [format!("{name}2"), format!("{name}_spent")] {
+                    for place in places {
+                        let line = place.replace("{}", &contains);
+                        parse(&line).unwrap_or_else(|err| panic!("{line:?}: {err}"));
+                    }
+                }
+            }
+        }
+    }
+
     /// Stock name with underscores and digits
     #[test]
     fn stock_name_with_underscores_and_digits() {
