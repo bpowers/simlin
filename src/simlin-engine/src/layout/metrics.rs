@@ -87,9 +87,17 @@ const ALIGN_REACH: f64 = 300.0;
 /// The defect terms are rates (means over the things they concern), so they
 /// are comparable across models of different size. Several terms are
 /// intentionally sensitive to absolute coordinate scale relative to the fixed
-/// pixel size of shapes and labels (`node_overlap`, `label_overlap`,
-/// `crowding`, `sprawl`): packing nodes tightly against those fixed sizes is
-/// exactly what they measure.
+/// pixel size of shapes, labels and distances (`node_overlap`,
+/// `node_connector_overlap`, `label_overlap`, `label_connector_overlap`,
+/// `crowding`, `sprawl`, `misalignment`): packing nodes tightly against those
+/// fixed sizes is exactly what they measure. The ratio terms over connector
+/// lengths and the view's extent (`long_connectors`, `edge_length_cv`,
+/// `aspect_penalty`, `loop_straightness`) depend on scale too, because
+/// connectors are clipped at fixed-size shapes and the extent includes them;
+/// they only approach their unscaled values as the view is scaled up.
+/// `loop_compactness` (node centers only) and `flow_bends` do not depend on
+/// scale, nor does `crossings` for a crossing interior to both connectors
+/// (`test_scale_invariance_of_scale_free_terms`).
 ///
 /// `Serialize`/`Deserialize` let the layout-quality eval sweep
 /// (`examples/layout_eval/`) emit the per-term breakdown into its artifacts

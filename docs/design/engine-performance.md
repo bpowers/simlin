@@ -533,9 +533,9 @@ lower bound in O(1) measured only ~0.7 ms gross (137.4 -> 136.7; the ~8-deep
 search over C-LEARN's 229-point tables is already well-predicted at a
 slowly-advancing index).
 Adversarial review then found the hint diverges from
-`lookup` on unsorted-x tables -- which ARE reachable, no import path validates
-x ordering (GH #715) -- so soundness required gating the hint on a per-table
-sortedness check.
+`lookup` on unsorted-x tables -- which no import path rejected when this was
+measured (decreasing x is a `BadTable` error, GH #715) -- so soundness required
+gating the hint on a per-table sortedness check.
 Every sound formulation (sentinel checked inside
 `lookup_with_hint`, or hoisted to the dispatch arm) measured a consistent
 +9..15 ms regression: one extra branch + call edge in `eval_bytecode`'s
@@ -1143,7 +1143,7 @@ short of it rather than taking a ~2-3%.
     `NaN - NaN` and evaluates to `NaN`, where an omitted slot is `+0.0`. It is
     reproduced both ways by
     `db::ltm_value_gate_tests::a_nonfinite_target_arm_is_omitted_to_zero_not_nan`.
-    Whether `0` is the better answer is **open** and tracked as #1022:
+    `0` is kept deliberately (#1022):
     `src/float.rs` argues an
     engine-manufactured NaN is noise, while GH #542 built the `ltm_post::group_totals`
     NaN exclusion specifically to preserve a `NaN` score as a per-loop "undefined

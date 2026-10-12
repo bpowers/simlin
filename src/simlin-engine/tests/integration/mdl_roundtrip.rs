@@ -1699,10 +1699,9 @@ fn mdl_format_roundtrip() {
 // aspirational goals: each maintains an allowlist of the fixtures that the
 // writer currently mishandles, and asserts BOTH that no *un*listed fixture
 // misbehaves (catches regressions) AND that every listed fixture *still*
-// misbehaves (catches a fix that forgot to shrink the allowlist). A later
-// writer fix therefore MUST delete the entries it repairs, or the gate fails
-// loudly -- which is the whole point: the allowlists shrink to empty as the
-// writer is hardened (GH #851).
+// misbehaves (catches a fix that forgot to shrink the allowlist). A writer
+// fix therefore MUST delete the entries it repairs, or the gate fails loudly.
+// Both allowlists are empty (GH #851).
 //
 // Performance: the walk parses+writes ~230 fixtures in-process (never spawns
 // the CLI). Fixtures larger than `MAX_FIXTURE_BYTES` are skipped so a debug
@@ -1740,10 +1739,6 @@ const MIN_CORPUS_FIXTURES: usize = 200;
 ///   - `PI()` builtin collision: a genuine `pi` builtin lowers to a numeric
 ///     literal, and a user variable named `PI`/`pi` is emitted as that
 ///     identifier -- neither produces the reader-rejected `PI()` (#850, #853).
-///
-/// Several fixtures cleared here still fail the IDEMPOTENCE ratchet for
-/// unrelated, pre-existing reasons (CRLF free-text accumulation #849, sketch
-/// connector instability); those are listed in `EXPECTED_NON_IDEMPOTENT`.
 const EXPECTED_REPARSE_FAILURES: &[&str] = &[];
 
 /// Re-parseable fixtures whose writer output is NOT a fixpoint: writing the

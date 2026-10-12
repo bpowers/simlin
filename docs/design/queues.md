@@ -269,8 +269,11 @@ The volume the overflow may take is exactly the front material the
 blocked sibling could not accept for one of those reasons.
 An overflow to a
 cloud or regular stock then drains that material entirely (like any unconstrained
-outflow); an overflow to another conveyor is itself constrained by that
-conveyor.
+outflow).
+An overflow to another conveyor would itself be constrained by that conveyor,
+but neither XMILE nor this spec defines that service, and the engine rejects such
+a model with `QueueSecondaryOutflowToConveyor` (§10.7): only a queue's first
+outflow may feed a conveyor (GH #868).
 
 If the higher-priority outflow was NOT blocked (it served everything it wanted,
 or was zero because the queue was empty, or was blocked for some other reason

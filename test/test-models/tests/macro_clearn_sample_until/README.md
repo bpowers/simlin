@@ -45,8 +45,7 @@ initial value = 99
 sampled       = SAMPLE UNTIL(last time, the input, initial value)
 ```
 
-Two-plus arguments, so the call is **not** rewritten to `LOOKUP`
-(GH #553). `initial value = 99` is a distinct sentinel (it differs from
+`initial value = 99` is a distinct sentinel (it differs from
 every sampled/frozen value, so a wrong init can never accidentally
 match).
 

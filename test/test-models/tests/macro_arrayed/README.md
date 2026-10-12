@@ -22,9 +22,6 @@ factor      = 3
 out[Region] = SCALE(inp[Region], factor)
 ```
 
-`SCALE` has **two** parameters so the call is not rewritten to `LOOKUP`
-(GH #553: a single-argument `NAME(arg)` MDL call is a lookup invocation).
-
 At compile time `out[Region] = SCALE(inp[Region], factor)` expands into one
 independent synthetic `Variable::Module` per `Region` element
 (`$⁚out⁚0⁚scale⁚r1`, `$⁚out⁚0⁚scale⁚r2`, `$⁚out⁚0⁚scale⁚r3`), each wiring

@@ -546,9 +546,10 @@ export enum LinkPolarity {
  * `MostlyReinforcing`/`MostlyBalancing` ("Rux"/"Bux" in the LTM literature)
  * are the mixed-sign runtime polarities: the loop expressed both signs over
  * the simulation but one dominates with high confidence (see
- * {@link Loop.polarityConfidence}). They appear on the discovery surface
- * (GH #495); the structural surface reports only Reinforcing/Balancing/
- * Undetermined.
+ * {@link Loop.polarityConfidence}). They appear only on a run's loop surface
+ * (libsimlin's `simlin_analyze_get_loops_runtime`), which this package does
+ * not bind yet (GH #731); the structural surface reports only Reinforcing/
+ * Balancing/Undetermined.
  */
 export enum LoopPolarity {
   /** Reinforcing: amplifies changes (positive feedback) */

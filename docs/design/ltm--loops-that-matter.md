@@ -1036,14 +1036,17 @@ concern, and the surfaces handle it differently:
 - **libsimlin / WASM / TS `simlin_analyze_get_loops`**: **intentionally
   structural-only**.
   The FFI takes only a `SimlinModel` (no simulation
-  `Results` in hand), folds `MostlyReinforcing`/`MostlyBalancing` to
-  `Reinforcing`/`Balancing`, and drops `polarity_confidence` at the C ABI
-  boundary.
-  Surfacing runtime polarity here requires the FFI plumbing tracked
-  under GH #495; it is **not** delivered by this change.
+  `Results` in hand), so it reports the structural label with a
+  `polarity_confidence` of 1.0 or 0.0, and never `MostlyReinforcing`/
+  `MostlyBalancing`.
   A consumer reading
   loop polarity from `get_loops` must expect the structural label, not the
   runtime one.
+- **libsimlin `simlin_analyze_get_loops_runtime`**: takes a run `SimlinSim`
+  and returns the same loops reclassified by
+  `reclassify_loops_from_results` (the primitive pysimlin's `Run.loops`
+  binds), all five polarity variants verbatim.
+  The TypeScript engine does not bind it yet (GH #731).
 
 `db::analysis::reclassify_loops_from_results(loops, results, loop_partitions)`
 is the **canonical in-engine reclassification primitive** -- it normalizes
@@ -2363,16 +2366,20 @@ cases remain deliberate carve-outs:
   non-literal/computed index -- `SUM(pop[idx, *])` with a dynamic `idx`,
   `arr[i+1]` -- is not statically describable, so it is not hoisted into an
   aggregate node; its reference stays on the conservative `DynamicIndex`
-  cross-product path (a coarse `from[d] → to[e]` for every pair), and the
-  link score keeps the delta-ratio stand-in with no diagnostic.
-- **Two executed reads are declined rather than described.** The ordinal
+  cross-product path (a coarse `from[d] → to[e]` for every pair), scored as a
+  read of any element of the source with a warning that the score is not
+  exact.
+  A computed index inside a hoisted reducer's body
+  (`SUM(m[d1, *] * n[d1, idx])`) is different: the reducer's partial cannot
+  pin the body and falls back to the target itself, so each row's link score
+  is +/-1 with no diagnostic (GH #1042).
+- **One executed read is declined rather than described.** The ordinal
   fallback of an undeclared pair with disjoint element names at equal
   cardinality (GH #527, a read Vensim rejects) is declined loudly, never
-  described positionally; and a bare reducer argument in a per-element
-  (`Ast::Arrayed`) slot reads the row its element pins while the only node its
-  identity mints is the whole array, so the slot's edge is declined loudly
-  (GH #792) rather than scored against that node -- the exact per-slot node is
-  the tracked follow-up.
+  described positionally.
+  A bare reducer argument in a per-element (`Ast::Arrayed`) slot is not one of
+  these: it reads the row its element pins and is scored as that row written
+  out (`ltm_elementwise_tests::a_slots_bare_reducer_argument_is_scored_as_the_row_it_reads`).
   A plain bare read of a shared-name pair under no
   mapping, or of a pair related only through a parent mapping, is described as
   the broadcast (a superset of the executed read) with its score declined.

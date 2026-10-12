@@ -4636,7 +4636,7 @@ fn assert_shared_dispatch_refusal(project: &crate::datamodel::Project, code: Err
 /// blocked at an earlier gate still: its conveyor lives in a SUB-MODEL, which
 /// expansion never descends into, so `compile_sim` refuses it for BOTH backends
 /// (GH #941). It is a discrete belt with a `dist` spread inflow besides, so it stays
-/// out of wasm scope even once #941 is resolved.
+/// out of wasm scope even once conveyors in sub-models are supported (#940).
 ///
 /// Pinned on the error CODE for the same reason as its sibling: the corpus gate runs
 /// every OTHER `test/conveyors/` fixture, and must not read "the engine refuses a real

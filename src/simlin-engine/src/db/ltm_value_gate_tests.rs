@@ -395,8 +395,8 @@ fn a_nested_freeze_arm_is_not_a_structural_zero() {
 /// omitted gives all zeros. An infinite target collapses to the same case, since
 /// `inf - inf` is also `NaN`.
 ///
-/// **This is a semantics decision that has not been adjudicated. It is tracked
-/// as GH #1022**, and the arguments do not point the same way:
+/// **The omitted slot's `0` is a deliberate semantics decision (GH #1022)**,
+/// taken over arguments that do not point the same way:
 ///
 /// * `src/float.rs` holds that a NaN the ENGINE manufactures is noise in a
 ///   channel practitioners already debug by hand. This NaN is engine-made -- it
@@ -415,8 +415,8 @@ fn a_nested_freeze_arm_is_not_a_structural_zero() {
 /// `NaN` -- only arms with no causal dependence on their source change.
 ///
 /// Blast radius is confined to models that already produce non-finite values.
-/// This row's job is to make the current answer fail if it changes, so whoever
-/// adjudicates GH #1022 does so on purpose rather than by re-pinning.
+/// This row's job is to make the answer fail if it changes, so a change to the
+/// GH #1022 decision is made on purpose rather than by re-pinning.
 fn nonfinite_target_project() -> datamodel::Project {
     TestProject::new("nonfinite_target")
         .with_sim_time(0.0, 5.0, 1.0)

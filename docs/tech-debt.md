@@ -200,7 +200,7 @@ Each entry has a description, component, severity, and measurement command.
   The companion `Wildcard`/`DynamicIndex` (inlined-reducer) cross-product was then also eliminated via aggregate-node hoisting -- a maximal inlined reducer is rerouted through a synthetic `$⁚ltm⁚agg⁚{n}` node (only the rows the reducer's `read_slice` reads, O(N+M)); see `docs/design-plans/2026-05-09-ltm-503-cross-element-agg.md` and commits 44527d17 / 3eca55fb.
 - **Note (2026-05-13):** The conservative-slice carve-out (a reducer over an explicit slice used as a sub-expression, `x[r] = ... + SUM(pop[NYC, *])`) was resolved by #514 (`docs/design-plans/2026-05-11-ltm-arrays-hardening.md`, Phase 4 -- commits ec018d0b / bfb61d08 / 7f837928): `AggNode.read_slice` (`AxisRead ∈ {Pinned, Iterated, Reduced}`) makes a sliced reducer hoistable and routes only the read rows through the agg; an arrayed reducer over an iterated dim (`SUM(matrix[D1, *])`) mints an arrayed agg with one slot per element.
   The only thing that still takes the full cross-product from a reducer is the *bare dynamic index* -- `SUM(pop[idx, *])` with a non-literal `idx`, or `arr[i+1]` -- which isn't statically describable; that is a deliberate narrow carve-out (the IR reclassifies it as `DynamicIndex`).
-  Mapped-dimension sliced reducers also stay conservative -- tracked as GH #534.
+  Mapped-dimension sliced reducers are hoisted (GH #534) except where the correspondence declines them (no declared correspondence, a many-to-one map, or a `MappedRead` axis, GH #997), which stay conservative.
 - **Measure**: Build a test model with explicit subscript references and count element-level edges vs. `N + N` expected.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-13
@@ -208,8 +208,8 @@ Each entry has a description, component, severity, and measurement command.
 ### 21. LTM Polarity Analysis Has Reducer Blind Spots
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `analyze_expr_polarity_with_context`)
-- **Severity**: medium
-- **Description**: Only the scalar two-arg forms of `Max(a, Some(b))` / `Min(a, Some(b))` are handled; the array reducer forms (`Sum`, `Mean`, `Max(_, None)`, `Min(_, None)`, `Stddev`, `Rank`) fall through to `App(_, _, _) => Unknown`.
+- **Severity**: RESOLVED (2026-06-09)
+- **Description**: (**Resolved**: every half is closed, see the notes below; `ltm/polarity.rs` passes SUM/MEAN through.) Only the scalar two-arg forms of `Max(a, Some(b))` / `Min(a, Some(b))` are handled; the array reducer forms (`Sum`, `Mean`, `Max(_, None)`, `Min(_, None)`, `Stddev`, `Rank`) fall through to `App(_, _, _) => Unknown`.
   Any variable computed via `SUM(x[*])` or `MEAN(x[*])` therefore contributes `Unknown` polarity, and every loop through it is classified `Undetermined`.
   For `Sum` and `Mean` polarity is trivially the argument's polarity (monotone in every element).
   Graphical-function monotonicity also uses a strict EPSILON=1e-10 check that flags numeric import noise as `Unknown`.
@@ -231,8 +231,8 @@ Each entry has a description, component, severity, and measurement command.
 ### 22. LTM Dedup Keys Fold Distinct Directed Cycles with Matching Node Sets
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `IndexedGraph::dedup_circuits`, `CausalGraph::deduplicate_loops`)
-- **Severity**: medium
-- **Description**: Dedup hashes the sorted node-index vector.
+- **Severity**: RESOLVED
+- **Description**: (**Resolved** by #308: dedup keys on the canonical edge-sequence rotation, `ltm::canonical_rotation`.) Dedup hashed the sorted node-index vector.
   In a multidigraph a cycle A->B->C->A and the distinct cycle A->C->B->A share a node set and are silently merged into a single `Loop`.
   `test_layout_arms_race` exercises this today.
   For scalar SD models with asymmetric dependency structure the merge happens to be benign, but the semantics are wrong: the two cycles have distinct edge sequences and potentially distinct polarity products.
@@ -263,8 +263,8 @@ Each entry has a description, component, severity, and measurement command.
 ### 25. LTM Element-Level Loop Enumeration Runs at Wrong Granularity
 
 - **Component**: simlin-engine (src/simlin-engine/src/db/analysis.rs `model_loop_circuits_tiered`)
-- **Severity**: RESOLVED (pending #496 merge)
-- **Description**: (**Resolved** by the variable-level loop enumeration refactor; see `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`. Marked RESOLVED contingent on PR #496 landing on main.) `model_element_loop_circuits` enumerated circuits on the full element graph; for a pure-A2A model with V variables over an N-element dimension, every variable-level cycle inflated to N element-level circuits that `build_element_level_loops` collapsed back to one A2A loop.
+- **Severity**: RESOLVED (2026-05-08, PR #496)
+- **Description**: (**Resolved** by the variable-level loop enumeration refactor; see `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`.) `model_element_loop_circuits` enumerated circuits on the full element graph; for a pure-A2A model with V variables over an N-element dimension, every variable-level cycle inflated to N element-level circuits that `build_element_level_loops` collapsed back to one A2A loop.
   The fix is `model_loop_circuits_tiered`: it runs Johnson on the variable graph first, classifies each cycle by its `RefShape` composition via `model_edge_shapes`, and emits pure-scalar / pure-A2A cycles as Loops directly.
   Only cross-element / mixed cycles flow through element-level Johnson, and only on the subgraph induced by their nodes.
   The auto-flip gate now keys on the variable-level SCC (cheap pre-Johnson check) and the slow-path subgraph SCC (computed inside the tiered enumerator) rather than the full N-times-inflated element-graph SCC.
@@ -285,7 +285,7 @@ Each entry has a description, component, severity, and measurement command.
   The fix splits the link score per `RefShape`: `model_ltm_variables` emitted one `LtmSyntheticVar` per `(from, to, shape)` triple, and `build_partial_equation_shaped` (in `ltm_augment.rs`) holds the matching-shape references live while wrapping the rest in `PREVIOUS()`.
   So `share = pop / SUM(pop[*])` produced both a Bare link score (`pop / PREVIOUS(SUM(pop[*]))`) and a Wildcard link score (`PREVIOUS(pop) / SUM(pop[*])`).
   **Superseded-by**: the per-shape *Wildcard* link score described here (the `…⁚wildcard` variant) was retired in commit 49be92dc; reducer references are now hoisted into a `$⁚ltm⁚agg⁚{n}` aggregate node and the lumped reducer link score is decomposed into the chain `pop[d] → agg → share[r]` -- the `pop[d] → agg` half recovers each source element's fractional contribution to the aggregate's velocity (the `…⁚wildcard` variant's variable-level Δpop denominator never did).
-  The Bare-vs-FixedIndex per-shape split survives. (Side note for #517: the A2A path emits the agg's reducer-shortcut numerator as `pop[r]/SUM(PREVIOUS(pop[*]))`, not the desired `pop[r]/PREVIOUS(SUM(pop[*]))`; `SUM(PREVIOUS(arr[*]))` evaluating to 0 under A2A is GH #517's territory.) See `docs/design-plans/2026-05-09-ltm-503-cross-element-agg.md`.
+  The Bare-vs-FixedIndex per-shape split survives. See `docs/design-plans/2026-05-09-ltm-503-cross-element-agg.md`.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-09
 
@@ -328,11 +328,9 @@ Each entry has a description, component, severity, and measurement command.
 ### 30. LTM Polarity Confidence Metric Missing
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `LoopPolarity::from_runtime_scores`)
-- **Severity**: low
-- **Description**: The paper's polarity-confidence metric `|r - |b|| / (r + |b|)` classifies loops as Rux/Bux when mostly one polarity.
-  Simlin collapses any sign change to Undetermined, losing information on mostly-reinforcing loops that briefly dip balancing (or vice versa).
-  Fix: retain the ratio alongside the categorical polarity and surface it in `DetectedLoopsResult`.
-  Implementation in flight on branch `ltm/485-polarity-confidence` (PR #490, in draft); mark RESOLVED with the merge commit hash once the PR lands.
+- **Severity**: RESOLVED (2026-05-08, PR #490)
+- **Description**: (**Resolved**.) The paper's polarity-confidence metric `|r - |b|| / (r + |b|)` classifies loops as Rux/Bux when mostly one polarity.
+  `LoopPolarity::from_runtime_scores` computes the ratio, classifies a mostly-one-sign loop as `MostlyReinforcing`/`MostlyBalancing`, and every loop surface carries it as `polarity_confidence`.
 - **Tracked in**: #485 (LTM tracking epic: #488)
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-06
@@ -497,14 +495,14 @@ Each entry has a description, component, severity, and measurement command.
 
 ### 41. POST /api/projects/:u/:p is not transactional
 
-- **Component**: server (`src/server/api.ts:240-307`)
-- **Severity**: medium
-- **Description**: `app.db.file.create(file.getId(), file)` runs unconditionally before the version-conditional `project.update`, so a 409 (concurrent update) leaves an orphaned file blob in Firestore.
-  The `setTimeout(() => preview.deleteOne(...))` also runs unconditionally, regardless of whether the project update actually succeeded -- which then regenerates the preview from the unchanged underlying state.
-  Pre-existing.
-- **Suspected fix**: Move file create + project update into a single Firestore transaction; gate preview invalidation on `result !== null`.
+- **Component**: server (`src/server/api.ts`, the save handler)
+- **Severity**: low
+- **Description**: The handler writes the File before the version-conditional `project.update`, because the `Table` interface has no cross-table transaction.
+  A stale version fails fast before anything is written, the loser of a version race (409) and a transport failure (500) delete the File they wrote (`cleanupUnreferencedFile`), and the preview is invalidated only after a successful update.
+  Two windows remain: a crash between the two writes leaks one File, and a winner saving byte-identical content in the same millisecond (same file id) that commits between the cleanup's re-read and its delete could lose its File.
+- **Suspected fix**: Move file create + project update into a single Firestore transaction, which needs a transaction primitive on the `Table` interface.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-05-08
+- **Last reviewed**: 2026-10-11
 
 ### 42. Username and project-name validation absent; Firestore filterId is single-replace
 
@@ -664,18 +662,6 @@ Each entry has a description, component, severity, and measurement command.
   Introduced in commit 9c7403e6 (rsbuild migration) / d0bc3e37 (`#214`).
 - **Suspected fix**: Delete both.
   If a service worker is reintroduced later, the exclusion can come back with it.
-- **Owner**: unassigned
-- **Last reviewed**: 2026-05-08
-
-### 57. Stale @system-dynamics/* import path in build-selection-map.test.ts
-
-- **Component**: diagram (`src/diagram/tests/build-selection-map.test.ts:6-7`)
-- **Severity**: low
-- **Description**: The file imports types from `@system-dynamics/core/datamodel` and `@system-dynamics/core/common` instead of `@simlin/core/...` like the rest of the codebase.
-  The test passes only because TypeScript erases type-only imports during compilation, so the dangling module specifier is never resolved.
-  Inconsistent with house style and one rename away from a confusing test failure.
-  Introduced in commit f932a7d1.
-- **Suspected fix**: Change both imports to `@simlin/core/datamodel` / `@simlin/core/common`.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-08
 

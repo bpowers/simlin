@@ -203,7 +203,8 @@ pub fn model_all_diagnostics(
     // Trigger the implicit-helper fragment compiles (GH #1000): a failure in
     // a SMOOTH/DELAY/TREND capture helper otherwise surfaces only as
     // `assemble_module`'s unattributed batch message, and the accumulation
-    // `compile_implicit_var_fragment` performs there is dormant (GH #581).
+    // `compile_implicit_var_fragment` performs there is never collected
+    // (GH #581).
     //
     // Probed with the EMPTY input set: byte-identical to assembly for the
     // ROOT model (root assembly uses the empty set), and only there. For a
@@ -211,7 +212,7 @@ pub fn model_all_diagnostics(
     // widen the module-ident parse context and a reference can resolve
     // solely through `ContextCore.inputs` -- so this probe can MISS a
     // failure that only occurs under a parent's bindings (that class keeps
-    // the pre-#1000 unattributed batch message), and, symmetrically, a
+    // only the unattributed batch message, GH #581), and, symmetrically, a
     // degenerate phantom-dst binding (`BadModuleInputDst`-warned, and
     // nondeterministically compiling due to a pre-existing implicit-index
     // instability) can fail HERE while assembly passes. Probing each model

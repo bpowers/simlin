@@ -37,8 +37,7 @@ initial value=
 sampled=
 	SAMPLE UNTIL(last time, the input, initial value)
 	~	dmnl
-	~	invocation of C-LEARN's SAMPLE UNTIL macro (>= 2 args so the call
-		is not rewritten to LOOKUP -- GH #553)
+	~	invocation of C-LEARN's SAMPLE UNTIL macro
 	|
 
 ********************************************************

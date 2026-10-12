@@ -56,8 +56,8 @@ pub(crate) enum ZeroSlotPolicy {
     /// `db::ltm_value_gate_tests::a_nonfinite_target_arm_is_omitted_to_zero_not_nan`
     /// reproduces both sides.
     ///
-    /// That trade is NOT adjudicated -- it is tracked as GH #1022 -- and the two
-    /// relevant positions disagree.
+    /// The omitted slot's `0` is the decision (GH #1022), taken over two
+    /// positions that disagree.
     /// `crate::float`'s module docs hold that an engine-manufactured NaN is
     /// noise in a channel practitioners debug by hand, and this NaN is
     /// engine-made -- the guard form's own subtraction -- on an arm with no

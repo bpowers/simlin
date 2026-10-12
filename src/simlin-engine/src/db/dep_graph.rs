@@ -478,11 +478,10 @@ pub(crate) fn dt_cycle_sccs(
 /// resolved-SCC set is instead policed by its own structural argument
 /// (the init cycle gate breaks only init-element-acyclic single-variable
 /// members' self-edges; any residual genuine init cycle still raises
-/// `CircularDependency`, exercised directly by the init-phase tests). A
-/// dedicated init-phase *instrumentation* + symmetric cross-check
-/// (mirroring `dt_cycle_sccs`/this predicate for the init relation)
-/// remains a later-task obligation; do not treat the absence of an init
-/// cross-check as a guarantee that the init path needs none.
+/// `CircularDependency`, exercised directly by the init-phase tests). No
+/// init-phase instrumentation or symmetric cross-check exists, by decision
+/// (GH #574: no init-phase defect of this kind has shipped, and such a
+/// check would share the engine's rule that a module has no dependencies).
 ///
 /// Returns `Some(reason)` iff the engine and the refinement diverge on
 /// the same compiled model (=> stop, do not gate: the instrumentation or
@@ -563,9 +562,8 @@ fn dt_cycle_sccs_consistency_violation(
     // init-phase resolved-SCC set has its own structural argument (the
     // init cycle gate breaks only init-element-acyclic members'
     // self-edges; any residual genuine init cycle still raises
-    // `CircularDependency`, exercised by the init-phase tests) and a
-    // dedicated init instrumentation/cross-check is a later-task
-    // obligation.
+    // `CircularDependency`, exercised by the init-phase tests) and no
+    // init cross-check (GH #574).
     if let Some(orphan) = resolved_sccs
         .iter()
         .filter(|s| s.phase == crate::db::SccPhase::Dt)
@@ -1340,7 +1338,7 @@ pub(crate) struct DtSccResolution {
 /// with-inputs re-run is the soundness backstop.
 ///
 /// **As-built decision -- no-input wiring is loud-safe; `module_input_names`
-/// plumbing is deferred (GH #573).** `element_order` is NOT consumed here
+/// plumbing is deliberately not done (GH #573).** `element_order` is NOT consumed here
 /// (it rides on the emitted `ResolvedScc`); Subcomponent B's combined-
 /// fragment injection (Task 6, `assemble_module` ->
 /// `var_phase_symbolic_fragment_prod`) deliberately consumes the *same*
@@ -1360,7 +1358,7 @@ pub(crate) struct DtSccResolution {
 /// a wrong `element_order` or a miscompile. (`ref.mdl` / `interleaved.mdl`
 /// / `init_recurrence.mdl` are all flat root models with no module inputs,
 /// so the corpus is unaffected regardless.) Full `module_input_names`
-/// plumbing into this identification is a deferred item tracked by GH #573;
+/// plumbing into this identification is deliberately not done (GH #573):
 /// it is *not* required for soundness given the backstop, so the `&[]`
 /// argument is loud-safe (not neutral, but never unsound) and there is no
 /// outstanding MUST on Task 6.

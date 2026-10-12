@@ -262,8 +262,8 @@ const K_ATOL: f64 = 1e-4;
 /// variable can be carved out of the comparison without weakening the 1%
 /// gate for any other variable. Mirrors `test_helpers::is_excluded_var`
 /// (the CSV-comparison path) so both gates share identical base-name
-/// semantics. This is a documented, tracked exclusion (every base maps to a
-/// cluster in GH #590 / #591), NOT a tolerance change.
+/// semantics. This is a documented exclusion (every base maps to a cluster
+/// of GH #591, a residual accepted as is), NOT a tolerance change.
 fn vdf_ident_is_excluded(ident: &str, excluded: &[&str]) -> bool {
     excluded.iter().any(|&base| {
         ident == base
@@ -445,10 +445,10 @@ fn ensure_vdf_results(vdf_expected: &Results, results: &Results) -> usize {
 ///   keeping a genuine >1% divergence on a meaningful value a failure.
 /// - **Exclusion (`excluded`):** a matched ident whose base name is in `excluded`
 ///   is SKIPPED entirely -- it counts toward neither `matched`, the failure
-///   count, nor the NaN guards. This is a TRANSPARENT, documented, tracked
-///   known-residual carve-out (every excluded base maps to a cluster in GH #590 /
-///   #591; see `EXPECTED_VDF_RESIDUAL`), NOT a tolerance loosening: the hard 1%
-///   comparison stays unconditional for every NON-excluded variable, and the
+///   count, nor the NaN guards. This is a TRANSPARENT, documented
+///   known-residual carve-out (every excluded base maps to a cluster of GH #591,
+///   accepted as is; see `EXPECTED_VDF_RESIDUAL`), NOT a tolerance loosening:
+///   the hard 1% comparison stays unconditional for every NON-excluded variable, and the
 ///   matched floor is checked AFTER exclusion so the carve-out cannot vacuously
 ///   pass.
 ///
@@ -524,9 +524,7 @@ fn ensure_vdf_results_excluding(
     eprintln!(
         "VDF comparison: {matched} variables matched (after exclusion) across {step_count} time steps"
     );
-    eprintln!(
-        "  excluded (known-residual, tracked in #590/#591) idents skipped: {excluded_matched}"
-    );
+    eprintln!("  excluded (known-residual, GH #591) idents skipped: {excluded_matched}");
     eprintln!(
         "  reference-missing (all-NaN VDF column, not saved) idents skipped: {reference_missing}"
     );
@@ -1948,7 +1946,8 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
 /// covered by the wasm backend -- a hard failure (AC3.2: every core-simulation
 /// model runs through both backends). A model the VM itself cannot simulate
 /// never reaches this hook: one the engine refuses (DELAY FIXED) is held to its
-/// refusal instead, and one waiting on data (GET DATA) is `#[ignore]`d. A supported-but-divergent model panics inside
+/// refusal instead, and one waiting on data (GET DATA) is not simulated at all
+/// (a comment beside `simulates_longeqns_mdl` says why). A supported-but-divergent model panics inside
 /// `ensure_wasm_matches`.
 ///
 /// Special-stock fixtures (`test/conveyors/`, `test/queues/`) must NOT be routed
@@ -2124,10 +2123,10 @@ special_stock_tests! {
 /// - `covid19_severity.stmx` sums its belts' conveyor-driven leak flows into an aux,
 ///   which the engine refuses with `ConveyorDrivenFlowRead` (GH #944).
 /// - `sir_social_distancing_mixnot.stmx` puts its conveyors in sub-models, which
-///   expansion never descends into (`ConveyorInSubmodelUnsupported`, GH #941).
+///   expansion never descends into (`ConveyorInSubmodelUnsupported`, GH #940).
 ///
 /// [`blocked_conveyor_fixtures_stay_blocked_for_their_stated_reason`] asserts the
-/// exact code rather than a bare `is_err()`, so resolving #944 or #941 turns this
+/// exact code rather than a bare `is_err()`, so resolving #944 or #940 turns this
 /// list RED and forces the fixture into [`CONVEYOR_CORPUS_FIXTURES`], instead of
 /// leaving it parked forever as a silently-tolerated "expected failure".
 static BLOCKED_CONVEYOR_FIXTURES: &[(&str, ErrorCode)] = &[
@@ -2192,7 +2191,7 @@ fn queue_fixture_directory_is_fully_accounted_for() {
 /// The two conveyor fixtures that cannot join the corpus, pinned on the EXACT
 /// `ErrorCode` that blocks each -- see [`BLOCKED_CONVEYOR_FIXTURES`]. A bare
 /// `is_err()` would keep passing if the fixture later failed for an unrelated
-/// reason, and would keep passing after #944/#941 are fixed; asserting the code
+/// reason, and would keep passing after #944/#940 are fixed; asserting the code
 /// makes the fixture's promotion to the corpus a test failure someone must act on.
 ///
 /// Both backends are checked, because the block is in the SHARED dispatch
@@ -3888,10 +3887,10 @@ fn simulates_wrld3_03_wasm() {
 /// `0+0` zeroing (#590, fixed Phase 1 -- lookup-only lowers to `gf(Time)`),
 /// RAMP FROM TO import linearization (Phase 2), the passthrough-INIT +
 /// dt-runlist ordering (Phase 3), and the init-runlist nondeterminism
-/// (`e24b0080`). The user-directed decision was to BANK that match and TRACK
-/// the residual rather than chase the rest to within 1%.
+/// (`e24b0080`). The user-directed decision was to BANK that match and accept
+/// the residual (GH #591) rather than chase the rest to within 1%.
 ///
-/// This is a TRANSPARENT, documented, tracked carve-out, NOT a tolerance
+/// This is a TRANSPARENT, documented carve-out, NOT a tolerance
 /// loosening: the hard 1% comparison stays unconditional for every NON-excluded
 /// variable, and the matched floor is checked AFTER exclusion (~2924 matched vs
 /// a ~344 floor, ~8.5x -- the exclusion cannot create a vacuous pass; pinned by
@@ -3949,7 +3948,7 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
 
     // ===== benign-near-zero (2): divergence ONLY on near-zero magnitudes =====
     // (cross-simulator f32/integration noise), never on a meaningful value.
-    // Tracked in #591 cluster 2.
+    // GH #591 cluster 2, accepted as is.
     "co2eq_gap_closing_percentage", // ratio of near-equal small values; peak ~1.1e-2 (vdf -6.8e-4 vs sim 6.9e-4).
     "diffusion_flux", // ~2% on a small early transient (~7% of cells, vdf 0 vs sim ~5e-10); matches late.
     // ===== NaN-vs-:NA: (0): NONE in this list (by construction) =====
@@ -3958,13 +3957,13 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
     // those cells and the finite tail matches within tolerance, so the series is
     // neither all-NaN nor has failing cells and never reaches the failure set.
     // Pinned independently by `classify_vdf_ident_nan_vs_na_skips_without_failing`.
-    // Tracked in #591 for the representation gap, not excluded here.
+    // The representation gap is GH #591's, accepted as is; not excluded here.
 
     // ===== boundary (2): match everywhere except :NA:-arithmetic cells =====
     // Vensim computes `-2*NA = -1.298e33` while Simlin keeps the bare `:NA:`
     // sentinel `-6.49e32` (`crate::float::NA`); NA-arithmetic is confirmed
     // CORRECT and explicitly out of scope (see `float::NA`). The genuine
-    // documented remainder, tracked in #591 cluster 1. (`historical_gdp_lookup`
+    // documented remainder, GH #591 cluster 1, accepted as is. (`historical_gdp_lookup`
     // -- the lookup table whose only divergence was this same -2*NA tail -- is
     // now dropped as a lookup-only table, so only the genuine consumer
     // `historical_gdp` remains here.)
@@ -3999,7 +3998,7 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
 // is PROVEN correct on all of them; the engine-genuine and NaN-vs-`:NA:`
 // categories are empty (the sole engine-genuine divergence, init-runlist
 // nondeterminism, was fixed in `e24b0080`). The exclusion is a transparent,
-// documented, tracked carve-out -- NOT a tolerance loosening; the hard 1% gate
+// documented carve-out -- NOT a tolerance loosening; the hard 1% gate
 // holds for every non-excluded variable and the matched floor is checked after
 // exclusion.
 //
@@ -4011,9 +4010,8 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
 fn simulates_clearn() {
     let (vdf_results, results) = run_clearn_vs_vdf();
 
-    // Hard 1% gate for every NON-excluded variable; the documented, tracked
-    // EXPECTED_VDF_RESIDUAL bases (#597 reader-artifact / #591 residual) are
-    // skipped. The matched floor is enforced AFTER exclusion, so this cannot
+    // Hard 1% gate for every NON-excluded variable; the documented
+    // EXPECTED_VDF_RESIDUAL bases (the #591 residual) are skipped. The matched floor is enforced AFTER exclusion, so this cannot
     // vacuously pass.
     let reference_missing =
         ensure_vdf_results_excluding(&vdf_results, &results, EXPECTED_VDF_RESIDUAL);
@@ -4147,7 +4145,7 @@ fn simulates_clearn_wasm() {
 ///
 /// Asserts the live set EQUALS `EXPECTED_VDF_RESIDUAL`, failing LOUDLY with the
 /// symmetric difference if the residual GREW (a regression -- new divergence to
-/// investigate, file under #590/#591) or SHRANK (an engine fix -- prune the now-
+/// investigate) or SHRANK (an engine fix -- prune the now-
 /// passing base from the exclusion). Reuses `classify_vdf_ident` (no comparator
 /// duplication). Runs by default like `simulates_clearn`, whose fixture it
 /// shares.
@@ -4208,8 +4206,8 @@ fn clearn_residual_exactness() {
     assert!(
         grew.is_empty() && shrank.is_empty(),
         "EXPECTED_VDF_RESIDUAL is no longer exact.\n  \
-         Newly-failing bases NOT in the exclusion (regression -- investigate, \
-         track under #590/#591): {grew:?}\n  \
+         Newly-failing bases NOT in the exclusion (regression -- \
+         investigate): {grew:?}\n  \
          Excluded bases that NO LONGER fail (a fix -- prune them from \
          EXPECTED_VDF_RESIDUAL): {shrank:?}"
     );
@@ -5124,13 +5122,13 @@ TIME STEP = 1 ~~|
 /// After the per-element resolution fix, that `MismatchedDimensions` is
 /// gone (the parser-level shape is correct).
 ///
-/// The end-to-end deep-ocean *value* check is deferred: the C-LEARN
-/// deep-ocean is a genuine subscript-shift recurrence (`dflux` depends on
-/// the stock) that only *simulates* once element-level cycle resolution
-/// also lands (#559). This minimal repro's `dflux` is constant, so it has
-/// no such cycle; we therefore assert ONLY the parser-level symptom
-/// removal (no `MismatchedDimensions` on the synthesized net-flow) and
-/// explicitly do NOT assert deep-ocean simulation *values* here.
+/// This test asserts ONLY the parser-level symptom removal (no
+/// `MismatchedDimensions` on the synthesized net-flow), not simulation
+/// values. The C-LEARN deep ocean is a genuine subscript-shift recurrence
+/// (`dflux` depends on the stock), resolved by element-level cycle
+/// resolution (#559); its values are checked against Vensim's by
+/// `simulates_clearn`. This minimal repro's `dflux` is constant, so it has
+/// no such cycle.
 #[test]
 fn simulates_synthetic_net_flow_shape() {
     use simlin_engine::common::ErrorCode;
@@ -5604,11 +5602,11 @@ fn mark2_mdl_simulates_with_ltm_under_rk4() {
 // each running `open_vensim` -> `compile_vm` -> VM -> `ensure_results` against
 // the fixture's `output.tab` (the same pipeline `simulate_mdl_path` runs).
 //
-// Group 2 covers the five single-output behaviors that have no bundled
-// fixture, using a trivial inline `.mdl` string with hand-computed expected
-// values. NOTE (GH #553): a single-argument `NAME(arg)` MDL call is rewritten
-// to `LOOKUP(NAME, arg)` before macro resolution, so every inline macro below
-// uses >= 2 parameters so the call survives MDL import as a macro invocation.
+// Group 2 covers the single-output behaviors that have no bundled fixture,
+// using a trivial inline `.mdl` string with hand-computed expected values.
+// A one-argument MDL call `NAME(arg)` is a table lookup only when the model
+// declares a variable `NAME`; otherwise it is a call of the macro or builtin
+// of that name (GH #553, `simulates_one_parameter_macro_calls`).
 // ===========================================================================
 
 /// Read a scalar variable's value at simulation step `step` (0-based) from a
@@ -5736,8 +5734,7 @@ fn simulates_macro_trailing_definition_mdl() {
 // Each of C-LEARN's three *invoked* macros (`SAMPLE UNTIL`, `SSHAPE`,
 // `RAMP FROM TO`) is exercised by a small focused `.mdl` whose `:MACRO:`
 // block is copied VERBATIM from `C-LEARN v77 for Vensim.mdl` and invoked
-// with known constant inputs (>= 2 args so the call is not rewritten to
-// `LOOKUP` -- GH #553). The expected `output.tab` is hand-computed by
+// with known constant inputs. The expected `output.tab` is hand-computed by
 // applying the macro body formula to those inputs (worked out in each
 // fixture's README.md, grounded in the engine's `STEP`/`RAMP`/`INTEG`
 // semantics). C-LEARN's uninvoked `INIT` macro needs no focused model --
@@ -5969,11 +5966,10 @@ fn simulates_passthrough_init_macro_scalar_capture_is_constant() {
     // The importer renames Vensim INITIAL to INIT, so BOTH the macro body
     // (`INIT = INITIAL(x)` -> `init = init(x)`) AND the caller's
     // `captured = INITIAL(growing)` (-> `init(growing)`) collide with the
-    // like-named renamed builtin -- the #591-c1 shape. The caller must write
-    // the genuine Vensim builtin `INITIAL(...)` (which the importer recognizes
-    // and renames), NOT the post-rename `INIT(...)`: a single-argument
-    // `INIT(arg)` written directly would hit the MDL importer's
-    // 1-arg-call->LOOKUP heuristic (GH #553) and never reach macro resolution.
+    // like-named renamed builtin -- the #591-c1 shape. The caller writes the
+    // genuine Vensim builtin `INITIAL(...)` (which the importer recognizes
+    // and renames), NOT the post-rename `INIT(...)`, so the call reaches
+    // macro resolution through the rename, as C-LEARN's does.
     let mdl = "\
 {UTF-8}
 :MACRO: INIT(x)
@@ -6054,8 +6050,7 @@ TIME STEP = 1 ~~|
 /// macros.AC2.7: a macro body referencing global time via the `$` escape
 /// (`Time$`) simulates with the global time values.
 ///
-/// Macro `M(base, offset) = base + offset + Time$` (a second parameter is
-/// required so the call is not rewritten to LOOKUP -- GH #553).
+/// Macro `M(base, offset) = base + offset + Time$`.
 ///   y = M(10, 0) = 10 + 0 + Time = 10 + Time
 /// With INITIAL TIME=0, FINAL TIME=4, TIME STEP=1: y[k] = 10 + k.
 #[test]
@@ -6130,7 +6125,7 @@ TIME STEP = 1 ~~|
 /// end-to-end through simulation.
 ///
 /// Macro `SSHAPE(x, p) = x + p` (a real `SSHAPE` builtin exists and is a
-/// 3-arg S-curve; a 2-arg call is NOT rewritten to LOOKUP).
+/// 3-arg S-curve).
 ///   y = SSHAPE(3, 4) = 3 + 4 = 7    (macro definition, NOT the builtin)
 ///   z = ABS(-7) = 7                 (an unrelated builtin still works)
 #[test]
@@ -6166,6 +6161,60 @@ TIME STEP = 1 ~~|
             (z - 7.0).abs() < 1e-9,
             "step {step}: z = {z}, expected 7 = ABS(-7) (unrelated builtin)"
         );
+    }
+}
+
+/// GH #553: a one-argument MDL call `NAME(arg)` is a macro invocation unless
+/// the model declares a variable `NAME`, in which case it is a call of that
+/// table (`calls_a_table` in `mdl/xmile_compat.rs`). Both arms are in one
+/// model, and each one-parameter macro is checked by its value: a stockless
+/// one with a time-varying argument and a stock-bearing one.
+///
+///   doubled     = DOUBLE(Time + 1), DOUBLE(x) = x * 2    -> 2 * (Time + 1)
+///   accumulated = ACCUM(2), ACCUM(rate) = INTEG(rate, 0) -> 2 * Time
+///   looked up   = tbl(Time), tbl through (0,10) and (4,50) -> 10 + 10 * Time
+/// With INITIAL TIME=0, FINAL TIME=4, TIME STEP=1: Time = 0..4.
+#[test]
+fn simulates_one_parameter_macro_calls() {
+    let mdl = "\
+{UTF-8}
+:MACRO: DOUBLE(x)
+DOUBLE = x * 2
+	~	dmnl
+	~	one-parameter stockless macro
+	|
+:END OF MACRO:
+:MACRO: ACCUM(rate)
+ACCUM = INTEG(rate, 0)
+	~	dmnl
+	~	one-parameter stock-bearing macro
+	|
+:END OF MACRO:
+tbl( [(0,0)-(4,50)],(0,10),(4,50) ) ~~|
+doubled = DOUBLE(Time + 1) ~~|
+accumulated = ACCUM(2) ~~|
+looked up = tbl(Time) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 4 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl);
+    assert_eq!(results.step_count, 5, "expected 5 saved steps (t=0..4)");
+    for step in 0..results.step_count {
+        let time = macro_test_value_at(&results, "time", step);
+        let checks = [
+            ("doubled", 2.0 * (time + 1.0)),
+            ("accumulated", 2.0 * time),
+            ("looked_up", 10.0 + 10.0 * time),
+        ];
+        for (name, expected) in checks {
+            let actual = macro_test_value_at(&results, name, step);
+            assert!(
+                (actual - expected).abs() < 1e-9,
+                "step {step} (Time={time}): {name} = {actual}, expected {expected}"
+            );
+        }
     }
 }
 
@@ -6206,9 +6255,6 @@ fn simulates_macro_multi_output_mdl() {
 // Variable::Module
 // per dimension element -- with no new mechanism. These tests verify that
 // (macros.AC3.4) and the per-element-independent-stock edge (macros.AC3.5).
-//
-// SCALE / ACCUM each take >= 2 parameters: a 1-arg MDL call `NAME(arg)` is
-// rewritten to LOOKUP before macro resolution (GH #553).
 // ===========================================================================
 
 /// macros.AC3.4: the bundled arrayed fixture parses, expands per-element,
@@ -6840,9 +6886,8 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
 /// builds on. It asserts the four macros import correctly AND the
 /// #554 macro-attributable cascade is gone (no macro-registry
 /// `CircularDependency`). It deliberately does NOT assert that all of
-/// C-LEARN compiles -- C-LEARN's non-macro blockers (#552, #553, #363,
-/// model-logic deps) remain out of scope -- only that no macro-specific
-/// error from #554 fires.
+/// C-LEARN compiles (`simulates_clearn` does) -- only that no
+/// macro-specific error from #554 fires.
 ///
 /// Runs by default. The "~4s just to parse C-LEARN" that justified `#[ignore]`
 /// is no longer true -- the `engine-compile-perf` branch cut MDL import by a
@@ -6903,11 +6948,10 @@ fn corpus_clearn_macros_import() {
     }
 
     // macros.AC6.2: compile C-LEARN via the salsa path, collect every
-    // diagnostic, and assert NO diagnostic is *macro-attributable*. C-LEARN's
-    // known NON-macro blockers (circular deps, dimension mismatches, unit
-    // errors, and a non-time `$` reference -- Phase 3's documented
-    // limitation) are expected and explicitly allowed; the assertion is
-    // specifically that macro handling itself introduced no error. The
+    // diagnostic, and assert NO diagnostic is *macro-attributable*. NON-macro
+    // diagnostics (circular deps, dimension mismatches, unit errors, a
+    // non-time `$` reference) are allowed; the assertion is specifically
+    // that macro handling itself introduced no error. The
     // classifier (`macro_attributable_diagnostics`, this file's own -- the
     // metasd corpus harness has a deliberately NARROWER variant of its own,
     // `metasd_macros::narrower_macro_attributable_diagnostics`) catches
@@ -6926,8 +6970,8 @@ fn corpus_clearn_macros_import() {
     assert!(
         macro_diags.is_empty(),
         "macros.AC6.2: C-LEARN must compile with NO macro-attributable \
-         diagnostic (its non-macro blockers -- circular deps, dim mismatches, \
-         unit errors, the non-time `$` ref -- are out of scope). The #554 fix \
+         diagnostic (non-macro diagnostics -- circular deps, dim mismatches, \
+         unit errors, a non-time `$` ref -- are out of scope). The #554 fix \
          removed the false `init -> init` macro-registry recursion and its \
          `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO` cascade; this guards that \
          regression. Found {} macro-attributable diagnostic(s): {macro_diags:#?}",

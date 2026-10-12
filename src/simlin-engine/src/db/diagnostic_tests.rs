@@ -3273,7 +3273,8 @@ fn a_model_that_compiles_gains_no_codegen_diagnostic() {
 ///
 /// Both arms are therefore unreachable TODAY rather than uncovered by
 /// oversight, and each becomes reachable independently: the stock arm if the
-/// lowering guard is relaxed (a `non_negative` clamp, GH #545), the module arm
+/// lowering guard is relaxed (a `non_negative` clamp, which GH #545 decided
+/// against), the module arm
 /// if module inputs ever lower to something richer than a bare reference. The
 /// wiring itself is shared -- all three sites call the same `compile_phase`
 /// closure -- so the two covered phases exercise the mechanism.

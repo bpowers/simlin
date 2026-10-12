@@ -101,7 +101,7 @@
 //!   wrong element moves a row.
 //! - `clearn_ltm_discovery_compiles` (`#[ignore]`d): asserts C-LEARN
 //!   compiles via the incremental path with LTM discovery enabled (a
-//!   clean `Ok`, no panic), re-verifying GH #363. It asserts only the
+//!   clean `Ok`, no panic), pinning GH #363. It asserts only the
 //!   compile result, not discovery tractability. It stays `#[ignore]`d
 //!   for its runtime class (parsing C-LEARN's 1.4 MB MDL plus a
 //!   discovery-mode compile runs tens of seconds in the debug build), not
@@ -127,13 +127,10 @@ use crate::test_helpers::ltm_discovery_inputs;
 const WORLD3_MDL: &str = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
 
 /// C-LEARN v77, a large Vensim model. It compiles via the incremental
-/// path with LTM discovery enabled (Vensim macro support is complete --
-/// `SAMPLE UNTIL`, `SSHAPE` and the rest inline through the converter, so
-/// the old GH #349 "macros not inlined" blocker no longer applies). GH
-/// #363 (the incremental compiler historically panicking on C-LEARN
-/// rather than returning a clean error) is re-verified by
-/// `clearn_ltm_discovery_compiles`: the panic does not reproduce on this
-/// path.
+/// path with LTM discovery enabled (its macros -- `SAMPLE UNTIL`, `SSHAPE`
+/// and the rest -- expand like any other, GH #349). GH #363 (a panic in
+/// the incremental compiler on C-LEARN rather than a clean error) is
+/// pinned by `clearn_ltm_discovery_compiles`.
 const CLEARN_MDL: &str = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
 
 /// C-LEARN as it opens.
@@ -496,13 +493,10 @@ fn discovery_contract_holds_on_tractable_arrayed_model() {
 
 /// C-LEARN compiles via the incremental path with LTM discovery enabled.
 ///
-/// C-LEARN v77 uses Vensim macros (`SAMPLE UNTIL`, `SSHAPE`); macro
-/// support is now complete (they inline through the converter -- see
-/// `corpus_clearn_macros_import`), so the old GH #349 "macros parsed but
-/// not inlined" blocker no longer applies. This test re-verifies GH #363
-/// (the incremental compiler historically panicking on C-LEARN rather
-/// than returning a clean error): the panic does not reproduce on this
-/// path.
+/// C-LEARN v77 uses Vensim macros (`SAMPLE UNTIL`, `SSHAPE`), which expand
+/// like any other (GH #349; `corpus_clearn_macros_import`). This test pins
+/// GH #363 (a panic in the incremental compiler on C-LEARN rather than a
+/// clean error).
 ///
 /// It parses C-LEARN, then compiles it via the incremental salsa path
 /// with **LTM discovery enabled** (`LtmOverlay::On` +
@@ -514,8 +508,8 @@ fn discovery_contract_holds_on_tractable_arrayed_model() {
 ///
 /// Scope: this asserts only a clean compile result (AC7.4). It does not
 /// run `discover_loops_with_graph` or assert discovery
-/// tractability/structural sanity on C-LEARN -- that broader coverage is
-/// out of scope here and would be tracked separately.
+/// tractability/structural sanity on C-LEARN; the loops discovery finds
+/// there are `clearn_leading_loops_keep_their_shares`'s.
 ///
 /// `#[ignore]`d for the `cargo test --workspace` time budget: parsing
 /// C-LEARN's 1.4 MB MDL plus a discovery-mode compile runs about a second
@@ -528,7 +522,7 @@ fn clearn_ltm_discovery_compiles() {
 
     // Compile via the incremental path with LTM discovery enabled. NOT
     // wrapped in `catch_unwind`: per AC7.5 a panic here is a hard,
-    // root-caused failure (the GH #363 symptom re-verified), never caught.
+    // root-caused failure (the GH #363 symptom), never caught.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);

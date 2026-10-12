@@ -52,7 +52,8 @@ const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 
 const IDENTITY_TOOLKIT_BASE = 'https://identitytoolkit.googleapis.com/admin/v2';
 const API_KEYS_BASE = 'https://apikeys.googleapis.com/v2';
-// Where the shipped SPA hardcodes its Firebase web API key (see issue #381).
+// Where the shipped SPA hardcodes its Firebase web API key, which is public by
+// design and referrer-restricted (issue #381).
 const FIREBASE_CONFIG_SOURCE = path.join(REPO_ROOT, 'src/app/App.tsx');
 
 // ===========================================================================

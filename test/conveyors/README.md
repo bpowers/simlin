@@ -14,12 +14,13 @@ container auxes included. That harness is `simulate_special_path` in
 **Know what that does and does not buy you.** The harness checks round-trip fidelity
 and VM-vs-wasm parity, not numeric truth. `wasmgen/belt.rs` is written to reproduce
 `conveyor.rs` bit for bit, quirks included (GH #942), so a belt-pass bug that both
-backends share passes every test here. The only automatic pin on the VM's numerics is
-`src/simlin-engine/src/conveyor_tests.rs`, whose expected values are transcribed by
-hand from `reference_prototype.py` (below) — nothing runs that script. GH #951 tracks
-extending it to the leak-zone, discrete, and coupled cases and running it from a Rust
-test, which is the only check that would catch a lockstep drift. GH #950 is a live
-instance: `queue_coupled_conveyor.xmile`'s belt contents are fractional where
+backends share passes every test here. The pins on the VM's numerics are
+`src/simlin-engine/src/conveyor_tests.rs` (scenarios s1–s15, leak zones and discrete
+admission included), whose expected values are transcribed by hand from
+`reference_prototype.py` (below), and the queue-coupling tests in
+`src/simlin-engine/src/queue_compile.rs`. No test runs that script, deliberately
+(GH #951). The queue-fed belt is the case none of them pins, because its semantics
+are undecided (GH #950), and it is a live instance: `queue_coupled_conveyor.xmile`'s belt contents are fractional where
 conveyors.md §6.4 says they must be integral, both backends agree, and no test notices.
 
 **Every model file in this directory is accounted for by name**, in one of two lists
@@ -51,8 +52,7 @@ dispatch, so the VM never simulates them either.
 
 - `sir_social_distancing_mixnot.stmx`: both conveyors are `Infected` stocks inside
   the `Not_Mixing` / `Not_Mixing_at_all` sub-models, and expansion never descends
-  into a sub-model — `ConveyorInSubmodelUnsupported` (GH #941, with the underlying
-  limitation tracked as GH #940). Even once that is fixed it needs the §8 `dist`
+  into a sub-model — `ConveyorInSubmodelUnsupported` (GH #940). Even once that is fixed it needs the §8 `dist`
   placement (GH #946) and the isee builtin `LOOKUPMEAN` for its transit time.
 - `covid19_severity.stmx`: its `death rate` aux is `SUM(contagious_deaths[*]) + ...`,
   a same-step read of four conveyor-driven leak flows, which the engine refuses with
@@ -63,7 +63,7 @@ dispatch, so the VM never simulates them either.
 
 Both are pinned on their exact `ErrorCode` (in `simulate.rs` and again, at the wasm
 lowering layer, in `src/simlin-engine/src/wasmgen/belt_tests.rs`), so fixing #944 or
-#941 turns those pins red and forces the fixture into the corpus — rather than
+#940 turns those pins red and forces the fixture into the corpus — rather than
 leaving it parked forever as a silently-tolerated "expected failure".
 
 ## Provenance and attribution
@@ -102,24 +102,29 @@ No open-source model was found that exercises conveyor `<capacity>`,
 capacity, discrete, `<in_limit>`, and queue-coupling fixtures above are
 hand-authored.
 
-Known corpus gaps. GH #949 tracks the missing single-belt feature fixtures:
-`<arrest>` and `<sample>` have no fixture, nor do `exponential_leak`,
-`<leak_integers/>`, the §7.2 explicit init list, or a time-varying `<len>` — only
-unit coverage in `wasmgen/belt_tests.rs` and `conveyor_tests.rs`, which build
-their XMILE in-test and so never cross the protobuf or XMILE round-trip. Three
-more that are easy to assume away (the first two tracked as GH #954, the third as
-GH #950):
+Known corpus gaps. `<arrest>` and `<sample>` have no fixture, nor do
+`exponential_leak`, `<leak_integers/>`, the §7.2 explicit init list, or a
+time-varying `<len>`. That is deliberate (GH #949): `conveyor_tests.rs` and
+`wasmgen/belt_tests.rs` cover their behaviour, and their round trips are covered by
+the XMILE tests in `xmile/variables.rs` (`conveyor_block_all_fields_roundtrip`,
+`exponential_leak_attr_roundtrips`) and by the protobuf proptest, which generates
+every conveyor field (`serde_proptest.rs`). Three more that are easy to assume away
+(the first two covered outside the corpus, GH #954; the third GH #950):
 
 - **No fixture combines a queue-coupled inflow with an equation-driven inflow on
   the same belt.** `queue_coupled_conveyor.xmile`'s belt has only the coupled
-  inflow, so the `rem_cap` drawdown between `conv_vol` and the equation-driven
-  apportion loop (`belt::emit_phase_b_active` step 4) is never exercised. A fault
-  injected into the apportion loop alone leaves that fixture green. (GH #954.)
+  inflow, so the corpus never exercises the `rem_cap` drawdown between `conv_vol`
+  and the equation-driven apportion loop (`belt::emit_phase_b_active` step 4); a
+  fault injected into the apportion loop alone leaves that fixture green.
+  `wasmgen/belt_tests.rs`'s `conv_vol_charges_capacity_room` covers that drawdown,
+  with a conveyor-driven inflow in the queue's place.
 - **No fixture exercises FIFO backlog or the four `(one_at_a_time,
   batch_integrity)` batch rules.** `queue_coupled_conveyor.xmile`'s queue carries
   an `<overflow/>`, so it drains fully every DT (queues.md §4.5) and never holds a
-  second cohort. `test/queues/queue_wait.xmile`, the backlog oracle queues.md §12
-  asks for, does not exist. (GH #954.)
+  second cohort, and `test/queues/queue_wait.xmile`, the backlog oracle queues.md
+  §12 asks for, does not exist. `wasmgen/belt_tests.rs`'s `every_coupled_batch_rule_matches_vm`
+  builds a backlog and checks all four rules VM against wasm, and the coupling
+  tests in `queue_compile.rs` pin the VM's values.
 - **`discrete="true"` in the coupled fixture is a gate, not an observable.** XMILE
   §3.7.2 requires a queue-fed belt to be discrete; it does not make that belt's
   contents integral here. See GH #950.

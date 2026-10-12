@@ -10,8 +10,7 @@ formula.
 `SSHAPE` is interesting for two reasons:
 
 1. A real `SSHAPE` builtin exists (a 3-arg S-curve); the project macro
-   **shadows** it. A 2-arg call is not rewritten to `LOOKUP` (GH #553) and
-   resolves to the macro.
+   **shadows** it: the call resolves to the macro.
 2. The macro body has a **macro-local helper** (`input = MIN(1, MAX(0,
    xin))`) and a two-branch `IF THEN ELSE`; both branches are exercised.
 
@@ -40,8 +39,6 @@ profile    = 2
 high input = 0.8     ->  s high = SSHAPE(0.8, 2)   (upper branch)
 low input  = 0.3     ->  s low  = SSHAPE(0.3, 2)   (lower branch)
 ```
-
-Two-plus arguments, so neither call is rewritten to `LOOKUP` (GH #553).
 
 ## Hand-computed expected values
 

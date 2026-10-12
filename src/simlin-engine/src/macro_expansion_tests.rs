@@ -791,10 +791,10 @@ y=
 //
 // These end-to-end tests reproduce the pattern on a tiny inline `.mdl`
 // (C-LEARN itself is 1.4 MB; its full-corpus guard is the `#[ignore]`d
-// `corpus_clearn_macros_import` in `tests/integration/simulate.rs`). The macros take two
-// params so the invocation is not rewritten to `LOOKUP` (the unrelated #553
-// 1-arg-call heuristic) -- the `INITIAL(x)`->`INIT(x)` rename inside the body
-// (the #554 trigger) is independent of the invocation's arity.
+// `corpus_clearn_macros_import` in `tests/integration/simulate.rs`). The
+// `INITIAL(x)`->`INIT(x)` rename inside the body (the #554 trigger) is
+// independent of the invocation's arity, so the macros' two params are
+// incidental.
 
 /// GH #554's model, through the production MDL import: C-LEARN's uninvoked
 /// `:MACRO: INIT(x) ... INIT = INITIAL(x)`, whose body the importer's necessary

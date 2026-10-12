@@ -11386,9 +11386,9 @@ fn gh791_full_extent_multisource_read_stays_scored() {
 /// so BEFORE the fix the edge fell to `emit_per_shape_link_scores` shape Bare
 /// and minted a single arrayed `link_score:pop->share` simulating to ~-0.0 at
 /// every step with NO per-edge warning (only `loop_score:u5` warned -- the
-/// other loops consumed the silent near-zero). The MDL importer expands a
-/// single apply-to-all Vensim equation into N per-element equations (GH #651),
-/// so this spelling is exactly what real imports produce.
+/// other loops consumed the silent near-zero). This spelling is the one a
+/// model written element by element has (an MDL import takes per-element
+/// copies back to one equation only where they say nothing more, GH #651).
 ///
 /// The fix routes it to the same GH #758/#780 loud skip the A2A spelling takes:
 /// one warning naming the edge + its actual slice, no link-score variable, the

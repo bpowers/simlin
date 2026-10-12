@@ -787,8 +787,8 @@ impl SymbolicByteCodeBuilder {
     /// always ends in an `Op2` and the fused form is always emittable. Codegen
     /// therefore fuses here, at emit time, and reports a typed error if a stock
     /// update ever arrives in a shape that would need the un-fused opcode --
-    /// most plausibly an eventual `non_negative` implementation (GH #545)
-    /// wrapping the update in a `MAX`. A comment could not fail; this can.
+    /// most plausibly a `non_negative` clamp (which the engine deliberately
+    /// does not enforce, GH #545) wrapping the update in a `MAX`. A comment could not fail; this can.
     ///
     /// Fusing at emit time is strictly inside `peephole_optimize`'s
     /// jump-target safety envelope rather than an exception to it: the `Op2`

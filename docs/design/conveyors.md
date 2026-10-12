@@ -1331,9 +1331,9 @@ no representation (tracked as GH #904); today's reader behavior is:
   dropped** — the reader's `<element>` struct carries only
   `eqn`/`init_eqn`/`gf`, so the sub-tag is never parsed and no diagnostic
   fires.
-- `<element>` with `<len>` but no `<eqn>`: the whole file fails to open with
-  an opaque `xml_deserialization: missing field 'eqn'` error (the `<eqn>`
-  field is required), not a targeted diagnostic.
+- `<element>` with `<len>` but no `<eqn>`: the file opens (the reader's `eqn`
+  is optional, GH #907), the `<len>` is dropped the same way, and the element
+  is read with an empty equation.
 
 The shared expressions can still **vary per element**, because each is
 evaluated per element (apply-to-all over the stock's dimensions): a `<len>` of
@@ -1447,9 +1447,10 @@ The VM's own numerics are pinned automatically
 only by `conveyor_tests.rs`, which transcribes the `reference_prototype.py`
 ([§15](#15-worked-examples-verified-reference-trajectories)) trajectories by hand;
 nothing executes that script.
-GH #951 tracks extending the prototype to the
-leak-zone, discrete, and coupled cases and running it from a Rust test against the
-fixtures below — the only check that catches a lockstep VM+wasm drift.
+Those transcriptions include the leak-zone and discrete cases; the queue-fed case
+is not pinned, since its semantics wait on GH #950.
+Running the prototype from a Rust test against the fixtures below is deliberately
+not done (GH #951).
 
 Each hand-authored fixture below has one `simulate_special_path` test in
 `tests/integration/simulate.rs`, listed in `CONVEYOR_CORPUS_FIXTURES`:
@@ -1474,10 +1475,13 @@ Each hand-authored fixture below has one `simulate_special_path` test in
   It pins the
   phase-A-before-serve interleaving, and nothing else about the queue: the
   `<overflow/>` drains the FIFO every DT, so backlog discipline and the four batch
-  rules go untested (queues.md §12's `queue_wait.xmile` is still missing), and the
-  belt's only inflow is the coupled one, so the `rem_cap` drawdown into the
-  equation-driven apportion loop is never exercised either.
-  Both gaps are GH #954.
+  rules go untested here (queues.md §12's `queue_wait.xmile` does not exist), and
+  the belt's only inflow is the coupled one, so the `rem_cap` drawdown into the
+  equation-driven apportion loop is not exercised here either.
+  Both are covered outside the corpus (GH #954): `belt_tests.rs`'s
+  `every_coupled_batch_rule_matches_vm` builds a backlog and checks all four batch
+  rules against the VM, `conv_vol_charges_capacity_room` is the shared-capacity
+  case, and `queue_compile.rs`'s coupling tests pin the VM's values.
   Its fractional slat contents are the GH #950 divergence above.
 
 The two vendored real-world models cannot join the corpus, for reasons unrelated
@@ -1490,7 +1494,7 @@ parked as a tolerated failure:
 - `sir_social_distancing_mixnot.stmx` — peterhovmand corpus, CC BY 4.0.
   Its
   conveyors live in sub-models, which expansion never descends into
-  (`ConveyorInSubmodelUnsupported`, GH #941 / #940).
+  (`ConveyorInSubmodelUnsupported`, GH #940).
   It would also need the §8
   `dist` placement (GH #946) and the isee builtin `LOOKUPMEAN`.
 - `covid19_severity.stmx` — peterhovmand corpus, CC BY 4.0.

@@ -510,7 +510,8 @@ pub enum ErrorCode {
     /// deferred feature, not an engine bug, so it is rejected up front with the
     /// offending stock's name and model rather than the internal invariant error.
     /// The spec does not yet state the limitation anywhere; GH #940 tracks writing
-    /// it down, and GH #941 is the real-world fixture it blocks.
+    /// it down, and `test/conveyors/sir_social_distancing_mixnot.stmx` is the
+    /// real-world fixture it blocks (GH #941).
     ConveyorInSubmodelUnsupported,
     /// A queue stock is defined in a model that is NOT the main model. Queue
     /// simulation is currently supported only in the main model (mirrors

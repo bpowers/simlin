@@ -699,10 +699,11 @@ nature of links is not important over the course of the simulation.
 > discovery (`analyze_model` / MCP) and pysimlin `Run.loops` reclassify from the loop's
 > partition-relative score series (Section 4.4; bounded per step, so the confidence is the
 > dominance-weighted time share of each sign, and for a loop alone in its partition the
-> plain time share) while keeping the loop id stable, whereas the libsimlin / WASM / TS
-> `get_loops` surface is structural-only (it has no simulation results in hand and folds
-> Rux/Bux to R/B at the FFI boundary -- surfacing runtime polarity there is tracked under
-> GH #495). See the "Runtime Polarity" section of
+> plain time share) while keeping the loop id stable. libsimlin has both: `get_loops` is
+> structural (it has no simulation results in hand, so it reports only R, B and
+> undetermined), and `simlin_analyze_get_loops_runtime` reclassifies a run's loops and
+> reports Rux/Bux. The TypeScript engine binds only the structural query (the runtime
+> binding is GH #731). See the "Runtime Polarity" section of
 > [the design doc](../design/ltm--loops-that-matter.md) for the per-surface breakdown and
 > the `reclassify_loops_from_results` in-engine primitive.
 

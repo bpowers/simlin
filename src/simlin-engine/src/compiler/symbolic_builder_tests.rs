@@ -175,8 +175,8 @@ fn test_builder_fuses_trailing_op2_into_assign_next() {
 }
 
 /// The other half of the contract: when the operand walk did NOT end in
-/// an `Op2` -- the shape an eventual `non_negative` implementation
-/// (GH #545) would produce by wrapping the stock update in a builtin --
+/// an `Op2` -- the shape a `non_negative` clamp (deliberately not
+/// enforced, GH #545) would produce by wrapping the stock update in a builtin --
 /// the helper refuses and emits nothing, so codegen can raise a typed
 /// error instead of silently dropping the store.
 #[test]

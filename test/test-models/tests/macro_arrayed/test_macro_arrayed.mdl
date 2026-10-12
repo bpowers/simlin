@@ -20,7 +20,7 @@ inp[Region]=
 factor=
 	3
 	~	dmnl
-	~	scalar scale factor (>= 2 args so the call is not LOOKUP -- GH #553)
+	~	scalar scale factor
 	|
 
 out[Region]=

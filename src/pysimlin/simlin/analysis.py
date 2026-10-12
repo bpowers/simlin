@@ -84,11 +84,12 @@ class LoopPolarity(IntEnum):
     implementation to drift.
 
     All five integer values mirror the C FFI `SimlinLoopPolarity` 1:1
-    (GH #495): the FFI no longer coalesces MOSTLY_* down to R/B, and carries
+    (GH #495): the FFI does not coalesce MOSTLY_* down to R/B, and carries
     a polarity-confidence ratio alongside the polarity (see
-    `Loop.polarity_confidence`). On the structural loop surface the FFI still
+    `Loop.polarity_confidence`). On the structural loop surface the FFI
     only emits R/B/U (it has no runtime scores); the MOSTLY_* variants and
-    intermediate confidences arrive on the discovery surface.
+    intermediate confidences arrive on the runtime surfaces (``Run.loops``,
+    ``Sim.get_loops_runtime``, and discovery).
     """
 
     REINFORCING = 0
@@ -325,7 +326,7 @@ class Loop:
     polarity: LoopPolarity
     """Loop polarity: REINFORCING (R), BALANCING (B), MOSTLY_REINFORCING (Rux),
     MOSTLY_BALANCING (Bux), or UNDETERMINED (U). All five arrive through the C
-    FFI verbatim (GH #495) -- the MOSTLY_* ("Rux"/"Bux") variants are no longer
+    FFI verbatim (GH #495) -- the MOSTLY_* ("Rux"/"Bux") variants are not
     coalesced onto REINFORCING/BALANCING. They occur on the runtime surfaces
     (``Run.loops``, ``Sim.get_loops_runtime``, and discovery), where the
     polarity is classified from the loop's partition-relative runtime score

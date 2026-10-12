@@ -82,9 +82,8 @@ fn classify_arg(arg: &str) -> &'static str {
         if any_expr {
             return "dynamic-expression subscript -> helper";
         }
-        // Since GH #654, a non-shadowed bare element compiles to a direct
-        // LoadPrev; only an element name shadowed by a variable still forces
-        // a helper.
+        // A non-shadowed bare element compiles to a direct LoadPrev (GH
+        // #654); only an element name shadowed by a variable forces a helper.
         return "bare-element subscript -> direct LoadPrev unless shadowed";
     }
     if is_bare_ident(arg) {

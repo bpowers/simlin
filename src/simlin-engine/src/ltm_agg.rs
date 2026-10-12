@@ -1064,9 +1064,13 @@ struct AggWalkCtx<'a> {
     /// whole array, and for a per-element (`Ast::Arrayed`) slot, where it is
     /// NOT: a bare argument there reads the row the slot's element pins
     /// (`slot[a] = SUM(matrix) * 0.001` is `matrix[a, *]`'s sum on the VM).
-    /// The whole-array node this empty list mints for such a slot serves the
-    /// scalar owners that share its identity; the slot's own edge through it
-    /// is declined loudly (`unhoisted_reducer_source_read`'s per-element
+    /// The walk reads such a slot with that row written out
+    /// (`model_lowered_variables`, through `FragmentInput::elementwise_target`),
+    /// so a slot's arrayed argument is bare here only where that view is absent (the
+    /// target's fragment input is refused, or the model's module graph has a
+    /// cycle); the whole-array node this empty list then mints serves the
+    /// scalar owners that share its identity, and the slot's own edge through
+    /// it is declined loudly (`unhoisted_reducer_source_read`'s per-element
     /// arm, `reducer_reads_source_bare`), never scored against it.
     target_dims: &'a [crate::dimensions::Dimension],
     dm_dims: &'a [crate::datamodel::Dimension],
@@ -2868,10 +2872,9 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
         // (bare refs, the disjoint-dim FixedIndex family) stays
         // `NotDescribable` and keeps its existing emission path. The first
         // statically-describable slice (sorted-slot walk order, deterministic)
-        // rides along for the diagnostic. Longer-term, per-slot pinned slices
-        // are statically describable (each slot pins its row), so a per-slot
-        // hoist could score this shape exactly -- tracked as a follow-up
-        // enhancement; see the PR's follow-up issue list.
+        // rides along for the diagnostic. A reducer hoisted per slot
+        // (`enumerate_agg_nodes`' `Ast::Arrayed` arm) is scored through its
+        // node and is not a read here (`hoisted_synthetic_keys`).
         Ast::Arrayed(_, subscript_map, default_expr, _) => {
             let ctx = AggWalkCtx {
                 variables: &variables,
@@ -2904,9 +2907,11 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
                 // no axis), while the slot reads the row its element pins
                 // (`slot[a] = SUM(m) * 0.001` is `m[a,*]`'s sum on the VM), so
                 // the agg halves would score the slot against a value it never
-                // reads. The exact per-slot description -- a node per slot
-                // with the element pinned -- is the follow-up the GH #792
-                // entry names; until then the edge is declined here.
+                // reads. Loop analysis reads a slot with that row written out
+                // (`FragmentInput::elementwise_target`), so an arrayed
+                // argument is bare here only where that view is absent (the target's
+                // fragment input is refused, or the model's module graph has
+                // a cycle), and the edge is declined.
                 if !slices.is_empty() || reducer_reads_source_bare(expr, &from_canon, false) {
                     any_reducer_read = true;
                     if representative.is_none() {

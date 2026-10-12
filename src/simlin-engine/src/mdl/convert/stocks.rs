@@ -1405,9 +1405,9 @@ stock1d[scenario] = INTEG(fluxatm[scenario] - fluxout[scenario], 0)
     /// `upper`-subrange element distinct), exactly as
     /// `build_element_context` + `format_expr_with_context` produce on the
     /// regular path. This is the parser-level shape assertion; the
-    /// end-to-end deep-ocean *value* check depends on the still-open
-    /// element-level cycle resolution (#559) and is deferred (see
-    /// `simulates_synthetic_net_flow_shape` in tests/integration/simulate.rs).
+    /// end-to-end check is `simulates_synthetic_net_flow_shape` in
+    /// tests/integration/simulate.rs, and the deep-ocean recurrence's values
+    /// are checked by C-LEARN's run (`simulates_clearn`).
     #[test]
     fn test_synthetic_net_flow_resolves_per_element() {
         let mdl = "scenario: s1, s2

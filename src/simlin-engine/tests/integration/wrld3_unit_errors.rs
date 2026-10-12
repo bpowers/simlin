@@ -2,23 +2,22 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Reproducer tests for two unit-error bugs found in the World3-03 Vensim model.
+//! Regression tests for two unit-error bugs found in the World3-03 Vensim
+//! model.
 //!
 //! Bug 1 (delay3 conflation): the stdlib `delay3` / `delay1` stock-init
 //!   equation has the form `(if isModuleInput(initial_value) then initial_value
 //!   else input) * delay_time`.  The stdlib-module argument compatibility check
-//!   in `db::units::check_model_units` extracts ALL identifiers referenced by the init
-//!   AST and pairwise-compares their declared units, so `input` (pollution/year)
-//!   and `delay_time` (year) are wrongly flagged as conflicting even though
-//!   `delay_time` participates only as a coefficient.  Only the identifiers in
-//!   the value branches of the `if-then-else` (here: `initial_value` and
-//!   `input`) need to share units.
+//!   in `db::units::check_model_units` must not pairwise-compare every
+//!   identifier the init AST references: `input` (pollution/year) and
+//!   `delay_time` (year) do not conflict, since `delay_time` participates only
+//!   as a coefficient.  Only the identifiers in the value branches of the
+//!   `if-then-else` (here: `initial_value` and `input`) need to share units.
 //!
 //! Bug 2 (resource_unit alias): the World3-03 MDL footer declares
-//!   `22:Resource unit,Resource units` making them unit-equivalent.  Despite
-//!   the alias entry being installed in the `units::Context`, the unit
-//!   inference and checking paths produce mismatch diagnostics citing both
-//!   `resource_unit` and `resource_units` as distinct units.
+//!   `22:Resource unit,Resource units` making them unit-equivalent, so no
+//!   unit diagnostic may cite `resource_unit` and `resource_units` as
+//!   distinct units.
 
 use simlin_engine::common::UnitError;
 use simlin_engine::db::{
@@ -109,15 +108,9 @@ fn wrld3_parses_without_hard_errors() {
     );
 }
 
-/// Bug 2 repro: the engine currently reports unit mismatches between
-/// `resource_unit` and `resource_units` even though the model's footer declares
-/// `22:Resource unit,Resource units` making them aliases of the same canonical
-/// unit.
-///
-/// Expected (correct) behaviour: the alias resolves both identifiers to the
-/// same canonical unit name, so no unit diagnostic should cite both tokens as
-/// distinct unit names.  This test currently FAILS; it must PASS after the
-/// alias-resolution fix.
+/// Bug 2: the model's footer declares `22:Resource unit,Resource units`,
+/// making `resource_unit` and `resource_units` aliases of the same canonical
+/// unit, so no unit diagnostic may cite both tokens as distinct unit names.
 #[test]
 fn wrld3_resource_unit_alias_should_not_conflict() {
     let project = load_wrld3();
@@ -171,11 +164,10 @@ fn wrld3_resource_unit_alias_should_not_conflict() {
 /// `input` and `delay_time` have inherently different roles and different
 /// units; only `input` and `initial_value` must match.
 ///
-/// Strengthened over the previous version: we now collect diagnostics
-/// directly and assert that no `DiagnosticError::Unit` cites BOTH the
-/// generation-rate and the transmission-delay identifiers as conflicting.
-/// The earlier `assert_compiles_incremental()` check did not examine unit
-/// warnings, so the bug was invisible to it.
+/// The test collects diagnostics directly and asserts that no
+/// `DiagnosticError::Unit` cites BOTH the generation-rate and the
+/// transmission-delay identifiers as conflicting; a compile-success check
+/// would not see the bug, since unit diagnostics are warnings.
 #[test]
 fn delay3_input_and_delay_time_different_units_is_valid() {
     use simlin_engine::test_common::TestProject;
@@ -208,8 +200,8 @@ fn delay3_input_and_delay_time_different_units_is_valid() {
                 return false;
             }
             let details = diag_details(d);
-            // The current buggy path emits a message citing both the
-            // generation-rate source and the transmission-delay source.
+            // Bug 1 shows as a message citing both the generation-rate
+            // source and the transmission-delay source.
             details.contains("generation_rate") && details.contains("transmission_delay")
         })
         .collect();
@@ -282,7 +274,7 @@ fn delay3_with_explicit_initial_value_does_not_falsely_flag_delay_time() {
 }
 
 /// Regression guard: a genuine initial_value vs input unit mismatch MUST
-/// still be caught.  After fixing Bug 1, we must not silence real errors:
+/// still be caught.  The Bug 1 rule must not silence real errors:
 /// this test looks specifically for a diagnostic citing `bad_initial` (the
 /// culprit) together with `generation_rate` (the intended input), which is
 /// the pair that truly must share units.
@@ -340,8 +332,8 @@ fn delay3_initial_value_unit_mismatch_is_caught() {
 
 /// Regression guard for the smth3 stdlib module.  The smth3 stock-init
 /// equation (`if isModuleInput(initial_value) then initial_value else input`)
-/// does not multiply by `delay_time`, so the current buggy path does not
-/// happen to trip here.  This test exists so that if someone changes the
+/// does not multiply by `delay_time`, so Bug 1's over-approximation would
+/// not trip here.  This test exists so that if someone changes the
 /// smth3 definition to include a delay_time factor in the stock init, OR
 /// changes the argument-unit-check to over-approximate, we catch the
 /// regression immediately.  smth3 takes (input, averaging_time) where
@@ -394,7 +386,7 @@ fn smth3_input_and_averaging_time_different_units_is_valid() {
 }
 
 /// Regression guard for smth3: a genuine initial_value vs input unit
-/// mismatch MUST still be caught after the fix.
+/// mismatch MUST still be caught.
 #[test]
 fn smth3_initial_value_unit_mismatch_is_caught() {
     use simlin_engine::test_common::TestProject;
@@ -448,8 +440,6 @@ fn smth3_initial_value_unit_mismatch_is_caught() {
 /// Bug 1 repro (World3 level): the generated `delay3` sub-module for
 /// `persistent_pollution_appearance_rate` must NOT carry a spurious unit
 /// mismatch citing the generation-rate and transmission-delay inputs.
-/// (Renamed from `..._currently_has_spurious_unit_error`: the assertion
-/// direction flipped once Bug 1 was fixed.)
 #[test]
 fn wrld3_delay3_pollution_variable_has_no_spurious_unit_error() {
     let project = load_wrld3();

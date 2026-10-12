@@ -813,8 +813,8 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     // (`errors.rs`'s `Assembly` arm never renders the `variable` field).
     // Accumulation attaches to the enclosing query: `model_all_diagnostics`'
     // implicit probe (drained by `collect_all_diagnostics`) or
-    // `assemble_module` (dormant until GH #581). Severity is `Error` for the
-    // same measured reason as the explicit path's (see
+    // `assemble_module` (whose rows no drain collects, GH #581). Severity is
+    // `Error` for the same measured reason as the explicit path's (see
     // `compile_var_fragment`): the fragment's absence fails the build, and
     // the corpus sweep shape holds -- added rows land only on projects that
     // already fail to compile. A helper whose initial and flow phases refuse

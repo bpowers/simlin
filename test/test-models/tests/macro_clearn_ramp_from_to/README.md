@@ -37,8 +37,6 @@ is linear = 1
 ramped    = RAMP FROM TO(x from, x to, t start, t end, is linear)
 ```
 
-Five arguments, so the call is not rewritten to `LOOKUP` (GH #553).
-
 ## Hand-computed expected values
 
 Both endpoints are positive, so:

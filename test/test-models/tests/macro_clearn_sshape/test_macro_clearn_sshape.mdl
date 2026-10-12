@@ -34,13 +34,13 @@ low input=
 s high=
 	SSHAPE(high input, profile)
 	~	dmnl
-	~	C-LEARN SSHAPE invocation, upper branch (>= 2 args -- not LOOKUP)
+	~	C-LEARN SSHAPE invocation, upper branch
 	|
 
 s low=
 	SSHAPE(low input, profile)
 	~	dmnl
-	~	C-LEARN SSHAPE invocation, lower branch (>= 2 args -- not LOOKUP)
+	~	C-LEARN SSHAPE invocation, lower branch
 	|
 
 ********************************************************

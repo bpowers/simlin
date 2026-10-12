@@ -6,7 +6,7 @@ This work builds a closed-loop measurement and tooling harness around `simlin-en
 automatic diagram layout, so that an agent (or human) can improve layout quality with
 evidence instead of guesswork. The core is two **pure** Rust modules that hold all the
 logic: a *quality-metric core* (`layout/metrics.rs`) that scores a laid-out diagram on
-explicit, scale-free aesthetic cost terms -- node overlap, connectors running through
+explicit aesthetic cost terms -- node overlap, connectors running through
 nodes, label overlap, edge crossings, sprawl, edge-length unevenness, and aspect ratio --
 and collapses them to a single `weighted_cost` scalar; and a *statistics core*
 (`layout/eval_stats.rs`) that treats a layout's quality as a distribution over random
@@ -45,7 +45,7 @@ is no in-repo way to *see* a generated layout outside the browser. This design c
 gaps.
 
 1. **A pure `LayoutMetrics` module** (`src/simlin-engine/src/layout/metrics.rs`) computes
-   scale-free aesthetic *cost* terms (0 = ideal) from a `StockFlow` view, on the same
+   aesthetic *cost* terms (0 = ideal) from a `StockFlow` view, on the same
    geometry the PNG renderer draws: `node_overlap`, `node_connector_overlap`,
    `label_overlap`, `crossings`, `sprawl`, `edge_length_cv`, and `aspect_penalty`, plus
    reserved zero-weighted structure terms. `weighted_cost(&MetricWeights) -> f64` collapses
@@ -96,7 +96,7 @@ gaps.
 
 ## Acceptance Criteria
 
-### layout-quality-eval.AC1: Metric terms are geometry-correct and scale-free
+### layout-quality-eval.AC1: Metric terms are geometry-correct
 - **layout-quality-eval.AC1.1 Success:** Two node boxes overlapping by a known area yield a `node_overlap` equal to the known overlap fraction.
 - **layout-quality-eval.AC1.2 Success:** Pairwise-disjoint nodes yield `node_overlap` = 0.
 - **layout-quality-eval.AC1.3 Success:** A connector whose polyline passes through a non-incident node box contributes to `node_connector_overlap`; one that avoids all non-incident boxes yields 0.
@@ -104,7 +104,7 @@ gaps.
 - **layout-quality-eval.AC1.5 Success:** `aspect_penalty` is 0 inside the target aspect band and positive outside it (a 1x10 bbox is penalized; a ~4:3 bbox is not).
 - **layout-quality-eval.AC1.6 Success:** `weighted_cost` equals the exact linear combination Σ wᵢ·termᵢ for given weights.
 - **layout-quality-eval.AC1.7 Edge:** An empty or single-element view yields all-zero terms with no NaN or divide-by-zero.
-- **layout-quality-eval.AC1.8 Success:** Uniformly scaling all coordinates leaves every normalized term unchanged within tolerance (scale invariance).
+- **layout-quality-eval.AC1.8 Success:** Uniformly scaling all coordinates leaves the terms that do not depend on scale unchanged within tolerance (scale invariance). Most terms do depend on it, because shapes and labels are drawn at a fixed size; the `LayoutMetrics` rustdoc in `layout/metrics.rs` lists which, and `test_scale_invariance_of_scale_free_terms` pins the rest.
 
 ### layout-quality-eval.AC2: Crossings are counted on real geometry
 - **layout-quality-eval.AC2.1 Success:** Two connectors that cross once yield a crossing count of 1; connectors sharing an endpoint yield 0.
@@ -180,7 +180,7 @@ gaps.
 - **`select_best_layout`**: The function (`mod.rs`) that picks the winning candidate among
   the seed runs. Rung 0 re-points it from "fewest crossings" to "lowest `weighted_cost`."
 - **`LayoutMetrics` / `weighted_cost` / `MetricWeights`**: The new quality-metric types.
-  `LayoutMetrics` holds one cost term per aesthetic concern (0 = ideal, all scale-free);
+  `LayoutMetrics` holds one cost term per aesthetic concern (0 = ideal);
   `MetricWeights` is one weight per term; `weighted_cost` is their weighted sum `Σ wᵢ·termᵢ`
   -- the single scalar an optimizer minimizes.
 - **`render_png` / resvg**: `render_png` (`diagram/render_png.rs`, behind the `png_render`
@@ -236,7 +236,7 @@ existing geometry helpers (`diagram::elements`/`flow` `*_bounds`, `diagram::conn
 path, `diagram::label::label_bounds`) -- so a layout's score and its rendered PNG can never
 disagree. Those helpers are `pub fn`, but their modules (`elements`, `flow`, `label`,
 `connector`) are private in `diagram/mod.rs` today, so a prerequisite is exposing them
-`pub(crate)` for `layout` to call. Every term is a **cost** (0 = ideal) and normalized to be scale-free, so models
+`pub(crate)` for `layout` to call. Every term is a **cost** (0 = ideal) and normalized as a rate, so models
 of different sizes are comparable and the corpus can be aggregated.
 
 | Term | Definition (cost; 0 = ideal) | Pain it captures |
@@ -427,12 +427,12 @@ an existing example, one edit to an existing selection function.
 - Unit tests on hand-built tiny views with known geometry (two boxes overlapping by a known
   fraction; two segments crossing once; shared-endpoint connectors -> 0; a 1x10 bbox ->
   known aspect penalty; an arc that crosses where its chord would not). Property tests:
-  overlap symmetric and scale-invariant; crossings invariant under translation/rotation.
+  overlap symmetric; crossings invariant under translation/rotation.
 
 **Dependencies:** none.
 
-**Done when:** the metric terms match the hand-computed values, scale/translation
-invariance holds, the polyline crossing count differs from the old chord count on the
+**Done when:** the metric terms match the hand-computed values, scale invariance
+holds for the terms that do not depend on scale, translation invariance for all, the polyline crossing count differs from the old chord count on the
 constructed arc case, `render_svg` output is unchanged (the `svg-rendering.test.ts` parity
 test still passes), and `cargo test` passes. Covers `layout-quality-eval.AC1.*`,
 `layout-quality-eval.AC2.*`.

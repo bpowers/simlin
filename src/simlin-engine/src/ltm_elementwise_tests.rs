@@ -355,6 +355,48 @@ fn a_slots_bare_reducer_argument_is_scored_as_the_row_it_reads() {
     assert_eq!(bare, rows);
 }
 
+/// Slots of one variable that reduce their bare argument with different
+/// reducers (`slot[a] = SUM(m)`, `slot[b] = MEAN(m)`) are each scored as the
+/// row their element pins, written out with the slot's own reducer (GH
+/// #1041).
+#[test]
+fn slots_with_different_reducers_of_a_bare_argument_are_scored_as_their_rows() {
+    let project = |a: &str, b: &str, c: &str| {
+        TestProject::new("per_element_slot_mixed_reducers")
+            .with_sim_time(0.0, 4.0, 1.0)
+            .named_dimension("d1", &["a", "b", "c"])
+            .named_dimension("d2", &["x", "y"])
+            .array_with_ranges("init[d1]", vec![("a", "10"), ("b", "20"), ("c", "40")])
+            .array_stock("p[d1]", "init[d1]", &["fp"], &[], None)
+            .array_aux("q[d2]", "3")
+            .array_aux("m[d1, d2]", "p[d1] * q[d2] + 1")
+            .array_with_ranges("slot[d1]", vec![("a", a), ("b", b), ("c", c)])
+            .array_flow("fp[d1]", "slot[d1] * 0.01", None)
+            .build_datamodel()
+    };
+    let bare = project("SUM(m) * 0.001", "MEAN(m) * 0.002", "MEAN(m) * 0.003");
+    let rows = project(
+        "SUM(m[a, *]) * 0.001",
+        "MEAN(m[b, *]) * 0.002",
+        "MEAN(m[c, *]) * 0.003",
+    );
+    // Slot b reading another element's row is another model, so equal
+    // scores below say which row each slot was scored as reading.
+    let other_row = project(
+        "SUM(m[a, *]) * 0.001",
+        "MEAN(m[a, *]) * 0.002",
+        "MEAN(m[c, *]) * 0.003",
+    );
+    let (bare, rows) = (loop_scores(&bare).unwrap(), loop_scores(&rows).unwrap());
+    let other_row = loop_scores(&other_row).unwrap();
+    assert!(!rows.loops.is_empty());
+    assert_ne!(
+        other_row, rows,
+        "the comparison sees which row slot b reads"
+    );
+    assert_eq!(bare, rows);
+}
+
 /// The same for a slot beside an apply-to-all owner of one text.
 #[test]
 fn a_slot_beside_an_a2a_owner_of_one_text_is_scored_as_the_row_it_reads() {

@@ -70,7 +70,8 @@ if [ "$NO_VERIFY_COUNT" -gt 0 ]; then
 fi
 
 # Rule 2: Rust source file size warning
-# Threshold set just above the current maximum (vm.rs at ~5513 lines).
+# A fixed cap above every non-test source file, not tied to the largest one:
+# a file that grows past it is split into modules. Files under tests/ are exempt.
 MAX_LINES=6000
 RS_FILES=$(mktemp)
 find src -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' \

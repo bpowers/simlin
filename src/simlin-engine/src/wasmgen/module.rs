@@ -547,9 +547,11 @@ struct PerInstance<'a> {
 /// in_0..in_{k-1}: f64)`; an `EvalModule` resolves the child instance and `call`s
 /// its function for the current phase (passing `module_off + decl.off` and the
 /// inputs), so one shared `CompiledModule` runs at every base offset it is
-/// instantiated at. The opcode programs a `CompiledSimulation` carries are the
-/// plain, un-fused scalar set (the VM's superinstruction fusion runs on a private
-/// execution copy), so each `Opcode` lowers via [`lower::emit_bytecode`].
+/// instantiated at. The opcode programs a `CompiledSimulation` carries hold the
+/// symbolic peephole's fused assignments (`AssignConstCurr`, `BinOpAssignCurr`,
+/// `BinOpAssignNext`) but none of the VM's late 3-address superinstructions,
+/// which `Vm::new` fuses into a private execution copy; each `Opcode` lowers via
+/// [`lower::emit_bytecode`].
 /// Anything outside the supported set -- an unsupported opcode, or array
 /// unrolling past the per-program work budget -- returns [`WasmGenError::Unsupported`]
 /// rather than emitting a wrong module.

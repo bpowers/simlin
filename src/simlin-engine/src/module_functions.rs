@@ -1441,8 +1441,7 @@ mod tests {
     fn issue_554_followup_macro_wrapping_same_named_delayn_builtin_builds_ok() {
         // Exactly the thyroid shape: a macro whose canonical name (`delayn`)
         // equals a stdlib-module-backed renamed builtin, whose body is
-        // `delayn = delayn(a, b)` (the importer-renamed `DELAY N(...)`; >=2
-        // params per GH#553's 1-arg-call->LOOKUP heuristic), PLUS a sibling
+        // `delayn = delayn(a, b)` (the importer-renamed `DELAY N(...)`), PLUS a sibling
         // macro. The registry must build (no false `delayn -> delayn`
         // CircularDependency) and BOTH macros must resolve, proving the
         // #554-class cascade that blocked thyroid's other macros is gone.
