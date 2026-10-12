@@ -31,16 +31,17 @@ If not tracked, file it:
 
 ### Prefer GitHub issues (when `gh` is available)
 
+Write the title and body to the standard in the "Writing Issues" section of the root `CLAUDE.md`: a plain `area: symptom` title, then a short summary, Example, Why it matters, Fix, and Pointers.
+The reader is the maintainer; an issue that cannot be read without knowing internal names is worse than no issue.
+Leave out how the problem was discovered (branches, commits, plan and phase names).
+
 ```bash
-gh issue create --title "<concise title>" --body "<detailed description>"
+gh issue create --title "<area: plain symptom>" --body-file <file> --label <area>,<bug|enhancement|hygiene>
 ```
 
-The issue body should include:
-- A clear description of the problem with concrete examples
-- Why it matters (correctness, maintainability, developer experience, etc.)
-- Component(s) affected
-- Possible approaches for resolution, if known
-- Context about how it was discovered (e.g., "Identified during PR #N review")
+Then add a `- [ ] #N` line for it to the tracking issue, in the section that fits: #488 if it carries the `ltm` label, #733 otherwise (`gh issue view <tracker> --json body`, edit, `gh issue edit <tracker> --body-file <file>`).
+
+If the description you were given is too thin to write the Example or Why it matters sections honestly, read the code it points at before filing; do not pad.
 
 ### Fall back to docs/tech-debt.md (when `gh` is not available)
 

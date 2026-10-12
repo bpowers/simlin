@@ -191,6 +191,41 @@ Discovering something mid-task tells you it exists; it does not tell you it belo
 When something genuinely does need tracking, spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a description of the problem.
 It checks for duplicates in GitHub issues and [docs/tech-debt.md](/docs/tech-debt.md) and files the item, keeping your context on the main task.
 
+## Writing Issues
+
+An issue is written for the maintainer, who knows SD, XMILE, Vensim, Rust, and TypeScript but not the internal function names, plan documents, or shorthand a working session coins.
+An issue the maintainer cannot read cannot be prioritized or declined, so write it the way a good colleague files a bug: decide what the reader needs in order to understand the problem and choose what to do, and write just that.
+
+**Title**: `area: plain statement of what is wrong or wanted`, about 70 characters.
+State the symptom a user or developer sees, not the mechanism.
+No parentheticals and no internal identifiers; names a user types (`SUM`, `SMTH3`, a CLI flag) are fine.
+
+**Body**: a 1-3 sentence summary (what happens today, what should happen), then these sections, dropping any with nothing to say:
+
+- **Example** -- the smallest model, equation, or command that shows it, with expected vs actual output.
+- **Why it matters** -- who hits this and how badly.
+  Say honestly whether it was seen in a real model (name it) or only in a case we constructed.
+- **Fix** -- the recommended direction and at most one alternative, each with its cost.
+  "Reject this with a clear error instead of supporting it" is a legitimate fix for a corner no real model has shown.
+- **Pointers** -- the files and functions a fixer starts from (verified to exist) and the related issues they must read.
+
+Rules:
+
+- 100-250 words of prose, hard cap about 350, excluding code blocks.
+- Keep what a fixer needs: the repro, the numbers, the error text, an external citation.
+- Leave out how it was discovered: branch names, commit lists, plan and phase names, acceptance-criteria IDs, audit names.
+- Use standard vocabulary (stock, flow, subscript, element, apply-to-all, link score, loop score).
+  Describe what the code does instead of using a coined term; if one is unavoidable, explain it in half a sentence.
+- Never point at a file that is not in the repo (a scratch script, another session's notes).
+- A claim about Vensim, Stella, or the XMILE spec carries its citation or the word "unverified".
+- Give it an area label (`engine`, `ltm`, `frontend`, `backend`, `layout`, `ci`, `docs`, `mcp`, `compat`, `security`) and `bug`, `enhancement`, or `hygiene` where one applies.
+- Add a `- [ ] #N` line to the tracker: #488 for `ltm` issues, #733 for everything else.
+  The open count in #733 should fall every month.
+
+Before filing, think like the owner.
+Simple, maintainable code that supports the models people actually build beats coverage of every corner we can imagine, and tests are a cost too: an issue whose whole content is "add another harness, corpus, or property test" needs a defect that actually shipped behind it.
+If the honest answer is "not worth doing", do not file it.
+
 ## Generated/Noise Paths
 
 Treat these as generated output unless the task explicitly targets them:
