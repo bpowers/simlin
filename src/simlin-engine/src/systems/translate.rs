@@ -708,11 +708,15 @@ mod tests {
             .collect()
     }
 
-    /// A stock named like a zero-argument builtin is read as the stock in
-    /// every equation the translation writes: a rate that names it, drained
-    /// or not, the drain of its outflows, the capacity left in it as a
-    /// destination, and another stock's initial value and maximum. Each model
-    /// runs as the same model under the plain name `a`.
+    /// A stock named like a zero-argument builtin, every name and alias, is
+    /// either refused or read as the stock, and which is decided by the one
+    /// definition of the run's clock names (`db::is_implicit_global`): a clock
+    /// name is refused (every spelling and place a line names a stock is
+    /// `parser::tests::a_stock_named_for_the_clock_is_refused`), and any other
+    /// is read as the stock in every equation the translation writes: a rate
+    /// that names it, drained or not, the drain of its outflows, the capacity
+    /// left in it as a destination, and another stock's initial value and
+    /// maximum. Each model runs as the same model under the plain name `a`.
     #[test]
     fn a_stock_named_like_a_builtin_is_read_as_the_stock() {
         let models = [
@@ -723,19 +727,28 @@ mod tests {
         // `inf` is left out: the systems format's own lexer reads it as
         // infinity (`Token::Inf`), so no systems model can name a stock `inf`
         // in an expression.
-        let names: Vec<&str> = crate::builtins::BuiltinSig::ALL
+        let (clock, names): (Vec<&str>, Vec<&str>) = crate::builtins::BuiltinSig::ALL
             .iter()
             .filter(|sig| sig.max_args == Some(0))
             .flat_map(|sig| std::iter::once(sig.name).chain(sig.aliases.iter().copied()))
             .filter(|name| *name != "inf")
-            .collect();
+            .partition(|name| crate::db::is_implicit_global(name));
+        // Every clock name is a builtin's, so the partition saw each of them.
+        assert_eq!(
+            clock.iter().collect::<HashSet<_>>(),
+            crate::db::IMPLICIT_GLOBALS.iter().collect::<HashSet<_>>()
+        );
+        assert!(!names.is_empty());
         for model in models {
+            for name in &clock {
+                let refused = crate::compat::open_systems(&model.replace('A', name));
+                assert!(refused.is_err(), "{name} in {model:?}");
+            }
             let plain = final_values(model);
             for name in &names {
                 let renamed = final_values(&model.replace('A', name));
                 // The columns of `a` and of what the translation names after
-                // it; a stock named for a clock column (`time`, `dt`) takes
-                // that column's key, so the plain run's clock is left out.
+                // it.
                 let expected: std::collections::BTreeMap<String, f64> = plain
                     .iter()
                     .filter(|(column, _)| column.starts_with('a'))

@@ -413,6 +413,8 @@ Integration is Euler-only.
   The `.pb` files are never rewritten -- bytes a current writer produces pin nothing about reading old ones -- and the test holds each to its SHA-256.
   `deserialize` returns a `ProtobufDecode` error, with what is missing and where, for a message that lacks what every writer writes and the reader has no reading for: the project's sim specs, a variable's kind or equation, an equation's kind, a view element's kind, a table's scales (an empty buffer decodes to such a message).
 - `systems/` is the line-oriented systems format.
+  Its reader refuses a stock named for one of the run's clock slots (`db::is_implicit_global`, the rule a rename keeps), naming the stock and its line: a variable of that name takes the slot's results key, where hosts read the clock.
+  Another builtin's name (`pi`, `time_step`) is a stock like any other, which the translator quotes.
   `data_provider/` resolves `GET DIRECT` references (`FilesystemDataProvider` behind `file_io`).
   `json.rs` and `json_sdai.rs` are the JSON schemas.
 

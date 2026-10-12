@@ -190,7 +190,14 @@ fn lex_stock_ref(s: &str, line_num: usize) -> Result<StockRef, LexError> {
     })
 }
 
-/// Validate that a stock name matches `[a-zA-Z][a-zA-Z0-9_]*`.
+/// Validate that a stock name matches `[a-zA-Z][a-zA-Z0-9_]*` and is not one
+/// of the run's clock names (`db::is_implicit_global`).
+///
+/// A variable named for a clock slot takes that slot's key in the results,
+/// where every host reads the clock by name, so a stock called `time` would be
+/// shown as the clock or the clock as the stock. The patch rename refuses
+/// these names for the same reason. Another builtin's name (`pi`) is a legal
+/// stock name: the translator quotes it, so equations read the stock.
 fn validate_stock_name(name: &str, line_num: usize) -> Result<(), LexError> {
     if name.is_empty() {
         return Err(LexError {
@@ -213,6 +220,16 @@ fn validate_stock_name(name: &str, line_num: usize) -> Result<(), LexError> {
                 message: format!("invalid character '{}' in stock name '{}'", ch, name),
             });
         }
+    }
+    if crate::db::is_implicit_global(&crate::canonicalize(name)) {
+        return Err(LexError {
+            line: line_num,
+            message: format!(
+                "stock '{name}' has one of the simulation's clock names ({}), \
+                 which a stock cannot take; rename the stock",
+                crate::db::IMPLICIT_GLOBALS.join(", ")
+            ),
+        });
     }
     Ok(())
 }
