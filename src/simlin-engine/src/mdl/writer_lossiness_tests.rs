@@ -1196,3 +1196,19 @@ fn the_elements_a_dropped_default_defines_are_named_a_few_and_counted() {
     assert!(warned.message.len() < 1000, "{}", warned.message.len());
     assert!(warned.message.contains("99999999"), "{}", warned.message);
 }
+
+#[test]
+fn exact_zero_safediv_exports_with_an_unsupported_function_warning() {
+    for equation in ["safediv(3, 0.0000001)", "safediv(3, -0.0000001, 7)"] {
+        let project = make_project(vec![make_model(vec![make_aux("y", equation, None, "")])]);
+        let (text, warnings) = project_to_mdl_with_warnings(&project).expect("writes");
+        assert!(text.contains("SAFEDIV("), "{text}");
+        assert!(!text.contains("ZIDZ(") && !text.contains("XIDZ("), "{text}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].message.contains("calls SAFEDIV"),
+            "{warnings:?}"
+        );
+        crate::mdl::parse_mdl(&text).expect("Simlin reads its unsupported spelling");
+    }
+}

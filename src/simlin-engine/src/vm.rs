@@ -3484,6 +3484,15 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
             // produce a / b, not silently fall back to the default c.
             if b != 0.0 { a / b } else { c }
         }
+        // Vensim defines XIDZ(a,b,c) as IF THEN ELSE(ABS(b)<1e-6,c,a/b).
+        // https://www.vensim.com/documentation/fn_xidz.html
+        BuiltinId::Xidz => {
+            if b.abs() < 1e-6 {
+                c
+            } else {
+                a / b
+            }
+        }
         BuiltinId::Sign => {
             if a > 0.0 {
                 1.0
@@ -3883,6 +3892,27 @@ mod lookup_tests {
 mod apply_tests {
     use super::*;
     use crate::bytecode::BuiltinId;
+
+    #[test]
+    fn apply_xidz_absolute_threshold() {
+        let t = 1e-6_f64;
+        for magnitude in [
+            0.0,
+            f64::from_bits(1),
+            t.next_down(),
+            t,
+            t.next_up(),
+            2.0,
+            f64::INFINITY,
+        ] {
+            for b in [magnitude, -magnitude] {
+                let expected = if b.abs() < t { 7.0 } else { 3.0 / b };
+                let got = apply(BuiltinId::Xidz, 0.0, 1.0, 3.0, b, 7.0);
+                assert_eq!(got.to_bits(), expected.to_bits(), "b={b:?}");
+            }
+        }
+        assert!(apply(BuiltinId::Xidz, 0.0, 1.0, 3.0, f64::NAN, 7.0).is_nan());
+    }
 
     // ── SafeDiv ─────────────────────────────────────────────────────────
 

@@ -218,12 +218,14 @@ fn function_rename_smooth3() {
 
 #[test]
 fn function_rename_safediv() {
-    assert_mdl("safediv(a, b)", "ZIDZ(a, b)");
+    assert_mdl("safediv(a, b)", "SAFEDIV(a, b)");
+    assert_mdl("xidz(a, b)", "ZIDZ(a, b)");
 }
 
 #[test]
-fn function_rename_safediv_three_args_emits_xidz() {
-    assert_mdl("safediv(a, b, x)", "XIDZ(a, b, x)");
+fn division_functions_preserve_their_distinct_semantics() {
+    assert_mdl("safediv(a, b, x)", "SAFEDIV(a, b, x)");
+    assert_mdl("xidz(a, b, x)", "XIDZ(a, b, x)");
 }
 
 #[test]

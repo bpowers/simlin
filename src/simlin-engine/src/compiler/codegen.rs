@@ -1568,6 +1568,7 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Ramp(_, _, _) => BuiltinId::Ramp,
                     BuiltinFn::Rem(_, _) => BuiltinId::Rem,
                     BuiltinFn::SafeDiv(_, _, _) => BuiltinId::SafeDiv,
+                    BuiltinFn::Xidz(_, _, _) => BuiltinId::Xidz,
                     BuiltinFn::Sign(_) => BuiltinId::Sign,
                     BuiltinFn::Sin(_) => BuiltinId::Sin,
                     BuiltinFn::Sshape(_, _, _) => BuiltinId::Sshape,
@@ -1599,7 +1600,9 @@ impl<'module> Compiler<'module> {
                 // slot (or drops the fragment when that slot has no symbolic
                 // mapping).
                 match builtin {
-                    BuiltinFn::Pulse(_, _, None) | BuiltinFn::SafeDiv(_, _, None) => {
+                    BuiltinFn::Pulse(_, _, None)
+                    | BuiltinFn::SafeDiv(_, _, None)
+                    | BuiltinFn::Xidz(_, _, None) => {
                         let id = self.curr_code.intern_literal(0.0);
                         self.push(SymbolicOpcode::LoadConstant { id });
                     }

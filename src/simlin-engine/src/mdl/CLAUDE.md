@@ -81,6 +81,9 @@ Tests: `import_loss_tests.rs` (a sketch holding one of each) and [tests/integrat
     `quoted_space_to_underbar` is the separate DEFINITION-side spelling (a `datamodel` ident, not equation text).
   - **PULSE and PULSE TRAIN** expand to the comparisons Vensim documents: PULSE is on while Time plus half a TIME STEP is strictly between start and start plus width, and a width of 0 is TIME STEP (vensim.com/documentation/fn_pulse.html); PULSE TRAIN repeats that every interval up to `end`, inclusive, each pulse at least one TIME STEP long (fn_pulse_train.html, and Vensim's own run in `test/sdeverywhere/models/pulsetrain/pulsetrain.dat`).
     Rows simulated in `pulse_tests.rs`; the writer recognizes each expansion as its call (`recognize_pulse`, `recognize_pulse_train`).
+  - **ZIDZ and XIDZ** import as the engine's `XIDZ`, testing `ABS(denominator) < 1e-6` (vensim.com/documentation/fn_xidz.html).
+    Arguments use the ordinary builtin evaluation path once each.
+    XMILE `SAFEDIV` tests exact zero; the writer retains its name with an unsupported-function warning because Vensim's functions would change its results.
   - **INTEGER and MODULO** import as the engine's `TRUNC` and `REM`: Vensim's truncate toward zero (fn_integer.html, fn_modulo.html; ground truth `test/test-models/tests/rounding/output.tab`), where XMILE's `INT` is the floor and `MOD` the floored modulus.
     For a divisor at or below zero `REM` is 0 (the engine's rule, unverified).
     A two-argument `MOD(a, b)` call of a name the model does not define is the floored modulus `(a) MOD (b)`, which is how the writer spells it.
@@ -104,7 +107,7 @@ Tests: `import_loss_tests.rs` (a sketch holding one of each) and [tests/integrat
   - **Functions**: each builtin is written under a name the reader knows (`xmile_to_mdl_function_name`; every entry of `builtins::BUILTINS` has a row in `every_builtin_the_reader_knows_is_saved_as_it_reads`).
     `TRUNC` is `INTEGER`, `REM` is `MODULO`, a one-argument `MAX`/`MIN` (the reduction) is `VMAX`/`VMIN` and `RANK` is `VECTOR RANK`, as Vensim names them (fn_vmax.html, fn_max.html, fn_vector_rank.html).
     A call of PULSE or MODULO is the builtin whatever variables the model names, so it is written as what it computes.
-    A function Vensim does not have -- `ROUND`, `INT` (the floor), `MEAN`, `PREVIOUS` -- is written by name with a warning: the reader reads it back as itself, and Vensim will not read it.
+    A function Vensim does not have -- `ROUND`, `INT` (the floor), `MEAN`, `PREVIOUS`, `SAFEDIV` -- is written by name with a warning: the reader reads it back as itself, and Vensim will not read it.
     The writer never lowers such a call to Vensim primitives (a composition repeats the argument, wrong for a stochastic one, and rests on unverified edge semantics, GH #610).
     The floored modulus is `MOD(a, b)`, read back as the operator; in a model that names a variable `mod` it is `MODULO` with a warning.
   - **Recognizers** of the importer's expansions (PULSE, PULSE TRAIN, QUANTUM, LOG 2-arg, SAMPLE IF TRUE, ALLOCATE BY PRIORITY, TIME BASE, RANDOM POISSON, RANDOM 0 1), each the exact inverse of its `xmile_compat` arm, and native lookup-call syntax `table ( input )`.
