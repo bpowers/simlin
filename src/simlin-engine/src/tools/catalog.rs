@@ -12,9 +12,11 @@
 //! regenerates it and compares; `UPDATE_TOOL_CATALOG=1` rewrites it.
 //!
 //! Property order in every schema is declaration order (schemars'
-//! `preserve_order`), except that a tagged variant's tag comes first
-//! (`tag_first`), so a host that bridges the catalog into a structured
-//! generation framework can take a property order from it.
+//! `preserve_order`), with a tagged variant's tag first, where schemars lists
+//! it, so a host that bridges the catalog into a structured generation
+//! framework can take a property order from it. Nothing here reorders a
+//! schema: under `preserve_order`, `serde_json::Map::remove` is a
+//! `swap_remove`, which moves the last property into the removed one's place.
 
 use serde::Serialize;
 
@@ -241,37 +243,7 @@ pub fn generate_catalog_json() -> String {
         if let Some(object) = value.as_object_mut() {
             object.remove("$schema");
         }
-        tag_first(&mut value);
         value
-    }
-    /// Each tagged variant's tag (`op`, `cites`: the property its `required`
-    /// names first, which holds a `const`) listed first among its
-    /// properties, where schemars lists it last: a reader, and a model
-    /// writing a call, meets what the object is before its fields.
-    fn tag_first(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(object) => {
-                let tag = object
-                    .get("required")
-                    .and_then(|required| required.get(0))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string);
-                if let (Some(tag), Some(serde_json::Value::Object(properties))) =
-                    (tag, object.get_mut("properties"))
-                    && properties
-                        .get(&tag)
-                        .is_some_and(|property| property.get("const").is_some())
-                    && let Some(property) = properties.remove(&tag)
-                {
-                    let rest = std::mem::take(properties);
-                    properties.insert(tag, property);
-                    properties.extend(rest);
-                }
-                object.values_mut().for_each(tag_first);
-            }
-            serde_json::Value::Array(items) => items.iter_mut().for_each(tag_first),
-            _ => {}
-        }
     }
     fn input<T: schemars::JsonSchema>() -> serde_json::Value {
         schema::<T>(schemars::generate::SchemaSettings::draft2020_12().for_deserialize())
