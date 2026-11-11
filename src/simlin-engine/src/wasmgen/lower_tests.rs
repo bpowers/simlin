@@ -4944,3 +4944,25 @@ fn assert_allocate_by_priority_matches(
         }
     }
 }
+
+#[test]
+fn apply_xidz_threshold_parity() {
+    // Documented finite-domain boundary matrix, plus IEEE special values.
+    // https://www.vensim.com/documentation/fn_xidz.html
+    let t = 1e-6_f64;
+    for magnitude in [
+        0.0,
+        f64::from_bits(1),
+        t.next_down(),
+        t,
+        t.next_up(),
+        2.0,
+        f64::INFINITY,
+    ] {
+        for b in [magnitude, -magnitude] {
+            let expected = if b.abs() < t { 7.0 } else { 3.0 / b };
+            assert_apply_exact(BuiltinId::Xidz, 3.0, b, 7.0, 0.0, 1.0, expected);
+        }
+    }
+    assert!(apply_eval(BuiltinId::Xidz, 3.0, f64::NAN, 7.0, 0.0, 1.0).is_nan());
+}

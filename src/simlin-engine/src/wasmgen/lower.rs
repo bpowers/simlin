@@ -2410,6 +2410,19 @@ fn emit_apply(func: BuiltinId, ctx: &EmitCtx, f: &mut Function) {
             f.instruction(&Ins::F64Ne);
             f.instruction(&Ins::Select);
         }
+        // XIDZ uses Vensim's strict absolute denominator threshold.
+        // https://www.vensim.com/documentation/fn_xidz.html
+        BuiltinId::Xidz => {
+            get(f, c);
+            get(f, a);
+            get(f, b);
+            f.instruction(&Ins::F64Div);
+            get(f, b);
+            f.instruction(&Ins::F64Abs);
+            f.instruction(&f64_const(1e-6));
+            f.instruction(&Ins::F64Lt);
+            f.instruction(&Ins::Select);
+        }
         // `Sshape = b + (c-b)/(1.0 + exp(-4.0*(2.0*a-1.0)))`.
         BuiltinId::Sshape => {
             get(f, b);

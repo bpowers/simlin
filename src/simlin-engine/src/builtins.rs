@@ -132,6 +132,8 @@ pub enum BuiltinFn<Expr> {
     // (mdl/writer.rs).
     Round(Box<Expr>),
     SafeDiv(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    /// Vensim division with an absolute denominator threshold of 1e-6.
+    Xidz(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Sign(Box<Expr>),
     Sshape(Box<Expr>, Box<Expr>, Box<Expr>),
     Sin(Box<Expr>),
@@ -495,6 +497,14 @@ static SAFEDIV: BuiltinSig = sig(
     ResultKind::Elementwise,
     Invariance::Pure,
 );
+static XIDZ: BuiltinSig = sig(
+    "xidz",
+    2,
+    Some(3),
+    &[SCALAR, SCALAR, SCALAR],
+    ResultKind::Elementwise,
+    Invariance::Pure,
+);
 static SIGN: BuiltinSig = unary_math("sign");
 static SSHAPE: BuiltinSig = sig(
     "sshape",
@@ -609,7 +619,7 @@ static INIT: BuiltinSig = sig(
 
 impl BuiltinSig {
     /// Every signature, one per [`BuiltinFn`] variant, in declaration order.
-    pub const ALL: [&'static BuiltinSig; 47] = [
+    pub const ALL: [&'static BuiltinSig; 48] = [
         &LOOKUP,
         &LOOKUP_FORWARD,
         &LOOKUP_BACKWARD,
@@ -635,6 +645,7 @@ impl BuiltinSig {
         &REM,
         &ROUND,
         &SAFEDIV,
+        &XIDZ,
         &SIGN,
         &SSHAPE,
         &SIN,
@@ -760,7 +771,7 @@ macro_rules! builtin_args {
                     out.push(a);
                 }
             }
-            Pulse(a, b, c) | Ramp(a, b, c) | SafeDiv(a, b, c) => {
+            Pulse(a, b, c) | Ramp(a, b, c) | SafeDiv(a, b, c) | Xidz(a, b, c) => {
                 out.push(&$($m)? **a);
                 out.push(&$($m)? **b);
                 if let Some(c) = c {
@@ -825,6 +836,7 @@ macro_rules! builtin_rebuild {
             Rem(a, b) => Rem($arg!($f, a), $arg!($f, b)),
             Round(a) => Round($arg!($f, a)),
             SafeDiv(a, b, c) => SafeDiv($arg!($f, a), $arg!($f, b), $opt!($f, c)),
+            Xidz(a, b, c) => Xidz($arg!($f, a), $arg!($f, b), $opt!($f, c)),
             Sign(a) => Sign($arg!($f, a)),
             Sshape(a, b, c) => Sshape($arg!($f, a), $arg!($f, b), $arg!($f, c)),
             Sin(a) => Sin($arg!($f, a)),
@@ -957,6 +969,7 @@ impl<Expr> BuiltinFn<Expr> {
             Rem(_, _) => &REM,
             Round(_) => &ROUND,
             SafeDiv(_, _, _) => &SAFEDIV,
+            Xidz(_, _, _) => &XIDZ,
             Sign(_) => &SIGN,
             Sshape(_, _, _) => &SSHAPE,
             Sin(_) => &SIN,
@@ -1179,6 +1192,7 @@ impl<Expr> BuiltinFn<Expr> {
             | Rem(_, _)
             | Round(_)
             | SafeDiv(_, _, _)
+            | Xidz(_, _, _)
             | Sign(_)
             | Sshape(_, _, _)
             | Sin(_)
@@ -1341,6 +1355,7 @@ mod tests {
             Builtin::Rem(b(1), b(2)),
             Builtin::Round(b(1)),
             Builtin::SafeDiv(b(1), b(2), None),
+            Builtin::Xidz(b(1), b(2), None),
             Builtin::Sign(b(1)),
             Builtin::Sshape(b(1), b(2), b(3)),
             Builtin::Sin(b(1)),
@@ -1391,6 +1406,7 @@ mod tests {
                 | Builtin::Rem(..)
                 | Builtin::Round(..)
                 | Builtin::SafeDiv(..)
+                | Builtin::Xidz(..)
                 | Builtin::Sign(..)
                 | Builtin::Sshape(..)
                 | Builtin::Sin(..)
@@ -1433,6 +1449,7 @@ mod tests {
             Builtin::Pulse(b(1), b(2), Some(b(3))),
             Builtin::Ramp(b(1), b(2), Some(b(3))),
             Builtin::SafeDiv(b(1), b(2), Some(b(3))),
+            Builtin::Xidz(b(1), b(2), Some(b(3))),
         ]
     }
 

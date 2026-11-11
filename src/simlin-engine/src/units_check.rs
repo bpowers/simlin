@@ -276,7 +276,7 @@ impl UnitEvaluator<'_> {
                     BuiltinFn::Pulse(_, _, _)
                     | BuiltinFn::Ramp(_, _, _)
                     | BuiltinFn::Step(_, _) => Ok(Units::Constant),
-                    BuiltinFn::SafeDiv(a, b, c) => {
+                    BuiltinFn::SafeDiv(a, b, c) | BuiltinFn::Xidz(a, b, c) => {
                         let div = Expr2::Op2(
                             BinaryOp::Div,
                             a.clone(),

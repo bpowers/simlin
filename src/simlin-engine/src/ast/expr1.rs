@@ -202,6 +202,11 @@ impl Expr1 {
                         required(&mut args),
                         optional(&mut args),
                     ),
+                    "xidz" => BuiltinFn::Xidz(
+                        required(&mut args),
+                        required(&mut args),
+                        optional(&mut args),
+                    ),
                     "sign" => BuiltinFn::Sign(required(&mut args)),
                     "sin" => BuiltinFn::Sin(required(&mut args)),
                     "sshape" => BuiltinFn::Sshape(

@@ -688,20 +688,21 @@ impl XmileFormatter {
                 }
             }
             "zidz" => {
-                // ZIDZ(a, b) -> SAFEDIV(a, b)
+                // Vensim tests ABS(b) < 1e-6, unlike XMILE SAFEDIV.
+                // https://www.vensim.com/documentation/fn_xidz.html
                 if args.len() >= 2 {
                     return format!(
-                        "SAFEDIV({}, {})",
+                        "XIDZ({}, {})",
                         self.format_expr_ctx(&args[0], ctx),
                         self.format_expr_ctx(&args[1], ctx)
                     );
                 }
             }
             "xidz" => {
-                // XIDZ(a, b, x) -> SAFEDIV(a, b, x)
+                // XIDZ retains its Vensim denominator threshold.
                 if args.len() >= 3 {
                     return format!(
-                        "SAFEDIV({}, {}, {})",
+                        "XIDZ({}, {}, {})",
                         self.format_expr_ctx(&args[0], ctx),
                         self.format_expr_ctx(&args[1], ctx),
                         self.format_expr_ctx(&args[2], ctx)
@@ -780,8 +781,8 @@ impl XmileFormatter {
             "modulo" => "REM".to_string(),
             "lookup invert" => "LOOKUPINV".to_string(),
             "random uniform" => "UNIFORM".to_string(),
-            "zidz" => "SAFEDIV".to_string(),
-            "xidz" => "SAFEDIV".to_string(),
+            "zidz" => "XIDZ".to_string(),
+            "xidz" => "XIDZ".to_string(),
             // The call, not the table, carries the extrapolation
             // (vensim.com/documentation/fn_lookup_extrapolate.html), so it
             // keeps a builtin of its own beside LOOKUP_FORWARD and
@@ -1448,7 +1449,7 @@ mod tests {
             vec![],
             loc(),
         );
-        assert_eq!(formatter.format_expr(&expr), "SAFEDIV(a, b)");
+        assert_eq!(formatter.format_expr(&expr), "XIDZ(a, b)");
     }
 
     #[test]
@@ -1466,7 +1467,7 @@ mod tests {
             vec![],
             loc(),
         );
-        assert_eq!(formatter.format_expr(&expr), "SAFEDIV(a, b, 1)");
+        assert_eq!(formatter.format_expr(&expr), "XIDZ(a, b, 1)");
     }
 
     #[test]

@@ -23,6 +23,8 @@ mod parser;
 mod pulse_tests;
 mod reader;
 #[cfg(test)]
+mod safe_division_tests;
+#[cfg(test)]
 mod save_roundtrip_tests;
 mod settings;
 #[cfg(test)]

@@ -958,7 +958,7 @@ fn xmile_to_mdl_function_name(xmile_name: &str) -> String {
         "rem" => "MODULO".to_owned(),
         "lookupinv" => "LOOKUP INVERT".to_owned(),
         "uniform" => "RANDOM UNIFORM".to_owned(),
-        "safediv" => "ZIDZ".to_owned(),
+        "xidz" => "ZIDZ".to_owned(),
         "forcst" => "FORECAST".to_owned(),
         "normalpink" => "RANDOM PINK NOISE".to_owned(),
         "normal" => "RANDOM NORMAL".to_owned(),
@@ -1585,7 +1585,7 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
                     return format!("{table_name} ( {input} )");
                 }
                 // A few builtins map to different Vensim names by arity:
-                //   - safediv 3+ args -> XIDZ (3-arg), else ZIDZ (2-arg)
+                //   - xidz 3+ args -> XIDZ (3-arg), else ZIDZ (2-arg)
                 //   - init 1 arg -> INITIAL, else ACTIVE INITIAL (which
                 //     requires two args -- emitting it 1-arg is invalid) (#852)
                 //   - a smooth or delay with an initial value is Vensim's
@@ -1608,7 +1608,7 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
                 };
                 let mdl_name = if let Some(name) = with_initial {
                     name.to_owned()
-                } else if func == "safediv" && args.len() >= 3 {
+                } else if func == "xidz" && args.len() >= 3 {
                     "XIDZ".to_owned()
                 } else if func == "init" {
                     if args.len() == 1 {
@@ -1723,7 +1723,7 @@ fn expr0_to_mdl_noting(expr: &Expr0, ctx: &WriterContext) -> (String, Inexact) {
 /// When `Expr0::new` cannot parse the stored equation there is no AST to render,
 /// so all the writer can do is emit the raw XMILE text with underscores turned
 /// back into spaces. That text is *not* MDL: it skips the builtin-rename table
-/// (`int` -> `INTEGER`, `smth1` -> `SMOOTH`, `safediv` -> `ZIDZ`, ...), and
+/// (`trunc` -> `INTEGER`, `smth1` -> `SMOOTH`, `xidz` -> `ZIDZ`, ...), and
 /// Vensim has no such builtins -- so on re-import an unmapped call reads as a
 /// **lookup invocation of an undefined table** (`INT(0)` -> `LOOKUP(INT, 0)`).
 /// The meaning changes silently, and compounds across passes. The writer cannot

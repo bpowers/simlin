@@ -603,6 +603,7 @@ pub(crate) enum BuiltinId {
     Step,
     Tan,
     Trunc,
+    Xidz,
 }
 
 impl BuiltinId {
@@ -650,7 +651,11 @@ impl BuiltinId {
             | BuiltinId::Quantum
             | BuiltinId::Rem
             | BuiltinId::Step => 2,
-            BuiltinId::Pulse | BuiltinId::Ramp | BuiltinId::SafeDiv | BuiltinId::Sshape => 3,
+            BuiltinId::Pulse
+            | BuiltinId::Ramp
+            | BuiltinId::SafeDiv
+            | BuiltinId::Xidz
+            | BuiltinId::Sshape => 3,
         }
     }
 }
@@ -3672,10 +3677,11 @@ pub(crate) mod tests {
             (BuiltinId::Pulse, 3),
             (BuiltinId::Ramp, 3),
             (BuiltinId::SafeDiv, 3),
+            (BuiltinId::Xidz, 3),
             (BuiltinId::Sshape, 3),
         ];
-        // 24 = every variant of BuiltinId. A new builtin must add a row.
-        assert_eq!(rows.len(), 24);
+        // 25 = every variant of BuiltinId. A new builtin must add a row.
+        assert_eq!(rows.len(), 25);
         for (id, want) in rows {
             assert_eq!(id.arity(), *want, "arity of {id:?}");
         }
