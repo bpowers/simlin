@@ -514,6 +514,17 @@ jobs:
       - name: Run project lint rules
         run: bash scripts/lint-project.sh
 
+  # Checks that values copied between files still match (rules in
+  # /blockwatch.toml). Pinned to a commit because a tag can move.
+  blockwatch:
+    name: Cross-file consistency
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check the rules in blockwatch.toml
+        uses: mennanov/blockwatch-action@69e69ccab29d4413f1aedbe106afb29c61ccb80f # v1.1.40
+
   # The embedded SPA is built ONCE, on ubuntu, and handed to the smoke legs
   # as an artifact. web/dist/ is platform-independent (wasm, JS, CSS), and
   # building it per leg cost every leg two wasm engine builds, which on the

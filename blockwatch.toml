@@ -1,0 +1,80 @@
+# Values copied between files that must stay equal.
+# Run `blockwatch` to check; `blockwatch explain FILE:NAME` shows what a rule compared.
+
+# -- Cross-build images ------------------------------------------------------
+# The Dockerfiles must install the same tools as the release workflows.
+
+[[block]]
+target = 'src/simlin-{mcp,serve}/Dockerfile.cross#/RUST_VERSION'
+name = 'rust-version'
+same-as = 'rust-toolchain.toml#/toolchain/channel'
+
+[[block]]
+target = 'src/simlin-mcp/Dockerfile.cross#/ZIG_VERSION'
+name = 'zig-version'
+same-as = '.github/workflows/mcp-release.yml#/jobs/build/steps/~[name=Install Zig]/with/version'
+
+[[block]]
+target = 'src/simlin-serve/Dockerfile.cross#/ZIG_VERSION'
+name = 'zig-version'
+same-as = '.github/workflows/serve-release.yml#/jobs/build/steps/~[name=Install Zig]/with/version'
+
+# Compares the whole command, since cargo rejects a short version like `@0.22`.
+# A pattern finds the line because RUN lines have no name to point at.
+[[block]]
+target = 'src/simlin-mcp/Dockerfile.cross'
+target-pattern = '^RUN (?P<value>cargo install .*cargo-zigbuild@\S+)$'
+name = 'cargo-zigbuild'
+same-as = '.github/workflows/mcp-release.yml#/jobs/build/steps/~[name=Install cargo-zigbuild]/run'
+
+[[block]]
+target = 'src/simlin-serve/Dockerfile.cross'
+target-pattern = '^RUN (?P<value>cargo install .*cargo-zigbuild@\S+)$'
+name = 'cargo-zigbuild'
+same-as = '.github/workflows/serve-release.yml#/jobs/build/steps/~[name=Install cargo-zigbuild]/run'
+
+# The pattern drops the `pnpm@` prefix and any `+sha512...` suffix.
+[[block]]
+target = 'src/simlin-serve/Dockerfile.cross#/PNPM_VERSION'
+name = 'pnpm-version'
+same-as = 'package.json#/packageManager'
+same-as-pattern = '^(?:pnpm@)?(?P<value>\d+\.\d+\.\d+)'
+
+# Every setup-node step must use the image's Node major version.
+[[block]]
+target = 'src/simlin-serve/Dockerfile.cross#/NODE_MAJOR'
+name = 'node-major'
+same-as = '.github/workflows/serve-release.yml'
+same-as-pattern = '''^(?:\s*node-version:\s*['"]?)?(?P<value>\d+)[.\w]*['"]?\s*$'''
+
+# -- AddressSanitizer toolchain ----------------------------------------------
+# test-asan.sh must default to the nightly that memory.yml installs.
+[[block]]
+target = 'test-asan.sh'
+target-pattern = '^NIGHTLY_TOOLCHAIN=.*$'
+name = 'nightly-toolchain'
+same-as = '.github/workflows/memory.yml'
+same-as-pattern = '(?P<value>nightly-\d{4}-\d{2}-\d{2})'
+
+# -- Notebook widget ---------------------------------------------------------
+# The browser and the kernel must use the same snapshot size limit.
+[[block]]
+target = 'src/notebook-widget/src/widget-core.ts#/MAX_SNAPSHOT_BYTES'
+name = 'max-snapshot-bytes'
+same-as = 'src/pysimlin/simlin/_widget_core.py#/MAX_SNAPSHOT_BYTES'
+
+# -- Workflow path filters ---------------------------------------------------
+# A workflow that runs on both push and pull_request must filter both by the
+# same paths, or it runs on merge but not on the pull request (or the reverse).
+# The lists must be exact copies, in order and with comments.
+[[block]]
+target = '.github/workflows/*.{yml,yaml}#/on/push/paths'
+target-if = { symbols = ['#/on/push/paths', '#/on/pull_request'] }
+name = 'push-paths'
+same-as = '#/on/pull_request/paths'
+
+[[block]]
+target = '.github/workflows/*.{yml,yaml}#/on/pull_request/paths'
+target-if = { symbols = ['#/on/pull_request/paths', '#/on/push'] }
+name = 'pull-request-paths'
+same-as = '#/on/push/paths'

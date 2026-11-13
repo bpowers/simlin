@@ -96,6 +96,19 @@ if ! command -v cbindgen >/dev/null 2>&1; then
     fi
 fi
 
+# blockwatch, for the pre-commit hook. At least the version CI's action
+# installs; an older one may not read blockwatch.toml.
+BLOCKWATCH_VERSION=0.19.1
+have_bw="$(blockwatch --version 2>/dev/null | awk '{print $2}')"
+if [ -z "$have_bw" ] \
+    || [ "$(printf '%s\n%s\n' "$BLOCKWATCH_VERSION" "$have_bw" | sort -V | head -1)" != "$BLOCKWATCH_VERSION" ]; then
+    if command -v cargo >/dev/null 2>&1; then
+        if ! cargo install --locked blockwatch --version "$BLOCKWATCH_VERSION" >/dev/null 2>&1; then
+            errors+=("Failed to install blockwatch. Run 'cargo install --locked blockwatch --version $BLOCKWATCH_VERSION' manually.")
+        fi
+    fi
+fi
+
 # 3. pnpm install (skip if pnpm missing -- already reported above)
 NODE_VERSION="$(node --version 2>/dev/null || echo missing)"
 PNPM_VERSION="$(pnpm --version 2>/dev/null || echo missing)"

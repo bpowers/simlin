@@ -220,39 +220,6 @@ fn ac2_5_chmod_for_non_windows_binaries() {
     }
 }
 
-// Dockerfile.cross must default to the same Rust version as rust-toolchain.toml
-// so that local cross-builds use the same compiler as the rest of the project.
-#[test]
-fn dockerfile_rust_version_matches_toolchain() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-
-    let toolchain = std::fs::read_to_string(repo_root.join("rust-toolchain.toml"))
-        .expect("read rust-toolchain.toml");
-    let toolchain_version = toolchain
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("channel = \"")
-                .and_then(|rest| rest.strip_suffix('"'))
-        })
-        .expect("rust-toolchain.toml must have channel = \"...\"");
-
-    let dockerfile = std::fs::read_to_string(repo_root.join("src/simlin-mcp/Dockerfile.cross"))
-        .expect("read Dockerfile.cross");
-    let docker_version = dockerfile
-        .lines()
-        .find_map(|line| line.strip_prefix("ARG RUST_VERSION="))
-        .expect("Dockerfile.cross must have ARG RUST_VERSION=...");
-
-    assert_eq!(
-        docker_version, toolchain_version,
-        "Dockerfile.cross RUST_VERSION ({docker_version}) must match rust-toolchain.toml ({toolchain_version})"
-    );
-}
-
 // Each npm publish step must be guarded by an existence check so that
 // reruns after partial failure skip already-published packages.
 // We verify that `npm view` appears at least as many times as `npm publish`,
@@ -317,25 +284,6 @@ fn release_builds_use_locked() {
     }
 }
 
-// Dockerfile.cross must pin cargo-zigbuild to a specific version
-// to stay in sync with the CI workflow.
-#[test]
-fn dockerfile_pins_cargo_zigbuild_version() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let dockerfile = std::fs::read_to_string(repo_root.join("src/simlin-mcp/Dockerfile.cross"))
-        .expect("read Dockerfile.cross");
-    assert!(
-        dockerfile
-            .lines()
-            .any(|line| line.contains("cargo-zigbuild@")),
-        "Dockerfile.cross must pin cargo-zigbuild to a specific version"
-    );
-}
-
 // The build cache key must include rust-toolchain.toml so toolchain version
 // bumps invalidate cached artifacts.
 #[test]
@@ -345,42 +293,6 @@ fn build_cache_key_includes_toolchain() {
         text.lines()
             .any(|line| line.contains("hashFiles") && line.contains("rust-toolchain.toml")),
         "build cache key must hash rust-toolchain.toml to invalidate on toolchain changes"
-    );
-}
-
-// Zig version in Dockerfile.cross must match the version in mcp-release.yml.
-#[test]
-fn dockerfile_zig_version_matches_workflow() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-
-    let dockerfile = std::fs::read_to_string(repo_root.join("src/simlin-mcp/Dockerfile.cross"))
-        .expect("read Dockerfile.cross");
-    let docker_zig = dockerfile
-        .lines()
-        .find_map(|line| line.strip_prefix("ARG ZIG_VERSION="))
-        .expect("Dockerfile.cross must have ARG ZIG_VERSION=...");
-
-    // Navigate the parsed YAML to find the Zig version in the setup-zig step,
-    // rather than doing fragile text matching on `version: '...'` lines.
-    let wf = load_workflow();
-    let steps = wf["jobs"]["build"]["steps"]
-        .as_sequence()
-        .expect("build.steps should be a sequence");
-    let zig_step = steps
-        .iter()
-        .find(|s| s["uses"].as_str().is_some_and(|u| u.contains("setup-zig")))
-        .expect("build steps should include a setup-zig action");
-    let wf_zig = zig_step["with"]["version"]
-        .as_str()
-        .expect("setup-zig step should have with.version");
-
-    assert_eq!(
-        docker_zig, wf_zig,
-        "Dockerfile.cross ZIG_VERSION ({docker_zig}) must match mcp-release.yml ({wf_zig})"
     );
 }
 
