@@ -90,15 +90,7 @@ rm -f "$RS_FILES"
 # check-copyright.py writes one error per line to stdout; summary to stderr.
 run_line_check "copyright header" python3 scripts/check-copyright.py
 
-# Rule 4: a path-filtered workflow's push and pull_request `paths` lists must
-# match. They are maintained by hand and read as one filter, so a path added to
-# only one of them silently means "runs on merge but not on the PR" (or the
-# reverse) -- a gap that looks like coverage. `.github/workflows/wasm-opt.yml`
-# is the only such workflow today; the loop covers any future one.
-run_line_check "workflow paths" python3 scripts/check-workflow-paths.py
-rm -f "$PATHS_OUTPUT"
-
-# Rule 5: a map or set keyed by an interned canonical identifier is spelled
+# Rule 4: a map or set keyed by an interned canonical identifier is spelled
 # `IdentMap` / `IdentSet` (simlin_engine::common), never `HashMap`, `HashSet`
 # or their `Fx` twins. The aliases are the one statement of how such a key is
 # hashed, so a second spelling is a second answer. The pattern reads the FIRST

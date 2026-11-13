@@ -14,7 +14,7 @@ pub struct SimlinProject {
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
 
-/// Opaque simulation structure  
+/// Opaque simulation structure
 #[repr(C)]
 #[allow(dead_code)]
 pub struct SimlinSim {

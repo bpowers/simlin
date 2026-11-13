@@ -4,10 +4,9 @@
 # Windows (mingw) binaries from a single image.  Used by scripts/cross-build.sh.
 
 # Passed by cross-build.sh from rust-toolchain.toml; default kept as fallback
-# (tested by dockerfile_rust_version_matches_toolchain)
+# /blockwatch.toml checks these pins against their other copies.
 ARG RUST_VERSION=1.97.1
-# Keep in sync with .github/workflows/mcp-release.yml
-# (tested by dockerfile_zig_version_matches_workflow)
+# Must match .github/workflows/mcp-release.yml
 ARG ZIG_VERSION=0.15.2
 
 FROM rust:${RUST_VERSION}-bookworm
@@ -22,8 +21,8 @@ RUN ARCH=$(uname -m) && \
         | tar -J -x -C /usr/local && \
     ln -s "/usr/local/${DIR}/zig" /usr/local/bin/zig
 
-# Keep version in sync with .github/workflows/mcp-release.yml
-RUN cargo install --locked cargo-zigbuild@0.22
+# Must match .github/workflows/mcp-release.yml
+RUN cargo install --locked cargo-zigbuild@0.22.1
 
 RUN rustup target add \
     x86_64-unknown-linux-musl \

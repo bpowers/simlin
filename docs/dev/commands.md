@@ -24,6 +24,10 @@ Run at the start of every session:
 | `pnpm lint` | Lint Rust (clippy) + TypeScript/JavaScript (eslint) |
 | `cargo clippy --all-targets --all-features -- -D warnings` | Rust linting only |
 | `cargo fmt --check` | Rust format check |
+| `blockwatch` | Check that values written in two places agree (rules in `/blockwatch.toml`) |
+
+`blockwatch` runs in the pre-commit hook and in CI ("Cross-file consistency"); `scripts/dev-init.sh` installs it.
+`blockwatch explain FILE:NAME` shows what a rule compared.
 
 ## Test
 
