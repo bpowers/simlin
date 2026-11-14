@@ -10,14 +10,14 @@
 # embedded frontend, so its image stays leaner.
 
 # Passed by cross-build.sh from rust-toolchain.toml; default kept as fallback
-# (tested by dockerfile_rust_version_matches_toolchain)
+# /blockwatch.toml checks these pins against their other copies.
 ARG RUST_VERSION=1.97.1
-# Keep in sync with .github/workflows/serve-release.yml
-# (tested by dockerfile_zig_version_matches_workflow)
+# Must match .github/workflows/serve-release.yml
 ARG ZIG_VERSION=0.15.2
-# Keep in sync with package.json engines / .github/workflows/serve-release.yml
+# Must match .github/workflows/serve-release.yml
 ARG NODE_MAJOR=24
-ARG PNPM_VERSION=9.15.0
+# Must match `packageManager` in /package.json
+ARG PNPM_VERSION=10.6.0
 
 FROM rust:${RUST_VERSION}-bookworm
 
@@ -33,8 +33,9 @@ RUN ARCH=$(uname -m) && \
         | tar -J -x -C /usr/local && \
     ln -s "/usr/local/${DIR}/zig" /usr/local/bin/zig
 
-# Keep version in sync with .github/workflows/serve-release.yml
-RUN cargo install --locked cargo-zigbuild@0.22
+# Must match .github/workflows/serve-release.yml. cargo needs the full
+# version: 0.22.1, not 0.22.
+RUN cargo install --locked cargo-zigbuild@0.22.1
 
 RUN rustup target add \
     x86_64-unknown-linux-musl \

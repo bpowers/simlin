@@ -29,6 +29,13 @@ python3 scripts/check-docs.py > "$DOCS_OUTPUT" 2>&1 &
 PID_DOCS=$!
 bash scripts/lint-project.sh > "$PLINT_OUTPUT" 2>&1 &
 PID_PLINT=$!
+# Rules in blockwatch.toml. CI runs them in their own job.
+BW_OUTPUT="$(mktemp)"
+PID_BW=""
+if command -v blockwatch > /dev/null 2>&1; then
+    blockwatch > "$BW_OUTPUT" 2>&1 &
+    PID_BW=$!
+fi
 
 echo -n "Checking dependency policy... "
 if wait $PID_DEPS; then
@@ -63,6 +70,22 @@ else
     POLICY_FAIL=1
 fi
 rm -f "$PLINT_OUTPUT"
+
+echo -n "Checking values copied between files... "
+if [ -z "$PID_BW" ]; then
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}blockwatch is not installed.${NC} Run ./scripts/dev-init.sh"
+    POLICY_FAIL=1
+elif wait $PID_BW; then
+    echo -e "${GREEN}✓${NC}"
+else
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}Values that must match differ (rules in blockwatch.toml):${NC}"
+    cat "$BW_OUTPUT"
+    echo -e "${YELLOW}'blockwatch explain FILE:NAME' shows what a rule compared${NC}"
+    POLICY_FAIL=1
+fi
+rm -f "$BW_OUTPUT"
 
 if [ "$POLICY_FAIL" -ne 0 ]; then
     exit 1
