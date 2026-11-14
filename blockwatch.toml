@@ -3,6 +3,8 @@
 
 # -- Cross-build images ------------------------------------------------------
 # The Dockerfiles must install the same tools as the release workflows.
+# Both images cross-build Rust the same way, so the mcp and serve images and
+# workflows share one Zig and one cargo-zigbuild: each rule ties all four files.
 
 [[block]]
 target = 'src/simlin-{mcp,serve}/Dockerfile.cross#/RUST_VERSION'
@@ -10,28 +12,23 @@ name = 'rust-version'
 same-as = 'rust-toolchain.toml#/toolchain/channel'
 
 [[block]]
-target = 'src/simlin-mcp/Dockerfile.cross#/ZIG_VERSION'
+target = 'src/simlin-{mcp,serve}/Dockerfile.cross#/ZIG_VERSION'
 name = 'zig-version'
-same-as = '.github/workflows/mcp-release.yml#/jobs/build/steps/~[name=Install Zig]/with/version'
-
-[[block]]
-target = 'src/simlin-serve/Dockerfile.cross#/ZIG_VERSION'
-name = 'zig-version'
-same-as = '.github/workflows/serve-release.yml#/jobs/build/steps/~[name=Install Zig]/with/version'
+same-as = [
+  '.github/workflows/mcp-release.yml#/jobs/build/steps/~[name=Install Zig]/with/version',
+  '.github/workflows/serve-release.yml#/jobs/build/steps/~[name=Install Zig]/with/version',
+]
 
 # Compares the whole command, since cargo rejects a short version like `@0.22`.
 # A pattern finds the line because RUN lines have no name to point at.
 [[block]]
-target = 'src/simlin-mcp/Dockerfile.cross'
+target = 'src/simlin-{mcp,serve}/Dockerfile.cross'
 target-pattern = '^RUN (?P<value>cargo install .*cargo-zigbuild@\S+)$'
 name = 'cargo-zigbuild'
-same-as = '.github/workflows/mcp-release.yml#/jobs/build/steps/~[name=Install cargo-zigbuild]/run'
-
-[[block]]
-target = 'src/simlin-serve/Dockerfile.cross'
-target-pattern = '^RUN (?P<value>cargo install .*cargo-zigbuild@\S+)$'
-name = 'cargo-zigbuild'
-same-as = '.github/workflows/serve-release.yml#/jobs/build/steps/~[name=Install cargo-zigbuild]/run'
+same-as = [
+  '.github/workflows/mcp-release.yml#/jobs/build/steps/~[name=Install cargo-zigbuild]/run',
+  '.github/workflows/serve-release.yml#/jobs/build/steps/~[name=Install cargo-zigbuild]/run',
+]
 
 # The pattern drops the `pnpm@` prefix and any `+sha512...` suffix.
 [[block]]

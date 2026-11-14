@@ -98,7 +98,7 @@ fi
 
 # blockwatch, for the pre-commit hook. At least the version CI's action
 # installs; an older one may not read blockwatch.toml.
-BLOCKWATCH_VERSION=0.19.1
+BLOCKWATCH_VERSION=0.19.2
 have_bw="$(blockwatch --version 2>/dev/null | awk '{print $2}')"
 if [ -z "$have_bw" ] \
     || [ "$(printf '%s\n%s\n' "$BLOCKWATCH_VERSION" "$have_bw" | sort -V | head -1)" != "$BLOCKWATCH_VERSION" ]; then

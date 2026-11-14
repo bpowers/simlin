@@ -523,7 +523,7 @@ jobs:
       contents: read
     steps:
       - name: Check the rules in blockwatch.toml
-        uses: mennanov/blockwatch-action@69e69ccab29d4413f1aedbe106afb29c61ccb80f # v1.1.40
+        uses: mennanov/blockwatch-action@d9cde319d3f71fe5794a9fbcfab90ba85a83059a # v1.1.41
 
   # The embedded SPA is built ONCE, on ubuntu, and handed to the smoke legs
   # as an artifact. web/dist/ is platform-independent (wasm, JS, CSS), and
