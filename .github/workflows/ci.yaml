@@ -513,3 +513,36 @@ jobs:
 
       - name: Run project lint rules
         run: bash scripts/lint-project.sh
+
+  # @simlin/mcp ships a win32-x64 binary that mcp-release.yml cross-compiles
+  # for the GNU target, and nothing else a pull request runs compiles the
+  # engine or simlin-mcp on Windows. This is a type-check of every target, so
+  # a change that does not build there is found before a release.
+  windows-check:
+    name: simlin-mcp check (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: -D warnings
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-check-windows-latest-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            cargo-check-windows-latest-
+
+      - name: Type-check every simlin-mcp target
+        run: cargo check -p simlin-mcp --all-targets
