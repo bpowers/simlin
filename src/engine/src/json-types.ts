@@ -590,6 +590,15 @@ export interface SetNotesPayload {
 }
 
 /**
+ * Payload for set lookup operation: the variable's lookup table; `null` removes
+ * it. Its equation, and any lookups its elements have of their own, stay.
+ */
+export interface SetLookupPayload {
+  ident: string;
+  lookup: JsonGraphicalFunction | null;
+}
+
+/**
  * Payload for set sim specs operation.
  */
 export interface SetSimSpecsPayload {
@@ -679,6 +688,11 @@ export interface SetNotesOp {
   payload: SetNotesPayload;
 }
 
+export interface SetLookupOp {
+  type: 'setLookup';
+  payload: SetLookupPayload;
+}
+
 /**
  * Union type for model operations.
  */
@@ -694,7 +708,8 @@ export type JsonModelOperation =
   | UpdateStockFlowsOp
   | SetEquationOp
   | SetUnitsOp
-  | SetNotesOp;
+  | SetNotesOp
+  | SetLookupOp;
 
 /**
  * Union type for project operations.

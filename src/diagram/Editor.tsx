@@ -15,13 +15,12 @@ import Button from './components/Button';
 import { canonicalize } from '@simlin/core/canonicalize';
 
 import { Project as EngineProject } from '@simlin/engine';
-import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@simlin/engine';
+import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs } from '@simlin/engine';
 import {
   Project,
   Model,
   Variable,
   UID,
-  Aux,
   ViewElement,
   NamedViewElement,
   StockFlowView,
@@ -32,7 +31,7 @@ import {
   flowToJson,
   auxToJson,
   moduleToJson,
-  arrayedEquationToJson,
+  graphicalFunctionToJson,
   stockFlowViewToJson,
   type ModuleReference,
 } from '@simlin/core/datamodel';
@@ -1890,29 +1889,6 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     );
   };
 
-  // Returns the equation fields for a JSON patch operation.
-  // For scalar equations, returns { equation: string }.
-  // For arrayed equations, returns { arrayedEquation: JsonArrayedEquation }.
-  const getEquationFields = (variable: Variable): { equation?: string; arrayedEquation?: JsonArrayedEquation } => {
-    const eq = variable.type === 'module' ? undefined : variable.equation;
-    if (!eq || eq.type === 'scalar') {
-      return { equation: eq?.equation ?? '' };
-    } else if (eq.type === 'applyToAll') {
-      return {
-        arrayedEquation: {
-          dimensions: [...eq.dimensionNames],
-          equation: eq.equation,
-        },
-      };
-    } else if (eq.type === 'arrayed') {
-      // Use the shared serializer so per-element graphical functions, per-element
-      // ACTIVE INITIAL equations, and the EXCEPT default round-trip through the
-      // upsert (a hand-rolled mapping here previously dropped them).
-      return { arrayedEquation: arrayedEquationToJson(eq) };
-    }
-    return { equation: '' };
-  };
-
   const handleEquationChange = React.useCallback(
     (
       ident: string,
@@ -1980,52 +1956,19 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     if (isReadOnly()) {
       return;
     }
-    enqueueVariableEdit('table update', ident, newTable, (variable, _committed, mName) => {
-      const gf = newTable
-        ? {
-            yPoints: [...newTable.yPoints],
-            kind: newTable.kind,
-            xScale: newTable.xScale ? { min: newTable.xScale.min, max: newTable.xScale.max } : undefined,
-            yScale: newTable.yScale ? { min: newTable.yScale.min, max: newTable.yScale.max } : undefined,
-          }
-        : undefined;
-
-      // Preserve the existing equation structure when updating the graphical function
-      const existingEqFields = getEquationFields(variable);
-
-      // Use *ToJson to preserve all fields (including compat flags),
-      // then override the graphical function.
-      let op: JsonModelOperation;
-      if (variable.type === 'flow') {
-        const base = flowToJson(variable);
-        op = {
-          type: 'upsertFlow',
-          payload: {
-            flow: {
-              ...base,
-              equation: existingEqFields.equation,
-              arrayedEquation: existingEqFields.arrayedEquation,
-              graphicalFunction: gf,
+    enqueueVariableEdit('table update', ident, newTable, (variable, _committed, mName) => ({
+      models: [
+        {
+          name: mName,
+          ops: [
+            {
+              type: 'setLookup',
+              payload: { ident: variable.ident, lookup: newTable ? graphicalFunctionToJson(newTable) : null },
             },
-          },
-        };
-      } else {
-        const auxVar = variable as Aux;
-        const base = auxToJson(auxVar);
-        op = {
-          type: 'upsertAux',
-          payload: {
-            aux: {
-              ...base,
-              equation: existingEqFields.equation,
-              arrayedEquation: existingEqFields.arrayedEquation,
-              graphicalFunction: gf,
-            },
-          },
-        };
-      }
-      return { models: [{ name: mName, ops: [op] }] };
-    });
+          ],
+        },
+      ],
+    }));
   }, []);
 
   // The module variable an edit builder reads; a variable that changed kind

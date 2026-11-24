@@ -15,6 +15,10 @@
 // serialized project must differ from before in that one field alone, through a
 // patch naming only that field. Undo then takes each edit back.
 //
+// The lookup tab's edits are tabled the same way: each control of the lookup
+// editor over a table with x points of its own and one without, a table added to
+// and removed from each shape of equation.
+//
 // The Editor mounts with the Canvas mocked and the panels real. What this does
 // not establish: what the panel shows for each kind
 // (variable-details-arrayed.test.tsx), or edits racing one another
@@ -38,6 +42,22 @@ beforeAll(() => {
     (Range.prototype as any).getClientRects = () =>
       ({ length: 0, item: () => null, [Symbol.iterator]: function* () {} }) as unknown as DOMRectList;
   }
+  // jsdom lays nothing out, and the lookup's chart draws its points only once it
+  // has a width.
+  Object.defineProperty(globalThis, 'ResizeObserver', {
+    configurable: true,
+    value: class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element): void {
+        const entry = { target, contentRect: { width: 400, height: 300 } } as ResizeObserverEntry;
+        this.callback([entry], this as unknown as ResizeObserver);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    },
+  });
+  Element.prototype.setPointerCapture = () => {};
+  Element.prototype.releasePointerCapture = () => {};
 });
 
 import * as React from 'react';
@@ -129,6 +149,16 @@ const auxiliaries: JsonVar[] = [
   { name: 'aux two dims', arrayedEquation: { dimensions: ['Region', 'Product'], equation: '1' } },
   { name: 'aux per element', ...perElement },
   { name: 'aux except', ...exceptDefault },
+  {
+    name: 'element lookups',
+    arrayedEquation: {
+      dimensions: ['Region'],
+      elements: [
+        { subscript: 'north', equation: 'TIME', graphicalFunction: table },
+        { subscript: 'south', equation: '2' },
+      ],
+    },
+  },
   { name: 'active initial', equation: 'price[north]', compat: { activeInitial: '6' } },
   { name: 'lookup only', equation: '', graphicalFunction: table },
   { name: 'with lookup', equation: 'TIME', graphicalFunction: table },
@@ -138,8 +168,8 @@ const auxiliaries: JsonVar[] = [
     graphicalFunction: {
       points: [
         [0, 0],
-        [1, 5],
-        [10, 9],
+        [2, 4],
+        [10, 8],
       ],
       kind: 'discrete',
       xScale: { min: 0, max: 10 },
@@ -377,6 +407,7 @@ const ROWS: ReadonlyArray<{ name: string; shape: EquationShape }> = [
   { name: 'aux two dims', shape: 'applyToAll' },
   { name: 'aux per element', shape: 'perElement' },
   { name: 'aux except', shape: 'perElement' },
+  { name: 'element lookups', shape: 'perElement' },
   { name: 'active initial', shape: 'equation' },
   { name: 'lookup only', shape: 'equation' },
   { name: 'with lookup', shape: 'equation' },
@@ -579,4 +610,226 @@ describeWithEngine('details-panel edits on the real engine', () => {
     expect(fieldText('.unitsEditor')).toBe('');
     expect(listed()).toEqual(equations);
   });
+
+  const openLookup = (name: string): void => {
+    openPanel(name);
+    act(() => {
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Lookup Function' }), { button: 0 });
+    });
+  };
+
+  const setLookupField = (label: string, value: string): void => {
+    act(() => {
+      fireEvent.change(screen.getByLabelText(label), { target: { value } });
+    });
+  };
+
+  // Drag the table's last point to the top of the chart.
+  const dragLastPointToTop = (): void => {
+    const overlay = document.querySelector('.overlay') as SVGRectElement;
+    act(() => {
+      fireEvent.pointerDown(overlay, { clientX: 5000, clientY: 150, pointerId: 1 });
+    });
+    act(() => {
+      fireEvent.pointerMove(overlay, { clientX: 5000, clientY: -5000, pointerId: 1 });
+    });
+    act(() => {
+      fireEvent.pointerUp(overlay, { clientX: 5000, clientY: -5000, pointerId: 1 });
+    });
+  };
+
+  const pressCancel = (): void => {
+    act(() => {
+      fireEvent.click(screen.getByText('Cancel'));
+    });
+  };
+
+  // What each edit makes of a table with x points of its own, (0,0), (2,4),
+  // (10,8) drawn over 0 to 10, and of one with y points 0, 5, 9 spread over 0 to
+  // 2. These are every control the lookup editor has; it has none for the kind,
+  // which the first table's rows hold to 'discrete'.
+  const lookupEdits: ReadonlyArray<{
+    name: string;
+    edit: () => void;
+    uneven: Record<string, unknown>;
+    even: Record<string, unknown>;
+  }> = [
+    {
+      name: 'a dragged point',
+      edit: dragLastPointToTop,
+      uneven: {
+        points: [
+          [0, 0],
+          [2, 4],
+          [10, 10],
+        ],
+      },
+      even: { yPoints: [0, 5, 10] },
+    },
+    {
+      name: 'Y axis max',
+      edit: () => setLookupField('Y axis max', '20'),
+      uneven: { yScale: { min: 0, max: 20 } },
+      even: { yScale: { min: 0, max: 20 } },
+    },
+    {
+      name: 'Y axis min',
+      edit: () => setLookupField('Y axis min', '-5'),
+      uneven: { yScale: { min: -5, max: 10 } },
+      even: { yScale: { min: -5, max: 10 } },
+    },
+    // Points of their own stay where they are: the x scale is the range they are
+    // drawn over. Without, the x scale is where the points are.
+    {
+      name: 'X axis max',
+      edit: () => setLookupField('X axis max', '20'),
+      uneven: { xScale: { min: 0, max: 20 } },
+      even: { xScale: { min: 0, max: 20 } },
+    },
+    {
+      name: 'X axis min',
+      edit: () => setLookupField('X axis min', '-10'),
+      uneven: { xScale: { min: -10, max: 10 } },
+      even: { xScale: { min: -10, max: 2 } },
+    },
+    {
+      name: 'the point count, spread over the x the table covers',
+      edit: () => setLookupField('Datapoint Count', '5'),
+      uneven: {
+        points: [
+          [0, 0],
+          [2.5, 4.25],
+          [5, 5.5],
+          [7.5, 6.75],
+          [10, 8],
+        ],
+      },
+      even: { yPoints: [0, 2.5, 5, 7, 9] },
+    },
+    {
+      name: 'the point count after the x scale',
+      edit: () => {
+        setLookupField('X axis max', '20');
+        setLookupField('Datapoint Count', '2');
+      },
+      uneven: {
+        points: [
+          [0, 0],
+          [10, 8],
+        ],
+        xScale: { min: 0, max: 20 },
+      },
+      even: { yPoints: [0, 9], xScale: { min: 0, max: 20 } },
+    },
+    {
+      name: 'a point count typed through a smaller one',
+      edit: () => {
+        setLookupField('Datapoint Count', '1');
+        setLookupField('Datapoint Count', '5');
+      },
+      uneven: {
+        points: [
+          [0, 0],
+          [2.5, 4.25],
+          [5, 5.5],
+          [7.5, 6.75],
+          [10, 8],
+        ],
+      },
+      even: { yPoints: [0, 2.5, 5, 7, 9] },
+    },
+    {
+      name: 'a point count put back, across an x scale edit',
+      edit: () => {
+        setLookupField('Datapoint Count', '2');
+        setLookupField('X axis max', '20');
+        setLookupField('Datapoint Count', '3');
+      },
+      uneven: { xScale: { min: 0, max: 20 } },
+      even: { xScale: { min: 0, max: 20 } },
+    },
+    {
+      name: 'the point count of a table with a dragged point',
+      edit: () => {
+        dragLastPointToTop();
+        setLookupField('Datapoint Count', '2');
+      },
+      uneven: {
+        points: [
+          [0, 0],
+          [10, 10],
+        ],
+      },
+      even: { yPoints: [0, 10] },
+    },
+    {
+      name: 'the point count after Cancel put a dragged point back',
+      edit: () => {
+        dragLastPointToTop();
+        pressCancel();
+        setLookupField('Datapoint Count', '2');
+      },
+      uneven: {
+        points: [
+          [0, 0],
+          [10, 8],
+        ],
+      },
+      even: { yPoints: [0, 9] },
+    },
+  ];
+  for (const { name, edit, ...expected } of lookupEdits) {
+    for (const [variable, change] of [
+      ['uneven lookup', expected.uneven],
+      ['a2a with lookup', expected.even],
+    ] as const) {
+      it(`${variable}: a lookup edit changes what it says and keeps the rest (${name})`, async () => {
+        const m = await mount();
+        const before = await m.engineVariables();
+        openLookup(variable);
+        edit();
+        act(() => {
+          fireEvent.click(screen.getByText('Save'));
+        });
+        await m.settle();
+        const lookup = { ...(before.get(variable)!.graphicalFunction as object), ...change };
+        expect(await m.engineVariables()).toEqual(withVariable(before, variable, { graphicalFunction: lookup }));
+        expect(lastOps(m).map((op) => op.type)).toEqual(['setLookup']);
+        pressButton('Undo');
+        await m.settle();
+        expect(await m.engineVariables()).toEqual(before);
+        expect(alerts()).toEqual([]);
+      });
+    }
+  }
+
+  for (const name of [
+    'data',
+    'flow scalar',
+    'price',
+    'flow a2a',
+    'aux per element',
+    'flow except',
+    'element lookups',
+  ]) {
+    it(`${name}: adding a lookup and removing it leave everything else as it was`, async () => {
+      const m = await mount();
+      const before = await m.engineVariables();
+      openLookup(name);
+      act(() => {
+        fireEvent.click(screen.getByText('Add lookup table'));
+      });
+      await m.settle();
+      const added = (await m.engineVariables()).get(name)!.graphicalFunction as Record<string, unknown>;
+      expect(added.yPoints).toEqual([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]);
+      expect(await m.engineVariables()).toEqual(withVariable(before, name, { graphicalFunction: added }));
+      act(() => {
+        fireEvent.click(screen.getByText('Remove'));
+      });
+      await m.settle();
+      expect(await m.engineVariables()).toEqual(before);
+      expect(lastOps(m)).toEqual([{ type: 'setLookup', payload: { ident: identOf(name), lookup: null } }]);
+      expect(alerts()).toEqual([]);
+    });
+  }
 });

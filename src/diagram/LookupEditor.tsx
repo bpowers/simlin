@@ -146,8 +146,15 @@ function getVariableGF(variable: Variable): GraphicalFunction {
 }
 
 // Recompute the x-points of a table to linearly span the gf's x scale. Pure;
-// returns a fresh table (formerly the static LookupEditor.rescaleX).
+// returns a fresh table, except that a table with x points of its own is
+// returned as it is. Its points are where they were put: the x scale is only the
+// range it is drawn over (the engine reads the scale only to place points that
+// have no x, `variable::parse_table`; XMILE 1.0 section 4.1.3 has a function
+// give one or the other).
 export function rescaleX(gf: GraphicalFunction, table: GFTable): GFTable {
+  if (gf.xPoints !== undefined) {
+    return table;
+  }
   const newTable = Object.assign({}, table);
   newTable.x = new Float64Array(table.x);
 
@@ -167,6 +174,30 @@ export function rescaleX(gf: GraphicalFunction, table: GFTable): GFTable {
   }
 
   return newTable;
+}
+
+// The table read at `count` points, spread evenly over the x it covers: its
+// first x to its last when it has x points of its own, else its x scale. The
+// table itself at its own count, so asking for that moves nothing. Undefined
+// when the range is empty.
+export function resample(gf: GraphicalFunction, table: GFTable, count: number): GFTable | undefined {
+  if (count === table.size) {
+    return table;
+  }
+  const covers = gf.xPoints !== undefined && table.size > 1;
+  const xMin = covers ? table.x[0] : defined(gf.xScale).min;
+  const xMax = covers ? table.x[table.size - 1] : defined(gf.xScale).max;
+  if (xMin >= xMax) {
+    return undefined;
+  }
+
+  const x = new Float64Array(count);
+  const y = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    x[i] = xAtTableIndex(i, count, xMin, xMax);
+    y[i] = lookup(table, x[i]);
+  }
+  return { ...table, size: count, x, y };
 }
 
 interface LookupEditorSeed {
@@ -207,6 +238,10 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
   const [yMin, setYMin] = React.useState(seed.yMin);
   const [yMax, setYMax] = React.useState(seed.yMax);
   const [datapointCount, setDatapointCount] = React.useState(seed.datapointCount);
+  // The table a point count resamples: the one shown before the count was
+  // touched. Typing 12 passes through 1, and resampling that one-point table
+  // would flatten the curve.
+  const [countBase, setCountBase] = React.useState(seed.table);
   // The inDrag flag mirrored the class state but was never read in render; it is
   // kept as a ref to preserve the onDragStart/onDragEnd bookkeeping without a
   // redundant re-render.
@@ -221,6 +256,7 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
     newTable.y[pointIndex] = newY;
     setHasChange(true);
     setTable(newTable);
+    setCountBase(newTable);
   };
 
   const handleDragStart = (): void => {
@@ -256,11 +292,10 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
     const xScale = defined(gf.xScale);
     const newGf: GraphicalFunction = { ...gf, xScale: { ...xScale, min: value } };
 
-    const newTable = rescaleX(newGf, table);
-
     setHasChange(true);
     setGf(newGf);
-    setTable(newTable);
+    setTable(rescaleX(newGf, table));
+    setCountBase(rescaleX(newGf, countBase));
   };
 
   const handleXMaxChange = (event: React.ChangeEvent<HTMLInputElement>): void => {
@@ -268,11 +303,10 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
     const xScale = defined(gf.xScale);
     const newGf: GraphicalFunction = { ...gf, xScale: { ...xScale, max: value } };
 
-    const newTable = rescaleX(newGf, table);
-
     setHasChange(true);
     setGf(newGf);
-    setTable(newTable);
+    setTable(rescaleX(newGf, table));
+    setCountBase(rescaleX(newGf, countBase));
   };
 
   const handleDatapointCountChange = (event: React.ChangeEvent<HTMLInputElement>): void => {
@@ -285,27 +319,10 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
       return;
     }
 
-    const oldTable = table;
-    const newTable = Object.assign({}, oldTable);
-    newTable.x = new Float64Array(newCount);
-    newTable.y = new Float64Array(newCount);
-
-    const size = newCount;
-    const xMin = defined(gf.xScale).min;
-    const xMax = defined(gf.xScale).max;
-    if (xMin >= xMax) {
-      return;
+    const newTable = resample(gf, countBase, newCount);
+    if (newTable !== undefined) {
+      setTable(newTable);
     }
-
-    for (let i = 0; i < size; i++) {
-      const xVal = xAtTableIndex(i, size, xMin, xMax);
-      newTable.x[i] = xVal;
-      newTable.y[i] = lookup(oldTable, xVal);
-    }
-    newTable.size = newCount;
-
-    setHasChange(true);
-    setTable(newTable);
   };
 
   const handleLookupRemove = (): void => {
@@ -317,6 +334,7 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
     setHasChange(false);
     setGf(reverted.gf);
     setTable(reverted.table);
+    setCountBase(reverted.table);
     setYMin(reverted.yMin);
     setYMax(reverted.yMax);
     setDatapointCount(reverted.datapointCount);
@@ -324,7 +342,9 @@ export function LookupEditor(props: LookupEditorProps): React.ReactElement {
 
   const handleLookupSave = (): void => {
     const yPoints = Array.from(table.y);
-    onLookupChange(defined(variable.ident), { ...gf, yPoints });
+    // The x points shown, for a table that has its own.
+    const xPoints = gf.xPoints ? Array.from(table.x) : undefined;
+    onLookupChange(defined(variable.ident), { ...gf, xPoints, yPoints });
     setHasChange(false);
   };
 
