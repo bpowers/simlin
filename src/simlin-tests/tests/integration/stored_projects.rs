@@ -5,10 +5,11 @@
 //! What a project stored as protobuf runs as.
 
 use simlin_base::datamodel::Project;
+use simlin_edit::apply_patch;
+use simlin_engine::Vm;
 use simlin_engine::db::{
     LtmOverlay, SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
 };
-use simlin_engine::{Vm, apply_patch};
 use simlin_formats::buffa::Message;
 use simlin_formats::{open_xmile, project_io, serde};
 

@@ -2251,6 +2251,7 @@ dependencies = [
  "simlin",
  "simlin-base",
  "simlin-diagram",
+ "simlin-edit",
  "simlin-engine",
  "simlin-formats",
  "wasm-interpreter",
@@ -2294,6 +2295,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "simlin-edit"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "rustc-hash",
+ "schemars",
+ "serde",
+ "serde_json",
+ "simlin-base",
+ "simlin-diagram",
+ "simlin-engine",
+ "simlin-formats",
+ "smallvec",
+]
+
+[[package]]
 name = "simlin-engine"
 version = "0.1.0"
 dependencies = [
@@ -2305,13 +2322,13 @@ dependencies = [
  "proptest",
  "rand 0.9.5",
  "rayon",
- "rustc-hash",
  "salsa",
  "schemars",
  "serde",
  "serde_json",
  "simlin-base",
  "simlin-diagram",
+ "simlin-edit",
  "simlin-formats",
  "smallvec",
  "wasm-encoder",
@@ -2366,6 +2383,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simlin-base",
+ "simlin-edit",
  "simlin-engine",
  "simlin-formats",
  "simlin-mcp-core",
@@ -2392,6 +2410,7 @@ dependencies = [
  "serde_json",
  "simlin-base",
  "simlin-diagram",
+ "simlin-edit",
  "simlin-engine",
  "simlin-formats",
  "tempfile",

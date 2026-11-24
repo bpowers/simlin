@@ -13,7 +13,7 @@
 // The scenario mirrors the editor's persistence path exactly. The editor loads
 // a serialized project, builds the in-memory datamodel, and -- on any edit --
 // re-serializes a variable as a FULL upsert (replace-by-UID, see
-// src/simlin-engine/src/patch.rs). Any wire field datamodel.ts fails to
+// src/simlin-edit/src/patch.rs). Any wire field datamodel.ts fails to
 // round-trip is therefore dropped the moment the user edits an unrelated field.
 
 import { describe, it, expect, beforeAll } from '@rstest/core';

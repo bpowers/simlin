@@ -30,11 +30,11 @@
 use crate::db::{
     SimlinDb, collect_all_diagnostics, compile_project_incremental, sync_from_datamodel_incremental,
 };
-use crate::patch::apply_patch;
 use crate::test_common::TestProject;
 use simlin_base::common::{ErrorCode, Ident};
 use simlin_base::datamodel;
 use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
+use simlin_edit::patch::apply_patch;
 
 /// The equation-language keywords in their `name=` spelling.
 ///

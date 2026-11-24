@@ -149,7 +149,7 @@ pub fn model_reads(
         }
 
         /// The reads `text` writes, by its references
-        /// ([`crate::patch::text_references`], the walk a rename makes), each
+        /// ([`simlin_edit::patch::text_references`], the walk a rename makes), each
         /// made as `made` says. A name alone in a subscript's brackets is a
         /// read only when no dimension has an element of that name, as the
         /// dependency walk reads it; a read through a module instance is a
@@ -161,7 +161,7 @@ pub fn model_reads(
             text: &str,
             made: ReadMade,
         ) -> bool {
-            let Some(references) = crate::patch::text_references(text) else {
+            let Some(references) = simlin_edit::patch::text_references(text) else {
                 return false;
             };
             for (site, reference) in references {
@@ -169,7 +169,7 @@ pub fn model_reads(
                 let name = name.strip_prefix("self\u{00B7}").unwrap_or(name);
                 let head = name.split('\u{00B7}').next().unwrap_or(name);
                 let element = simlin_base::common::CanonicalElementName::from_raw(head);
-                if site == crate::patch::Site::Index
+                if site == simlin_edit::patch::Site::Index
                     && dimensions.is_element_of_any_dimension(&element)
                 {
                     continue;
@@ -374,7 +374,7 @@ pub fn model_unread_equations(
             equation
                 .iter()
                 .chain(compat.iter())
-                .any(|(_, text)| crate::patch::text_references(text).is_none())
+                .any(|(_, text)| simlin_edit::patch::text_references(text).is_none())
         })
         .map(|(name, _)| name.clone())
         .collect();

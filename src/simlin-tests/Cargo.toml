@@ -30,6 +30,7 @@ ltm_bench = ["simlin-engine/ltm_bench"]
 # compiles its test away without a word (GH #925).
 simlin-base = { path = "../simlin-base" }
 simlin-diagram = { path = "../simlin-diagram", features = ["png_render", "test-support"] }
+simlin-edit = { path = "../simlin-edit" }
 simlin-formats = { path = "../simlin-formats", features = ["file_io", "test-support"] }
 simlin-engine = { path = "../simlin-engine", features = ["test-support"] }
 buffa = "0.9"

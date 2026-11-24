@@ -881,7 +881,7 @@ pub unsafe extern "C" fn simlin_model_get_equation(
     };
     let contents = (*model_ref.project).datamodel.lock().unwrap().shared();
     let Some(view) =
-        simlin_engine::equation_view::variable_equation(&contents, &model_ref.model_name, ident)
+        simlin_edit::equation_view::variable_equation(&contents, &model_ref.model_name, ident)
     else {
         store_error(
             out_error,

@@ -21,6 +21,7 @@
 use crate::db::{DiagnosticError, DiagnosticSeverity};
 use crate::test_common::TestProject;
 use simlin_base::common::{ErrorCode, MismatchedRead};
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 
 /// One refused read as a host reads it: the reader, the element whose own
 /// equation holds it (if any), the reference's text, and the read.
@@ -184,13 +185,19 @@ fn a_lookup_of_a_split_table_is_told_at_the_table() {
             .aux_with_gf("tbl", "TIME", gf.clone())
             .scalar_aux("x", equation)
             .build_datamodel();
-        let project_dims = project.dimensions.clone();
-        crate::patch_fields::set_dimensions(
-            &project_dims,
-            &mut project.models[0],
-            "tbl",
-            &["Region".to_string()],
-            None,
+        simlin_edit::apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![ModelOperation::SetDimensions {
+                        ident: "tbl".to_string(),
+                        dimensions: vec!["Region".to_string()],
+                        keep: None,
+                    }],
+                }],
+            },
         )
         .expect("the table splits");
         assert_eq!(
@@ -342,7 +349,7 @@ fn a_read_paired_by_position_alone_is_refused() {
 #[ignore = "compiles every corpus model; run under the gates profile"]
 fn the_corpus_reads_by_position_alone_in_these_models() {
     let (mut models, mut warned) = (0, 0);
-    crate::patch_sharing_tests::for_each_corpus_project(|path, project| {
+    simlin_formats::test_support::for_each_corpus_project(|path, project| {
         models += 1;
         let rows: Vec<String> = TestProject::from_datamodel(project.clone())
             .diagnostics_incremental()

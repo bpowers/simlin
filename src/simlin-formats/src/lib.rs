@@ -44,6 +44,8 @@ pub mod systems;
 mod systems_stdlib_tests;
 #[cfg(test)]
 mod test_sir_xmile;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod vdf;
 pub mod xmile;
 

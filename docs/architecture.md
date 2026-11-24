@@ -19,6 +19,9 @@ A model's stock-and-flow diagram drawn: as SVG, as PNG and as the scene display 
 ### `src/simlin-formats` (Rust)
 The files a model is kept in, read and written: Vensim MDL and VDF, XMILE, the systems format, JSON (native and SD-AI), and the protobuf a stored project is.
 
+### `src/simlin-edit` (Rust)
+Edits to a project: the patches a host or an agent lands, the plans of a person's gestures on a diagram, and a variable's equations as a host draws them.
+
 ### `src/simlin-engine` (Rust)
 Core simulation engine.
 Compiles, type-checks, unit-checks, and simulates SD models; [src/simlin-engine/CLAUDE.md](/src/simlin-engine/CLAUDE.md) is the map of the crate and its standing invariants.
@@ -96,14 +99,15 @@ The allowed dependency graph is enforced by `scripts/check-deps.py` reading from
 - `simlin-base` -> (none)
 - `simlin-diagram` -> `simlin-base`
 - `simlin-formats` -> `simlin-base`, `simlin-diagram`
-- `simlin-engine` -> `simlin-base`, `simlin-diagram`, `simlin-formats`
-- `simlin` (libsimlin) -> `simlin-engine`, `simlin-formats`, `simlin-diagram`, `simlin-base`
-- `simlin-mcp-core` -> `simlin-engine`, `simlin-formats`, `simlin-base`
+- `simlin-edit` -> `simlin-base`, `simlin-diagram`, `simlin-formats`
+- `simlin-engine` -> `simlin-base`, `simlin-diagram`, `simlin-formats`, `simlin-edit`
+- `simlin` (libsimlin) -> `simlin-engine`, `simlin-edit`, `simlin-formats`, `simlin-diagram`, `simlin-base`
+- `simlin-mcp-core` -> `simlin-engine`, `simlin-edit`, `simlin-formats`, `simlin-base`
 - `simlin-mcp` -> `simlin-mcp-core`
 - `simlin-cli` -> `simlin-engine`, `simlin-formats`, `simlin-diagram`, `simlin-base`
 - `simlin-tests` -> (none; its dependencies are dev-dependencies, which the policy leaves out)
 
-Inside `simlin-engine`, the crate-root modules form layers, bottom up: `compiler`, `edit`, `wasmgen`, `layout`, `tools`.
+Inside `simlin-engine`, the crate-root modules form layers, bottom up: `compiler`, `wasmgen`, `layout`, `tools`.
 `scripts/engine-layers.json` lists each layer's modules and the other layers it may use, and `scripts/check-engine-layers.py` enforces it over production code.
 A test may reach above its module's layer.
 

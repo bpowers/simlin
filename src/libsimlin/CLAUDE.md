@@ -199,8 +199,8 @@ Do not add a re-export shim for that surface -- a second spelling of the same ty
   `simlin_project_apply_patch` and `simlin_project_add_model` stage the one copy an edit makes and commit it with `replace`, so a dry run, a rejected patch or a refused add copies nothing.
   `simlin_project_apply_patch_reporting` applies a patch the same way and also writes, as JSON, what the patch did to its variables' identity (renamed, deleted, created), which the project it leaves cannot say.
   The indexes and the revision live under the datamodel's own lock (no cache lock; the order stays datamodel-then-db).
-  `hit_index(model_name)` returns the cached `simlin_engine::editing::HitIndex` of a model's first view or builds one; a build that fails caches nothing
-- **`src/editing.rs`** - The editing planner for native hosts (`simlin_engine::editing`):
+  `hit_index(model_name)` returns the cached `simlin_edit::editing::HitIndex` of a model's first view or builds one; a build that fails caches nothing
+- **`src/editing.rs`** - The editing planner for native hosts (`simlin_edit::editing`):
   - `simlin_model_hit_test(model, x, y, tolerance, out_hit, out_uid, out_part, out_error)` - the view element and `SimlinHitPart` under a canvas point, the tolerance in model units (the host's slop divided by the zoom), answered from the project's cached hit index (`ProjectContents::hit_index`), which the first hit test after a change builds.
     It locks the datamodel as the planners do, so a hit test issued while an edit holds the project waits and answers the contents the edit leaves, the contents the press is then planned against
   - `simlin_model_plan_tap(model, press, ..)` - a tap's plan as JSON (`{kind, commit, selection, handoff, details, label, patch}`) in a `simlin_malloc` buffer

@@ -382,7 +382,7 @@ fn most_read(model: &datamodel::Model) -> Option<String> {
     let mut counts: std::collections::HashMap<String, usize> = Default::default();
     for var in &model.variables {
         for (_, text) in var.expression_texts() {
-            let references = crate::patch::text_references(text).unwrap_or_default();
+            let references = simlin_edit::patch::text_references(text).unwrap_or_default();
             for (_, name) in references {
                 *counts.entry(name.as_str().to_string()).or_default() += 1;
             }

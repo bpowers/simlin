@@ -8,7 +8,7 @@
 //! A host draws a model's scene (`simlin_project_render_scene`) and routes its
 //! input through these entry points, which plan against the model's first
 //! stock-and-flow view as it is when a tap lands or a drag begins
-//! (`simlin_engine::editing`). Every edit comes back as a JSON project patch the
+//! (`simlin_edit::editing`). Every edit comes back as a JSON project patch the
 //! host applies with `simlin_project_apply_patch`, so an edit lands through the
 //! one patch path with its validation and error collection; a view edit's model
 //! operations are derived when it applies (`ModelOperation::EditView`).
@@ -20,7 +20,7 @@
 use serde::Serialize;
 use simlin_base::datamodel;
 use simlin_diagram::SceneElement;
-use simlin_engine::editing;
+use simlin_edit::editing;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;

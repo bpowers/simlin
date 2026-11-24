@@ -10,7 +10,7 @@ crate-type = ["rlib"]
 
 [features]
 default = ["schema", "ai_info", "agent_tools"]
-schema = ["dep:schemars", "simlin-formats/schema"]
+schema = ["dep:schemars", "simlin-edit/schema", "simlin-formats/schema"]
 ai_info = ["dep:ed25519", "dep:base64"]
 # The agent tool surface (`tools`): a session per model that answers an
 # agent's tool calls with JSON. On by default; libsimlin's browser wasm bundle
@@ -34,17 +34,14 @@ test-support = []
 # is simlin-tests' `layout_eval` example, whose `instruments` feature turns this
 # on, so the 1,300-line module leaves every wasm/native production build. It is
 # `cfg(any(test, ...))`, so its own tests run under a plain `cargo test`.
-layout_eval = []
+layout_eval = ["simlin-edit/invariants"]
 
 [dependencies]
 simlin-base = { path = "../simlin-base" }
 simlin-diagram = { path = "../simlin-diagram" }
+simlin-edit = { path = "../simlin-edit" }
 simlin-formats = { path = "../simlin-formats" }
 smallvec = { version = "1", features = [ "union" ] }
-# Fast, deterministic (fixed-seed) hasher for hot internal maps in the
-# dependency-graph cycle gate. Wasm-safe (no getrandom). FxHash's fixed seed
-# keeps map iteration deterministic where it is intentionally not order-leaking.
-rustc-hash = "2"
 ed25519 = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }
 serde = { version = "1", features = ["derive"] }
@@ -76,6 +73,7 @@ rayon = "1"
 [dev-dependencies]
 simlin-base = { path = "../simlin-base", features = ["test-support"] }
 simlin-diagram = { path = "../simlin-diagram", features = ["test-support"] }
+simlin-edit = { path = "../simlin-edit", features = ["test-support"] }
 simlin-formats = { path = "../simlin-formats", features = ["test-support", "file_io"] }
 rand = "0.9"
 # The tests read JSON floats exactly: without float_roundtrip, serde_json's fast

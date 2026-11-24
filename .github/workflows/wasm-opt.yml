@@ -46,6 +46,7 @@ name: WASM optimized-bundle check
     paths:
       - 'src/simlin-base/**'
       - 'src/simlin-diagram/**'
+      - 'src/simlin-edit/**'
       - 'src/simlin-engine/**'
       - 'src/simlin-formats/**'
       - 'src/libsimlin/**'
@@ -69,6 +70,7 @@ name: WASM optimized-bundle check
     paths:
       - 'src/simlin-base/**'
       - 'src/simlin-diagram/**'
+      - 'src/simlin-edit/**'
       - 'src/simlin-engine/**'
       - 'src/simlin-formats/**'
       - 'src/libsimlin/**'

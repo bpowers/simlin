@@ -259,6 +259,35 @@ impl<T> SharedVec<T> {
     }
 }
 
+/// The keys of the elements an edit changed, after asserting that every
+/// element `same` as the one before it under its key is the same allocation:
+/// nothing was copied that the edit left as it was.
+#[cfg(any(test, feature = "test-support"))]
+pub fn changed_by<T: Clone, K: Eq + std::hash::Hash + Clone + std::fmt::Debug>(
+    before: &SharedVec<T>,
+    after: &SharedVec<T>,
+    key: impl Fn(&T) -> K,
+    same: impl Fn(&T, &T) -> bool,
+    what: &str,
+) -> Vec<K> {
+    let mut before_at: std::collections::HashMap<K, (usize, &T)> = std::collections::HashMap::new();
+    for (element, address) in before.iter().zip(before.addresses()) {
+        before_at.entry(key(element)).or_insert((address, element));
+    }
+    let mut changed = Vec::new();
+    for (e, address) in after.iter().zip(after.addresses()) {
+        let k = key(e);
+        match before_at.get(&k) {
+            Some((before_address, before_value)) if same(before_value, e) => assert_eq!(
+                *before_address, address,
+                "{what}: {k:?} is unchanged but was copied"
+            ),
+            _ => changed.push(k),
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 #[path = "shared_vec_tests.rs"]
 mod tests;

@@ -45,7 +45,7 @@ pub(crate) fn normalize<T: Positioned + Clone>(points: &[T]) -> SmallVec<[T; 12]
     }
 }
 
-pub(crate) fn path_length<T: Positioned>(points: &[T]) -> f64 {
+pub fn path_length<T: Positioned>(points: &[T]) -> f64 {
     points
         .windows(2)
         .map(|w| w[0].point().distance(w[1].point()))
@@ -67,7 +67,7 @@ fn nearest_t(a: Point, b: Point, p: Point) -> f64 {
 
 /// The arc-length position of the point on the path nearest `p` (the earliest
 /// one on a tie).
-pub(crate) fn arc_position<T: Positioned>(points: &[T], p: Point) -> f64 {
+pub fn arc_position<T: Positioned>(points: &[T], p: Point) -> f64 {
     let mut best = f64::INFINITY;
     let mut position = 0.0;
     let mut traversed = 0.0;
@@ -100,7 +100,7 @@ pub(crate) fn distance_to_path<T: Positioned>(points: &[T], p: Point) -> f64 {
 /// The point at arc length `s` along the path, clamped to the path. An empty
 /// path has no points to return one of, and yields NaN coordinates, which
 /// every caller's finiteness check rejects.
-pub(crate) fn point_at_arc<T: Positioned>(points: &[T], s: f64) -> Point {
+pub fn point_at_arc<T: Positioned>(points: &[T], s: f64) -> Point {
     let Some(first) = points.first() else {
         return Point::new(f64::NAN, f64::NAN);
     };
@@ -148,7 +148,7 @@ pub(crate) fn valve_distance<T: Positioned>(
 /// end: applying it while measuring would move a valve that sat inside the
 /// margin on the base path further inward whenever the path grows at the far
 /// end.
-pub(crate) fn place_valve(points: &[Point], from: FlowEnd, distance: Option<f64>) -> Point {
+pub fn place_valve(points: &[Point], from: FlowEnd, distance: Option<f64>) -> Point {
     let length = path_length(points);
     let s = match distance {
         None => length / 2.0,

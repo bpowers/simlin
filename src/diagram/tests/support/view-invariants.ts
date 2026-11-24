@@ -155,7 +155,7 @@ interface AttachmentChange {
  * empty lists before. Renames are excluded: a named element whose uid survives
  * with a new ident is the same variable, and the engine's RenameVariable
  * respells every list entry naming a renamed flow in its place
- * (`Rename::renamed_name` in src/simlin-engine/src/patch.rs), so base idents are
+ * (`Rename::renamed_name` in src/simlin-edit/src/patch.rs), so base idents are
  * carried through the rename before anything is compared. The new-list
  * requirement applies only when both the stock and the flow variable exist in
  * the next model, matching the plan's "only existing flow variables and existing

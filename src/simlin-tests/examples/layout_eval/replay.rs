@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use simlin_base::datamodel::{self, StockFlow, Variable};
 use simlin_base::{ModelOperation, ModelPatch, ProjectPatch, canonicalize};
-use simlin_engine::apply_patch;
+use simlin_edit::apply_patch;
 use simlin_engine::layout::{compute_layout_metadata, generate_best_layout, incremental_layout};
 
 use crate::corpus::MAIN_MODEL;

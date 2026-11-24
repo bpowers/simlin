@@ -17,9 +17,9 @@ use super::*;
 use crate::layout::edit_scenarios::{
     Scenario, ScenarioKind, build_scenario, first_difference, run_scenario, sync_view,
 };
-use crate::patch::apply_patch;
 use simlin_base::datamodel::view_element::{self, LabelSide};
 use simlin_base::project_patch::ProjectPatch;
+use simlin_edit::patch::apply_patch;
 
 const MODEL: &str = "main";
 const POPULATION: &str = "default_projects/population/model.xmile";

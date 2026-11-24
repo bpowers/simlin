@@ -10,10 +10,10 @@
 use std::collections::HashMap;
 
 use crate::patch::apply_patch;
-use crate::test_common::TestProject;
 use simlin_base::common::ErrorCode;
 use simlin_base::datamodel::{self, Dimension, Equation, Project};
 use simlin_base::project_patch::{ProjectOperation, ProjectPatch};
+use simlin_engine::test_common::TestProject;
 
 fn apply(project: &Project, ops: Vec<ProjectOperation>) -> Result<Project, (ErrorCode, String)> {
     let mut edited = project.clone();

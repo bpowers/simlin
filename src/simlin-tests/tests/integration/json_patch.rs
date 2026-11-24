@@ -5,7 +5,7 @@
 //! A patch as JSON, landed.
 
 use simlin_base::datamodel;
-use simlin_engine::apply_patch;
+use simlin_edit::apply_patch;
 use simlin_engine::test_common::TestProject;
 use simlin_formats::json::ProjectPatch;
 

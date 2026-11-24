@@ -5,7 +5,7 @@
 //! The diagram editing FFI, from a press to an applied patch.
 //!
 //! What a tap or a drag plans is the engine's decision, pinned by the decision
-//! tables in `simlin_engine::editing`'s tests. These tests pin the boundary:
+//! tables in `simlin_edit::editing`'s tests. These tests pin the boundary:
 //! each entry point marshals a press in and a plan out, the patch a plan carries
 //! applies through `simlin_project_apply_patch` to the edit the plan described,
 //! a model the editor cannot plan against is refused with a code a host can act

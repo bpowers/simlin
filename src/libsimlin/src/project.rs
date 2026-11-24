@@ -578,7 +578,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
     // of the contents advances the revision and drops the hit indexes, so a
     // refused add must not take one.
     let mut staged = (*datamodel_locked.shared()).clone();
-    if let Err(err) = simlin_engine::apply_patch(&mut staged, add) {
+    if let Err(err) = simlin_edit::apply_patch(&mut staged, add) {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::from(err.code)).with_message(err.to_string()),

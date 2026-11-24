@@ -135,14 +135,14 @@ pub(crate) fn nearest_face_attachment(
 /// A cloud as a free terminal carries it: its uid and its center as the view
 /// holds it, which an operation moving the endpoint moves onto the endpoint.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct CloudRef {
+pub struct CloudRef {
     pub uid: i32,
     pub at: Point,
 }
 
 /// One end of a flow as routing sees it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum Terminal {
+pub enum Terminal {
     /// A stock. `face` and `offset` describe the BASE flow's attachment
     /// (`offset` is the endpoint's along-face distance from the face center),
     /// so stickiness needs no previous frame; both are `None` for a stock the
@@ -163,7 +163,7 @@ pub(crate) enum Terminal {
 
 impl Terminal {
     /// The element the endpoint attaches to.
-    pub(crate) fn uid(&self) -> Option<i32> {
+    pub fn uid(&self) -> Option<i32> {
         match self {
             Terminal::Stock { uid, .. } => Some(*uid),
             Terminal::Free { cloud, .. } => cloud.map(|c| c.uid),
@@ -188,7 +188,7 @@ impl Terminal {
         }
     }
 
-    pub(crate) fn stock_center(&self) -> Option<Point> {
+    pub fn stock_center(&self) -> Option<Point> {
         match self {
             Terminal::Stock { center, .. } => Some(*center),
             Terminal::Free { .. } => None,
@@ -202,7 +202,7 @@ impl Terminal {
 
 /// A flow's two terminals.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Terminals {
+pub struct Terminals {
     pub source: Terminal,
     pub sink: Terminal,
 }
@@ -239,7 +239,7 @@ pub(crate) fn stock_terminal(
 }
 
 /// A new stock target: no base attachment.
-pub(crate) fn target_stock_terminal(uid: i32, center: Point) -> Terminal {
+pub fn target_stock_terminal(uid: i32, center: Point) -> Terminal {
     Terminal::Stock {
         uid,
         center,
@@ -248,7 +248,7 @@ pub(crate) fn target_stock_terminal(uid: i32, center: Point) -> Terminal {
     }
 }
 
-pub(crate) fn free_terminal(point: Point, cloud: Option<CloudRef>) -> Terminal {
+pub fn free_terminal(point: Point, cloud: Option<CloudRef>) -> Terminal {
     Terminal::Free { point, cloud }
 }
 
@@ -258,7 +258,7 @@ pub(crate) fn free_terminal(point: Point, cloud: Option<CloudRef>) -> Terminal {
 /// corner); a cloud endpoint's terminal is its cloud, at the cloud's center; an
 /// unattached or dangling endpoint is a free point with no cloud, which no
 /// operation attaches.
-pub(crate) fn flow_terminals<'a>(
+pub fn flow_terminals<'a>(
     flow: &Flow,
     lookup: impl Fn(i32) -> Option<&'a ViewElement>,
 ) -> Terminals {
@@ -289,7 +289,7 @@ pub(crate) fn flow_terminals<'a>(
 
 /// A cloud whose center an operation moved onto its endpoint.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct CloudMove {
+pub struct CloudMove {
     pub uid: i32,
     pub at: Point,
 }
@@ -301,7 +301,7 @@ pub(crate) type CloudMoves = SmallVec<[CloudMove; 2]>;
 /// center changed because its endpoint moved (a cloud endpoint always equals
 /// its cloud's center, G7).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct FlowGeometry {
+pub struct FlowGeometry {
     pub flow: Flow,
     pub clouds: CloudMoves,
 }

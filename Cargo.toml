@@ -6,6 +6,7 @@ members = [
     "src/simlin-base",
     "src/simlin-cli",
     "src/simlin-diagram",
+    "src/simlin-edit",
     "src/simlin-engine",
     "src/simlin-formats",
     "src/simlin-mcp",

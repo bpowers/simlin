@@ -37,7 +37,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use simlin_engine::editing::{self, Point};
+use simlin_edit::editing::{self, Point};
 
 use crate::ffi_error::SimlinError;
 use crate::lock_order::{self, Event, Rank};

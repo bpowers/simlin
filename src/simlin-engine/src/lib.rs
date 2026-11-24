@@ -38,8 +38,6 @@ pub mod conveyor_compile;
 mod conveyor_tests;
 pub mod db;
 mod diagnostic;
-pub mod editing;
-pub mod equation_view;
 pub mod errors;
 #[cfg(test)]
 mod keyword_ident_tests;
@@ -63,11 +61,6 @@ mod mapped_reference_semantics_tests;
 #[cfg(test)]
 mod mismatched_read_tests;
 mod model;
-mod patch;
-mod patch_dimensions;
-mod patch_fields;
-#[cfg(test)]
-mod patch_sharing_tests;
 #[cfg(test)]
 mod per_element_gf_tests;
 pub mod queue;
@@ -109,9 +102,6 @@ mod vm_vector_sort_order;
 // interpreter and comparing against the VM.
 pub mod wasmgen;
 
-pub use self::patch::{
-    PatchReport, Renamed, VariableRef, apply_patch, apply_patch_reporting, is_view_only_patch,
-};
 pub use self::queue_compile::build_sim;
 #[cfg(feature = "test-support")]
 pub use self::variable::parse_table;

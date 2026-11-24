@@ -136,7 +136,7 @@ enum Origin {
 /// far, by `(model, canonical name)` as they stand: a name not held here is
 /// held by the variable that had it before.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Identities {
+pub struct Identities {
     names: HashMap<(String, String), Origin>,
     deleted: Vec<VariableRef>,
 }
@@ -179,7 +179,7 @@ impl Identities {
 
     /// The account of identity the patches applied so far give, of the
     /// project they leave.
-    pub(crate) fn report(&self, project: &datamodel::Project) -> PatchReport {
+    pub fn report(&self, project: &datamodel::Project) -> PatchReport {
         let exists = |model: &str, name: &str| {
             project
                 .get_model(model)
@@ -233,7 +233,7 @@ pub fn apply_patch_reporting(
 /// patch's that this one carries on: a patch that fails leaves both as they
 /// were. A caller that applies an edit as several patches, and reads one
 /// account of them all, keeps one `identities` and reports it at the end.
-pub(crate) fn apply_patch_into(
+pub fn apply_patch_into(
     project: &mut datamodel::Project,
     patch: ProjectPatch,
     identities: &mut Identities,
@@ -1057,8 +1057,7 @@ fn apply_rename_variable(
 /// variable", so a reference the compiler's report does not show (an
 /// equation that failed already, a cycle hidden behind another) is found as
 /// the rename would find it.
-#[cfg(feature = "agent_tools")]
-pub(crate) fn variables_naming(
+pub fn variables_naming(
     project: &datamodel::Project,
     model_name: &str,
     name: &str,
@@ -1133,7 +1132,7 @@ enum ReadAs {
 /// Where in an expression a reference is written, which decides what the
 /// compiler can read it as.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Site {
+pub enum Site {
     /// An identifier anywhere but alone in a subscript's brackets: an
     /// operand, a call's argument, a part of an index expression.
     Value,
@@ -1627,7 +1626,7 @@ pub(crate) fn respelled_text(
 /// is written at: the walk a rename makes of a text (`renamed_text`), asked
 /// to respell nothing. `None` for a text that does not parse, whose
 /// references no reader can know; an empty text writes none.
-pub(crate) fn text_references(text: &str) -> Option<Vec<(Site, Ident<Canonical>)>> {
+pub fn text_references(text: &str) -> Option<Vec<(Site, Ident<Canonical>)>> {
     let expr = match Expr0::new(text, LexerType::Equation) {
         Ok(Some(expr)) => expr,
         Ok(None) => return Some(Vec::new()),
@@ -1829,9 +1828,9 @@ mod rename_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_common::TestProject;
     use simlin_base::datamodel::{self, Equation, Visibility};
     use simlin_base::project_patch::ModelPatch;
+    use simlin_engine::test_common::TestProject;
 
     #[test]
     fn upsert_aux_adds_variable() {
@@ -2000,7 +1999,7 @@ mod tests {
     /// name, with nothing declined.
     #[test]
     fn a_lowered_expression_names_a_variable_with_a_period_as_itself() {
-        use crate::db::{LtmOverlay, SimlinDb, collect_all_diagnostics};
+        use simlin_engine::db::{LtmOverlay, SimlinDb, collect_all_diagnostics};
 
         let link_score = |rate: &str| {
             let project = TestProject::new("period")
@@ -2021,11 +2020,11 @@ mod tests {
                 .collect();
             assert!(rows.is_empty(), "{rate}: {rows:#?}");
             let compiled =
-                crate::db::compile_project_incremental(&db, source, "main", LtmOverlay::On)
+                simlin_engine::db::compile_project_incremental(&db, source, "main", LtmOverlay::On)
                     .expect("the model compiles under LTM");
-            let mut vm = crate::vm::Vm::new((*compiled).clone()).expect("a vm");
+            let mut vm = simlin_engine::Vm::new((*compiled).clone()).expect("a vm");
             vm.run_to_end().expect("it runs");
-            let results = crate::test_common::collect_results(&vm.into_results());
+            let results = simlin_engine::test_common::collect_results(&vm.into_results());
             results["$\u{205A}ltm\u{205A}link_score\u{205A}level\u{2192}inflow"].clone()
         };
         let plain = link_score("rate_x");
@@ -2048,9 +2047,9 @@ mod tests {
             time_units: None,
         };
         let last_time = |project: &datamodel::Project, model: &str| {
-            let mut vm = crate::queue_compile::build_vm(project, model).expect("it builds");
+            let mut vm = simlin_engine::queue_compile::build_vm(project, model).expect("it builds");
             vm.run_to_end().expect("it runs");
-            let results = crate::test_common::collect_results(&vm.into_results());
+            let results = simlin_engine::test_common::collect_results(&vm.into_results());
             results["time"].last().copied()
         };
         let set = ProjectPatch {

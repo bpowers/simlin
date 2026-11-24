@@ -42,7 +42,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use simlin_base::datamodel;
-use simlin_engine::editing;
+use simlin_edit::editing;
 
 /// A project's datamodel, its revision, and the indexes derived from it.
 pub struct ProjectContents {

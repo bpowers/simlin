@@ -14,10 +14,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::patch::apply_patch;
 use simlin_base::common::canonicalize;
 use simlin_base::datamodel::{self, Equation, StockFlow, Variable, ViewElement};
 use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
+use simlin_edit::patch::apply_patch;
 
 use super::edit_audit::{Displacement, EditAudit, EditInput, Finding, FindingKind, audit_edit};
 use super::metadata::ComputedMetadata;

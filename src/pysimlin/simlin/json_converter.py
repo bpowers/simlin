@@ -17,7 +17,7 @@ on purpose:
   arrayed-level ``activeInitial`` merge into the one public ``Compat``;
 - ``uid`` is never written: the engine preserves an existing variable's uid
   when an upsert payload has none and mints one for new variables
-  (src/simlin-engine/src/patch.rs, upsert_variable).
+  (src/simlin-edit/src/patch.rs, upsert_variable).
 """
 
 from __future__ import annotations

@@ -30,6 +30,7 @@ mod clearn_unit_errors;
 mod compiler_vector;
 mod diagram;
 mod element_subscripts;
+mod field_edits;
 mod import_losses;
 mod json_patch;
 mod json_roundtrip;

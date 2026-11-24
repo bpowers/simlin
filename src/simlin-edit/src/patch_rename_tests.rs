@@ -12,9 +12,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::BufReader;
 
 use super::*;
-use crate::test_common::TestProject;
 use simlin_base::datamodel::{Compat, Equation, view_element};
 use simlin_base::project_patch::ModelPatch;
+use simlin_engine::test_common::TestProject;
 
 fn rename_in(model: &str, from: &str, to: &str) -> ProjectPatch {
     ProjectPatch {
@@ -320,11 +320,13 @@ fn outcome(project: &datamodel::Project) -> std::result::Result<HashMap<String, 
     let Some(main) = project.models.first() else {
         return Err("has no model".to_string());
     };
-    let mut vm = crate::queue_compile::build_vm(project, &main.name)
+    let mut vm = simlin_engine::queue_compile::build_vm(project, &main.name)
         .map_err(|err| format!("does not build: {}", err.code))?;
     vm.run_to_end()
         .map_err(|err| format!("does not run: {}", err.code))?;
-    Ok(crate::test_common::collect_results(&vm.into_results()))
+    Ok(simlin_engine::test_common::collect_results(
+        &vm.into_results(),
+    ))
 }
 
 /// Every series the project's run saves, by name.
@@ -2438,7 +2440,7 @@ fn a_spliced_rename_parses_to_the_renamed_tree() {
 #[ignore = "renames variables of every corpus model; run under the gates profile"]
 fn a_spliced_rename_parses_to_the_renamed_tree_across_the_corpus() {
     let mut models = 0;
-    crate::patch_sharing_tests::for_each_corpus_project(|_, project| {
+    simlin_formats::test_support::for_each_corpus_project(|_, project| {
         models += 1;
         check_spliced_renames_parse_to_the_renamed_tree(project, 40);
     });
@@ -2503,7 +2505,7 @@ fn a_rename_changes_no_series() {
 #[ignore = "renames variables of every corpus model and runs each; run under the gates profile"]
 fn a_rename_changes_no_series_across_the_corpus() {
     let (mut checked, mut refused) = (0, 0);
-    crate::patch_sharing_tests::for_each_corpus_project(|_, project| {
+    simlin_formats::test_support::for_each_corpus_project(|_, project| {
         let (ran, declined) = check_renames_change_no_series(project, 3);
         checked += ran;
         refused += declined;

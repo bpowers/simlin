@@ -12,8 +12,8 @@ use std::io::BufReader;
 
 use super::*;
 use crate::patch_sharing_tests::{MODEL_OPERATION_VARIANTS, model_operation_variant};
-use crate::test_common::TestProject;
 use simlin_base::project_patch::ModelPatch;
+use simlin_engine::test_common::TestProject;
 
 fn model_patch(ops: Vec<ModelOperation>) -> ProjectPatch {
     ProjectPatch {
@@ -33,9 +33,10 @@ fn open(xmile: &str) -> datamodel::Project {
 /// Every series the project's run saves, by name.
 fn series(project: &datamodel::Project) -> HashMap<String, Vec<f64>> {
     let main = project.models[0].name.clone();
-    let mut vm = crate::queue_compile::build_vm(project, &main).expect("the fixture builds");
+    let mut vm =
+        simlin_engine::queue_compile::build_vm(project, &main).expect("the fixture builds");
     vm.run_to_end().expect("the fixture runs");
-    crate::test_common::collect_results(&vm.into_results())
+    simlin_engine::test_common::collect_results(&vm.into_results())
 }
 
 fn renamed(project: &datamodel::Project, from: &str, to: &str) -> datamodel::Project {
@@ -391,7 +392,7 @@ const COMPETING_OUTFLOWS: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 fn a_queue_whose_overflow_sorts_first_still_expands_after_an_edit() {
     let project = open(QUEUE_WITH_OVERFLOW);
     let expands = |project: &datamodel::Project| {
-        crate::queue_compile::expand_queues(project, &project.models[0].name).map(|_| ())
+        simlin_engine::queue_compile::expand_queues(project, &project.models[0].name).map(|_| ())
     };
     assert_eq!(expands(&project), Ok(()), "the fixture expands as opened");
 

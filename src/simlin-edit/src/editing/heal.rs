@@ -33,11 +33,7 @@ use super::validity::{Fault, path_quality};
 /// violates G2-G6, re-route. The valve is re-projected onto the healed path and
 /// the margin applied. A non-finite terminal returns the flow unchanged;
 /// non-finite points (or fewer than two) route afresh.
-pub(crate) fn heal<O: Obstacles + ?Sized>(
-    flow: &Flow,
-    terminals: &Terminals,
-    stocks: &O,
-) -> FlowGeometry {
+pub fn heal<O: Obstacles + ?Sized>(flow: &Flow, terminals: &Terminals, stocks: &O) -> FlowGeometry {
     if !terminals.source.is_finite() || !terminals.sink.is_finite() {
         return FlowGeometry::unchanged(flow);
     }

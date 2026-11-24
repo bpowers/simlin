@@ -667,7 +667,7 @@ fn the_specs_and_a_loop_name_the_person_changed_are_not_overwritten_unseen() {
         .collect();
     // The person names the same loop first.
     host.edit(|p| {
-        crate::apply_patch(
+        simlin_edit::apply_patch(
             p,
             ProjectPatch {
                 project_ops: vec![],

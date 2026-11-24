@@ -1209,7 +1209,7 @@ fn pinned_scalar_feeder_agg_loop_dedups_in_exhaustive_mode() {
 #[ignore = "C-LEARN compiled and run under LTM with a pinned loop; run under the gates profile"]
 fn clearn_pinned_climate_loop_is_scored() {
     use simlin_base::{ModelOperation, ModelPatch, ProjectPatch};
-    use simlin_engine::apply_patch;
+    use simlin_edit::apply_patch;
 
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let contents = std::fs::read_to_string(mdl_path)

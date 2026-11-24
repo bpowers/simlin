@@ -341,7 +341,7 @@ pub async fn edit_model<A: ProjectAccess>(
 
     let patch = build_patch(&model_name, input.sim_specs, input.operations);
     let model_patch = patch.models.iter().find(|m| m.name == model_name).cloned();
-    simlin_engine::apply_patch(&mut project, patch).map_err(|e| {
+    simlin_edit::apply_patch(&mut project, patch).map_err(|e| {
         AccessError::ParseError(anyhow::anyhow!(
             "patch application failed: {}",
             crate::errors::engine_error_text(&e)
@@ -703,7 +703,7 @@ mod tests {
     fn install_synced_view_arms() {
         use simlin_base::datamodel::View;
         let mut project = build_empty_project(default_sim_specs());
-        simlin_engine::apply_patch(
+        simlin_edit::apply_patch(
             &mut project,
             build_patch(
                 "main",

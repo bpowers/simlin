@@ -3,11 +3,12 @@
     "simlin-base": [],
     "simlin-diagram": ["simlin-base"],
     "simlin-formats": ["simlin-base", "simlin-diagram"],
-    "simlin-engine": ["simlin-base", "simlin-diagram", "simlin-formats"],
-    "simlin": ["simlin-base", "simlin-diagram", "simlin-formats", "simlin-engine"],
+    "simlin-edit": ["simlin-base", "simlin-diagram", "simlin-formats"],
+    "simlin-engine": ["simlin-base", "simlin-diagram", "simlin-formats", "simlin-edit"],
+    "simlin": ["simlin-base", "simlin-diagram", "simlin-formats", "simlin-edit", "simlin-engine"],
     "simlin-cli": ["simlin-base", "simlin-diagram", "simlin-formats", "simlin-engine", "simlin"],
     "simlin-mcp": ["simlin-mcp-core"],
-    "simlin-mcp-core": ["simlin-base", "simlin-formats", "simlin-engine"],
+    "simlin-mcp-core": ["simlin-base", "simlin-formats", "simlin-edit", "simlin-engine"],
     "simlin-tests": []
   },
   "typescript": {

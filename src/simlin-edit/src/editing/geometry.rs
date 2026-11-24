@@ -94,7 +94,7 @@ impl Point {
 }
 
 /// Anything with a position the geometry reads: points and flow points.
-pub(crate) trait Positioned {
+pub trait Positioned {
     fn point(&self) -> Point;
 }
 
@@ -181,7 +181,7 @@ impl FlowEnd {
 
 /// An axis-aligned box.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Bounds {
+pub struct Bounds {
     pub min_x: f64,
     pub max_x: f64,
     pub min_y: f64,
@@ -291,7 +291,7 @@ pub(crate) fn segment_through(a: Point, b: Point, bounds: Bounds) -> bool {
 /// its terminals, so routing never walks the whole set: the planner implements
 /// this over a grid built once per gesture, and a slice implements it for
 /// callers with a handful of stocks (tests, a single flow).
-pub(crate) trait Obstacles {
+pub trait Obstacles {
     /// Calls `f` with the center of every stock whose body touches `region`,
     /// possibly more (the result is a superset), stopping as soon as `f`
     /// returns true; returns whether it did.

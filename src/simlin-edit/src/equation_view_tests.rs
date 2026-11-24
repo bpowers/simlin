@@ -5,7 +5,7 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::test_common::TestProject;
+use simlin_engine::test_common::TestProject;
 
 fn view(project: TestProject, ident: &str) -> Value {
     let datamodel = project.build_datamodel();

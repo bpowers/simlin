@@ -390,7 +390,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     allow_errors: bool,
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
-) -> Option<simlin_engine::PatchReport> {
+) -> Option<simlin_edit::PatchReport> {
     // Hold the datamodel lock for the entire operation. This prevents
     // concurrent patchers from snapshotting a stale datamodel between
     // our validation and commit phases.
@@ -400,16 +400,16 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // model operation) don't affect variables, equations, or simulation
     // results. Skip the expensive compilation and diagnostic validation and
     // apply directly to the datamodel.
-    let view_only = simlin_engine::is_view_only_patch(&datamodel_locked, &patch);
+    let view_only = simlin_edit::is_view_only_patch(&datamodel_locked, &patch);
 
     if view_only && !dry_run {
         // A patch with no operation changes nothing, so it is no change: a
         // mutable borrow would advance the revision and copy a datamodel a
         // copy of the project shares.
         if !has_operations(&patch) {
-            return Some(simlin_engine::PatchReport::default());
+            return Some(simlin_edit::PatchReport::default());
         }
-        return match simlin_engine::apply_patch_reporting(&mut datamodel_locked, patch) {
+        return match simlin_edit::apply_patch_reporting(&mut datamodel_locked, patch) {
             Ok(report) => Some(report),
             Err(err) => {
                 store_error(
@@ -444,7 +444,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::SnapshotWhileProjectLocked, project_ref);
 
-    let report = match simlin_engine::apply_patch_reporting(&mut staged_datamodel, patch) {
+    let report = match simlin_edit::apply_patch_reporting(&mut staged_datamodel, patch) {
         Ok(report) => report,
         Err(err) => {
             store_error(
@@ -562,12 +562,12 @@ pub(crate) unsafe fn apply_project_patch_internal(
 /// "deleted": [{"model", "ident"}], "created": [{"model", "ident"}]}`.
 #[derive(serde::Serialize)]
 struct PatchReportJson<'a> {
-    renamed: &'a [simlin_engine::Renamed],
-    deleted: &'a [simlin_engine::VariableRef],
-    created: &'a [simlin_engine::VariableRef],
+    renamed: &'a [simlin_edit::Renamed],
+    deleted: &'a [simlin_edit::VariableRef],
+    created: &'a [simlin_edit::VariableRef],
 }
 
-fn patch_report_json(report: &simlin_engine::PatchReport) -> Vec<u8> {
+fn patch_report_json(report: &simlin_edit::PatchReport) -> Vec<u8> {
     let json = PatchReportJson {
         renamed: &report.renamed,
         deleted: &report.deleted,

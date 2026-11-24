@@ -1499,7 +1499,7 @@ fn find_element_uid(
 fn test_incremental_combined_ops() {
     use simlin_base::datamodel;
     use simlin_base::{ModelOperation, ModelPatch, ProjectPatch};
-    use simlin_engine::apply_patch;
+    use simlin_edit::apply_patch;
     use simlin_engine::layout::incremental_layout;
 
     // SIR model variables:

@@ -22,9 +22,9 @@
 use std::io::BufReader;
 
 use super::*;
-use crate::patch::apply_patch;
 use crate::test_common::TestProject;
 use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
+use simlin_edit::patch::apply_patch;
 
 /// What one input holds, read back field by field. The struct literal names
 /// every field of `SourceVariableFields`, so a field added to the extraction

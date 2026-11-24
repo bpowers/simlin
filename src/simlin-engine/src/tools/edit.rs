@@ -333,14 +333,14 @@ pub struct EditModelOutput {
     /// (`PatchReport`): for a host that follows a variable through the edit.
     /// The variables it renamed. A line's `to` says the same for a reader.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub renamed: Vec<crate::patch::Renamed>,
+    pub renamed: Vec<simlin_edit::patch::Renamed>,
     /// The variables, by their names before the edit, that no longer exist.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub deleted: Vec<crate::patch::VariableRef>,
+    pub deleted: Vec<simlin_edit::patch::VariableRef>,
     /// The variables, by their names after the edit, that did not exist
     /// before it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub created: Vec<crate::patch::VariableRef>,
+    pub created: Vec<simlin_edit::patch::VariableRef>,
     /// Lines left out to keep the answer within its budget.
     #[serde(skip_serializing_if = "is_zero")]
     pub omitted: usize,
@@ -983,8 +983,8 @@ struct Made {
     /// The project as the edit leaves it.
     working: datamodel::Project,
     /// What the edit did to the identity of the variables it touched
-    /// ([`crate::patch::PatchReport`]).
-    identities: crate::patch::PatchReport,
+    /// ([`simlin_edit::patch::PatchReport`]).
+    identities: simlin_edit::patch::PatchReport,
     delta: Delta,
     changes: Vec<ChangeLine>,
     diagnostics: Vec<Found>,
@@ -1286,7 +1286,7 @@ struct Builder<'a> {
     renames: Vec<(String, String)>,
     /// What the operations did to the identity of the variables they
     /// touched, as the patches that made them follow it.
-    identities: crate::patch::Identities,
+    identities: simlin_edit::patch::Identities,
     /// The variables the operations name, by their canonical names as the
     /// edit leaves them: what provenance marks, and whose equations the gate
     /// holds the edit to.
@@ -1309,7 +1309,7 @@ impl<'a> Builder<'a> {
             evidence,
             ops: Vec::new(),
             renames: Vec::new(),
-            identities: crate::patch::Identities::default(),
+            identities: simlin_edit::patch::Identities::default(),
             touched: BTreeMap::new(),
             pins: Vec::new(),
         }
@@ -1494,7 +1494,7 @@ impl<'a> Builder<'a> {
 
     /// Apply `ops` to the working copy, through the production patch path.
     fn apply(&mut self, ops: Vec<ModelOperation>) -> Result<(), ToolError> {
-        crate::patch::apply_patch_into(
+        simlin_edit::patch::apply_patch_into(
             &mut self.working,
             ProjectPatch {
                 project_ops: vec![],
@@ -1881,7 +1881,7 @@ impl<'a> Builder<'a> {
 
     /// Apply one edit of the project's dimensions (`patch_dimensions`).
     fn dimension_edit(&mut self, op: ProjectOperation) -> Result<(), ToolError> {
-        crate::apply_patch(
+        simlin_edit::apply_patch(
             &mut self.working,
             ProjectPatch {
                 project_ops: vec![op],
@@ -2089,7 +2089,7 @@ impl<'a> Builder<'a> {
                 IntegrationMethod::Rk4 => datamodel::SimMethod::RungeKutta4,
             };
         }
-        crate::apply_patch(
+        simlin_edit::apply_patch(
             &mut self.working,
             ProjectPatch {
                 project_ops: vec![ProjectOperation::SetSimSpecs(specs)],
@@ -3084,7 +3084,7 @@ fn gate(
         .iter()
         .filter_map(|(model, name, spelled)| {
             let readers: Vec<(Option<String>, String)> =
-                crate::patch::variables_naming(edit.working, model, name)
+                simlin_edit::patch::variables_naming(edit.working, model, name)
                     .into_iter()
                     .map(|(reader_model, reader)| {
                         (

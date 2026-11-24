@@ -1482,8 +1482,8 @@ fn translate_view_element(elem: &mut ViewElement, dx: f64, dy: f64) {
 /// radius, so the cloud reads as off the stock rather than on it.
 const DETACHED_CLOUD_GAP: f64 = 2.0;
 
-fn point_of(p: &FlowPoint) -> crate::editing::Point {
-    crate::editing::Point::new(p.x, p.y)
+fn point_of(p: &FlowPoint) -> simlin_edit::editing::Point {
+    simlin_edit::editing::Point::new(p.x, p.y)
 }
 
 /// Where a flow end that becomes a cloud goes: `p` itself when no stock body
@@ -1491,10 +1491,10 @@ fn point_of(p: &FlowPoint) -> crate::editing::Point {
 /// `adjacent`, past the stock's face by the cloud's radius and a gap, so the
 /// pipe keeps its line and the cloud sits off the stock it left.
 fn clear_of_stocks(
-    p: crate::editing::Point,
-    adjacent: crate::editing::Point,
-    stocks: &[crate::editing::Point],
-) -> crate::editing::Point {
+    p: simlin_edit::editing::Point,
+    adjacent: simlin_edit::editing::Point,
+    stocks: &[simlin_edit::editing::Point],
+) -> simlin_edit::editing::Point {
     use simlin_diagram::constants::{CLOUD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
     const EPS: f64 = 1e-6;
     let (half_w, half_h) = (STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0);
@@ -1524,7 +1524,7 @@ fn clear_of_stocks(
         .min(exit(p.y, center.y, half_h, uy))
         .max(0.0);
     let step = leave + CLOUD_RADIUS + DETACHED_CLOUD_GAP;
-    crate::editing::Point::new(p.x + ux * step, p.y + uy * step)
+    simlin_edit::editing::Point::new(p.x + ux * step, p.y + uy * step)
 }
 
 /// How far past a flow end, along its end segment, a cloud may be set when no
@@ -1546,12 +1546,12 @@ const MAX_CLOUD_EXTENSION: f64 = 4.0 * simlin_diagram::constants::CLOUD_RADIUS;
 /// not separate them; and one can draw a parameter on the short pipe between
 /// a stock and a valve, where only the space the stock took is clear.
 fn clear_along_pipe(
-    path: &[crate::editing::Point],
-    valve: crate::editing::Point,
+    path: &[simlin_edit::editing::Point],
+    valve: simlin_edit::editing::Point,
     shapes: &[simlin_diagram::common::Rect],
-) -> (crate::editing::Point, usize) {
-    use crate::editing::{Point, arc_position, point_at_arc};
+) -> (simlin_edit::editing::Point, usize) {
     use simlin_diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
+    use simlin_edit::editing::{Point, arc_position, point_at_arc};
     /// The step, in px, at which candidate positions are tried.
     const STEP: f64 = 1.0;
     const EPS: f64 = 1e-9;
@@ -1609,10 +1609,10 @@ enum RetargetedEnd {
     /// Still attached where the model says.
     Kept,
     /// Attaches to a different stock, drawn at a center.
-    Stock(i32, crate::editing::Point),
+    Stock(i32, simlin_edit::editing::Point),
     /// Becomes a cloud at a point, past this many of the pipe's points, which
     /// the pipe drops.
-    Cloud(crate::editing::Point, usize),
+    Cloud(simlin_edit::editing::Point, usize),
 }
 
 /// Re-attach a drawn flow whose stocks changed by moving only the ends that
@@ -1634,13 +1634,13 @@ fn retarget_flow(
     state: &mut LayoutState,
     flow_uid: i32,
     expected: [Option<i32>; 2],
-    stock_centers: &BTreeMap<i32, crate::editing::Point>,
+    stock_centers: &BTreeMap<i32, simlin_edit::editing::Point>,
 ) -> bool {
-    use crate::editing::{
+    use simlin_diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
+    use simlin_edit::editing::{
         CloudRef, FlowEnd, FlowGeometry, flow_terminals, free_terminal, heal, place_valve, route,
         route_end, target_stock_terminal,
     };
-    use simlin_diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
     let Some(index) = state
         .elements
         .iter()
@@ -1655,7 +1655,7 @@ fn retarget_flow(
     if n < 2 {
         return false;
     }
-    let stocks: Vec<crate::editing::Point> = stock_centers.values().copied().collect();
+    let stocks: Vec<simlin_edit::editing::Point> = stock_centers.values().copied().collect();
     // Every shape but this flow's own valve and clouds, which a cloud end this
     // pass creates must not cover: another flow's cloud (one an earlier
     // re-attachment made included), a valve, a parameter.
@@ -1689,7 +1689,7 @@ fn retarget_flow(
                 None => {
                     // The pipe from this end inward, its end moved off any
                     // stock body first.
-                    let mut path: Vec<crate::editing::Point> =
+                    let mut path: Vec<simlin_edit::editing::Point> =
                         flow.points.iter().map(point_of).collect();
                     if i == 1 {
                         path.reverse();
@@ -1697,7 +1697,7 @@ fn retarget_flow(
                     path[0] = clear_of_stocks(path[0], path[1], &stocks);
                     let (at, passed) = clear_along_pipe(
                         &path,
-                        crate::editing::Point::new(flow.x, flow.y),
+                        simlin_edit::editing::Point::new(flow.x, flow.y),
                         &shapes,
                     );
                     RetargetedEnd::Cloud(at, passed)
@@ -1742,7 +1742,7 @@ fn retarget_flow(
         .into_iter()
         .filter_map(|t| t.stock_center().and(t.uid()))
         .collect();
-    let occupied: Vec<crate::editing::Point> = state
+    let occupied: Vec<simlin_edit::editing::Point> = state
         .elements
         .iter()
         .filter_map(|e| match e {
@@ -1797,17 +1797,17 @@ fn retarget_flow(
             .find(|p| p.attached_to_uid == Some(uid))
             .map(point_of)
     };
-    let valve = crate::editing::Point::new(next.x, next.y);
+    let valve = simlin_edit::editing::Point::new(next.x, next.y);
     let covered = created_clouds.iter().any(|&uid| {
         end_at(uid)
             .is_some_and(|at| (at.x - valve.x).hypot(at.y - valve.y) < CLOUD_RADIUS + AUX_RADIUS)
     });
     if covered {
-        let path: Vec<crate::editing::Point> = next.points.iter().map(point_of).collect();
+        let path: Vec<simlin_edit::editing::Point> = next.points.iter().map(point_of).collect();
         let middle = place_valve(&path, FlowEnd::Source, None);
         (next.x, next.y) = (middle.x, middle.y);
     }
-    let created: Vec<(i32, crate::editing::Point)> = created_clouds
+    let created: Vec<(i32, simlin_edit::editing::Point)> = created_clouds
         .iter()
         .filter_map(|&uid| end_at(uid).map(|at| (uid, at)))
         .collect();
@@ -1898,7 +1898,7 @@ fn retarget_flow(
 /// one of its ends.
 fn crosses_foreign_stock(
     flow: &view_element::Flow,
-    stocks: &[(i32, crate::editing::Point)],
+    stocks: &[(i32, simlin_edit::editing::Point)],
 ) -> bool {
     use simlin_diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
     const EPS: f64 = 1e-6;
@@ -1937,7 +1937,7 @@ fn crosses_foreign_stock(
 /// A pipe that already clears every stock keeps what the finishing pass gave
 /// it.
 fn route_created_flows_around_stocks(elements: &mut [ViewElement], created: &HashSet<i32>) {
-    use crate::editing::{FlowEnd, FlowGeometry, Point, flow_terminals, route};
+    use simlin_edit::editing::{FlowEnd, FlowGeometry, Point, flow_terminals, route};
     let stocks: Vec<(i32, Point)> = elements
         .iter()
         .filter_map(|e| match e {
@@ -2010,10 +2010,10 @@ fn route_created_flows_around_stocks(elements: &mut [ViewElement], created: &Has
 /// `VALVE_CLAMP_MARGIN` from the pipe's ends; a pipe with no clear position
 /// keeps its valve.
 fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32>) {
-    use crate::editing::{VALVE_CLAMP_MARGIN, arc_position, path_length, point_at_arc};
     use crate::layout::metrics::node_shape_box;
     use simlin_diagram::common::Rect;
     use simlin_diagram::constants::AUX_RADIUS;
+    use simlin_edit::editing::{VALVE_CLAMP_MARGIN, arc_position, path_length, point_at_arc};
     /// The step, in px of arc length, at which candidate valve positions are
     /// tried.
     const STEP: f64 = 1.0;
@@ -2026,7 +2026,7 @@ fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32
         if !created.contains(&f.uid) || f.points.len() < 2 {
             continue;
         }
-        let clear = |p: crate::editing::Point| {
+        let clear = |p: simlin_edit::editing::Point| {
             shapes
                 .iter()
                 .filter(|(uid, _)| *uid != f.uid)
@@ -2036,7 +2036,7 @@ fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32
                     w <= 0.0 || h <= 0.0
                 })
         };
-        let valve = crate::editing::Point::new(f.x, f.y);
+        let valve = simlin_edit::editing::Point::new(f.x, f.y);
         if clear(valve) {
             continue;
         }
@@ -2501,11 +2501,11 @@ pub fn incremental_layout(
         // The stocks a re-attached pipe routes around and whose bodies a cloud
         // end stays out of: every drawn stock, plus the stocks a kind change
         // redraws in place below.
-        let stock_centers: BTreeMap<i32, crate::editing::Point> = state
+        let stock_centers: BTreeMap<i32, simlin_edit::editing::Point> = state
             .elements
             .iter()
             .filter_map(|e| match e {
-                ViewElement::Stock(s) => Some((s.uid, crate::editing::Point::new(s.x, s.y))),
+                ViewElement::Stock(s) => Some((s.uid, simlin_edit::editing::Point::new(s.x, s.y))),
                 _ => None,
             })
             .chain(kind_changed_centers.iter().filter_map(|(ident, pos)| {
@@ -2515,7 +2515,7 @@ pub fn incremental_layout(
                 )
                 .then_some(())?;
                 let uid = state.uid_manager.get_uid(ident)?;
-                Some((uid, crate::editing::Point::new(pos.x, pos.y)))
+                Some((uid, simlin_edit::editing::Point::new(pos.x, pos.y)))
             }))
             .collect();
         for flow_ident in flows_to_reset {
@@ -2903,6 +2903,10 @@ pub fn incremental_layout(
     // Step 9: Build StockFlow
     Ok(build_stock_flow_from_state(state, old_view))
 }
+
+#[cfg(test)]
+#[path = "incremental_sharing_tests.rs"]
+mod sharing_tests;
 
 #[cfg(test)]
 #[path = "incremental_tests.rs"]

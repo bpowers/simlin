@@ -16,15 +16,14 @@
 //! corpus model. The first property is also held of the conveyor and queue
 //! expansions, which rewrite a copy of the project.
 
-use std::collections::HashMap;
-use std::hash::Hash;
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
 
-use crate::patch::{apply_patch, apply_patch_in_place};
+use crate::patch::apply_patch_in_place;
 use simlin_base::canonicalize;
-use simlin_base::datamodel::{self, Equation, Project, SharedVec, Variable, View, ViewElement};
+use simlin_base::datamodel::{self, Equation, Project, Variable, View, ViewElement};
 use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
+use simlin_base::shared_vec::changed_by;
+use simlin_formats::test_support::for_each_corpus_project;
 
 fn world3() -> Project {
     simlin_formats::compat::open_vensim(include_str!("../../../test/metasd/WRLD3-03/wrld3-03.mdl"))
@@ -37,47 +36,6 @@ fn hares_and_lynxes() -> Project {
         "../../../test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile"
     );
     simlin_formats::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens")
-}
-
-fn corpus_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            corpus_files(&path, out);
-        } else if matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("mdl" | "stmx" | "xmile" | "itmx")
-        ) {
-            out.push(path);
-        }
-    }
-}
-
-/// Calls `f` with every model file under the repository's `test/` that
-/// opens, in path order.
-pub(crate) fn for_each_corpus_project(mut f: impl FnMut(&Path, &Project)) {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test");
-    let mut files = Vec::new();
-    corpus_files(&root, &mut files);
-    for path in files {
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        let project = if path.extension().and_then(|e| e.to_str()) == Some("mdl") {
-            String::from_utf8(bytes)
-                .ok()
-                .and_then(|text| simlin_formats::compat::open_vensim(&text).ok())
-        } else {
-            simlin_formats::compat::open_xmile(&mut BufReader::new(bytes.as_slice())).ok()
-        };
-        if let Some(project) = project {
-            f(&path, &project);
-        }
-    }
 }
 
 /// How many variants `ModelOperation` has.
@@ -515,34 +473,6 @@ fn generated_patches(project: &Project, max: usize) -> Vec<(String, ProjectPatch
     out
 }
 
-/// The keys of the elements an edit changed, after asserting that every
-/// element `same` as the one before it under its key is the same allocation:
-/// nothing was copied that the edit left as it was.
-fn changed_by<T: Clone, K: Eq + Hash + Clone + std::fmt::Debug>(
-    before: &SharedVec<T>,
-    after: &SharedVec<T>,
-    key: impl Fn(&T) -> K,
-    same: impl Fn(&T, &T) -> bool,
-    what: &str,
-) -> Vec<K> {
-    let mut before_at: HashMap<K, (usize, &T)> = HashMap::new();
-    for (element, address) in before.iter().zip(before.addresses()) {
-        before_at.entry(key(element)).or_insert((address, element));
-    }
-    let mut changed = Vec::new();
-    for (e, address) in after.iter().zip(after.addresses()) {
-        let k = key(e);
-        match before_at.get(&k) {
-            Some((before_address, before_value)) if same(before_value, e) => assert_eq!(
-                *before_address, address,
-                "{what}: {k:?} is unchanged but was copied"
-            ),
-            _ => changed.push(k),
-        }
-    }
-    changed
-}
-
 fn ident(v: &Variable) -> String {
     canonicalize(v.get_ident()).into_owned()
 }
@@ -632,7 +562,7 @@ fn a_patch_copies_only_what_it_changes_and_lands_the_same_shared_or_not() {
     check_sharing(&hares_and_lynxes(), 4, &mut covered, "hares and lynxes");
     // Neither of those is arrayed: an element's own equation needs a model
     // that is.
-    let arrayed = crate::test_common::TestProject::new("arrayed")
+    let arrayed = simlin_engine::test_common::TestProject::new("arrayed")
         .named_dimension("Region", &["North", "South"])
         .array_with_default_and_overrides("growth[Region]", "0.1", vec![("South", "0.2")])
         .array_aux("level[Region]", "growth * 2")
@@ -724,12 +654,12 @@ fn naming_a_loop_copies_no_variable_that_has_its_uid() {
 fn an_expansion_shares_every_variable_it_leaves_as_it_was() {
     type Expansion = fn(&Project) -> Project;
     let conveyors: Expansion = |project| {
-        crate::conveyor_compile::expand_conveyors(project, &project.models[0].name)
+        simlin_engine::conveyor_compile::expand_conveyors(project, &project.models[0].name)
             .expect("the conveyors expand")
             .0
     };
     let queues: Expansion = |project| {
-        crate::queue_compile::expand_queues(project, &project.models[0].name)
+        simlin_engine::queue_compile::expand_queues(project, &project.models[0].name)
             .expect("the queues expand")
             .0
     };
@@ -786,53 +716,6 @@ fn an_expansion_shares_every_variable_it_leaves_as_it_was() {
         );
         assert!(shared > 0, "{what}: and something is left as it was");
     }
-}
-
-fn elements(project: &Project) -> &SharedVec<ViewElement> {
-    match &project.models[0].views[0] {
-        View::StockFlow(sf) => &sf.elements,
-    }
-}
-
-#[test]
-fn a_layout_sync_shares_every_element_it_leaves_in_place() {
-    let original = world3();
-    let mut copy = original.clone();
-    let aux = original.models[0]
-        .variables
-        .iter()
-        .rev()
-        .find_map(|v| match v {
-            Variable::Aux(a) if matches!(a.equation, Equation::Scalar(_)) => Some(a.clone()),
-            _ => None,
-        })
-        .expect("world3 has a scalar aux");
-    let mut edited = aux;
-    edited.equation = tweaked(&edited.equation);
-    let patch = ProjectPatch {
-        project_ops: vec![],
-        models: vec![ModelPatch {
-            name: "main".to_string(),
-            ops: vec![ModelOperation::UpsertAux(edited)],
-        }],
-    };
-    apply_patch(&mut copy, patch.clone()).unwrap();
-    let View::StockFlow(old) = &copy.models[0].views[0];
-    let old = old.clone();
-    // The layout lays every element out afresh, as a host's diagram sync
-    // does after each edit.
-    let synced = crate::layout::incremental_layout(&old, &copy, "main", &patch.models[0], None)
-        .expect("the layout syncs");
-    copy.models[0].views[0] = View::StockFlow(synced);
-
-    let moved = changed_by(
-        elements(&original),
-        elements(&copy),
-        ViewElement::get_uid,
-        |a, b| a == b,
-        "a sync after an equation edit",
-    );
-    assert!(moved.is_empty(), "an equation edit moves nothing");
 }
 
 #[test]

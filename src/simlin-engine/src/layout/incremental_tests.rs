@@ -85,7 +85,7 @@ fn sync(
     let mut patched = project.clone();
     patched.get_model_mut(TEST_MODEL).expect("model").views =
         vec![datamodel::View::StockFlow(old_view.clone())];
-    crate::patch::apply_patch(
+    simlin_edit::patch::apply_patch(
         &mut patched,
         simlin_base::project_patch::ProjectPatch {
             project_ops: vec![],
@@ -365,7 +365,7 @@ fn overlaps_involving(view: &datamodel::StockFlow, uids: &HashSet<i32>) -> Vec<(
 
 /// The strict flow invariant violations of the flows in `uids`.
 fn strict_violations(view: &datamodel::StockFlow, uids: &HashSet<i32>) -> String {
-    use crate::editing::invariants::{Mode, check_flow_invariants, format_violations};
+    use simlin_edit::editing::invariants::{Mode, check_flow_invariants, format_violations};
     format_violations(&check_flow_invariants(
         &view.elements.to_vec(),
         Mode::Strict { routed: Some(uids) },

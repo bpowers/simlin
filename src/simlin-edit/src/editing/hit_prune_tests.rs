@@ -38,9 +38,9 @@ use rayon::prelude::*;
 use crate::editing::base::position_of;
 use crate::editing::scene_gen::{Rng, imported_scene, strict_scene};
 use crate::editing::test_support::{aux, cloud, flow, labeled, load, project_of, stock, view_of};
-use crate::test_common::TestProject;
 use simlin_base::datamodel::view_element::{self, LabelSide};
 use simlin_base::datamodel::{self, Equation, Variable, ViewElement};
+use simlin_engine::test_common::TestProject;
 
 use super::*;
 

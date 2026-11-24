@@ -3,10 +3,10 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::patch::apply_patch;
-use crate::test_common::TestProject;
 use simlin_base::common::ErrorCode;
 use simlin_base::datamodel::{self, Equation};
 use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
+use simlin_engine::test_common::TestProject;
 
 type Arm = (
     String,
@@ -351,19 +351,6 @@ fn an_elements_lookup_leaves_the_others_reading_through_the_variables() {
     );
 }
 
-/// An element given an empty equation has none of its own: it follows the
-/// equation every element follows, and an MDL save keeps that.
-#[test]
-fn an_empty_element_equation_is_none() {
-    use crate::save_check::{SaveFormat, check_save};
-    let base = ages().array_aux("d[Age]", "c * 2").build_datamodel();
-    for text in ["", "  "] {
-        let edited = edit(&base, set_element("d", &["old"], Some(text))).unwrap();
-        assert_eq!(equation(&edited, "d"), equation(&base, "d"), "{text:?}");
-        assert!(check_save(&edited, SaveFormat::Mdl).unwrap().is_empty());
-    }
-}
-
 /// A variable made a scalar from an element whose only definition of its own
 /// is a lookup keeps the equation every element follows as that lookup's
 /// input.
@@ -533,62 +520,6 @@ fn what_a_dimensions_edit_refuses() {
         edit(&base, set_dimensions("c", &[], Some(&["Young", "North"]))).err(),
         Some(ErrorCode::MismatchedDimensions)
     );
-}
-
-/// What the field edits store -- one equation for every element, elements
-/// with equations and lookups of their own, elements of two dimensions -- is
-/// kept by a save in every format Simlin writes and reads back: the save
-/// check reads each save back and finds the same definitions and, run, the
-/// same results. (An equation for every element that no element follows is
-/// the one thing an MDL save does not keep: `:EXCEPT:` cannot except every
-/// element.)
-#[test]
-fn what_the_field_edits_store_round_trips_through_every_format() {
-    use crate::save_check::{SaveFormat, check_save};
-    let mut project = ages()
-        .with_sim_time(0.0, 2.0, 1.0)
-        .array_aux("d[Age]", "c * 2")
-        .array_aux("p[Region, Age]", "c + 1")
-        .build_datamodel();
-    for op in [
-        set_element("d", &["Old"], Some("inflow")),
-        set_element("p", &["North", "Young"], Some("c[Adult] / 4")),
-        set_element("p", &["South", "Adult"], Some("0")),
-        ModelOperation::SetLookup {
-            ident: "d".to_string(),
-            element: Some(strings(&["Adult"])),
-            lookup: Some(datamodel::GraphicalFunction {
-                kind: datamodel::GraphicalFunctionKind::Continuous,
-                x_points: Some(vec![0.0, 100.0]),
-                y_points: vec![0.0, 1.0],
-                x_scale: datamodel::GraphicalFunctionScale {
-                    min: 0.0,
-                    max: 100.0,
-                },
-                y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
-            }),
-        },
-    ] {
-        project = edit(&project, op).unwrap();
-    }
-    assert!(matches!(
-        equation(&project, "d"),
-        Equation::Arrayed(_, _, Some(_), true)
-    ));
-    for format in [
-        SaveFormat::Xmile,
-        SaveFormat::Json,
-        SaveFormat::Mdl,
-        SaveFormat::Protobuf,
-    ] {
-        let changes = check_save(&project, format).expect("the save reads back");
-        assert!(
-            changes.is_empty(),
-            "a {} save keeps the model: {:?}",
-            format.name(),
-            changes.iter().map(|c| c.reason.clone()).collect::<Vec<_>>()
-        );
-    }
 }
 
 /// An element's own initial is its own: collapsing to the element that has
