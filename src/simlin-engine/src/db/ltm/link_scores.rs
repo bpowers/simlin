@@ -17,9 +17,9 @@ use crate::common::{Canonical, Ident, IdentSet};
 
 use crate::db::{
     Db, LtmArm, LtmEquation, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, lowered_variable_by_name, model_variable_by_name,
-    project_dimensions_context,
+    SourceVariable, lowered_variable_by_name, model_variable_by_name, project_dimensions_context,
 };
+use crate::variable::SourceVariableKind;
 
 use crate::ltm_augment::DepElementPin;
 
@@ -244,7 +244,7 @@ pub(super) fn datamodel_dim_names(
 /// Bare edge the wiring's pairing (`db::BareSpelling::StockFlow`) applies to.
 fn is_structural_flow_to_stock(db: &dyn Db, model: SourceModel, from: &str, to: &str) -> bool {
     model.variables(db).get(to).is_some_and(|var| {
-        var.kind(db) == crate::db::SourceVariableKind::Stock
+        var.kind(db) == crate::variable::SourceVariableKind::Stock
             && var
                 .inflows(db)
                 .iter()

@@ -28,9 +28,10 @@ use crate::ltm::strip_subscript;
 
 use super::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, lowered_variable_by_name, model_causal_edges,
-    project_datamodel_dims, project_dimensions_context,
+    SourceVariable, lowered_variable_by_name, model_causal_edges, project_datamodel_dims,
+    project_dimensions_context,
 };
+use crate::variable::SourceVariableKind;
 
 mod compile;
 mod equation;

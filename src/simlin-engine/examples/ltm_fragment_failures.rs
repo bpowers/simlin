@@ -710,7 +710,7 @@ fn main() {
     let explicit_modules: std::collections::BTreeSet<String> = source_model
         .variables(&db)
         .iter()
-        .filter(|(_, sv)| sv.kind(&db) == simlin_engine::db::SourceVariableKind::Module)
+        .filter(|(_, sv)| sv.kind(&db) == simlin_engine::SourceVariableKind::Module)
         .map(|(n, _)| n.to_string())
         .collect();
     println!(

@@ -44,9 +44,10 @@ use crate::capture::CaptureKind;
 use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::db::{
     Db, DepPhase, DepRefs, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, project_module_graph, variable_direct_dependencies,
+    project_module_graph, variable_direct_dependencies,
 };
 use crate::variable::DepLag;
+use crate::variable::SourceVariableKind;
 
 /// Per-variable dependency facts used to build the model dependency
 /// graph.

@@ -54,12 +54,13 @@ use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::FragmentInput;
 use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, LtmOverlay,
-    ModuleInputSet, ParsedVariableResult, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, VariableDeps, canonical_module_input_set, model_implicit_var_by_name,
-    model_variable_by_name, module_dep_shape, parse_source_variable, project_converted_dimensions,
+    ModuleInputSet, ParsedVariableResult, SourceModel, SourceProject, SourceVariable, VariableDeps,
+    canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
+    module_dep_shape, parse_source_variable, project_converted_dimensions,
     project_dimensions_context, variable_dimensions, variable_direct_dependencies, variable_tables,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
+use crate::variable::SourceVariableKind;
 use crate::variable::Variable;
 
 /// Outcome of [`explicit_fragment_input`]: every diagnostic the constructor

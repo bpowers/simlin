@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::datamodel;
+use crate::variable::SourceVariableKind;
 
 // `BTreeSet` is imported for the root-mounted `#[cfg(test)]` test modules,
 // which reach it through their `use super::*` glob; the root module's own code
@@ -72,7 +73,7 @@ pub use diagnostic::{collect_all_diagnostics, collect_model_diagnostics, model_a
 mod input;
 pub use input::{
     LtmLinkId, ModuleInputSet, PinnedLoopSpec, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, variable_source,
+    variable_source,
 };
 pub(crate) use input::{source_model_is_stdlib, source_var_is_table_only};
 

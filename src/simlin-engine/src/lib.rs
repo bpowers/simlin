@@ -168,7 +168,7 @@ pub use self::patch::{
 pub use self::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
 pub use self::queue_compile::build_sim;
 pub use self::results::{Method, Results, Specs as SimSpecs};
-pub use self::variable::{DepClassification, DepLag, DepOccurrence, Variable};
+pub use self::variable::{DepClassification, DepLag, DepOccurrence, SourceVariableKind, Variable};
 pub use self::vm::{CompiledSimulation, Vm};
 pub use self::vm_profile::BytecodeProfile;
 

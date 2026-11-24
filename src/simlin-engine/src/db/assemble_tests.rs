@@ -406,7 +406,7 @@ fn module_target(
     if let Some(svar) = model.variables(db).get(var) {
         assert_eq!(
             svar.kind(db),
-            crate::db::SourceVariableKind::Module,
+            crate::variable::SourceVariableKind::Module,
             "`{var}` is used as a module path segment but is not a module variable"
         );
         return svar.model_name(db).clone();
@@ -518,7 +518,7 @@ fn assert_module_decls_sit_at_layout_slots(
     for (name, entry) in layout.iter() {
         let is_module = source_vars
             .get(name)
-            .is_some_and(|v| v.kind(db) == crate::db::SourceVariableKind::Module)
+            .is_some_and(|v| v.kind(db) == crate::variable::SourceVariableKind::Module)
             || implicit.get(name).is_some_and(|m| m.is_module);
         if !is_module {
             continue;

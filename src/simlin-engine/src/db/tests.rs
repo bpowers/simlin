@@ -3126,7 +3126,7 @@ fn test_incremental_sync_updates_module_visibility() {
 /// * `module_refs`/`model_name` -- the `sub` module row.
 #[test]
 fn variable_source_producers_agree_for_every_source_variable_kind() {
-    use crate::db::SourceVariableKind;
+    use crate::variable::SourceVariableKind;
     use crate::variable::{ParseContext, VarKind, VariableSource, parse_var};
     use std::collections::{HashMap, HashSet};
 

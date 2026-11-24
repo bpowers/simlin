@@ -14,7 +14,11 @@
 //! `ModelAnalysis::analysis_error` -- so "could not analyse" is distinguishable
 //! from "no loops" (GH #660).
 
+use std::collections::{HashMap, HashSet};
+
 use crate::db::{SimlinDb, SourceProject};
+use crate::json_sdai::{Polarity, Relationship};
+use crate::ltm::LinkPolarity;
 use crate::ltm_dominance::{self, DominantPeriod, FeedbackLoop};
 use crate::{datamodel, json};
 
@@ -310,7 +314,7 @@ pub fn build_link_expansion_context(
     let flow_to_stock = source_model
         .variables(db)
         .iter()
-        .filter(|(_, var)| var.kind(db) == crate::db::SourceVariableKind::Stock)
+        .filter(|(_, var)| var.kind(db) == crate::variable::SourceVariableKind::Stock)
         .flat_map(|(stock, var)| {
             let stock = crate::common::Ident::<crate::common::Canonical>::new(stock.as_str());
             var.inflows(db)
@@ -745,6 +749,79 @@ fn build_time_array(results: &crate::results::Results) -> Vec<f64> {
         .collect()
 }
 
+/// Generate SD-AI relationships from pre-computed equation dependency
+/// polarities.
+///
+/// Takes the polarity map produced by `compute_link_polarities()` and the
+/// datamodel, filters out stock-flow structural edges (which the SD-AI
+/// conformance evaluator generates independently), and maps remaining
+/// equation-derived edges to `Relationship` values with computed polarity.
+pub fn generate_relationships(
+    polarities: &HashMap<(String, String), LinkPolarity>,
+    model: &datamodel::Model,
+) -> Vec<Relationship> {
+    // Map canonical identifiers back to authored variable names so the
+    // relationships array matches the names in the variables array.
+    let canonical_to_authored: HashMap<String, &str> = model
+        .variables
+        .iter()
+        .map(|v| {
+            let authored = v.get_ident();
+            (crate::common::canonicalize(authored).into_owned(), authored)
+        })
+        .collect();
+
+    // Stock-flow structural edges are excluded because the conformance
+    // evaluator generates them itself via makeRelationshipsFromStocks().
+    // Identifiers are canonicalized so that mixed-case names in the datamodel
+    // (e.g. stock "Population" with inflow "Births") correctly match the
+    // lowercase canonical keys produced by compute_link_polarities().
+    let mut stock_flow_edges: HashSet<(String, String)> = HashSet::new();
+    for var in &model.variables {
+        if let datamodel::Variable::Stock(stock) = var {
+            let stock_ident = crate::common::canonicalize(&stock.ident).into_owned();
+            for inflow in &stock.inflows {
+                stock_flow_edges.insert((
+                    crate::common::canonicalize(inflow).into_owned(),
+                    stock_ident.clone(),
+                ));
+            }
+            for outflow in &stock.outflows {
+                stock_flow_edges.insert((
+                    crate::common::canonicalize(outflow).into_owned(),
+                    stock_ident.clone(),
+                ));
+            }
+        }
+    }
+
+    let mut relationships: Vec<Relationship> = polarities
+        .iter()
+        .filter(|((from, to), _)| !stock_flow_edges.contains(&(from.clone(), to.clone())))
+        // Only include edges where both endpoints are declared model
+        // variables.  This excludes simulator builtins (TIME, DT) and
+        // implicit compiler nodes ($-prefixed SMOOTH/DELAY expansions).
+        .filter_map(|((from, to), polarity)| {
+            let authored_from = canonical_to_authored.get(from)?;
+            let authored_to = canonical_to_authored.get(to)?;
+            Some(Relationship {
+                reasoning: None,
+                from: authored_from.to_string(),
+                to: authored_to.to_string(),
+                polarity: match polarity {
+                    LinkPolarity::Positive => Polarity::Positive,
+                    LinkPolarity::Negative => Polarity::Negative,
+                    LinkPolarity::Unknown => Polarity::Unknown,
+                },
+                polarity_reasoning: None,
+            })
+        })
+        .collect();
+
+    relationships.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+    relationships
+}
+
 /// One causal link of a model, as [`model_links`] reports it: its endpoints,
 /// its statically analyzed polarity, and, for a run under the LTM overlay, its
 /// link-score series.
@@ -1022,7 +1099,8 @@ pub fn model_reads(
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
     use crate::common::{Canonical, Ident};
-    use crate::db::{DepRefs, ImplicitVarDeps, SourceVariable, SourceVariableKind};
+    use crate::db::{DepRefs, ImplicitVarDeps, SourceVariable};
+    use crate::variable::SourceVariableKind;
 
     /// The reads found so far, for one reader at a time.
     struct Reads<'a> {
@@ -1261,7 +1339,7 @@ fn equation_is_read(
     project: SourceProject,
     dimensions: &crate::dimensions::DimensionsContext,
 ) -> bool {
-    if var.kind(db) == crate::db::SourceVariableKind::Module {
+    if var.kind(db) == crate::variable::SourceVariableKind::Module {
         return true;
     }
     let parsed = &crate::db::parse_source_variable(db, var, project).variable;
@@ -1304,6 +1382,10 @@ pub fn model_unread_equations(
 #[cfg(test)]
 #[path = "analysis_reads_tests.rs"]
 mod reads_tests;
+
+#[cfg(test)]
+#[path = "analysis_relationships_tests.rs"]
+mod relationships_tests;
 
 #[cfg(test)]
 mod tests {

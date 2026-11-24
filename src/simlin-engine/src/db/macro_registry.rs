@@ -38,7 +38,8 @@
 //! it via `crate::db::macro_registry::...`.
 
 use crate::datamodel;
-use crate::db::{Db, SourceProject, SourceVariable, SourceVariableKind, variable_source};
+use crate::db::{Db, SourceProject, SourceVariable, variable_source};
+use crate::variable::SourceVariableKind;
 
 /// The kind-tagged `datamodel::Variable` form of a macro-marked model's body
 /// variable.

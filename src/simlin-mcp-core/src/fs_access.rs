@@ -193,7 +193,7 @@ fn serialize_project(
                     let polarities =
                         simlin_engine::db::compute_link_polarities(&db, source_model, sync.project);
                     sdai_model.relationships = Some(
-                        simlin_engine::json_sdai::generate_relationships(&polarities, dm_model),
+                        simlin_engine::analysis::generate_relationships(&polarities, dm_model),
                     );
                 }
             }

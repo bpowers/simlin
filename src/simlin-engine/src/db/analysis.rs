@@ -31,10 +31,10 @@ use crate::datamodel;
 
 use super::{
     Db, DepPhase, DepRefs, DepTarget, LtmMode, ModuleInputSet, SourceModel, SourceProject,
-    SourceVariableKind, lowered_implicit_variable, lowered_source_variable,
-    model_implicit_var_info, model_ltm_mode, project_datamodel_dims, project_dimensions_context,
-    variable_direct_dependencies,
+    lowered_implicit_variable, lowered_source_variable, model_implicit_var_info, model_ltm_mode,
+    project_datamodel_dims, project_dimensions_context, variable_direct_dependencies,
 };
+use crate::variable::SourceVariableKind;
 
 /// The sub-model outputs each node of a model reads in the dt phase, by
 /// reader: the qualified [`DepTarget`]s of an explicit variable's equation, a
@@ -1966,7 +1966,7 @@ pub fn model_edge_shapes(
     // `model_element_causal_edges` for the same case.
     let mut structural_flow_to_stock: BTreeSet<(String, String)> = BTreeSet::new();
     for (stock_name, source_var) in source_vars.iter() {
-        if source_var.kind(db) == super::SourceVariableKind::Stock {
+        if source_var.kind(db) == SourceVariableKind::Stock {
             for flow in source_var
                 .inflows(db)
                 .iter()
@@ -1993,7 +1993,7 @@ pub fn model_edge_shapes(
             // here keeps the intent explicit.
             let to_is_module = source_vars
                 .get(to_name)
-                .map(|sv| sv.kind(db) == super::SourceVariableKind::Module)
+                .map(|sv| sv.kind(db) == SourceVariableKind::Module)
                 .unwrap_or(false);
             if to_is_module
                 || structural_flow_to_stock.contains(&(from_name.clone(), to_name.clone()))
@@ -2304,7 +2304,7 @@ pub fn model_element_causal_edges(
     // explicit and matches `model_edge_shapes`.
     let mut structural_flow_to_stock: BTreeSet<(String, String)> = BTreeSet::new();
     for (stock_name, source_var) in source_vars.iter() {
-        if source_var.kind(db) == super::SourceVariableKind::Stock {
+        if source_var.kind(db) == SourceVariableKind::Stock {
             for flow in source_var
                 .inflows(db)
                 .iter()

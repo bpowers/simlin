@@ -21,7 +21,6 @@ use crate::common::{
     EquationResult, Ident, IdentMap, IdentSet, canonicalize,
 };
 use crate::datamodel;
-use crate::db::SourceVariableKind;
 use crate::diagnostic::DiagnosticError;
 use crate::dimensions::{Dimension, DimensionsContext};
 use crate::lexer::LexerType;
@@ -1448,6 +1447,26 @@ fn parse_equation(
                     (None, errors)
                 }
             }
+        }
+    }
+}
+
+/// Which of the datamodel's kinds of variable a [`VariableSource`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceVariableKind {
+    Stock,
+    Flow,
+    Aux,
+    Module,
+}
+
+impl SourceVariableKind {
+    pub(crate) fn from_datamodel_variable(var: &datamodel::Variable) -> Self {
+        match var {
+            datamodel::Variable::Stock(_) => SourceVariableKind::Stock,
+            datamodel::Variable::Flow(_) => SourceVariableKind::Flow,
+            datamodel::Variable::Aux(_) => SourceVariableKind::Aux,
+            datamodel::Variable::Module(_) => SourceVariableKind::Module,
         }
     }
 }

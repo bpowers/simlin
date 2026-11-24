@@ -46,10 +46,11 @@ use crate::datamodel;
 use crate::db::var_fragment::{helper_dimensions, source_dimensions};
 use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, model_implicit_var_info, model_written_variables,
-    project_dimensions_context, project_units_context, source_model_is_stdlib,
+    SourceVariable, model_implicit_var_info, model_written_variables, project_dimensions_context,
+    project_units_context, source_model_is_stdlib,
 };
 use crate::units_check::UnitModel;
+use crate::variable::SourceVariableKind;
 
 /// Collect the identifiers that must share units because they sit in the
 /// "value branches" of an `if isModuleInput(x) then x else y` conditional.

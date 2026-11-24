@@ -21,10 +21,11 @@ use std::collections::{HashMap, HashSet};
 use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::db::{
     CycleClass, Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, causal_graph_with_modules, classify_cycle, model_edge_shapes,
-    model_element_causal_edges, project_datamodel_dims, variable_direct_dependencies,
+    causal_graph_with_modules, classify_cycle, model_edge_shapes, model_element_causal_edges,
+    project_datamodel_dims, variable_direct_dependencies,
 };
 use crate::ltm::{Loop, strip_subscript};
+use crate::variable::SourceVariableKind;
 
 use super::endpoint_dimensions;
 
