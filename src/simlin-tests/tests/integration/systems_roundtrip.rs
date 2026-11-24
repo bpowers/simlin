@@ -22,26 +22,26 @@ fn roundtrip_systems_file(txt_path: &str, csv_path: &str, rounds: u64) {
         .unwrap_or_else(|e| panic!("failed to read {txt_path}: {e}"));
 
     // First pass: parse -> translate -> write
-    let model1 = simlin_engine::systems::parse(&contents)
+    let model1 = simlin_formats::systems::parse(&contents)
         .unwrap_or_else(|e| panic!("failed to parse {txt_path}: {e}"));
-    let project1 = simlin_engine::systems::translate::translate(&model1, rounds)
+    let project1 = simlin_formats::systems::translate::translate(&model1, rounds)
         .unwrap_or_else(|e| panic!("failed to translate {txt_path}: {e}"));
-    let written = simlin_engine::compat::to_systems(&project1)
+    let written = simlin_formats::compat::to_systems(&project1)
         .unwrap_or_else(|e| panic!("failed to write {txt_path}: {e}"));
 
     eprintln!("written output:\n{written}---");
 
     // Second pass: parse written output -> translate -> simulate
-    let model2 = simlin_engine::systems::parse(&written).unwrap_or_else(|e| {
+    let model2 = simlin_formats::systems::parse(&written).unwrap_or_else(|e| {
         panic!("failed to re-parse written output for {txt_path}: {e}\nwritten:\n{written}")
     });
     let project2 =
-        simlin_engine::systems::translate::translate(&model2, rounds).unwrap_or_else(|e| {
+        simlin_formats::systems::translate::translate(&model2, rounds).unwrap_or_else(|e| {
             panic!("failed to re-translate written output for {txt_path}: {e}\nwritten:\n{written}")
         });
 
     // Simulate the round-tripped model
-    let expected = simlin_engine::compat::load_csv(csv_path, b',')
+    let expected = simlin_formats::compat::load_csv(csv_path, b',')
         .unwrap_or_else(|e| panic!("failed to load {csv_path}: {e}"));
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project2, None);
@@ -113,11 +113,11 @@ fn roundtrip_extended_syntax() {
 #[test]
 fn compat_open_and_write_systems() {
     let contents = std::fs::read_to_string("../../test/systems-format/hiring.txt").unwrap();
-    let project = simlin_engine::compat::open_systems(&contents).unwrap();
-    let written = simlin_engine::compat::to_systems(&project).unwrap();
+    let project = simlin_formats::compat::open_systems(&contents).unwrap();
+    let written = simlin_formats::compat::to_systems(&project).unwrap();
 
     // Verify written output can be re-parsed and compiled
-    let project2 = simlin_engine::compat::open_systems(&written).unwrap();
+    let project2 = simlin_formats::compat::open_systems(&written).unwrap();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project2, None);
     assert!(

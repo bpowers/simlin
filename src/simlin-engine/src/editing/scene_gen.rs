@@ -20,9 +20,9 @@
 
 use std::collections::HashSet;
 
-use crate::json;
 use simlin_base::datamodel::ViewElement;
 use simlin_diagram::constants::{CLOUD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
+use simlin_formats::json;
 
 use super::geometry::Face;
 use super::invariants::{

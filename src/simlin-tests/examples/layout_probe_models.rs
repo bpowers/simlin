@@ -33,13 +33,13 @@ fn main() {
         "vensim-probes/repeated_dimension.mdl",
     ] {
         let original = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        let mut project = simlin_engine::compat::open_vensim(&original)
+        let mut project = simlin_formats::compat::open_vensim(&original)
             .unwrap_or_else(|e| panic!("open {path}: {e}"));
         let model_name = project.models[0].name.clone();
         let view = simlin_engine::layout::generate_best_layout(&project, &model_name, None)
             .unwrap_or_else(|e| panic!("layout {path}: {e}"));
         project.models[0].views = vec![simlin_base::datamodel::View::StockFlow(view)];
-        let (rendered, warnings) = simlin_engine::compat::to_mdl_with_warnings(&project)
+        let (rendered, warnings) = simlin_formats::compat::to_mdl_with_warnings(&project)
             .unwrap_or_else(|e| panic!("render {path}: {e}"));
         for w in &warnings {
             eprintln!("warning ({path}): {}", w.message);

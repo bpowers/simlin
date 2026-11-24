@@ -114,11 +114,11 @@ fn main() {
         let rel = path.strip_prefix(&root).unwrap().display().to_string();
         let dm = match path.extension().and_then(|e| e.to_str()) {
             Some("mdl") => match std::fs::read_to_string(&path) {
-                Ok(s) => simlin_engine::open_vensim(&s),
+                Ok(s) => simlin_formats::open_vensim(&s),
                 Err(_) => continue,
             },
             _ => match std::fs::File::open(&path) {
-                Ok(f) => simlin_engine::open_xmile(&mut std::io::BufReader::new(f)),
+                Ok(f) => simlin_formats::open_xmile(&mut std::io::BufReader::new(f)),
                 Err(_) => continue,
             },
         };

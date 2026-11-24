@@ -31,7 +31,7 @@ use std::process::Command;
 
 use rayon::prelude::*;
 use simlin_base::common::{Canonical, Ident, IdentMap};
-use simlin_engine::vdf::{VdfFile, VdfKind, probe_vdf_kind};
+use simlin_formats::vdf::{VdfFile, VdfKind, probe_vdf_kind};
 
 /// Directories walked for parity fixtures. `test/` is always present; the
 /// two third_party corpora ride the existence-continue convention (optional

@@ -93,7 +93,7 @@ fn build_queue_model(stop: f64) -> Vm {
 </xmile>"#
     );
     let project =
-        simlin_engine::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
+        simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
             .unwrap();
     let main = project.models[0].name.clone();
     simlin_engine::queue_compile::build_vm(&project, &main).unwrap()
@@ -127,7 +127,7 @@ fn build_conveyor_model(stop: f64, transit: f64) -> Vm {
 </xmile>"#
     );
     let project =
-        simlin_engine::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
+        simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
             .unwrap();
     let main = project.models[0].name.clone();
     simlin_engine::queue_compile::build_vm(&project, &main).unwrap()

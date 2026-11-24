@@ -306,9 +306,7 @@ impl<MI, E> Variable<MI, E> {
 /// is checked instead, so the refusal names what the graphical function
 /// holds: a bound that is not a finite number, or a minimum above the
 /// maximum, which would spread the points downward.
-pub(crate) fn parse_table(
-    gf: Option<&datamodel::GraphicalFunction>,
-) -> EquationResult<Option<Table>> {
+pub fn parse_table(gf: Option<&datamodel::GraphicalFunction>) -> EquationResult<Option<Table>> {
     let Some(gf) = gf else {
         return Ok(None);
     };

@@ -45,7 +45,7 @@ def atomic_write(path: _PathLike, data: bytes) -> None:
     fsynced, and renamed over the target, so a reader (our own watcher, an
     editor, ``simlin-mcp``) sees either the old bytes or the new bytes and
     never a partial file.  This is the same convention as
-    ``simlin_engine::io::atomic_write``.
+    ``simlin_formats::io::atomic_write``.
 
     The tempfile is created with ``open(..., "xb")`` so it gets the ordinary
     umask-derived mode rather than ``mkstemp``'s private ``0600``; when the

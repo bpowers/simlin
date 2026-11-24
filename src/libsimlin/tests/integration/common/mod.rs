@@ -3,8 +3,8 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use simlin::*;
-use simlin_engine::buffa::Message;
-use simlin_engine::serde as engine_serde;
+use simlin_formats::buffa::Message;
+use simlin_formats::serde as engine_serde;
 use std::ffi::CStr;
 use std::ptr;
 

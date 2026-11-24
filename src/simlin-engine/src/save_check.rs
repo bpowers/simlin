@@ -64,8 +64,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::BufReader;
 
-use crate::buffa::Message;
-use crate::data_provider::DataProvider;
 use crate::errors::code_and_reason;
 use simlin_base::ast::{Aliases, CanonicalEqn, Expr0, UnaryOp};
 use simlin_base::builtins::UntypedBuiltinFn;
@@ -76,6 +74,8 @@ use simlin_base::datamodel::{
     MacroSpec, Model, Module, ModuleReference, Project, Queue, SimMethod, SimSpecs, SpreadFlow,
     Stock, Variable,
 };
+use simlin_formats::buffa::Message;
+use simlin_formats::data_provider::DataProvider;
 
 #[cfg(test)]
 #[path = "save_check_tests.rs"]
@@ -201,17 +201,17 @@ fn write(project: &Project, format: SaveFormat) -> Result<Vec<u8>> {
         )
     };
     Ok(match format {
-        SaveFormat::Mdl => crate::compat::to_mdl(project)?.into_bytes(),
-        SaveFormat::Xmile => crate::compat::to_xmile(project)?.into_bytes(),
+        SaveFormat::Mdl => simlin_formats::compat::to_mdl(project)?.into_bytes(),
+        SaveFormat::Xmile => simlin_formats::compat::to_xmile(project)?.into_bytes(),
         SaveFormat::Json => {
-            let json: crate::json::Project = project.clone().into();
+            let json: simlin_formats::json::Project = project.clone().into();
             serde_json::to_vec(&json).map_err(unwritable)?
         }
         SaveFormat::SdaiJson => {
-            let model: crate::json_sdai::SdaiModel = project.clone().into();
+            let model: simlin_formats::json_sdai::SdaiModel = project.clone().into();
             serde_json::to_vec(&model).map_err(unwritable)?
         }
-        SaveFormat::Protobuf => crate::serde::serialize(project)?.encode_to_vec(),
+        SaveFormat::Protobuf => simlin_formats::serde::serialize(project)?.encode_to_vec(),
     })
 }
 
@@ -225,21 +225,20 @@ fn read(
     match format {
         SaveFormat::Mdl => {
             let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
-            crate::compat::open_vensim_with_data(text, data).map_err(|e| e.to_string())
+            simlin_formats::compat::open_vensim_with_data(text, data).map_err(|e| e.to_string())
         }
-        SaveFormat::Xmile => {
-            crate::compat::open_xmile(&mut BufReader::new(bytes)).map_err(|e| e.to_string())
-        }
-        SaveFormat::Json => crate::json::Project::from_reader(bytes)
+        SaveFormat::Xmile => simlin_formats::compat::open_xmile(&mut BufReader::new(bytes))
+            .map_err(|e| e.to_string()),
+        SaveFormat::Json => simlin_formats::json::Project::from_reader(bytes)
             .map(Into::into)
             .map_err(|e| e.to_string()),
-        SaveFormat::SdaiJson => crate::json_sdai::SdaiModel::from_reader(bytes)
+        SaveFormat::SdaiJson => simlin_formats::json_sdai::SdaiModel::from_reader(bytes)
             .map(Into::into)
             .map_err(|e| e.to_string()),
-        SaveFormat::Protobuf => crate::project_io::Project::decode_from_slice(bytes)
+        SaveFormat::Protobuf => simlin_formats::project_io::Project::decode_from_slice(bytes)
             .map_err(|e| e.to_string())
             .and_then(|stored| {
-                crate::serde::deserialize(stored).map_err(|e| e.reason().to_string())
+                simlin_formats::serde::deserialize(stored).map_err(|e| e.reason().to_string())
             }),
     }
 }
@@ -790,7 +789,7 @@ impl VariableMeaning {
         var: &Variable,
         dimensions: &BTreeMap<String, DimensionMeaning>,
         macros: &BTreeSet<String>,
-        elements_reader: &crate::element_equations::ElementReader,
+        elements_reader: &simlin_formats::element_equations::ElementReader,
     ) -> VariableMeaning {
         // What each kind of variable holds. Documentation, units, the AI
         // provenance mark and the diagram's uid describe a variable; none of
@@ -1039,7 +1038,7 @@ impl ModelMeaning {
         model: &Model,
         dimensions: &BTreeMap<String, DimensionMeaning>,
         macros: &BTreeSet<String>,
-        elements: &crate::element_equations::ElementReader,
+        elements: &simlin_formats::element_equations::ElementReader,
     ) -> ModelMeaning {
         let Model {
             name,
@@ -1142,7 +1141,7 @@ impl Meaning {
                             model,
                             &dimensions,
                             &macros,
-                            &crate::element_equations::ElementReader::new(project, model),
+                            &simlin_formats::element_equations::ElementReader::new(project, model),
                         ),
                     )
                 })

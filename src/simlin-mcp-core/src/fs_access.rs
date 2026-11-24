@@ -34,7 +34,7 @@ use std::io;
 use std::path::Path;
 
 use simlin_base::datamodel;
-use simlin_engine::json as ejson;
+use simlin_formats::json as ejson;
 
 use crate::access::{OpenedProject, ProjectAccess, SaveOutcome};
 use crate::errors::AccessError;
@@ -83,7 +83,7 @@ impl ProjectAccess for FileSystemAccess {
         _expected_version: Option<u64>,
     ) -> Result<SaveOutcome, AccessError> {
         let (bytes, warnings) = serialize_project(project, format)?;
-        simlin_engine::io::atomic_write(abs_path, &bytes).map_err(AccessError::WriteError)?;
+        simlin_formats::io::atomic_write(abs_path, &bytes).map_err(AccessError::WriteError)?;
         Ok(SaveOutcome {
             version: 0,
             warnings,
@@ -122,7 +122,7 @@ impl ProjectAccess for FileSystemAccess {
         // populated project would lose MDL lossiness warnings here; use
         // `save` for that.
         let (bytes, _warnings) = serialize_project(project, format)?;
-        simlin_engine::io::atomic_write(abs_path, &bytes).map_err(AccessError::WriteError)?;
+        simlin_formats::io::atomic_write(abs_path, &bytes).map_err(AccessError::WriteError)?;
         Ok(())
     }
 }
@@ -144,7 +144,7 @@ fn serialize_project(
 ) -> Result<(Vec<u8>, Vec<ErrorOutput>), AccessError> {
     match format {
         SourceFormat::Xmile => {
-            let xml = simlin_engine::to_xmile(project).map_err(|e| {
+            let xml = simlin_formats::to_xmile(project).map_err(|e| {
                 AccessError::ParseError(anyhow::anyhow!(
                     "failed to serialize XMILE: {}",
                     crate::errors::engine_error_text(&e)
@@ -158,7 +158,7 @@ fn serialize_project(
             // they fail the save because the alternative is corrupt Vensim
             // text.  Degraded-but-representable constructs come back as
             // warnings and the write proceeds.
-            let (text, warnings) = simlin_engine::to_mdl_with_warnings(project).map_err(|e| {
+            let (text, warnings) = simlin_formats::to_mdl_with_warnings(project).map_err(|e| {
                 AccessError::WriteError(io::Error::new(
                     io::ErrorKind::Unsupported,
                     format!("failed to serialize Vensim MDL: {e}"),
@@ -177,7 +177,7 @@ fn serialize_project(
             Ok((bytes, Vec::new()))
         }
         SourceFormat::SdaiJson => {
-            let mut sdai_model = simlin_engine::json_sdai::SdaiModel::from(project);
+            let mut sdai_model = simlin_formats::json_sdai::SdaiModel::from(project);
             // Preserve the existing simlin-mcp semantic: relationships are
             // generated from the post-edit model's equation-dependency
             // polarities, not preserved from whatever was in the source

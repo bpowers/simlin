@@ -10,11 +10,6 @@
 // statically validates that compiled bytecode cannot exceed STACK_CAPACITY.
 #![deny(unsafe_code)]
 
-// Re-exported so downstream crates (libsimlin, simlin-cli) encode and decode
-// `project_io` messages through the same runtime the generated code was built
-// against, instead of each declaring a `buffa` version of its own that has to
-// track this crate's.
-pub use buffa;
 // Re-exported so downstream crates (libsimlin, integration tests) can name the
 // `IndexMap` type of `db::LtmVariablesResult.loop_partitions` without taking a
 // direct `indexmap` dependency. The emission-order iteration is load-bearing
@@ -36,27 +31,16 @@ mod bytecode;
 #[cfg(test)]
 mod canonical_value_tests;
 mod capture;
-pub mod compat;
 mod compiler;
 pub mod conveyor;
 pub mod conveyor_compile;
 #[cfg(test)]
 mod conveyor_tests;
-pub mod data_provider;
 pub mod db;
 mod diagnostic;
 pub mod editing;
-mod element_equations;
 pub mod equation_view;
 pub mod errors;
-mod import_losses;
-pub mod io;
-pub mod json;
-#[cfg(test)]
-mod json_proptest;
-pub mod json_sdai;
-#[cfg(test)]
-mod json_sdai_proptest;
 #[cfg(test)]
 mod keyword_ident_tests;
 pub mod layout;
@@ -69,14 +53,13 @@ pub mod ltm_dominance;
 #[cfg(test)]
 mod ltm_elementwise_tests;
 pub mod ltm_finding;
-#[cfg(test)]
-mod ltm_loop_scores_test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod ltm_loop_scores_test_support;
 pub mod ltm_post;
 #[cfg(test)]
 mod macro_expansion_tests;
 #[cfg(test)]
 mod mapped_reference_semantics_tests;
-pub mod mdl;
 #[cfg(test)]
 mod mismatched_read_tests;
 mod model;
@@ -87,15 +70,6 @@ mod patch_fields;
 mod patch_sharing_tests;
 #[cfg(test)]
 mod per_element_gf_tests;
-// Generated code: silence the lints buffa-codegen's output trips rather than
-// hand-editing a file the freshness test regenerates.
-#[allow(
-    clippy::derive_partial_eq_without_eq,
-    clippy::derivable_impls,
-    clippy::match_single_binding
-)]
-#[path = "project_io.gen.rs"]
-pub mod project_io;
 pub mod queue;
 pub mod queue_compile;
 #[cfg(test)]
@@ -105,20 +79,11 @@ mod rk_integration_tests;
 #[cfg(test)]
 mod round_builtin_tests;
 pub mod save_check;
-pub mod serde;
-#[cfg(test)]
-mod serde_proptest;
 mod snapshot_arg;
 #[cfg(test)]
 mod subscript_out_of_range_tests;
-pub mod systems;
-#[cfg(test)]
-#[path = "systems_stdlib_tests.rs"]
-mod systems_stdlib_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_common;
-#[cfg(test)]
-mod test_sir_xmile;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testutils;
 #[cfg(feature = "agent_tools")]
@@ -131,7 +96,6 @@ mod units;
 mod units_check;
 mod units_infer;
 mod variable;
-pub mod vdf;
 mod vm;
 // Bytecode-composition profiling for CompiledSimulation; a diagnostics-only
 // sibling of `vm` kept separate purely for the per-file line cap.
@@ -144,62 +108,13 @@ mod vm_vector_sort_order;
 // VM. Validated in tests by executing the emitted module under a pure-Rust wasm
 // interpreter and comparing against the VM.
 pub mod wasmgen;
-pub mod xmile;
 
-pub use self::import_losses::ImportWarning;
 pub use self::patch::{
     PatchReport, Renamed, VariableRef, apply_patch, apply_patch_reporting, is_view_only_patch,
 };
 pub use self::queue_compile::build_sim;
+#[cfg(feature = "test-support")]
+pub use self::variable::parse_table;
 pub use self::variable::{DepClassification, DepLag, DepOccurrence, SourceVariableKind, Variable};
 pub use self::vm::{CompiledSimulation, Vm};
 pub use self::vm_profile::BytecodeProfile;
-
-// Re-export compat functions at the crate root for convenience
-#[cfg(any(test, feature = "file_io"))]
-pub use self::compat::{load_csv, load_dat};
-pub use self::compat::{
-    open_systems, open_vensim, open_vensim_with_data, open_vensim_with_data_and_warnings,
-    open_vensim_with_warnings, open_xmile, open_xmile_with_warnings, to_mdl, to_mdl_with_warnings,
-    to_systems, to_xmile,
-};
-#[cfg(any(test, feature = "file_io"))]
-pub use self::data_provider::FilesystemDataProvider;
-pub use self::data_provider::{DataProvider, NullDataProvider};
-#[cfg(test)]
-mod protobuf_freshness_tests {
-    use sha2::{Digest, Sha256};
-    use std::fs;
-
-    const GEN_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/project_io.gen.rs");
-    const PROTO_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/project_io.proto");
-
-    fn extract_hash_from_gen_file(content: &str) -> Option<&str> {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("// Proto file SHA256: ") {
-                return Some(rest.trim());
-            }
-        }
-        None
-    }
-
-    #[test]
-    fn project_io_gen_is_up_to_date() {
-        let gen_content = fs::read_to_string(GEN_FILE)
-            .expect("failed to read project_io.gen.rs - run `pnpm build:gen-protobufs`");
-
-        let recorded_hash = extract_hash_from_gen_file(&gen_content)
-            .expect("project_io.gen.rs is missing SHA256 hash header");
-
-        let proto_content = fs::read(PROTO_FILE).expect("failed to read project_io.proto");
-        let mut hasher = Sha256::new();
-        hasher.update(&proto_content);
-        let current_hash = format!("{:x}", hasher.finalize());
-
-        assert_eq!(
-            recorded_hash, current_hash,
-            "project_io.proto has changed since project_io.gen.rs was generated.\n\
-             Run `pnpm build:gen-protobufs` to regenerate the Rust protobuf code."
-        );
-    }
-}

@@ -498,7 +498,7 @@ FINAL TIME = 4 ~~|
 SAVEPER = 1 ~~|
 TIME STEP = 1 ~~|
 ";
-    let dm = crate::open_vensim(mdl).expect("the MDL parses");
+    let dm = simlin_formats::open_vensim(mdl).expect("the MDL parses");
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm);
     let helpers = |var: &str| -> Vec<String> {

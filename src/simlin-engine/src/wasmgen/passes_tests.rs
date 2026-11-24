@@ -33,7 +33,8 @@ type Inst = Stored<ModuleAddr>;
 const EPS: f64 = 1e-9;
 
 fn parse(xml: &str) -> simlin_base::datamodel::Project {
-    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("parse xmile")
+    simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+        .expect("parse xmile")
 }
 
 fn artifact_for(project: &simlin_base::datamodel::Project) -> WasmArtifact {

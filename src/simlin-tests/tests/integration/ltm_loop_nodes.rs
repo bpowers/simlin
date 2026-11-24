@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use simlin_engine::db::{
     SimlinDb, model_detected_loops, set_project_ltm_discovery_mode, sync_from_datamodel_incremental,
 };
-use simlin_engine::json;
+use simlin_formats::json;
 
 /// The investigation's corpus shape as Simlin JSON: `pop[Region]` (100, 200,
 /// 300) with inflow `growth[Region] = pop * 0.02 * (1 - <reducer var> /

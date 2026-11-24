@@ -203,7 +203,7 @@ fn test_project_apply_patch_upsert_flow() {
 #[test]
 fn test_project_apply_patch_queue_model_accepts_benign_edit() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -268,7 +268,7 @@ fn test_project_apply_patch_queue_model_accepts_benign_edit() {
 #[test]
 fn test_project_apply_patch_conveyor_model_accepts_benign_edit() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 

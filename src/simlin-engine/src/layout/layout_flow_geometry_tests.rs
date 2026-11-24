@@ -212,8 +212,9 @@ fn test_finish_flow_geometry_collapses_a_stub_under_the_minimum() {
 #[test]
 fn test_fresh_layout_holds_the_flow_invariants() {
     const LEAKY: &str = include_str!("../../../../test/conveyors/leaky_conveyor.xmile");
-    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(LEAKY.as_bytes()))
-        .expect("leaky_conveyor imports");
+    let project =
+        simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(LEAKY.as_bytes()))
+            .expect("leaky_conveyor imports");
     let model_name = project.models[0].name.clone();
     let view = generate_layout(&project, &model_name, None).expect("layout");
     assert_eq!(

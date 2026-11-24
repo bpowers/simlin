@@ -189,7 +189,7 @@ export function graphicalFunctionToJson(gf: GraphicalFunction): JsonGraphicalFun
 // DataSource: external-data reference (Vensim GET DIRECT DATA / CONSTANTS /
 // LOOKUPS / SUBSCRIPT). Carried on a variable's compat so an edit to any other
 // field does not drop the reference. The wire shape and `kind` values are
-// defined by the Rust json::JsonDataSource serializer (src/simlin-engine/src/json.rs).
+// defined by the Rust json::JsonDataSource serializer (src/simlin-formats/src/json.rs).
 
 export type DataSourceKind = 'data' | 'constants' | 'lookups' | 'subscript';
 
@@ -241,7 +241,7 @@ export function dataSourceToJson(ds: DataSource): JsonDataSource {
 // queue model to a plain stock-and-flow model -- the same fidelity contract as
 // activeInitial/dataSource (see tests/datamodel-roundtrip-e2e.test.ts). The
 // wire shapes are defined by the Rust json::{Conveyor, Leakage, SpreadFlow,
-// Queue} serializers (src/simlin-engine/src/json.rs): conveyor and queue ride
+// Queue} serializers (src/simlin-formats/src/json.rs): conveyor and queue ride
 // on stocks; leakage, spreadflow, and overflow ride on flows. The Rust JSON
 // reader also accepts these fields on auxes/modules (its Compat struct is
 // uniform), but no importer or editor ever produces them there, so Aux and

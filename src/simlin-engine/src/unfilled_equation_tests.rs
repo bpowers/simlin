@@ -623,7 +623,7 @@ fn read_xmile(dimensions: &str, vars: &str) -> datamodel::Project {
 }
 
 fn read_xmile_with_models(dimensions: &str, vars: &str, extra_models: &str) -> datamodel::Project {
-    crate::compat::open_xmile(&mut xmile_doc(dimensions, vars, extra_models).as_bytes())
+    simlin_formats::compat::open_xmile(&mut xmile_doc(dimensions, vars, extra_models).as_bytes())
         .expect("XMILE must parse")
 }
 
@@ -656,7 +656,7 @@ fn an_mdl_a_function_of_placeholder_warns_naming_the_variable() {
         "revenue = marketing * price\n\t~\t\n\t~\t|\n\n",
         "\\\\\\---/// Sketch information - do not modify anything except names\n"
     );
-    let project = crate::compat::open_vensim(mdl).expect("MDL must parse");
+    let project = simlin_formats::compat::open_vensim(mdl).expect("MDL must parse");
 
     // The premise: the importer really does store the placeholder as the NaN
     // literal. If this stops holding, the rest of the test proves nothing.
@@ -971,7 +971,7 @@ fn a_model_declaring_a_variable_named_nan_gets_no_findings() {
         "b = nan\n\t~\t\n\t~\t|\n\n",
         "\\\\\\---/// Sketch information - do not modify anything except names\n"
     );
-    let project = crate::compat::open_vensim(mdl).expect("MDL must parse");
+    let project = simlin_formats::compat::open_vensim(mdl).expect("MDL must parse");
     assert_eq!(
         Vec::<(String, String, String)>::new(),
         unfilled_findings(&project),

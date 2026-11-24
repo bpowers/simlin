@@ -24,11 +24,11 @@ use std::io::BufReader;
 use std::path::PathBuf;
 
 use simlin_base::datamodel::Project;
-use simlin_engine::buffa::Message;
 use simlin_engine::db::{
     LtmOverlay, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel_incremental,
 };
+use simlin_formats::buffa::Message;
 
 /// Loop analysis compiles the model under the LTM overlay and searches its
 /// loops, so only files up to this size take it.
@@ -62,9 +62,9 @@ fn corpus() -> Vec<String> {
 
 fn open(path: &str, bytes: &[u8]) -> Option<(Project, Vec<String>)> {
     let (project, warnings) = if path.to_ascii_lowercase().ends_with(".mdl") {
-        simlin_engine::open_vensim_with_warnings(std::str::from_utf8(bytes).ok()?).ok()?
+        simlin_formats::open_vensim_with_warnings(std::str::from_utf8(bytes).ok()?).ok()?
     } else {
-        simlin_engine::open_xmile_with_warnings(&mut BufReader::new(bytes)).ok()?
+        simlin_formats::open_xmile_with_warnings(&mut BufReader::new(bytes)).ok()?
     };
     Some((project, warnings.into_iter().map(|w| w.message).collect()))
 }
@@ -75,17 +75,17 @@ fn artifacts(path: &str, bytes: &[u8]) -> Option<BTreeMap<&'static str, Vec<u8>>
     let (project, warnings) = open(path, bytes)?;
     let mut out: BTreeMap<&'static str, Vec<u8>> = BTreeMap::new();
     out.insert("import warnings", warnings.join("\n").into_bytes());
-    if let Ok(stored) = simlin_engine::serde::serialize(&project) {
+    if let Ok(stored) = simlin_formats::serde::serialize(&project) {
         out.insert("protobuf", stored.encode_to_vec());
     }
-    let json: simlin_engine::json::Project = project.clone().into();
+    let json: simlin_formats::json::Project = project.clone().into();
     if let Ok(json) = serde_json::to_vec(&json) {
         out.insert("json", json);
     }
-    if let Ok(text) = simlin_engine::to_xmile(&project) {
+    if let Ok(text) = simlin_formats::to_xmile(&project) {
         out.insert("xmile", text.into_bytes());
     }
-    if let Ok((text, warnings)) = simlin_engine::compat::to_mdl_with_warnings(&project) {
+    if let Ok((text, warnings)) = simlin_formats::compat::to_mdl_with_warnings(&project) {
         out.insert("mdl", text.into_bytes());
         out.insert(
             "mdl export warnings",

@@ -99,12 +99,12 @@ fn test_render_svg_generates_layout_for_viewless_model() {
             &mut ser_err as *mut *mut SimlinError,
         );
         crate::common::expect_no_error(ser_err, "serialize after render");
-        let roundtripped: simlin_engine::project_io::Project =
-            simlin_engine::buffa::Message::decode_from_slice(std::slice::from_raw_parts(
+        let roundtripped: simlin_formats::project_io::Project =
+            simlin_formats::buffa::Message::decode_from_slice(std::slice::from_raw_parts(
                 ser_buf, ser_len,
             ))
             .unwrap();
-        let deserialized = simlin_engine::serde::deserialize(roundtripped).unwrap();
+        let deserialized = simlin_formats::serde::deserialize(roundtripped).unwrap();
         let model = deserialized.get_model("main").unwrap();
         assert!(
             model.views.is_empty(),
@@ -344,12 +344,12 @@ fn test_render_scene_generates_layout_for_viewless_model() {
             &mut ser_err as *mut *mut SimlinError,
         );
         crate::common::expect_no_error(ser_err, "serialize after render");
-        let roundtripped: simlin_engine::project_io::Project =
-            simlin_engine::buffa::Message::decode_from_slice(std::slice::from_raw_parts(
+        let roundtripped: simlin_formats::project_io::Project =
+            simlin_formats::buffa::Message::decode_from_slice(std::slice::from_raw_parts(
                 ser_buf, ser_len,
             ))
             .unwrap();
-        let deserialized = simlin_engine::serde::deserialize(roundtripped).unwrap();
+        let deserialized = simlin_formats::serde::deserialize(roundtripped).unwrap();
         assert!(
             deserialized.get_model("main").unwrap().views.is_empty(),
             "render_scene must not persist a generated view"

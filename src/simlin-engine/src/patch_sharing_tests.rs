@@ -27,7 +27,7 @@ use simlin_base::datamodel::{self, Equation, Project, SharedVec, Variable, View,
 use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
 
 fn world3() -> Project {
-    crate::compat::open_vensim(include_str!("../../../test/metasd/WRLD3-03/wrld3-03.mdl"))
+    simlin_formats::compat::open_vensim(include_str!("../../../test/metasd/WRLD3-03/wrld3-03.mdl"))
         .expect("world3 opens")
 }
 
@@ -36,7 +36,7 @@ fn hares_and_lynxes() -> Project {
     let xmile = include_str!(
         "../../../test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile"
     );
-    crate::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens")
+    simlin_formats::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens")
 }
 
 fn corpus_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -70,9 +70,9 @@ pub(crate) fn for_each_corpus_project(mut f: impl FnMut(&Path, &Project)) {
         let project = if path.extension().and_then(|e| e.to_str()) == Some("mdl") {
             String::from_utf8(bytes)
                 .ok()
-                .and_then(|text| crate::compat::open_vensim(&text).ok())
+                .and_then(|text| simlin_formats::compat::open_vensim(&text).ok())
         } else {
-            crate::compat::open_xmile(&mut BufReader::new(bytes.as_slice())).ok()
+            simlin_formats::compat::open_xmile(&mut BufReader::new(bytes.as_slice())).ok()
         };
         if let Some(project) = project {
             f(&path, &project);
@@ -759,8 +759,8 @@ fn an_expansion_shares_every_variable_it_leaves_as_it_was() {
         ),
     ];
     for (what, xmile, expand, kept) in fixtures {
-        let project =
-            crate::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens");
+        let project = simlin_formats::compat::open_xmile(&mut BufReader::new(xmile.as_bytes()))
+            .expect("it opens");
         let expanded = expand(&project);
         let (before, after) = (&project.models[0].variables, &expanded.models[0].variables);
         let changed = changed_by(before, after, ident, |x, y| x == y, what);

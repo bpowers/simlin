@@ -1,7 +1,7 @@
 """Wire-level dataclasses for the simlin patch API.
 
 These types back the JSON patch format understood by the engine
-(src/simlin-engine/src/json.rs): patch operations, views, sim specs, and
+(src/simlin-formats/src/json.rs): patch operations, views, sim specs, and
 project structure. Variables themselves are represented by the unified
 public types in ``simlin.types`` (Stock, Flow, Aux, Module); the converter
 in ``json_converter`` maps those to and from the engine's wire shape.

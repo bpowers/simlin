@@ -4751,7 +4751,7 @@ fn slot_count_for(var: &LtmSyntheticVar, dims: &[datamodel::Dimension]) -> usize
 fn minimal_conveyor_datamodel() -> datamodel::Project {
     use std::io::BufReader;
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+    simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile")
 }
 
@@ -4853,7 +4853,7 @@ fn test_conveyor_still_simulates_despite_ltm_degraded_warning() {
 fn queue_drain_datamodel() -> datamodel::Project {
     use std::io::BufReader;
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+    simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile")
 }
 

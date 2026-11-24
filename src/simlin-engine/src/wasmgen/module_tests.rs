@@ -8,11 +8,11 @@
 //! `use super::*` still resolves the module's private items.
 
 use super::*;
-use crate::compat::open_xmile;
 use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use crate::vm::Vm;
 use checked::Store;
 use simlin_base::common::{Canonical, Ident};
+use simlin_formats::compat::open_xmile;
 use std::io::BufReader;
 use wasm::validate;
 

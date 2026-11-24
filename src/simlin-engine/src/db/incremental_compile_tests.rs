@@ -814,7 +814,7 @@ fn test_incremental_teacup_xmile_file() {
     }
     let xmile_data = std::fs::read(&xmile_path).unwrap();
     let mut reader = BufReader::new(xmile_data.as_slice());
-    let dm_project = crate::open_xmile(&mut reader).expect("failed to parse teacup.stmx");
+    let dm_project = simlin_formats::open_xmile(&mut reader).expect("failed to parse teacup.stmx");
 
     let mut db = SimlinDb::default();
     let persistent_state = sync_from_datamodel_incremental(&mut db, &dm_project, None);

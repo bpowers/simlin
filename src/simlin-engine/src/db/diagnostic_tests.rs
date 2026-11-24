@@ -2317,7 +2317,7 @@ fn test_xmile_duplicate_pair_rejected_end_to_end() {
     </variables>
   </model>
 </xmile>"#;
-    let project = crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+    let project = simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
         .expect("the reader itself tolerates duplicates");
     let main = project.models[0].name.clone();
     let mut db = SimlinDb::default();

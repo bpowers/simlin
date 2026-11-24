@@ -2,11 +2,12 @@
   "rust": {
     "simlin-base": [],
     "simlin-diagram": ["simlin-base"],
-    "simlin-engine": ["simlin-base", "simlin-diagram"],
-    "simlin": ["simlin-base", "simlin-diagram", "simlin-engine"],
-    "simlin-cli": ["simlin-base", "simlin-diagram", "simlin-engine", "simlin"],
-    "simlin-mcp": ["simlin-engine", "simlin-mcp-core"],
-    "simlin-mcp-core": ["simlin-base", "simlin-engine"],
+    "simlin-formats": ["simlin-base", "simlin-diagram"],
+    "simlin-engine": ["simlin-base", "simlin-diagram", "simlin-formats"],
+    "simlin": ["simlin-base", "simlin-diagram", "simlin-formats", "simlin-engine"],
+    "simlin-cli": ["simlin-base", "simlin-diagram", "simlin-formats", "simlin-engine", "simlin"],
+    "simlin-mcp": ["simlin-mcp-core"],
+    "simlin-mcp-core": ["simlin-base", "simlin-formats", "simlin-engine"],
     "simlin-tests": []
   },
   "typescript": {

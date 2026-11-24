@@ -25,7 +25,7 @@ fn main() {
         "/../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl"
     );
     let contents = std::fs::read_to_string(path).expect("read model");
-    let datamodel = simlin_engine::open_vensim(&contents).expect("import");
+    let datamodel = simlin_formats::open_vensim(&contents).expect("import");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
     let mut names: Vec<String> = Vec::new();

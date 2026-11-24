@@ -23,9 +23,9 @@
 use crate::editing::test_support::{
     alias, aux, cloud, flow, labeled, link, load, project_of, stock, view_of,
 };
-use crate::json;
 use simlin_base::datamodel::ViewElement;
 use simlin_diagram::{ScenePaint, SceneShape, build_scene};
+use simlin_formats::json;
 
 use super::*;
 

@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use simlin_engine::db::{
     LtmEquation, LtmSyntheticVar, SimlinDb, model_ltm_variables, sync_from_datamodel_incremental,
 };
-use simlin_engine::open_vensim;
+use simlin_formats::open_vensim;
 
 /// The generated equation text for a synthetic variable, one entry per arm
 /// (a scalar equation has exactly one).

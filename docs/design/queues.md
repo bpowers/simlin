@@ -459,7 +459,7 @@ mirroring `ConveyorLtmDegraded` and emitted from the same
 
 ### 10.6 Readers, writers, and other surfaces
 
-- XMILE reader/writer (`src/simlin-engine/src/xmile/`): recognize `<queue/>` on
+- XMILE reader/writer (`src/simlin-formats/src/xmile/`): recognize `<queue/>` on
   a stock, `<overflow/>` on a flow, and the `<uses_queue>` header; emit them.
   This alone fixes the round-trip corruption.
 - MDL: Vensim has no queue primitive; not covered.

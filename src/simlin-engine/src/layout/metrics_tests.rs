@@ -1352,7 +1352,7 @@ fn default_project_view(dir: &str) -> datamodel::StockFlow {
         dir
     );
     let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
-    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(file))
+    let project = simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(file))
         .unwrap_or_else(|e| panic!("parse {path}: {e:?}"));
     match project.get_model("main").and_then(|m| m.views.first()) {
         Some(datamodel::View::StockFlow(sf)) => sf.clone(),
@@ -1426,7 +1426,7 @@ fn auto_cost(dir: &str) -> f64 {
         dir
     );
     let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
-    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(file))
+    let project = simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(file))
         .unwrap_or_else(|e| panic!("parse {path}: {e:?}"));
     let config = LayoutConfig {
         annealing_random_seed: REF_PAIR_SEED,

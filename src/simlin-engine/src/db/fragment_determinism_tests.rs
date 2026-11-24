@@ -899,7 +899,7 @@ fn undimensioned_arrayed_project() -> datamodel::Project {
         </variables>
     </model>
 </xmile>"#;
-    let project = crate::compat::open_xmile(&mut xmile.as_bytes())
+    let project = simlin_formats::compat::open_xmile(&mut xmile.as_bytes())
         .expect("the fixture document must parse as XMILE");
     let arr = project.models[0]
         .variables

@@ -12,7 +12,7 @@ use simlin_base::datamodel::{
     LoopMetadata, Model, ModelGroup, Rect, SimMethod, SimSpecs, StockFlow, View, ViewElement,
     Visibility,
 };
-use simlin_engine::open_xmile;
+use simlin_formats::open_xmile;
 
 fn escape_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")

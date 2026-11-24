@@ -233,7 +233,7 @@ fn patched(project: &datamodel::Project, ops: Vec<ModelOperation>) -> datamodel:
 }
 
 fn open(xmile: &str) -> datamodel::Project {
-    crate::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens")
+    simlin_formats::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens")
 }
 
 fn pool() -> Vec<(&'static str, datamodel::Project)> {

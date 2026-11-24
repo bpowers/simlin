@@ -19,22 +19,22 @@ const STARTUP_STEPS: usize = 3;
 
 /// One project's loop analysis.
 #[derive(Debug, PartialEq)]
-pub(crate) struct LoopScores {
+pub struct LoopScores {
     /// Every slot of every loop score variable that is not zero at every
     /// step, as its values' bits after the startup steps (a zero of either
     /// sign as 0), sorted: two spellings of one model compare equal however
     /// their loops are numbered.
-    pub(crate) loops: Vec<Vec<u64>>,
+    pub loops: Vec<Vec<u64>>,
     /// The LTM diagnostics, sorted.
-    pub(crate) diagnostics: Vec<String>,
+    pub diagnostics: Vec<String>,
     /// The loops the model's analysis reports (`analysis::analyze_model`,
     /// discovery for a model too large to enumerate): each one's importance
     /// series as bits, sorted, with how many there are.
-    pub(crate) discovered: Vec<Vec<u64>>,
+    pub discovered: Vec<Vec<u64>>,
 }
 
 /// `project`'s loop analysis, or why it has none.
-pub(crate) fn loop_scores(project: &Project) -> Result<LoopScores, String> {
+pub fn loop_scores(project: &Project) -> Result<LoopScores, String> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     let main = project

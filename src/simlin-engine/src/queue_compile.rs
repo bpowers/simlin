@@ -1764,7 +1764,7 @@ mod tests {
     use std::io::BufReader;
 
     fn parse(xml: &str) -> datamodel::Project {
-        crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap()
+        simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap()
     }
 
     /// A scalar queue -> regular stock with a constant inflow, no initial batch.

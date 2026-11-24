@@ -270,8 +270,9 @@ fn a_plan_of_run_specs_alone_stages_nothing() {
         "/../../test/conveyors/minimal_conveyor.xmile"
     ))
     .expect("the corpus has the conveyor model");
-    let conveyor = crate::compat::open_xmile(&mut std::io::BufReader::new(conveyor.as_bytes()))
-        .expect("the conveyor model opens");
+    let conveyor =
+        simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(conveyor.as_bytes()))
+            .expect("the conveyor model opens");
     let mut host = Host::new(conveyor);
     let model = host.project.models[0].clone();
     let plan = RunPlan {
@@ -544,7 +545,7 @@ fn a_finer_dt_saves_the_rows_the_models_own_run_does() {
         "/../../test/test-models/samples/pendulum/Single_Pendulum.mdl"
     ))
     .expect("the corpus has the pendulum model");
-    let project = crate::compat::open_vensim(&pendulum).expect("the pendulum model opens");
+    let project = simlin_formats::compat::open_vensim(&pendulum).expect("the pendulum model opens");
     let dt = 1.0 / 128.0;
     assert_eq!(project.sim_specs.dt, datamodel::Dt::Dt(dt));
     assert_eq!(project.sim_specs.save_step, Some(datamodel::Dt::Dt(0.1)));

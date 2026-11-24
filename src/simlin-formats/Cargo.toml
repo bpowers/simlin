@@ -1,0 +1,56 @@
+[package]
+name = "simlin-formats"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "The files a system dynamics model is kept in, read and written"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+schema = ["dep:schemars"]
+file_io = ["dep:csv"]
+ext_data = ["dep:calamine"]
+# Compiles in the test helpers other crates' tests use. Consumers add it through
+# a `[dev-dependencies]` edge, so a normal `cargo build` never sees it.
+test-support = ["simlin-base/test-support", "dep:proptest"]
+
+[dependencies]
+simlin-base = { path = "../simlin-base" }
+simlin-diagram = { path = "../simlin-diagram" }
+# Protobuf runtime for the checked-in `src/project_io.gen.rs`. The generator in
+# scripts/gen-rust-protobufs.sh pins buffa-build to the version Cargo.lock
+# resolves this to, so bumping it means regenerating.
+buffa = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 1.2.3 is the floor: earlier releases list an internally tagged variant's tag
+# last, and the tool catalog's property order lists it first.
+schemars = { version = "1.2.3", features = ["preserve_order"], optional = true }
+# compat dependencies
+quick-xml = { version = "0.41", features = [ "serialize", "overlapped-lists" ] }
+csv = { version = "1", optional = true }
+calamine = { version = "0.33", optional = true }
+proptest = { version = "1.5", optional = true }
+unicode-xid = "0.2"
+
+[dev-dependencies]
+simlin-base = { path = "../simlin-base", features = ["test-support"] }
+simlin-diagram = { path = "../simlin-diagram", features = ["test-support"] }
+simlin-engine = { path = "../simlin-engine", features = ["test-support"] }
+# `file_io` keeps the `csv` dependency (and filesystem access) out of the wasm
+# bundle: it is a production dependency gate, not a test-coverage gate. The code
+# it gates is `cfg(any(test, feature = "file_io"))`, with the crate it needs
+# here, so no choice of features compiles a test of it away (GH #925).
+csv = "1"
+# The tests read JSON floats exactly: without float_roundtrip, serde_json's fast
+# parser can be off by one ULP. Dev-only: production builds of the crate keep
+# the default fast parser.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+proptest = "1.5"
+jsonschema = { version = "0.26", default-features = false }
+rayon = "1"
+sha2 = "0.10"
+tempfile = "3"

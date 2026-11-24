@@ -23,8 +23,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use simlin_base::common::ErrorKind;
 use simlin_base::datamodel::Project as DatamodelProject;
 use simlin_base::{Error, ErrorCode, Result, Results, datamodel};
-use simlin_engine::buffa::Message;
-use simlin_engine::data_provider::FilesystemDataProvider;
+use simlin_engine::build_sim;
 use simlin_engine::db::{
     LtmOverlay, PersistentSyncState, SimlinDb, SourceProject, collect_all_diagnostics,
     compile_project_incremental, model_detected_loops, parse_source_variable, sync_from_datamodel,
@@ -34,11 +33,13 @@ use simlin_engine::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
     format_simulation_error,
 };
-use simlin_engine::{build_sim, project_io, serde};
-use simlin_engine::{
+use simlin_formats::buffa::Message;
+use simlin_formats::data_provider::FilesystemDataProvider;
+use simlin_formats::{
     load_csv, load_dat, open_vensim, open_vensim_with_data, open_xmile, to_mdl_with_warnings,
     to_xmile,
 };
+use simlin_formats::{project_io, serde};
 
 mod gen_stdlib;
 mod vdf_dump;
@@ -269,12 +270,12 @@ fn open_model(input: &InputArgs) -> (DatamodelProject, Option<VisibleStocks>) {
         InputFormat::Xmile => (open_xmile(&mut BufReader::new(bytes.as_slice())), None),
         InputFormat::Systems => {
             let contents = model_text(&file_path, bytes);
-            let systems_model = simlin_engine::systems::parse(&contents)
+            let systems_model = simlin_formats::systems::parse(&contents)
                 .unwrap_or_else(|e| die!("model '{}' parse error: {}", &file_path, e));
-            let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
-            let project = simlin_engine::systems::translate::translate(
+            let visible = simlin_formats::systems::translate::visible_stocks(&systems_model);
+            let project = simlin_formats::systems::translate::translate(
                 &systems_model,
-                simlin_engine::systems::translate::DEFAULT_ROUNDS,
+                simlin_formats::systems::translate::DEFAULT_ROUNDS,
             );
             (project, Some(visible))
         }

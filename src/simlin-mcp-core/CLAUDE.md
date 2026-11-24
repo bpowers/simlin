@@ -27,7 +27,7 @@ Native async-fn-in-trait (AFIT) avoids the heap allocation `async-trait` would f
 - `src/fs_access.rs` -- `FileSystemAccess`, the stateless filesystem `ProjectAccess` impl.
   Used by the `simlin-mcp` binary (re-exported there as `simlin_mcp::access::FileSystemAccess`) AND by this crate's integration suites (`test_support::TestFileSystemAccess` is a type alias for it).
   It lives here rather than in the binary so the tests exercise the shipping impl -- a hand-maintained near-copy drifts at exactly the points where this file is non-trivial (the MDL lossiness-warning channel and the SD-AI `relationships` regeneration on save), so a test saving through a copy proves something about a simpler function than the one that ships.
-  Every `SourceFormat` is written back in place in its own format; `Mdl` goes through `simlin_engine::to_mdl_with_warnings`, whose hard errors (more than one non-macro model, an ordinary Module variable) fail the save and whose lossiness warnings ride `SaveOutcome::warnings`.
+  Every `SourceFormat` is written back in place in its own format; `Mdl` goes through `simlin_formats::to_mdl_with_warnings`, whose hard errors (more than one non-macro model, an ordinary Module variable) fail the save and whose lossiness warnings ride `SaveOutcome::warnings`.
 - `src/tools/` -- The three tools (`read_model.rs`, `edit_model.rs`, `create_model.rs`) as async free functions taking `&impl ProjectAccess`.
   Exposed types use `#[serde(rename_all = "camelCase")]`; the curated *input* types deliberately exclude engine-internal fields (`uid`, `compat`, `aiState`), while both tool outputs embed the full engine `json::Model`, which serializes `uid`/`compat` when populated.
   `read_model`/`edit_model` both unconditionally run LTM loop analysis (`analysis::analyze_model`), so they (1) carry an `analysisError` field that surfaces the actionable compile error (naming the variable that failed to compile) when a model can't be compiled for LTM instead of returning a silent empty `loopDominance` (GH #660), and (2) collect their `collect_all_diagnostics` passes with the LTM overlay on (`simlin_engine::db::LtmOverlay::On`, the same harvest libsimlin's `simlin_project_get_errors` runs for a project that requested LTM, GH #466), surfacing the LTM auto-flip-to-discovery advisory and synthetic-fragment compile-failure warnings in a model-scoped `warnings` field that a collection under `Off` never carries (GH #662).
@@ -73,7 +73,7 @@ Concretely:
 
 ## Dependencies
 
-- Depends on `simlin-engine` for parsing, diagnostics, and the `datamodel::Project` shape.
+- Depends on `simlin-formats` for parsing and writing files, `simlin-engine` for diagnostics and loop analysis, and `simlin-base` for the `datamodel::Project` shape.
 - Depends on `rmcp` (server + macros + schemars features) for the `ServerHandler` trait and `#[tool_router]` / `#[tool_handler]` macros.
 - Depends on `tokio` (rt-multi-thread + macros + fs) because the trait methods are `async` and `read_model.rs` etc. await the access impl.
 - Used-by: `simlin-mcp`.

@@ -14,7 +14,7 @@ because the file carries enough metadata to map variable names to time series.
 This document describes that metadata and the deterministic procedure that
 reconstructs a `Results` struct (variable names -> time series) from a VDF
 alone.
-The implementation is in `src/simlin-engine/src/vdf.rs` and its
+The implementation is in `src/simlin-formats/src/vdf.rs` and its
 submodules; `tools/vdf_xray.py` is a structural inspector for the same format.
 The two implementations are pinned together by a differential parity harness
 (`parity_python_and_rust_vdf_extraction_agree` in

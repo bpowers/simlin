@@ -71,8 +71,8 @@ use simlin_engine::db::{
     model_element_causal_edges, model_ltm_variables, reclassify_loops_from_results,
     set_project_ltm_discovery_mode, sync_from_datamodel_incremental,
 };
-use simlin_engine::open_vensim;
 use simlin_engine::test_common::TestProject;
+use simlin_formats::open_vensim;
 
 /// Canonical prefixes of the two LTM score-variable families. The
 /// separator is U+205A (TWO DOT PUNCTUATION), the character LTM uses to

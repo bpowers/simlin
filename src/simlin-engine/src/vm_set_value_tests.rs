@@ -300,7 +300,7 @@ fn test_set_value_module_stock_returns_error() {
     let file_bytes =
         std::fs::read(test_file).expect("modules_hares_and_foxes test fixture must exist");
     let mut cursor = std::io::Cursor::new(file_bytes);
-    let project_datamodel = crate::open_xmile(&mut cursor).unwrap();
+    let project_datamodel = simlin_formats::open_xmile(&mut cursor).unwrap();
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project_datamodel, None);
     let compiled = crate::db::compile_project_incremental(

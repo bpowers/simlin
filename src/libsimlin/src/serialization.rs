@@ -8,8 +8,8 @@
 //! systems, SVG, PNG, and scene formats. The memory for the output buffers is allocated via
 //! `simlin_malloc` so that callers free it with `simlin_free`.
 
-use simlin_engine::buffa::Message;
-use simlin_engine::serde as engine_serde;
+use simlin_formats::buffa::Message;
+use simlin_formats::serde as engine_serde;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
     };
     let bytes = match format {
         ffi::SimlinJsonFormat::Native => {
-            let json_project: simlin_engine::json::Project = datamodel.into();
+            let json_project: simlin_formats::json::Project = datamodel.into();
             match serde_json::to_vec(&json_project) {
                 Ok(data) => data,
                 Err(err) => {
@@ -207,7 +207,7 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
             }
         }
         ffi::SimlinJsonFormat::Sdai => {
-            let sdai_model: simlin_engine::json_sdai::SdaiModel = datamodel.into();
+            let sdai_model: simlin_formats::json_sdai::SdaiModel = datamodel.into();
             match serde_json::to_vec(&sdai_model) {
                 Ok(data) => data,
                 Err(err) => {
@@ -281,7 +281,7 @@ pub unsafe extern "C" fn simlin_project_serialize_xmile(
     };
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    match simlin_engine::to_xmile(&datamodel_locked) {
+    match simlin_formats::to_xmile(&datamodel_locked) {
         Ok(xmile_str) => {
             let bytes = xmile_str.into_bytes();
             let len = bytes.len();
@@ -369,7 +369,7 @@ pub unsafe extern "C" fn simlin_project_serialize_mdl(
     let proj = ffi_try!(out_error, require_project(project));
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    let (mdl_text, warnings) = match simlin_engine::to_mdl_with_warnings(&datamodel_locked) {
+    let (mdl_text, warnings) = match simlin_formats::to_mdl_with_warnings(&datamodel_locked) {
         Ok(result) => result,
         Err(err) => {
             store_error(
@@ -498,13 +498,13 @@ pub unsafe extern "C" fn simlin_project_check_save(
     let datamodel = proj.datamodel.lock().unwrap().shared();
     let format: simlin_engine::save_check::SaveFormat = format.into();
     #[cfg(feature = "file_io")]
-    let provider = data_dir.map(simlin_engine::FilesystemDataProvider::new);
+    let provider = data_dir.map(simlin_formats::FilesystemDataProvider::new);
     #[cfg(feature = "file_io")]
     let data = provider
         .as_ref()
-        .map(|p| p as &dyn simlin_engine::DataProvider);
+        .map(|p| p as &dyn simlin_formats::DataProvider);
     #[cfg(not(feature = "file_io"))]
-    let data: Option<&dyn simlin_engine::DataProvider> = {
+    let data: Option<&dyn simlin_formats::DataProvider> = {
         let _ = data_dir;
         None
     };
@@ -594,7 +594,7 @@ pub unsafe extern "C" fn simlin_project_serialize_systems(
     };
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    match simlin_engine::to_systems(&datamodel_locked) {
+    match simlin_formats::to_systems(&datamodel_locked) {
         Ok(systems_str) => {
             let bytes = systems_str.into_bytes();
             let len = bytes.len();

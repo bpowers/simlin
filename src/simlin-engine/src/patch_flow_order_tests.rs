@@ -26,7 +26,8 @@ fn model_patch(ops: Vec<ModelOperation>) -> ProjectPatch {
 }
 
 fn open(xmile: &str) -> datamodel::Project {
-    crate::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("the fixture opens")
+    simlin_formats::compat::open_xmile(&mut BufReader::new(xmile.as_bytes()))
+        .expect("the fixture opens")
 }
 
 /// Every series the project's run saves, by name.

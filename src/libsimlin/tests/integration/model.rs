@@ -8,8 +8,8 @@ use std::ptr;
 
 use serde_json::Value;
 use simlin::*;
-use simlin_engine::buffa::{Message, MessageField};
 use simlin_engine::test_common::TestProject;
+use simlin_formats::buffa::{Message, MessageField};
 
 use crate::common::{expect_no_error, open_project_from_datamodel};
 
@@ -769,31 +769,31 @@ fn test_model_get_var_json_case_insensitive() {
 #[test]
 fn test_model_functions() {
     // Create a project with multiple models
-    let project = simlin_engine::project_io::Project {
+    let project = simlin_formats::project_io::Project {
         name: "test_multi_model".to_string(),
-        sim_specs: MessageField::some(simlin_engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: MessageField::some(simlin_engine::project_io::Dt {
+            dt: MessageField::some(simlin_formats::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
             save_step: MessageField::none(),
-            sim_method: simlin_engine::project_io::SimMethod::Euler.into(),
+            sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
         models: vec![
-            simlin_engine::project_io::Model {
+            simlin_formats::project_io::Model {
                 name: "model1".to_string(),
                 variables: vec![
-                    simlin_engine::project_io::Variable {
-                        v: Some(simlin_engine::project_io::variable::V::Aux(
-                            simlin_engine::project_io::variable::Aux {
+                    simlin_formats::project_io::Variable {
+                        v: Some(simlin_formats::project_io::variable::V::Aux(
+                            simlin_formats::project_io::variable::Aux {
                                 ident: "var1".to_string(),
-                                equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                                equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                                     equation: Some(
-                                        simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                            simlin_engine::project_io::variable::ScalarEquation {
+                                        simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                            simlin_formats::project_io::variable::ScalarEquation {
                                                 equation: "1".to_string(),
                                                 initial_equation: None,
                                             },
@@ -804,21 +804,21 @@ fn test_model_functions() {
                                 units: String::new(),
                                 gf: MessageField::none(),
                                 can_be_module_input: false,
-                                visibility: simlin_engine::project_io::variable::Visibility::Private
+                                visibility: simlin_formats::project_io::variable::Visibility::Private
                                     .into(),
                                 uid: 0,
                                 compat: MessageField::none(),
                             },
                         )),
                     },
-                    simlin_engine::project_io::Variable {
-                        v: Some(simlin_engine::project_io::variable::V::Aux(
-                            simlin_engine::project_io::variable::Aux {
+                    simlin_formats::project_io::Variable {
+                        v: Some(simlin_formats::project_io::variable::V::Aux(
+                            simlin_formats::project_io::variable::Aux {
                                 ident: "var2".to_string(),
-                                equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                                equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                                     equation: Some(
-                                        simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                            simlin_engine::project_io::variable::ScalarEquation {
+                                        simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                            simlin_formats::project_io::variable::ScalarEquation {
                                                 equation: "var1 * 2".to_string(),
                                                 initial_equation: None,
                                             },
@@ -829,7 +829,7 @@ fn test_model_functions() {
                                 units: String::new(),
                                 gf: MessageField::none(),
                                 can_be_module_input: false,
-                                visibility: simlin_engine::project_io::variable::Visibility::Private
+                                visibility: simlin_formats::project_io::variable::Visibility::Private
                                     .into(),
                                 uid: 0,
                                 compat: MessageField::none(),
@@ -843,17 +843,17 @@ fn test_model_functions() {
                 macro_spec: MessageField::none(),
                 sim_specs: MessageField::none(),
             },
-            simlin_engine::project_io::Model {
+            simlin_formats::project_io::Model {
                 name: "model2".to_string(),
                 variables: vec![
-                    simlin_engine::project_io::Variable {
-                        v: Some(simlin_engine::project_io::variable::V::Stock(
-                            simlin_engine::project_io::variable::Stock {
+                    simlin_formats::project_io::Variable {
+                        v: Some(simlin_formats::project_io::variable::V::Stock(
+                            simlin_formats::project_io::variable::Stock {
                                 ident: "stock".to_string(),
-                                equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                                equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                                     equation: Some(
-                                        simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                            simlin_engine::project_io::variable::ScalarEquation {
+                                        simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                            simlin_formats::project_io::variable::ScalarEquation {
                                                 equation: "100".to_string(),
                                                 initial_equation: None,
                                             },
@@ -866,21 +866,21 @@ fn test_model_functions() {
                                 outflows: vec![],
                                 non_negative: false,
                                 can_be_module_input: false,
-                                visibility: simlin_engine::project_io::variable::Visibility::Private
+                                visibility: simlin_formats::project_io::variable::Visibility::Private
                                     .into(),
                                 uid: 0,
                                 compat: MessageField::none(),
                             },
                         )),
                     },
-                    simlin_engine::project_io::Variable {
-                        v: Some(simlin_engine::project_io::variable::V::Flow(
-                            simlin_engine::project_io::variable::Flow {
+                    simlin_formats::project_io::Variable {
+                        v: Some(simlin_formats::project_io::variable::V::Flow(
+                            simlin_formats::project_io::variable::Flow {
                                 ident: "inflow".to_string(),
-                                equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                                equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                                     equation: Some(
-                                        simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                            simlin_engine::project_io::variable::ScalarEquation {
+                                        simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                            simlin_formats::project_io::variable::ScalarEquation {
                                                 equation: "rate * stock".to_string(),
                                                 initial_equation: None,
                                             },
@@ -892,21 +892,21 @@ fn test_model_functions() {
                                 gf: MessageField::none(),
                                 non_negative: false,
                                 can_be_module_input: false,
-                                visibility: simlin_engine::project_io::variable::Visibility::Private
+                                visibility: simlin_formats::project_io::variable::Visibility::Private
                                     .into(),
                                 uid: 0,
                                 compat: MessageField::none(),
                             },
                         )),
                     },
-                    simlin_engine::project_io::Variable {
-                        v: Some(simlin_engine::project_io::variable::V::Aux(
-                            simlin_engine::project_io::variable::Aux {
+                    simlin_formats::project_io::Variable {
+                        v: Some(simlin_formats::project_io::variable::V::Aux(
+                            simlin_formats::project_io::variable::Aux {
                                 ident: "rate".to_string(),
-                                equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                                equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                                     equation: Some(
-                                        simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                            simlin_engine::project_io::variable::ScalarEquation {
+                                        simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                            simlin_formats::project_io::variable::ScalarEquation {
                                                 equation: "0.1".to_string(),
                                                 initial_equation: None,
                                             },
@@ -917,7 +917,7 @@ fn test_model_functions() {
                                 units: String::new(),
                                 gf: MessageField::none(),
                                 can_be_module_input: false,
-                                visibility: simlin_engine::project_io::variable::Visibility::Private
+                                visibility: simlin_formats::project_io::variable::Visibility::Private
                                     .into(),
                                 uid: 0,
                                 compat: MessageField::none(),

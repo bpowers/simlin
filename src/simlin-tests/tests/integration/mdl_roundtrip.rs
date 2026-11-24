@@ -7,7 +7,7 @@ use std::fs;
 use std::io::BufReader;
 
 use simlin_base::datamodel::{self, Dt, Project, Variable, ViewElement};
-use simlin_engine::{mdl, xmile};
+use simlin_formats::{mdl, xmile};
 
 // MDL test files that should survive a full MDL -> Project -> MDL -> Project roundtrip
 // at the equation/semantic level.

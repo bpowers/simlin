@@ -1359,7 +1359,7 @@ def _span(rec_idx: int, name: str, start: int, length: int = 1) -> vdf_xray.Deco
 class StandaloneLookupOnlyDescriptorTests(unittest.TestCase):
     """
     Port of the Rust `standalone_descriptor_tests` module
-    (src/simlin-engine/src/vdf/record_results.rs): the pure standalone
+    (src/simlin-formats/src/vdf/record_results.rs): the pure standalone
     lookup-only descriptor detection over synthetic inputs.
     """
 

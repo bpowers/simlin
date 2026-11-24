@@ -8,7 +8,7 @@ use std::io::BufReader;
 use simlin_engine::db::{
     DiagnosticSeverity, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
 };
-use simlin_engine::xmile;
+use simlin_formats::xmile;
 
 /// The models this file round-trips through XMILE serialization.
 ///

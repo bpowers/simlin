@@ -247,7 +247,7 @@ struct FrameJson<'a> {
 enum OpJson {
     EditView {
         index: u32,
-        upsert: Vec<simlin_engine::json::ViewElement>,
+        upsert: Vec<simlin_formats::json::ViewElement>,
         remove: Vec<i32>,
     },
     RenameVariable {

@@ -91,7 +91,7 @@ use simlin_engine::ltm_finding::{
     CandidateGen, DiscoveryResult, FallbackClosures, FallbackConfig, FallbackSeeds,
     FallbackTieBreak, FallbackWeight, FoundLoop,
 };
-use simlin_engine::{open_vensim, open_xmile};
+use simlin_formats::{open_vensim, open_xmile};
 
 /// Recall is reported at these prefix lengths of the exact ranked list.
 const RECALL_KS: [usize; 5] = [1, 10, 50, 100, 200];

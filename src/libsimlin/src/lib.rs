@@ -73,9 +73,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
-use simlin_engine::buffa::Message;
+use simlin_formats::buffa::Message;
 #[cfg(test)]
-use simlin_engine::serde as engine_serde;
+use simlin_formats::serde as engine_serde;
 #[cfg(test)]
 use std::ffi::CStr;
 

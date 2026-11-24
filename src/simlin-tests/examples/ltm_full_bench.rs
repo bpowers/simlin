@@ -54,7 +54,7 @@ use simlin_engine::db::{
     compile_project_incremental, model_causal_edges, model_element_causal_edges,
     model_ltm_variables, sync_from_datamodel_incremental,
 };
-use simlin_engine::{json, open_vensim, open_xmile};
+use simlin_formats::{json, open_vensim, open_xmile};
 
 fn read_proc_status_kb(key: &str) -> Option<u64> {
     let status = fs::read_to_string("/proc/self/status").ok()?;

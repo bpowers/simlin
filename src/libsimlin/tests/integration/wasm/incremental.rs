@@ -278,7 +278,7 @@ fn compile_to_wasm_latches_special_stock_ltm_diagnostics() {
         ),
     ] {
         let datamodel =
-            simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes())).unwrap();
+            simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes())).unwrap();
         let fixture = Fixture::new(&datamodel);
         for (request, expected) in [(false, false), (true, true), (false, true)] {
             fixture.compile(request, false).unwrap();

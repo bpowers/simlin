@@ -35,9 +35,9 @@ use std::path::PathBuf;
 
 use simlin_base::Results;
 use simlin_base::datamodel::Project;
-use simlin_engine::buffa::Message;
 use simlin_engine::queue_compile;
 use simlin_engine::save_check::{ChangeKind, SaveFormat, check_save, column_variable};
+use simlin_formats::buffa::Message;
 
 use Cause::{Defect, Format};
 use SaveFormat::{Json, Mdl, Protobuf, Xmile};
@@ -220,8 +220,8 @@ fn format_of(path: &str) -> SaveFormat {
 fn open(path: &str) -> Option<Project> {
     let bytes = fs::read(format!("../../{path}")).ok()?;
     match format_of(path) {
-        Mdl => simlin_engine::open_vensim(std::str::from_utf8(&bytes).ok()?).ok(),
-        _ => simlin_engine::open_xmile(&mut BufReader::new(bytes.as_slice())).ok(),
+        Mdl => simlin_formats::open_vensim(std::str::from_utf8(&bytes).ok()?).ok(),
+        _ => simlin_formats::open_xmile(&mut BufReader::new(bytes.as_slice())).ok(),
     }
 }
 
@@ -247,24 +247,24 @@ fn simulate(project: &Project) -> Option<Results> {
 /// own save, apart from the check's.
 fn saved(project: &Project, format: SaveFormat) -> Option<Project> {
     match format {
-        Mdl => simlin_engine::open_vensim(&simlin_engine::to_mdl(project).ok()?).ok(),
+        Mdl => simlin_formats::open_vensim(&simlin_formats::to_mdl(project).ok()?).ok(),
         Xmile => {
-            let text = simlin_engine::to_xmile(project).ok()?;
-            simlin_engine::open_xmile(&mut BufReader::new(text.as_bytes())).ok()
+            let text = simlin_formats::to_xmile(project).ok()?;
+            simlin_formats::open_xmile(&mut BufReader::new(text.as_bytes())).ok()
         }
         Json => {
-            let json: simlin_engine::json::Project = project.clone().into();
+            let json: simlin_formats::json::Project = project.clone().into();
             let bytes = serde_json::to_vec(&json).ok()?;
-            let back = simlin_engine::json::Project::from_reader(bytes.as_slice()).ok()?;
+            let back = simlin_formats::json::Project::from_reader(bytes.as_slice()).ok()?;
             Some(back.into())
         }
         Protobuf => {
-            let bytes = simlin_engine::serde::serialize(project)
+            let bytes = simlin_formats::serde::serialize(project)
                 .ok()?
                 .try_encode_to_vec()
                 .ok()?;
-            let back = simlin_engine::project_io::Project::decode_from_slice(&bytes).ok()?;
-            simlin_engine::serde::deserialize(back).ok()
+            let back = simlin_formats::project_io::Project::decode_from_slice(&bytes).ok()?;
+            simlin_formats::serde::deserialize(back).ok()
         }
         SaveFormat::SdaiJson => None,
     }
@@ -507,10 +507,10 @@ fn a_save_that_reads_data_is_read_back_with_its_provider() {
     let dir = std::path::Path::new(path)
         .parent()
         .expect("the model is in a directory");
-    let provider = simlin_engine::FilesystemDataProvider::new(dir);
+    let provider = simlin_formats::FilesystemDataProvider::new(dir);
     let text = fs::read_to_string(path).expect("the model reads");
     let project =
-        simlin_engine::open_vensim_with_data(&text, Some(&provider)).expect("the model opens");
+        simlin_formats::open_vensim_with_data(&text, Some(&provider)).expect("the model opens");
 
     let changes =
         check_save_with_data(&project, Mdl, Some(&provider)).expect("MDL holds the model");

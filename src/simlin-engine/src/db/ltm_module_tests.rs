@@ -1309,7 +1309,7 @@ fn test_clearn_results_offsets_agree_with_layout() {
         env!("CARGO_MANIFEST_DIR")
     );
     let contents = std::fs::read_to_string(&path).expect("read C-LEARN mdl");
-    let project = crate::open_vensim(&contents).expect("parse C-LEARN");
+    let project = simlin_formats::open_vensim(&contents).expect("parse C-LEARN");
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);

@@ -311,9 +311,10 @@ fn split_preserves_special_stock_reconciliation_initials() {
     <aux name="ratio"><eqn>SUM(waiting) / INIT(SUM(waiting))</eqn></aux>
   </variables></model>
 </xmile>"#;
-    let queue = crate::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
-        .expect("queue model");
-    let conveyor = crate::xmile::project_from_reader(&mut std::io::BufReader::new(
+    let queue =
+        simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
+            .expect("queue model");
+    let conveyor = simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(
         include_str!("../../../../test/conveyors/conveyor_containers.xmile").as_bytes(),
     ))
     .expect("conveyor model");

@@ -28,11 +28,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use simlin_base::Results;
+use simlin_engine::Vm;
 use simlin_engine::db::{
     DiagnosticSeverity, LtmOverlay, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{FilesystemDataProvider, Vm, load_csv, load_dat};
+use simlin_formats::{FilesystemDataProvider, load_csv, load_dat};
 
 use crate::test_helpers::series_that_differ;
 
@@ -140,7 +141,7 @@ pub(crate) fn classify(path: &str, expected: &Results) -> (Class, String, Vec<St
     };
     let dir = file.parent().unwrap_or(Path::new("."));
     let provider = FilesystemDataProvider::new(dir);
-    let project = match simlin_engine::open_vensim_with_data(&text, Some(&provider)) {
+    let project = match simlin_formats::open_vensim_with_data(&text, Some(&provider)) {
         Ok(project) => project,
         Err(err) => return (Class::DoesNotImport, err.to_string(), Vec::new()),
     };

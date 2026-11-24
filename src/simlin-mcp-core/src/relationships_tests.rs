@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use super::generate_relationships;
-use simlin_engine::json_sdai::Polarity;
 use simlin_engine::ltm::LinkPolarity;
+use simlin_formats::json_sdai::Polarity;
 
 #[test]
 fn test_generate_relationships_basic_equation_deps() {

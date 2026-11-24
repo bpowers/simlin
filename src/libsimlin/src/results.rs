@@ -13,7 +13,7 @@
 //! two surfaces identically.
 
 use simlin_base::common::{Canonical, Ident};
-use simlin_engine::vdf;
+use simlin_formats::vdf;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double};
 use std::ptr;

@@ -33,7 +33,7 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use simlin_base::datamodel::{self, Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-use simlin_engine::open_vensim;
+use simlin_formats::open_vensim;
 
 // Back this harness with mimalloc, the allocator every native binary that
 // embeds the engine installs. The compile path is allocation-bound, so timing

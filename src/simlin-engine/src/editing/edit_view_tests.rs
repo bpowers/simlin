@@ -16,8 +16,8 @@ use crate::editing::test_support::{
     agreement_report, alias, apply_edit, aux, cloud, edit_patch, flow, link, load, main_model,
     project_of, stock, stock_flow_of, view_of,
 };
-use crate::json;
 use crate::patch::is_view_only_patch;
+use simlin_formats::json;
 
 use super::*;
 

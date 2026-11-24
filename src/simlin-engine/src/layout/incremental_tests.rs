@@ -118,7 +118,7 @@ fn default_project(name: &str) -> datamodel::Project {
         env!("CARGO_MANIFEST_DIR")
     );
     let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    crate::compat::open_xmile(&mut std::io::BufReader::new(file)).expect("model imports")
+    simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(file)).expect("model imports")
 }
 
 fn shipped_view(project: &datamodel::Project) -> datamodel::StockFlow {

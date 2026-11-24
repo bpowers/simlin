@@ -102,10 +102,10 @@ fn load(rel: &str) -> datamodel::Project {
     let path = format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"));
     if rel.ends_with(".mdl") {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        crate::compat::open_vensim(&text).unwrap_or_else(|e| panic!("{path}: {e:?}"))
+        simlin_formats::compat::open_vensim(&text).unwrap_or_else(|e| panic!("{path}: {e:?}"))
     } else {
         let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        crate::compat::open_xmile(&mut std::io::BufReader::new(file))
+        simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(file))
             .unwrap_or_else(|e| panic!("{path}: {e:?}"))
     }
 }

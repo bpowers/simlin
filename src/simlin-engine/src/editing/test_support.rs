@@ -14,7 +14,6 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 
-use crate::json;
 use crate::patch::apply_patch;
 use crate::test_common::TestProject;
 use simlin_base::common::canonicalize;
@@ -22,6 +21,7 @@ use simlin_base::datamodel::view_element::{Flow, FlowPoint, Stock};
 use simlin_base::datamodel::{self, Variable, ViewElement};
 use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 use simlin_diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+use simlin_formats::json;
 
 use super::base::BaseView;
 use super::gesture::ViewEdit;

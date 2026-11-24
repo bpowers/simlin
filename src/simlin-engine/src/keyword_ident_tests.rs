@@ -63,7 +63,7 @@ const KEYWORD_MODEL_VARS: &str = r#"
         <aux name="c"><eqn>b + 1</eqn></aux>"#;
 
 fn read_xmile(vars: &str) -> datamodel::Project {
-    crate::compat::open_xmile(&mut xmile_doc(vars).as_bytes()).expect("XMILE must parse")
+    simlin_formats::compat::open_xmile(&mut xmile_doc(vars).as_bytes()).expect("XMILE must parse")
 }
 
 /// Diagnostics production would report for `project`, via the incremental path.
@@ -145,7 +145,7 @@ fn mdl_reader_admits_a_keyword_named_variable() {
                  c = b + 1\n\t~\t\n\t~\t|\n\n\
                  \\\\\\---/// Sketch information - do not modify anything except names\n"
             );
-            let project = crate::compat::open_vensim(&mdl)
+            let project = simlin_formats::compat::open_vensim(&mdl)
                 .unwrap_or_else(|e| panic!("MDL must parse ({keyword}, {reference}): {e:?}"));
 
             let mut idents: Vec<&str> = project.models[0]
@@ -200,7 +200,7 @@ fn a_bare_nan_reference_in_mdl_is_still_the_literal() {
         "b = nan * 2\n\t~\t\n\t~\t|\n\n",
         "\\\\\\---/// Sketch information - do not modify anything except names\n"
     );
-    let project = crate::compat::open_vensim(mdl).expect("MDL must parse");
+    let project = simlin_formats::compat::open_vensim(mdl).expect("MDL must parse");
 
     // Compiles clean either way, which is what makes the case silent: the
     // diagnostics channel cannot see it, only the number can.
@@ -220,7 +220,7 @@ fn a_bare_nan_reference_in_mdl_is_still_the_literal() {
         "b = mod * 2\n\t~\t\n\t~\t|\n\n",
         "\\\\\\---/// Sketch information - do not modify anything except names\n"
     );
-    let project = crate::compat::open_vensim(mdl_mod).expect("MDL must parse");
+    let project = simlin_formats::compat::open_vensim(mdl_mod).expect("MDL must parse");
     assert_compiles_clean(&project, "the bare-`mod` MDL model");
     assert_eq!(6.0, final_value(&project, "b"));
 }
@@ -254,7 +254,7 @@ fn a_placeholder_round_trips_even_when_nan_names_a_variable() {
     );
 
     for (label, src) in [("declares `nan`", with_nan), ("control", without_nan)] {
-        let first = crate::compat::open_vensim(src).expect("MDL must parse");
+        let first = simlin_formats::compat::open_vensim(src).expect("MDL must parse");
         assert_eq!(
             Some(datamodel::Equation::Scalar("NAN".to_string())),
             placeholder_equation(&first),
@@ -265,8 +265,8 @@ fn a_placeholder_round_trips_even_when_nan_names_a_variable() {
             "{label}: a variable with no equation must evaluate to NaN"
         );
 
-        let written = crate::mdl::project_to_mdl(&first).expect("MDL must write");
-        let second = crate::compat::open_vensim(&written).expect("re-import must parse");
+        let written = simlin_formats::mdl::project_to_mdl(&first).expect("MDL must write");
+        let second = simlin_formats::compat::open_vensim(&written).expect("re-import must parse");
         // Compared case-insensitively: the placeholder arrives as `NAN` from the
         // importer's `A FUNCTION OF` arm and comes back as `NaN` from the
         // writer's `Const` text. Both lex to the NaN literal, and that -- not
@@ -556,7 +556,7 @@ fn mdl_with_control(variables: &str) -> datamodel::Project {
          SAVEPER = TIME STEP\n\t~\t\n\t~\t|\n\n\
          \\\\\\---/// Sketch information - do not modify anything except names\n"
     );
-    crate::compat::open_vensim(&mdl).expect("MDL must parse")
+    simlin_formats::compat::open_vensim(&mdl).expect("MDL must parse")
 }
 
 // A Vensim model may declare a variable named like one of this engine's
@@ -606,18 +606,18 @@ fn an_mdl_save_writes_a_variable_defined_as_the_time_step_as_it_was() {
         "dt = TIME STEP\n\t~\t\n\t~\t|\n\n\
          x = dt * 2\n\t~\t\n\t~\t|\n\n",
     );
-    let written = crate::compat::to_mdl(&project).expect("MDL must write");
+    let written = simlin_formats::compat::to_mdl(&project).expect("MDL must write");
     let lines: Vec<&str> = written.lines().map(str::trim).collect();
     assert!(lines.contains(&"dt = TIME STEP"), "{written}");
     assert!(lines.contains(&"x = dt * 2"), "{written}");
-    let read_back = crate::compat::open_vensim(&written).expect("the save reads");
+    let read_back = simlin_formats::compat::open_vensim(&written).expect("the save reads");
     assert_eq!(final_value(&read_back, "dt"), 0.125);
     assert_eq!(final_value(&read_back, "x"), 0.25);
 
     let theil = std::fs::read_to_string("../../test/metasd/theil-statistics/Theil_2011.mdl")
         .expect("the corpus file reads");
-    let theil = crate::compat::open_vensim(&theil).expect("the corpus file imports");
-    let written = crate::compat::to_mdl(&theil).expect("MDL must write");
+    let theil = simlin_formats::compat::open_vensim(&theil).expect("the corpus file imports");
+    let written = simlin_formats::compat::to_mdl(&theil).expect("MDL must write");
     assert!(
         written.lines().any(|line| line.trim() == "dt = TIME STEP"),
         "{written}"

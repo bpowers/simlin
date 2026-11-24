@@ -11,14 +11,14 @@
 
 use serde::Serialize;
 use simlin_base::datamodel;
-use simlin_engine::json as ejson;
+use simlin_formats::json as ejson;
 
 use crate::errors::AccessError;
 
 /// Identifies how a model file was parsed so write-back can use the same
 /// format.  `Xmile` covers `.stmx`, `.xmile`, and `.xml`; `Mdl` is a Vensim
 /// `.mdl` file, read by the engine's MDL parser and written back in place by
-/// its MDL writer (`simlin_engine::to_mdl_with_warnings`); the JSON variants
+/// its MDL writer (`simlin_formats::to_mdl_with_warnings`); the JSON variants
 /// are distinguished by content rather than extension (`models` vs
 /// `variables` at the top level).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +56,7 @@ pub(crate) fn model_snapshot(
 /// file can hold.
 pub(crate) fn mdl_export_warnings_to_outputs(
     project: &datamodel::Project,
-    warnings: &[simlin_engine::mdl::ExportWarning],
+    warnings: &[simlin_formats::mdl::ExportWarning],
 ) -> Vec<ErrorOutput> {
     warnings
         .iter()
@@ -116,7 +116,7 @@ pub(crate) fn preflight_export(
     format: SourceFormat,
 ) -> Result<Vec<ErrorOutput>, crate::errors::AccessError> {
     match format {
-        SourceFormat::Mdl => match simlin_engine::to_mdl_with_warnings(project) {
+        SourceFormat::Mdl => match simlin_formats::to_mdl_with_warnings(project) {
             Ok((_text, warnings)) => Ok(mdl_export_warnings_to_outputs(project, &warnings)),
             Err(e) => Err(crate::errors::AccessError::Validation {
                 errors: vec![mdl_export_error_to_output(project, &e)],
@@ -353,7 +353,7 @@ mod tests {
             "/../../test/logistic_growth_ltm/logistic_growth.stmx"
         );
         let file = std::fs::File::open(path).expect("failed to open test fixture");
-        let project = simlin_engine::open_xmile(&mut std::io::BufReader::new(file))
+        let project = simlin_formats::open_xmile(&mut std::io::BufReader::new(file))
             .expect("failed to parse XMILE");
         let snapshot = model_snapshot(&project, "main").expect("the model is there");
 
@@ -483,10 +483,10 @@ mod tests {
         let mut project = build_empty_project(default_sim_specs());
         project.models[0].name = "cooling".to_string();
         let warnings = vec![
-            simlin_engine::mdl::ExportWarning {
+            simlin_formats::mdl::ExportWarning {
                 message: "flow 'heat loss' is non-negative; Vensim cannot express this".to_string(),
             },
-            simlin_engine::mdl::ExportWarning {
+            simlin_formats::mdl::ExportWarning {
                 message: "graphical function for 'demand' uses discrete interpolation".to_string(),
             },
         ];

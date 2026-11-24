@@ -49,7 +49,8 @@ use simlin_engine::db::{
     PersistentSyncState, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{CompiledSimulation, Vm, open_vensim};
+use simlin_engine::{CompiledSimulation, Vm};
+use simlin_formats::open_vensim;
 
 // --- Counting allocator -----------------------------------------------------
 //

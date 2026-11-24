@@ -4,24 +4,6 @@
     "test-support"
   ],
   "layers": {
-    "formats": {
-      "uses": [],
-      "modules": [
-        "compat",
-        "data_provider",
-        "element_equations",
-        "import_losses",
-        "io",
-        "json",
-        "json_sdai",
-        "mdl",
-        "project_io",
-        "serde",
-        "systems",
-        "vdf",
-        "xmile"
-      ]
-    },
     "compiler": {
       "uses": [],
       "modules": [
@@ -57,9 +39,7 @@
       ]
     },
     "edit": {
-      "uses": [
-        "formats"
-      ],
+      "uses": [],
       "modules": [
         "editing",
         "equation_view",
@@ -87,7 +67,6 @@
     },
     "tools": {
       "uses": [
-        "formats",
         "compiler",
         "edit",
         "wasmgen",

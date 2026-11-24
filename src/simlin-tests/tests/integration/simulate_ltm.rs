@@ -27,8 +27,9 @@ use simlin_engine::db::{
     sync_from_datamodel_incremental,
 };
 use simlin_engine::indexmap::IndexMap;
-use simlin_engine::xmile;
-use simlin_engine::{CompiledSimulation, Vm, json, ltm_finding, ltm_post};
+use simlin_engine::{CompiledSimulation, Vm, ltm_finding, ltm_post};
+use simlin_formats::json;
+use simlin_formats::xmile;
 
 const LTM_TOLERANCE: f64 = 0.05;
 
@@ -9554,7 +9555,7 @@ fn clearn_with_ltm_simulates_model_vars_identically() {
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let contents = std::fs::read_to_string(mdl_path)
         .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
-    let project = simlin_engine::open_vensim(&contents)
+    let project = simlin_formats::open_vensim(&contents)
         .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
 
     // Plain (LTM-disabled) run: the known-good baseline. `simulates_clearn`

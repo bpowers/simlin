@@ -242,7 +242,8 @@ fn modules_are_outlined_with_their_model_and_wiring() {
         "/../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx"
     );
     let file = std::fs::File::open(path).expect("the hares and foxes model is in the corpus");
-    let project = crate::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap();
+    let project =
+        simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap();
     let outline = outline_of(project);
     assert_eq!(names(&outline["modules"]), ["hares", "lynxes"]);
     assert_eq!(outline["modules"][0]["model"], "hares");
@@ -576,7 +577,7 @@ fn the_largest_corpus_models_are_outlined_within_the_budget() {
     ] {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
         let mdl = std::fs::read_to_string(&path).expect("the corpus model is present");
-        let project = crate::compat::open_vensim(&mdl).expect("the corpus model parses");
+        let project = simlin_formats::compat::open_vensim(&mdl).expect("the corpus model parses");
         let mut host = Host::new(project.clone());
         let mut session = Session::new("main");
 

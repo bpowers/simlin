@@ -462,7 +462,7 @@ fn a_hit_on_world3_decided_over_the_elements_within_reach_is_the_hit_decided_ove
         "/../../test/metasd/WRLD3-03/wrld3-03.mdl"
     );
     let contents = std::fs::read_to_string(path).expect("the World3 model is in the corpus");
-    let project = crate::compat::open_vensim(&contents).expect("World3 opens");
+    let project = simlin_formats::compat::open_vensim(&contents).expect("World3 opens");
     let tally = sweep(&project, &CORPUS, &[], &mut Rng::new(3), "World3");
     assert!(
         tally.differing == 0,

@@ -3022,7 +3022,7 @@ fn a_time_constant_declared_dimensionless_is_known_by_its_role() {
         let mdl =
             std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
                 .expect("the corpus model is present");
-        let project = crate::compat::open_vensim(&mdl).expect("the corpus model parses");
+        let project = simlin_formats::compat::open_vensim(&mdl).expect("the corpus model parses");
         let mut host = Host::new(project);
         let mut session = Session::new("main");
         let read = host.call(
@@ -4487,10 +4487,10 @@ fn corpus_model(path: &str) -> datamodel::Project {
         .join(path);
     let bytes = std::fs::read(&full).unwrap_or_else(|err| panic!("{path}: {err}"));
     if path.ends_with(".mdl") {
-        crate::compat::open_vensim(&String::from_utf8_lossy(&bytes))
+        simlin_formats::compat::open_vensim(&String::from_utf8_lossy(&bytes))
             .unwrap_or_else(|err| panic!("{path}: {err}"))
     } else {
-        crate::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..]))
+        simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..]))
             .unwrap_or_else(|err| panic!("{path}: {err}"))
     }
 }

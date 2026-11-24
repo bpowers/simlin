@@ -54,7 +54,7 @@ pub struct VariableEquation {
     pub unmatched: Vec<UnmatchedArm>,
     /// The variable's own lookup table, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lookup: Option<crate::json::GraphicalFunction>,
+    pub lookup: Option<simlin_formats::json::GraphicalFunction>,
 }
 
 /// A dimension as a variable's cells are laid out over it.
@@ -95,7 +95,7 @@ pub struct Cell {
     pub own: Option<EquationText>,
     /// The element's own lookup table, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lookup: Option<crate::json::GraphicalFunction>,
+    pub lookup: Option<simlin_formats::json::GraphicalFunction>,
 }
 
 /// An element equation whose subscript names no element of the variable.
@@ -224,7 +224,9 @@ pub fn variable_equation(
         datamodel::Variable::Aux(aux) => ("aux", aux.gf.as_ref()),
         datamodel::Variable::Module(_) => ("module", None),
     };
-    let lookup = gf.cloned().map(crate::json::GraphicalFunction::from);
+    let lookup = gf
+        .cloned()
+        .map(simlin_formats::json::GraphicalFunction::from);
     let empty = || VariableEquation {
         kind,
         dimensions: Vec::new(),
@@ -288,7 +290,7 @@ pub fn variable_equation(
                         .map(|(_, text, ..)| scope.text(text));
                     let lookup = arm
                         .and_then(|(.., gf)| gf.clone())
-                        .map(crate::json::GraphicalFunction::from);
+                        .map(simlin_formats::json::GraphicalFunction::from);
                     let state = if own.is_some() || lookup.is_some() {
                         CellState::Own
                     } else if every.is_some() {

@@ -14,6 +14,7 @@ test-support = []
 
 [dependencies]
 simlin-base = { path = "../simlin-base" }
+simlin-formats = { path = "../simlin-formats", features = ["schema"] }
 simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["schema"] }
 rmcp = { version = "1", features = ["server", "macros", "schemars"] }
 schemars = { version = "1", features = ["preserve_order"] }

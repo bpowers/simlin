@@ -15,7 +15,7 @@ fn default_project_view(dir: &str) -> StockFlow {
         dir
     );
     let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
-    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(file))
+    let project = simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(file))
         .unwrap_or_else(|e| panic!("parse {path}: {e:?}"));
     match project.get_model("main").and_then(|m| m.views.first()) {
         Some(datamodel::View::StockFlow(sf)) => sf.clone(),

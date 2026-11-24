@@ -13,8 +13,8 @@
 use std::fs;
 use std::path::Path;
 
-use simlin_engine::compat::open_vensim;
-use simlin_engine::vdf::VdfFile;
+use simlin_formats::compat::open_vensim;
+use simlin_formats::vdf::VdfFile;
 
 fn parse_vdf(path: &str) -> VdfFile {
     let bytes = fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));

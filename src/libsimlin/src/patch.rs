@@ -618,7 +618,7 @@ unsafe fn read_patch(
         json_str
     };
 
-    match serde_json::from_str::<simlin_engine::json::ProjectPatch>(json_str) {
+    match serde_json::from_str::<simlin_formats::json::ProjectPatch>(json_str) {
         Ok(patch) => Some(simlin_base::ProjectPatch::from(patch)),
         Err(err) => {
             store_error(

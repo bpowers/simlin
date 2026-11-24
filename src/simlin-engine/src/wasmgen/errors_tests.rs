@@ -250,7 +250,7 @@ fn error_word_zero_code_is_no_error() {
 #[test]
 fn reconstruct_transit_too_long_matches_vm_message() {
     let _guard = SlatBoundGuard::new(4);
-    let project = crate::xmile::project_from_reader(&mut BufReader::new(
+    let project = simlin_formats::xmile::project_from_reader(&mut BufReader::new(
         over_bound_conveyor_xmile("1.25").as_bytes(),
     ))
     .expect("parse xmile");
@@ -286,7 +286,7 @@ fn reconstruct_transit_too_long_matches_vm_message() {
 #[test]
 fn reconstruct_error_matches_literal_vm_format() {
     let _guard = SlatBoundGuard::new(4);
-    let project = crate::xmile::project_from_reader(&mut BufReader::new(
+    let project = simlin_formats::xmile::project_from_reader(&mut BufReader::new(
         over_bound_conveyor_xmile("1.25").as_bytes(),
     ))
     .expect("parse xmile");
@@ -311,7 +311,7 @@ fn reconstruct_error_matches_literal_vm_format() {
 /// `TIME` is 0 at t=0, which the belt init rejects.
 #[test]
 fn reconstruct_transit_not_positive_matches_vm_message() {
-    let project = crate::xmile::project_from_reader(&mut BufReader::new(
+    let project = simlin_formats::xmile::project_from_reader(&mut BufReader::new(
         over_bound_conveyor_xmile("TIME").as_bytes(),
     ))
     .expect("parse xmile");
@@ -343,7 +343,7 @@ fn reconstruct_transit_not_positive_matches_vm_message() {
 /// panicking or silently reporting success.
 #[test]
 fn reconstruct_error_is_total_on_a_bad_channel() {
-    let project = crate::xmile::project_from_reader(&mut BufReader::new(
+    let project = simlin_formats::xmile::project_from_reader(&mut BufReader::new(
         over_bound_conveyor_xmile("1").as_bytes(),
     ))
     .expect("parse xmile");

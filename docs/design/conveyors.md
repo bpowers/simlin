@@ -44,7 +44,7 @@ Before any of the below was implemented, conveyors failed **silently and
 confusingly**:
 
 1. **Import drops the block.** The XMILE reader struct `xmile::Stock`
-   (`src/simlin-engine/src/xmile/variables.rs`) has no field for `<conveyor>`;
+   (`src/simlin-formats/src/xmile/variables.rs`) has no field for `<conveyor>`;
    quick-xml ignores unknown child elements, so the conveyor spec is discarded.
 2. **Compilation then fails on the outflow.** A conveyor outflow MUST NOT have an
    equation (the conveyor drives it — XMILE §4.3).
@@ -1253,14 +1253,14 @@ LTM-through-conveyor attribution is a separate enhancement.
 
 ### 9.7 Readers, writers, and other surfaces
 
-- XMILE reader/writer (`src/simlin-engine/src/xmile/variables.rs`): add the
+- XMILE reader/writer (`src/simlin-formats/src/xmile/variables.rs`): add the
   `<conveyor>` block and `<element>`-level plumbing to `Stock`, the leak
   properties and `isee:spreadflow`/`<isee:distrib_eq>` to `Flow`; accept both
   leak encodings ([§3.3](#33-leakage-flows)); emit the `<conveyor>` block and
   `<uses_conveyor/>`.
   This alone fixes the round-trip corruption.
 - MDL: Vensim has no conveyor primitive; the `delay conveyor` name recognized in
-  `src/simlin-engine/src/mdl/builtins.rs` is a distinct, separate function — not
+  `src/simlin-formats/src/mdl/builtins.rs` is a distinct, separate function — not
   a conveyor, not covered here.
 - JSON (`src/json.rs`), TypeScript datamodel (`src/core`), and the diagram
   editor extend once the engine representation lands; the diagram renders a

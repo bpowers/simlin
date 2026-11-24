@@ -991,7 +991,7 @@ pub unsafe extern "C" fn simlin_model_get_var_json(
         }
     };
 
-    let tagged: simlin_engine::json::TaggedVariable = dm_var.clone().into();
+    let tagged: simlin_formats::json::TaggedVariable = dm_var.clone().into();
     let bytes = match serde_json::to_vec(&tagged) {
         Ok(b) => b,
         Err(err) => {
@@ -1047,7 +1047,7 @@ pub unsafe extern "C" fn simlin_model_get_sim_specs_json(
         .and_then(|m| m.sim_specs.as_ref())
         .unwrap_or(&datamodel_locked.sim_specs);
 
-    let json_sim_specs: simlin_engine::json::SimSpecs = dm_sim_specs.clone().into();
+    let json_sim_specs: simlin_formats::json::SimSpecs = dm_sim_specs.clone().into();
 
     let bytes = match serde_json::to_vec(&json_sim_specs) {
         Ok(b) => b,

@@ -934,7 +934,7 @@ mod tests {
         use std::io::BufReader;
         let f = File::open(path).expect("failed to open test fixture");
         let mut reader = BufReader::new(f);
-        crate::xmile::project_from_reader(&mut reader).expect("failed to parse XMILE")
+        simlin_formats::xmile::project_from_reader(&mut reader).expect("failed to parse XMILE")
     }
 
     fn synced_db(project: &datamodel::Project) -> (SimlinDb, SourceProject) {
@@ -1049,7 +1049,7 @@ mod tests {
     #[test]
     fn analyze_model_conveyor_reports_no_spurious_error() {
         let xml = include_str!("../../../test/conveyors/minimal_conveyor.xmile");
-        let project = crate::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        let project = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
             .expect("parse minimal_conveyor.xmile");
         let (mut db, sp) = synced_db(&project);
         let analysis =

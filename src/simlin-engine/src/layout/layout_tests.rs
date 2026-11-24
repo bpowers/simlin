@@ -1459,8 +1459,9 @@ fn test_layout_emits_a_flow_listed_by_two_stocks_once() {
     const NON_NEGATIVE: &str = include_str!(
         "../../../../test/test-models/tests/non_negative_all/test_non_negative_all1.xmile"
     );
-    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(NON_NEGATIVE.as_bytes()))
-        .expect("fixture imports");
+    let project =
+        simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(NON_NEGATIVE.as_bytes()))
+            .expect("fixture imports");
     let view = generate_layout(&project, "default", None).expect("layout");
     for name in ["outflow", "if_else"] {
         let count = view

@@ -368,7 +368,7 @@ async fn mdl_edit_surfaces_export_lossiness_as_warnings_and_still_writes() {
             equation: "teacup_temperature".into(),
             units: None,
             documentation: None,
-            graphical_function: Some(simlin_engine::json::GraphicalFunction {
+            graphical_function: Some(simlin_formats::json::GraphicalFunction {
                 points: vec![[0.0, 0.0], [100.0, 1.0], [200.0, 2.0]],
                 y_points: vec![],
                 kind: "discrete".into(),

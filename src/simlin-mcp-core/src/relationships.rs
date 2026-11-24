@@ -10,8 +10,8 @@
 use std::collections::{HashMap, HashSet};
 
 use simlin_base::datamodel;
-use simlin_engine::json_sdai::{Polarity, Relationship};
 use simlin_engine::ltm::LinkPolarity;
+use simlin_formats::json_sdai::{Polarity, Relationship};
 
 /// Generate SD-AI relationships from pre-computed equation dependency
 /// polarities.

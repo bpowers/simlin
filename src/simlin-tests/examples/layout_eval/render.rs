@@ -162,7 +162,7 @@ pub fn render_view(
     // The rendered view itself, for inspection and for replaying a judgment
     // against a later metric: `{stem}.view.json` in the JSON project schema.
     if let Some(stem) = file.strip_suffix(".png") {
-        let json_view = simlin_engine::json::View::from(datamodel::View::StockFlow(view.clone()));
+        let json_view = simlin_formats::json::View::from(datamodel::View::StockFlow(view.clone()));
         if let Ok(text) = serde_json::to_string(&json_view) {
             let _ = std::fs::write(format!("{out}/{stem}.view.json"), text);
         }

@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use simlin_engine::db::{SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental};
-use simlin_engine::{open_vensim, open_xmile};
+use simlin_formats::{open_vensim, open_xmile};
 
 /// Which decline this diagnostic reports, keyed off the message's own wording
 /// (the messages are the only channel `collect_all_diagnostics` exposes).

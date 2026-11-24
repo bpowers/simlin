@@ -7,6 +7,7 @@ members = [
     "src/simlin-cli",
     "src/simlin-diagram",
     "src/simlin-engine",
+    "src/simlin-formats",
     "src/simlin-mcp",
     "src/simlin-mcp-core",
     "src/simlin-tests",

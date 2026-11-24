@@ -24,7 +24,7 @@ use simlin_engine::db::{
     LtmEquation, SimlinDb, model_ltm_implicit_var_info, model_ltm_variables,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{open_vensim, open_xmile};
+use simlin_formats::{open_vensim, open_xmile};
 
 /// Extract the balanced-paren argument starting right after an opening paren.
 fn balanced_arg(text: &str) -> &str {

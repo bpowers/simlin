@@ -73,7 +73,7 @@ use simlin_engine::db::{
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{open_vensim, open_xmile};
+use simlin_formats::{open_vensim, open_xmile};
 
 /// Encode one score value as JSON, spelling a non-finite value explicitly
 /// (`"nan"` / `"inf"` / `"-inf"`) instead of letting `serde_json` collapse it

@@ -5,7 +5,7 @@
 /**
  * JSON-compatible types for the simlin patch API.
  *
- * These types match the Rust JSON types in src/simlin-engine/src/json.rs
+ * These types match the Rust JSON types in src/simlin-formats/src/json.rs
  * and are used for serializing patches to send to the simulation engine.
  */
 
@@ -33,7 +33,7 @@ export interface JsonGraphicalFunction {
 /**
  * External-data reference (Vensim GET DIRECT DATA / CONSTANTS / LOOKUPS /
  * SUBSCRIPT). Field names and the `kind` string values match the Rust
- * `json::JsonDataSource` serializer in src/simlin-engine/src/json.rs
+ * `json::JsonDataSource` serializer in src/simlin-formats/src/json.rs
  * (`#[serde(rename_all = "camelCase")]`; kind is one of
  * `data`/`constants`/`lookups`/`subscript`).
  */

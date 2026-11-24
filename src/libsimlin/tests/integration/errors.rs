@@ -340,7 +340,7 @@ unsafe fn any_detail_message_contains(all_errors: *const SimlinError, needle: &s
 #[test]
 fn test_get_errors_queue_model_reports_none() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -369,7 +369,7 @@ fn test_get_errors_queue_model_reports_none() {
 #[test]
 fn test_get_errors_conveyor_model_has_no_not_expanded() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -430,7 +430,7 @@ const CONVEYOR_IN_SUBMODEL_XMILE: &str = r#"<?xml version="1.0" encoding="utf-8"
 /// never a panic or a silent success).
 #[test]
 fn test_submodel_conveyor_surfaces_clear_error() {
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(
         CONVEYOR_IN_SUBMODEL_XMILE.as_bytes(),
     ))
     .expect("parse conveyor-in-submodel xmile");
@@ -848,7 +848,7 @@ fn test_get_errors_auto_flip_warning_has_warning_severity() {
 #[test]
 fn test_get_errors_surfaces_conveyor_ltm_degraded_warning_after_ltm_sim() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -903,7 +903,7 @@ fn test_get_errors_surfaces_conveyor_ltm_degraded_warning_after_ltm_sim() {
 #[test]
 fn test_get_errors_surfaces_queue_ltm_degraded_warning_after_ltm_sim() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -944,7 +944,7 @@ fn test_get_errors_surfaces_queue_ltm_degraded_warning_after_ltm_sim() {
 #[test]
 fn test_get_errors_no_conveyor_ltm_degraded_when_ltm_not_requested() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -1031,7 +1031,7 @@ fn test_get_errors_surfaces_conveyor_spec_warnings() {
     </variables>
   </model>
 </xmile>"#;
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse conveyor spec-warning fixture");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -1108,7 +1108,7 @@ fn test_conveyor_and_queue_ltm_sim_report_disabled_ltm_mode() {
             "queue",
         ),
     ] {
-        let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
             .unwrap_or_else(|_| panic!("parse {label} fixture"));
         let proj = open_project_from_datamodel(&datamodel);
 

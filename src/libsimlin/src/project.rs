@@ -8,8 +8,8 @@
 //! reference counting, querying models, and checking simulatability.
 
 use anyhow::{anyhow, Result};
-use simlin_engine::buffa::Message;
-use simlin_engine::serde as engine_serde;
+use simlin_formats::buffa::Message;
+use simlin_formats::serde as engine_serde;
 use std::ffi::{CStr, CString};
 use std::io::BufReader;
 use std::os::raw::c_char;
@@ -58,11 +58,12 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
         // crafted payload from amplifying into gigabytes, and real projects sit
         // far below it: C-LEARN, the largest model in the test corpus, needs
         // under a twentieth of it.
-        let pb_project =
-            simlin_engine::project_io::Project::decode_from_slice(slice).map_err(|decode_err| {
+        let pb_project = simlin_formats::project_io::Project::decode_from_slice(slice).map_err(
+            |decode_err| {
                 FfiError::new(SimlinErrorCode::ProtobufDecode)
                     .with_message(format!("failed to decode project protobuf: {decode_err}"))
-            })?;
+            },
+        )?;
 
         // Bytes that decode are not thereby a project: one that lacks what
         // every writer writes (an empty buffer, a truncated save) is refused
@@ -128,8 +129,8 @@ pub unsafe extern "C" fn simlin_project_open_json(
 
         let datamodel_project: simlin_base::datamodel::Project = match format {
             ffi::SimlinJsonFormat::Native => {
-                let json_project: simlin_engine::json::Project =
-                    simlin_engine::json::Project::from_reader(json_str.as_bytes()).map_err(
+                let json_project: simlin_formats::json::Project =
+                    simlin_formats::json::Project::from_reader(json_str.as_bytes()).map_err(
                         |engine_err: simlin_base::Error| {
                             FfiError::new(SimlinErrorCode::Generic)
                                 .with_message(engine_err.to_string())
@@ -138,13 +139,12 @@ pub unsafe extern "C" fn simlin_project_open_json(
                 json_project.into()
             }
             ffi::SimlinJsonFormat::Sdai => {
-                let sdai_model: simlin_engine::json_sdai::SdaiModel =
-                    simlin_engine::json_sdai::SdaiModel::from_reader(json_str.as_bytes()).map_err(
-                        |engine_err: simlin_base::Error| {
+                let sdai_model: simlin_formats::json_sdai::SdaiModel =
+                    simlin_formats::json_sdai::SdaiModel::from_reader(json_str.as_bytes())
+                        .map_err(|engine_err: simlin_base::Error| {
                             FfiError::new(SimlinErrorCode::Generic)
                                 .with_message(engine_err.to_string())
-                        },
-                    )?;
+                        })?;
                 sdai_model.into()
             }
         };
@@ -405,11 +405,11 @@ pub unsafe extern "C" fn simlin_project_get_dimensions(
 
     let project_ref = ffi_try!(out_error, require_project(project));
     let contents = project_ref.datamodel.lock().unwrap().shared();
-    let dimensions: Vec<simlin_engine::json::Dimension> = contents
+    let dimensions: Vec<simlin_formats::json::Dimension> = contents
         .dimensions
         .iter()
         .cloned()
-        .map(simlin_engine::json::Dimension::from)
+        .map(simlin_formats::json::Dimension::from)
         .collect();
     let bytes = match serde_json::to_vec(&dimensions) {
         Ok(bytes) => bytes,
@@ -803,7 +803,7 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     let slice = std::slice::from_raw_parts(data, len);
     let mut reader = BufReader::new(slice);
 
-    match simlin_engine::open_xmile(&mut reader) {
+    match simlin_formats::open_xmile(&mut reader) {
         Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
@@ -857,7 +857,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
         }
     };
 
-    match simlin_engine::open_vensim(contents) {
+    match simlin_formats::open_vensim(contents) {
         Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
@@ -980,11 +980,11 @@ pub unsafe extern "C" fn simlin_import_losses(
                 return;
             };
             #[cfg(feature = "file_io")]
-            let provider = data_dir.map(simlin_engine::FilesystemDataProvider::new);
+            let provider = data_dir.map(simlin_formats::FilesystemDataProvider::new);
             #[cfg(feature = "file_io")]
             let provider = provider
                 .as_ref()
-                .map(|provider| provider as &dyn simlin_engine::DataProvider);
+                .map(|provider| provider as &dyn simlin_formats::DataProvider);
             #[cfg(not(feature = "file_io"))]
             let provider = {
                 let _ = data_dir;
@@ -992,13 +992,13 @@ pub unsafe extern "C" fn simlin_import_losses(
             };
             (
                 "MDL",
-                simlin_engine::open_vensim_with_data_and_warnings(contents, provider)
+                simlin_formats::open_vensim_with_data_and_warnings(contents, provider)
                     .map(|(_, warnings)| warnings),
             )
         }
         Ok(ffi::SimlinSaveFormat::Xmile) => (
             "XMILE",
-            simlin_engine::open_xmile_with_warnings(&mut BufReader::new(slice))
+            simlin_formats::open_xmile_with_warnings(&mut BufReader::new(slice))
                 .map(|(_, warnings)| warnings),
         ),
         Ok(
@@ -1019,7 +1019,7 @@ pub unsafe extern "C" fn simlin_import_losses(
     };
     match read {
         Ok(warnings) => {
-            let summary = simlin_engine::ImportWarning::summary(&warnings);
+            let summary = simlin_formats::ImportWarning::summary(&warnings);
             store_warnings(
                 out_collected_errors,
                 &format!("{source} import"),
@@ -1082,7 +1082,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
     };
 
     let result = if data_dir.is_null() {
-        simlin_engine::open_vensim(contents)
+        simlin_formats::open_vensim(contents)
     } else {
         let dir_slice = std::slice::from_raw_parts(data_dir, data_dir_len);
         let dir_str = match std::str::from_utf8(dir_slice) {
@@ -1099,13 +1099,13 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
 
         #[cfg(feature = "file_io")]
         {
-            let provider = simlin_engine::FilesystemDataProvider::new(dir_str);
-            simlin_engine::open_vensim_with_data(contents, Some(&provider))
+            let provider = simlin_formats::FilesystemDataProvider::new(dir_str);
+            simlin_formats::open_vensim_with_data(contents, Some(&provider))
         }
         #[cfg(not(feature = "file_io"))]
         {
             let _ = dir_str;
-            simlin_engine::open_vensim(contents)
+            simlin_formats::open_vensim(contents)
         }
     };
 
@@ -1161,7 +1161,7 @@ pub unsafe extern "C" fn simlin_project_open_systems(
         }
     };
 
-    match simlin_engine::open_systems(contents) {
+    match simlin_formats::open_systems(contents) {
         Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(

@@ -7,29 +7,29 @@ use std::ptr;
 use std::sync::atomic::Ordering;
 
 use simlin::*;
-use simlin_engine::buffa::{Message, MessageField};
-use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
+use simlin_formats::buffa::{Message, MessageField};
+use simlin_formats::serde as engine_serde;
 
 use crate::common::{expect_error_code, expect_no_error, open_project_from_datamodel};
 
 #[test]
 fn test_project_lifecycle() {
     // Create a minimal valid protobuf project
-    let project = simlin_engine::project_io::Project {
+    let project = simlin_formats::project_io::Project {
         name: "test".to_string(),
-        sim_specs: MessageField::some(simlin_engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: MessageField::some(simlin_engine::project_io::Dt {
+            dt: MessageField::some(simlin_formats::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
             save_step: MessageField::none(),
-            sim_method: simlin_engine::project_io::SimMethod::Euler.into(),
+            sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
-        models: vec![simlin_engine::project_io::Model {
+        models: vec![simlin_formats::project_io::Model {
             name: "main".to_string(),
             variables: vec![],
             views: vec![],
@@ -67,11 +67,11 @@ fn test_project_lifecycle() {
 /// kind. Opening either is an error the host can show, not a panic.
 #[test]
 fn test_open_protobuf_refuses_a_message_that_is_not_a_project() {
-    let kindless_variable = simlin_engine::project_io::Project {
-        sim_specs: MessageField::some(simlin_engine::project_io::SimSpecs::default()),
-        models: vec![simlin_engine::project_io::Model {
+    let kindless_variable = simlin_formats::project_io::Project {
+        sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs::default()),
+        models: vec![simlin_formats::project_io::Model {
             name: "main".to_string(),
-            variables: vec![simlin_engine::project_io::Variable { v: None }],
+            variables: vec![simlin_formats::project_io::Variable { v: None }],
             ..Default::default()
         }],
         ..Default::default()
@@ -203,20 +203,20 @@ fn test_import_mdl() {
 #[test]
 fn test_project_add_model() {
     // Create a minimal project with just one model
-    let project = simlin_engine::project_io::Project {
+    let project = simlin_formats::project_io::Project {
         name: "test_project".to_string(),
-        sim_specs: MessageField::some(simlin_engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
             start: 0.0,
             stop: 100.0,
-            dt: MessageField::some(simlin_engine::project_io::Dt {
+            dt: MessageField::some(simlin_formats::project_io::Dt {
                 value: 0.25,
                 is_reciprocal: false,
             }),
             save_step: MessageField::none(),
-            sim_method: simlin_engine::project_io::SimMethod::Euler.into(),
+            sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
-        models: vec![simlin_engine::project_io::Model {
+        models: vec![simlin_formats::project_io::Model {
             name: "main".to_string(),
             variables: vec![],
             views: vec![],
@@ -378,17 +378,17 @@ fn test_project_add_model_null_safety() {
         simlin_error_free(err);
 
         // Create a valid project for other null tests
-        let project = simlin_engine::project_io::Project {
+        let project = simlin_formats::project_io::Project {
             name: "test".to_string(),
-            sim_specs: MessageField::some(simlin_engine::project_io::SimSpecs {
+            sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
                 start: 0.0,
                 stop: 10.0,
-                dt: MessageField::some(simlin_engine::project_io::Dt {
+                dt: MessageField::some(simlin_formats::project_io::Dt {
                     value: 1.0,
                     is_reciprocal: false,
                 }),
                 save_step: MessageField::none(),
-                sim_method: simlin_engine::project_io::SimMethod::Euler.into(),
+                sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
                 time_units: None,
             }),
             models: vec![],
@@ -752,7 +752,7 @@ fn test_is_simulatable_invalid_project() {
 #[test]
 fn test_is_simulatable_queue_model() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -771,7 +771,7 @@ fn test_is_simulatable_queue_model() {
 #[test]
 fn test_is_simulatable_conveyor_model() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -1113,31 +1113,31 @@ fn test_import_invalid_data() {
 #[test]
 fn test_error_api_with_valid_project() {
     // Create a project with intentional errors
-    let project = simlin_engine::project_io::Project {
+    let project = simlin_formats::project_io::Project {
         name: "test_errors".to_string(),
-        sim_specs: MessageField::some(simlin_engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: MessageField::some(simlin_engine::project_io::Dt {
+            dt: MessageField::some(simlin_formats::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
             save_step: MessageField::none(),
-            sim_method: simlin_engine::project_io::SimMethod::Euler.into(),
+            sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
-        models: vec![simlin_engine::project_io::Model {
+        models: vec![simlin_formats::project_io::Model {
             name: "main".to_string(),
             variables: vec![
                 // Variable with an equation error (unknown dependency)
-                simlin_engine::project_io::Variable {
-                    v: Some(simlin_engine::project_io::variable::V::Aux(
-                        simlin_engine::project_io::variable::Aux {
+                simlin_formats::project_io::Variable {
+                    v: Some(simlin_formats::project_io::variable::V::Aux(
+                        simlin_formats::project_io::variable::Aux {
                             ident: "error_var".to_string(),
-                            equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                            equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                                 equation: Some(
-                                    simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                        simlin_engine::project_io::variable::ScalarEquation {
+                                    simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                        simlin_formats::project_io::variable::ScalarEquation {
                                             equation: "unknown_var + 1".to_string(),
                                             initial_equation: None,
                                         },
@@ -1148,21 +1148,21 @@ fn test_error_api_with_valid_project() {
                             units: String::new(),
                             gf: MessageField::none(),
                             can_be_module_input: false,
-                            visibility: simlin_engine::project_io::variable::Visibility::Private.into(),
+                            visibility: simlin_formats::project_io::variable::Visibility::Private.into(),
                             uid: 0,
                             compat: MessageField::none(),
                         },
                     )),
                 },
                 // Variable with bad units
-                simlin_engine::project_io::Variable {
-                    v: Some(simlin_engine::project_io::variable::V::Aux(
-                        simlin_engine::project_io::variable::Aux {
+                simlin_formats::project_io::Variable {
+                    v: Some(simlin_formats::project_io::variable::V::Aux(
+                        simlin_formats::project_io::variable::Aux {
                             ident: "bad_units_var".to_string(),
-                            equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                            equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                                 equation: Some(
-                                    simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                        simlin_engine::project_io::variable::ScalarEquation {
+                                    simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                        simlin_formats::project_io::variable::ScalarEquation {
                                             equation: "1".to_string(),
                                             initial_equation: None,
                                         },
@@ -1173,7 +1173,7 @@ fn test_error_api_with_valid_project() {
                             units: "bad units here!!!".to_string(),
                             gf: MessageField::none(),
                             can_be_module_input: false,
-                            visibility: simlin_engine::project_io::variable::Visibility::Private.into(),
+                            visibility: simlin_formats::project_io::variable::Visibility::Private.into(),
                             uid: 0,
                             compat: MessageField::none(),
                         },
@@ -1248,31 +1248,31 @@ fn test_error_api_with_valid_project() {
 #[test]
 fn test_error_api_with_compilation_errors() {
     // Create a project with compilation errors
-    let project = simlin_engine::project_io::Project {
+    let project = simlin_formats::project_io::Project {
         name: "test_compilation_errors".to_string(),
-        sim_specs: MessageField::some(simlin_engine::project_io::SimSpecs {
+        sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: MessageField::some(simlin_engine::project_io::Dt {
+            dt: MessageField::some(simlin_formats::project_io::Dt {
                 value: 1.0,
                 is_reciprocal: false,
             }),
             save_step: MessageField::none(),
-            sim_method: simlin_engine::project_io::SimMethod::Euler.into(),
+            sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
             time_units: None,
         }),
-        models: vec![simlin_engine::project_io::Model {
+        models: vec![simlin_formats::project_io::Model {
             name: "main".to_string(),
             variables: vec![
                 // This will cause a compilation error - circular reference
-                simlin_engine::project_io::Variable {
-                    v: Some(simlin_engine::project_io::variable::V::Aux(
-                        simlin_engine::project_io::variable::Aux {
+                simlin_formats::project_io::Variable {
+                    v: Some(simlin_formats::project_io::variable::V::Aux(
+                        simlin_formats::project_io::variable::Aux {
                             ident: "a".to_string(),
-                            equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                            equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                                 equation: Some(
-                                    simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                        simlin_engine::project_io::variable::ScalarEquation {
+                                    simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                        simlin_formats::project_io::variable::ScalarEquation {
                                             equation: "b + 1".to_string(),
                                             initial_equation: None,
                                         },
@@ -1283,20 +1283,20 @@ fn test_error_api_with_compilation_errors() {
                             units: String::new(),
                             gf: MessageField::none(),
                             can_be_module_input: false,
-                            visibility: simlin_engine::project_io::variable::Visibility::Private.into(),
+                            visibility: simlin_formats::project_io::variable::Visibility::Private.into(),
                             uid: 0,
                             compat: MessageField::none(),
                         },
                     )),
                 },
-                simlin_engine::project_io::Variable {
-                    v: Some(simlin_engine::project_io::variable::V::Aux(
-                        simlin_engine::project_io::variable::Aux {
+                simlin_formats::project_io::Variable {
+                    v: Some(simlin_formats::project_io::variable::V::Aux(
+                        simlin_formats::project_io::variable::Aux {
                             ident: "b".to_string(),
-                            equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                            equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                                 equation: Some(
-                                    simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                        simlin_engine::project_io::variable::ScalarEquation {
+                                    simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                        simlin_formats::project_io::variable::ScalarEquation {
                                             equation: "a + 1".to_string(),
                                             initial_equation: None,
                                         },
@@ -1307,7 +1307,7 @@ fn test_error_api_with_compilation_errors() {
                             units: String::new(),
                             gf: MessageField::none(),
                             can_be_module_input: false,
-                            visibility: simlin_engine::project_io::variable::Visibility::Private.into(),
+                            visibility: simlin_formats::project_io::variable::Visibility::Private.into(),
                             uid: 0,
                             compat: MessageField::none(),
                         },
@@ -1369,29 +1369,29 @@ fn test_error_api_with_compilation_errors() {
 fn test_error_api_no_errors() {
     // Create a valid project with no errors
     let project =
-        simlin_engine::project_io::Project {
+        simlin_formats::project_io::Project {
             name: "test_no_errors".to_string(),
-            sim_specs: MessageField::some(simlin_engine::project_io::SimSpecs {
+            sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
                 start: 0.0,
                 stop: 10.0,
-                dt: MessageField::some(simlin_engine::project_io::Dt {
+                dt: MessageField::some(simlin_formats::project_io::Dt {
                     value: 1.0,
                     is_reciprocal: false,
                 }),
                 save_step: MessageField::none(),
-                sim_method: simlin_engine::project_io::SimMethod::Euler.into(),
+                sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
                 time_units: None,
             }),
-            models: vec![simlin_engine::project_io::Model {
+            models: vec![simlin_formats::project_io::Model {
                 name: "main".to_string(),
-                variables: vec![simlin_engine::project_io::Variable {
-                v: Some(simlin_engine::project_io::variable::V::Aux(
-                    simlin_engine::project_io::variable::Aux {
+                variables: vec![simlin_formats::project_io::Variable {
+                v: Some(simlin_formats::project_io::variable::V::Aux(
+                    simlin_formats::project_io::variable::Aux {
                         ident: "time_var".to_string(),
-                        equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                        equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                             equation: Some(
-                                simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                    simlin_engine::project_io::variable::ScalarEquation {
+                                simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                    simlin_formats::project_io::variable::ScalarEquation {
                                         equation: "time".to_string(),
                                         initial_equation: None,
                                     },
@@ -1402,7 +1402,7 @@ fn test_error_api_no_errors() {
                         units: String::new(),
                         gf: MessageField::none(),
                         can_be_module_input: false,
-                        visibility: simlin_engine::project_io::variable::Visibility::Private.into(),
+                        visibility: simlin_formats::project_io::variable::Visibility::Private.into(),
                         uid: 0,
                         compat: MessageField::none(),
                     },
@@ -1442,29 +1442,29 @@ fn test_get_errors_repeated_calls_reuse_sync_state() {
     // reuses the persistent sync state rather than creating fresh
     // salsa inputs on every call (which would cause unbounded DB growth).
     let project =
-        simlin_engine::project_io::Project {
+        simlin_formats::project_io::Project {
             name: "repeated_errors".to_string(),
-            sim_specs: MessageField::some(simlin_engine::project_io::SimSpecs {
+            sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
                 start: 0.0,
                 stop: 10.0,
-                dt: MessageField::some(simlin_engine::project_io::Dt {
+                dt: MessageField::some(simlin_formats::project_io::Dt {
                     value: 1.0,
                     is_reciprocal: false,
                 }),
                 save_step: MessageField::none(),
-                sim_method: simlin_engine::project_io::SimMethod::Euler.into(),
+                sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
                 time_units: None,
             }),
-            models: vec![simlin_engine::project_io::Model {
+            models: vec![simlin_formats::project_io::Model {
                 name: "main".to_string(),
-                variables: vec![simlin_engine::project_io::Variable {
-                v: Some(simlin_engine::project_io::variable::V::Aux(
-                    simlin_engine::project_io::variable::Aux {
+                variables: vec![simlin_formats::project_io::Variable {
+                v: Some(simlin_formats::project_io::variable::V::Aux(
+                    simlin_formats::project_io::variable::Aux {
                         ident: "x".to_string(),
-                        equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                        equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                             equation: Some(
-                                simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                    simlin_engine::project_io::variable::ScalarEquation {
+                                simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                    simlin_formats::project_io::variable::ScalarEquation {
                                         equation: "unknown_ref".to_string(),
                                         initial_equation: None,
                                     },
@@ -1475,7 +1475,7 @@ fn test_get_errors_repeated_calls_reuse_sync_state() {
                         units: String::new(),
                         gf: MessageField::none(),
                         can_be_module_input: false,
-                        visibility: simlin_engine::project_io::variable::Visibility::Private.into(),
+                        visibility: simlin_formats::project_io::variable::Visibility::Private.into(),
                         uid: 0,
                         compat: MessageField::none(),
                     },
@@ -1531,29 +1531,29 @@ fn test_error_api_null_safety() {
 fn test_error_offsets() {
     // Create a project with an error at a specific location
     let project =
-        simlin_engine::project_io::Project {
+        simlin_formats::project_io::Project {
             name: "test_offsets".to_string(),
-            sim_specs: MessageField::some(simlin_engine::project_io::SimSpecs {
+            sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
                 start: 0.0,
                 stop: 10.0,
-                dt: MessageField::some(simlin_engine::project_io::Dt {
+                dt: MessageField::some(simlin_formats::project_io::Dt {
                     value: 1.0,
                     is_reciprocal: false,
                 }),
                 save_step: MessageField::none(),
-                sim_method: simlin_engine::project_io::SimMethod::Euler.into(),
+                sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
                 time_units: None,
             }),
-            models: vec![simlin_engine::project_io::Model {
+            models: vec![simlin_formats::project_io::Model {
                 name: "main".to_string(),
-                variables: vec![simlin_engine::project_io::Variable {
-                v: Some(simlin_engine::project_io::variable::V::Aux(
-                    simlin_engine::project_io::variable::Aux {
+                variables: vec![simlin_formats::project_io::Variable {
+                v: Some(simlin_formats::project_io::variable::V::Aux(
+                    simlin_formats::project_io::variable::Aux {
                         ident: "var_with_offset_error".to_string(),
-                        equation: MessageField::some(simlin_engine::project_io::variable::Equation {
+                        equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                             equation: Some(
-                                simlin_engine::project_io::variable::equation::Equation::Scalar(
-                                    simlin_engine::project_io::variable::ScalarEquation {
+                                simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                    simlin_formats::project_io::variable::ScalarEquation {
                                         equation: "1 + unknown_var_here".to_string(),
                                         initial_equation: None,
                                     },
@@ -1564,7 +1564,7 @@ fn test_error_offsets() {
                         units: String::new(),
                         gf: MessageField::none(),
                         can_be_module_input: false,
-                        visibility: simlin_engine::project_io::variable::Visibility::Private.into(),
+                        visibility: simlin_formats::project_io::variable::Visibility::Private.into(),
                         uid: 0,
                         compat: MessageField::none(),
                     },
@@ -1714,7 +1714,7 @@ fn test_stdlib_models_present_after_json_open() {
         assert!(!pb_buf.is_null());
 
         let pb_bytes = std::slice::from_raw_parts(pb_buf, pb_len);
-        let pb_project = simlin_engine::project_io::Project::decode_from_slice(pb_bytes)
+        let pb_project = simlin_formats::project_io::Project::decode_from_slice(pb_bytes)
             .expect("protobuf decode failed");
         let pb_model_names: Vec<&str> = pb_project.models.iter().map(|m| m.name.as_str()).collect();
         assert!(
@@ -1791,7 +1791,7 @@ unsafe fn warning_reasons(collected: *mut SimlinError, source: &str) -> Vec<Stri
 fn import_losses_reports_what_a_vensim_file_holds_that_a_project_does_not_keep() {
     let data = std::fs::read("testdata/SIR.mdl").expect("SIR.mdl fixture must exist");
     let text = std::str::from_utf8(&data).unwrap();
-    let (_, expected) = simlin_engine::open_vensim_with_warnings(text).unwrap();
+    let (_, expected) = simlin_formats::open_vensim_with_warnings(text).unwrap();
     assert!(
         !expected.is_empty(),
         "SIR.mdl's loop markers and their labels are comments the reader does not keep"
@@ -1799,7 +1799,7 @@ fn import_losses_reports_what_a_vensim_file_holds_that_a_project_does_not_keep()
 
     unsafe {
         let collected = import_losses(SimlinSaveFormat::Mdl as u32, &data).expect("the report");
-        let summary = simlin_engine::ImportWarning::summary(&expected).unwrap();
+        let summary = simlin_formats::ImportWarning::summary(&expected).unwrap();
         assert_eq!(
             CStr::from_ptr(simlin_error_get_message(collected)).to_str(),
             Ok(summary.as_str())
@@ -1846,8 +1846,8 @@ fn import_losses_of_a_file_with_data_references_reads_its_data() {
     let data =
         std::fs::read(format!("{dir}/test_get_data.mdl")).expect("the get_data fixture must exist");
     let text = std::str::from_utf8(&data).unwrap();
-    let provider = simlin_engine::FilesystemDataProvider::new(dir);
-    let (_, expected) = simlin_engine::open_vensim_with_data_and_warnings(text, Some(&provider))
+    let provider = simlin_formats::FilesystemDataProvider::new(dir);
+    let (_, expected) = simlin_formats::open_vensim_with_data_and_warnings(text, Some(&provider))
         .expect("the file opens with its data");
 
     unsafe {

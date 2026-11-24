@@ -29,15 +29,15 @@ SAVEPER = TIME STEP ~~|
 ";
 
 fn mdl(source: &str) -> Project {
-    crate::compat::open_vensim(source).expect("the model reads")
+    simlin_formats::compat::open_vensim(source).expect("the model reads")
 }
 
 fn corpus_file(path: &str) -> Project {
     let bytes = std::fs::read(format!("../../{path}")).expect("the corpus file reads");
     if path.ends_with(".mdl") {
-        crate::compat::open_vensim(std::str::from_utf8(&bytes).unwrap()).expect("it opens")
+        simlin_formats::compat::open_vensim(std::str::from_utf8(&bytes).unwrap()).expect("it opens")
     } else {
-        crate::compat::open_xmile(&mut BufReader::new(bytes.as_slice())).expect("it opens")
+        simlin_formats::compat::open_xmile(&mut BufReader::new(bytes.as_slice())).expect("it opens")
     }
 }
 
@@ -57,7 +57,8 @@ fn xmile_with(variables: &str, specs: &str) -> Project {
 <sim_specs>{specs}</sim_specs>
 <model><variables>{variables}</variables></model></xmile>"#
     );
-    crate::compat::open_xmile(&mut BufReader::new(text.as_bytes())).expect("the model reads")
+    simlin_formats::compat::open_xmile(&mut BufReader::new(text.as_bytes()))
+        .expect("the model reads")
 }
 
 fn reasons(changes: &[MeaningChange]) -> Vec<&str> {
@@ -832,7 +833,8 @@ fn the_run_names_a_variable_whatever_its_name_holds() {
 <dimensions><dim name="d"><elem name="e1"/><elem name="e2"/></dim></dimensions>
 <model><variables><aux name="{name}">{over}<eqn>{value}</eqn></aux><aux name="other"><eqn>5</eqn></aux></variables></model></xmile>"#
         );
-        crate::compat::open_xmile(&mut BufReader::new(text.as_bytes())).expect("the model reads")
+        simlin_formats::compat::open_xmile(&mut BufReader::new(text.as_bytes()))
+            .expect("the model reads")
     };
     // (the name as written, whether it is arrayed, its canonical ident)
     let rows = [

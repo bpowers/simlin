@@ -678,7 +678,7 @@ fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
     }
 
     const SIR: &str = include_str!("../../../../test/test-models/samples/SIR/SIR.xmile");
-    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(SIR.as_bytes()))
+    let project = simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(SIR.as_bytes()))
         .expect("SIR imports");
     let (infectious_in, mut infectious_out) = stock_lists(&project, "infectious");
     let (mut susceptible_in, susceptible_out) = stock_lists(&project, "susceptible");
@@ -704,7 +704,7 @@ fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
     assert_slot_keeps_spacing(&new, "relapse", row);
 
     const MARK2: &str = include_str!("../../../../test/bobby/vdf/econ/mark2.mdl");
-    let project = crate::compat::open_vensim(MARK2).expect("mark2 imports");
+    let project = simlin_formats::compat::open_vensim(MARK2).expect("mark2 imports");
     let (inflows, mut outflows) = stock_lists(&project, "risk_taking_behavior");
     outflows.push("probe_a".to_string());
     outflows.push("probe_b".to_string());
@@ -830,8 +830,9 @@ fn a_flow_created_between_offset_stocks_keeps_its_spacing() {
         let text = XML
             .replace("STOCK_B_Y", &(100 + offset).to_string())
             .replace("F1_Y", &line.to_string());
-        let project = crate::compat::open_xmile(&mut std::io::BufReader::new(text.as_bytes()))
-            .expect("the view imports");
+        let project =
+            simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(text.as_bytes()))
+                .expect("the view imports");
         let model_name = project.models[0].name.clone();
         let datamodel::View::StockFlow(old) = &project.models[0].views[0];
         let mut patched = project.clone();

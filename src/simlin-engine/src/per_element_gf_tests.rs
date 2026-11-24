@@ -596,7 +596,8 @@ FINAL TIME = 1 ~~|
 SAVEPER = 1 ~~|
 TIME STEP = 1 ~~|
 ";
-    let project = crate::open_vensim(mdl).expect("MDL should parse to a datamodel project");
+    let project =
+        simlin_formats::open_vensim(mdl).expect("MDL should parse to a datamodel project");
     let values = simulate_out(&project);
     let get = |elem: &str| {
         *values
@@ -1244,7 +1245,7 @@ fn array_slice_model(equation: &str) -> datamodel::Project {
 }
 
 fn probe_mdl(body: &str) -> datamodel::Project {
-    crate::open_vensim(&format!("{{UTF-8}}\n{body}{BARE_TABLE_SIM_SPECS}"))
+    simlin_formats::open_vensim(&format!("{{UTF-8}}\n{body}{BARE_TABLE_SIM_SPECS}"))
         .expect("the probe MDL parses")
 }
 

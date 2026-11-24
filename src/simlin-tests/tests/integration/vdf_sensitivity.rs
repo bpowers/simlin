@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use simlin_engine::vdf::{
+use simlin_formats::vdf::{
     VDF_SECTION6_OT_CODE_TIME, VDF_SENSITIVITY_FILE_MAGIC, VdfBlockGrid, VdfFile, VdfKind,
     is_owner_ot_class_code, probe_vdf_kind, read_u16,
 };

@@ -850,9 +850,9 @@ fn corpus_run(path: &str) -> simlin_base::results::Results {
     let full = format!("{}/../../test/{path}", env!("CARGO_MANIFEST_DIR"));
     let contents = std::fs::read_to_string(&full).unwrap_or_else(|err| panic!("{full}: {err}"));
     let project = if path.ends_with(".mdl") {
-        crate::compat::open_vensim(&contents)
+        simlin_formats::compat::open_vensim(&contents)
     } else {
-        crate::compat::open_xmile(&mut std::io::BufReader::new(contents.as_bytes()))
+        simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(contents.as_bytes()))
     }
     .expect("the model opens");
     let mut db = crate::db::SimlinDb::default();

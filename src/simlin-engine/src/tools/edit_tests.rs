@@ -994,7 +994,8 @@ fn an_agents_edit_records_its_provenance_and_stays_its_own() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../test/ai-information/GeneratedByAIThenEdited.stmx");
     let file = std::fs::File::open(path).expect("the model is in the corpus");
-    let project = crate::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap();
+    let project =
+        simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap();
     let mut host = Host::new(project);
     let state = |host: &Host, name: &str| {
         host.project.models[0]
@@ -1068,7 +1069,7 @@ fn a_structural_edit_keeps_what_a_vensim_writer_needs_of_the_view() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../test/test-models/samples/SIR/SIR.mdl");
     let mdl = std::fs::read_to_string(path).expect("the model is in the corpus");
-    let mut project = crate::compat::open_vensim(&mdl).unwrap();
+    let mut project = simlin_formats::compat::open_vensim(&mdl).unwrap();
     let view = |p: &datamodel::Project| {
         let datamodel::View::StockFlow(view) = &p.models[0].views[0];
         (view.font.clone(), view.sketch_compat.clone())
@@ -1125,10 +1126,10 @@ pub(super) fn corpus(path: &str) -> datamodel::Project {
         .join(path);
     if path.ends_with(".mdl") {
         let mdl = std::fs::read_to_string(&full).expect("the model is in the corpus");
-        crate::compat::open_vensim(&mdl).unwrap()
+        simlin_formats::compat::open_vensim(&mdl).unwrap()
     } else {
         let file = std::fs::File::open(&full).expect("the model is in the corpus");
-        crate::compat::open_xmile(&mut std::io::BufReader::new(file)).unwrap()
+        simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(file)).unwrap()
     }
 }
 
@@ -3535,7 +3536,8 @@ fn an_edit_that_changes_no_record_marks_nothing_and_draws_nothing() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../test/ai-information/GeneratedByAIThenEdited.stmx");
     let file = std::fs::File::open(path).expect("the model is in the corpus");
-    let project = crate::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap();
+    let project =
+        simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap();
     let viewless = crate::test_common::TestProject::new("viewless")
         .with_sim_time(0.0, 4.0, 1.0)
         .stock("level", "10", &["inflow"], &[], None)

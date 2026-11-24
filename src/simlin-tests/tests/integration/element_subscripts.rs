@@ -22,11 +22,12 @@ use std::collections::HashMap;
 
 use simlin_base::Results;
 use simlin_base::common::ErrorCode;
+use simlin_engine::Vm;
 use simlin_engine::db::{
     DiagnosticError, LtmOverlay, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{Vm, json};
+use simlin_formats::json;
 
 /// The `sliced_sum` model as Simlin JSON, with the stock's six per-element
 /// subscripts spelled by `subscript`.
@@ -356,7 +357,7 @@ fn an_xmile_element_with_neither_equation_nor_gf_is_reported() {
     <aux name="reads_v"><eqn>v[b]</eqn></aux>
   </variables></model>
 </xmile>"#;
-    let project = simlin_engine::compat::open_xmile(&mut xmile.as_bytes()).expect("XMILE parses");
+    let project = simlin_formats::compat::open_xmile(&mut xmile.as_bytes()).expect("XMILE parses");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     let diagnostics = collect_all_diagnostics(&db, sync.project, LtmOverlay::Off);

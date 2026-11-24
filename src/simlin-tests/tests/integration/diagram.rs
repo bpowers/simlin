@@ -17,7 +17,7 @@ fn load_xmile_project(path: &str) -> datamodel::Project {
         panic!("failed to open {}: {}", path, e);
     });
     let mut reader = std::io::BufReader::new(file);
-    simlin_engine::open_xmile(&mut reader).unwrap_or_else(|e| {
+    simlin_formats::open_xmile(&mut reader).unwrap_or_else(|e| {
         panic!("failed to parse {}: {}", path, e);
     })
 }

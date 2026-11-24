@@ -4350,9 +4350,9 @@ mod rank_tests {
     use crate::db::{
         DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
     };
-    use crate::open_vensim;
     use crate::test_common::TestProject;
     use simlin_base::common::ErrorCode;
+    use simlin_formats::open_vensim;
 
     fn assert_bad_rank_arity(project: &TestProject, var_name: &str) {
         let datamodel = project.build_datamodel();
@@ -4644,7 +4644,7 @@ TIME STEP = 1 ~~|
 #[cfg(test)]
 mod group_mapped_temp_arg_tests {
     use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-    use crate::open_vensim;
+    use simlin_formats::open_vensim;
 
     /// A minimized C-LEARN shape: `Aggregated Regions -> (COP: ...subgroups...)`
     /// is a heterogeneous group mapping (one source element maps to a
@@ -4797,7 +4797,7 @@ TIME STEP = 1 ~~|
 #[cfg(test)]
 mod arrayed_gf_in_reducer_tests {
     use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-    use crate::open_vensim;
+    use simlin_formats::open_vensim;
 
     /// `g[D]` is a genuine per-element arrayed graphical function (three
     /// distinct tables); `drive = Time` is strictly non-constant; `total =

@@ -12,7 +12,7 @@ use simlin_engine::Vm;
 use simlin_engine::db::{
     SimlinDb, compile_project_incremental, sync_from_datamodel, sync_from_datamodel_incremental,
 };
-use simlin_engine::load_csv;
+use simlin_formats::load_csv;
 
 use crate::test_helpers::{WasmRunOutcome, ensure_results, ensure_wasm_matches};
 
@@ -41,9 +41,9 @@ fn simulate_systems_file(txt_path: &str, csv_path: &str, rounds: u64) {
 
     let contents = std::fs::read_to_string(txt_path)
         .unwrap_or_else(|e| panic!("failed to read {txt_path}: {e}"));
-    let systems_model = simlin_engine::systems::parse(&contents)
+    let systems_model = simlin_formats::systems::parse(&contents)
         .unwrap_or_else(|e| panic!("failed to parse {txt_path}: {e}"));
-    let datamodel_project = simlin_engine::systems::translate::translate(&systems_model, rounds)
+    let datamodel_project = simlin_formats::systems::translate::translate(&systems_model, rounds)
         .unwrap_or_else(|e| panic!("failed to translate {txt_path}: {e}"));
 
     let expected =
@@ -92,11 +92,11 @@ fn wasm_systems_outcome_for_path(path: &str, rounds: u64) -> WasmRunOutcome {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return WasmRunOutcome::Skipped(format!("could not read {path}"));
     };
-    let systems_model = match simlin_engine::systems::parse(&contents) {
+    let systems_model = match simlin_formats::systems::parse(&contents) {
         Ok(m) => m,
         Err(e) => return WasmRunOutcome::Skipped(format!("parse failed: {e}")),
     };
-    let datamodel = match simlin_engine::systems::translate::translate(&systems_model, rounds) {
+    let datamodel = match simlin_formats::systems::translate::translate(&systems_model, rounds) {
         Ok(p) => p,
         Err(e) => return WasmRunOutcome::Skipped(format!("translate failed: {e}")),
     };
@@ -265,9 +265,9 @@ fn assert_systems_model_compiles(txt_path: &str, rounds: u64) {
 
     let contents = std::fs::read_to_string(txt_path)
         .unwrap_or_else(|e| panic!("failed to read {txt_path}: {e}"));
-    let systems_model = simlin_engine::systems::parse(&contents)
+    let systems_model = simlin_formats::systems::parse(&contents)
         .unwrap_or_else(|e| panic!("failed to parse {txt_path}: {e}"));
-    let datamodel_project = simlin_engine::systems::translate::translate(&systems_model, rounds)
+    let datamodel_project = simlin_formats::systems::translate::translate(&systems_model, rounds)
         .unwrap_or_else(|e| panic!("failed to translate {txt_path}: {e}"));
 
     let db = SimlinDb::default();
@@ -316,9 +316,9 @@ fn all_valid_models_compile_cleanly() {
 #[test]
 fn visible_stocks_excludes_infinite_preserves_order() {
     let contents = std::fs::read_to_string("../../test/systems-format/hiring.txt").unwrap();
-    let systems_model = simlin_engine::systems::parse(&contents).unwrap();
+    let systems_model = simlin_formats::systems::parse(&contents).unwrap();
 
-    let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
+    let visible = simlin_formats::systems::translate::visible_stocks(&systems_model);
 
     // hiring.txt has 8 stocks: Candidates (infinite), PhoneScreens, Onsites,
     // Offers, Hires, Employees, Departures, Departed (infinite).
@@ -363,9 +363,9 @@ fn visible_stocks_excludes_infinite_preserves_order() {
 #[test]
 fn visible_stocks_all_when_no_infinite() {
     let contents = std::fs::read_to_string("../../test/systems-format/formula_deps.txt").unwrap();
-    let systems_model = simlin_engine::systems::parse(&contents).unwrap();
+    let systems_model = simlin_formats::systems::parse(&contents).unwrap();
 
-    let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
+    let visible = simlin_formats::systems::translate::visible_stocks(&systems_model);
     assert_eq!(visible.len(), 4);
 }
 
@@ -376,9 +376,9 @@ fn visible_stocks_all_when_no_infinite() {
 #[test]
 fn visible_stocks_includes_inf_initial() {
     let contents = "A(inf) > B @ 5\nB > C @ 3";
-    let systems_model = simlin_engine::systems::parse(contents).unwrap();
+    let systems_model = simlin_formats::systems::parse(contents).unwrap();
 
-    let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
+    let visible = simlin_formats::systems::translate::visible_stocks(&systems_model);
     let names: Vec<&str> = visible.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, &["A", "B", "C"]);
 }
@@ -390,7 +390,7 @@ fn open_systems_entry_point_works() {
     for path in ALL_VALID_MODELS {
         let contents =
             std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-        let project = simlin_engine::open_systems(&contents)
+        let project = simlin_formats::open_systems(&contents)
             .unwrap_or_else(|e| panic!("open_systems failed for {path}: {e}"));
 
         let db = SimlinDb::default();

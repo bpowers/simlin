@@ -254,7 +254,7 @@ fn an_xmile_internal_module_reference_compiles_and_binds_nothing() {
 <aux name="output"><eqn>input + 1</eqn></aux>
 </variables></model>
 </xmile>"#;
-    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let project = simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("the fixture is well-formed XMILE");
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);

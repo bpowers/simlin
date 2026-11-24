@@ -697,7 +697,7 @@ fn gf_fixture(consumers: &str) -> TestProject {
          SAVEPER = 1 ~~|\n\
          TIME STEP = 1 ~~|\n"
     );
-    TestProject::from_datamodel(crate::open_vensim(&mdl).expect("the fixture MDL parses"))
+    TestProject::from_datamodel(simlin_formats::open_vensim(&mdl).expect("the fixture MDL parses"))
 }
 
 /// `LOOKUP(g, Time)` over the three-element table holder takes a temp of its

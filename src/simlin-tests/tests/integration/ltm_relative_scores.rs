@@ -24,7 +24,8 @@ use simlin_engine::db::{
     sync_from_datamodel_incremental,
 };
 use simlin_engine::indexmap::IndexMap;
-use simlin_engine::{Vm, ltm_post, xmile};
+use simlin_engine::{Vm, ltm_post};
+use simlin_formats::xmile;
 
 fn load_xmile_model(path: &str) -> simlin_base::datamodel::Project {
     let f = File::open(path).unwrap_or_else(|e| panic!("failed to open {path}: {e}"));

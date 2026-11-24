@@ -30,7 +30,7 @@ const LINK: i32 = 5;
 /// variable the diagram does not draw, loaded through the production JSON
 /// conversion.
 fn project() -> *mut SimlinProject {
-    let project: simlin_engine::json::Project = serde_json::from_value(json!({
+    let project: simlin_formats::json::Project = serde_json::from_value(json!({
         "name": "editing",
         "simSpecs": {"startTime": 0.0, "endTime": 10.0, "dt": "1"},
         "models": [{

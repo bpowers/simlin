@@ -44,7 +44,8 @@ const EPS: f64 = 1e-9;
 // ── drivers ──────────────────────────────────────────────────────────────────
 
 fn parse(xml: &str) -> simlin_base::datamodel::Project {
-    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("parse xmile")
+    simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+        .expect("parse xmile")
 }
 
 /// Lower a conveyor model through the PUBLIC datamodel entry point. Since GH #924

@@ -941,7 +941,7 @@ impl TestProject {
 
 /// Extract variable timeseries from simulation results, including
 /// aggregated base-name entries for arrayed variables.
-pub(crate) fn collect_results(results: &simlin_base::Results) -> HashMap<String, Vec<f64>> {
+pub fn collect_results(results: &simlin_base::Results) -> HashMap<String, Vec<f64>> {
     let mut output: HashMap<String, Vec<f64>> = HashMap::new();
 
     for (name, &offset) in &results.offsets {

@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use simlin_engine::vdf::{VdfBlockGrid, VdfFile, read_u16};
+use simlin_formats::vdf::{VdfBlockGrid, VdfFile, read_u16};
 
 fn vdf_file(path: &str) -> VdfFile {
     let data = std::fs::read(path).unwrap_or_else(|err| panic!("{path}: read: {err}"));

@@ -341,9 +341,9 @@ fn corpus_model(path: &str) -> datamodel::Project {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
     let text = std::fs::read_to_string(&path).expect("the corpus model is present");
     if path.extension().is_some_and(|e| e == "mdl") {
-        crate::compat::open_vensim(&text).expect("the corpus model parses")
+        simlin_formats::compat::open_vensim(&text).expect("the corpus model parses")
     } else {
-        crate::open_xmile(&mut std::io::BufReader::new(text.as_bytes()))
+        simlin_formats::open_xmile(&mut std::io::BufReader::new(text.as_bytes()))
             .expect("the corpus model parses")
     }
 }
@@ -2141,9 +2141,9 @@ fn every_corpus_models_loop_analysis_agrees_with_its_scores_and_structure() {
         // The sweep is of the analysis, not of the importers.
         let project = std::panic::catch_unwind(|| {
             if is_mdl {
-                crate::compat::open_vensim(&String::from_utf8_lossy(&bytes)).ok()
+                simlin_formats::compat::open_vensim(&String::from_utf8_lossy(&bytes)).ok()
             } else {
-                crate::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..])).ok()
+                simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..])).ok()
             }
         })
         .ok()
@@ -2199,7 +2199,7 @@ fn a_model_with_a_conveyor_says_its_loops_through_it_are_not_analyzed() {
     <stock name="Alumni"><eqn>10</eqn><inflow>graduating</inflow></stock>
   </variables></model>
 </xmile>"#;
-    let project = crate::open_xmile(&mut std::io::BufReader::new(xml.as_bytes())).unwrap();
+    let project = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes())).unwrap();
     let mut host = Host::new(project);
     let mut session = Session::new("main");
     let output = analyze(&mut host, &mut session, json!({}));

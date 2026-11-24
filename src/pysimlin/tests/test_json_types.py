@@ -5,7 +5,7 @@ These tests ensure:
    variable types (simlin.types) and the wire/patch types (simlin.json_types)
 2. Schema compliance (generated JSON validates against docs/simlin-project.schema.json)
 3. Exact wire-format fidelity against dicts matching what the Rust
-   serializer in src/simlin-engine/src/json.rs emits
+   serializer in src/simlin-formats/src/json.rs emits
 """
 
 import json
@@ -701,7 +701,7 @@ class TestCompatConveyorWireFormat:
     """Wire-format round-trip tests for the conveyor/queue Compat fields.
 
     The input dicts below match byte-for-byte what the Rust serializer in
-    src/simlin-engine/src/json.rs emits (camelCase keys, skip-if-None /
+    src/simlin-formats/src/json.rs emits (camelCase keys, skip-if-None /
     skip-if-false omission).  Each test structures the JSON into the unified
     dataclass, unstructures it back, and asserts the output equals the input
     exactly -- so absent fields stay absent (no spurious nulls) and no field
@@ -973,7 +973,7 @@ class TestElementLevelCompat:
     """Element-level compat carries ACTIVE INITIAL only.
 
     The engine deliberately reads nothing else from an element's compat
-    (src/simlin-engine/src/json.rs, ElementEquation: "Per-element compat
+    (src/simlin-formats/src/json.rs, ElementEquation: "Per-element compat
     carries active_initial ONLY ... other fields hand-authored here are
     tolerated by serde and dropped"), so the unified ElementEquation models
     exactly that field.

@@ -20,7 +20,7 @@ use simlin_base::datamodel;
 use simlin_engine::db::{SimlinDb, model_ltm_variables, sync_from_datamodel_incremental};
 use simlin_engine::ltm_finding::{self, FoundLoop};
 use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_datamodel_to_artifact};
-use simlin_engine::xmile;
+use simlin_formats::xmile;
 
 use crate::test_helpers::{
     LTM_SERIES_TOLERANCE, assert_ltm_slabs_match, ltm_discovery_inputs, vm_results_for_ltm,
@@ -744,7 +744,7 @@ fn discovery_clearn_matches_vm_wasm() {
     let path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let mdl =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-    let project = simlin_engine::open_vensim(&mdl)
+    let project = simlin_formats::open_vensim(&mdl)
         .unwrap_or_else(|e| panic!("open_vensim should parse C-LEARN: {e:?}"));
     discovery_matches_helper(&project, path);
 }
@@ -764,7 +764,7 @@ fn discovery_world3_matches_vm_wasm() {
     let path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
     let mdl =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-    let project = simlin_engine::open_vensim(&mdl)
+    let project = simlin_formats::open_vensim(&mdl)
         .unwrap_or_else(|e| panic!("open_vensim should parse World3: {e:?}"));
     discovery_matches_helper(&project, path);
 }

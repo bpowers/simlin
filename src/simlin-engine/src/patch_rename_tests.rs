@@ -1302,7 +1302,8 @@ fn a_rename_of_a_distribution_keeps_the_conveyor_computing_the_same() {
     <aux name="profile"><eqn>0+0</eqn><gf><xscale min="0" max="1"/><yscale min="0" max="1"/><ypts>0,0.25,0.5,0.75,1</ypts></gf></aux>
   </variables></model>
 </xmile>"#;
-    let base = crate::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens");
+    let base = simlin_formats::compat::open_xmile(&mut BufReader::new(xmile.as_bytes()))
+        .expect("it opens");
     let before = series(&base);
     assert!(
         before["out_f"][2] > 0.0,
@@ -1331,8 +1332,8 @@ fn a_rename_of_a_distribution_keeps_the_conveyor_computing_the_same() {
 #[test]
 fn a_conveyor_whose_transit_time_names_a_renamed_variable_still_builds() {
     let xmile = include_str!("../../../test/conveyors/arrayed_conveyor.xmile");
-    let mut project =
-        crate::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens");
+    let mut project = simlin_formats::compat::open_xmile(&mut BufReader::new(xmile.as_bytes()))
+        .expect("it opens");
     let before = series(&project);
     apply_patch(&mut project, rename_in("main", "transit", "belt time")).unwrap();
     assert_same_run(&before, series(&project), "transit", "belt_time");
@@ -1342,7 +1343,7 @@ fn hares_and_lynxes() -> datamodel::Project {
     let xmile = include_str!(
         "../../../test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile"
     );
-    crate::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens")
+    simlin_formats::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens")
 }
 
 #[test]

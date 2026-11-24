@@ -84,7 +84,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
                 return;
             }
         };
-        let json_patch: simlin_engine::json::ProjectPatch = match serde_json::from_str(json_str) {
+        let json_patch: simlin_formats::json::ProjectPatch = match serde_json::from_str(json_str) {
             Ok(p) => p,
             Err(e) => {
                 store_error(

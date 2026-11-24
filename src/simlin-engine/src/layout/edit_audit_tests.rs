@@ -28,7 +28,7 @@ const SIR: &str = "test/test-models/samples/SIR/SIR.stmx";
 fn load(rel: &str) -> datamodel::Project {
     let path = format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"));
     let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    crate::compat::open_xmile(&mut std::io::BufReader::new(file))
+    simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(file))
         .unwrap_or_else(|e| panic!("{path}: {e:?}"))
 }
 

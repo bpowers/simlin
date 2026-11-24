@@ -580,7 +580,8 @@ SAVEPER  = TIME STEP
 	~		|
 "#
     );
-    let project = crate::compat::open_vensim(&source).expect("the macro source must import");
+    let project =
+        simlin_formats::compat::open_vensim(&source).expect("the macro source must import");
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let macro_model = sync

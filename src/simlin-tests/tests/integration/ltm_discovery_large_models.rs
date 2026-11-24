@@ -118,8 +118,9 @@ use simlin_engine::db::{
     sync_from_datamodel_incremental,
 };
 use simlin_engine::ltm::CausalGraph;
+use simlin_engine::ltm_finding;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{ltm_finding, open_vensim};
+use simlin_formats::open_vensim;
 
 use crate::test_helpers::ltm_discovery_inputs;
 

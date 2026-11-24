@@ -68,11 +68,11 @@ See [benchmarks.md](benchmarks.md) for profiling instructions.
 
 ## Component-Specific Commands
 
-### simlin-engine (Rust)
+### The engine crates (Rust)
 
 ```bash
 cargo test -p simlin-engine              # Engine unit tests only
-cargo test -p simlin-engine mdl::        # MDL parser tests
+cargo test -p simlin-formats mdl::       # MDL parser tests
 cargo test -p simlin-tests               # The integration tests
 ```
 

@@ -42,7 +42,7 @@ fn three_steps() -> SimSpecs {
 }
 
 fn parse(xml: &str) -> datamodel::Project {
-    crate::compat::open_xmile(&mut BufReader::new(xml.as_bytes())).expect("imports")
+    simlin_formats::compat::open_xmile(&mut BufReader::new(xml.as_bytes())).expect("imports")
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn mdl_export_writes_a_repeated_flow_once() {
         .flow("f", "1", None)
         .stock("s", "0", &["f", "f"], &[], None)
         .build_datamodel();
-    let mdl = crate::compat::to_mdl(&project).expect("exports");
+    let mdl = simlin_formats::compat::to_mdl(&project).expect("exports");
     assert!(
         mdl.contains("INTEG") && !mdl.contains("f+f") && !mdl.contains("f + f"),
         "the INTEG names f once:\n{mdl}"

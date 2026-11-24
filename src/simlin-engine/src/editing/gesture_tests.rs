@@ -27,13 +27,13 @@ use crate::editing::test_support::{
     agreement_report, alias, apply_edit, aux, base_of, cloud, flow, labeled, link, load,
     project_of, stock, strict_report, view_of,
 };
-use crate::json;
 use simlin_base::common::canonicalize;
 use simlin_base::datamodel;
 use simlin_diagram::connector::{ConnectorGeometry, connector_geometry};
 use simlin_diagram::elements::aux_geometry;
 use simlin_diagram::flow::flow_geometry;
 use simlin_diagram::label::label_bounds;
+use simlin_formats::json;
 
 use super::*;
 

@@ -2252,6 +2252,7 @@ dependencies = [
  "simlin-base",
  "simlin-diagram",
  "simlin-engine",
+ "simlin-formats",
  "wasm-interpreter",
  "wasmalloc",
 ]
@@ -2277,6 +2278,7 @@ dependencies = [
  "simlin-base",
  "simlin-diagram",
  "simlin-engine",
+ "simlin-formats",
  "tempfile",
 ]
 
@@ -2296,15 +2298,11 @@ name = "simlin-engine"
 version = "0.1.0"
 dependencies = [
  "base64",
- "buffa",
- "calamine",
  "checked",
- "csv",
  "ed25519",
  "indexmap",
  "jsonschema",
  "proptest",
- "quick-xml 0.41.0",
  "rand 0.9.5",
  "rayon",
  "rustc-hash",
@@ -2312,14 +2310,34 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "simlin-base",
+ "simlin-diagram",
+ "simlin-formats",
+ "smallvec",
+ "wasm-encoder",
+ "wasm-interpreter",
+]
+
+[[package]]
+name = "simlin-formats"
+version = "0.1.0"
+dependencies = [
+ "buffa",
+ "calamine",
+ "csv",
+ "jsonschema",
+ "proptest",
+ "quick-xml 0.41.0",
+ "rayon",
+ "schemars",
+ "serde",
+ "serde_json",
  "sha2",
  "simlin-base",
  "simlin-diagram",
- "smallvec",
+ "simlin-engine",
  "tempfile",
  "unicode-xid",
- "wasm-encoder",
- "wasm-interpreter",
 ]
 
 [[package]]
@@ -2332,7 +2350,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "simlin-base",
- "simlin-engine",
+ "simlin-formats",
  "simlin-mcp-core",
  "tempfile",
  "tokio",
@@ -2349,6 +2367,7 @@ dependencies = [
  "serde_json",
  "simlin-base",
  "simlin-engine",
+ "simlin-formats",
  "simlin-mcp-core",
  "tempfile",
  "tokio",
@@ -2365,6 +2384,7 @@ dependencies = [
  "csv",
  "ed25519-dalek",
  "mimalloc",
+ "proptest",
  "rayon",
  "resvg",
  "salsa",
@@ -2373,6 +2393,7 @@ dependencies = [
  "simlin-base",
  "simlin-diagram",
  "simlin-engine",
+ "simlin-formats",
  "tempfile",
  "wasm-interpreter",
 ]

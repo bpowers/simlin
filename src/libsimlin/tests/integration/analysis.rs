@@ -7,9 +7,9 @@ use std::os::raw::c_char;
 use std::ptr;
 
 use simlin::*;
-use simlin_engine::buffa::Message;
-use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
+use simlin_formats::buffa::Message;
+use simlin_formats::serde as engine_serde;
 
 use crate::common::expect_no_error;
 
@@ -258,7 +258,7 @@ fn test_get_incoming_links_lists_variables_of_the_model_not_module_reads() {
     use simlin_base::datamodel;
 
     let incoming = |project: &datamodel::Project, var: &str| -> Vec<String> {
-        let xmile = simlin_engine::to_xmile(project).unwrap();
+        let xmile = simlin_formats::to_xmile(project).unwrap();
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();
             let proj = simlin_project_open_xmile(xmile.as_ptr(), xmile.len(), &mut err);
@@ -3910,7 +3910,7 @@ unsafe fn ffi_loop_id_with_variables(loops: *mut SimlinLoops, vars: &[&str]) -> 
 #[test]
 fn test_cross_element_rel_scores_share_one_partition_denominator_via_ffi() {
     let xml = std::fs::read_to_string("../../test/cross_element_ltm/cross_element.stmx").unwrap();
-    let project = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let project = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("the cross_element fixture parses");
     let pb = engine_serde::serialize(&project).unwrap();
     let buf = pb.encode_to_vec();

@@ -3808,7 +3808,8 @@ fn a_prologue_reading_an_scc_member_refuses_the_recurrence() {
         )
     };
     let compiles = |operand: &str| -> bool {
-        let datamodel = crate::open_vensim(&model(operand)).expect("the fixture MDL parses");
+        let datamodel =
+            simlin_formats::open_vensim(&model(operand)).expect("the fixture MDL parses");
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
         crate::db::compile_project_incremental(

@@ -8,13 +8,14 @@ use std::fs::File;
 use std::io::BufReader;
 
 use simlin_base::{ErrorCode, Method, Results, SimSpecs as Specs};
-use simlin_engine::FilesystemDataProvider;
+use simlin_engine::Vm;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::queue_compile::build_vm;
-use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::wasmgen::{WasmGenError, compile_datamodel_to_artifact};
-use simlin_engine::{Vm, project_io};
-use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
+use simlin_formats::FilesystemDataProvider;
+use simlin_formats::project_io;
+use simlin_formats::serde::{deserialize, serialize};
+use simlin_formats::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
 use crate::test_helpers::{
     WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches,
@@ -1904,7 +1905,7 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
     // datamodel equality (the reader legitimately normalizes), so simulating
     // the re-read project is the only thing that pins its behaviour.
     {
-        use simlin_engine::buffa::Message;
+        use simlin_formats::buffa::Message;
 
         let buf = serialize(&datamodel_project).unwrap().encode_to_vec();
 
@@ -2044,7 +2045,7 @@ fn simulate_special_path(xmile_path: &str) {
     // must survive serialization, or the re-compiled model silently loses its
     // pass and drains as an ordinary stock.
     let datamodel_proto = {
-        use simlin_engine::buffa::Message;
+        use simlin_formats::buffa::Message;
 
         let buf = serialize(&datamodel_project).unwrap().encode_to_vec();
         deserialize(project_io::Project::decode_from_slice(&buf).unwrap()).unwrap()
@@ -2508,7 +2509,7 @@ fn simulates_except2() {
 /// it did not would change the model under a person's edits.
 #[test]
 fn except_defaults_survive_a_protobuf_round_trip() {
-    use simlin_engine::buffa::Message;
+    use simlin_formats::buffa::Message;
 
     for path in [
         "../../test/sdeverywhere/models/except/except.mdl",
@@ -2984,7 +2985,7 @@ fn a_vensim_lookup_listed_out_of_x_order_is_imported_in_x_order() {
     let series: Vec<f64> = results.iter().map(|row| row[reader]).collect();
     assert_eq!(series, [-1.0, -4.0, -7.0, -5.0, -3.0]);
 
-    let saved = simlin_engine::to_xmile(&datamodel).unwrap();
+    let saved = simlin_formats::to_xmile(&datamodel).unwrap();
     assert!(saved.contains("<xpts>0,1,2</xpts>"), "{saved}");
     assert!(!saved.contains("<xpts>2,1"), "{saved}");
 }
@@ -3052,7 +3053,7 @@ fn an_xmile_graphical_functions_type_decides_how_it_is_read() {
   </model>
 </xmile>"#
         );
-        simlin_engine::open_xmile(&mut BufReader::new(xmile.as_bytes())).unwrap()
+        simlin_formats::open_xmile(&mut BufReader::new(xmile.as_bytes())).unwrap()
     };
     // (type, input, value): an intermediate input and one below the points.
     let rows = [
@@ -3071,8 +3072,8 @@ fn an_xmile_graphical_functions_type_decides_how_it_is_read() {
             "a {gf_type} function at {input}"
         );
         // The writer writes the type where the reader reads it.
-        let saved = simlin_engine::to_xmile(&datamodel).unwrap();
-        let reopened = simlin_engine::open_xmile(&mut BufReader::new(saved.as_bytes())).unwrap();
+        let saved = simlin_formats::to_xmile(&datamodel).unwrap();
+        let reopened = simlin_formats::open_xmile(&mut BufReader::new(saved.as_bytes())).unwrap();
         assert_eq!(
             cell(&vm_last_row(&reopened), "out"),
             want,
@@ -3123,7 +3124,7 @@ fn assert_fixed_delays_are_refused(path: &str, delayed: &[&str]) {
     let datamodel = if path.ends_with(".mdl") {
         open_vensim(&contents).unwrap()
     } else {
-        simlin_engine::open_xmile(&mut BufReader::new(contents.as_bytes())).unwrap()
+        simlin_formats::open_xmile(&mut BufReader::new(contents.as_bytes())).unwrap()
     };
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
@@ -3429,7 +3430,7 @@ fn simulates_wrld3_03() {
     let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
     let vdf_data_bytes =
         std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
-    let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
+    let vdf_file = simlin_formats::vdf::VdfFile::parse(vdf_data_bytes)
         .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
     let vdf_results = vdf_file
         .to_results_via_records()
@@ -4047,7 +4048,7 @@ fn clearn_vdf_results() -> Results {
     let vdf_path = "../../test/xmutil_test_models/Ref.vdf";
     let vdf_data_bytes =
         std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
-    let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
+    let vdf_file = simlin_formats::vdf::VdfFile::parse(vdf_data_bytes)
         .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
     vdf_file
         .to_results_via_records()
@@ -5841,10 +5842,10 @@ fn macro_cross_format_mdl_to_xmile_to_datamodel_preserves_macro() {
 
     // datamodel -> .xmile -> datamodel (the cross-format round-trip).
     let xmile_str =
-        simlin_engine::to_xmile(&from_mdl).unwrap_or_else(|e| panic!("to_xmile failed: {e}"));
+        simlin_formats::to_xmile(&from_mdl).unwrap_or_else(|e| panic!("to_xmile failed: {e}"));
     let cross_rt = {
         let mut reader = BufReader::new(xmile_str.as_bytes());
-        simlin_engine::open_xmile(&mut reader)
+        simlin_formats::open_xmile(&mut reader)
             .unwrap_or_else(|e| panic!("open_xmile of the converted XMILE failed: {e}"))
     };
 
@@ -7417,7 +7418,7 @@ fn compiles_and_runs_clearn_structural() {
     let vdf_path = "../../test/xmutil_test_models/Ref.vdf";
     let vdf_data_bytes =
         std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
-    let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
+    let vdf_file = simlin_formats::vdf::VdfFile::parse(vdf_data_bytes)
         .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
     let vdf_results = vdf_file
         .to_results_via_records()
@@ -7879,7 +7880,7 @@ fn a_subrange_dimension_reference_reads_by_name_in_every_spelling() {
 </variables></model>
 </xmile>"#
         );
-        simlin_engine::open_xmile(&mut BufReader::new(text.as_bytes()))
+        simlin_formats::open_xmile(&mut BufReader::new(text.as_bytes()))
             .unwrap_or_else(|e| panic!("open_xmile: {e}"))
     };
 

@@ -160,8 +160,9 @@ fn internal_src_warns_that_it_binds_nothing() {
 <model name="leaf"><variables>{leaf_vars}</variables></model>
 </xmile>"#
         );
-        let project = crate::compat::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
-            .expect("the fixture is well-formed XMILE");
+        let project =
+            simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+                .expect("the fixture is well-formed XMILE");
         let diags = diagnostics(&project);
         let internal: Vec<&Diagnostic> = diags
             .iter()

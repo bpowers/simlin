@@ -182,7 +182,7 @@ Each entry has a description, component, severity, and measurement command.
 
 ### 19. Rust VDF Parser Boundary Parity
 
-- **Component**: simlin-engine (src/simlin-engine/src/vdf.rs)
+- **Component**: simlin-engine (src/simlin-formats/src/vdf.rs)
 - **Severity**: RESOLVED (2026-07-05)
 - **Description**: (**Resolved** on branch `vdf-parity-fixes`.) `tools/vdf_xray.py` handled several VDF boundary cases the Rust parser had not adopted.
   The two decode rules were ported to Rust `extract_data`: (1) per-block bitmap width -- `VdfFile::parse` now reads header `0x7C` (block time-point grid count) alongside `0x78` (saved count), and `VdfFile::block_bitmap_layout` discriminates each block by "u16 count == bitmap popcount" (preferring the compact saved-grid width when both match), with full-grid blocks decoded over the whole grid and sampled at the saved Time positions (`block_positions_for_time_values`, origin from the last saved time) -- fixing the garbage decode of the class-0x05 input blocks on the saved-suffix `risk.vdf`/`risk2.vdf` fixtures; (2) raw-zero OT entries with dynamic class `0x11` and a nonzero section-6 final value now decode as all-NaN missing data (`inline_ot_entry_is_missing`; 455 such slots on `Ref.vdf`) instead of constant 0.0, and the C-LEARN comparator skips such reference-missing columns (`vdf_reference_is_missing` in `src/simlin-tests/tests/integration/simulate.rs`).

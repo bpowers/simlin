@@ -1,0 +1,4440 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+//! JSON serialization for system dynamics models.
+//!
+//! Provides JSON format matching the Go `sd` package, with separate
+//! arrays for stocks/flows/auxiliaries/modules rather than unified enums.
+//!
+//! # Example
+//! ```no_run
+//! use simlin_formats::json;
+//!
+//! let json_str = r#"{"name": "test", "simSpecs": {...}, ...}"#;
+//! let json_proj: json::Project = serde_json::from_str(json_str)?;
+//! let datamodel_proj: simlin_base::datamodel::Project = json_proj.into();
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+
+#[cfg(feature = "schema")]
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use simlin_base::canonicalize;
+use simlin_base::datamodel;
+
+// Helper functions for serde skip_serializing_if
+
+fn is_zero_i32(val: &i32) -> bool {
+    *val == 0
+}
+
+fn is_zero_f64(val: &f64) -> bool {
+    *val == 0.0
+}
+
+fn is_false(val: &bool) -> bool {
+    !*val
+}
+
+fn is_empty_string(val: &str) -> bool {
+    val.is_empty()
+}
+
+fn is_empty_vec<T>(val: &[T]) -> bool {
+    val.is_empty()
+}
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Default + serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
+// Type alias matching Go's Ident
+pub type Ident = String;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ElementEquation {
+    pub subscript: String,
+    pub equation: String,
+    /// Per-element compat carries `active_initial` ONLY: the datamodel's
+    /// `Equation::Arrayed` element tuple has a slot for nothing else, and
+    /// every other `Compat` field is a variable-level concept (conveyor and
+    /// queue mark whole stocks, leakage/spreadflow/overflow whole flows,
+    /// data_source/is_public/can_be_module_input whole variables). The
+    /// datamodel conversions below deliberately read just `active_initial`
+    /// from an element's compat; other fields hand-authored here are
+    /// tolerated by serde and dropped.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub graphical_function: Option<GraphicalFunction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Compat {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub active_initial: Option<String>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub non_negative: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub can_be_module_input: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub is_public: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub data_source: Option<JsonDataSource>,
+    /// Present on a stock iff it is a conveyor. Mirrors [`datamodel::Compat::conveyor`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub conveyor: Option<Conveyor>,
+    /// Present on a flow iff it is a conveyor leakage outflow. Mirrors [`datamodel::Compat::leakage`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub leakage: Option<Leakage>,
+    /// Present on a conveyor inflow that selects a non-default placement. Mirrors [`datamodel::Compat::spreadflow`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub spreadflow: Option<SpreadFlow>,
+    /// Present on a stock iff it is a queue. Mirrors [`datamodel::Compat::queue`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub queue: Option<Queue>,
+    /// True on a queue outflow marked overflow. Mirrors [`datamodel::Compat::overflow`].
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub overflow: bool,
+}
+
+impl Compat {
+    pub fn is_empty(&self) -> bool {
+        self.active_initial.is_none()
+            && !self.non_negative
+            && !self.can_be_module_input
+            && !self.is_public
+            && self.data_source.is_none()
+            && self.conveyor.is_none()
+            && self.leakage.is_none()
+            && self.spreadflow.is_none()
+            && self.queue.is_none()
+            && !self.overflow
+    }
+}
+
+/// A conveyor stock. Mirrors [`datamodel::Conveyor`]; the fields hold XMILE
+/// expression strings, and `None`/`false` means the option was absent (the
+/// documented default applies). New optional fields are additive to the Go `sd`
+/// package schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Conveyor {
+    pub transit_time: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub capacity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub inflow_limit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sample: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub arrest: Option<String>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub discrete: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub batch_integrity: bool,
+    // Absent means `false` here, matching the protobuf `bool` default. The
+    // XMILE/spec default for this option is `true`, but that default is applied
+    // when reading XMILE, not in this serialization layer -- so a hand-authored
+    // `.sd.json` omitting `oneAtATime` yields `false` where the same XMILE
+    // conveyor with the attribute absent would yield `true`. Making the JSON
+    // default `true` would put json out of sync with protobuf for the absent
+    // case, so the plain-bool mapping is kept deliberately.
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub one_at_a_time: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub exponential_leak: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub ignore_earlier_zone_losses: bool,
+}
+
+/// Marks a flow as a conveyor leakage outflow. Mirrors [`datamodel::Leakage`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Leakage {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fraction: Option<String>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub integers: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub zone_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub zone_end: Option<String>,
+}
+
+/// Conveyor inflow-placement method. Mirrors [`datamodel::SpreadFlow`].
+/// Adjacently tagged (`{"type": "...", "distribution": "..."}`) because the
+/// `Dist` variant carries a payload the internally-tagged style this file uses
+/// for its other enums cannot represent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(tag = "type", content = "distribution", rename_all = "snake_case")]
+pub enum SpreadFlow {
+    Beginning,
+    Even,
+    Dest,
+    Dist(String),
+    Source,
+}
+
+/// A queue stock. Mirrors [`datamodel::Queue`]: a bare marker with no options
+/// (XMILE §4.2). Kept a struct rather than a bool so a future vendor attribute
+/// does not churn every construction site.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Queue {}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ArrayedEquation {
+    pub dimensions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub equation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub elements: Option<Vec<ElementEquation>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub has_except_default: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct GraphicalFunctionScale {
+    pub min: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct GraphicalFunction {
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub points: Vec<[f64; 2]>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub y_points: Vec<f64>,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub x_scale: Option<GraphicalFunctionScale>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub y_scale: Option<GraphicalFunctionScale>,
+}
+
+/// Who made a variable and who edited it, as ISEE's AI information records
+/// it: the letters of [`datamodel::AiState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub enum AiState {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+}
+
+impl From<AiState> for datamodel::AiState {
+    fn from(state: AiState) -> datamodel::AiState {
+        match state {
+            AiState::A => datamodel::AiState::A,
+            AiState::B => datamodel::AiState::B,
+            AiState::C => datamodel::AiState::C,
+            AiState::D => datamodel::AiState::D,
+            AiState::E => datamodel::AiState::E,
+            AiState::F => datamodel::AiState::F,
+            AiState::G => datamodel::AiState::G,
+            AiState::H => datamodel::AiState::H,
+        }
+    }
+}
+
+impl From<datamodel::AiState> for AiState {
+    fn from(state: datamodel::AiState) -> AiState {
+        match state {
+            datamodel::AiState::A => AiState::A,
+            datamodel::AiState::B => AiState::B,
+            datamodel::AiState::C => AiState::C,
+            datamodel::AiState::D => AiState::D,
+            datamodel::AiState::E => AiState::E,
+            datamodel::AiState::F => AiState::F,
+            datamodel::AiState::G => AiState::G,
+            datamodel::AiState::H => AiState::H,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Stock {
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub uid: i32,
+    pub name: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub initial_equation: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub units: String,
+    pub inflows: Vec<Ident>,
+    pub outflows: Vec<Ident>,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub documentation: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub arrayed_equation: Option<ArrayedEquation>,
+    /// Who made the variable, as ISEE's AI information records it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ai_state: Option<AiState>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
+    // Legacy fields: read from old JSON but never written
+    #[serde(skip_serializing, default)]
+    pub non_negative: bool,
+    #[serde(skip_serializing, default)]
+    pub can_be_module_input: bool,
+    #[serde(skip_serializing, default)]
+    pub is_public: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Flow {
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub uid: i32,
+    pub name: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub equation: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub units: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub graphical_function: Option<GraphicalFunction>,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub documentation: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub arrayed_equation: Option<ArrayedEquation>,
+    /// Who made the variable, as ISEE's AI information records it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ai_state: Option<AiState>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
+    // Legacy fields: read from old JSON but never written
+    #[serde(skip_serializing, default)]
+    pub non_negative: bool,
+    #[serde(skip_serializing, default)]
+    pub can_be_module_input: bool,
+    #[serde(skip_serializing, default)]
+    pub is_public: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Auxiliary {
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub uid: i32,
+    pub name: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub equation: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub units: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub graphical_function: Option<GraphicalFunction>,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub documentation: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub arrayed_equation: Option<ArrayedEquation>,
+    /// Who made the variable, as ISEE's AI information records it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ai_state: Option<AiState>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
+    // Legacy fields: read from old JSON but never written
+    #[serde(skip_serializing, default)]
+    pub can_be_module_input: bool,
+    #[serde(skip_serializing, default)]
+    pub is_public: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleReference {
+    pub src: String,
+    pub dst: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Module {
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub uid: i32,
+    pub name: String,
+    pub model_name: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub units: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub documentation: String,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub references: Vec<ModuleReference>,
+    /// Who made the variable, as ISEE's AI information records it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ai_state: Option<AiState>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compat: Option<Compat>,
+    // Legacy fields: read from old JSON but never written
+    #[serde(skip_serializing, default)]
+    pub can_be_module_input: bool,
+    #[serde(skip_serializing, default)]
+    pub is_public: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SimSpecs {
+    pub start_time: f64,
+    pub end_time: f64,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub dt: String,
+    #[serde(skip_serializing_if = "is_zero_f64", default)]
+    pub save_step: f64,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub method: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub time_units: String,
+}
+
+// View element types
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct FlowPoint {
+    pub x: f64,
+    pub y: f64,
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub attached_to_uid: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct StockViewElement {
+    pub uid: i32,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub label_side: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct FlowViewElement {
+    pub uid: i32,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub label_side: String,
+    pub points: Vec<FlowPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AuxiliaryViewElement {
+    pub uid: i32,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub label_side: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CloudViewElement {
+    pub uid: i32,
+    pub flow_uid: i32,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkViewElement {
+    pub uid: i32,
+    pub from_uid: i32,
+    pub to_uid: i32,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub arc: Option<f64>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub multi_points: Vec<LinkPoint>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub polarity: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleViewElement {
+    pub uid: i32,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub label_side: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AliasViewElement {
+    pub uid: i32,
+    pub alias_of_uid: i32,
+    pub x: f64,
+    pub y: f64,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub label_side: String,
+}
+
+/// Visual container for grouping related model elements.
+/// In JSON (matching XMILE spec), x/y are top-left coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct GroupViewElement {
+    pub uid: i32,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_mdl_view_marker: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ViewElement {
+    Stock(StockViewElement),
+    Flow(FlowViewElement),
+    #[serde(rename = "aux")]
+    Auxiliary(AuxiliaryViewElement),
+    Cloud(CloudViewElement),
+    Link(LinkViewElement),
+    Module(ModuleViewElement),
+    Alias(AliasViewElement),
+    Group(GroupViewElement),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct View {
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+    pub elements: Vec<ViewElement>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub view_box: Option<Rect>,
+    /// View zoom as a factor: 1.0 = 100%, 2.0 = twice as big (XMILE's
+    /// percentage is converted on import/export). Omitted means 1.0.
+    #[serde(skip_serializing_if = "is_zero_f64", default)]
+    pub zoom: f64,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub use_lettered_polarity: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Model {
+    pub name: String,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub stocks: Vec<Stock>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub flows: Vec<Flow>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub auxiliaries: Vec<Auxiliary>,
+    #[serde(
+        skip_serializing_if = "is_empty_vec",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub modules: Vec<Module>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sim_specs: Option<SimSpecs>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub views: Vec<View>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub loop_metadata: Vec<LoopMetadata>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub groups: Vec<ModelGroup>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub macro_spec: Option<MacroSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct JsonElementMapEntry {
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct JsonDimensionMapping {
+    pub target: String,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub element_map: Vec<JsonElementMapEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Dimension {
+    pub name: String,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub elements: Vec<String>,
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub size: i32,
+    /// Simple positional mapping target for backward compatibility.
+    /// Used when a dimension has a single positional mapping with no element-level entries.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub maps_to: Option<String>,
+    /// Element-level dimension mappings with explicit source->target correspondence.
+    /// Takes precedence over maps_to during deserialization.
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub mappings: Vec<JsonDimensionMapping>,
+    /// For indexed subdimensions, the name of the parent dimension.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct JsonDataSource {
+    pub kind: String,
+    pub file: String,
+    pub tab_or_delimiter: String,
+    pub row_or_col: String,
+    pub cell: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Unit {
+    pub name: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub equation: String,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub disabled: bool,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub aliases: Vec<String>,
+}
+
+/// Marks a model as a callable macro template and records its calling
+/// convention. `Some` on `json::Model.macro_spec` (mirrored from
+/// [`datamodel::MacroSpec`]) means the model's variables are the macro body;
+/// this names which body variables are the formal parameters and outputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct MacroSpec {
+    pub parameters: Vec<String>,
+    pub primary_output: String,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub additional_outputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LoopMetadata {
+    pub uids: Vec<i32>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub deleted: bool,
+    pub name: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub description: String,
+}
+
+/// Semantic/organizational group for categorizing model variables.
+/// This is distinct from visual diagram groups (ViewElement::Group).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ModelGroup {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub doc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent: Option<String>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub members: Vec<String>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub run_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Source {
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub extension: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub name: String,
+    pub sim_specs: SimSpecs,
+    pub models: Vec<Model>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub dimensions: Vec<Dimension>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub units: Vec<Unit>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source: Option<Source>,
+}
+
+/// Generate the JSON Schema for the Project type
+#[cfg(feature = "schema")]
+pub fn generate_schema() -> schemars::Schema {
+    schemars::schema_for!(Project)
+}
+
+/// Generate the JSON Schema as a formatted JSON string
+#[cfg(feature = "schema")]
+pub fn generate_schema_json() -> String {
+    let schema = generate_schema();
+    serde_json::to_string_pretty(&schema).expect("schema serialization should never fail")
+}
+
+/// A variable with a `"type"` discriminator for targeted model queries.
+///
+/// Serializes with `#[serde(tag = "type")]` so the JSON output includes
+/// e.g. `{"type": "stock", "name": "population", ...}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TaggedVariable {
+    Stock(Stock),
+    Flow(Flow),
+    #[serde(rename = "aux")]
+    Auxiliary(Auxiliary),
+    Module(Module),
+}
+
+impl From<datamodel::Variable> for TaggedVariable {
+    fn from(var: datamodel::Variable) -> Self {
+        match var {
+            datamodel::Variable::Stock(s) => TaggedVariable::Stock(s.into()),
+            datamodel::Variable::Flow(f) => TaggedVariable::Flow(f.into()),
+            datamodel::Variable::Aux(a) => TaggedVariable::Auxiliary(a.into()),
+            datamodel::Variable::Module(m) => TaggedVariable::Module(m.into()),
+        }
+    }
+}
+
+impl TaggedVariable {
+    /// The display name of this variable.
+    pub fn name(&self) -> &str {
+        match self {
+            TaggedVariable::Stock(s) => &s.name,
+            TaggedVariable::Flow(f) => &f.name,
+            TaggedVariable::Auxiliary(a) => &a.name,
+            TaggedVariable::Module(m) => &m.name,
+        }
+    }
+}
+
+// Conversions FROM json types TO datamodel types
+
+impl From<GraphicalFunctionScale> for datamodel::GraphicalFunctionScale {
+    fn from(scale: GraphicalFunctionScale) -> Self {
+        datamodel::GraphicalFunctionScale {
+            min: scale.min,
+            max: scale.max,
+        }
+    }
+}
+
+impl From<GraphicalFunction> for datamodel::GraphicalFunction {
+    fn from(gf: GraphicalFunction) -> Self {
+        let kind = match gf.kind.as_str() {
+            "discrete" => datamodel::GraphicalFunctionKind::Discrete,
+            "extrapolate" => datamodel::GraphicalFunctionKind::Extrapolate,
+            _ => datamodel::GraphicalFunctionKind::Continuous,
+        };
+
+        let x_points = if !gf.points.is_empty() {
+            Some(gf.points.iter().map(|p| p[0]).collect())
+        } else {
+            None
+        };
+
+        let y_points = if !gf.points.is_empty() {
+            gf.points.iter().map(|p| p[1]).collect()
+        } else {
+            gf.y_points
+        };
+
+        let x_scale = gf.x_scale.unwrap_or(GraphicalFunctionScale {
+            min: 0.0,
+            max: y_points.len().saturating_sub(1) as f64,
+        });
+
+        let y_scale = gf
+            .y_scale
+            .unwrap_or(GraphicalFunctionScale { min: 0.0, max: 1.0 });
+
+        datamodel::GraphicalFunction {
+            kind,
+            x_points,
+            y_points,
+            x_scale: x_scale.into(),
+            y_scale: y_scale.into(),
+        }
+    }
+}
+
+impl From<Stock> for datamodel::Stock {
+    fn from(stock: Stock) -> Self {
+        let c = stock.compat.as_ref();
+        // OR-merge compat booleans with legacy top-level fields.  Old code
+        // never writes compat booleans and new code never writes top-level
+        // booleans (skip_serializing), so both cannot be meaningfully set
+        // at once; OR is safe and handles the transitional case where compat
+        // exists only for activeInitial alongside top-level boolean flags.
+        let compat = datamodel::Compat {
+            active_initial: c
+                .and_then(|c| c.active_initial.clone())
+                .filter(|s| !s.is_empty()),
+            non_negative: c.map(|c| c.non_negative).unwrap_or(false) || stock.non_negative,
+            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false)
+                || stock.can_be_module_input,
+            visibility: if c.map(|c| c.is_public).unwrap_or(false) || stock.is_public {
+                datamodel::Visibility::Public
+            } else {
+                datamodel::Visibility::Private
+            },
+            data_source: c
+                .and_then(|c| c.data_source.clone())
+                .map(data_source_from_json),
+            conveyor: c.and_then(|c| c.conveyor.clone()).map(conveyor_from_json),
+            leakage: c.and_then(|c| c.leakage.clone()).map(leakage_from_json),
+            spreadflow: c
+                .and_then(|c| c.spreadflow.clone())
+                .map(spreadflow_from_json),
+            queue: c.and_then(|c| c.queue.clone()).map(queue_from_json),
+            overflow: c.map(|c| c.overflow).unwrap_or(false),
+        };
+        let equation = match stock.arrayed_equation {
+            Some(arrayed) => {
+                if let Some(elements) = arrayed.elements {
+                    // Legacy JSON without has_except_default: infer true when
+                    // a default equation is present, preserving pre-flag behavior.
+                    let has_except = arrayed
+                        .has_except_default
+                        .unwrap_or(arrayed.equation.is_some());
+                    datamodel::Equation::Arrayed(
+                        arrayed.dimensions,
+                        elements
+                            .into_iter()
+                            .map(|ee| {
+                                (
+                                    // The datamodel stores the element key's
+                                    // canonical spelling, the one owner of
+                                    // what a subscript names (`from_subscript`).
+                                    simlin_base::common::CanonicalElementName::from_subscript(
+                                        &ee.subscript,
+                                    )
+                                    .as_str()
+                                    .to_string(),
+                                    ee.equation,
+                                    ee.compat
+                                        .and_then(|c| c.active_initial)
+                                        .filter(|s| !s.is_empty()),
+                                    ee.graphical_function.map(|gf| gf.into()),
+                                )
+                            })
+                            .collect(),
+                        arrayed.equation,
+                        has_except,
+                    )
+                } else {
+                    datamodel::Equation::ApplyToAll(
+                        arrayed.dimensions,
+                        arrayed.equation.unwrap_or_default(),
+                    )
+                }
+            }
+            None => datamodel::Equation::Scalar(stock.initial_equation),
+        };
+
+        datamodel::Stock {
+            ident: stock.name,
+            equation,
+            documentation: stock.documentation,
+            units: if stock.units.is_empty() {
+                None
+            } else {
+                Some(stock.units)
+            },
+            inflows: stock.inflows,
+            outflows: stock.outflows,
+            ai_state: stock.ai_state.map(Into::into),
+            uid: if stock.uid == 0 {
+                None
+            } else {
+                Some(stock.uid)
+            },
+            compat,
+        }
+    }
+}
+
+impl From<Flow> for datamodel::Flow {
+    fn from(flow: Flow) -> Self {
+        let c = flow.compat.as_ref();
+        let compat = datamodel::Compat {
+            active_initial: c
+                .and_then(|c| c.active_initial.clone())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    flow.arrayed_equation
+                        .as_ref()
+                        .and_then(|a| a.compat.as_ref())
+                        .and_then(|c| c.active_initial.clone())
+                }),
+            non_negative: c.map(|c| c.non_negative).unwrap_or(false) || flow.non_negative,
+            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false)
+                || flow.can_be_module_input,
+            visibility: if c.map(|c| c.is_public).unwrap_or(false) || flow.is_public {
+                datamodel::Visibility::Public
+            } else {
+                datamodel::Visibility::Private
+            },
+            data_source: c
+                .and_then(|c| c.data_source.clone())
+                .map(data_source_from_json),
+            conveyor: c.and_then(|c| c.conveyor.clone()).map(conveyor_from_json),
+            leakage: c.and_then(|c| c.leakage.clone()).map(leakage_from_json),
+            spreadflow: c
+                .and_then(|c| c.spreadflow.clone())
+                .map(spreadflow_from_json),
+            queue: c.and_then(|c| c.queue.clone()).map(queue_from_json),
+            overflow: c.map(|c| c.overflow).unwrap_or(false),
+        };
+        let equation = match flow.arrayed_equation {
+            Some(arrayed) => {
+                if let Some(elements) = arrayed.elements {
+                    let has_except = arrayed
+                        .has_except_default
+                        .unwrap_or(arrayed.equation.is_some());
+                    datamodel::Equation::Arrayed(
+                        arrayed.dimensions,
+                        elements
+                            .into_iter()
+                            .map(|ee| {
+                                (
+                                    // The datamodel stores the element key's
+                                    // canonical spelling, the one owner of
+                                    // what a subscript names (`from_subscript`).
+                                    simlin_base::common::CanonicalElementName::from_subscript(
+                                        &ee.subscript,
+                                    )
+                                    .as_str()
+                                    .to_string(),
+                                    ee.equation,
+                                    ee.compat
+                                        .and_then(|c| c.active_initial)
+                                        .filter(|s| !s.is_empty()),
+                                    ee.graphical_function.map(|gf| gf.into()),
+                                )
+                            })
+                            .collect(),
+                        arrayed.equation,
+                        has_except,
+                    )
+                } else {
+                    datamodel::Equation::ApplyToAll(
+                        arrayed.dimensions,
+                        arrayed.equation.unwrap_or_default(),
+                    )
+                }
+            }
+            None => datamodel::Equation::Scalar(flow.equation),
+        };
+
+        datamodel::Flow {
+            ident: flow.name,
+            equation,
+            documentation: flow.documentation,
+            units: if flow.units.is_empty() {
+                None
+            } else {
+                Some(flow.units)
+            },
+            gf: flow.graphical_function.map(|gf| gf.into()),
+            ai_state: flow.ai_state.map(Into::into),
+            uid: if flow.uid == 0 { None } else { Some(flow.uid) },
+            compat,
+        }
+    }
+}
+
+impl From<Auxiliary> for datamodel::Aux {
+    fn from(aux: Auxiliary) -> Self {
+        let c = aux.compat.as_ref();
+        let compat = datamodel::Compat {
+            active_initial: c
+                .and_then(|c| c.active_initial.clone())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    aux.arrayed_equation
+                        .as_ref()
+                        .and_then(|a| a.compat.as_ref())
+                        .and_then(|c| c.active_initial.clone())
+                }),
+            non_negative: false,
+            can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false)
+                || aux.can_be_module_input,
+            visibility: if c.map(|c| c.is_public).unwrap_or(false) || aux.is_public {
+                datamodel::Visibility::Public
+            } else {
+                datamodel::Visibility::Private
+            },
+            data_source: c
+                .and_then(|c| c.data_source.clone())
+                .map(data_source_from_json),
+            conveyor: c.and_then(|c| c.conveyor.clone()).map(conveyor_from_json),
+            leakage: c.and_then(|c| c.leakage.clone()).map(leakage_from_json),
+            spreadflow: c
+                .and_then(|c| c.spreadflow.clone())
+                .map(spreadflow_from_json),
+            queue: c.and_then(|c| c.queue.clone()).map(queue_from_json),
+            overflow: c.map(|c| c.overflow).unwrap_or(false),
+        };
+        let equation = match aux.arrayed_equation {
+            Some(arrayed) => {
+                if let Some(elements) = arrayed.elements {
+                    let has_except = arrayed
+                        .has_except_default
+                        .unwrap_or(arrayed.equation.is_some());
+                    datamodel::Equation::Arrayed(
+                        arrayed.dimensions,
+                        elements
+                            .into_iter()
+                            .map(|ee| {
+                                (
+                                    // The datamodel stores the element key's
+                                    // canonical spelling, the one owner of
+                                    // what a subscript names (`from_subscript`).
+                                    simlin_base::common::CanonicalElementName::from_subscript(
+                                        &ee.subscript,
+                                    )
+                                    .as_str()
+                                    .to_string(),
+                                    ee.equation,
+                                    ee.compat
+                                        .and_then(|c| c.active_initial)
+                                        .filter(|s| !s.is_empty()),
+                                    ee.graphical_function.map(|gf| gf.into()),
+                                )
+                            })
+                            .collect(),
+                        arrayed.equation,
+                        has_except,
+                    )
+                } else {
+                    datamodel::Equation::ApplyToAll(
+                        arrayed.dimensions,
+                        arrayed.equation.unwrap_or_default(),
+                    )
+                }
+            }
+            None => datamodel::Equation::Scalar(aux.equation),
+        };
+
+        datamodel::Aux {
+            ident: aux.name,
+            equation,
+            documentation: aux.documentation,
+            units: if aux.units.is_empty() {
+                None
+            } else {
+                Some(aux.units)
+            },
+            gf: aux.graphical_function.map(|gf| gf.into()),
+            ai_state: aux.ai_state.map(Into::into),
+            uid: if aux.uid == 0 { None } else { Some(aux.uid) },
+            compat,
+        }
+    }
+}
+
+impl From<ModuleReference> for datamodel::ModuleReference {
+    fn from(mr: ModuleReference) -> Self {
+        datamodel::ModuleReference {
+            src: mr.src,
+            dst: mr.dst,
+        }
+    }
+}
+
+impl From<Module> for datamodel::Module {
+    fn from(module: Module) -> Self {
+        let c = module.compat.as_ref();
+        datamodel::Module {
+            ident: module.name,
+            model_name: module.model_name,
+            documentation: module.documentation,
+            units: if module.units.is_empty() {
+                None
+            } else {
+                Some(module.units)
+            },
+            references: module.references.into_iter().map(|r| r.into()).collect(),
+            ai_state: module.ai_state.map(Into::into),
+            uid: if module.uid == 0 {
+                None
+            } else {
+                Some(module.uid)
+            },
+            // Fields listed exhaustively (no `..Default::default()`) so a future
+            // datamodel::Compat field is compiler-forced to be handled here. A
+            // module is never a conveyor/queue/leak/spread flow, so those stay
+            // None/false, preserving the datamodel invariant that only
+            // stocks/flows carry them.
+            compat: datamodel::Compat {
+                active_initial: None,
+                non_negative: false,
+                can_be_module_input: c.map(|c| c.can_be_module_input).unwrap_or(false)
+                    || module.can_be_module_input,
+                visibility: if c.map(|c| c.is_public).unwrap_or(false) || module.is_public {
+                    datamodel::Visibility::Public
+                } else {
+                    datamodel::Visibility::Private
+                },
+                data_source: c
+                    .and_then(|c| c.data_source.clone())
+                    .map(data_source_from_json),
+                conveyor: None,
+                leakage: None,
+                spreadflow: None,
+                queue: None,
+                overflow: false,
+            },
+        }
+    }
+}
+
+impl From<SimSpecs> for datamodel::SimSpecs {
+    fn from(ss: SimSpecs) -> Self {
+        let dt = if ss.dt.is_empty() || ss.dt == "1" {
+            datamodel::Dt::Dt(1.0)
+        } else if ss.dt.starts_with("1/") {
+            let reciprocal_str = &ss.dt[2..];
+            let reciprocal_value = reciprocal_str.parse::<f64>().unwrap_or(1.0);
+            datamodel::Dt::Reciprocal(reciprocal_value)
+        } else {
+            let dt_value = ss.dt.parse::<f64>().unwrap_or(1.0);
+            datamodel::Dt::Dt(dt_value)
+        };
+
+        let save_step = if ss.save_step == 0.0 {
+            None
+        } else {
+            Some(datamodel::Dt::Dt(ss.save_step))
+        };
+
+        let sim_method = match ss.method.to_lowercase().as_str() {
+            "rk4" => datamodel::SimMethod::RungeKutta4,
+            "rk2" => datamodel::SimMethod::RungeKutta2,
+            _ => datamodel::SimMethod::Euler,
+        };
+
+        datamodel::SimSpecs {
+            start: ss.start_time,
+            stop: ss.end_time,
+            dt,
+            save_step,
+            sim_method,
+            time_units: if ss.time_units.is_empty() {
+                None
+            } else {
+                Some(ss.time_units)
+            },
+        }
+    }
+}
+
+impl From<ViewElement> for datamodel::ViewElement {
+    fn from(ve: ViewElement) -> Self {
+        match ve {
+            ViewElement::Stock(s) => {
+                datamodel::ViewElement::Stock(datamodel::view_element::Stock {
+                    name: s.name,
+                    uid: s.uid,
+                    x: s.x,
+                    y: s.y,
+                    label_side: label_side_from_string(&s.label_side),
+                    compat: None,
+                })
+            }
+            ViewElement::Flow(f) => datamodel::ViewElement::Flow(datamodel::view_element::Flow {
+                name: f.name,
+                uid: f.uid,
+                x: f.x,
+                y: f.y,
+                label_side: label_side_from_string(&f.label_side),
+                points: f
+                    .points
+                    .into_iter()
+                    .map(|p| datamodel::view_element::FlowPoint {
+                        x: p.x,
+                        y: p.y,
+                        attached_to_uid: if p.attached_to_uid == 0 {
+                            None
+                        } else {
+                            Some(p.attached_to_uid)
+                        },
+                    })
+                    .collect(),
+                compat: None,
+                label_compat: None,
+            }),
+            ViewElement::Auxiliary(a) => {
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                    name: a.name,
+                    uid: a.uid,
+                    x: a.x,
+                    y: a.y,
+                    label_side: label_side_from_string(&a.label_side),
+                    compat: None,
+                })
+            }
+            ViewElement::Cloud(c) => {
+                datamodel::ViewElement::Cloud(datamodel::view_element::Cloud {
+                    uid: c.uid,
+                    flow_uid: c.flow_uid,
+                    x: c.x,
+                    y: c.y,
+                    compat: None,
+                })
+            }
+            ViewElement::Link(l) => datamodel::ViewElement::Link(datamodel::view_element::Link {
+                uid: l.uid,
+                from_uid: l.from_uid,
+                to_uid: l.to_uid,
+                shape: if let Some(arc) = l.arc {
+                    datamodel::view_element::LinkShape::Arc(arc)
+                } else if !l.multi_points.is_empty() {
+                    datamodel::view_element::LinkShape::MultiPoint(
+                        l.multi_points
+                            .into_iter()
+                            .map(|p| datamodel::view_element::FlowPoint {
+                                x: p.x,
+                                y: p.y,
+                                attached_to_uid: None,
+                            })
+                            .collect(),
+                    )
+                } else {
+                    datamodel::view_element::LinkShape::Straight
+                },
+                polarity: match l.polarity.as_deref() {
+                    Some("+") => Some(datamodel::view_element::LinkPolarity::Positive),
+                    Some("-") => Some(datamodel::view_element::LinkPolarity::Negative),
+                    _ => None,
+                },
+            }),
+            ViewElement::Module(m) => {
+                datamodel::ViewElement::Module(datamodel::view_element::Module {
+                    name: m.name,
+                    uid: m.uid,
+                    x: m.x,
+                    y: m.y,
+                    label_side: label_side_from_string(&m.label_side),
+                })
+            }
+            ViewElement::Alias(a) => {
+                datamodel::ViewElement::Alias(datamodel::view_element::Alias {
+                    uid: a.uid,
+                    alias_of_uid: a.alias_of_uid,
+                    x: a.x,
+                    y: a.y,
+                    label_side: label_side_from_string(&a.label_side),
+                    compat: None,
+                })
+            }
+            ViewElement::Group(g) => {
+                // JSON uses top-left coordinates, datamodel uses center
+                datamodel::ViewElement::Group(datamodel::view_element::Group {
+                    uid: g.uid,
+                    name: g.name,
+                    x: g.x + g.width / 2.0,
+                    y: g.y + g.height / 2.0,
+                    width: g.width,
+                    height: g.height,
+                    is_mdl_view_marker: g.is_mdl_view_marker,
+                })
+            }
+        }
+    }
+}
+
+fn label_side_from_string(s: &str) -> datamodel::view_element::LabelSide {
+    match s {
+        "top" => datamodel::view_element::LabelSide::Top,
+        "left" => datamodel::view_element::LabelSide::Left,
+        "bottom" => datamodel::view_element::LabelSide::Bottom,
+        "right" => datamodel::view_element::LabelSide::Right,
+        _ => datamodel::view_element::LabelSide::Center,
+    }
+}
+
+impl From<View> for datamodel::View {
+    fn from(view: View) -> Self {
+        datamodel::View::StockFlow(datamodel::StockFlow {
+            name: view.name,
+            elements: view.elements.into_iter().map(|e| e.into()).collect(),
+            view_box: view
+                .view_box
+                .map(|vb| datamodel::Rect {
+                    x: vb.x,
+                    y: vb.y,
+                    width: vb.width,
+                    height: vb.height,
+                })
+                .unwrap_or_default(),
+            zoom: if view.zoom == 0.0 { 1.0 } else { view.zoom },
+            use_lettered_polarity: view.use_lettered_polarity,
+            font: None,
+            sketch_compat: None,
+        })
+    }
+}
+
+impl From<Model> for datamodel::Model {
+    fn from(model: Model) -> Self {
+        let mut variables = Vec::new();
+
+        for stock in model.stocks {
+            variables.push(datamodel::Variable::Stock(stock.into()));
+        }
+        for flow in model.flows {
+            variables.push(datamodel::Variable::Flow(flow.into()));
+        }
+        for aux in model.auxiliaries {
+            variables.push(datamodel::Variable::Aux(aux.into()));
+        }
+        for module in model.modules {
+            variables.push(datamodel::Variable::Module(module.into()));
+        }
+
+        datamodel::Model {
+            name: model.name,
+            sim_specs: model.sim_specs.map(|ss| ss.into()),
+            variables: variables.into(),
+            views: model.views.into_iter().map(|v| v.into()).collect(),
+            loop_metadata: model
+                .loop_metadata
+                .into_iter()
+                .map(|lm| lm.into())
+                .collect(),
+            groups: model.groups.into_iter().map(|g| g.into()).collect(),
+            macro_spec: model.macro_spec.map(|m| m.into()),
+        }
+    }
+}
+
+impl From<Dimension> for datamodel::Dimension {
+    fn from(dim: Dimension) -> Self {
+        let mut result = if !dim.elements.is_empty() {
+            datamodel::Dimension::named(dim.name, dim.elements)
+        } else if dim.size > 0 {
+            datamodel::Dimension::indexed(dim.name, dim.size as u32)
+        } else {
+            datamodel::Dimension::named(dim.name, vec![])
+        };
+        result.parent = dim.parent;
+        // Reconstruct mappings: if the richer `mappings` array is present,
+        // use it exclusively (it may include the maps_to target). Otherwise
+        // fall back to the legacy `maps_to` field for backward compatibility.
+        if !dim.mappings.is_empty() {
+            for m in dim.mappings {
+                result.mappings.push(datamodel::DimensionMapping {
+                    target: m.target,
+                    element_map: m
+                        .element_map
+                        .into_iter()
+                        .map(|e| (e.source, e.target))
+                        .collect(),
+                });
+            }
+        } else if let Some(target) = dim.maps_to {
+            result.set_maps_to(target);
+        }
+        result
+    }
+}
+
+impl From<Unit> for datamodel::Unit {
+    fn from(unit: Unit) -> Self {
+        datamodel::Unit {
+            name: unit.name,
+            equation: if unit.equation.is_empty() {
+                None
+            } else {
+                Some(unit.equation)
+            },
+            disabled: unit.disabled,
+            aliases: unit.aliases,
+        }
+    }
+}
+
+impl From<LoopMetadata> for datamodel::LoopMetadata {
+    fn from(loop_metadata: LoopMetadata) -> Self {
+        datamodel::LoopMetadata {
+            uids: loop_metadata.uids,
+            deleted: loop_metadata.deleted,
+            name: loop_metadata.name,
+            description: loop_metadata.description,
+        }
+    }
+}
+
+impl From<MacroSpec> for datamodel::MacroSpec {
+    fn from(macro_spec: MacroSpec) -> Self {
+        datamodel::MacroSpec {
+            parameters: macro_spec.parameters,
+            primary_output: macro_spec.primary_output,
+            additional_outputs: macro_spec.additional_outputs,
+        }
+    }
+}
+
+impl From<ModelGroup> for datamodel::ModelGroup {
+    fn from(group: ModelGroup) -> Self {
+        datamodel::ModelGroup {
+            name: group.name,
+            doc: group.doc,
+            parent: group.parent,
+            members: group.members,
+            run_enabled: group.run_enabled,
+        }
+    }
+}
+
+impl From<Source> for datamodel::Source {
+    fn from(source: Source) -> Self {
+        let extension = match source.extension.as_str() {
+            "xmile" => datamodel::Extension::Xmile,
+            "vensim" => datamodel::Extension::Vensim,
+            _ => datamodel::Extension::Unspecified,
+        };
+        datamodel::Source {
+            extension,
+            content: source.content,
+        }
+    }
+}
+
+impl From<Project> for datamodel::Project {
+    fn from(project: Project) -> Self {
+        datamodel::Project {
+            name: project.name,
+            sim_specs: project.sim_specs.into(),
+            dimensions: project.dimensions.into_iter().map(|d| d.into()).collect(),
+            units: project.units.into_iter().map(|u| u.into()).collect(),
+            models: project.models.into_iter().map(|m| m.into()).collect(),
+            source: project.source.map(|s| s.into()),
+            ai_information: None,
+        }
+    }
+}
+
+impl std::str::FromStr for Project {
+    type Err = simlin_base::common::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(s).map_err(|err| {
+            simlin_base::common::Error::new(
+                simlin_base::common::ErrorKind::Import,
+                simlin_base::common::ErrorCode::Generic,
+                Some(format!("Failed to parse JSON project: {}", err)),
+            )
+        })
+    }
+}
+
+impl Project {
+    /// Parse a Project from a reader
+    pub fn from_reader(reader: impl std::io::Read) -> simlin_base::common::Result<Self> {
+        serde_json::from_reader(reader).map_err(|err| {
+            simlin_base::common::Error::new(
+                simlin_base::common::ErrorKind::Import,
+                simlin_base::common::ErrorCode::Generic,
+                Some(format!("Failed to parse JSON project: {}", err)),
+            )
+        })
+    }
+}
+
+// Conversions FROM datamodel types TO json types
+
+impl From<datamodel::GraphicalFunctionScale> for GraphicalFunctionScale {
+    fn from(scale: datamodel::GraphicalFunctionScale) -> Self {
+        GraphicalFunctionScale {
+            min: scale.min,
+            max: scale.max,
+        }
+    }
+}
+
+impl From<datamodel::GraphicalFunction> for GraphicalFunction {
+    fn from(gf: datamodel::GraphicalFunction) -> Self {
+        let kind = match gf.kind {
+            datamodel::GraphicalFunctionKind::Discrete => "discrete",
+            datamodel::GraphicalFunctionKind::Extrapolate => "extrapolate",
+            datamodel::GraphicalFunctionKind::Continuous => "continuous",
+        }
+        .to_string();
+
+        let (points, y_points) = if let Some(x_points) = gf.x_points {
+            let pts = x_points
+                .into_iter()
+                .zip(gf.y_points.iter())
+                .map(|(x, y)| [x, *y])
+                .collect();
+            (pts, vec![])
+        } else {
+            (vec![], gf.y_points)
+        };
+
+        GraphicalFunction {
+            points,
+            y_points,
+            kind,
+            x_scale: Some(gf.x_scale.into()),
+            y_scale: Some(gf.y_scale.into()),
+        }
+    }
+}
+
+fn data_source_to_json(ds: &datamodel::DataSource) -> JsonDataSource {
+    let kind = match ds.kind {
+        datamodel::DataSourceKind::Data => "data",
+        datamodel::DataSourceKind::Constants => "constants",
+        datamodel::DataSourceKind::Lookups => "lookups",
+        datamodel::DataSourceKind::Subscript => "subscript",
+    }
+    .to_string();
+    JsonDataSource {
+        kind,
+        file: ds.file.clone(),
+        tab_or_delimiter: ds.tab_or_delimiter.clone(),
+        row_or_col: ds.row_or_col.clone(),
+        cell: ds.cell.clone(),
+    }
+}
+
+fn data_source_from_json(ds: JsonDataSource) -> datamodel::DataSource {
+    let kind = match ds.kind.as_str() {
+        "constants" => datamodel::DataSourceKind::Constants,
+        "lookups" => datamodel::DataSourceKind::Lookups,
+        "subscript" => datamodel::DataSourceKind::Subscript,
+        _ => datamodel::DataSourceKind::Data,
+    };
+    datamodel::DataSource {
+        kind,
+        file: ds.file,
+        tab_or_delimiter: ds.tab_or_delimiter,
+        row_or_col: ds.row_or_col,
+        cell: ds.cell,
+    }
+}
+
+fn conveyor_to_json(c: &datamodel::Conveyor) -> Conveyor {
+    Conveyor {
+        transit_time: c.transit_time.clone(),
+        capacity: c.capacity.clone(),
+        inflow_limit: c.inflow_limit.clone(),
+        sample: c.sample.clone(),
+        arrest: c.arrest.clone(),
+        discrete: c.discrete,
+        batch_integrity: c.batch_integrity,
+        one_at_a_time: c.one_at_a_time,
+        exponential_leak: c.exponential_leak,
+        ignore_earlier_zone_losses: c.ignore_earlier_zone_losses,
+    }
+}
+
+fn conveyor_from_json(c: Conveyor) -> datamodel::Conveyor {
+    datamodel::Conveyor {
+        transit_time: c.transit_time,
+        capacity: c.capacity,
+        inflow_limit: c.inflow_limit,
+        sample: c.sample,
+        arrest: c.arrest,
+        discrete: c.discrete,
+        batch_integrity: c.batch_integrity,
+        one_at_a_time: c.one_at_a_time,
+        exponential_leak: c.exponential_leak,
+        ignore_earlier_zone_losses: c.ignore_earlier_zone_losses,
+    }
+}
+
+fn leakage_to_json(l: &datamodel::Leakage) -> Leakage {
+    Leakage {
+        fraction: l.fraction.clone(),
+        integers: l.integers,
+        zone_start: l.zone_start.clone(),
+        zone_end: l.zone_end.clone(),
+    }
+}
+
+fn leakage_from_json(l: Leakage) -> datamodel::Leakage {
+    datamodel::Leakage {
+        fraction: l.fraction,
+        integers: l.integers,
+        zone_start: l.zone_start,
+        zone_end: l.zone_end,
+    }
+}
+
+fn spreadflow_to_json(s: &datamodel::SpreadFlow) -> SpreadFlow {
+    match s {
+        datamodel::SpreadFlow::Beginning => SpreadFlow::Beginning,
+        datamodel::SpreadFlow::Even => SpreadFlow::Even,
+        datamodel::SpreadFlow::Dest => SpreadFlow::Dest,
+        datamodel::SpreadFlow::Dist(eq) => SpreadFlow::Dist(eq.clone()),
+        datamodel::SpreadFlow::Source => SpreadFlow::Source,
+    }
+}
+
+fn spreadflow_from_json(s: SpreadFlow) -> datamodel::SpreadFlow {
+    match s {
+        SpreadFlow::Beginning => datamodel::SpreadFlow::Beginning,
+        SpreadFlow::Even => datamodel::SpreadFlow::Even,
+        SpreadFlow::Dest => datamodel::SpreadFlow::Dest,
+        SpreadFlow::Dist(eq) => datamodel::SpreadFlow::Dist(eq),
+        SpreadFlow::Source => datamodel::SpreadFlow::Source,
+    }
+}
+
+fn queue_to_json(_q: &datamodel::Queue) -> Queue {
+    Queue {}
+}
+
+fn queue_from_json(_q: Queue) -> datamodel::Queue {
+    datamodel::Queue {}
+}
+
+fn compat_to_json(compat: &datamodel::Compat) -> Compat {
+    Compat {
+        active_initial: compat.active_initial.clone(),
+        non_negative: compat.non_negative,
+        can_be_module_input: compat.can_be_module_input,
+        is_public: matches!(compat.visibility, datamodel::Visibility::Public),
+        data_source: compat.data_source.as_ref().map(data_source_to_json),
+        conveyor: compat.conveyor.as_ref().map(conveyor_to_json),
+        leakage: compat.leakage.as_ref().map(leakage_to_json),
+        spreadflow: compat.spreadflow.as_ref().map(spreadflow_to_json),
+        queue: compat.queue.as_ref().map(queue_to_json),
+        overflow: compat.overflow,
+    }
+}
+
+impl From<datamodel::Stock> for Stock {
+    fn from(stock: datamodel::Stock) -> Self {
+        let (initial_equation, arrayed_equation) = match stock.equation {
+            datamodel::Equation::Scalar(eq) => (eq, None),
+            datamodel::Equation::ApplyToAll(dims, eq) => (
+                String::new(),
+                Some(ArrayedEquation {
+                    dimensions: dims,
+                    equation: Some(eq),
+                    compat: None,
+                    elements: None,
+                    has_except_default: None,
+                }),
+            ),
+            datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
+                // Only serialize has_except_default when a default equation
+                // exists; the flag is meaningless without one.
+                let has_except_flag = if default_eq.is_some() {
+                    Some(has_except_default)
+                } else {
+                    None
+                };
+                let ees = elems
+                    .into_iter()
+                    .map(
+                        |(subscript, equation, active_initial, gf)| ElementEquation {
+                            subscript,
+                            equation,
+                            compat: active_initial.map(|ai| Compat {
+                                active_initial: Some(ai),
+                                ..Default::default()
+                            }),
+                            graphical_function: gf.map(|g| g.into()),
+                        },
+                    )
+                    .collect();
+                (
+                    String::new(),
+                    Some(ArrayedEquation {
+                        dimensions: dims,
+                        equation: default_eq,
+                        compat: None,
+                        elements: Some(ees),
+                        has_except_default: has_except_flag,
+                    }),
+                )
+            }
+        };
+
+        let compat = compat_to_json(&stock.compat);
+
+        Stock {
+            uid: stock.uid.unwrap_or(0),
+            name: stock.ident,
+            initial_equation,
+            units: stock.units.unwrap_or_default(),
+            inflows: stock.inflows,
+            outflows: stock.outflows,
+            documentation: stock.documentation,
+            arrayed_equation,
+            ai_state: stock.ai_state.map(Into::into),
+            compat: if compat.is_empty() {
+                None
+            } else {
+                Some(compat)
+            },
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
+        }
+    }
+}
+
+impl From<datamodel::Flow> for Flow {
+    fn from(flow: datamodel::Flow) -> Self {
+        let (equation, arrayed_equation) = match flow.equation {
+            datamodel::Equation::Scalar(eq) => (eq, None),
+            datamodel::Equation::ApplyToAll(dims, eq) => (
+                String::new(),
+                Some(ArrayedEquation {
+                    dimensions: dims,
+                    equation: Some(eq),
+                    compat: None,
+                    elements: None,
+                    has_except_default: None,
+                }),
+            ),
+            datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
+                let has_except_flag = if default_eq.is_some() {
+                    Some(has_except_default)
+                } else {
+                    None
+                };
+                let ees = elems
+                    .into_iter()
+                    .map(
+                        |(subscript, equation, active_initial, gf)| ElementEquation {
+                            subscript,
+                            equation,
+                            compat: active_initial.map(|ai| Compat {
+                                active_initial: Some(ai),
+                                ..Default::default()
+                            }),
+                            graphical_function: gf.map(|g| g.into()),
+                        },
+                    )
+                    .collect();
+                (
+                    String::new(),
+                    Some(ArrayedEquation {
+                        dimensions: dims,
+                        equation: default_eq,
+                        compat: None,
+                        elements: Some(ees),
+                        has_except_default: has_except_flag,
+                    }),
+                )
+            }
+        };
+
+        let compat = compat_to_json(&flow.compat);
+
+        Flow {
+            uid: flow.uid.unwrap_or(0),
+            name: flow.ident,
+            equation,
+            units: flow.units.unwrap_or_default(),
+            graphical_function: flow.gf.map(|gf| gf.into()),
+            documentation: flow.documentation,
+            arrayed_equation,
+            ai_state: flow.ai_state.map(Into::into),
+            compat: if compat.is_empty() {
+                None
+            } else {
+                Some(compat)
+            },
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
+        }
+    }
+}
+
+impl From<datamodel::Aux> for Auxiliary {
+    fn from(aux: datamodel::Aux) -> Self {
+        let (equation, arrayed_equation) = match aux.equation {
+            datamodel::Equation::Scalar(eq) => (eq, None),
+            datamodel::Equation::ApplyToAll(dims, eq) => (
+                String::new(),
+                Some(ArrayedEquation {
+                    dimensions: dims,
+                    equation: Some(eq),
+                    compat: None,
+                    elements: None,
+                    has_except_default: None,
+                }),
+            ),
+            datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
+                let has_except_flag = if default_eq.is_some() {
+                    Some(has_except_default)
+                } else {
+                    None
+                };
+                let ees = elems
+                    .into_iter()
+                    .map(
+                        |(subscript, equation, active_initial, gf)| ElementEquation {
+                            subscript,
+                            equation,
+                            compat: active_initial.map(|ai| Compat {
+                                active_initial: Some(ai),
+                                ..Default::default()
+                            }),
+                            graphical_function: gf.map(|g| g.into()),
+                        },
+                    )
+                    .collect();
+                (
+                    String::new(),
+                    Some(ArrayedEquation {
+                        dimensions: dims,
+                        equation: default_eq,
+                        compat: None,
+                        elements: Some(ees),
+                        has_except_default: has_except_flag,
+                    }),
+                )
+            }
+        };
+
+        let compat = compat_to_json(&aux.compat);
+
+        Auxiliary {
+            uid: aux.uid.unwrap_or(0),
+            name: aux.ident,
+            equation,
+            units: aux.units.unwrap_or_default(),
+            graphical_function: aux.gf.map(|gf| gf.into()),
+            documentation: aux.documentation,
+            arrayed_equation,
+            ai_state: aux.ai_state.map(Into::into),
+            compat: if compat.is_empty() {
+                None
+            } else {
+                Some(compat)
+            },
+            can_be_module_input: false,
+            is_public: false,
+        }
+    }
+}
+
+impl From<datamodel::ModuleReference> for ModuleReference {
+    fn from(mr: datamodel::ModuleReference) -> Self {
+        ModuleReference {
+            src: mr.src,
+            dst: mr.dst,
+        }
+    }
+}
+
+impl From<datamodel::Module> for Module {
+    fn from(module: datamodel::Module) -> Self {
+        let compat = compat_to_json(&module.compat);
+        Module {
+            uid: module.uid.unwrap_or(0),
+            name: module.ident,
+            model_name: module.model_name,
+            units: module.units.unwrap_or_default(),
+            documentation: module.documentation,
+            references: module.references.into_iter().map(|r| r.into()).collect(),
+            ai_state: module.ai_state.map(Into::into),
+            compat: if compat.is_empty() {
+                None
+            } else {
+                Some(compat)
+            },
+            can_be_module_input: false,
+            is_public: false,
+        }
+    }
+}
+
+impl From<datamodel::SimSpecs> for SimSpecs {
+    fn from(ss: datamodel::SimSpecs) -> Self {
+        let dt = match ss.dt {
+            datamodel::Dt::Dt(v) if (v - 1.0).abs() < 1e-10 => String::new(),
+            datamodel::Dt::Dt(v) if v.fract() == 0.0 => format!("{}", v as i64),
+            datamodel::Dt::Dt(v) => format!("{}", v),
+            datamodel::Dt::Reciprocal(v) if v.fract() == 0.0 => format!("1/{}", v as i64),
+            datamodel::Dt::Reciprocal(v) => format!("1/{}", v),
+        };
+
+        let save_step = match ss.save_step {
+            Some(datamodel::Dt::Dt(v)) => v,
+            Some(datamodel::Dt::Reciprocal(v)) => 1.0 / v,
+            None => 0.0,
+        };
+
+        let method = match ss.sim_method {
+            datamodel::SimMethod::RungeKutta4 => "rk4".to_string(),
+            datamodel::SimMethod::RungeKutta2 => "rk2".to_string(),
+            datamodel::SimMethod::Euler => String::new(),
+        };
+
+        SimSpecs {
+            start_time: ss.start,
+            end_time: ss.stop,
+            dt,
+            save_step,
+            method,
+            time_units: ss.time_units.unwrap_or_default(),
+        }
+    }
+}
+
+fn label_side_to_string(ls: datamodel::view_element::LabelSide) -> String {
+    match ls {
+        datamodel::view_element::LabelSide::Top => "top",
+        datamodel::view_element::LabelSide::Left => "left",
+        datamodel::view_element::LabelSide::Bottom => "bottom",
+        datamodel::view_element::LabelSide::Right => "right",
+        datamodel::view_element::LabelSide::Center => "",
+    }
+    .to_string()
+}
+
+impl From<datamodel::ViewElement> for ViewElement {
+    fn from(ve: datamodel::ViewElement) -> Self {
+        match ve {
+            datamodel::ViewElement::Stock(s) => ViewElement::Stock(StockViewElement {
+                uid: s.uid,
+                name: s.name,
+                x: s.x,
+                y: s.y,
+                label_side: label_side_to_string(s.label_side),
+            }),
+            datamodel::ViewElement::Flow(f) => ViewElement::Flow(FlowViewElement {
+                uid: f.uid,
+                name: f.name,
+                x: f.x,
+                y: f.y,
+                label_side: label_side_to_string(f.label_side),
+                points: f
+                    .points
+                    .into_iter()
+                    .map(|p| FlowPoint {
+                        x: p.x,
+                        y: p.y,
+                        attached_to_uid: p.attached_to_uid.unwrap_or(0),
+                    })
+                    .collect(),
+            }),
+            datamodel::ViewElement::Aux(a) => ViewElement::Auxiliary(AuxiliaryViewElement {
+                uid: a.uid,
+                name: a.name,
+                x: a.x,
+                y: a.y,
+                label_side: label_side_to_string(a.label_side),
+            }),
+            datamodel::ViewElement::Cloud(c) => ViewElement::Cloud(CloudViewElement {
+                uid: c.uid,
+                flow_uid: c.flow_uid,
+                x: c.x,
+                y: c.y,
+            }),
+            datamodel::ViewElement::Link(l) => ViewElement::Link(LinkViewElement {
+                uid: l.uid,
+                from_uid: l.from_uid,
+                to_uid: l.to_uid,
+                arc: match &l.shape {
+                    datamodel::view_element::LinkShape::Arc(arc) => Some(*arc),
+                    _ => None,
+                },
+                multi_points: match l.shape {
+                    datamodel::view_element::LinkShape::MultiPoint(points) => points
+                        .into_iter()
+                        .map(|p| LinkPoint { x: p.x, y: p.y })
+                        .collect(),
+                    _ => vec![],
+                },
+                polarity: match l.polarity {
+                    Some(datamodel::view_element::LinkPolarity::Positive) => Some("+".to_string()),
+                    Some(datamodel::view_element::LinkPolarity::Negative) => Some("-".to_string()),
+                    None => None,
+                },
+            }),
+            datamodel::ViewElement::Module(m) => ViewElement::Module(ModuleViewElement {
+                uid: m.uid,
+                name: m.name,
+                x: m.x,
+                y: m.y,
+                label_side: label_side_to_string(m.label_side),
+            }),
+            datamodel::ViewElement::Alias(a) => ViewElement::Alias(AliasViewElement {
+                uid: a.uid,
+                alias_of_uid: a.alias_of_uid,
+                x: a.x,
+                y: a.y,
+                label_side: label_side_to_string(a.label_side),
+            }),
+            datamodel::ViewElement::Group(g) => {
+                // Datamodel uses center coordinates, JSON uses top-left
+                ViewElement::Group(GroupViewElement {
+                    uid: g.uid,
+                    name: g.name,
+                    x: g.x - g.width / 2.0,
+                    y: g.y - g.height / 2.0,
+                    width: g.width,
+                    height: g.height,
+                    is_mdl_view_marker: g.is_mdl_view_marker,
+                })
+            }
+        }
+    }
+}
+
+impl From<datamodel::View> for View {
+    fn from(view: datamodel::View) -> Self {
+        match view {
+            datamodel::View::StockFlow(sf) => View {
+                kind: "stock_flow".to_string(),
+                name: sf.name,
+                elements: sf.elements.into_iter().map(|e| e.into()).collect(),
+                view_box: Some(Rect {
+                    x: sf.view_box.x,
+                    y: sf.view_box.y,
+                    width: sf.view_box.width,
+                    height: sf.view_box.height,
+                }),
+                zoom: sf.zoom,
+                use_lettered_polarity: sf.use_lettered_polarity,
+            },
+        }
+    }
+}
+
+impl From<datamodel::Model> for Model {
+    fn from(model: datamodel::Model) -> Self {
+        let mut stocks = Vec::new();
+        let mut flows = Vec::new();
+        let mut auxiliaries = Vec::new();
+        let mut modules = Vec::new();
+
+        for var in model.variables {
+            match var {
+                datamodel::Variable::Stock(s) => stocks.push(s.into()),
+                datamodel::Variable::Flow(f) => flows.push(f.into()),
+                datamodel::Variable::Aux(a) => auxiliaries.push(a.into()),
+                datamodel::Variable::Module(m) => modules.push(m.into()),
+            }
+        }
+
+        // Sort all arrays by canonical identifier for determinism
+        stocks.sort_by_cached_key(|s: &Stock| canonicalize(&s.name).into_owned());
+        flows.sort_by_cached_key(|f: &Flow| canonicalize(&f.name).into_owned());
+        auxiliaries.sort_by_cached_key(|a: &Auxiliary| canonicalize(&a.name).into_owned());
+        modules.sort_by_cached_key(|m: &Module| canonicalize(&m.name).into_owned());
+
+        Model {
+            name: model.name,
+            stocks,
+            flows,
+            auxiliaries,
+            modules,
+            sim_specs: model.sim_specs.map(|ss| ss.into()),
+            views: model.views.into_iter().map(|v| v.into()).collect(),
+            loop_metadata: model
+                .loop_metadata
+                .into_iter()
+                .map(|lm| lm.into())
+                .collect(),
+            groups: model.groups.into_iter().map(|g| g.into()).collect(),
+            macro_spec: model.macro_spec.map(|m| m.into()),
+        }
+    }
+}
+
+impl From<datamodel::Dimension> for Dimension {
+    fn from(dim: datamodel::Dimension) -> Self {
+        // Single positional mapping (one mapping with empty element_map) is
+        // captured by maps_to for backward compatibility. All OTHER mappings
+        // (additional positional targets, element-level mappings) go in the
+        // mappings array so multi-target cases are not silently dropped.
+        let maps_to = dim.maps_to().map(|s| s.to_owned());
+        let skip_first_positional = maps_to.is_some();
+        let mut skipped = false;
+        let mappings: Vec<JsonDimensionMapping> = dim
+            .mappings
+            .iter()
+            .filter(|m| {
+                if skip_first_positional && !skipped && m.element_map.is_empty() {
+                    skipped = true;
+                    return false;
+                }
+                true
+            })
+            .map(|m| JsonDimensionMapping {
+                target: m.target.clone(),
+                element_map: m
+                    .element_map
+                    .iter()
+                    .map(|(src, tgt)| JsonElementMapEntry {
+                        source: src.clone(),
+                        target: tgt.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        match dim.elements {
+            datamodel::DimensionElements::Named(elements) => Dimension {
+                name: dim.name,
+                elements,
+                size: 0,
+                maps_to,
+                mappings,
+                parent: dim.parent,
+            },
+            datamodel::DimensionElements::Indexed(size) => Dimension {
+                name: dim.name,
+                elements: vec![],
+                size: size as i32,
+                maps_to,
+                mappings,
+                parent: dim.parent,
+            },
+        }
+    }
+}
+
+impl From<datamodel::Unit> for Unit {
+    fn from(unit: datamodel::Unit) -> Self {
+        Unit {
+            name: unit.name,
+            equation: unit.equation.unwrap_or_default(),
+            disabled: unit.disabled,
+            aliases: unit.aliases,
+        }
+    }
+}
+
+impl From<datamodel::LoopMetadata> for LoopMetadata {
+    fn from(loop_metadata: datamodel::LoopMetadata) -> Self {
+        LoopMetadata {
+            uids: loop_metadata.uids,
+            deleted: loop_metadata.deleted,
+            name: loop_metadata.name,
+            description: loop_metadata.description,
+        }
+    }
+}
+
+impl From<datamodel::MacroSpec> for MacroSpec {
+    fn from(macro_spec: datamodel::MacroSpec) -> Self {
+        MacroSpec {
+            parameters: macro_spec.parameters,
+            primary_output: macro_spec.primary_output,
+            additional_outputs: macro_spec.additional_outputs,
+        }
+    }
+}
+
+impl From<datamodel::ModelGroup> for ModelGroup {
+    fn from(group: datamodel::ModelGroup) -> Self {
+        ModelGroup {
+            name: group.name,
+            doc: group.doc,
+            parent: group.parent,
+            members: group.members,
+            run_enabled: group.run_enabled,
+        }
+    }
+}
+
+impl From<datamodel::Source> for Source {
+    fn from(source: datamodel::Source) -> Self {
+        let extension = match source.extension {
+            datamodel::Extension::Xmile => "xmile",
+            datamodel::Extension::Vensim => "vensim",
+            datamodel::Extension::Unspecified => "",
+        }
+        .to_string();
+        Source {
+            extension,
+            content: source.content,
+        }
+    }
+}
+
+impl From<datamodel::Project> for Project {
+    fn from(project: datamodel::Project) -> Self {
+        Project {
+            name: project.name,
+            sim_specs: project.sim_specs.into(),
+            models: project.models.into_iter().map(|m| m.into()).collect(),
+            dimensions: project.dimensions.into_iter().map(|d| d.into()).collect(),
+            units: project.units.into_iter().map(|u| u.into()).collect(),
+            source: project.source.map(|s| s.into()),
+        }
+    }
+}
+
+impl From<&datamodel::Project> for Project {
+    fn from(project: &datamodel::Project) -> Self {
+        Project {
+            name: project.name.clone(),
+            sim_specs: project.sim_specs.clone().into(),
+            models: project.models.iter().map(|m| m.clone().into()).collect(),
+            dimensions: project
+                .dimensions
+                .iter()
+                .map(|d| d.clone().into())
+                .collect(),
+            units: project.units.iter().map(|u| u.clone().into()).collect(),
+            source: project.source.as_ref().map(|s| s.clone().into()),
+        }
+    }
+}
+
+// ── Project patches ──────────────────────────────────────────────────────
+
+/// A patch to a project as JSON: what `simlin_project_apply_patch` takes, and
+/// the form an edit plan's patch travels in to the host that lands it. The
+/// engine's own [`simlin_base::ProjectPatch`] converts to and from it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPatch {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_ops: Vec<ProjectOperation>,
+    #[serde(default)]
+    pub models: Vec<ModelPatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
+pub enum ProjectOperation {
+    SetSimSpecs {
+        #[serde(rename = "simSpecs")]
+        sim_specs: SimSpecs,
+    },
+    AddModel {
+        name: String,
+    },
+    /// Adds a dimension, or sets the elements, mappings and parent of the
+    /// declared dimension of its name. An element removed takes with it the
+    /// variables' own equations there; renaming an element is
+    /// `renameElement`.
+    UpsertDimension {
+        dimension: Dimension,
+    },
+    /// Renames a dimension, and every variable and equation that names it.
+    RenameDimension {
+        from: String,
+        to: String,
+    },
+    /// Renames one element of a dimension, and every key and subscript that
+    /// names it.
+    RenameElement {
+        dimension: String,
+        from: String,
+        to: String,
+    },
+    /// Deletes a dimension no variable, equation or dimension uses.
+    DeleteDimension {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelPatch {
+    pub name: String,
+    #[serde(default)]
+    pub ops: Vec<ModelOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
+pub enum ModelOperation {
+    UpsertAux {
+        aux: Auxiliary,
+    },
+    UpsertStock {
+        stock: Stock,
+    },
+    UpsertFlow {
+        flow: Flow,
+    },
+    UpsertModule {
+        module: Module,
+    },
+    DeleteVariable {
+        ident: String,
+    },
+    RenameVariable {
+        from: String,
+        to: String,
+    },
+    UpsertView {
+        index: u32,
+        view: View,
+    },
+    DeleteView {
+        index: u32,
+    },
+    UpdateStockFlows {
+        ident: String,
+        inflows: Vec<String>,
+        outflows: Vec<String>,
+    },
+    SetLoopName {
+        variables: Vec<String>,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    /// Upsert and remove view elements; the engine derives the model operations
+    /// the edit implies when it applies (`ModelOperation::EditView`).
+    EditView {
+        index: u32,
+        #[serde(default)]
+        upsert: Vec<ViewElement>,
+        #[serde(default)]
+        remove: Vec<i32>,
+    },
+    /// A scalar's equation (a stock's initial value), or the equation every
+    /// element of an arrayed variable follows; elements with equations of
+    /// their own keep them.
+    SetEquation {
+        ident: String,
+        equation: String,
+    },
+    /// One element's own equation, the element named on each of the
+    /// variable's dimensions in order; `null` returns the element to
+    /// following the equation every element follows.
+    SetElementEquation {
+        ident: String,
+        element: Vec<String>,
+        #[serde(default)]
+        equation: Option<String>,
+    },
+    /// The variable's units; `null` or empty clears them.
+    SetUnits {
+        ident: String,
+        #[serde(default)]
+        units: Option<String>,
+    },
+    /// The variable's documentation; empty clears it.
+    SetNotes {
+        ident: String,
+        notes: String,
+    },
+    /// The variable's lookup table, or with `element` one element's; `null`
+    /// removes it.
+    SetLookup {
+        ident: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        element: Option<Vec<String>>,
+        #[serde(default)]
+        lookup: Option<GraphicalFunction>,
+    },
+    /// The dimensions the variable is arrayed over, in order; none makes it
+    /// a scalar. `keep` names the element kept on each dimension removed.
+    SetDimensions {
+        ident: String,
+        dimensions: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep: Option<Vec<String>>,
+    },
+}
+
+impl From<ProjectPatch> for simlin_base::project_patch::ProjectPatch {
+    fn from(patch: ProjectPatch) -> Self {
+        simlin_base::project_patch::ProjectPatch {
+            project_ops: patch
+                .project_ops
+                .into_iter()
+                .map(|op| match op {
+                    ProjectOperation::SetSimSpecs { sim_specs } => {
+                        simlin_base::project_patch::ProjectOperation::SetSimSpecs(sim_specs.into())
+                    }
+                    ProjectOperation::AddModel { name } => {
+                        simlin_base::project_patch::ProjectOperation::AddModel { name }
+                    }
+                    ProjectOperation::UpsertDimension { dimension } => {
+                        simlin_base::project_patch::ProjectOperation::UpsertDimension(
+                            dimension.into(),
+                        )
+                    }
+                    ProjectOperation::RenameDimension { from, to } => {
+                        simlin_base::project_patch::ProjectOperation::RenameDimension { from, to }
+                    }
+                    ProjectOperation::RenameElement {
+                        dimension,
+                        from,
+                        to,
+                    } => simlin_base::project_patch::ProjectOperation::RenameElement {
+                        dimension,
+                        from,
+                        to,
+                    },
+                    ProjectOperation::DeleteDimension { name } => {
+                        simlin_base::project_patch::ProjectOperation::DeleteDimension { name }
+                    }
+                })
+                .collect(),
+            models: patch
+                .models
+                .into_iter()
+                .map(|model| simlin_base::project_patch::ModelPatch {
+                    name: model.name,
+                    ops: model.ops.into_iter().map(Into::into).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<ModelOperation> for simlin_base::project_patch::ModelOperation {
+    fn from(op: ModelOperation) -> Self {
+        use simlin_base::project_patch::ModelOperation as Op;
+        match op {
+            ModelOperation::UpsertAux { aux } => Op::UpsertAux(aux.into()),
+            ModelOperation::UpsertStock { stock } => Op::UpsertStock(stock.into()),
+            ModelOperation::UpsertFlow { flow } => Op::UpsertFlow(flow.into()),
+            ModelOperation::UpsertModule { module } => Op::UpsertModule(module.into()),
+            ModelOperation::DeleteVariable { ident } => Op::DeleteVariable { ident },
+            ModelOperation::RenameVariable { from, to } => Op::RenameVariable { from, to },
+            ModelOperation::UpsertView { index, view } => Op::UpsertView {
+                index,
+                view: view.into(),
+            },
+            ModelOperation::DeleteView { index } => Op::DeleteView { index },
+            ModelOperation::UpdateStockFlows {
+                ident,
+                inflows,
+                outflows,
+            } => Op::UpdateStockFlows {
+                ident,
+                inflows,
+                outflows,
+            },
+            ModelOperation::SetLoopName {
+                variables,
+                name,
+                description,
+            } => Op::SetLoopName {
+                variables,
+                name,
+                description,
+            },
+            ModelOperation::EditView {
+                index,
+                upsert,
+                remove,
+            } => Op::EditView {
+                index,
+                upsert: upsert.into_iter().map(Into::into).collect(),
+                remove,
+            },
+            ModelOperation::SetEquation { ident, equation } => Op::SetEquation { ident, equation },
+            ModelOperation::SetElementEquation {
+                ident,
+                element,
+                equation,
+            } => Op::SetElementEquation {
+                ident,
+                element,
+                equation,
+            },
+            ModelOperation::SetUnits { ident, units } => Op::SetUnits { ident, units },
+            ModelOperation::SetNotes { ident, notes } => Op::SetNotes { ident, notes },
+            ModelOperation::SetLookup {
+                ident,
+                element,
+                lookup,
+            } => Op::SetLookup {
+                ident,
+                element,
+                lookup: lookup.map(Into::into),
+            },
+            ModelOperation::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            } => Op::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            },
+        }
+    }
+}
+
+/// The JSON form of an engine patch. A source change, which a host never
+/// sends and a plan never makes, has none.
+impl TryFrom<simlin_base::project_patch::ProjectPatch> for ProjectPatch {
+    type Error = String;
+
+    fn try_from(patch: simlin_base::project_patch::ProjectPatch) -> Result<Self, String> {
+        let project_ops = patch
+            .project_ops
+            .into_iter()
+            .map(|op| match op {
+                simlin_base::project_patch::ProjectOperation::SetSimSpecs(sim_specs) => {
+                    Ok(ProjectOperation::SetSimSpecs {
+                        sim_specs: sim_specs.into(),
+                    })
+                }
+                simlin_base::project_patch::ProjectOperation::AddModel { name } => {
+                    Ok(ProjectOperation::AddModel { name })
+                }
+                simlin_base::project_patch::ProjectOperation::SetSource(_) => {
+                    Err("a change of the project's source has no JSON form".to_string())
+                }
+                simlin_base::project_patch::ProjectOperation::UpsertDimension(dimension) => {
+                    Ok(ProjectOperation::UpsertDimension {
+                        dimension: dimension.into(),
+                    })
+                }
+                simlin_base::project_patch::ProjectOperation::RenameDimension { from, to } => {
+                    Ok(ProjectOperation::RenameDimension { from, to })
+                }
+                simlin_base::project_patch::ProjectOperation::RenameElement {
+                    dimension,
+                    from,
+                    to,
+                } => Ok(ProjectOperation::RenameElement {
+                    dimension,
+                    from,
+                    to,
+                }),
+                simlin_base::project_patch::ProjectOperation::DeleteDimension { name } => {
+                    Ok(ProjectOperation::DeleteDimension { name })
+                }
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let models = patch
+            .models
+            .into_iter()
+            .map(|model| ModelPatch {
+                name: model.name,
+                ops: model.ops.into_iter().map(Into::into).collect(),
+            })
+            .collect();
+        Ok(ProjectPatch {
+            project_ops,
+            models,
+        })
+    }
+}
+
+impl From<simlin_base::project_patch::ModelOperation> for ModelOperation {
+    fn from(op: simlin_base::project_patch::ModelOperation) -> Self {
+        use simlin_base::project_patch::ModelOperation as Op;
+        match op {
+            Op::UpsertAux(aux) => ModelOperation::UpsertAux { aux: aux.into() },
+            Op::UpsertStock(stock) => ModelOperation::UpsertStock {
+                stock: stock.into(),
+            },
+            Op::UpsertFlow(flow) => ModelOperation::UpsertFlow { flow: flow.into() },
+            Op::UpsertModule(module) => ModelOperation::UpsertModule {
+                module: module.into(),
+            },
+            Op::DeleteVariable { ident } => ModelOperation::DeleteVariable { ident },
+            Op::RenameVariable { from, to } => ModelOperation::RenameVariable { from, to },
+            Op::UpsertView { index, view } => ModelOperation::UpsertView {
+                index,
+                view: view.into(),
+            },
+            Op::DeleteView { index } => ModelOperation::DeleteView { index },
+            Op::UpdateStockFlows {
+                ident,
+                inflows,
+                outflows,
+            } => ModelOperation::UpdateStockFlows {
+                ident,
+                inflows,
+                outflows,
+            },
+            Op::SetLoopName {
+                variables,
+                name,
+                description,
+            } => ModelOperation::SetLoopName {
+                variables,
+                name,
+                description,
+            },
+            Op::EditView {
+                index,
+                upsert,
+                remove,
+            } => ModelOperation::EditView {
+                index,
+                upsert: upsert.into_iter().map(Into::into).collect(),
+                remove,
+            },
+            Op::SetEquation { ident, equation } => ModelOperation::SetEquation { ident, equation },
+            Op::SetElementEquation {
+                ident,
+                element,
+                equation,
+            } => ModelOperation::SetElementEquation {
+                ident,
+                element,
+                equation,
+            },
+            Op::SetUnits { ident, units } => ModelOperation::SetUnits { ident, units },
+            Op::SetNotes { ident, notes } => ModelOperation::SetNotes { ident, notes },
+            Op::SetLookup {
+                ident,
+                element,
+                lookup,
+            } => ModelOperation::SetLookup {
+                ident,
+                element,
+                lookup: lookup.map(Into::into),
+            },
+            Op::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            } => ModelOperation::SetDimensions {
+                ident,
+                dimensions,
+                keep,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_graphical_function_roundtrip() {
+        let cases = vec![
+            (
+                "explicit points continuous",
+                GraphicalFunction {
+                    points: vec![[0.0, 0.0], [1.0, 10.0], [2.0, 20.0]],
+                    y_points: vec![],
+                    kind: "continuous".to_string(),
+                    x_scale: None,
+                    y_scale: None,
+                },
+            ),
+            (
+                "explicit points with y_scale",
+                GraphicalFunction {
+                    points: vec![[0.0, 5.0], [10.0, 15.0], [20.0, 25.0]],
+                    y_points: vec![],
+                    kind: "discrete".to_string(),
+                    x_scale: None,
+                    y_scale: Some(GraphicalFunctionScale {
+                        min: 5.0,
+                        max: 25.0,
+                    }),
+                },
+            ),
+            (
+                "scale-based with y_points",
+                GraphicalFunction {
+                    points: vec![],
+                    y_points: vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0],
+                    kind: "continuous".to_string(),
+                    x_scale: Some(GraphicalFunctionScale {
+                        min: 0.0,
+                        max: 45.0,
+                    }),
+                    y_scale: None,
+                },
+            ),
+            (
+                "extrapolate function",
+                GraphicalFunction {
+                    points: vec![[-10.0, -5.0], [0.0, 0.0], [10.0, 5.0]],
+                    y_points: vec![],
+                    kind: "extrapolate".to_string(),
+                    x_scale: None,
+                    y_scale: None,
+                },
+            ),
+        ];
+
+        for (name, json_gf) in cases {
+            // Convert to datamodel
+            let dm_gf: datamodel::GraphicalFunction = json_gf.clone().into();
+
+            // Convert back to JSON
+            let json_gf2: GraphicalFunction = dm_gf.into();
+
+            // Serialize and deserialize through JSON
+            let json_str = serde_json::to_string(&json_gf2).unwrap();
+            let json_gf3: GraphicalFunction = serde_json::from_str(&json_str).unwrap();
+
+            // Verify roundtrip
+            assert_eq!(json_gf.kind, json_gf3.kind, "Failed for: {}", name);
+            if !json_gf.points.is_empty() {
+                assert_eq!(
+                    json_gf.points.len(),
+                    json_gf3.points.len(),
+                    "Failed for: {}",
+                    name
+                );
+            } else {
+                assert_eq!(json_gf.y_points, json_gf3.y_points, "Failed for: {}", name);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_graphical_function_uses_zero_width_x_scale() {
+        let json_gf = GraphicalFunction {
+            points: vec![],
+            y_points: vec![],
+            kind: "continuous".to_string(),
+            x_scale: None,
+            y_scale: None,
+        };
+
+        let dm_gf: datamodel::GraphicalFunction = json_gf.into();
+
+        assert_eq!(dm_gf.x_scale.min, 0.0);
+        assert_eq!(dm_gf.x_scale.max, 0.0);
+        assert!(dm_gf.y_points.is_empty());
+    }
+
+    #[test]
+    fn test_sim_specs_dt_roundtrip() {
+        let cases = vec![
+            ("empty DT", ""),
+            ("regular decimal", "0.125"),
+            ("reciprocal", "1/8"),
+            ("integer", "1"),
+            ("reciprocal with decimal", "1/32.5"),
+        ];
+
+        for (name, dt_str) in cases {
+            let json_ss = SimSpecs {
+                start_time: 0.0,
+                end_time: 100.0,
+                dt: dt_str.to_string(),
+                save_step: 1.0,
+                method: "euler".to_string(),
+                time_units: "months".to_string(),
+            };
+
+            // Convert to datamodel
+            let dm_ss: datamodel::SimSpecs = json_ss.clone().into();
+
+            // Convert back to JSON
+            let json_ss2: SimSpecs = dm_ss.into();
+
+            // Serialize and deserialize
+            let json_str = serde_json::to_string(&json_ss2).unwrap();
+            let json_ss3: SimSpecs = serde_json::from_str(&json_str).unwrap();
+
+            // Verify fields
+            assert_eq!(
+                json_ss.start_time, json_ss3.start_time,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(json_ss.end_time, json_ss3.end_time, "Failed for: {}", name);
+
+            // DT value is preserved (empty and "1" both normalize to empty on roundtrip)
+            if dt_str.is_empty() || dt_str == "1" {
+                assert_eq!("", json_ss3.dt, "Failed for: {}", name);
+            } else {
+                assert_eq!(json_ss.dt, json_ss3.dt, "Failed for: {}", name);
+            }
+        }
+    }
+
+    #[test]
+    fn test_auxiliary_roundtrip() {
+        let cases = vec![
+            (
+                "scalar aux",
+                Auxiliary {
+                    uid: 200,
+                    name: "birth_rate".to_string(),
+                    equation: "0.02".to_string(),
+                    ai_state: None,
+                    compat: Some(Compat {
+                        active_initial: Some("0.015".to_string()),
+                        can_be_module_input: true,
+                        ..Default::default()
+                    }),
+                    units: "1/year".to_string(),
+                    graphical_function: None,
+                    documentation: "Annual birth rate".to_string(),
+                    arrayed_equation: None,
+                    can_be_module_input: false,
+                    is_public: false,
+                },
+            ),
+            (
+                "apply to all aux",
+                Auxiliary {
+                    uid: 0,
+                    name: "capacity".to_string(),
+                    equation: String::new(),
+                    units: String::new(),
+                    graphical_function: None,
+                    documentation: String::new(),
+                    arrayed_equation: Some(ArrayedEquation {
+                        dimensions: vec!["plants".to_string()],
+                        equation: Some("base_capacity".to_string()),
+                        compat: None,
+                        elements: None,
+                        has_except_default: None,
+                    }),
+                    ai_state: None,
+                    compat: Some(Compat {
+                        active_initial: Some("initial_capacity".to_string()),
+                        is_public: true,
+                        ..Default::default()
+                    }),
+                    can_be_module_input: false,
+                    is_public: false,
+                },
+            ),
+            (
+                "arrayed aux",
+                Auxiliary {
+                    uid: 0,
+                    name: "demand".to_string(),
+                    equation: String::new(),
+                    units: String::new(),
+                    graphical_function: None,
+                    documentation: String::new(),
+                    arrayed_equation: Some(ArrayedEquation {
+                        dimensions: vec!["regions".to_string()],
+                        equation: None,
+                        compat: None,
+                        elements: Some(vec![
+                            ElementEquation {
+                                subscript: "north".to_string(),
+                                equation: "north_demand".to_string(),
+                                compat: Some(Compat {
+                                    active_initial: Some("north_demand_init".to_string()),
+                                    ..Default::default()
+                                }),
+                                graphical_function: None,
+                            },
+                            ElementEquation {
+                                subscript: "south".to_string(),
+                                equation: "south_demand".to_string(),
+                                compat: None,
+                                graphical_function: None,
+                            },
+                        ]),
+                        has_except_default: None,
+                    }),
+                    ai_state: None,
+                    compat: Some(Compat {
+                        is_public: true,
+                        ..Default::default()
+                    }),
+                    can_be_module_input: false,
+                    is_public: false,
+                },
+            ),
+        ];
+
+        for (name, json_aux) in cases {
+            let dm_aux: datamodel::Aux = json_aux.clone().into();
+            let json_aux2: Auxiliary = dm_aux.into();
+            let json_str = serde_json::to_string(&json_aux2).unwrap();
+            let json_aux3: Auxiliary = serde_json::from_str(&json_str).unwrap();
+
+            assert_eq!(json_aux.name, json_aux3.name, "Failed for: {}", name);
+            assert_eq!(
+                json_aux.equation, json_aux3.equation,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(json_aux.compat, json_aux3.compat, "Failed for: {}", name);
+            assert_eq!(json_aux.units, json_aux3.units, "Failed for: {}", name);
+            assert_eq!(
+                json_aux.graphical_function, json_aux3.graphical_function,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_aux.arrayed_equation, json_aux3.arrayed_equation,
+                "Failed for: {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_element_roundtrip() {
+        let cases = vec![
+            (
+                "stock",
+                ViewElement::Stock(StockViewElement {
+                    uid: 1,
+                    name: "pop".to_string(),
+                    x: 100.0,
+                    y: 200.0,
+                    label_side: "top".to_string(),
+                }),
+            ),
+            (
+                "flow",
+                ViewElement::Flow(FlowViewElement {
+                    uid: 2,
+                    name: "rate".to_string(),
+                    x: 150.0,
+                    y: 200.0,
+                    label_side: "left".to_string(),
+                    points: vec![
+                        FlowPoint {
+                            x: 100.0,
+                            y: 200.0,
+                            attached_to_uid: 1,
+                        },
+                        FlowPoint {
+                            x: 200.0,
+                            y: 200.0,
+                            attached_to_uid: 0,
+                        },
+                    ],
+                }),
+            ),
+            (
+                "cloud",
+                ViewElement::Cloud(CloudViewElement {
+                    uid: 3,
+                    flow_uid: 2,
+                    x: 50.0,
+                    y: 200.0,
+                }),
+            ),
+            (
+                "link with arc",
+                ViewElement::Link(LinkViewElement {
+                    uid: 4,
+                    from_uid: 1,
+                    to_uid: 2,
+                    arc: Some(45.0),
+                    multi_points: vec![],
+                    polarity: None,
+                }),
+            ),
+            (
+                "group",
+                ViewElement::Group(GroupViewElement {
+                    uid: 5,
+                    name: "Sector".to_string(),
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 80.0,
+                    is_mdl_view_marker: false,
+                }),
+            ),
+        ];
+
+        for (name, json_ve) in cases {
+            // Roundtrip through datamodel
+            let dm_ve: datamodel::ViewElement = json_ve.clone().into();
+            let json_ve2: ViewElement = dm_ve.into();
+
+            // Serialize and deserialize
+            let json_str = serde_json::to_string(&json_ve2).unwrap();
+            let json_ve3: ViewElement = serde_json::from_str(&json_str).unwrap();
+
+            // Verify type field is present in JSON
+            assert!(
+                json_str.contains("\"type\""),
+                "Missing type field for: {}",
+                name
+            );
+
+            // Verify basic structure matches
+            match (&json_ve, &json_ve3) {
+                (ViewElement::Stock(s1), ViewElement::Stock(s2)) => {
+                    assert_eq!(s1.name, s2.name, "Failed for: {}", name);
+                }
+                (ViewElement::Flow(f1), ViewElement::Flow(f2)) => {
+                    assert_eq!(f1.name, f2.name, "Failed for: {}", name);
+                }
+                (ViewElement::Cloud(c1), ViewElement::Cloud(c2)) => {
+                    assert_eq!(c1.uid, c2.uid, "Failed for: {}", name);
+                }
+                (ViewElement::Link(l1), ViewElement::Link(l2)) => {
+                    assert_eq!(l1.from_uid, l2.from_uid, "Failed for: {}", name);
+                }
+                (ViewElement::Group(g1), ViewElement::Group(g2)) => {
+                    assert_eq!(g1.name, g2.name, "Failed for: {}", name);
+                    assert_eq!(g1.width, g2.width, "Failed for: {}", name);
+                    assert_eq!(g1.height, g2.height, "Failed for: {}", name);
+                }
+                _ => panic!("Type mismatch for: {}", name),
+            }
+        }
+    }
+
+    #[test]
+    fn test_group_view_element_roundtrip() {
+        // Test Group view element - groups are organizational containers for other elements.
+        // In JSON (matching XMILE spec), x/y are top-left coordinates.
+        // Internally in datamodel, x/y are center coordinates for consistency with other elements.
+        let json_group = ViewElement::Group(GroupViewElement {
+            uid: 100,
+            name: "Economic Sector".to_string(),
+            x: 50.0,  // top-left x
+            y: 100.0, // top-left y
+            width: 200.0,
+            height: 150.0,
+            is_mdl_view_marker: false,
+        });
+
+        // Roundtrip through datamodel and back
+        let dm_ve: datamodel::ViewElement = json_group.clone().into();
+        let json_ve2: ViewElement = dm_ve.clone().into();
+
+        // Verify datamodel stores center coordinates
+        if let datamodel::ViewElement::Group(g) = &dm_ve {
+            // Center should be top-left + half dimensions
+            assert_eq!(g.x, 50.0 + 100.0, "x should be center");
+            assert_eq!(g.y, 100.0 + 75.0, "y should be center");
+            assert_eq!(g.width, 200.0);
+            assert_eq!(g.height, 150.0);
+            assert_eq!(g.name, "Economic Sector");
+        } else {
+            panic!("Expected Group variant");
+        }
+
+        // Verify JSON serialization uses top-left coordinates
+        if let ViewElement::Group(g) = &json_ve2 {
+            assert_eq!(g.x, 50.0, "x should be top-left in JSON");
+            assert_eq!(g.y, 100.0, "y should be top-left in JSON");
+            assert_eq!(g.width, 200.0);
+            assert_eq!(g.height, 150.0);
+        } else {
+            panic!("Expected Group variant");
+        }
+
+        // Serialize and deserialize
+        let json_str = serde_json::to_string(&json_ve2).unwrap();
+        let json_ve3: ViewElement = serde_json::from_str(&json_str).unwrap();
+
+        // Verify type field is "group"
+        assert!(
+            json_str.contains("\"type\":\"group\""),
+            "Missing or incorrect type field: {}",
+            json_str
+        );
+
+        // Verify all fields are preserved after JSON roundtrip
+        if let ViewElement::Group(g) = json_ve3 {
+            assert_eq!(g.uid, 100);
+            assert_eq!(g.name, "Economic Sector");
+            assert_eq!(g.x, 50.0);
+            assert_eq!(g.y, 100.0);
+            assert_eq!(g.width, 200.0);
+            assert_eq!(g.height, 150.0);
+        } else {
+            panic!("Expected Group variant after JSON roundtrip");
+        }
+    }
+
+    #[test]
+    fn test_model_roundtrip() {
+        let json_model = Model {
+            name: "test_model".to_string(),
+            stocks: vec![Stock {
+                uid: 1,
+                name: "stock1".to_string(),
+                initial_equation: "100".to_string(),
+                units: String::new(),
+                inflows: vec!["flow1".to_string()],
+                outflows: vec![],
+                documentation: String::new(),
+                arrayed_equation: None,
+                ai_state: None,
+                compat: None,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
+            }],
+            flows: vec![Flow {
+                uid: 2,
+                name: "flow1".to_string(),
+                equation: "10".to_string(),
+                units: String::new(),
+                graphical_function: None,
+                documentation: String::new(),
+                arrayed_equation: None,
+                ai_state: None,
+                compat: None,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
+            }],
+            auxiliaries: vec![Auxiliary {
+                uid: 3,
+                name: "aux1".to_string(),
+                equation: "5".to_string(),
+                units: String::new(),
+                graphical_function: None,
+                documentation: String::new(),
+                arrayed_equation: None,
+                ai_state: None,
+                compat: None,
+                can_be_module_input: false,
+                is_public: false,
+            }],
+            modules: vec![],
+            sim_specs: Some(SimSpecs {
+                start_time: 5.0,
+                end_time: 50.0,
+                dt: "0.5".to_string(),
+                save_step: 0.5,
+                method: "rk4".to_string(),
+                time_units: "Months".to_string(),
+            }),
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        };
+
+        // Roundtrip
+        let dm_model: datamodel::Model = json_model.clone().into();
+        let dm_model_specs = dm_model.sim_specs.clone();
+        let json_model2: Model = dm_model.into();
+        let json_str = serde_json::to_string(&json_model2).unwrap();
+        let json_model3: Model = serde_json::from_str(&json_str).unwrap();
+
+        // Verify structure
+        assert_eq!(json_model.name, json_model3.name);
+        assert_eq!(json_model.stocks.len(), json_model3.stocks.len());
+        assert_eq!(json_model.flows.len(), json_model3.flows.len());
+        assert_eq!(json_model.auxiliaries.len(), json_model3.auxiliaries.len());
+        assert_eq!(dm_model_specs.as_ref().map(|ss| ss.start), Some(5.0));
+        assert_eq!(
+            json_model3.sim_specs.as_ref().map(|ss| (
+                ss.start_time,
+                ss.end_time,
+                ss.dt.clone(),
+                ss.method.clone(),
+                ss.time_units.clone()
+            )),
+            Some((
+                5.0,
+                50.0,
+                "0.5".to_string(),
+                "rk4".to_string(),
+                "Months".to_string()
+            ))
+        );
+
+        // Verify arrays are sorted by canonical name
+        assert_eq!(json_model3.stocks[0].name, "stock1");
+        assert_eq!(json_model3.flows[0].name, "flow1");
+        assert_eq!(json_model3.auxiliaries[0].name, "aux1");
+    }
+
+    /// Verifies macros.AC1.4 (JSON half): a macro-bearing `Model` round-trips
+    /// losslessly through `json::Model` -> `datamodel::Model` -> `json::Model`
+    /// -> serialized JSON string -> `json::Model`. Exercises a populated
+    /// `MacroSpec` (non-empty `parameters`, non-empty `primary_output`,
+    /// non-empty `additional_outputs`) plus a body variable (the "macro body").
+    #[test]
+    fn test_macro_spec_roundtrip() {
+        let json_model = Model {
+            name: "smooth_macro".to_string(),
+            stocks: vec![],
+            flows: vec![],
+            auxiliaries: vec![Auxiliary {
+                uid: 1,
+                name: "output".to_string(),
+                equation: "input * gain".to_string(),
+                units: String::new(),
+                graphical_function: None,
+                documentation: String::new(),
+                arrayed_equation: None,
+                ai_state: None,
+                compat: None,
+                can_be_module_input: false,
+                is_public: false,
+            }],
+            modules: vec![],
+            sim_specs: None,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: Some(MacroSpec {
+                parameters: vec!["input".to_string(), "gain".to_string()],
+                primary_output: "output".to_string(),
+                additional_outputs: vec!["debug_trace".to_string()],
+            }),
+        };
+
+        // json::Model -> datamodel::Model -> json::Model -> string -> json::Model
+        let dm_model: datamodel::Model = json_model.clone().into();
+        let json_model2: Model = dm_model.clone().into();
+        let json_str = serde_json::to_string(&json_model2).unwrap();
+        let json_model3: Model = serde_json::from_str(&json_str).unwrap();
+
+        // The datamodel layer preserves the spec.
+        let dm_spec = dm_model.macro_spec.as_ref().expect("datamodel macro_spec");
+        assert_eq!(
+            dm_spec.parameters,
+            vec!["input".to_string(), "gain".to_string()]
+        );
+        assert_eq!(dm_spec.primary_output, "output");
+        assert_eq!(dm_spec.additional_outputs, vec!["debug_trace".to_string()]);
+
+        // The fully round-tripped json::Model is identical to the original,
+        // including the macro spec and the body variable.
+        assert_eq!(json_model, json_model3);
+        assert_eq!(json_model.macro_spec, json_model3.macro_spec);
+        assert_eq!(json_model3.auxiliaries.len(), 1);
+
+        // A non-macro model still round-trips and stays None (and the
+        // optional-singular serde idiom omits the key entirely).
+        let plain = Model {
+            name: "plain".to_string(),
+            stocks: vec![],
+            flows: vec![],
+            auxiliaries: vec![],
+            modules: vec![],
+            sim_specs: None,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        };
+        let plain_dm: datamodel::Model = plain.clone().into();
+        assert!(plain_dm.macro_spec.is_none());
+        let plain_str = serde_json::to_string(&plain).unwrap();
+        assert!(!plain_str.contains("macroSpec"));
+        let plain3: Model = serde_json::from_str(&plain_str).unwrap();
+        assert_eq!(plain, plain3);
+    }
+
+    #[test]
+    fn test_model_without_sim_specs_defaults_to_none() {
+        let json = r#"{
+            "name": "test_model",
+            "stocks": [],
+            "flows": [],
+            "auxiliaries": [],
+            "modules": [],
+            "views": [],
+            "loop_metadata": []
+        }"#;
+
+        let json_model: Model = serde_json::from_str(json).unwrap();
+        assert!(json_model.sim_specs.is_none());
+
+        let dm_model: datamodel::Model = json_model.into();
+        assert!(dm_model.sim_specs.is_none());
+
+        let json_model2: Model = dm_model.into();
+        assert!(json_model2.sim_specs.is_none());
+    }
+
+    #[test]
+    fn test_dimension_maps_to_preserved_in_json() {
+        // Verify that mapsTo is correctly serialized to/from JSON
+        let json_str = r#"{
+            "name": "DimA",
+            "elements": ["A1", "A2", "A3"],
+            "mapsTo": "DimB"
+        }"#;
+
+        let dim: Dimension = serde_json::from_str(json_str).unwrap();
+        assert_eq!(dim.name, "DimA");
+        assert_eq!(dim.maps_to, Some("DimB".to_string()));
+
+        // Convert to datamodel and back
+        let dm_dim: datamodel::Dimension = dim.into();
+        assert_eq!(dm_dim.maps_to(), Some("DimB"));
+
+        let json_dim: Dimension = dm_dim.into();
+        assert_eq!(json_dim.maps_to, Some("DimB".to_string()));
+
+        // Serialize and verify mapsTo is present
+        let serialized = serde_json::to_string(&json_dim).unwrap();
+        assert!(
+            serialized.contains("\"mapsTo\":\"DimB\""),
+            "mapsTo should be serialized: {}",
+            serialized
+        );
+    }
+
+    #[test]
+    fn test_dimension_maps_to_omitted_when_none() {
+        // Verify mapsTo is not serialized when None (due to skip_serializing_if)
+        let dim = Dimension {
+            name: "Region".to_string(),
+            elements: vec!["North".to_string(), "South".to_string()],
+            size: 0,
+            maps_to: None,
+            mappings: vec![],
+            parent: None,
+        };
+
+        let serialized = serde_json::to_string(&dim).unwrap();
+        assert!(
+            !serialized.contains("mapsTo"),
+            "mapsTo should not appear when None: {}",
+            serialized
+        );
+    }
+
+    #[test]
+    fn test_deserialize_with_null_modules() {
+        let json_str = r#"{
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
+                "dt": "1",
+                "method": "euler"
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [],
+                "flows": [],
+                "auxiliaries": [],
+                "modules": null,
+                "simSpecs": {
+                    "startTime": 0.0,
+                    "endTime": 10.0,
+                    "dt": "1",
+                    "method": "euler"
+                },
+                "views": []
+            }],
+            "dimensions": [],
+            "units": []
+        }"#;
+
+        let result: Result<Project, _> = serde_json::from_str(json_str);
+        assert!(result.is_ok(), "Failed to deserialize: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_source_roundtrip() {
+        let cases = vec![
+            (
+                "xmile extension with content",
+                Source {
+                    extension: "xmile".to_string(),
+                    content: "<xmile>...</xmile>".to_string(),
+                },
+                datamodel::Extension::Xmile,
+            ),
+            (
+                "vensim extension with content",
+                Source {
+                    extension: "vensim".to_string(),
+                    content: "{UTF-8}\nPopulation= INTEG (...)".to_string(),
+                },
+                datamodel::Extension::Vensim,
+            ),
+            (
+                "empty extension",
+                Source {
+                    extension: "".to_string(),
+                    content: "some content".to_string(),
+                },
+                datamodel::Extension::Unspecified,
+            ),
+            (
+                "unknown extension maps to unspecified",
+                Source {
+                    extension: "unknown_format".to_string(),
+                    content: "".to_string(),
+                },
+                datamodel::Extension::Unspecified,
+            ),
+            (
+                "empty source",
+                Source {
+                    extension: "".to_string(),
+                    content: "".to_string(),
+                },
+                datamodel::Extension::Unspecified,
+            ),
+        ];
+
+        for (name, json_source, expected_extension) in cases {
+            // Convert to datamodel
+            let dm_source: datamodel::Source = json_source.clone().into();
+
+            // Verify the extension was correctly mapped
+            assert_eq!(
+                dm_source.extension, expected_extension,
+                "Extension mapping failed for: {}",
+                name
+            );
+            assert_eq!(
+                dm_source.content, json_source.content,
+                "Content not preserved for: {}",
+                name
+            );
+
+            // Convert back to JSON
+            let json_source2: Source = dm_source.into();
+
+            // Serialize and deserialize through JSON
+            let json_str = serde_json::to_string(&json_source2).unwrap();
+            let json_source3: Source = serde_json::from_str(&json_str).unwrap();
+
+            // Content should always be preserved
+            assert_eq!(
+                json_source.content, json_source3.content,
+                "Content roundtrip failed for: {}",
+                name
+            );
+
+            // Extension roundtrip: known extensions should survive, unknown ones become empty
+            match expected_extension {
+                datamodel::Extension::Xmile => {
+                    assert_eq!(
+                        "xmile", json_source3.extension,
+                        "Xmile extension roundtrip failed for: {}",
+                        name
+                    );
+                }
+                datamodel::Extension::Vensim => {
+                    assert_eq!(
+                        "vensim", json_source3.extension,
+                        "Vensim extension roundtrip failed for: {}",
+                        name
+                    );
+                }
+                datamodel::Extension::Unspecified => {
+                    assert_eq!(
+                        "", json_source3.extension,
+                        "Unspecified extension should serialize as empty for: {}",
+                        name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_source_datamodel_to_json() {
+        // Test datamodel::Source -> Source conversion directly
+        let cases = vec![
+            (
+                "xmile",
+                datamodel::Source {
+                    extension: datamodel::Extension::Xmile,
+                    content: "<xmile version=\"1.0\">...</xmile>".to_string(),
+                },
+                "xmile",
+            ),
+            (
+                "vensim",
+                datamodel::Source {
+                    extension: datamodel::Extension::Vensim,
+                    content: "Model content here".to_string(),
+                },
+                "vensim",
+            ),
+            (
+                "unspecified",
+                datamodel::Source {
+                    extension: datamodel::Extension::Unspecified,
+                    content: "".to_string(),
+                },
+                "",
+            ),
+        ];
+
+        for (name, dm_source, expected_ext_str) in cases {
+            let json_source: Source = dm_source.clone().into();
+
+            assert_eq!(
+                json_source.extension, expected_ext_str,
+                "Extension string mismatch for: {}",
+                name
+            );
+            assert_eq!(
+                json_source.content, dm_source.content,
+                "Content mismatch for: {}",
+                name
+            );
+
+            // Verify serialization produces valid JSON
+            let json_str = serde_json::to_string(&json_source).unwrap();
+            let parsed: Source = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(
+                parsed.extension, expected_ext_str,
+                "JSON serialization roundtrip failed for: {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_source_json_to_datamodel() {
+        // Test Source -> datamodel::Source conversion directly
+        let cases = vec![
+            ("xmile", "xmile", datamodel::Extension::Xmile),
+            ("vensim", "vensim", datamodel::Extension::Vensim),
+            ("empty", "", datamodel::Extension::Unspecified),
+            ("unknown", "mdl", datamodel::Extension::Unspecified),
+            (
+                "XMILE uppercase",
+                "XMILE",
+                datamodel::Extension::Unspecified,
+            ), // case sensitive
+        ];
+
+        for (name, ext_str, expected_extension) in cases {
+            let json_source = Source {
+                extension: ext_str.to_string(),
+                content: "test content".to_string(),
+            };
+
+            let dm_source: datamodel::Source = json_source.into();
+
+            assert_eq!(
+                dm_source.extension, expected_extension,
+                "Extension enum mismatch for: {}",
+                name
+            );
+            assert_eq!(
+                dm_source.content, "test content",
+                "Content mismatch for: {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_tagged_variable_stock_serialization() {
+        let stock = Stock {
+            uid: 1,
+            name: "population".to_string(),
+            initial_equation: "100".to_string(),
+            units: "people".to_string(),
+            inflows: vec!["births".to_string()],
+            outflows: vec!["deaths".to_string()],
+            documentation: String::new(),
+            arrayed_equation: None,
+            ai_state: None,
+            compat: None,
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let tagged = TaggedVariable::Stock(stock.clone());
+        let json_str = serde_json::to_string(&tagged).unwrap();
+
+        assert!(
+            json_str.contains("\"type\":\"stock\""),
+            "missing type discriminator: {}",
+            json_str
+        );
+        assert!(
+            json_str.contains("\"name\":\"population\""),
+            "missing name: {}",
+            json_str
+        );
+
+        let roundtrip: TaggedVariable = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(tagged, roundtrip);
+        assert_eq!(roundtrip.name(), "population");
+    }
+
+    #[test]
+    fn test_tagged_variable_flow_serialization() {
+        let flow = Flow {
+            uid: 2,
+            name: "births".to_string(),
+            equation: "population * birth_rate".to_string(),
+            units: "people/year".to_string(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: None,
+            ai_state: None,
+            compat: None,
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let tagged = TaggedVariable::Flow(flow);
+        let json_str = serde_json::to_string(&tagged).unwrap();
+
+        assert!(
+            json_str.contains("\"type\":\"flow\""),
+            "missing type discriminator: {}",
+            json_str
+        );
+
+        let roundtrip: TaggedVariable = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(tagged, roundtrip);
+        assert_eq!(roundtrip.name(), "births");
+    }
+
+    #[test]
+    fn test_tagged_variable_aux_serialization() {
+        let aux = Auxiliary {
+            uid: 3,
+            name: "birth_rate".to_string(),
+            equation: "0.02".to_string(),
+            ai_state: None,
+            compat: None,
+            units: "1/year".to_string(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: None,
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let tagged = TaggedVariable::Auxiliary(aux);
+        let json_str = serde_json::to_string(&tagged).unwrap();
+
+        // aux variant uses #[serde(rename = "aux")]
+        assert!(
+            json_str.contains("\"type\":\"aux\""),
+            "missing/wrong type discriminator: {}",
+            json_str
+        );
+
+        let roundtrip: TaggedVariable = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(tagged, roundtrip);
+        assert_eq!(roundtrip.name(), "birth_rate");
+    }
+
+    #[test]
+    fn test_tagged_variable_module_serialization() {
+        let module = Module {
+            uid: 4,
+            name: "submodel".to_string(),
+            model_name: "SubModel".to_string(),
+            units: String::new(),
+            documentation: String::new(),
+            references: vec![],
+            ai_state: None,
+            compat: None,
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let tagged = TaggedVariable::Module(module);
+        let json_str = serde_json::to_string(&tagged).unwrap();
+
+        assert!(
+            json_str.contains("\"type\":\"module\""),
+            "missing type discriminator: {}",
+            json_str
+        );
+
+        let roundtrip: TaggedVariable = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(tagged, roundtrip);
+        assert_eq!(roundtrip.name(), "submodel");
+    }
+
+    #[test]
+    fn test_tagged_variable_from_datamodel() {
+        let dm_stock = datamodel::Variable::Stock(datamodel::Stock {
+            ident: "inventory".to_string(),
+            equation: datamodel::Equation::Scalar("50".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["production".to_string()],
+            outflows: vec!["sales".to_string()],
+            ai_state: None,
+            uid: Some(10),
+            compat: datamodel::Compat::default(),
+        });
+
+        let tagged: TaggedVariable = dm_stock.into();
+        match &tagged {
+            TaggedVariable::Stock(s) => {
+                assert_eq!(s.name, "inventory");
+                assert_eq!(s.uid, 10);
+                assert_eq!(s.inflows, vec!["production"]);
+                assert_eq!(s.outflows, vec!["sales"]);
+            }
+            _ => panic!("expected Stock variant"),
+        }
+
+        let json_str = serde_json::to_string(&tagged).unwrap();
+        assert!(json_str.contains("\"type\":\"stock\""));
+    }
+
+    #[test]
+    fn test_tagged_variable_array_serialization() {
+        let vars = vec![
+            TaggedVariable::Stock(Stock {
+                uid: 1,
+                name: "pop".to_string(),
+                initial_equation: "100".to_string(),
+                units: String::new(),
+                inflows: vec![],
+                outflows: vec![],
+                documentation: String::new(),
+                arrayed_equation: None,
+                ai_state: None,
+                compat: None,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
+            }),
+            TaggedVariable::Flow(Flow {
+                uid: 2,
+                name: "rate".to_string(),
+                equation: "10".to_string(),
+                units: String::new(),
+                graphical_function: None,
+                documentation: String::new(),
+                arrayed_equation: None,
+                ai_state: None,
+                compat: None,
+                non_negative: false,
+                can_be_module_input: false,
+                is_public: false,
+            }),
+            TaggedVariable::Auxiliary(Auxiliary {
+                uid: 3,
+                name: "constant".to_string(),
+                equation: "5".to_string(),
+                ai_state: None,
+                compat: None,
+                units: String::new(),
+                graphical_function: None,
+                documentation: String::new(),
+                arrayed_equation: None,
+                can_be_module_input: false,
+                is_public: false,
+            }),
+        ];
+
+        let json_str = serde_json::to_string(&vars).unwrap();
+        let roundtrip: Vec<TaggedVariable> = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(vars.len(), roundtrip.len());
+        for (orig, rt) in vars.iter().zip(roundtrip.iter()) {
+            assert_eq!(orig, rt);
+        }
+    }
+
+    #[test]
+    fn flow_empty_compat_falls_back_to_arrayed_equation_compat() {
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("base * 2".to_string()),
+                compat: Some(Compat {
+                    active_initial: Some("base * 3".to_string()),
+                    ..Default::default()
+                }),
+                elements: None,
+                has_except_default: None,
+            }),
+            ai_state: None,
+            compat: Some(Compat {
+                active_initial: None,
+                ..Default::default()
+            }),
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let dm: datamodel::Flow = flow.into();
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("base * 3"));
+    }
+
+    #[test]
+    fn aux_empty_compat_falls_back_to_arrayed_equation_compat() {
+        let aux = Auxiliary {
+            uid: 0,
+            name: "val".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("x + 1".to_string()),
+                compat: Some(Compat {
+                    active_initial: Some("x + 2".to_string()),
+                    ..Default::default()
+                }),
+                elements: None,
+                has_except_default: None,
+            }),
+            ai_state: None,
+            compat: Some(Compat {
+                active_initial: None,
+                ..Default::default()
+            }),
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let dm: datamodel::Aux = aux.into();
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("x + 2"));
+    }
+
+    #[test]
+    fn flow_top_level_compat_takes_precedence() {
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("base * 2".to_string()),
+                compat: Some(Compat {
+                    active_initial: Some("stale".to_string()),
+                    ..Default::default()
+                }),
+                elements: None,
+                has_except_default: None,
+            }),
+            ai_state: None,
+            compat: Some(Compat {
+                active_initial: Some("correct".to_string()),
+                ..Default::default()
+            }),
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let dm: datamodel::Flow = flow.into();
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("correct"));
+    }
+
+    #[test]
+    fn empty_active_initial_normalized_to_none() {
+        // Top-level compat with empty activeInitial should become None
+        let stock = Stock {
+            uid: 0,
+            name: "pop".to_string(),
+            initial_equation: "100".to_string(),
+            units: String::new(),
+            inflows: vec![],
+            outflows: vec![],
+            documentation: String::new(),
+            arrayed_equation: None,
+            ai_state: None,
+            compat: Some(Compat {
+                active_initial: Some(String::new()),
+                ..Default::default()
+            }),
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
+        };
+        let dm_stock: datamodel::Stock = stock.into();
+        assert_eq!(dm_stock.compat.active_initial, None);
+
+        // Element-level compat with empty activeInitial should become None
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: String::new(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: None,
+                compat: None,
+                elements: Some(vec![ElementEquation {
+                    subscript: "north".to_string(),
+                    equation: "10".to_string(),
+                    compat: Some(Compat {
+                        active_initial: Some(String::new()),
+                        ..Default::default()
+                    }),
+                    graphical_function: None,
+                }]),
+                has_except_default: None,
+            }),
+            ai_state: None,
+            compat: None,
+            non_negative: false,
+            can_be_module_input: false,
+            is_public: false,
+        };
+        let dm_flow: datamodel::Flow = flow.into();
+        match &dm_flow.equation {
+            datamodel::Equation::Arrayed(_, elems, _, _) => {
+                assert_eq!(elems[0].2, None);
+            }
+            _ => panic!("expected Arrayed equation"),
+        }
+    }
+
+    #[test]
+    fn legacy_booleans_merge_when_compat_present_for_active_initial() {
+        // Simulates a legacy file with compat only for activeInitial and
+        // boolean flags at top level. The top-level true values must survive
+        // even though compat's booleans default to false.
+        let stock = Stock {
+            uid: 0,
+            name: "pop".to_string(),
+            initial_equation: "100".to_string(),
+            units: String::new(),
+            inflows: vec![],
+            outflows: vec![],
+            documentation: String::new(),
+            arrayed_equation: None,
+            ai_state: None,
+            compat: Some(Compat {
+                active_initial: Some("50".to_string()),
+                ..Default::default()
+            }),
+            non_negative: true,
+            can_be_module_input: true,
+            is_public: true,
+        };
+        let dm: datamodel::Stock = stock.into();
+        assert!(dm.compat.non_negative, "legacy non_negative lost");
+        assert!(
+            dm.compat.can_be_module_input,
+            "legacy can_be_module_input lost"
+        );
+        assert_eq!(
+            dm.compat.visibility,
+            datamodel::Visibility::Public,
+            "legacy is_public lost"
+        );
+        assert_eq!(dm.compat.active_initial.as_deref(), Some("50"));
+    }
+
+    #[test]
+    fn legacy_booleans_merge_for_flow_and_aux() {
+        let flow = Flow {
+            uid: 0,
+            name: "rate".to_string(),
+            equation: "10".to_string(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: None,
+            ai_state: None,
+            compat: Some(Compat {
+                active_initial: Some("5".to_string()),
+                ..Default::default()
+            }),
+            non_negative: true,
+            can_be_module_input: false,
+            is_public: true,
+        };
+        let dm_flow: datamodel::Flow = flow.into();
+        assert!(
+            dm_flow.compat.non_negative,
+            "flow: legacy non_negative lost"
+        );
+        assert_eq!(dm_flow.compat.visibility, datamodel::Visibility::Public);
+
+        let aux = Auxiliary {
+            uid: 0,
+            name: "val".to_string(),
+            equation: "1".to_string(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: None,
+            ai_state: None,
+            compat: Some(Compat {
+                active_initial: Some("0".to_string()),
+                ..Default::default()
+            }),
+            can_be_module_input: true,
+            is_public: false,
+        };
+        let dm_aux: datamodel::Aux = aux.into();
+        assert!(
+            dm_aux.compat.can_be_module_input,
+            "aux: legacy can_be_module_input lost"
+        );
+    }
+
+    #[test]
+    fn test_arrayed_equation_with_default_equation_roundtrip() {
+        let json_aux = Auxiliary {
+            uid: 0,
+            name: "cost".to_string(),
+            equation: String::new(),
+            units: "dollars".to_string(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: Some(ArrayedEquation {
+                dimensions: vec!["Region".to_string()],
+                equation: Some("base_cost".to_string()),
+                compat: None,
+                elements: Some(vec![ElementEquation {
+                    subscript: "north".to_string(),
+                    equation: "base_cost * 1.1".to_string(),
+                    compat: None,
+                    graphical_function: None,
+                }]),
+                has_except_default: None,
+            }),
+            ai_state: None,
+            compat: None,
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let json_str = serde_json::to_string(&json_aux).unwrap();
+        let json_aux2: Auxiliary = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_aux, json_aux2);
+
+        let dm_aux: datamodel::Aux = json_aux.into();
+        match &dm_aux.equation {
+            datamodel::Equation::Arrayed(dims, elements, default_eq, _) => {
+                assert_eq!(dims, &["Region"]);
+                assert_eq!(elements.len(), 1);
+                assert_eq!(elements[0].0, "north");
+                assert_eq!(default_eq, &Some("base_cost".to_string()));
+            }
+            other => panic!("expected Arrayed, got {:?}", other),
+        }
+
+        let json_aux3: Auxiliary = dm_aux.into();
+        let json_str2 = serde_json::to_string(&json_aux3).unwrap();
+        let json_aux4: Auxiliary = serde_json::from_str(&json_str2).unwrap();
+        assert_eq!(json_aux3, json_aux4);
+    }
+
+    #[test]
+    fn test_dimension_with_element_level_mapping_roundtrip() {
+        let json_dim = Dimension {
+            name: "DimA".to_string(),
+            elements: vec!["A1".to_string(), "A2".to_string()],
+            size: 0,
+            maps_to: None,
+            mappings: vec![JsonDimensionMapping {
+                target: "DimB".to_string(),
+                element_map: vec![
+                    JsonElementMapEntry {
+                        source: "A1".to_string(),
+                        target: "B2".to_string(),
+                    },
+                    JsonElementMapEntry {
+                        source: "A2".to_string(),
+                        target: "B1".to_string(),
+                    },
+                ],
+            }],
+            parent: None,
+        };
+
+        let json_str = serde_json::to_string(&json_dim).unwrap();
+        let json_dim2: Dimension = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_dim, json_dim2);
+
+        let dm_dim: datamodel::Dimension = json_dim.into();
+        assert_eq!(dm_dim.mappings.len(), 1);
+        assert_eq!(dm_dim.mappings[0].target, "DimB");
+        assert_eq!(dm_dim.mappings[0].element_map.len(), 2);
+        assert_eq!(
+            dm_dim.mappings[0].element_map[0],
+            ("A1".to_string(), "B2".to_string())
+        );
+
+        let json_dim3: Dimension = dm_dim.into();
+        let json_str2 = serde_json::to_string(&json_dim3).unwrap();
+        let json_dim4: Dimension = serde_json::from_str(&json_str2).unwrap();
+        assert_eq!(json_dim3, json_dim4);
+    }
+
+    #[test]
+    fn test_dimension_simple_maps_to_backward_compat() {
+        let json_dim = Dimension {
+            name: "DimA".to_string(),
+            elements: vec!["A1".to_string(), "A2".to_string()],
+            size: 0,
+            maps_to: Some("DimB".to_string()),
+            mappings: vec![],
+            parent: None,
+        };
+
+        let json_str = serde_json::to_string(&json_dim).unwrap();
+        let json_dim2: Dimension = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_dim, json_dim2);
+
+        let dm_dim: datamodel::Dimension = json_dim.into();
+        assert_eq!(dm_dim.maps_to(), Some("DimB"));
+        assert_eq!(dm_dim.mappings.len(), 1);
+        assert!(dm_dim.mappings[0].element_map.is_empty());
+
+        let json_dim3: Dimension = dm_dim.into();
+        assert_eq!(json_dim3.maps_to, Some("DimB".to_string()));
+        assert!(json_dim3.mappings.is_empty());
+    }
+
+    #[test]
+    fn test_data_source_roundtrip_through_compat() {
+        let json_aux = Auxiliary {
+            uid: 0,
+            name: "ext_data".to_string(),
+            equation: "0".to_string(),
+            units: String::new(),
+            graphical_function: None,
+            documentation: String::new(),
+            arrayed_equation: None,
+            ai_state: None,
+            compat: Some(Compat {
+                data_source: Some(JsonDataSource {
+                    kind: "data".to_string(),
+                    file: "input.xlsx".to_string(),
+                    tab_or_delimiter: "Sheet1".to_string(),
+                    row_or_col: "B".to_string(),
+                    cell: "B2".to_string(),
+                }),
+                ..Default::default()
+            }),
+            can_be_module_input: false,
+            is_public: false,
+        };
+
+        let json_str = serde_json::to_string(&json_aux).unwrap();
+        let json_aux2: Auxiliary = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_aux, json_aux2);
+
+        let dm_aux: datamodel::Aux = json_aux.into();
+        let ds = dm_aux.compat.data_source.as_ref().unwrap();
+        assert_eq!(ds.kind, datamodel::DataSourceKind::Data);
+        assert_eq!(ds.file, "input.xlsx");
+        assert_eq!(ds.tab_or_delimiter, "Sheet1");
+
+        let json_aux3: Auxiliary = dm_aux.into();
+        let ds3 = json_aux3
+            .compat
+            .as_ref()
+            .unwrap()
+            .data_source
+            .as_ref()
+            .unwrap();
+        assert_eq!(ds3.kind, "data");
+        assert_eq!(ds3.file, "input.xlsx");
+    }
+
+    #[test]
+    fn json_preserves_multi_target_positional_mappings() {
+        // Dimensions with multiple positional mappings (empty element_map)
+        // must be preserved through JSON serialization, not silently dropped.
+        let dim = datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![
+                datamodel::DimensionMapping {
+                    target: "dim_b".to_string(),
+                    element_map: vec![],
+                },
+                datamodel::DimensionMapping {
+                    target: "dim_c".to_string(),
+                    element_map: vec![],
+                },
+            ],
+            parent: None,
+        };
+
+        let json_dim: Dimension = dim.clone().into();
+        let roundtripped: datamodel::Dimension = json_dim.into();
+        assert_eq!(
+            roundtripped.mappings.len(),
+            2,
+            "both positional mappings must survive JSON round-trip"
+        );
+        assert_eq!(roundtripped.mappings[0].target, "dim_b");
+        assert_eq!(roundtripped.mappings[1].target, "dim_c");
+    }
+
+    #[test]
+    fn mappings_takes_precedence_over_maps_to() {
+        // When both maps_to and mappings are present in JSON, mappings is
+        // authoritative and maps_to should be ignored.
+        let json_str = r#"{
+            "name": "dim_a",
+            "elements": ["a1", "a2"],
+            "maps_to": "stale_target",
+            "mappings": [{
+                "target": "dim_b",
+                "element_map": [
+                    {"source": "a1", "target": "b1"},
+                    {"source": "a2", "target": "b2"}
+                ]
+            }]
+        }"#;
+
+        let json_dim: Dimension = serde_json::from_str(json_str).unwrap();
+        let dm_dim: datamodel::Dimension = json_dim.into();
+
+        assert_eq!(
+            dm_dim.mappings.len(),
+            1,
+            "only the explicit mapping should be present"
+        );
+        assert_eq!(dm_dim.mappings[0].target, "dim_b");
+        assert!(
+            !dm_dim.mappings.iter().any(|m| m.target == "stale_target"),
+            "stale maps_to target should not be injected into mappings"
+        );
+    }
+
+    #[test]
+    fn test_legacy_json_arrayed_with_default_eq_infers_has_except_default() {
+        // Legacy JSON without has_except_default but with a default equation
+        // should infer has_except_default=true to preserve old behavior.
+        let json_str = r#"{
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0, "endTime": 10, "dt": "1"
+            },
+            "models": [{
+                "name": "main",
+                "auxiliaries": [{
+                    "name": "x",
+                    "arrayedEquation": {
+                        "dimensions": ["DimA"],
+                        "equation": "default_val",
+                        "elements": [
+                            {"subscript": "a1", "equation": "10"}
+                        ]
+                    }
+                }],
+                "views": []
+            }]
+        }"#;
+        let project: Project = serde_json::from_str(json_str).unwrap();
+        let dm_project = datamodel::Project::from(project);
+
+        let x = dm_project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x")
+            .unwrap();
+        if let datamodel::Variable::Aux(a) = x {
+            match &a.equation {
+                datamodel::Equation::Arrayed(_, _, default_eq, has_except_default) => {
+                    assert_eq!(default_eq.as_deref(), Some("default_val"));
+                    assert!(
+                        *has_except_default,
+                        "legacy JSON with default equation should infer has_except_default=true"
+                    );
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn from_ref_project_matches_from_owned() {
+        let json_project = Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs {
+                start_time: 0.0,
+                end_time: 10.0,
+                dt: "1".to_string(),
+                save_step: 0.0,
+                method: String::new(),
+                time_units: String::new(),
+            },
+            models: vec![Model {
+                name: "main".to_string(),
+                stocks: vec![Stock {
+                    uid: 1,
+                    name: "pop".to_string(),
+                    initial_equation: "100".to_string(),
+                    units: String::new(),
+                    inflows: vec!["births".to_string()],
+                    outflows: vec![],
+                    documentation: String::new(),
+                    arrayed_equation: None,
+                    ai_state: None,
+                    compat: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
+                }],
+                flows: vec![],
+                auxiliaries: vec![],
+                modules: vec![],
+                sim_specs: None,
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            }],
+            dimensions: vec![],
+            units: vec![],
+            source: None,
+        };
+
+        let dm_project: datamodel::Project = json_project.into();
+        let from_owned = Project::from(dm_project.clone());
+        let from_ref = Project::from(&dm_project);
+
+        assert_eq!(from_owned.name, from_ref.name);
+        assert_eq!(from_owned.models.len(), from_ref.models.len());
+        assert_eq!(
+            from_owned.models[0].stocks.len(),
+            from_ref.models[0].stocks.len()
+        );
+        assert_eq!(
+            from_owned.models[0].stocks[0].name,
+            from_ref.models[0].stocks[0].name
+        );
+        assert_eq!(from_owned.dimensions.len(), from_ref.dimensions.len());
+        assert_eq!(from_owned.units.len(), from_ref.units.len());
+    }
+
+    /// Who made each variable -- ISEE's AI information, one letter a
+    /// variable -- survives the JSON forms, so an edit through them keeps it.
+    #[test]
+    fn a_variables_provenance_round_trips_through_json() {
+        let mut project = simlin_engine::test_common::TestProject::new("provenance")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("level", "10", &["inflow"], &[], None)
+            .flow("inflow", "rate", None)
+            .aux("rate", "1", None)
+            .aux("unmarked", "2", None)
+            .build_datamodel();
+        let states = [
+            ("level", datamodel::AiState::C),
+            ("inflow", datamodel::AiState::G),
+            ("rate", datamodel::AiState::F),
+        ];
+        for (name, state) in states {
+            match project.models[0].get_variable_mut(name).unwrap() {
+                datamodel::Variable::Stock(v) => v.ai_state = Some(state),
+                datamodel::Variable::Flow(v) => v.ai_state = Some(state),
+                datamodel::Variable::Aux(v) => v.ai_state = Some(state),
+                datamodel::Variable::Module(v) => v.ai_state = Some(state),
+            }
+        }
+        let text = serde_json::to_string(&Project::from(project.clone())).unwrap();
+        assert!(text.contains(r#""aiState":"G""#), "{text}");
+        let back: datamodel::Project = serde_json::from_str::<Project>(&text).unwrap().into();
+        for (name, state) in states {
+            assert_eq!(
+                back.models[0].get_variable(name).unwrap().get_ai_state(),
+                Some(state),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            back.models[0]
+                .get_variable("unmarked")
+                .unwrap()
+                .get_ai_state(),
+            None
+        );
+    }
+}

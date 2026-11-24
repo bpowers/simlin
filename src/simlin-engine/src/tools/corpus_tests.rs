@@ -58,9 +58,9 @@ fn open(path: &Path) -> Option<datamodel::Project> {
         .is_some_and(|e| e.eq_ignore_ascii_case("mdl"));
     std::panic::catch_unwind(|| {
         if is_mdl {
-            crate::compat::open_vensim(&String::from_utf8_lossy(&bytes)).ok()
+            simlin_formats::compat::open_vensim(&String::from_utf8_lossy(&bytes)).ok()
         } else {
-            crate::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..])).ok()
+            simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..])).ok()
         }
     })
     .ok()

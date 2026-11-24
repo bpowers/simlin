@@ -29,7 +29,7 @@ use simlin_engine::db::{
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{open_vensim, open_xmile};
+use simlin_formats::{open_vensim, open_xmile};
 
 fn phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
     print!("{name:<28} ... ");

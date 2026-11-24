@@ -2,7 +2,7 @@
 """
 VDF X-Ray: structural inspector for Vensim VDF (binary data file) files.
 
-Shares its decoding with the Rust parser (src/simlin-engine/src/vdf.rs) and
+Shares its decoding with the Rust parser (src/simlin-formats/src/vdf.rs) and
 the CLI dump tool (src/simlin-cli/src/vdf_dump.rs). See docs/design/vdf.md
 for the format specification.
 

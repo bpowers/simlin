@@ -24,7 +24,7 @@ fn hares_and_foxes() -> datamodel::Project {
         "/../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx"
     );
     let file = std::fs::File::open(path).expect("the hares and foxes model is in the corpus");
-    crate::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap()
+    simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap()
 }
 
 /// One variable of each kind, and what its record must hold.

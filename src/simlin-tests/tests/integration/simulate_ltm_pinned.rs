@@ -1214,7 +1214,7 @@ fn clearn_pinned_climate_loop_is_scored() {
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let contents = std::fs::read_to_string(mdl_path)
         .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
-    let mut project = simlin_engine::open_vensim(&contents)
+    let mut project = simlin_formats::open_vensim(&contents)
         .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
 
     // Pin "Feedback cooling" via the production patch path (the importer does
@@ -2111,7 +2111,7 @@ fn pinned_loop_through_unscoreable_edge_skipped_with_single_warnings() {
 fn hero_culture_fixture_pins_all_resolve_and_score() {
     let f = std::fs::File::open("../../test/hero_culture_ltm/hero_culture.sd.json").unwrap();
     let json_project =
-        simlin_engine::json::Project::from_reader(std::io::BufReader::new(f)).unwrap();
+        simlin_formats::json::Project::from_reader(std::io::BufReader::new(f)).unwrap();
     let project: datamodel::Project = json_project.into();
     let pins = project.models[0].loop_metadata.len();
     assert_eq!(pins, 14, "the fixture declares fourteen pins");

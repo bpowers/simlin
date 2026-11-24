@@ -23,7 +23,7 @@ use simlin_base::common::UnitError;
 use simlin_engine::db::{
     Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
 };
-use simlin_engine::open_vensim;
+use simlin_formats::open_vensim;
 
 /// Extract a human-readable detail string from a diagnostic's unit-error payload.
 ///

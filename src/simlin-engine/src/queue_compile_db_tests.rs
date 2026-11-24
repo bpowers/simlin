@@ -19,7 +19,7 @@ use simlin_base::common::{ErrorCode, Ident};
 use std::io::BufReader;
 
 fn parse(xml: &str) -> datamodel::Project {
-    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap()
+    simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap()
 }
 
 /// The steady-state conveyor fixture plus two ordinary auxes: `unrelated` is

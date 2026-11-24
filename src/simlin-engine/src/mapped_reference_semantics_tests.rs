@@ -1858,7 +1858,7 @@ TIME STEP = 1 ~~|
 SAVEPER = 1 ~~|
 \\\\\\---///
 ";
-    let project = crate::open_vensim(mdl).expect("the model imports");
+    let project = simlin_formats::open_vensim(mdl).expect("the model imports");
     let target = project.models[0]
         .variables
         .iter()
@@ -1959,7 +1959,7 @@ fn a_subrange_on_both_sides_reads_by_name_and_on_the_right_alone_through_its_map
              INITIAL TIME = 0 ~~|\nFINAL TIME = 1 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = 1 ~~|\n\
              \\\\\\---///\n"
         );
-        let project = crate::open_vensim(&mdl).expect("imports");
+        let project = simlin_formats::open_vensim(&mdl).expect("imports");
         TestProject::from_datamodel(project).run_vm().expect("runs")
     };
     let last = |r: &std::collections::HashMap<String, Vec<f64>>, key: &str| {

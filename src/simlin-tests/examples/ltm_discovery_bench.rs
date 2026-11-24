@@ -33,7 +33,7 @@ use simlin_engine::db::{
     sync_from_datamodel_incremental,
 };
 use simlin_engine::ltm_finding::{CandidateGen, FallbackConfig, FallbackWeight};
-use simlin_engine::{open_vensim, open_xmile};
+use simlin_formats::{open_vensim, open_xmile};
 
 fn main() {
     let mut models: Vec<String> = std::env::args().skip(1).collect();

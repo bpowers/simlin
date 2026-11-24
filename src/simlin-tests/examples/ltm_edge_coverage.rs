@@ -49,7 +49,7 @@ use std::path::PathBuf;
 use simlin_engine::db::{
     SimlinDb, model_element_causal_edges, model_ltm_variables, sync_from_datamodel_incremental,
 };
-use simlin_engine::{open_vensim, open_xmile};
+use simlin_formats::{open_vensim, open_xmile};
 
 const LINK_PREFIX: &str = "$\u{205A}ltm\u{205A}link_score\u{205A}";
 const ARROW: char = '\u{2192}';

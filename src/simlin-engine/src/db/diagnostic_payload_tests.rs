@@ -179,7 +179,7 @@ fn parallel_pathways_project(paths: usize) -> datamodel::Project {
 }
 
 fn xmile_project(xml: &str) -> datamodel::Project {
-    crate::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
+    simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("the checked-in fixture parses")
 }
 

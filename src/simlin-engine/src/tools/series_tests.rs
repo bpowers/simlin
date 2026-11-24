@@ -1059,7 +1059,8 @@ fn a_module_instance_has_no_columns_of_its_own() {
         "/../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx"
     );
     let file = std::fs::File::open(path).expect("the hares and foxes model is in the corpus");
-    let project = crate::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap();
+    let project =
+        simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(file)).unwrap();
     let mut host = Host::new(project);
     let mut session = Session::new("main");
     let run = session

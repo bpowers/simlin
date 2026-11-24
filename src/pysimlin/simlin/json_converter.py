@@ -1,7 +1,7 @@
 """cattrs converter configuration for JSON serialization.
 
 Maps the unified public variable types (``simlin.types``: Stock, Flow, Aux,
-Module) to and from the engine's wire JSON (src/simlin-engine/src/json.rs),
+Module) to and from the engine's wire JSON (src/simlin-formats/src/json.rs),
 and configures cattrs for the remaining wire dataclasses (views, sim specs,
 patches).
 

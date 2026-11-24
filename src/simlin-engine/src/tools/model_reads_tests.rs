@@ -290,7 +290,7 @@ fn a_module_instance_never_reads_itself() {
             .join("../../test")
             .join(path);
         let bytes = std::fs::read(&full).unwrap_or_else(|err| panic!("{path}: {err}"));
-        let project = crate::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..]))
+        let project = simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..]))
             .unwrap_or_else(|err| panic!("{path}: {err:?}"));
         let reads = reads_of(&project);
         assert!(!reads.is_empty(), "{path}");
@@ -406,9 +406,12 @@ fn every_corpus_models_reads_agree_with_its_causal_links() {
                 continue;
             };
             let project = std::panic::catch_unwind(|| match extension.as_deref() {
-                Some("mdl") => crate::compat::open_vensim(&String::from_utf8_lossy(&bytes)).ok(),
+                Some("mdl") => {
+                    simlin_formats::compat::open_vensim(&String::from_utf8_lossy(&bytes)).ok()
+                }
                 Some("xmile" | "stmx" | "itmx") => {
-                    crate::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..])).ok()
+                    simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..]))
+                        .ok()
                 }
                 _ => None,
             })
@@ -507,7 +510,7 @@ fn a_corpus_conveyor_reads_its_transit_time() {
             .join("../../test/conveyors")
             .join(path);
         let file = std::fs::File::open(&full).expect("the model is in the corpus");
-        crate::compat::open_xmile(&mut std::io::BufReader::new(file)).unwrap()
+        simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(file)).unwrap()
     };
     let reads = reads_of(&open("arrayed_conveyor.xmile"));
     assert_eq!(
@@ -796,9 +799,9 @@ fn assert_reads_match_the_text(path: &str) {
         .join(path);
     let bytes = std::fs::read(&full).unwrap_or_else(|err| panic!("{path}: {err}"));
     let project = if path.to_lowercase().ends_with(".mdl") {
-        crate::compat::open_vensim(&String::from_utf8_lossy(&bytes)).unwrap()
+        simlin_formats::compat::open_vensim(&String::from_utf8_lossy(&bytes)).unwrap()
     } else {
-        crate::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..])).unwrap()
+        simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..])).unwrap()
     };
     for model in project.models.iter().filter(|m| m.macro_spec.is_none()) {
         let (missed, invented) = reads_against_text(&project, &model.name);
@@ -853,9 +856,12 @@ fn every_corpus_models_reads_match_what_the_text_writes() {
                 continue;
             };
             let project = std::panic::catch_unwind(|| match extension.as_deref() {
-                Some("mdl") => crate::compat::open_vensim(&String::from_utf8_lossy(&bytes)).ok(),
+                Some("mdl") => {
+                    simlin_formats::compat::open_vensim(&String::from_utf8_lossy(&bytes)).ok()
+                }
                 Some("xmile" | "stmx" | "itmx") => {
-                    crate::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..])).ok()
+                    simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(&bytes[..]))
+                        .ok()
                 }
                 _ => None,
             })

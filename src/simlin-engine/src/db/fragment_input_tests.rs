@@ -712,7 +712,7 @@ fn xmile_project(main_variables: &str, extra_models: &str) -> datamodel::Project
   {extra_models}
 </xmile>"#
     );
-    crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
+    simlin_formats::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
 }
 
 /// The t=0 value of every variable of `project`'s root, keyed by canonical

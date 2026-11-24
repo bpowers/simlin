@@ -15,7 +15,7 @@ use crate::queue_compile::{build_compiled_fresh, build_vm};
 use std::io::BufReader;
 
 fn parse(xml: &str) -> datamodel::Project {
-    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap()
+    simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap()
 }
 
 #[test]
@@ -3415,7 +3415,7 @@ fn explicit_list_survives_xmile_roundtrip() {
         .expect("belt stock");
     assert_eq!(after, Equation::Scalar("10, 20, 30".to_string()));
 
-    let out = crate::compat::to_xmile(&project).expect("to_xmile");
+    let out = simlin_formats::compat::to_xmile(&project).expect("to_xmile");
     assert!(
         out.contains("10, 20, 30"),
         "writer must re-emit the list eqn: {out}"

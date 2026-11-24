@@ -25,7 +25,7 @@ use simlin_engine::db::{
     SimlinDb, causal_graph_from_element_edges, compile_project_incremental,
     model_element_causal_edges, sync_from_datamodel_incremental,
 };
-use simlin_engine::open_vensim;
+use simlin_formats::open_vensim;
 
 fn load_wrld3() -> simlin_base::datamodel::Project {
     let mdl_content = std::fs::read_to_string("../../test/metasd/WRLD3-03/wrld3-03.mdl").expect(

@@ -1,0 +1,811 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+//! Vensim builtin function recognition.
+//!
+//! This module provides XMUtil-compatible name canonicalization via `to_lower_space`
+//! and a lookup table of built-in function names.
+
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
+/// Returns true if `c` is a whitespace character for `to_lower_space` purposes.
+#[inline(always)]
+fn is_tls_whitespace(c: char) -> bool {
+    c == ' ' || c == '_' || c == '\t' || c == '\n' || c == '\r'
+}
+
+/// Strip surrounding quotes from a string if present, returning the inner slice.
+#[inline]
+fn strip_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    if len > 1 && bytes[0] == b'"' && bytes[len - 1] == b'"' {
+        &s[1..len - 1]
+    } else {
+        s
+    }
+}
+
+/// Canonicalize a name using XMUtil's ToLowerSpace algorithm.
+///
+/// This follows the C++ implementation in `SymbolNameSpace.cpp:81-123`:
+/// 1. Strip surrounding quotes if present
+/// 2. Skip leading whitespace (space, underscore, tab, newline, CR)
+/// 3. For each character:
+///    - `\_` (escaped underscore) -> keep literally as `\_`
+///    - Whitespace (space, `_`, tab, `\n`, `\r`) -> collapse consecutive to single space
+///    - Otherwise -> keep character
+/// 4. Strip trailing whitespace
+/// 5. Lowercase the result
+pub(crate) fn to_lower_space(s: &str) -> String {
+    space_normalized(s, true)
+}
+
+/// A name with its spaces as `to_lower_space` makes them -- quotes stripped,
+/// each run of whitespace (space, `_`, tab, newline) one space, none at
+/// either end -- and its case kept. The one normalization a name's
+/// definition (`to_lower_space`) and a reference to it (`xmile_compat`'s
+/// `quote_reference`) share, so the two spell one name the same way
+/// whatever run of spaces the file writes. What Vensim does with repeated
+/// spaces inside a name is unverified.
+pub(crate) fn collapse_space(s: &str) -> String {
+    space_normalized(s, false)
+}
+
+fn space_normalized(s: &str, lowercase: bool) -> String {
+    let s = strip_quotes(s);
+
+    // ASCII fast path: all whitespace and escaped-underscore checks involve
+    // only ASCII characters, so we can process entirely at the byte level
+    // and avoid char decoding and Peekable overhead.
+    if s.is_ascii() {
+        return to_lower_space_ascii(s.as_bytes(), lowercase);
+    }
+
+    to_lower_space_unicode(s, lowercase)
+}
+
+/// ASCII-only fast path for `to_lower_space`. Processes bytes directly.
+fn to_lower_space_ascii(bytes: &[u8], lowercase: bool) -> String {
+    let mut result = Vec::with_capacity(bytes.len());
+    let len = bytes.len();
+
+    // Skip leading whitespace
+    let mut i = 0;
+    while i < len && is_tls_whitespace_byte(bytes[i]) {
+        i += 1;
+    }
+
+    // Process bytes
+    while i < len {
+        let b = bytes[i];
+
+        // Escaped underscore: \_
+        if b == b'\\' && i + 1 < len && bytes[i + 1] == b'_' {
+            result.push(b'\\');
+            result.push(b'_');
+            i += 2;
+            continue;
+        }
+
+        // Whitespace collapse
+        if is_tls_whitespace_byte(b) {
+            while i + 1 < len && is_tls_whitespace_byte(bytes[i + 1]) {
+                i += 1;
+            }
+            result.push(b' ');
+            i += 1;
+            continue;
+        }
+
+        result.push(if lowercase { b.to_ascii_lowercase() } else { b });
+        i += 1;
+    }
+
+    // Strip trailing whitespace
+    while result.last() == Some(&b' ') {
+        result.pop();
+    }
+
+    // Input was ASCII and we only wrote ASCII lowercase bytes, so this is
+    // always valid UTF-8, but the crate forbids unsafe so we use the
+    // infallible conversion that rechecks.
+    String::from_utf8(result).unwrap()
+}
+
+/// Byte-level equivalent of `is_tls_whitespace` for the ASCII fast path.
+#[inline(always)]
+fn is_tls_whitespace_byte(b: u8) -> bool {
+    b == b' ' || b == b'_' || b == b'\t' || b == b'\n' || b == b'\r'
+}
+
+/// Unicode slow path for `to_lower_space`.
+fn to_lower_space_unicode(s: &str, lowercase: bool) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    // Skip leading whitespace
+    while let Some(&c) = chars.peek() {
+        if !is_tls_whitespace(c) {
+            break;
+        }
+        chars.next();
+    }
+
+    // Process characters with inline lowercasing
+    while let Some(c) = chars.next() {
+        // Escaped underscore: \_
+        if c == '\\' && chars.peek() == Some(&'_') {
+            result.push('\\');
+            result.push('_');
+            chars.next();
+            continue;
+        }
+
+        // Whitespace collapse
+        if is_tls_whitespace(c) {
+            while let Some(&next) = chars.peek() {
+                if !is_tls_whitespace(next) {
+                    break;
+                }
+                chars.next();
+            }
+            result.push(' ');
+            continue;
+        }
+
+        // Lowercase inline
+        if !lowercase {
+            result.push(c);
+        } else if c.is_ascii() {
+            result.push(c.to_ascii_lowercase());
+        } else {
+            for lc in c.to_lowercase() {
+                result.push(lc);
+            }
+        }
+    }
+
+    // Strip trailing collapsed whitespace. After the main loop the only
+    // TLS-whitespace character that can appear in the result is ' ' (from
+    // collapsing). Raw '_', '\t', '\n', '\r' have already been consumed by
+    // the collapsing step, so we must NOT trim them here -- the only '_'
+    // that survives is part of an escaped "\_" sequence.
+    while result.ends_with(' ') {
+        result.pop();
+    }
+
+    result
+}
+
+/// Compare a name against an already-canonicalized target without allocating.
+///
+/// Equivalent to `to_lower_space(s) == target` but avoids heap allocation.
+/// The `target` must already be in canonical form (lowercase, single spaces, no
+/// leading/trailing whitespace).
+pub(crate) fn eq_lower_space(s: &str, target: &str) -> bool {
+    let s = strip_quotes(s);
+
+    let mut chars = s.chars().peekable();
+    let mut target_chars = target.chars();
+    let mut pending_space = false;
+
+    // Skip leading whitespace
+    while let Some(&c) = chars.peek() {
+        if !is_tls_whitespace(c) {
+            break;
+        }
+        chars.next();
+    }
+
+    while let Some(c) = chars.next() {
+        // Escaped underscore: \_
+        if c == '\\' && chars.peek() == Some(&'_') {
+            if pending_space {
+                if target_chars.next() != Some(' ') {
+                    return false;
+                }
+                pending_space = false;
+            }
+            if target_chars.next() != Some('\\') {
+                return false;
+            }
+            if target_chars.next() != Some('_') {
+                return false;
+            }
+            chars.next();
+            continue;
+        }
+
+        // Whitespace: defer emission until we see a non-whitespace char
+        // (handles trailing whitespace by never emitting the space)
+        if is_tls_whitespace(c) {
+            while let Some(&next) = chars.peek() {
+                if !is_tls_whitespace(next) {
+                    break;
+                }
+                chars.next();
+            }
+            pending_space = true;
+            continue;
+        }
+
+        // Flush pending space before emitting a non-whitespace char
+        if pending_space {
+            if target_chars.next() != Some(' ') {
+                return false;
+            }
+            pending_space = false;
+        }
+
+        // Lowercase and compare
+        if c.is_ascii() {
+            if target_chars.next() != Some(c.to_ascii_lowercase()) {
+                return false;
+            }
+        } else {
+            for lc in c.to_lowercase() {
+                if target_chars.next() != Some(lc) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // If pending_space remains, it's trailing whitespace -- ignore it.
+    // Target must also be exhausted.
+    target_chars.next().is_none()
+}
+
+/// Built-in function names in their canonicalized form (via `to_lower_space`).
+///
+/// This table is derived from the C++ `Function.h` class definitions.
+pub static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        // Mathematical functions
+        "abs",
+        "exp",
+        "sqrt",
+        "ln",
+        "log",
+        "sin",
+        "cos",
+        "tan",
+        "arcsin",
+        "arccos",
+        "arctan",
+        "integer",
+        "modulo",
+        "quantum",
+        // Min/Max
+        "max",
+        "min",
+        "vmax",
+        "vmin",
+        // Conditional/Division
+        "if then else",
+        "zidz",
+        "xidz",
+        // Time functions
+        "pulse",
+        "pulse train",
+        "step",
+        "ramp",
+        // Delay/Smooth functions
+        "smooth",
+        "smoothi",
+        "smooth3",
+        "smooth3i",
+        "smooth n",
+        "delay1",
+        "delay1i",
+        "delay3",
+        "delay3i",
+        "delay fixed",
+        "delay n",
+        "delay conveyor",
+        "trend",
+        "forecast",
+        // Integration/State
+        "integ",
+        "active initial",
+        "initial",
+        "reinitial",
+        "sample if true",
+        // Lookup functions
+        "with lookup",
+        "lookup invert",
+        "lookup area",
+        "lookup extrapolate",
+        "lookup forward",
+        "lookup backward",
+        "tabxl",
+        "get data at time",
+        "get data between times",
+        "get data last time",
+        // Array functions
+        "sum",
+        "prod",
+        "elmcount",
+        "vector select",
+        "vector elm map",
+        "vector rank",
+        "vector sort order",
+        "vector reorder",
+        "vector lookup",
+        // Random functions
+        "random 0 1",
+        "random uniform",
+        "random normal",
+        "random pink noise",
+        "random poisson",
+        // Special
+        "a function of",
+        "game",
+        "time base",
+        "npv",
+        "sshape",
+        "ramp from to",
+        "allocate available",
+        "allocate by priority",
+        "get direct data",
+        "get data mean",
+        // Keyword (handled specially, but included for completeness)
+        "tabbed array",
+    ]
+    .into_iter()
+    .collect()
+});
+
+/// Classification of a symbol token after canonicalization.
+///
+/// Used by the normalizer to classify a symbol in a single `to_lower_space`
+/// call rather than checking each category separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SymbolClass {
+    /// "WITH LOOKUP" keyword
+    WithLookup,
+    /// GET XLS/VDF/DATA/DIRECT/123 function, with the canonical prefix
+    GetXls(&'static str),
+    /// "TABBED ARRAY" keyword
+    TabbedArray,
+    /// Known builtin function
+    Builtin,
+    /// Regular symbol (not a builtin or keyword)
+    Regular,
+}
+
+/// Classify a symbol by canonicalizing once and checking all categories.
+pub(crate) fn classify_symbol(name: &str) -> SymbolClass {
+    // Check known keywords first without allocating
+    if eq_lower_space(name, "with lookup") {
+        return SymbolClass::WithLookup;
+    }
+    if eq_lower_space(name, "tabbed array") {
+        return SymbolClass::TabbedArray;
+    }
+    // For prefix matching and HashSet lookup, we need the canonical string
+    let canonical = to_lower_space(name);
+    if let Some(rest) = canonical.strip_prefix("get ") {
+        if rest.starts_with("123") {
+            return SymbolClass::GetXls("{GET 123");
+        }
+        if rest.starts_with("data") {
+            return SymbolClass::GetXls("{GET DATA");
+        }
+        if let Some(direct_rest) = rest.strip_prefix("direct ") {
+            if direct_rest.starts_with("data") {
+                return SymbolClass::GetXls("{GET DIRECT DATA");
+            }
+            if direct_rest.starts_with("constants") {
+                return SymbolClass::GetXls("{GET DIRECT CONSTANTS");
+            }
+            if direct_rest.starts_with("lookups") {
+                return SymbolClass::GetXls("{GET DIRECT LOOKUPS");
+            }
+            if direct_rest.starts_with("subscript") {
+                return SymbolClass::GetXls("{GET DIRECT SUBSCRIPT");
+            }
+            return SymbolClass::GetXls("{GET DIRECT");
+        }
+        if rest.starts_with("direct") {
+            return SymbolClass::GetXls("{GET DIRECT");
+        }
+        if rest.starts_with("vdf") {
+            return SymbolClass::GetXls("{GET VDF");
+        }
+        if rest.starts_with("xls") {
+            return SymbolClass::GetXls("{GET XLS");
+        }
+    }
+    if BUILTINS.contains(canonical.as_str()) {
+        return SymbolClass::Builtin;
+    }
+    SymbolClass::Regular
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Allocation-free comparison tests
+
+    #[test]
+    fn test_eq_lower_space_simple() {
+        assert!(eq_lower_space("ABC", "abc"));
+        assert!(eq_lower_space("foo", "foo"));
+        assert!(eq_lower_space("FooBar", "foobar"));
+        assert!(!eq_lower_space("ABC", "xyz"));
+        assert!(!eq_lower_space("foo", "foobar"));
+    }
+
+    #[test]
+    fn test_eq_lower_space_underscores() {
+        assert!(eq_lower_space("IF_THEN_ELSE", "if then else"));
+        assert!(eq_lower_space("my_variable", "my variable"));
+        assert!(!eq_lower_space("IF_THEN_ELSE", "if then"));
+    }
+
+    #[test]
+    fn test_eq_lower_space_whitespace() {
+        assert!(eq_lower_space("IF  THEN  ELSE", "if then else"));
+        assert!(eq_lower_space("IF\t_\nTHEN", "if then"));
+        assert!(eq_lower_space("  foo  ", "foo"));
+        assert!(eq_lower_space("__foo__", "foo"));
+        assert!(eq_lower_space("   ", ""));
+    }
+
+    #[test]
+    fn test_eq_lower_space_escaped_underscore() {
+        assert!(eq_lower_space("foo\\_bar", "foo\\_bar"));
+        assert!(!eq_lower_space("foo\\_bar", "foo bar"));
+    }
+
+    #[test]
+    fn test_eq_lower_space_quoted() {
+        assert!(eq_lower_space("\"foo\"", "foo"));
+        assert!(eq_lower_space("\"MY_VAR\"", "my var"));
+    }
+
+    #[test]
+    fn test_eq_lower_space_empty() {
+        assert!(eq_lower_space("", ""));
+        assert!(eq_lower_space("\"\"", ""));
+        assert!(!eq_lower_space("", "x"));
+        assert!(!eq_lower_space("x", ""));
+    }
+
+    #[test]
+    fn test_eq_lower_space_non_ascii() {
+        assert!(eq_lower_space("Foo\u{00B7}Bar", "foo\u{00b7}bar"));
+    }
+
+    #[test]
+    fn test_eq_lower_space_matches_to_lower_space() {
+        // Verify eq_lower_space agrees with to_lower_space for all test cases
+        let cases = [
+            "ABC",
+            "foo",
+            "FooBar",
+            "IF_THEN_ELSE",
+            "my_variable",
+            "IF  THEN  ELSE",
+            "IF\t_\nTHEN",
+            "  foo  ",
+            "__foo__",
+            "   ",
+            "foo\\_bar",
+            "\"foo\"",
+            "\"MY_VAR\"",
+            "",
+            "\"\"",
+            "WITH LOOKUP",
+            "TABBED_ARRAY",
+            "INTEG",
+            "MAX",
+            "if then else",
+        ];
+        for case in &cases {
+            let canonical = to_lower_space(case);
+            assert!(
+                eq_lower_space(case, &canonical),
+                "eq_lower_space({:?}, {:?}) should be true",
+                case,
+                canonical
+            );
+            // Also verify non-matching target returns false (unless empty)
+            if !canonical.is_empty() {
+                assert!(
+                    !eq_lower_space(case, "ZZZZ_NOT_A_MATCH"),
+                    "eq_lower_space({:?}, \"ZZZZ_NOT_A_MATCH\") should be false",
+                    case
+                );
+            }
+        }
+    }
+
+    // Phase 1: ToLowerSpace Canonicalization Tests
+
+    #[test]
+    fn test_to_lower_space_simple() {
+        assert_eq!(to_lower_space("ABC"), "abc");
+        assert_eq!(to_lower_space("foo"), "foo");
+        assert_eq!(to_lower_space("FooBar"), "foobar");
+    }
+
+    #[test]
+    fn test_to_lower_space_underscores() {
+        assert_eq!(to_lower_space("IF_THEN_ELSE"), "if then else");
+        assert_eq!(to_lower_space("my_variable"), "my variable");
+        assert_eq!(to_lower_space("a_b_c"), "a b c");
+    }
+
+    #[test]
+    fn test_to_lower_space_multiple_spaces() {
+        assert_eq!(to_lower_space("IF  THEN  ELSE"), "if then else");
+        assert_eq!(to_lower_space("a     b"), "a b");
+    }
+
+    #[test]
+    fn test_to_lower_space_mixed_whitespace() {
+        assert_eq!(to_lower_space("IF\t_\nTHEN"), "if then");
+        assert_eq!(to_lower_space("a \t_\n\r b"), "a b");
+    }
+
+    #[test]
+    fn test_to_lower_space_escaped_underscore() {
+        // Escaped underscore \_ should be preserved literally
+        assert_eq!(to_lower_space("foo\\_bar"), "foo\\_bar");
+        assert_eq!(to_lower_space("a\\_b\\_c"), "a\\_b\\_c");
+    }
+
+    #[test]
+    fn test_to_lower_space_leading_trailing() {
+        assert_eq!(to_lower_space("  foo  "), "foo");
+        assert_eq!(to_lower_space("__foo__"), "foo");
+        assert_eq!(to_lower_space("\t\nfoo\r\n"), "foo");
+        assert_eq!(to_lower_space("   "), "");
+    }
+
+    #[test]
+    fn test_to_lower_space_quoted_strings() {
+        // Surrounding quotes should be stripped
+        assert_eq!(to_lower_space("\"foo\""), "foo");
+        assert_eq!(to_lower_space("\"MY_VAR\""), "my var");
+        // Single char in quotes
+        assert_eq!(to_lower_space("\"x\""), "x");
+    }
+
+    #[test]
+    fn test_to_lower_space_empty() {
+        assert_eq!(to_lower_space(""), "");
+        assert_eq!(to_lower_space("\"\""), "");
+    }
+
+    #[test]
+    fn test_to_lower_space_non_ascii() {
+        assert_eq!(to_lower_space("Foo\u{00B7}Bar"), "foo\u{00b7}bar");
+    }
+
+    #[test]
+    fn test_to_lower_space_ascii_fast_path() {
+        // Pure ASCII inputs that exercise the byte-level fast path
+        assert_eq!(to_lower_space("ABC"), "abc");
+        assert_eq!(to_lower_space("IF_THEN_ELSE"), "if then else");
+        assert_eq!(to_lower_space("  foo  "), "foo");
+        assert_eq!(to_lower_space("__bar__"), "bar");
+        assert_eq!(to_lower_space("a\t\tb\tc"), "a b c");
+        assert_eq!(to_lower_space("foo\\_bar"), "foo\\_bar");
+        assert_eq!(to_lower_space("\"QUOTED\""), "quoted");
+        assert_eq!(to_lower_space("x"), "x");
+        assert_eq!(to_lower_space(""), "");
+        assert_eq!(to_lower_space("   "), "");
+    }
+
+    #[test]
+    fn test_to_lower_space_unicode_slow_path() {
+        // Non-ASCII inputs that must go through the Unicode path
+        assert_eq!(to_lower_space("Café"), "café");
+        assert_eq!(to_lower_space("NAÏVE"), "naïve");
+        assert_eq!(to_lower_space("Über"), "über");
+    }
+
+    #[test]
+    fn test_to_lower_space_trailing_escaped_underscore() {
+        // Escaped underscore at end of string must be preserved identically
+        // regardless of whether the input takes the ASCII or Unicode path.
+        let ascii = to_lower_space("a\\_");
+        let unicode = to_lower_space("é\\_");
+        assert_eq!(ascii, "a\\_");
+        assert_eq!(unicode, "é\\_");
+    }
+
+    #[test]
+    fn test_classify_symbol() {
+        assert!(matches!(
+            classify_symbol("WITH LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("WITH_LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("with lookup"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("TABBED ARRAY"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(matches!(
+            classify_symbol("tabbed_array"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(matches!(classify_symbol("GET XLS"), SymbolClass::GetXls(_)));
+        assert!(matches!(classify_symbol("GET_VDF"), SymbolClass::GetXls(_)));
+        assert!(matches!(
+            classify_symbol("GET DIRECT DATA"),
+            SymbolClass::GetXls(_)
+        ));
+        assert!(matches!(classify_symbol("MAX"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("integ"), SymbolClass::Builtin));
+        assert!(matches!(
+            classify_symbol("IF_THEN_ELSE"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("my_variable"),
+            SymbolClass::Regular
+        ));
+        assert!(matches!(classify_symbol("foo"), SymbolClass::Regular));
+    }
+
+    // Phase 4: Function Classification Tests
+
+    #[test]
+    fn test_max_is_builtin() {
+        assert!(matches!(classify_symbol("MAX"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("max"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("Max"), SymbolClass::Builtin));
+    }
+
+    #[test]
+    fn test_function_case_insensitive() {
+        assert!(matches!(classify_symbol("INTEG"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("integ"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("Integ"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("SMOOTH3"), SymbolClass::Builtin));
+        assert!(matches!(classify_symbol("smooth3"), SymbolClass::Builtin));
+    }
+
+    #[test]
+    fn test_function_with_underscores() {
+        assert!(matches!(
+            classify_symbol("IF_THEN_ELSE"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("if_then_else"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("PULSE_TRAIN"),
+            SymbolClass::Builtin
+        ));
+    }
+
+    #[test]
+    fn test_function_with_spaces() {
+        assert!(matches!(
+            classify_symbol("IF THEN ELSE"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("if then else"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("DELAY FIXED"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("RANDOM UNIFORM"),
+            SymbolClass::Builtin
+        ));
+    }
+
+    #[test]
+    fn test_vector_rank_is_builtin() {
+        assert!(matches!(
+            classify_symbol("VECTOR RANK"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("VECTOR_RANK"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("vector rank"),
+            SymbolClass::Builtin
+        ));
+    }
+
+    #[test]
+    fn test_non_function_stays_symbol() {
+        assert!(matches!(
+            classify_symbol("my_variable"),
+            SymbolClass::Regular
+        ));
+        assert!(matches!(
+            classify_symbol("NOT_A_FUNCTION"),
+            SymbolClass::Regular
+        ));
+        assert!(matches!(classify_symbol("foo"), SymbolClass::Regular));
+    }
+
+    #[test]
+    fn test_tabbed_array_keyword() {
+        assert!(matches!(
+            classify_symbol("TABBED ARRAY"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(matches!(
+            classify_symbol("tabbed_array"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(matches!(
+            classify_symbol("Tabbed_Array"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(!matches!(
+            classify_symbol("TABBED"),
+            SymbolClass::TabbedArray
+        ));
+        assert!(!matches!(
+            classify_symbol("ARRAY"),
+            SymbolClass::TabbedArray
+        ));
+    }
+
+    #[test]
+    fn test_with_lookup_keyword() {
+        // All spacing variants should match
+        assert!(matches!(
+            classify_symbol("WITH LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("with lookup"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("WITH_LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("with_lookup"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("WITH  LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(matches!(
+            classify_symbol("WITH\tLOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        // Non-matches
+        assert!(!matches!(classify_symbol("WITH"), SymbolClass::WithLookup));
+        assert!(!matches!(
+            classify_symbol("LOOKUP"),
+            SymbolClass::WithLookup
+        ));
+        assert!(!matches!(
+            classify_symbol("WITHLOOKUP"),
+            SymbolClass::WithLookup
+        ));
+    }
+}

@@ -12,7 +12,7 @@ use std::fs;
 use std::io::BufReader;
 use std::path::PathBuf;
 
-use simlin_engine::{
+use simlin_formats::{
     ImportWarning, open_vensim, open_vensim_with_warnings, open_xmile, open_xmile_with_warnings,
     to_mdl, to_xmile,
 };

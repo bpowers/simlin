@@ -15,7 +15,7 @@ use simlin_engine::layout::{
     compute_layout_metadata, count_view_crossings, generate_best_layout, generate_layout,
     generate_layout_with_config,
 };
-use simlin_engine::open_xmile;
+use simlin_formats::open_xmile;
 
 /// The main model name in single-model XMILE files is the empty string;
 /// `Project::get_model` maps "main" to the first model when the name is empty.
@@ -676,7 +676,7 @@ fn test_dominant_period_timestamps_respect_effective_save_cadence() {
 </xmile>"#;
 
     let mut reader = std::io::BufReader::new(xmile.as_bytes());
-    let project = simlin_engine::open_xmile(&mut reader).unwrap();
+    let project = simlin_formats::open_xmile(&mut reader).unwrap();
     let metadata = compute_metadata(&project, MAIN_MODEL, None).unwrap();
 
     let sim_stop = 10.0_f64;
@@ -720,7 +720,7 @@ fn test_dep_graph_excludes_self_references() {
 </xmile>"#;
 
     let mut reader = BufReader::new(xmile.as_bytes());
-    let project = simlin_engine::open_xmile(&mut reader).unwrap();
+    let project = simlin_formats::open_xmile(&mut reader).unwrap();
     let metadata = compute_layout_metadata(&project, MAIN_MODEL, None).unwrap();
 
     for (var, deps) in &metadata.dep_graph {
@@ -781,7 +781,7 @@ fn test_constant_variable_has_no_deps_with_salsa() {
 </xmile>"#;
 
     let mut reader = BufReader::new(xmile.as_bytes());
-    let project = simlin_engine::open_xmile(&mut reader).unwrap();
+    let project = simlin_formats::open_xmile(&mut reader).unwrap();
 
     let mut db = SimlinDb::default();
     let state = sync_from_datamodel_incremental(&mut db, &project, None);
@@ -1276,8 +1276,8 @@ fn test_systems_format_layout_with_modules() {
     let contents = std::fs::read_to_string(&file_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", file_path.display(), e));
 
-    let systems_model = simlin_engine::systems::parse(&contents).unwrap();
-    let project = simlin_engine::systems::translate::translate(&systems_model, 5).unwrap();
+    let systems_model = simlin_formats::systems::parse(&contents).unwrap();
+    let project = simlin_formats::systems::translate::translate(&systems_model, 5).unwrap();
 
     let view = generate_layout(&project, MAIN_MODEL, None)
         .expect("layout generation should succeed for systems format model");
@@ -1753,8 +1753,8 @@ fn test_layout_hiring_no_flow_overlap() {
     let contents = std::fs::read_to_string(&file_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", file_path.display(), e));
 
-    let systems_model = simlin_engine::systems::parse(&contents).unwrap();
-    let project = simlin_engine::systems::translate::translate(&systems_model, 10).unwrap();
+    let systems_model = simlin_formats::systems::parse(&contents).unwrap();
+    let project = simlin_formats::systems::translate::translate(&systems_model, 10).unwrap();
 
     let view =
         generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
@@ -2475,9 +2475,9 @@ fn test_flow_endpoints_geometrically_attached_to_stocks() {
 fn test_incremental_two_word_label_round_trips_every_format() {
     use simlin_base::datamodel;
     use simlin_base::{ModelOperation, ModelPatch};
-    use simlin_engine::buffa::Message;
     use simlin_engine::layout::incremental_layout;
-    use simlin_engine::{json, project_io, serde as project_serde};
+    use simlin_formats::buffa::Message;
+    use simlin_formats::{json, project_io, serde as project_serde};
 
     let project = load_project("test/test-models/samples/teacup/teacup_w_diagram.xmile");
     let old_view = match project.get_model(MAIN_MODEL).unwrap().views.first() {
@@ -2562,7 +2562,7 @@ fn test_incremental_two_word_label_round_trips_every_format() {
     );
 
     // XMILE
-    let xml = simlin_engine::xmile::project_to_xmile(&patched).unwrap();
+    let xml = simlin_formats::xmile::project_to_xmile(&patched).unwrap();
     assert!(
         xml.contains(r#"name="from\npython""#),
         "XMILE writes the literal escape, got: {}",
@@ -2571,7 +2571,7 @@ fn test_incremental_two_word_label_round_trips_every_format() {
             .unwrap_or("<no line>")
     );
     let from_xmile =
-        simlin_engine::xmile::project_from_reader(&mut std::io::Cursor::new(xml.as_bytes()))
+        simlin_formats::xmile::project_from_reader(&mut std::io::Cursor::new(xml.as_bytes()))
             .unwrap();
     assert_eq!(
         label_of(&first_view(&from_xmile)),

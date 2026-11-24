@@ -135,7 +135,7 @@ pub fn open_project(
     let (mut project, format) = match format_for_extension(path) {
         Some(SourceFormat::Xmile) => {
             let mut reader = BufReader::new(contents.as_bytes());
-            let project = simlin_engine::open_xmile(&mut reader).map_err(|e| {
+            let project = simlin_formats::open_xmile(&mut reader).map_err(|e| {
                 AccessError::ParseError(anyhow::anyhow!(
                     "failed to parse XMILE: {}",
                     crate::errors::engine_error_text(&e)
@@ -144,7 +144,7 @@ pub fn open_project(
             (project, SourceFormat::Xmile)
         }
         Some(SourceFormat::Mdl) => {
-            let project = simlin_engine::open_vensim(contents).map_err(|e| {
+            let project = simlin_formats::open_vensim(contents).map_err(|e| {
                 AccessError::ParseError(anyhow::anyhow!(
                     "failed to parse Vensim: {}",
                     crate::errors::engine_error_text(&e)
@@ -160,12 +160,12 @@ pub fn open_project(
                 .context("failed to parse JSON")
                 .map_err(AccessError::ParseError)?;
             if v.get("models").is_some() {
-                let json_project: simlin_engine::json::Project = serde_json::from_value(v)
+                let json_project: simlin_formats::json::Project = serde_json::from_value(v)
                     .context("failed to parse native Simlin JSON")
                     .map_err(AccessError::ParseError)?;
                 (json_project.into(), SourceFormat::NativeJson)
             } else if v.get("variables").is_some() {
-                let sdai_model: simlin_engine::json_sdai::SdaiModel = serde_json::from_value(v)
+                let sdai_model: simlin_formats::json_sdai::SdaiModel = serde_json::from_value(v)
                     .context("failed to parse SD-AI JSON")
                     .map_err(AccessError::ParseError)?;
                 (sdai_model.into(), SourceFormat::SdaiJson)
@@ -471,7 +471,7 @@ mod tests {
 
         // Simulate save: convert to SdaiModel (which now embeds the uids) and
         // serialize back to JSON.
-        let sdai_model = simlin_engine::json_sdai::SdaiModel::from(project1);
+        let sdai_model = simlin_formats::json_sdai::SdaiModel::from(project1);
         let saved_json =
             serde_json::to_string_pretty(&sdai_model).expect("serialization must succeed");
 
@@ -540,7 +540,7 @@ mod tests {
             });
 
         // Save: serialize to SD-AI JSON with embedded UIDs
-        let sdai_model = simlin_engine::json_sdai::SdaiModel::from(project);
+        let sdai_model = simlin_formats::json_sdai::SdaiModel::from(project);
         let saved_json =
             serde_json::to_string_pretty(&sdai_model).expect("serialization must succeed");
 

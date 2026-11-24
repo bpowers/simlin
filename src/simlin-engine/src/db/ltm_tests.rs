@@ -2717,7 +2717,7 @@ fn delay3_ramp_project(in_submodel: bool) -> datamodel::Project {
   {sub_model}
 </xmile>"#
     );
-    crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
+    simlin_formats::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
 }
 
 /// The `input -> stock` link score of a `DELAY3` instance reads the bound

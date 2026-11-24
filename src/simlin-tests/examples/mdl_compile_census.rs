@@ -38,7 +38,7 @@ fn main() {
         let Ok(contents) = std::fs::read_to_string(f) else {
             continue;
         };
-        let dm = match simlin_engine::open_vensim(&contents) {
+        let dm = match simlin_formats::open_vensim(&contents) {
             Ok(d) => d,
             Err(e) => {
                 import_err += 1;

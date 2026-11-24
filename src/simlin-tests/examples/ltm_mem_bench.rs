@@ -44,7 +44,7 @@ use simlin_engine::db::{
     CausalEdgesResult, SimlinDb, causal_graph_from_edges, model_causal_edges, sync_from_datamodel,
 };
 use simlin_engine::ltm::CausalGraph;
-use simlin_engine::open_vensim;
+use simlin_formats::open_vensim;
 
 /// Tracking allocator: counts the number of `alloc` calls and the total
 /// bytes requested.  The benchmark zeros the counters before each

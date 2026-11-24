@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
-use simlin_engine::vdf::{
+use simlin_formats::vdf::{
     VDF_FILE_MAGIC, VDF_RECORD_VIEW_HEADER_CLASS, VDF_SECTION6_OT_CODE_STOCK, VdfFile,
 };
 

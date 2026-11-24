@@ -1,8 +1,8 @@
 # Vensim MDL Parser Design
 
-The design and the Vensim format notes of the native Rust Vensim MDL reader and writer (`src/simlin-engine/src/mdl/`).
+The design and the Vensim format notes of the native Rust Vensim MDL reader and writer (`src/simlin-formats/src/mdl/`).
 
-For current status and agent guidance, see `src/simlin-engine/src/mdl/CLAUDE.md`.
+For current status and agent guidance, see `src/simlin-formats/src/mdl/CLAUDE.md`.
 
 ## Motivation
 

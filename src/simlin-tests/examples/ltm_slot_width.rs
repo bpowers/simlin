@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use simlin_engine::db::{SimlinDb, model_ltm_variables, sync_from_datamodel_incremental};
 use simlin_engine::queue_compile::compile_sim;
-use simlin_engine::{open_vensim, open_xmile};
+use simlin_formats::{open_vensim, open_xmile};
 
 fn main() {
     let model_path = std::env::var("LTM_WIDTH_MODEL")

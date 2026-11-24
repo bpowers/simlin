@@ -20,13 +20,13 @@
 // parameters, matching the bundled `macro_*` fixtures (all `(input,
 // parameter)`); this is a pre-existing MDL behavior, not a Phase 3 concern.
 
-use crate::compat::open_vensim;
 use crate::db::{
     DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::vm::Vm;
 use simlin_base::common::ErrorCode;
+use simlin_formats::compat::open_vensim;
 
 /// The fixed Vensim control + sketch tail every test `.mdl` shares. Keeps the
 /// per-test source focused on the macro definitions and invocations.
@@ -921,7 +921,7 @@ fn a_passthrough_macro_keeps_its_declared_arity_at_an_external_call_site() {
   </macro>
 </xmile>"#
         );
-        crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE imports")
+        simlin_formats::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE imports")
     };
     let compile = |project: &simlin_base::datamodel::Project| {
         let mut db = SimlinDb::default();

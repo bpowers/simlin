@@ -60,11 +60,12 @@
 //! macro failure.
 
 use simlin_base::common::ErrorCode;
+use simlin_engine::Vm;
 use simlin_engine::db::{
     Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{Vm, open_vensim};
+use simlin_formats::open_vensim;
 
 use crate::test_helpers::ensure_results;
 
@@ -758,12 +759,12 @@ fn metasd_simulation_tier() {
                 let expected = if reference.ends_with(".vdf") {
                     let bytes = std::fs::read(reference)
                         .unwrap_or_else(|e| panic!("failed to read {reference}: {e}"));
-                    simlin_engine::vdf::VdfFile::parse(bytes)
+                    simlin_formats::vdf::VdfFile::parse(bytes)
                         .unwrap_or_else(|e| panic!("failed to parse VDF {reference}: {e}"))
                         .to_results_via_records()
                         .unwrap_or_else(|e| panic!("VDF decode failed for {reference}: {e}"))
                 } else if reference.ends_with(".dat") {
-                    simlin_engine::load_dat(reference)
+                    simlin_formats::load_dat(reference)
                         .unwrap_or_else(|e| panic!("failed to load {reference}: {e}"))
                 } else {
                     let delim = if reference.ends_with(".csv") {
@@ -771,7 +772,7 @@ fn metasd_simulation_tier() {
                     } else {
                         b'\t'
                     };
-                    simlin_engine::load_csv(reference, delim)
+                    simlin_formats::load_csv(reference, delim)
                         .unwrap_or_else(|e| panic!("failed to load {reference}: {e}"))
                 };
                 ensure_results(&expected, &results);

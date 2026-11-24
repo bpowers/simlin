@@ -14,7 +14,7 @@ use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use simlin_engine::json;
+use simlin_formats::json;
 
 use crate::access::ProjectAccess;
 use crate::errors::AccessError;
