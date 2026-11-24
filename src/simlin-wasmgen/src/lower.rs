@@ -73,7 +73,7 @@ use wasm_encoder::{Function, Instruction, MemArg, ValType};
 use simlin_engine::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, GraphicalFunctionId, LookupMode, Op2, Opcode,
 };
-use simlin_engine::vm::{StepPart, make_module_key};
+use simlin_engine::{StepPart, make_module_key};
 
 use super::WasmGenError;
 use super::views::{ElementAddr, RegionBases};
@@ -260,7 +260,7 @@ pub(crate) struct EmitCtx<'a> {
     /// `module.rs` before any program function is emitted (the module
     /// instantiation graph is acyclic, so every child index exists by the time its
     /// caller is emitted). Empty for a single-module (no-submodule) program.
-    pub module_fn_index: &'a IdentMap<(simlin_engine::vm::ModuleKey, StepPart), u32>,
+    pub module_fn_index: &'a IdentMap<(simlin_engine::ModuleKey, StepPart), u32>,
     /// The module instance's `ByteCodeContext`, holding the compile-time array
     /// tables the view opcodes reference by index (`static_views`, `dim_lists`,
     /// `dimensions`, `temp_offsets`) *and* the `modules`

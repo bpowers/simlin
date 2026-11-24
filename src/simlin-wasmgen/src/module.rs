@@ -59,7 +59,7 @@ use simlin_base::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, Method, Spe
 use simlin_engine::bytecode::{ByteCode, CompiledModule, Opcode};
 use simlin_engine::conveyor_compile::ConveyorPlan;
 use simlin_engine::queue_compile::{CouplingTable, QueuePlan};
-use simlin_engine::vm::{CompiledSimulation, ModuleKey, StepPart};
+use simlin_engine::{CompiledSimulation, ModuleKey, StepPart};
 
 use super::WasmGenError;
 use super::belt::{self, ConveyorPass, ConveyorPassLayout, ConveyorPassLocals};
@@ -1336,7 +1336,7 @@ fn collect_instance_input_counts(sim: &CompiledSimulation) -> IdentMap<ModuleKey
                 if let Opcode::EvalModule { id, n_inputs } = op {
                     let decl = &module.context.modules[*id as usize];
                     let child_key =
-                        simlin_engine::vm::make_module_key(&decl.model_name, &decl.input_set);
+                        simlin_engine::make_module_key(&decl.model_name, &decl.input_set);
                     counts.entry(child_key).or_insert(u32::from(*n_inputs));
                 }
             }
@@ -1484,8 +1484,7 @@ fn collect_all_stock_offsets(
             }
             Opcode::EvalModule { id, .. } => {
                 let decl = &module.context.modules[*id as usize];
-                let child_key =
-                    simlin_engine::vm::make_module_key(&decl.model_name, &decl.input_set);
+                let child_key = simlin_engine::make_module_key(&decl.model_name, &decl.input_set);
                 offsets.extend(collect_all_stock_offsets(
                     modules,
                     &child_key,
@@ -1559,7 +1558,7 @@ fn collect_overridable_defaults(
         }
     }
     for decl in &module.context.modules {
-        let child_key = simlin_engine::vm::make_module_key(&decl.model_name, &decl.input_set);
+        let child_key = simlin_engine::make_module_key(&decl.model_name, &decl.input_set);
         out.extend(collect_overridable_defaults(
             modules,
             &child_key,

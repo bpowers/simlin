@@ -28,7 +28,7 @@ use simlin_base::common::ErrorCode;
 use simlin_engine::conveyor::SlatBoundGuard;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::queue_compile::{build_vm, compile_sim};
-use simlin_engine::vm::{CompiledSimulation, Vm};
+use simlin_engine::{CompiledSimulation, Vm};
 use std::io::BufReader;
 use wasm::addrs::ModuleAddr;
 use wasm::validate;

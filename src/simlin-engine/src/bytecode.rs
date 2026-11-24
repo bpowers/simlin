@@ -366,6 +366,10 @@ impl RuntimeView {
     /// `offset_for_iter_index` arithmetic (index decompose + stride dot
     /// product) collapses to `start + k` for these views, so iteration and
     /// reduction loops over them can be plain linear scans (GH #603).
+    ///
+    /// `#[inline]`: asked of every view iterated or reduced, and out of line it
+    /// is about 1% of a C-LEARN run without LTO.
+    #[inline]
     pub(crate) fn dense_linear_start(&self) -> Option<usize> {
         if !self.sparse.is_empty() {
             return None;
@@ -1428,6 +1432,11 @@ impl StaticArrayView {
     /// (non-star-range) view -- the overwhelmingly common case -- so we take a
     /// free fresh empty `SmallVec` then and only fall back to a real clone for a
     /// genuinely sparse view.
+    ///
+    /// `#[inline]`: the VM's dispatch loop is its one production caller, and
+    /// being public for simlin-wasmgen's tests it is otherwise emitted out of
+    /// line (about 2% of a C-LEARN run without LTO).
+    #[inline]
     pub fn to_runtime_view(&self, module_off: u32) -> RuntimeView {
         let sparse = if self.sparse.is_empty() {
             SmallVec::new()

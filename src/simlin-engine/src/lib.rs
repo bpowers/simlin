@@ -85,17 +85,26 @@ pub mod units;
 pub mod units_check;
 mod units_infer;
 mod variable;
-pub mod vm;
+mod vm;
+// The VM's own arithmetic, which simlin-wasmgen's tests hold the code it emits
+// to. Only tests name it, so a build without `test-support` keeps it inside the
+// crate, where the compiler inlines it into the VM's one call of each.
+#[cfg(feature = "test-support")]
+pub mod vm_oracle {
+    pub use crate::vm::{ChunkRegions, increment_indices, is_truthy, lookup_in_mode, pulse};
+    pub use crate::vm_vector_elm_map::vector_elm_map;
+    pub use crate::vm_vector_sort_order::vector_sort_order;
+}
 // Bytecode-composition profiling for CompiledSimulation; a diagnostics-only
 // sibling of `vm` kept separate purely for the per-file line cap.
 mod vm_profile;
-pub mod vm_vector_elm_map;
-pub mod vm_vector_sort_order;
+mod vm_vector_elm_map;
+mod vm_vector_sort_order;
 
 pub use self::queue_compile::build_sim;
 pub use self::variable::{
     DepClassification, DepLag, DepOccurrence, SourceVariableKind, Variable, is_lookup_only,
     parse_table,
 };
-pub use self::vm::{CompiledSimulation, Vm};
+pub use self::vm::{CompiledSimulation, ModuleKey, StepPart, Vm, make_module_key};
 pub use self::vm_profile::BytecodeProfile;

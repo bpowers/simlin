@@ -37,9 +37,8 @@ fn empty_ctx() -> &'static ByteCodeContext {
 /// tests build single root-only functions (0 module inputs) and never emit an
 /// `EvalModule`, so the map is never consulted. The whole-model `EvalModule` /
 /// `LoadModuleInput` parity is exercised end-to-end in `module.rs`'s tests.
-fn empty_module_fn_index() -> &'static IdentMap<(simlin_engine::vm::ModuleKey, StepPart), u32> {
-    static EMPTY: OnceLock<IdentMap<(simlin_engine::vm::ModuleKey, StepPart), u32>> =
-        OnceLock::new();
+fn empty_module_fn_index() -> &'static IdentMap<(simlin_engine::ModuleKey, StepPart), u32> {
+    static EMPTY: OnceLock<IdentMap<(simlin_engine::ModuleKey, StepPart), u32>> = OnceLock::new();
     EMPTY.get_or_init(IdentMap::default)
 }
 
@@ -959,7 +958,7 @@ fn run_lookup_opcode(
 
 /// The VM oracle for `mode` -- the exact function the opcode dispatches to.
 fn vm_lookup_oracle(mode: LookupMode, knots: &[(f64, f64)], index: f64) -> f64 {
-    simlin_engine::vm::lookup_in_mode(mode, knots, index)
+    simlin_engine::vm_oracle::lookup_in_mode(mode, knots, index)
 }
 
 fn assert_lookup_opcode_matches_vm(mode: LookupMode, knots: &[(f64, f64)], index: f64) {
@@ -1772,7 +1771,7 @@ fn vm_ramp(time: f64, slope: f64, start: f64, end: f64) -> f64 {
     }
 }
 fn vm_pulse(time: f64, dt: f64, volume: f64, first: f64, interval: f64) -> f64 {
-    simlin_engine::vm::pulse(time, dt, volume, first, interval)
+    simlin_engine::vm_oracle::pulse(time, dt, volume, first, interval)
 }
 
 /// Assert a wasm `Apply` result equals an exact f64 value (for the
@@ -3290,7 +3289,7 @@ fn array_size_over_huge_view_is_free() {
 // per-element offset array into a `write_temp_id` temp region. Both are run
 // under DLR-FT and cross-checked against the VM: VectorSelect against a faithful
 // oracle of the `vm.rs:2444-2502` arm, VectorElmMap against the sibling
-// `simlin_engine::vm_vector_elm_map::vector_elm_map` function directly.
+// `simlin_engine::vm_oracle::vector_elm_map` function directly.
 // ════════════════════════════════════════════════════════════════════════
 
 /// The VM `VectorSelect` oracle (mirroring `vm.rs:2444-2502`): zip the two views
@@ -3314,12 +3313,12 @@ fn vm_vector_select_oracle(
     for _ in 0..size {
         let sel_off = sel_rv.flat_offset(&sel_idx);
         let sel_val = sel_data[sel_rv.base_off as usize + sel_off];
-        if simlin_engine::vm::is_truthy(sel_val) {
+        if simlin_engine::vm_oracle::is_truthy(sel_val) {
             let expr_off = expr_rv.flat_offset(&expr_idx);
             selected.push(expr_data[expr_rv.base_off as usize + expr_off]);
         }
-        simlin_engine::vm::increment_indices(&mut sel_idx, &sel_rv.dims);
-        simlin_engine::vm::increment_indices(&mut expr_idx, &expr_rv.dims);
+        simlin_engine::vm_oracle::increment_indices(&mut sel_idx, &sel_rv.dims);
+        simlin_engine::vm_oracle::increment_indices(&mut expr_idx, &expr_rv.dims);
     }
     if selected.is_empty() {
         max_value
@@ -3533,7 +3532,7 @@ fn run_vector_elm_map(
 }
 
 /// The VM oracle for `VectorElmMap`: run the sibling
-/// `simlin_engine::vm_vector_elm_map::vector_elm_map` over `RuntimeView`s built from the
+/// `simlin_engine::vm_oracle::vector_elm_map` over `RuntimeView`s built from the
 /// same static views, reading `curr` from `data`. Returns the written temp 0
 /// slots (`temp_slots` wide).
 fn vm_elm_map_oracle(
@@ -3546,12 +3545,12 @@ fn vm_elm_map_oracle(
     let mut context = ByteCodeContext::default();
     context.set_temp_info(vec![0], temp_slots);
     let mut temp_storage = vec![0.0f64; temp_slots];
-    simlin_engine::vm_vector_elm_map::vector_elm_map(
+    simlin_engine::vm_oracle::vector_elm_map(
         &source.to_runtime_view(0),
         &offset.to_runtime_view(0),
         0,
         full_source_len,
-        simlin_engine::vm::ChunkRegions::curr_only(data),
+        simlin_engine::vm_oracle::ChunkRegions::curr_only(data),
         &mut temp_storage,
         &context,
     );
@@ -3879,7 +3878,7 @@ fn run_sort_op(
 }
 
 /// The VM oracle for `VectorSortOrder`: run the sibling
-/// `simlin_engine::vm_vector_sort_order::vector_sort_order` over a `RuntimeView`.
+/// `simlin_engine::vm_oracle::vector_sort_order` over a `RuntimeView`.
 fn vm_sort_order_oracle(
     input: &StaticArrayView,
     direction: i32,
@@ -3889,11 +3888,11 @@ fn vm_sort_order_oracle(
     let mut context = ByteCodeContext::default();
     context.set_temp_info(vec![0], temp_slots);
     let mut temp_storage = vec![0.0f64; temp_slots];
-    simlin_engine::vm_vector_sort_order::vector_sort_order(
+    simlin_engine::vm_oracle::vector_sort_order(
         &input.to_runtime_view(0),
         direction,
         0,
-        simlin_engine::vm::ChunkRegions::curr_only(data),
+        simlin_engine::vm_oracle::ChunkRegions::curr_only(data),
         &mut temp_storage,
         &context,
     );
@@ -3916,7 +3915,7 @@ fn vm_rank_oracle(
     for i in 0..size {
         let flat = rv.flat_offset(&idx);
         indexed.push((data[rv.base_off as usize + flat], i));
-        simlin_engine::vm::increment_indices(&mut idx, &rv.dims);
+        simlin_engine::vm_oracle::increment_indices(&mut idx, &rv.dims);
     }
     if direction == 1 {
         indexed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -4315,7 +4314,7 @@ fn vm_lookup_array_oracle(
             let gf = tables[base_gf as usize + elem_off];
             vm_lookup_oracle(mode, gf, index)
         };
-        simlin_engine::vm::increment_indices(&mut idx, &rv.dims);
+        simlin_engine::vm_oracle::increment_indices(&mut idx, &rv.dims);
     }
     temp
 }

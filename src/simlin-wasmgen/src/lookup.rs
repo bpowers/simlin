@@ -501,7 +501,7 @@ mod tests {
     use checked::Store;
     use proptest::prelude::*;
     use simlin_engine::bytecode::LookupMode;
-    use simlin_engine::vm::lookup_in_mode;
+    use simlin_engine::vm_oracle::lookup_in_mode;
     use wasm::validate;
     use wasm_encoder::{
         CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, FunctionSection,
