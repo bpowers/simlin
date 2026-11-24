@@ -13,8 +13,6 @@
 
 use super::*;
 
-use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
-use crate::datamodel::{self, StockFlow, View, ViewElement};
 use crate::diagram::constants::{
     CLOUD_RADIUS, GROUP_RADIUS, MODULE_HEIGHT, MODULE_RADIUS, MODULE_WIDTH,
 };
@@ -22,6 +20,8 @@ use crate::diagram::elements::cloud_bounds;
 use crate::diagram::path::{OP_CLOSE, OP_CUBIC, OP_LINE, OP_MOVE};
 use crate::diagram::render_svg;
 use crate::test_common::TestProject;
+use simlin_base::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
+use simlin_base::datamodel::{self, StockFlow, View, ViewElement};
 
 /// How far a scene number may sit from its printed SVG twin. The SVG quantizes
 /// every coordinate to six decimals (`js_format_number`), which moves a number

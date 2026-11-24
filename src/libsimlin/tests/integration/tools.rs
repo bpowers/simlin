@@ -603,7 +603,7 @@ unsafe fn equation_of(proj: *mut SimlinProject, variable: &str) -> String {
         .unwrap()
         .clone();
     match var.get_equation() {
-        Some(simlin_engine::datamodel::Equation::Scalar(text)) => text.clone(),
+        Some(simlin_base::datamodel::Equation::Scalar(text)) => text.clone(),
         other => panic!("{variable} has no scalar equation: {:?}", other.is_some()),
     }
 }
@@ -615,7 +615,7 @@ unsafe fn share_contents(a: *mut SimlinProject, b: *mut SimlinProject) -> bool {
     // each holds stays where it is while neither is edited.
     let datamodel_of = |proj: *mut SimlinProject| {
         let contents = (*proj).datamodel.lock().unwrap();
-        &**contents as *const simlin_engine::datamodel::Project
+        &**contents as *const simlin_base::datamodel::Project
     };
     datamodel_of(a) == datamodel_of(b)
 }

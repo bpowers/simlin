@@ -20,13 +20,13 @@ use std::collections::BTreeSet;
 use salsa::Accumulator;
 
 use super::*;
-use crate::ast::{DepShape, LoweringScope};
-use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{FragmentInput, lower_fragment};
 use crate::db::assemble::EmitRefusal;
 use crate::db::var_fragment::{
     DeclaredName, ExplicitFragment, ResolvedHeads, explicit_fragment_input,
 };
+use simlin_base::ast::{DepShape, LoweringScope};
+use simlin_base::common::{Canonical, Ident, IdentMap};
 
 // Test-only per-thread record of which fragment-compiler bodies ran.
 //
@@ -179,7 +179,7 @@ pub fn compile_var_fragment<'db>(
     // wrote -- the stock named by `compiler::check_stock_updates_are_emittable`,
     // the identifier a `MismatchedDimensions` could not shape -- rides along
     // with it. The error has no span, so the conversion leaves `0..0`.
-    let accumulate_var_compile_error = |err: &crate::Error| {
+    let accumulate_var_compile_error = |err: &simlin_base::Error| {
         Diagnostic {
             model: model.name(db).clone(),
             variable: Some(var.ident(db).clone()),
@@ -276,7 +276,7 @@ pub fn compile_var_fragment<'db>(
     // phase it is not a member of is never compiled, so its lowering outcome
     // is not a diagnostic either.
     let source = var;
-    let emit = |lowered: &Result<crate::compiler::Var, crate::Error>| match lowered {
+    let emit = |lowered: &Result<crate::compiler::Var, simlin_base::Error>| match lowered {
         Ok(var) => {
             report_out_of_range_reads(db, model, &input, var, var.ident.as_str(), |offset| {
                 element_at(&input, offset)
@@ -345,11 +345,11 @@ pub fn compile_var_fragment<'db>(
 }
 
 /// Whether `err` is the refusal of a read of a variable `input` depends on
-/// ([`crate::common::MismatchedRead`]). Codegen names the variable that owns
+/// ([`simlin_base::common::MismatchedRead`]). Codegen names the variable that owns
 /// the refused view's slots, which for a read of a module's output is the
 /// module instance; that refusal stays prose, since the read's own name is
 /// not the owner's.
-fn refused_read(input: &FragmentInput<'_>, err: &crate::Error) -> bool {
+fn refused_read(input: &FragmentInput<'_>, err: &simlin_base::Error) -> bool {
     err.read().is_some_and(|(read, _)| {
         input
             .deps
@@ -363,14 +363,14 @@ fn refused_read(input: &FragmentInput<'_>, err: &crate::Error) -> bool {
 fn element_at(
     input: &FragmentInput<'_>,
     offset: usize,
-) -> Option<crate::common::CanonicalElementName> {
+) -> Option<simlin_base::common::CanonicalElementName> {
     let dims = input.target.get_dimensions()?;
     if dims.is_empty() {
         return None;
     }
-    crate::dimensions::SubscriptIterator::new(dims)
+    simlin_base::dimensions::SubscriptIterator::new(dims)
         .nth(offset)
-        .map(|element| crate::common::CanonicalElementName::from_parts(&element))
+        .map(|element| simlin_base::common::CanonicalElementName::from_parts(&element))
 }
 
 /// File one `SubscriptOutOfRange` warning, on `reported_on`, for each read
@@ -388,7 +388,7 @@ fn report_out_of_range_reads(
     input: &FragmentInput<'_>,
     var: &crate::compiler::Var,
     reported_on: &str,
-    element_of: impl Fn(usize) -> Option<crate::common::CanonicalElementName>,
+    element_of: impl Fn(usize) -> Option<simlin_base::common::CanonicalElementName>,
 ) {
     for read in crate::compiler::out_of_range_reads(var) {
         let source = read.source.as_str();
@@ -419,13 +419,13 @@ fn report_out_of_range_reads(
             variable: Some(reported_on.to_string()),
             owner: None,
             severity: DiagnosticSeverity::Warning,
-            error: DiagnosticError::Equation(crate::common::EquationError {
+            error: DiagnosticError::Equation(simlin_base::common::EquationError {
                 start: read.loc.start,
                 end: read.loc.end,
-                code: crate::common::ErrorCode::SubscriptOutOfRange,
+                code: simlin_base::common::ErrorCode::SubscriptOutOfRange,
                 details: Some(details),
                 element: element.map(|e| e.as_str().to_string()),
-                read_past: dimension.map(|dimension| crate::common::ReadPast {
+                read_past: dimension.map(|dimension| simlin_base::common::ReadPast {
                     dimension,
                     before_first: read.before_start,
                 }),
@@ -440,13 +440,13 @@ fn report_out_of_range_reads(
 /// own, whose text a span in it indexes; `None` when it follows the equation
 /// every element follows.
 fn own_arm(
-    equation: &crate::datamodel::Equation,
-    element: &crate::common::CanonicalElementName,
+    equation: &simlin_base::datamodel::Equation,
+    element: &simlin_base::common::CanonicalElementName,
 ) -> Option<String> {
     match equation {
-        crate::datamodel::Equation::Arrayed(_, arms, _, _)
+        simlin_base::datamodel::Equation::Arrayed(_, arms, _, _)
             if arms.iter().any(|(subscript, ..)| {
-                crate::common::CanonicalElementName::from_subscript(subscript) == *element
+                simlin_base::common::CanonicalElementName::from_subscript(subscript) == *element
             }) =>
         {
             Some(element.as_str().to_string())
@@ -471,10 +471,10 @@ fn report_positional_reads(
     model: SourceModel,
     var: &crate::compiler::Var,
     reported_on: &str,
-    element_of: impl Fn(&crate::common::CanonicalElementName) -> Option<String>,
+    element_of: impl Fn(&simlin_base::common::CanonicalElementName) -> Option<String>,
 ) -> bool {
     for positional in &var.positional_reads {
-        let mut error = crate::common::EquationError::mismatched_read(
+        let mut error = simlin_base::common::EquationError::mismatched_read(
             positional.loc.start,
             positional.loc.end,
             positional.read.clone(),
@@ -626,7 +626,7 @@ pub(crate) fn lowered_implicit_variable(
             DepShape::var(
                 helper
                     .get_dimensions()
-                    .map(<[crate::dimensions::Dimension]>::to_vec)
+                    .map(<[simlin_base::dimensions::Dimension]>::to_vec)
                     .unwrap_or_default(),
             ),
         );
@@ -702,7 +702,7 @@ pub(crate) fn implicit_fragment_input<'db>(
         DepShape::var(
             lowered
                 .get_dimensions()
-                .map(<[crate::dimensions::Dimension]>::to_vec)
+                .map(<[simlin_base::dimensions::Dimension]>::to_vec)
                 .unwrap_or_default(),
         )
     };
@@ -912,7 +912,7 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     // apply-to-all argument a `PREVIOUS` or an `INIT` captures) writes, at
     // each slot, the parent's element of that name.
     let helper_element = input.target.element_scope().map(|scope| {
-        crate::common::CanonicalElementName::from_parts(
+        simlin_base::common::CanonicalElementName::from_parts(
             &scope.element.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
         )
     });
@@ -925,9 +925,9 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
         .filter(|element| {
             matches!(
                 meta.parent_source_var.equation(db),
-                crate::datamodel::Equation::Arrayed(_, arms, _, _)
+                simlin_base::datamodel::Equation::Arrayed(_, arms, _, _)
                     if arms.iter().any(|(subscript, ..)| {
-                        crate::common::CanonicalElementName::from_subscript(subscript) == **element
+                        simlin_base::common::CanonicalElementName::from_subscript(subscript) == **element
                     })
             )
         })
@@ -938,11 +938,11 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     // the parent would recompile every helper.
     let iterates_parent_dims = || {
         let parent_dims: Vec<String> = match meta.parent_source_var.equation(db) {
-            crate::datamodel::Equation::ApplyToAll(dims, ..)
-            | crate::datamodel::Equation::Arrayed(dims, ..) => {
+            simlin_base::datamodel::Equation::ApplyToAll(dims, ..)
+            | simlin_base::datamodel::Equation::Arrayed(dims, ..) => {
                 dims.iter().map(|d| canonicalize(d).into_owned()).collect()
             }
-            crate::datamodel::Equation::Scalar(..) => vec![],
+            simlin_base::datamodel::Equation::Scalar(..) => vec![],
         };
         let helper_dims: Vec<String> = input
             .target
@@ -953,14 +953,14 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
             .collect();
         !parent_dims.is_empty() && parent_dims == helper_dims
     };
-    // A refused read ([`crate::common::MismatchedRead`]) is the parent's
+    // A refused read ([`simlin_base::common::MismatchedRead`]) is the parent's
     // equation error at the reference. A subtree-bodied helper's reference is
     // written in the parent's text, where the refusal's span already points;
     // a module instance's is the argument the call wires to the port, which
     // the instance keeps. Whichever phase refuses it, the read is the same
     // and the drain collapses the repeats.
-    let report_read = |err: crate::Error| {
-        let mut error = crate::common::EquationError::from(err);
+    let report_read = |err: simlin_base::Error| {
+        let mut error = simlin_base::common::EquationError::from(err);
         if (error.start, error.end) == (0, 0)
             && let Some(read) = &error.mismatched_read
             && let Some(loc) = meta
@@ -1030,7 +1030,7 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                         variable: Some(meta.parent_source_var.ident(db).clone()),
                         owner: None,
                         severity: DiagnosticSeverity::Error,
-                        error: DiagnosticError::Equation(crate::common::EquationError {
+                        error: DiagnosticError::Equation(simlin_base::common::EquationError {
                             start: loc.start,
                             end: loc.end,
                             code: err.code,

@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::BufReader;
 
-use simlin_engine::datamodel::{self, Dt, Project, Variable, ViewElement};
+use simlin_base::datamodel::{self, Dt, Project, Variable, ViewElement};
 use simlin_engine::{mdl, xmile};
 
 // MDL test files that should survive a full MDL -> Project -> MDL -> Project roundtrip
@@ -2064,7 +2064,7 @@ fn clearn_save_simulates_as_clearn_does() {
         LtmOverlay, SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
     };
 
-    let run = |project: &simlin_engine::datamodel::Project| {
+    let run = |project: &simlin_base::datamodel::Project| {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, project, None);
         let compiled = compile_project_incremental(&db, sync.project, "main", LtmOverlay::Off)
@@ -2080,7 +2080,7 @@ fn clearn_save_simulates_as_clearn_does() {
     let reread = mdl::parse_mdl(&save).expect("C-LEARN's save reads back");
     let (before, after) = (run(&original), run(&reread));
     assert_eq!(before.offsets, after.offsets, "the save has other series");
-    let bits = |r: &simlin_engine::Results| r.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    let bits = |r: &simlin_base::Results| r.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
     assert!(
         bits(&before) == bits(&after),
         "C-LEARN's save simulates differently"

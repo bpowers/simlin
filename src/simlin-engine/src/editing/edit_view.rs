@@ -15,10 +15,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
-use crate::datamodel::view_element::{Cloud, Flow};
-use crate::datamodel::{self, Compat, Equation, StockFlow, Variable, ViewElement};
-use crate::project_patch::ModelOperation;
+use simlin_base::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
+use simlin_base::datamodel::view_element::{Cloud, Flow};
+use simlin_base::datamodel::{self, Compat, Equation, StockFlow, Variable, ViewElement};
+use simlin_base::project_patch::ModelOperation;
 
 use super::base::{VariableKind, is_named};
 use super::geometry::FlowEnd;

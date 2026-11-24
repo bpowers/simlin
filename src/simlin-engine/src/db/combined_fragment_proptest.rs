@@ -41,12 +41,12 @@ use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 
 use super::combine_scc_fragment;
-use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::symbolic::{
     PerVarBytecodes, SymStaticViewBase, SymVarRef, SymbolicByteCode, SymbolicModuleDecl,
     SymbolicOpcode, SymbolicStaticView,
 };
 use crate::db::{ResolvedScc, SccPhase};
+use simlin_base::common::{Canonical, Ident, IdentMap};
 use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap, HashSet};
 

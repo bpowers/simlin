@@ -8,7 +8,7 @@
 use std::time::Instant;
 
 use rayon::prelude::*;
-use simlin_engine::datamodel;
+use simlin_base::datamodel;
 use simlin_engine::layout::config::LayoutConfig;
 use simlin_engine::layout::eval_stats::{MetricSample, ModelStats};
 use simlin_engine::layout::metrics::{MetricWeights, compute_layout_metrics};

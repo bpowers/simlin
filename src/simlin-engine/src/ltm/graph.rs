@@ -20,8 +20,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::variable::{VarKind, Variable};
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet};
 
 use super::indexed::{IndexedCircuits, IndexedGraph, TruncatedByBudgetInternal};
 use super::partitions::{CyclePartitions, tarjan_scc};
@@ -1341,7 +1341,7 @@ impl CausalGraph {
     pub(crate) fn source_to_agg_polarity(
         &self,
         feeder: &Ident<Canonical>,
-        reducer: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
+        reducer: &simlin_base::builtins::BuiltinFn<simlin_base::ast::Expr2>,
     ) -> LinkPolarity {
         super::polarity::analyze_source_to_agg_polarity(reducer, feeder, &self.variables)
     }

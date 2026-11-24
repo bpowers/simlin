@@ -35,7 +35,7 @@
 //! scalar flows, missing sides) in `ltm_augment_tests.rs` (`flow_to_stock_*`
 //! and `net_flow_equation_*`).
 
-use simlin_engine::datamodel::{Equation, Variable};
+use simlin_base::datamodel::{Equation, Variable};
 use simlin_engine::ltm_finding;
 use simlin_engine::ltm_post;
 use simlin_engine::test_common::TestProject;
@@ -299,7 +299,7 @@ fn a_scalar_flow_into_an_arrayed_stock_is_scored_per_element() {
 /// A scalar inflow that reads one element of the arrayed stock it feeds:
 /// `tank[D]` (a: 50, b: 100), `fill = 2 + 0.05 * tank[a]`,
 /// `drain[D] = tank[D] * rate[D]` with rates 0.1 and 0.2, dt 1.
-fn scalar_flow_loop_project() -> simlin_engine::datamodel::Project {
+fn scalar_flow_loop_project() -> simlin_base::datamodel::Project {
     TestProject::new("scalar_flow_loop")
         .with_sim_time(0.0, 6.0, 1.0)
         .named_dimension("D", &["a", "b"])
@@ -435,7 +435,7 @@ fn an_outflow_only_stock_scores_minus_one() {
 /// Replace stock `name`'s initial-value equation in `project` with a
 /// per-element one (`Equation::Arrayed` over `dims`).
 fn set_stock_initial_per_element(
-    project: &mut simlin_engine::datamodel::Project,
+    project: &mut simlin_base::datamodel::Project,
     name: &str,
     dims: &[&str],
     elements: &[(&str, &str)],

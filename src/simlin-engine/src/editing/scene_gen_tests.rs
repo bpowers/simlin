@@ -17,9 +17,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::datamodel::ViewElement;
 use crate::editing::invariants::{FlowArm, Mode, check_flow_invariants, format_violations};
 use crate::editing::test_support::{directions, flow_of};
+use simlin_base::datamodel::ViewElement;
 
 use super::*;
 

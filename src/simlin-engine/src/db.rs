@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use crate::canonicalize;
-use crate::common::{Canonical, Ident, IdentMap};
-use crate::datamodel;
 use crate::variable::SourceVariableKind;
+use simlin_base::canonicalize;
+use simlin_base::common::{Canonical, Ident, IdentMap};
+use simlin_base::datamodel;
 
 // `BTreeSet` is imported for the root-mounted `#[cfg(test)]` test modules,
 // which reach it through their `use super::*` glob; the root module's own code
@@ -263,7 +263,7 @@ pub struct SimlinDb {
     /// The immutable stdlib model inputs (SMOOTH/DELAY/TREND/systems_*),
     /// built EXACTLY ONCE per db session and reused by every sync.
     ///
-    /// Stdlib models never change, so re-walking `crate::stdlib::MODEL_NAMES`
+    /// Stdlib models never change, so re-walking `simlin_base::stdlib::MODEL_NAMES`
     /// (with its per-name `format!`/`canonicalize`/`get`) and re-creating the
     /// `SourceModel`/`SourceVariable` salsa inputs on every sync is pure
     /// overhead on the interactive edit/sync hot path. Building the inputs once
@@ -284,9 +284,9 @@ pub struct SimlinDb {
 
 /// The one-shot stdlib salsa-input cache held by `SimlinDb::stdlib_models`.
 ///
-/// Built once from `crate::stdlib::MODEL_NAMES`; thereafter both sync paths
+/// Built once from `simlin_base::stdlib::MODEL_NAMES`; thereafter both sync paths
 /// splice these handles in without re-walking `MODEL_NAMES` or re-doing the
-/// `format!`/`canonicalize`/`crate::stdlib::get` work. `pub(crate)` because
+/// `format!`/`canonicalize`/`simlin_base::stdlib::get` work. `pub(crate)` because
 /// `build_stdlib_models` (in `db::sync`) returns it; its fields stay private
 /// (accessible to the `db::sync` descendant module that builds and splices it).
 pub(crate) struct StdlibModels {
@@ -905,7 +905,7 @@ pub(crate) fn module_link_score_equation(
     from_var: Option<&std::sync::Arc<crate::variable::Variable>>,
     to_var: &std::sync::Arc<crate::variable::Variable>,
 ) -> Option<LtmEquation> {
-    use crate::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     let from_ident = Ident::<Canonical>::new(from_name);
     let to_ident = Ident::<Canonical>::new(to_name);
@@ -1106,7 +1106,7 @@ pub(crate) fn module_link_score_equation(
 /// as degraded.
 fn module_input_pathways_from_edges(
     edges_result: &CausalEdgesResult,
-    output_ports: &[crate::common::Ident<crate::common::Canonical>],
+    output_ports: &[simlin_base::common::Ident<simlin_base::common::Canonical>],
 ) -> crate::ltm::ModulePathwaysWithTruncation {
     let graph = causal_graph_from_edges(edges_result);
     graph.enumerate_pathways_to_outputs_with_truncation(output_ports)
@@ -1204,7 +1204,7 @@ pub fn set_project_ltm_discovery_mode(db: &mut SimlinDb, project: SourceProject,
 /// order. Duplicate canonical idents are rejected by `compile_project_incremental`
 /// before this runs, so the lookup is one-to-one and a miss can only mean the raw
 /// list and the map disagree -- skipped rather than panicked on.
-fn validate_model_overflow_markers(db: &SimlinDb, model: SourceModel) -> crate::Result<()> {
+fn validate_model_overflow_markers(db: &SimlinDb, model: SourceModel) -> simlin_base::Result<()> {
     use crate::queue_compile::MarkerVar;
 
     let vars = model.variables(db);
@@ -1233,8 +1233,8 @@ fn validate_model_overflow_markers(db: &SimlinDb, model: SourceModel) -> crate::
 
     match crate::queue_compile::validate_overflow_markers_over(&marker_vars) {
         Ok(()) => Ok(()),
-        Err((code, msg)) => Err(crate::common::Error::new(
-            crate::common::ErrorKind::Simulation,
+        Err((code, msg)) => Err(simlin_base::common::Error::new(
+            simlin_base::common::ErrorKind::Simulation,
             code,
             Some(msg),
         )),
@@ -1251,7 +1251,7 @@ pub fn compile_project_incremental(
     project: SourceProject,
     main_model_name: &str,
     overlay: LtmOverlay,
-) -> crate::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
+) -> simlin_base::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
     // An invalid macro set (AC5.2 cycle / AC5.3 duplicate / collision) fails
     // the project-level compile before per-model processing, uniformly as
     // `NotSimulatable`. The build error's own typed code reaches the diagnostic
@@ -1260,7 +1260,7 @@ pub fn compile_project_incremental(
     if let Some((_code, msg)) =
         &crate::db::macro_registry::project_macro_registry(db, project).build_error
     {
-        return crate::sim_err!(NotSimulatable, msg.clone());
+        return simlin_base::sim_err!(NotSimulatable, msg.clone());
     }
     // Two models whose names canonicalize alike collapse into one on the
     // canonical-keyed `models` map, the later standing for both, so the run
@@ -1269,9 +1269,9 @@ pub fn compile_project_incremental(
     if let Some((canonical, spellings)) =
         crate::db::diagnostic::project_duplicate_models(db, project).first()
     {
-        return crate::sim_err!(
+        return simlin_base::sim_err!(
             DuplicateVariable,
-            crate::common::duplicate_model_message(canonical, spellings)
+            simlin_base::common::duplicate_model_message(canonical, spellings)
         );
     }
     // Two variables whose names canonicalize to the same ident silently
@@ -1294,9 +1294,13 @@ pub fn compile_project_incremental(
             if let Some((canonical, spellings)) =
                 crate::db::diagnostic::model_duplicate_variables(db, model).first()
             {
-                return crate::sim_err!(
+                return simlin_base::sim_err!(
                     DuplicateVariable,
-                    crate::common::duplicate_variable_message(model.name(db), canonical, spellings)
+                    simlin_base::common::duplicate_variable_message(
+                        model.name(db),
+                        canonical,
+                        spellings
+                    )
                 );
             }
         }
@@ -1349,7 +1353,7 @@ pub fn compile_project_incremental(
             let source_var = vars[var_name];
             if source_var.compat(db).conveyor.is_some() {
                 if in_main {
-                    return crate::sim_err!(
+                    return simlin_base::sim_err!(
                         ConveyorNotExpanded,
                         format!(
                             "internal error: conveyor stock '{}' reached the ordinary compile \
@@ -1360,7 +1364,7 @@ pub fn compile_project_incremental(
                         )
                     );
                 }
-                return crate::sim_err!(
+                return simlin_base::sim_err!(
                     ConveyorInSubmodelUnsupported,
                     format!(
                         "conveyor stock '{}' is defined in model '{}', but conveyors are \
@@ -1373,7 +1377,7 @@ pub fn compile_project_incremental(
             }
             if source_var.compat(db).queue.is_some() {
                 if in_main {
-                    return crate::sim_err!(
+                    return simlin_base::sim_err!(
                         QueueNotExpanded,
                         format!(
                             "internal error: queue stock '{}' reached the ordinary compile path \
@@ -1384,7 +1388,7 @@ pub fn compile_project_incremental(
                         )
                     );
                 }
-                return crate::sim_err!(
+                return simlin_base::sim_err!(
                     QueueInSubmodelUnsupported,
                     format!(
                         "queue stock '{}' is defined in model '{}', but queues are currently \
@@ -1452,7 +1456,7 @@ pub fn compile_project_incremental(
     // `String` mapped to `NotSimulatable`.
     match assemble_simulation(db, project, main_model_name.to_string(), overlay) {
         Ok(compiled) => Ok(compiled),
-        Err(msg) => crate::sim_err!(NotSimulatable, msg.clone()),
+        Err(msg) => simlin_base::sim_err!(NotSimulatable, msg.clone()),
     }
 }
 

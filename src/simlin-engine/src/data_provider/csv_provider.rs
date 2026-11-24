@@ -4,10 +4,10 @@
 
 use std::path::PathBuf;
 
-use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::data_provider::{
     DataProvider, col_index, is_column_only, parse_cell_ref, parse_row_or_cell_ref,
 };
+use simlin_base::common::{Error, ErrorCode, ErrorKind, Result};
 
 /// Filesystem-based data provider that reads CSV and Excel files.
 ///

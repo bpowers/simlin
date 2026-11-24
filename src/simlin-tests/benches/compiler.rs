@@ -31,7 +31,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use simlin_engine::datamodel::{self, Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
+use simlin_base::datamodel::{self, Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::open_vensim;
 

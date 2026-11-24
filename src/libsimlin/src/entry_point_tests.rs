@@ -149,7 +149,7 @@ pub(crate) unsafe fn shares_datamodel(a: *mut SimlinProject, b: *mut SimlinProje
 
 pub(crate) unsafe fn datamodel_of(
     proj: *mut SimlinProject,
-) -> Arc<simlin_engine::datamodel::Project> {
+) -> Arc<simlin_base::datamodel::Project> {
     (*proj).datamodel.lock().unwrap().shared()
 }
 

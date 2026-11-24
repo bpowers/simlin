@@ -14,9 +14,11 @@
 //! last own cell is cleared becomes apply-to-all again, and one with no
 //! dimensions left becomes a scalar. A stock's equation is its initial value.
 
-use crate::common::{CanonicalElementName, Error, ErrorCode, ErrorKind, Result, canonicalize};
-use crate::datamodel::{self, Equation, GraphicalFunction, Variable};
 use crate::patch::Site;
+use simlin_base::common::{
+    CanonicalElementName, Error, ErrorCode, ErrorKind, Result, canonicalize,
+};
+use simlin_base::datamodel::{self, Equation, GraphicalFunction, Variable};
 
 /// One element's arm as `Equation::Arrayed` stores it: its subscript, its
 /// equation, its active initial, and its lookup.

@@ -29,7 +29,7 @@
 //! index is lagged exactly once, by the enclosing freeze
 //! (`a_clock_read_in_a_frozen_deps_index_is_lagged_once`).
 
-use simlin_engine::datamodel::Project;
+use simlin_base::datamodel::Project;
 use simlin_engine::test_common::TestProject;
 
 use crate::test_helpers::{ltm_run, ltm_series};
@@ -188,10 +188,10 @@ fn a_time_bearing_reducer_body_keeps_the_frozen_argmin_at_zero() {
     // south starts at 20: the same equations, a larger start, never the argmin.
     project.models[0].variables.rewrite(|variables| {
         for var in variables.iter_mut() {
-            if let simlin_engine::datamodel::Variable::Stock(stock) = var
+            if let simlin_base::datamodel::Variable::Stock(stock) = var
                 && stock.ident == "pop"
             {
-                stock.equation = simlin_engine::datamodel::Equation::Arrayed(
+                stock.equation = simlin_base::datamodel::Equation::Arrayed(
                     vec!["Region".to_string()],
                     vec![
                         ("north".to_string(), "10".to_string(), None, None),
@@ -230,10 +230,10 @@ fn frozen_dep_indexed_by_time() -> Project {
         .build_datamodel();
     project.models[0].variables.rewrite(|variables| {
         for var in variables.iter_mut() {
-            if let simlin_engine::datamodel::Variable::Aux(aux) = var
+            if let simlin_base::datamodel::Variable::Aux(aux) = var
                 && aux.ident == "arr"
             {
-                aux.equation = simlin_engine::datamodel::Equation::Arrayed(
+                aux.equation = simlin_base::datamodel::Equation::Arrayed(
                     vec!["Slot".to_string()],
                     ["1", "2", "4", "8", "16"]
                         .iter()

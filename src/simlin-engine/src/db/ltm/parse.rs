@@ -20,8 +20,8 @@
 use crate::builtins_visitor::{
     SnapshotIndexFacts, empty_macro_registry, instantiate_implicit_modules,
 };
-use crate::common::{Canonical, Ident, IdentSet};
-use crate::dimensions::DimensionsContext;
+use simlin_base::common::{Canonical, Ident, IdentSet};
+use simlin_base::dimensions::DimensionsContext;
 
 use crate::db::ParsedVariableResult;
 

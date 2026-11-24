@@ -12,8 +12,8 @@ use std::io::BufReader;
 
 use super::*;
 use crate::patch_sharing_tests::{MODEL_OPERATION_VARIANTS, model_operation_variant};
-use crate::project_patch::ModelPatch;
 use crate::test_common::TestProject;
+use simlin_base::project_patch::ModelPatch;
 
 fn model_patch(ops: Vec<ModelOperation>) -> ProjectPatch {
     ProjectPatch {

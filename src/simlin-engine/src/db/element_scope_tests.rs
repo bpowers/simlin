@@ -23,13 +23,13 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::print_eqn;
 use crate::capture::ImplicitVar;
 use crate::db::{
     SimlinDb, model_element_causal_edges, model_ltm_variables, sync_from_datamodel,
     sync_from_datamodel_incremental,
 };
 use crate::test_common::{TestProject, implicit_vars_of};
+use simlin_base::ast::print_eqn;
 
 /// A per-element capture scores into its own target element and no other.
 ///
@@ -107,7 +107,7 @@ fn a_per_element_capture_scores_its_own_element_only() {
     vm.run_to_end().expect("runs");
     let results = vm.into_results();
     let series = |name: &str| -> Vec<f64> {
-        let off = compiled.offsets[&crate::common::Ident::new(name)];
+        let off = compiled.offsets[&simlin_base::common::Ident::new(name)];
         (0..4)
             .map(|step| results.data[step * results.step_size + off])
             .collect()
@@ -335,7 +335,7 @@ fn a_hoisted_read_of_a_proper_subdimension_is_scored_at_its_own_element() {
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("vm");
     vm.run_to_end().expect("runs");
     let results = vm.into_results();
-    let off = compiled.offsets[&crate::common::Ident::new(&own)];
+    let off = compiled.offsets[&simlin_base::common::Ident::new(&own)];
     let series: Vec<f64> = (0..4)
         .map(|step| results.data[step * results.step_size + off])
         .collect();

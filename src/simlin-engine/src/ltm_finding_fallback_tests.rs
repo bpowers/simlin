@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 use super::super::{LinkOffset, MemoryMeter, ScriptedClock, SystemClock};
 use super::*;
-use crate::common::{Canonical, Ident, IdentMap};
-use crate::results::{Method, Specs};
+use simlin_base::common::{Canonical, Ident, IdentMap};
+use simlin_base::results::{Method, Specs};
 
 // --- Fixture construction -------------------------------------------------
 

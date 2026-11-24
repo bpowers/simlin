@@ -49,8 +49,8 @@
 //!    The clearest case is now diagnosed: a variable whose whole equation is the
 //!    NaN literal gets a `Warning` naming it
 //!    (`crate::common::ErrorCode::UnfilledEquation`, decided by
-//!    `crate::variable::unfilled_arms` and emitted per model by
-//!    `crate::db::diagnostic`). That shape is where Vensim's `A FUNCTION OF(...)`
+//!    `simlin_engine::variable::unfilled_arms` and emitted per model by
+//!    `simlin_engine::db::diagnostic`). That shape is where Vensim's `A FUNCTION OF(...)`
 //!    sketch placeholder lands, and Vensim itself refuses to simulate a model
 //!    containing one -- so without the warning we returned NaN where the source
 //!    tool declined to answer at all.
@@ -64,7 +64,7 @@
 //!    dynamic subscript index -- whose first-DT value was the language default
 //!    `0`, which is in range for no dimension. The fix names the un-lagged index
 //!    as that freeze's initial value instead
-//!    (`crate::ltm_augment::freeze_at_previous`), so nothing manufactures the
+//!    (`simlin_engine::ltm_augment::freeze_at_previous`), so nothing manufactures the
 //!    NaN in the first place.
 //!
 //! **The technical footnote**, which follows from the above rather than
@@ -75,7 +75,7 @@
 //! at the language surface -- the lexer's `nan` keyword -- and it yields one
 //! canonical `f64::NAN` (`0x7ff8_0000_0000_0000`). The engine can manufacture
 //! one too, by folding an arithmetic NaN at compile time
-//! (`crate::compiler::fold` on `0/0`) or by computing one at runtime; on
+//! (`simlin_engine::compiler::fold` on `0/0`) or by computing one at runtime; on
 //! x86-64 those carry the hardware default quiet NaN
 //! (`0xfff8_0000_0000_0000`) instead. That difference is deterministic and,
 //! more to the point, semantically empty: a NaN is a NaN.

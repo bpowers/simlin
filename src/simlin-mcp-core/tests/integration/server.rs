@@ -16,7 +16,7 @@ use std::path::Path;
 
 use rmcp::model::ReadResourceRequestParams;
 use rmcp::{ServerHandler, ServiceError, ServiceExt};
-use simlin_engine::datamodel;
+use simlin_base::datamodel;
 use simlin_mcp_core::access::{OpenedProject, ProjectAccess, SaveOutcome};
 use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::server::{ResourceContent, SimlinMcpServer};

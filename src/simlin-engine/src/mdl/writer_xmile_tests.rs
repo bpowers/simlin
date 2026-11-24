@@ -8,10 +8,10 @@
 //! reads a model the XMILE reader produces, saves it, and asks `check_save`
 //! what the save changes.
 
-use crate::datamodel;
 use crate::mdl::builtins::BUILTINS;
 use crate::mdl::{parse_mdl, project_to_mdl, project_to_mdl_with_warnings};
 use crate::save_check::{ChangeKind, SaveFormat, check_save};
+use simlin_base::datamodel;
 
 /// The project the XMILE reader makes of these dimensions and variables.
 fn xmile(dimensions: &str, variables: &str) -> datamodel::Project {
@@ -115,7 +115,7 @@ fn a_variable_named_for_a_function_is_read_back_as_a_variable() {
                     let mut idents: Vec<String> = p.models[0]
                         .variables
                         .iter()
-                        .map(|v| crate::common::canonicalize(v.get_ident()).into_owned())
+                        .map(|v| simlin_base::common::canonicalize(v.get_ident()).into_owned())
                         .collect();
                     idents.sort();
                     idents

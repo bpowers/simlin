@@ -687,14 +687,14 @@ impl BuiltinSig {
     }
 
     /// Whether a (lowercased) source name denotes a `LOOKUP` family builtin.
-    pub(crate) fn name_reads_a_table(name: &str) -> bool {
+    pub fn name_reads_a_table(name: &str) -> bool {
         Self::by_name(name).is_some_and(BuiltinSig::reads_a_table)
     }
 
     /// The name of every `LOOKUP` family builtin, for tests whose rows are
     /// the family.
-    #[cfg(test)]
-    pub(crate) fn table_readers() -> impl Iterator<Item = &'static str> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn table_readers() -> impl Iterator<Item = &'static str> {
         Self::ALL
             .iter()
             .filter(|sig| sig.reads_a_table())
@@ -1146,7 +1146,7 @@ impl<Expr> BuiltinFn<Expr> {
     /// variants are bound whole through one or-pattern) so a new
     /// `Loc`-carrying variant is a compile error here rather than a silently
     /// retained source position.
-    pub(crate) fn strip_own_locs(self) -> Self {
+    pub fn strip_own_locs(self) -> Self {
         use BuiltinFn::*;
         match self {
             Lookup(a, b, _) => Lookup(a, b, Loc::default()),
@@ -1252,7 +1252,7 @@ pub fn is_0_arity_builtin_fn_ci(name: &str) -> bool {
 /// per-element expansion decision (`builtins_visitor::per_element_requirements`)
 /// and the expansion itself cannot disagree: a `stdlib⁚systems_*` model has no
 /// descriptor and is not a callable function.
-pub(crate) fn is_stdlib_module_function(func_name: &str) -> bool {
+pub fn is_stdlib_module_function(func_name: &str) -> bool {
     matches!(func_name, "delay" | "delayn" | "smthn")
         || crate::module_functions::stdlib_descriptor(func_name).is_some()
 }
@@ -1262,7 +1262,7 @@ pub fn is_builtin_fn(name: &str) -> bool {
     BuiltinSig::by_name(name).is_some()
 }
 
-pub(crate) enum BuiltinContents<'a, Expr> {
+pub enum BuiltinContents<'a, Expr> {
     Ident(&'a str, Loc),
     Expr(&'a Expr),
     /// The table-identity argument of a graphical-function lookup
@@ -1281,7 +1281,7 @@ pub(crate) enum BuiltinContents<'a, Expr> {
 /// [`BuiltinContents::Ident`], a lookup's table position as
 /// [`BuiltinContents::LookupTable`], and every other argument as
 /// [`BuiltinContents::Expr`].
-pub(crate) fn walk_builtin_expr<'a, Expr, F>(builtin: &'a BuiltinFn<Expr>, mut cb: F)
+pub fn walk_builtin_expr<'a, Expr, F>(builtin: &'a BuiltinFn<Expr>, mut cb: F)
 where
     F: FnMut(BuiltinContents<'a, Expr>),
 {

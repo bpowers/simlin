@@ -7,9 +7,9 @@
 
 use serde_json::Value;
 
-use crate::datamodel::{self, Project};
 use crate::db::SimlinDb;
 use crate::test_common::TestProject;
+use simlin_base::datamodel::{self, Project};
 
 use super::{Session, ToolOutput, Workspace};
 

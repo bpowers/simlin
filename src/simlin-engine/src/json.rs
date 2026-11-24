@@ -13,7 +13,7 @@
 //!
 //! let json_str = r#"{"name": "test", "simSpecs": {...}, ...}"#;
 //! let json_proj: json::Project = serde_json::from_str(json_str)?;
-//! let datamodel_proj: simlin_engine::datamodel::Project = json_proj.into();
+//! let datamodel_proj: simlin_base::datamodel::Project = json_proj.into();
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -21,8 +21,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::canonicalize;
-use crate::datamodel;
+use simlin_base::canonicalize;
+use simlin_base::datamodel;
 
 // Helper functions for serde skip_serializing_if
 
@@ -898,7 +898,7 @@ impl From<Stock> for datamodel::Stock {
                                     // The datamodel stores the element key's
                                     // canonical spelling, the one owner of
                                     // what a subscript names (`from_subscript`).
-                                    crate::common::CanonicalElementName::from_subscript(
+                                    simlin_base::common::CanonicalElementName::from_subscript(
                                         &ee.subscript,
                                     )
                                     .as_str()
@@ -993,7 +993,7 @@ impl From<Flow> for datamodel::Flow {
                                     // The datamodel stores the element key's
                                     // canonical spelling, the one owner of
                                     // what a subscript names (`from_subscript`).
-                                    crate::common::CanonicalElementName::from_subscript(
+                                    simlin_base::common::CanonicalElementName::from_subscript(
                                         &ee.subscript,
                                     )
                                     .as_str()
@@ -1083,7 +1083,7 @@ impl From<Auxiliary> for datamodel::Aux {
                                     // The datamodel stores the element key's
                                     // canonical spelling, the one owner of
                                     // what a subscript names (`from_subscript`).
-                                    crate::common::CanonicalElementName::from_subscript(
+                                    simlin_base::common::CanonicalElementName::from_subscript(
                                         &ee.subscript,
                                     )
                                     .as_str()
@@ -1510,13 +1510,13 @@ impl From<Project> for datamodel::Project {
 }
 
 impl std::str::FromStr for Project {
-    type Err = crate::common::Error;
+    type Err = simlin_base::common::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         serde_json::from_str(s).map_err(|err| {
-            crate::common::Error::new(
-                crate::common::ErrorKind::Import,
-                crate::common::ErrorCode::Generic,
+            simlin_base::common::Error::new(
+                simlin_base::common::ErrorKind::Import,
+                simlin_base::common::ErrorCode::Generic,
                 Some(format!("Failed to parse JSON project: {}", err)),
             )
         })
@@ -1525,11 +1525,11 @@ impl std::str::FromStr for Project {
 
 impl Project {
     /// Parse a Project from a reader
-    pub fn from_reader(reader: impl std::io::Read) -> crate::common::Result<Self> {
+    pub fn from_reader(reader: impl std::io::Read) -> simlin_base::common::Result<Self> {
         serde_json::from_reader(reader).map_err(|err| {
-            crate::common::Error::new(
-                crate::common::ErrorKind::Import,
-                crate::common::ErrorCode::Generic,
+            simlin_base::common::Error::new(
+                simlin_base::common::ErrorKind::Import,
+                simlin_base::common::ErrorCode::Generic,
                 Some(format!("Failed to parse JSON project: {}", err)),
             )
         })
@@ -2284,7 +2284,7 @@ impl From<&datamodel::Project> for Project {
 
 /// A patch to a project as JSON: what `simlin_project_apply_patch` takes, and
 /// the form an edit plan's patch travels in to the host that lands it. The
-/// engine's own [`crate::ProjectPatch`] converts to and from it.
+/// engine's own [`simlin_base::ProjectPatch`] converts to and from it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectPatch {
@@ -2431,43 +2431,45 @@ pub enum ModelOperation {
     },
 }
 
-impl From<ProjectPatch> for crate::project_patch::ProjectPatch {
+impl From<ProjectPatch> for simlin_base::project_patch::ProjectPatch {
     fn from(patch: ProjectPatch) -> Self {
-        crate::project_patch::ProjectPatch {
+        simlin_base::project_patch::ProjectPatch {
             project_ops: patch
                 .project_ops
                 .into_iter()
                 .map(|op| match op {
                     ProjectOperation::SetSimSpecs { sim_specs } => {
-                        crate::project_patch::ProjectOperation::SetSimSpecs(sim_specs.into())
+                        simlin_base::project_patch::ProjectOperation::SetSimSpecs(sim_specs.into())
                     }
                     ProjectOperation::AddModel { name } => {
-                        crate::project_patch::ProjectOperation::AddModel { name }
+                        simlin_base::project_patch::ProjectOperation::AddModel { name }
                     }
                     ProjectOperation::UpsertDimension { dimension } => {
-                        crate::project_patch::ProjectOperation::UpsertDimension(dimension.into())
+                        simlin_base::project_patch::ProjectOperation::UpsertDimension(
+                            dimension.into(),
+                        )
                     }
                     ProjectOperation::RenameDimension { from, to } => {
-                        crate::project_patch::ProjectOperation::RenameDimension { from, to }
+                        simlin_base::project_patch::ProjectOperation::RenameDimension { from, to }
                     }
                     ProjectOperation::RenameElement {
                         dimension,
                         from,
                         to,
-                    } => crate::project_patch::ProjectOperation::RenameElement {
+                    } => simlin_base::project_patch::ProjectOperation::RenameElement {
                         dimension,
                         from,
                         to,
                     },
                     ProjectOperation::DeleteDimension { name } => {
-                        crate::project_patch::ProjectOperation::DeleteDimension { name }
+                        simlin_base::project_patch::ProjectOperation::DeleteDimension { name }
                     }
                 })
                 .collect(),
             models: patch
                 .models
                 .into_iter()
-                .map(|model| crate::project_patch::ModelPatch {
+                .map(|model| simlin_base::project_patch::ModelPatch {
                     name: model.name,
                     ops: model.ops.into_iter().map(Into::into).collect(),
                 })
@@ -2476,9 +2478,9 @@ impl From<ProjectPatch> for crate::project_patch::ProjectPatch {
     }
 }
 
-impl From<ModelOperation> for crate::project_patch::ModelOperation {
+impl From<ModelOperation> for simlin_base::project_patch::ModelOperation {
     fn from(op: ModelOperation) -> Self {
-        use crate::project_patch::ModelOperation as Op;
+        use simlin_base::project_patch::ModelOperation as Op;
         match op {
             ModelOperation::UpsertAux { aux } => Op::UpsertAux(aux.into()),
             ModelOperation::UpsertStock { stock } => Op::UpsertStock(stock.into()),
@@ -2554,34 +2556,34 @@ impl From<ModelOperation> for crate::project_patch::ModelOperation {
 
 /// The JSON form of an engine patch. A source change, which a host never
 /// sends and a plan never makes, has none.
-impl TryFrom<crate::project_patch::ProjectPatch> for ProjectPatch {
+impl TryFrom<simlin_base::project_patch::ProjectPatch> for ProjectPatch {
     type Error = String;
 
-    fn try_from(patch: crate::project_patch::ProjectPatch) -> Result<Self, String> {
+    fn try_from(patch: simlin_base::project_patch::ProjectPatch) -> Result<Self, String> {
         let project_ops = patch
             .project_ops
             .into_iter()
             .map(|op| match op {
-                crate::project_patch::ProjectOperation::SetSimSpecs(sim_specs) => {
+                simlin_base::project_patch::ProjectOperation::SetSimSpecs(sim_specs) => {
                     Ok(ProjectOperation::SetSimSpecs {
                         sim_specs: sim_specs.into(),
                     })
                 }
-                crate::project_patch::ProjectOperation::AddModel { name } => {
+                simlin_base::project_patch::ProjectOperation::AddModel { name } => {
                     Ok(ProjectOperation::AddModel { name })
                 }
-                crate::project_patch::ProjectOperation::SetSource(_) => {
+                simlin_base::project_patch::ProjectOperation::SetSource(_) => {
                     Err("a change of the project's source has no JSON form".to_string())
                 }
-                crate::project_patch::ProjectOperation::UpsertDimension(dimension) => {
+                simlin_base::project_patch::ProjectOperation::UpsertDimension(dimension) => {
                     Ok(ProjectOperation::UpsertDimension {
                         dimension: dimension.into(),
                     })
                 }
-                crate::project_patch::ProjectOperation::RenameDimension { from, to } => {
+                simlin_base::project_patch::ProjectOperation::RenameDimension { from, to } => {
                     Ok(ProjectOperation::RenameDimension { from, to })
                 }
-                crate::project_patch::ProjectOperation::RenameElement {
+                simlin_base::project_patch::ProjectOperation::RenameElement {
                     dimension,
                     from,
                     to,
@@ -2590,7 +2592,7 @@ impl TryFrom<crate::project_patch::ProjectPatch> for ProjectPatch {
                     from,
                     to,
                 }),
-                crate::project_patch::ProjectOperation::DeleteDimension { name } => {
+                simlin_base::project_patch::ProjectOperation::DeleteDimension { name } => {
                     Ok(ProjectOperation::DeleteDimension { name })
                 }
             })
@@ -2610,9 +2612,9 @@ impl TryFrom<crate::project_patch::ProjectPatch> for ProjectPatch {
     }
 }
 
-impl From<crate::project_patch::ModelOperation> for ModelOperation {
-    fn from(op: crate::project_patch::ModelOperation) -> Self {
-        use crate::project_patch::ModelOperation as Op;
+impl From<simlin_base::project_patch::ModelOperation> for ModelOperation {
+    fn from(op: simlin_base::project_patch::ModelOperation) -> Self {
+        use simlin_base::project_patch::ModelOperation as Op;
         match op {
             Op::UpsertAux(aux) => ModelOperation::UpsertAux { aux: aux.into() },
             Op::UpsertStock(stock) => ModelOperation::UpsertStock {
@@ -2699,7 +2701,7 @@ mod tests {
     /// the JSON is the shape `simlin_project_apply_patch` has always taken.
     #[test]
     fn a_patch_round_trips_through_json_with_every_operation() {
-        use crate::project_patch::{
+        use simlin_base::project_patch::{
             ModelOperation as Op, ModelPatch as MP, ProjectOperation as PO,
         };
         let base = crate::test_common::TestProject::new("roundtrip")
@@ -2723,7 +2725,7 @@ mod tests {
         };
         let mut specs = base.sim_specs.clone();
         specs.stop = 20.0;
-        let patch = crate::project_patch::ProjectPatch {
+        let patch = simlin_base::project_patch::ProjectPatch {
             project_ops: vec![
                 PO::SetSimSpecs(specs),
                 PO::UpsertDimension(datamodel::Dimension::named(

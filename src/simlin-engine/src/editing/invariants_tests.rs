@@ -23,11 +23,11 @@
 
 use std::collections::HashSet;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::Flow;
 use crate::editing::test_support::{aux, cloud, flow, load, stock};
 use crate::editing::{self, Face};
 use crate::json;
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::Flow;
 
 use super::*;
 

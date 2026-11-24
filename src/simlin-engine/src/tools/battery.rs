@@ -93,12 +93,12 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
-use crate::ast::{BinaryOp, Expr0, IndexExpr0, Literal, UnaryOp};
-use crate::builtins::UntypedBuiltinFn;
-use crate::common::{Canonical, Ident};
-use crate::datamodel::{self, Equation, UnitMap, Variable};
-use crate::lexer::LexerType;
-use crate::results::Results;
+use simlin_base::ast::{BinaryOp, Expr0, IndexExpr0, Literal, UnaryOp};
+use simlin_base::builtins::UntypedBuiltinFn;
+use simlin_base::common::{Canonical, Ident};
+use simlin_base::datamodel::{self, Equation, UnitMap, Variable};
+use simlin_base::lexer::LexerType;
+use simlin_base::results::Results;
 
 use super::behavior::{
     BehaviorMode, Damping, Direction, ModeKind, Shape, magnitude, residue_bound, shape_at,
@@ -859,7 +859,7 @@ impl Check {
         Check {
             key: TestKey {
                 test,
-                variable: variable.map(|v| crate::canonicalize(v.get_ident()).into_owned()),
+                variable: variable.map(|v| simlin_base::canonicalize(v.get_ident()).into_owned()),
                 condition,
             },
             result: TestResult {
@@ -1034,7 +1034,7 @@ pub(crate) fn run_tests(
         );
         for var in named {
             let name = var.get_ident();
-            let canonical = crate::canonicalize(name).into_owned();
+            let canonical = simlin_base::canonicalize(name).into_owned();
             if given.contains_key(&canonical) {
                 return Err(ToolError::new(format!(
                     "extremes names '{name}' twice: give its low and high in one entry"
@@ -1223,7 +1223,7 @@ pub(crate) fn run_tests(
     } else {
         record
             .iter()
-            .map(|v| crate::canonicalize(v.get_ident()).into_owned())
+            .map(|v| simlin_base::canonicalize(v.get_ident()).into_owned())
             .collect()
     };
     for (result, check) in output.results.iter().zip(&listed) {
@@ -1508,7 +1508,7 @@ impl Graph {
             .variables
             .iter()
             .filter(|v| matches!(v, Variable::Stock(_)))
-            .map(|v| crate::canonicalize(v.get_ident()).into_owned())
+            .map(|v| simlin_base::canonicalize(v.get_ident()).into_owned())
             .collect();
         Graph { readers, stocks }
     }
@@ -1559,7 +1559,7 @@ impl Graph {
             .filter(|v| settable(v).is_ok())
             .filter_map(|v| {
                 let stocks = self
-                    .downstream(&crate::canonicalize(v.get_ident()))
+                    .downstream(&simlin_base::canonicalize(v.get_ident()))
                     .iter()
                     .filter(|name| self.stocks.contains(*name))
                     .count();
@@ -1601,7 +1601,7 @@ impl Units {
         if !model_time.is_empty() && !time.contains(&model_time) {
             time.push(model_time.clone());
         }
-        let model_name = crate::canonicalize(&resolved.model.name).into_owned();
+        let model_name = simlin_base::canonicalize(&resolved.model.name).into_owned();
         let warned = crate::db::collect_all_diagnostics(
             ws.db,
             resolved.source_project,
@@ -1609,7 +1609,7 @@ impl Units {
         )
         .into_iter()
         .filter(|d| {
-            crate::canonicalize(&d.model) == model_name
+            simlin_base::canonicalize(&d.model) == model_name
                 && matches!(
                     d.category(),
                     crate::db::DiagnosticCategory::UnitConsistency
@@ -1617,7 +1617,7 @@ impl Units {
                 )
         })
         .filter_map(|d| d.owner.or(d.variable))
-        .map(|name| crate::canonicalize(&name).into_owned())
+        .map(|name| simlin_base::canonicalize(&name).into_owned())
         .collect();
         Units {
             ctx,
@@ -1744,7 +1744,7 @@ impl<'m> Parsed<'m> {
                 .map(|expr| normalized(&expr))
                 .collect();
             equations.insert(
-                crate::canonicalize(var.get_ident()).into_owned(),
+                simlin_base::canonicalize(var.get_ident()).into_owned(),
                 (var, parsed),
             );
         }
@@ -1912,7 +1912,7 @@ impl Roles {
         let mut dates = HashSet::new();
         let mut starts = HashSet::new();
         for var in model.variables.iter().filter(|v| settable(v).is_ok()) {
-            let canonical = crate::canonicalize(var.get_ident()).into_owned();
+            let canonical = simlin_base::canonicalize(var.get_ident()).into_owned();
             if graph.only_starts(&canonical) {
                 starts.insert(canonical.clone());
             }
@@ -1972,7 +1972,7 @@ impl Roles {
         targeted: Targeted,
     ) -> (Vec<&'m Variable>, LeftOut<'m>) {
         let is_in = |set: &HashSet<String>, var: &Variable| {
-            set.contains(crate::canonicalize(var.get_ident()).as_ref())
+            set.contains(simlin_base::canonicalize(var.get_ident()).as_ref())
         };
         let (conversions, rest): (Vec<&Variable>, Vec<&Variable>) = graph
             .reaching_stocks(model)
@@ -1987,24 +1987,24 @@ impl Roles {
 
     fn time_constant(&self, var: &Variable) -> Option<TimeConstant> {
         self.time_constants
-            .get(crate::canonicalize(var.get_ident()).as_ref())
+            .get(simlin_base::canonicalize(var.get_ident()).as_ref())
             .copied()
     }
 
     fn share_whole(&self, var: &Variable) -> Option<f64> {
         self.shares
-            .get(crate::canonicalize(var.get_ident()).as_ref())
+            .get(simlin_base::canonicalize(var.get_ident()).as_ref())
             .copied()
     }
 
     fn only_starts(&self, var: &Variable) -> bool {
         self.starts
-            .contains(crate::canonicalize(var.get_ident()).as_ref())
+            .contains(simlin_base::canonicalize(var.get_ident()).as_ref())
     }
 
     fn is_date(&self, var: &Variable) -> bool {
         self.dates
-            .contains(crate::canonicalize(var.get_ident()).as_ref())
+            .contains(simlin_base::canonicalize(var.get_ident()).as_ref())
     }
 
     /// The highest value a fractional rate takes: one over
@@ -2014,7 +2014,7 @@ impl Roles {
     fn fastest_rate(&self, var: &Variable, dt: f64) -> Option<f64> {
         let per = (*self
             .rates
-            .get(crate::canonicalize(var.get_ident()).as_ref())?)?;
+            .get(simlin_base::canonicalize(var.get_ident()).as_ref())?)?;
         Some(1.0 / (DTS_PER_FASTEST_RATE * dt * per))
     }
 
@@ -2024,7 +2024,7 @@ impl Roles {
         &self,
         var: &Variable,
         given: GivenExtremes,
-        specs: &crate::results::Specs,
+        specs: &simlin_base::results::Specs,
     ) -> (Extreme, Option<TimeConstantEvidence>) {
         if let Some(low) = given.low {
             return (Extreme::new(ExtremeRule::Given, move |_| low), None);
@@ -2041,7 +2041,7 @@ impl Roles {
                 Some(tc.evidence),
             );
         }
-        let canonical = crate::canonicalize(var.get_ident());
+        let canonical = simlin_base::canonicalize(var.get_ident());
         if self.divisors.contains(canonical.as_ref()) || self.starts.contains(canonical.as_ref()) {
             return (
                 Extreme::new(ExtremeRule::Tenth, |value| value / EXTREME_FACTOR),
@@ -2053,7 +2053,12 @@ impl Roles {
 
     /// `var`'s high extreme, in a run with `specs`: the call's, else by what
     /// the constant is.
-    fn high(&self, var: &Variable, given: GivenExtremes, specs: &crate::results::Specs) -> Extreme {
+    fn high(
+        &self,
+        var: &Variable,
+        given: GivenExtremes,
+        specs: &simlin_base::results::Specs,
+    ) -> Extreme {
         if let Some(high) = given.high {
             return Extreme::new(ExtremeRule::Given, move |_| high);
         }
@@ -2114,7 +2119,7 @@ fn beyond(value: f64, high: f64) -> f64 {
 /// The builtin `name` calls, by its canonical name (`BuiltinSig::by_name`,
 /// which knows the aliases).
 fn builtin_called(name: &str) -> Option<&'static str> {
-    crate::builtins::BuiltinSig::by_name(&name.to_lowercase()).map(|sig| sig.name)
+    simlin_base::builtins::BuiltinSig::by_name(&name.to_lowercase()).map(|sig| sig.name)
 }
 
 /// The variable `expr` is a bare reference to.
@@ -2500,7 +2505,7 @@ fn share_whole(
 ) -> Option<f64> {
     let raw = var
         .get_units()
-        .map(|units| crate::canonicalize(units.trim()).into_owned());
+        .map(|units| simlin_base::canonicalize(units.trim()).into_owned());
     let in_percent = matches!(raw.as_deref(), Some("percent" | "%" | "pct"));
     let whole = if in_percent { 100.0 } else { 1.0 };
     let dimensionless = declared.is_none_or(UnitMap::is_empty) || in_percent;
@@ -2553,7 +2558,7 @@ fn time_constants(
         .filter(|v| settable(v).is_ok())
         .map(|v| {
             (
-                crate::canonicalize(v.get_ident()).into_owned(),
+                simlin_base::canonicalize(v.get_ident()).into_owned(),
                 units.of_variable(v),
             )
         })
@@ -2585,7 +2590,7 @@ fn time_constants(
     let mut stock_dependent: HashSet<String> = HashSet::new();
     for var in &model.variables {
         if matches!(var, Variable::Stock(_)) {
-            let stock = crate::canonicalize(var.get_ident()).into_owned();
+            let stock = simlin_base::canonicalize(var.get_ident()).into_owned();
             stock_dependent.extend(graph.moved_by(&stock));
             stock_dependent.insert(stock);
         }
@@ -2864,9 +2869,9 @@ fn note_stages(found: &mut HashMap<String, TimeConstant>, name: &str, stages: f6
 /// `builtins_visitor::rewrite_alias_module_call` reads them; `DELAY` has no
 /// order and is first order there.
 fn time_argument(function: &str, args: &[Expr0]) -> Option<(usize, f64)> {
-    if let Some(ports) = crate::module_functions::stdlib_args(function) {
+    if let Some(ports) = simlin_base::module_functions::stdlib_args(function) {
         let index = ports.iter().position(|port| *port == TIME_PORT)?;
-        let stages = crate::stdlib::get(function).map_or(1, |model| {
+        let stages = simlin_base::stdlib::get(function).map_or(1, |model| {
             model
                 .variables
                 .iter()
@@ -2875,7 +2880,7 @@ fn time_argument(function: &str, args: &[Expr0]) -> Option<(usize, f64)> {
         });
         return Some((index, stages.max(1) as f64));
     }
-    if !crate::builtins::is_stdlib_module_function(function) {
+    if !simlin_base::builtins::is_stdlib_module_function(function) {
         return None;
     }
     let order = match function {
@@ -2972,7 +2977,7 @@ fn change(
     let (values, applied) = value_change(base, var, from_time, to).map_err(|err| err.error)?;
     let plan = RunPlan {
         values: vec![ValueChange {
-            variable: crate::canonicalize(var.get_ident()).into_owned(),
+            variable: simlin_base::canonicalize(var.get_ident()).into_owned(),
             from_time,
             values,
         }],
@@ -2993,7 +2998,7 @@ fn element_start_values(
     model: &datamodel::Model,
     var: &Variable,
 ) -> Vec<(String, f64)> {
-    let canonical = crate::canonicalize(var.get_ident()).into_owned();
+    let canonical = simlin_base::canonicalize(var.get_ident()).into_owned();
     let Some(first) = base.results.iter().next() else {
         return vec![];
     };
@@ -3046,7 +3051,7 @@ fn extreme_conditions(
     let mut checks = vec![watched.own_run()];
     for &var in targets {
         let given = given
-            .get(crate::canonicalize(var.get_ident()).as_ref())
+            .get(simlin_base::canonicalize(var.get_ident()).as_ref())
             .copied()
             .unwrap_or_default();
         let current = element_values(base, model, var);
@@ -3196,7 +3201,7 @@ impl Watched {
         let by_ident: HashMap<String, &Variable> = model
             .variables
             .iter()
-            .map(|v| (crate::canonicalize(v.get_ident()).into_owned(), v))
+            .map(|v| (simlin_base::canonicalize(v.get_ident()).into_owned(), v))
             .collect();
         let times = base.times();
         let mut keys: Vec<(&Ident<Canonical>, usize)> = base
@@ -3305,7 +3310,7 @@ impl Watched {
         results: &Results,
     ) -> Vec<Problem> {
         let rows: Vec<&[f64]> = results.iter().collect();
-        let time = |row: usize| round(rows[row][crate::results::TIME_OFF]);
+        let time = |row: usize| round(rows[row][simlin_base::results::TIME_OFF]);
         let mut problems = Vec::new();
         for watched in &self.series {
             let Some(&offset) = results.offsets.get(&watched.key) else {
@@ -3413,8 +3418,9 @@ fn negative_in_run(
 /// every one of the model's steps instead, among which are its rows; it
 /// holds more rows than the model's run, and the cost check of a run
 /// (`runs::over_budget`) says when that is too many.
-fn finer_specs(specs: &crate::results::Specs, divisor: f64) -> SpecsChange {
-    let on_the_grid = crate::results::save_step_is_on_the_step_grid(specs.dt, specs.save_step);
+fn finer_specs(specs: &simlin_base::results::Specs, divisor: f64) -> SpecsChange {
+    let on_the_grid =
+        simlin_base::results::save_step_is_on_the_step_grid(specs.dt, specs.save_step);
     SpecsChange {
         dt: Some(specs.dt / divisor),
         save_step: Some(if on_the_grid {
@@ -3446,11 +3452,11 @@ fn rows_at(saved: &[f64], times: &[f64], dt: f64) -> Vec<usize> {
 
 /// The order a method's error shrinks at as DT does, on a smooth model: what
 /// an estimate assumes where the runs cannot show it.
-fn nominal_order(method: crate::results::Method) -> f64 {
+fn nominal_order(method: simlin_base::results::Method) -> f64 {
     match method {
-        crate::results::Method::Euler => 1.0,
-        crate::results::Method::RungeKutta2 => 2.0,
-        crate::results::Method::RungeKutta4 => 4.0,
+        simlin_base::results::Method::Euler => 1.0,
+        simlin_base::results::Method::RungeKutta2 => 2.0,
+        simlin_base::results::Method::RungeKutta4 => 4.0,
     }
 }
 
@@ -4235,7 +4241,7 @@ fn loop_knockout(
             };
             let plan = RunPlan {
                 equations: vec![EquationChange {
-                    variable: crate::canonicalize(name).into_owned(),
+                    variable: simlin_base::canonicalize(name).into_owned(),
                     replacement,
                 }],
                 ..RunPlan::default()

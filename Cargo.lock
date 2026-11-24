@@ -2249,9 +2249,21 @@ dependencies = [
  "serde",
  "serde_json",
  "simlin",
+ "simlin-base",
  "simlin-engine",
  "wasm-interpreter",
  "wasmalloc",
+]
+
+[[package]]
+name = "simlin-base"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rustc-hash",
+ "sha2",
+ "smallvec",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -2261,6 +2273,7 @@ dependencies = [
  "clap",
  "mimalloc",
  "sha2",
+ "simlin-base",
  "simlin-engine",
  "tempfile",
 ]
@@ -2288,6 +2301,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "simlin-base",
  "smallvec",
  "tempfile",
  "unicode-xid",
@@ -2304,6 +2318,7 @@ dependencies = [
  "rmcp",
  "serde_json",
  "serde_yaml",
+ "simlin-base",
  "simlin-engine",
  "simlin-mcp-core",
  "tempfile",
@@ -2319,6 +2334,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "simlin-base",
  "simlin-engine",
  "simlin-mcp-core",
  "tempfile",
@@ -2336,11 +2352,11 @@ dependencies = [
  "csv",
  "ed25519-dalek",
  "mimalloc",
- "rand 0.9.5",
  "rayon",
  "salsa",
  "serde",
  "serde_json",
+ "simlin-base",
  "simlin-engine",
  "tempfile",
  "wasm-interpreter",

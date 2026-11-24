@@ -45,7 +45,7 @@
 //! conveyor construct [`super::belt::reject_unsupported`] refuses
 //! returns `WasmGenError::Unsupported`.
 
-use crate::common::IdentMap;
+use simlin_base::common::IdentMap;
 use wasm_encoder::Instruction as I;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, Function,
@@ -58,8 +58,8 @@ use std::collections::HashMap;
 use crate::bytecode::{ByteCode, CompiledModule, Opcode};
 use crate::conveyor_compile::ConveyorPlan;
 use crate::queue_compile::{CouplingTable, QueuePlan};
-use crate::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, Method, Specs, TIME_OFF};
 use crate::vm::{CompiledSimulation, ModuleKey, StepPart};
+use simlin_base::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, Method, Specs, TIME_OFF};
 
 use super::WasmGenError;
 use super::belt::{self, ConveyorPass, ConveyorPassLayout, ConveyorPassLocals};
@@ -218,7 +218,7 @@ const RI_BELT_N_SLATS: u32 = 1;
 /// branch: that path compiles a separate `SourceProject` without the overlay
 /// (a documented degradation, `queues.md` §10).
 pub fn compile_datamodel_to_artifact(
-    datamodel: &crate::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
     ltm_enabled: bool,
     ltm_discovery_mode: bool,
@@ -253,7 +253,7 @@ pub fn compile_datamodel_to_artifact(
 /// once used this entry point now call [`compile_datamodel_to_artifact`]
 /// directly.
 pub fn compile_datamodel_to_wasm(
-    datamodel: &crate::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
     ltm_enabled: bool,
     ltm_discovery_mode: bool,
@@ -2145,7 +2145,7 @@ fn emit_run_to(
     f.instruction(&I::F64Sub);
     f.instruction(&f64_const(specs.dt));
     f.instruction(&I::F64Div);
-    f.instruction(&f64_const(crate::results::STEP_TOLERANCE));
+    f.instruction(&f64_const(simlin_base::results::STEP_TOLERANCE));
     f.instruction(&I::F64Add);
     f.instruction(&I::F64Floor);
     f.instruction(&I::LocalSet(RT_TARGET));
@@ -2371,7 +2371,7 @@ fn emit_save_advance(
     f.instruction(&I::F64ConvertI32S);
     f.instruction(&f64_const(specs.save_step_in_steps()));
     f.instruction(&I::F64Mul);
-    f.instruction(&f64_const(crate::results::STEP_TOLERANCE));
+    f.instruction(&f64_const(simlin_base::results::STEP_TOLERANCE));
     f.instruction(&I::F64Sub);
     f.instruction(&I::F64Ceil);
     f.instruction(&I::F64Eq);

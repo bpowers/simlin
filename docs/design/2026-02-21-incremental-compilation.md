@@ -422,12 +422,12 @@ accumulators, which separate error collection from computation results.
 parameter that complicates salsa integration.
 
 **Components:**
-- `SimFloat` trait in `src/simlin-engine/src/float.rs` -- remove trait, replace
+- `SimFloat` trait in `src/simlin-base/src/float.rs` -- remove trait, replace
   all `F: SimFloat` with `f64`
 - `Module<F>`, `Var<F>`, `Compiler<F>` in `src/simlin-engine/src/compiler/` --
   remove generic parameter
 - `CompiledSimulation<F>`, `Vm<F>`, `Results<F>` in
-  `src/simlin-engine/src/vm.rs`, `src/simlin-engine/src/results.rs` -- remove
+  `src/simlin-engine/src/vm.rs`, `src/simlin-base/src/results.rs` -- remove
   generic parameter
 - `ByteCode<F>`, `Opcode` variants in `src/simlin-engine/src/bytecode.rs` --
   remove generic parameter

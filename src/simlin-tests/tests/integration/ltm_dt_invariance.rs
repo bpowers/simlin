@@ -43,12 +43,13 @@
 
 use std::collections::HashMap;
 
+use simlin_base::Results;
 use simlin_engine::db::{
     SimlinDb, compile_project_incremental, model_ltm_variables, sync_from_datamodel_incremental,
 };
 use simlin_engine::indexmap::IndexMap;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{Results, Vm, ltm_post};
+use simlin_engine::{Vm, ltm_post};
 
 /// Canonical prefix of an LTM `loop_score` synthetic variable. The
 /// separator is U+205A (TWO DOT PUNCTUATION), the character LTM uses to
@@ -60,7 +61,7 @@ const LOOP_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
 /// loop-id -> per-slot cycle-partition map that the post-simulation
 /// relative-score computation consumes.
 fn run_ltm(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> (Results, IndexMap<String, Vec<Option<usize>>>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);

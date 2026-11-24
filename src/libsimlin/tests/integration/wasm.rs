@@ -29,7 +29,7 @@ type Inst = Stored<ModuleAddr>;
 
 /// A small scalar stock-and-flow model: a constant inflow fills a stock. Used as
 /// the supported-model fixture (it runs through the wasm backend cleanly).
-fn simple_model() -> simlin_engine::datamodel::Project {
+fn simple_model() -> simlin_base::datamodel::Project {
     TestProject::new("ffi_wasm")
         .with_sim_time(0.0, 10.0, 1.0)
         .aux("inflow_rate", "2", None)

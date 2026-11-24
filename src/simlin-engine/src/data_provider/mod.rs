@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::common::{Error, ErrorCode, ErrorKind, Result};
+use simlin_base::common::{Error, ErrorCode, ErrorKind, Result};
 
 /// Trait for resolving external data references during MDL compilation.
 ///

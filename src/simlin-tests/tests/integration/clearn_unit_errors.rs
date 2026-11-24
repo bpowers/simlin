@@ -11,13 +11,13 @@
 //!
 //!   cargo test -p simlin-tests --test integration clearn_unit_errors -- --nocapture
 
-use simlin_engine::common::UnitError;
+use simlin_base::common::UnitError;
 use simlin_engine::db::{
     Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
 
-fn load_clearn() -> simlin_engine::datamodel::Project {
+fn load_clearn() -> simlin_base::datamodel::Project {
     let mdl_content =
         std::fs::read_to_string("../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl")
             .expect("failed to read C-LEARN mdl -- run from the simlin-tests crate dir");

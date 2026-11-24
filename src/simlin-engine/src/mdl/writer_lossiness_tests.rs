@@ -7,11 +7,11 @@
 //! shares the `make_*` fixture helpers from the sibling `tests` module.
 
 use super::tests::{make_aux, make_model, make_project, make_stock};
-use crate::datamodel::{
+use crate::mdl::{ExportWarning, project_to_mdl_with_warnings};
+use simlin_base::datamodel::{
     self, Aux, Compat, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
     GraphicalFunctionScale, Variable,
 };
-use crate::mdl::{ExportWarning, project_to_mdl_with_warnings};
 
 fn make_flow(ident: &str, eqn: &str) -> Variable {
     Variable::Flow(Flow {

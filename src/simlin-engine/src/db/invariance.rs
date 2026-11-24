@@ -50,7 +50,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::common::{Canonical, Ident};
 use crate::db::dep_graph::model_var_info;
 use crate::db::var_fragment::fragment_overlay;
 use crate::db::{
@@ -58,6 +57,7 @@ use crate::db::{
     model_dependency_graph, variable_direct_dependencies,
 };
 use crate::variable::DepLag;
+use simlin_base::common::{Canonical, Ident};
 
 /// The set of a module's flow-phase variables that are run-invariant, by
 /// canonical name. Empty for submodules and for any model with no invariant
@@ -195,9 +195,9 @@ pub(crate) fn model_flows_invariant<'db>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel;
     use crate::db::{SimlinDb, sync_from_datamodel};
     use crate::test_common::TestProject;
+    use simlin_base::datamodel;
 
     /// Compute the salsa-path run-invariant flow var-name set for a `main`
     /// model built from `tp`.

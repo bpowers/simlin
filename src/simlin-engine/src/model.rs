@@ -13,14 +13,14 @@
 //! a consumer that needs several variables assembles handles to the memos
 //! (`db::model_lowered_variables`).
 
-use crate::ast::{
-    Ast, Expr0, Expr1, Expr2, LoweringResult, LoweringScope, lower_ast, lower_typed_ast, typed_ast,
-};
-use crate::canonicalize;
-use crate::datamodel;
 use crate::db::{build_module_inputs, module_input_prefix};
 use crate::diagnostic::DiagnosticError;
 use crate::variable::{VarKind, Variable};
+use simlin_base::ast::{
+    Ast, Expr0, Expr1, Expr2, LoweringResult, LoweringScope, lower_ast, lower_typed_ast, typed_ast,
+};
+use simlin_base::canonicalize;
+use simlin_base::datamodel;
 
 /// A variable as the parse leaves it: `Expr0` equations and a module's
 /// input wiring still as the datamodel's references.
@@ -55,7 +55,7 @@ pub(crate) fn lower_variable_from_typed(
     primary: Option<LoweringResult<Ast<Expr1>>>,
 ) -> Variable {
     let mut diagnostics = parsed.diagnostics.clone();
-    let element_scope: Option<Vec<crate::dimensions::Dimension>> =
+    let element_scope: Option<Vec<simlin_base::dimensions::Dimension>> =
         parsed.element_scope().map(|element_scope| {
             element_scope
                 .dims
@@ -300,8 +300,8 @@ fn lower_variable_preserves_every_field_of_every_kind() {
 /// gate, as an `UnknownDependency` attributed to the referencing variable.
 #[test]
 fn unknown_dependency_is_attributed_to_the_referencing_variable() {
-    use crate::common::ErrorCode;
     use crate::test_common::TestProject;
+    use simlin_base::common::ErrorCode;
 
     let errs = TestProject::new("main")
         .aux("aux_3", "unknown_variable * 3.14", None)

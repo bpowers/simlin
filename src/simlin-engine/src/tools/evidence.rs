@@ -35,12 +35,12 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
-use crate::common::ErrorCode;
-use crate::datamodel;
 use crate::db::{
     Diagnostic, DiagnosticCategory, DiagnosticSeverity, LtmOverlay, collect_all_diagnostics,
 };
 use crate::errors::format_diagnostic_with_datamodel;
+use simlin_base::common::ErrorCode;
+use simlin_base::datamodel;
 
 use super::{ResolvedModel, Workspace};
 
@@ -241,11 +241,11 @@ impl Evidence {
         ws: &Workspace<'_>,
         resolved: &ResolvedModel<'_>,
     ) -> Vec<DiagnosticReport> {
-        let model_name = crate::canonicalize(&resolved.model.name).into_owned();
+        let model_name = simlin_base::canonicalize(&resolved.model.name).into_owned();
         let diagnostics: Vec<Diagnostic> =
             collect_all_diagnostics(ws.db, resolved.source_project, LtmOverlay::Off)
                 .into_iter()
-                .filter(|d| d.model.is_empty() || crate::canonicalize(&d.model) == model_name)
+                .filter(|d| d.model.is_empty() || simlin_base::canonicalize(&d.model) == model_name)
                 .collect();
         let described: Vec<Described> = diagnostics
             .iter()

@@ -28,10 +28,10 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use crate::ast::{DepKind, DepShape, ModelShape};
-use crate::common::{Canonical, Ident, IdentMap, IdentSet, Result};
-use crate::dimensions::{Dimension, DimensionsContext};
 use crate::variable::Variable;
+use simlin_base::ast::{DepKind, DepShape, ModelShape};
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet, Result};
+use simlin_base::dimensions::{Dimension, DimensionsContext};
 
 use super::codegen::ModuleCtx;
 use super::context::{Context, ContextCore};
@@ -140,54 +140,55 @@ impl FragmentInput<'_> {
     /// written element by element has. An element with no equation is left
     /// out, as it is from the target.
     pub(crate) fn elementwise_target(&self) -> Option<Variable> {
-        use crate::ast::Ast;
+        use simlin_base::ast::Ast;
         if self.target.element_scope().is_some() {
             return None;
         }
         let ctx = self.context(false);
-        let per_element = |ast: &Ast<crate::ast::Expr2>| -> Option<Ast<crate::ast::Expr2>> {
-            let (dims, arms, default, applies) = match ast {
-                Ast::Scalar(_) => return None,
-                Ast::ApplyToAll(dims, expr) => {
-                    if !reads_a_computed_position(expr, dims) {
-                        return None;
+        let per_element =
+            |ast: &Ast<simlin_base::ast::Expr2>| -> Option<Ast<simlin_base::ast::Expr2>> {
+                let (dims, arms, default, applies) = match ast {
+                    Ast::Scalar(_) => return None,
+                    Ast::ApplyToAll(dims, expr) => {
+                        if !reads_a_computed_position(expr, dims) {
+                            return None;
+                        }
+                        (dims, None, Some(expr), false)
                     }
-                    (dims, None, Some(expr), false)
-                }
-                Ast::Arrayed(dims, arms, default, applies) => (
-                    dims,
-                    Some(arms),
-                    default.as_ref().filter(|_| *applies),
-                    *applies,
-                ),
-            };
-            let bodies = || {
-                arms.into_iter()
-                    .flat_map(|arms| arms.values())
-                    .chain(default)
-            };
-            let names: Vec<&str> = dims.iter().map(|d| d.canonical_name().as_str()).collect();
-            let mut reads = ReadSpellings::default();
-            for body in bodies() {
-                reads.collect(body, &names, false);
-            }
-            let mut elements = IdentMap::default();
-            for parts in crate::dimensions::SubscriptIterator::new(dims) {
-                let key = crate::common::CanonicalElementName::from_parts(&parts);
-                let Some(expr) = arms.and_then(|arms| arms.get(&key)).or(default) else {
-                    continue;
+                    Ast::Arrayed(dims, arms, default, applies) => (
+                        dims,
+                        Some(arms),
+                        default.as_ref().filter(|_| *applies),
+                        *applies,
+                    ),
                 };
-                let elem_ctx =
-                    ctx.with_active_subscripts(std::sync::Arc::<[_]>::from(dims.clone()), &parts);
-                elements.insert(key, describe_at_element(&elem_ctx, expr, &reads.pinned));
-            }
-            // Equations whose elements each read as written are their own
-            // view.
-            if arms.is_some_and(|arms| *arms == elements) {
-                return None;
-            }
-            Some(Ast::Arrayed(dims.clone(), elements, None, applies))
-        };
+                let bodies = || {
+                    arms.into_iter()
+                        .flat_map(|arms| arms.values())
+                        .chain(default)
+                };
+                let names: Vec<&str> = dims.iter().map(|d| d.canonical_name().as_str()).collect();
+                let mut reads = ReadSpellings::default();
+                for body in bodies() {
+                    reads.collect(body, &names, false);
+                }
+                let mut elements = IdentMap::default();
+                for parts in simlin_base::dimensions::SubscriptIterator::new(dims) {
+                    let key = simlin_base::common::CanonicalElementName::from_parts(&parts);
+                    let Some(expr) = arms.and_then(|arms| arms.get(&key)).or(default) else {
+                        continue;
+                    };
+                    let elem_ctx = ctx
+                        .with_active_subscripts(std::sync::Arc::<[_]>::from(dims.clone()), &parts);
+                    elements.insert(key, describe_at_element(&elem_ctx, expr, &reads.pinned));
+                }
+                // Equations whose elements each read as written are their own
+                // view.
+                if arms.is_some_and(|arms| *arms == elements) {
+                    return None;
+                }
+                Some(Ast::Arrayed(dims.clone(), elements, None, applies))
+            };
         let mut view = self.target.as_ref().clone();
         let changed = match &mut view.kind {
             crate::variable::VarKind::Aux { ast, init_ast, .. } => {
@@ -230,10 +231,10 @@ impl FragmentInput<'_> {
         let Ok((_, elem_ctx, _)) = ctx.element_scope_context(scope) else {
             return self.target.as_ref().clone();
         };
-        let pin = |ast: &Option<crate::ast::Ast<crate::ast::Expr2>>| {
+        let pin = |ast: &Option<simlin_base::ast::Ast<simlin_base::ast::Expr2>>| {
             ast.as_ref().map(|ast| match ast {
-                crate::ast::Ast::Scalar(expr) => {
-                    crate::ast::Ast::Scalar(elem_ctx.pin_element_reads(expr))
+                simlin_base::ast::Ast::Scalar(expr) => {
+                    simlin_base::ast::Ast::Scalar(elem_ctx.pin_element_reads(expr))
                 }
                 other => other.clone(),
             })
@@ -338,9 +339,9 @@ struct ReadSpellings {
 }
 
 impl ReadSpellings {
-    fn collect(&mut self, expr: &crate::ast::Expr2, dims: &[&str], in_reducer: bool) {
-        use crate::ast::{Expr2, IndexExpr2};
-        use crate::builtins::ArgKind;
+    fn collect(&mut self, expr: &simlin_base::ast::Expr2, dims: &[&str], in_reducer: bool) {
+        use simlin_base::ast::{Expr2, IndexExpr2};
+        use simlin_base::builtins::ArgKind;
         match expr {
             Expr2::Var(id, ..) => {
                 if in_reducer {
@@ -397,11 +398,11 @@ impl ReadSpellings {
 /// dimension read as a value is the element's position.
 fn describe_at_element(
     ctx: &Context,
-    expr: &crate::ast::Expr2,
+    expr: &simlin_base::ast::Expr2,
     pinned: &IdentSet<Ident<Canonical>>,
-) -> crate::ast::Expr2 {
-    use crate::ast::Expr2;
-    use crate::builtins::ArgKind;
+) -> simlin_base::ast::Expr2 {
+    use simlin_base::ast::Expr2;
+    use simlin_base::builtins::ArgKind;
     let recur = |e: &Expr2| describe_at_element(ctx, e, pinned);
     match expr {
         Expr2::Var(id, ..) if ctx.is_active_dimension(id) || pinned.contains(id) => {
@@ -457,11 +458,11 @@ fn describe_at_element(
 /// Whether a subscript of `expr` computes its index from one of `dims`: an
 /// offset (`c[Age - 1]`), whose element is a constant at each element.
 fn reads_a_computed_position(
-    expr: &crate::ast::Expr2,
-    dims: &[crate::dimensions::Dimension],
+    expr: &simlin_base::ast::Expr2,
+    dims: &[simlin_base::dimensions::Dimension],
 ) -> bool {
-    use crate::ast::{Expr2, IndexExpr2};
-    fn names_one(expr: &Expr2, dims: &[crate::dimensions::Dimension]) -> bool {
+    use simlin_base::ast::{Expr2, IndexExpr2};
+    fn names_one(expr: &Expr2, dims: &[simlin_base::dimensions::Dimension]) -> bool {
         match expr {
             Expr2::Var(id, ..) => dims
                 .iter()
@@ -473,9 +474,9 @@ fn reads_a_computed_position(
             }
             Expr2::App(builtin, ..) => {
                 let mut found = false;
-                crate::builtins::walk_builtin_expr(builtin, |contents| {
-                    if let crate::builtins::BuiltinContents::Expr(e)
-                    | crate::builtins::BuiltinContents::LookupTable(e) = contents
+                simlin_base::builtins::walk_builtin_expr(builtin, |contents| {
+                    if let simlin_base::builtins::BuiltinContents::Expr(e)
+                    | simlin_base::builtins::BuiltinContents::LookupTable(e) = contents
                     {
                         found |= names_one(e, dims);
                     }
@@ -490,9 +491,9 @@ fn reads_a_computed_position(
         Expr2::Const(..) | Expr2::Var(..) => false,
         Expr2::App(builtin, ..) => {
             let mut found = false;
-            crate::builtins::walk_builtin_expr(builtin, |contents| {
-                if let crate::builtins::BuiltinContents::Expr(e)
-                | crate::builtins::BuiltinContents::LookupTable(e) = contents
+            simlin_base::builtins::walk_builtin_expr(builtin, |contents| {
+                if let simlin_base::builtins::BuiltinContents::Expr(e)
+                | simlin_base::builtins::BuiltinContents::LookupTable(e) = contents
                 {
                     found |= computes(e);
                 }

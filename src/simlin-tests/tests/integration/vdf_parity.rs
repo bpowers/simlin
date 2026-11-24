@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rayon::prelude::*;
-use simlin_engine::common::{Canonical, Ident, IdentMap};
+use simlin_base::common::{Canonical, Ident, IdentMap};
 use simlin_engine::vdf::{VdfFile, VdfKind, probe_vdf_kind};
 
 /// Directories walked for parity fixtures. `test/` is always present; the

@@ -6,7 +6,7 @@
 //! geometry fresh layouts draw from it.
 
 use super::*;
-use crate::datamodel;
+use simlin_base::datamodel;
 
 // ---------------------------------------------------------------------------
 // classify_flow_sides tests

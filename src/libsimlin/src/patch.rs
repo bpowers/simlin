@@ -9,8 +9,7 @@
 //! (with optional dry-run), and collect both compile-time and static-analysis
 //! errors.
 
-use simlin_engine::common::ErrorCode;
-use simlin_engine::{self as engine};
+use simlin_base::common::ErrorCode;
 use std::ptr;
 
 use simlin_engine::errors;
@@ -95,8 +94,8 @@ struct ErrorDetailBuilder {
     severity: crate::SimlinErrorSeverity,
     details: Option<String>,
     element_name: Option<String>,
-    read_past: Option<engine::common::ReadPast>,
-    mismatched_read: Option<engine::common::MismatchedRead>,
+    read_past: Option<simlin_base::common::ReadPast>,
+    mismatched_read: Option<simlin_base::common::MismatchedRead>,
 }
 
 impl ErrorDetailBuilder {
@@ -164,12 +163,12 @@ impl ErrorDetailBuilder {
         self
     }
 
-    fn read_past(mut self, read_past: Option<engine::common::ReadPast>) -> Self {
+    fn read_past(mut self, read_past: Option<simlin_base::common::ReadPast>) -> Self {
         self.read_past = read_past;
         self
     }
 
-    fn mismatched_read(mut self, read: Option<engine::common::MismatchedRead>) -> Self {
+    fn mismatched_read(mut self, read: Option<simlin_base::common::MismatchedRead>) -> Self {
         self.mismatched_read = read;
         self
     }
@@ -219,11 +218,15 @@ impl ErrorDetailBuilder {
             errors::FormattedErrorKind::Simulation => SimlinErrorKind::Simulation,
         };
         let unit_error_kind = match error.category {
-            Some(engine::db::DiagnosticCategory::UnitDefinition) => SimlinUnitErrorKind::Definition,
-            Some(engine::db::DiagnosticCategory::UnitConsistency) => {
+            Some(simlin_engine::db::DiagnosticCategory::UnitDefinition) => {
+                SimlinUnitErrorKind::Definition
+            }
+            Some(simlin_engine::db::DiagnosticCategory::UnitConsistency) => {
                 SimlinUnitErrorKind::Consistency
             }
-            Some(engine::db::DiagnosticCategory::UnitInference) => SimlinUnitErrorKind::Inference,
+            Some(simlin_engine::db::DiagnosticCategory::UnitInference) => {
+                SimlinUnitErrorKind::Inference
+            }
             _ => SimlinUnitErrorKind::NotApplicable,
         };
         let mut builder = ErrorDetailBuilder::new(error.code)
@@ -261,13 +264,13 @@ impl ErrorDetailBuilder {
 /// The `datamodel` parameter enables snippet/squiggle formatting by
 /// providing variable equation text for equation and unit errors.
 pub(crate) fn gather_error_details_with_db(
-    db: &engine::db::SimlinDb,
-    project: engine::db::SourceProject,
-    vm_error: Option<&engine::Error>,
-    datamodel: &engine::datamodel::Project,
-    overlay: engine::db::LtmOverlay,
+    db: &simlin_engine::db::SimlinDb,
+    project: simlin_engine::db::SourceProject,
+    vm_error: Option<&simlin_base::Error>,
+    datamodel: &simlin_base::datamodel::Project,
+    overlay: simlin_engine::db::LtmOverlay,
 ) -> Vec<ErrorDetailData> {
-    let diags = engine::db::collect_all_diagnostics(db, project, overlay);
+    let diags = simlin_engine::db::collect_all_diagnostics(db, project, overlay);
     let mut all_errors: Vec<ErrorDetailData> = diags
         .iter()
         .map(|d| {
@@ -284,11 +287,11 @@ pub(crate) fn gather_error_details_with_db(
     // reported, that row only repeats them, as a second problem a host would
     // list beside the real one. The command line drops it for the same reason
     // (`simulation_error_is_redundant`). Any other build error is reported.
-    let explained = |error: &engine::Error| {
+    let explained = |error: &simlin_base::Error| {
         error.code == ErrorCode::NotSimulatable
             && diags
                 .iter()
-                .any(|d| d.severity == engine::db::DiagnosticSeverity::Error)
+                .any(|d| d.severity == simlin_engine::db::DiagnosticSeverity::Error)
     };
     if let Some(error) = vm_error.filter(|error| !explained(error)) {
         let formatted = errors::format_simulation_error("main", error);
@@ -308,11 +311,11 @@ pub(crate) fn gather_error_details_with_db(
 /// Error-severity diagnostics is the same -- but a project carrying both a
 /// project-level and a per-model error now reports the project-level code.
 fn first_error_code(
-    diagnostics: &[engine::db::Diagnostic],
-    sim_error: Option<&engine::Error>,
+    diagnostics: &[simlin_engine::db::Diagnostic],
+    sim_error: Option<&simlin_base::Error>,
 ) -> Option<SimlinErrorCode> {
     for d in diagnostics {
-        if d.severity == engine::db::DiagnosticSeverity::Error {
+        if d.severity == simlin_engine::db::DiagnosticSeverity::Error {
             return Some(diagnostic_to_error_code(d));
         }
     }
@@ -323,7 +326,7 @@ fn first_error_code(
 /// The wire code of a diagnostic: its own code, except that every unit
 /// diagnostic reports as `UnitDefinitionErrors` (the one unit code the wire
 /// numbering had before the per-definition parse codes were added).
-fn diagnostic_to_error_code(diagnostic: &engine::db::Diagnostic) -> SimlinErrorCode {
+fn diagnostic_to_error_code(diagnostic: &simlin_engine::db::Diagnostic) -> SimlinErrorCode {
     if is_unit_diagnostic(diagnostic) {
         SimlinErrorCode::UnitDefinitionErrors
     } else {
@@ -331,8 +334,8 @@ fn diagnostic_to_error_code(diagnostic: &engine::db::Diagnostic) -> SimlinErrorC
     }
 }
 
-fn is_unit_diagnostic(diagnostic: &engine::db::Diagnostic) -> bool {
-    use engine::db::DiagnosticCategory;
+fn is_unit_diagnostic(diagnostic: &simlin_engine::db::Diagnostic) -> bool {
+    use simlin_engine::db::DiagnosticCategory;
     matches!(
         diagnostic.category(),
         DiagnosticCategory::UnitDefinition
@@ -349,11 +352,13 @@ fn is_unit_diagnostic(diagnostic: &engine::db::Diagnostic) -> bool {
 /// ensures that if a model already had unit warnings before a patch, further patches
 /// to that model are allowed (even if they don't fix the existing warnings).
 fn collect_models_with_unit_warnings(
-    diagnostics: &[engine::db::Diagnostic],
+    diagnostics: &[simlin_engine::db::Diagnostic],
 ) -> std::collections::HashSet<String> {
     diagnostics
         .iter()
-        .filter(|d| d.severity == engine::db::DiagnosticSeverity::Warning && is_unit_diagnostic(d))
+        .filter(|d| {
+            d.severity == simlin_engine::db::DiagnosticSeverity::Warning && is_unit_diagnostic(d)
+        })
         .map(|d| d.model.clone())
         .collect()
 }
@@ -362,7 +367,7 @@ fn collect_models_with_unit_warnings(
 
 /// Whether `patch` holds any operation: one with none, however it is spelled
 /// (no models, or models with no operations), applies as no change.
-fn has_operations(patch: &engine::ProjectPatch) -> bool {
+fn has_operations(patch: &simlin_base::ProjectPatch) -> bool {
     !patch.project_ops.is_empty() || patch.models.iter().any(|model| !model.ops.is_empty())
 }
 
@@ -380,12 +385,12 @@ fn has_operations(patch: &engine::ProjectPatch) -> bool {
 /// patch committed, or one a dry run would commit; None for one refused.
 pub(crate) unsafe fn apply_project_patch_internal(
     project_ref: &SimlinProject,
-    patch: engine::ProjectPatch,
+    patch: simlin_base::ProjectPatch,
     dry_run: bool,
     allow_errors: bool,
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
-) -> Option<engine::PatchReport> {
+) -> Option<simlin_engine::PatchReport> {
     // Hold the datamodel lock for the entire operation. This prevents
     // concurrent patchers from snapshotting a stale datamodel between
     // our validation and commit phases.
@@ -395,16 +400,16 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // model operation) don't affect variables, equations, or simulation
     // results. Skip the expensive compilation and diagnostic validation and
     // apply directly to the datamodel.
-    let view_only = engine::is_view_only_patch(&datamodel_locked, &patch);
+    let view_only = simlin_engine::is_view_only_patch(&datamodel_locked, &patch);
 
     if view_only && !dry_run {
         // A patch with no operation changes nothing, so it is no change: a
         // mutable borrow would advance the revision and copy a datamodel a
         // copy of the project shares.
         if !has_operations(&patch) {
-            return Some(engine::PatchReport::default());
+            return Some(simlin_engine::PatchReport::default());
         }
-        return match engine::apply_patch_reporting(&mut datamodel_locked, patch) {
+        return match simlin_engine::apply_patch_reporting(&mut datamodel_locked, patch) {
             Ok(report) => Some(report),
             Err(err) => {
                 store_error(
@@ -420,10 +425,10 @@ pub(crate) unsafe fn apply_project_patch_internal(
     let models_with_existing_warnings = {
         let db_locked = project_ref.lock_db_with(&datamodel_locked);
         if let Some(source_project) = db_locked.current_source_project() {
-            let diags = engine::db::collect_all_diagnostics(
+            let diags = simlin_engine::db::collect_all_diagnostics(
                 &db_locked,
                 source_project,
-                engine::db::LtmOverlay::Off,
+                simlin_engine::db::LtmOverlay::Off,
             );
             collect_models_with_unit_warnings(&diags)
         } else {
@@ -439,7 +444,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::SnapshotWhileProjectLocked, project_ref);
 
-    let report = match engine::apply_patch_reporting(&mut staged_datamodel, patch) {
+    let report = match simlin_engine::apply_patch_reporting(&mut staged_datamodel, patch) {
         Ok(report) => report,
         Err(err) => {
             store_error(
@@ -465,15 +470,16 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // validated against the model as written (no LTM overlay): the overlay's
     // advisories belong to `simlin_project_get_errors`, and an LTM-only
     // rejection must never veto an edit to a model that simulates fine.
-    let overlay = engine::db::LtmOverlay::Off;
-    let staged_diags = engine::db::collect_all_diagnostics(&db, staged_sp, overlay);
+    let overlay = simlin_engine::db::LtmOverlay::Off;
+    let staged_diags = simlin_engine::db::collect_all_diagnostics(&db, staged_sp, overlay);
 
     // Attempt compilation + VM validation to detect assembly-level errors
     // that are not captured by per-variable diagnostics. `build_sim` routes a
     // staged conveyor/queue datamodel through its special expansion build path,
     // so a valid special-stock edit is not rejected (and rolled back) by the
     // ordinary compile path's NotExpanded guard.
-    let sim_error = engine::build_sim(&mut db, staged_sp, &staged_datamodel, "main", overlay).err();
+    let sim_error =
+        simlin_engine::build_sim(&mut db, staged_sp, &staged_datamodel, "main", overlay).err();
 
     let all_errors = gather_error_details_with_db(
         &db,
@@ -556,12 +562,12 @@ pub(crate) unsafe fn apply_project_patch_internal(
 /// "deleted": [{"model", "ident"}], "created": [{"model", "ident"}]}`.
 #[derive(serde::Serialize)]
 struct PatchReportJson<'a> {
-    renamed: &'a [engine::Renamed],
-    deleted: &'a [engine::VariableRef],
-    created: &'a [engine::VariableRef],
+    renamed: &'a [simlin_engine::Renamed],
+    deleted: &'a [simlin_engine::VariableRef],
+    created: &'a [simlin_engine::VariableRef],
 }
 
-fn patch_report_json(report: &engine::PatchReport) -> Vec<u8> {
+fn patch_report_json(report: &simlin_engine::PatchReport) -> Vec<u8> {
     let json = PatchReportJson {
         renamed: &report.renamed,
         deleted: &report.deleted,
@@ -576,7 +582,7 @@ unsafe fn read_patch(
     patch_data: *const u8,
     patch_len: usize,
     out_error: *mut *mut SimlinError,
-) -> Option<engine::ProjectPatch> {
+) -> Option<simlin_base::ProjectPatch> {
     if patch_len > 0 && patch_data.is_null() {
         store_error(
             out_error,
@@ -612,8 +618,8 @@ unsafe fn read_patch(
         json_str
     };
 
-    match serde_json::from_str::<engine::json::ProjectPatch>(json_str) {
-        Ok(patch) => Some(engine::ProjectPatch::from(patch)),
+    match serde_json::from_str::<simlin_engine::json::ProjectPatch>(json_str) {
+        Ok(patch) => Some(simlin_base::ProjectPatch::from(patch)),
         Err(err) => {
             store_error(
                 out_error,

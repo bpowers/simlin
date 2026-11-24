@@ -15,8 +15,8 @@
 use std::io::BufReader;
 
 use super::{ChangeKind, MeaningChange, SaveFormat, check_save, compare};
-use crate::datamodel::{Equation, Project, Variable};
 use crate::test_common::TestProject;
+use simlin_base::datamodel::{Equation, Project, Variable};
 
 #[path = "save_check_field_tests.rs"]
 mod fields;
@@ -163,7 +163,9 @@ fn a_variable_of_another_kind_is_named() {
 /// included. A y point that is not a number, in both, is the same.
 #[test]
 fn tables_are_compared_as_the_compiler_reads_them() {
-    use crate::datamodel::{GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale};
+    use simlin_base::datamodel::{
+        GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
+    };
     let scale = |min, max| GraphicalFunctionScale { min, max };
     let implied = |y: Vec<f64>| GraphicalFunction {
         kind: GraphicalFunctionKind::Continuous,
@@ -428,7 +430,7 @@ fn equations_are_compared_in_their_canonical_form() {
         let mut project = model(equation);
         let mut body = project.models[0].clone();
         body.name = "modulo".to_string();
-        body.macro_spec = Some(crate::datamodel::MacroSpec {
+        body.macro_spec = Some(simlin_base::datamodel::MacroSpec {
             parameters: vec!["heat loss".to_string(), "x".to_string()],
             primary_output: "modulo".to_string(),
             additional_outputs: Vec::new(),
@@ -452,7 +454,9 @@ fn equations_are_compared_in_their_canonical_form() {
 /// beside a table when `tables`, with `default` as its `:EXCEPT:` default,
 /// applied or not.
 fn arrayed(equations: [&str; 2], tables: bool, default: Option<(&str, bool)>) -> Project {
-    use crate::datamodel::{GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale};
+    use simlin_base::datamodel::{
+        GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
+    };
     let table = || {
         tables.then(|| GraphicalFunction {
             kind: GraphicalFunctionKind::Continuous,
@@ -569,7 +573,7 @@ fn dimension_parents_and_a_models_own_specs_are_compared() {
 
     let project = TestProject::new("p").aux("x", "1", None).build_datamodel();
     let mut own = project.clone();
-    own.models[0].sim_specs = Some(crate::datamodel::SimSpecs {
+    own.models[0].sim_specs = Some(simlin_base::datamodel::SimSpecs {
         stop: project.sim_specs.stop * 2.0,
         ..project.sim_specs.clone()
     });

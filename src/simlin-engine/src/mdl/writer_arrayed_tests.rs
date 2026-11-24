@@ -6,9 +6,9 @@
 //! test imports an MDL file, saves it, and asks `check_save` what the save
 //! changes, so the variable is the shape the reader produces.
 
-use crate::datamodel::{self, Equation};
 use crate::mdl::{parse_mdl, project_to_mdl};
 use crate::save_check::{SaveFormat, check_save};
+use simlin_base::datamodel::{self, Equation};
 
 const CONTROL: &str =
     "INITIAL TIME = 0 ~~|\nFINAL TIME = 2 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = TIME STEP ~~|\n";

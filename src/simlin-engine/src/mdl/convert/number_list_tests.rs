@@ -9,7 +9,7 @@
 //! leading dimensions, since a list holds at most two.
 
 use super::convert_mdl;
-use crate::datamodel::{Equation, Project};
+use simlin_base::datamodel::{Equation, Project};
 
 const END: &str = "\\\\\\---///\n";
 

@@ -11,9 +11,9 @@ use super::tests::{
 };
 use super::*;
 use crate::bytecode::Opcode;
-use crate::common::{Canonical, Ident};
-use crate::datamodel::{self, SimMethod};
 use crate::test_common::TestProject;
+use simlin_base::common::{Canonical, Ident};
+use simlin_base::datamodel::{self, SimMethod};
 
 /// Read section/vector lengths only; instruction validation stays with the wasm
 /// interpreter. Inspecting the code section proves a test actually split its

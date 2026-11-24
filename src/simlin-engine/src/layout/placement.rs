@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::f64::consts::PI;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::{LabelSide, LinkShape};
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::{LabelSide, LinkShape};
 
 use super::graph::Position;
 
@@ -366,7 +366,7 @@ pub fn normalize_coordinates(elements: &mut [ViewElement], margin: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::view_element;
+    use simlin_base::datamodel::view_element;
 
     #[test]
     fn test_mid_gap_angle_empty() {

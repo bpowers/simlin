@@ -36,7 +36,7 @@ use std::collections::VecDeque;
 /// [`ErrorCode::ConveyorTransitTooLong`]) rather than silently saturating the
 /// belt geometry.
 ///
-/// [`ErrorCode::ConveyorTransitTooLong`]: crate::common::ErrorCode::ConveyorTransitTooLong
+/// [`ErrorCode::ConveyorTransitTooLong`]: simlin_base::common::ErrorCode::ConveyorTransitTooLong
 pub(crate) const MAX_SLATS_PER_BELT: usize = 1_000_000;
 
 #[cfg(test)]

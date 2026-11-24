@@ -15,7 +15,7 @@
 //! line-count lint; included via `#[path]`, so `super::*` resolves the parent's
 //! private items.
 
-use crate::common::IdentSet;
+use simlin_base::common::IdentSet;
 
 use crate::variable::{VarKind, Variable};
 
@@ -184,7 +184,7 @@ pub(crate) fn with_lookup_reducer_owner_wrap(to_var: &Variable) -> WithLookupWra
 /// Coverage boundary: see the `Implicit WITH LOOKUP coverage` note on
 /// [`is_implicit_with_lookup`].
 pub(crate) fn with_lookup_table_ref(to_var: &Variable) -> Option<String> {
-    use crate::ast::Ast;
+    use simlin_base::ast::Ast;
     let VarKind::Aux {
         tables,
         is_table_only: false,
@@ -249,7 +249,7 @@ enum SlotRefKind {
     /// is shared by elements carrying different tables (a documented residual).
     PerElement {
         quoted: String,
-        with_table: IdentSet<crate::common::CanonicalElementName>,
+        with_table: IdentSet<simlin_base::common::CanonicalElementName>,
     },
 }
 
@@ -257,14 +257,17 @@ impl WithLookupSlotRefs {
     /// Resolve `to_var`'s slot-wrap rule. `target_ast_dims` are the target's AST
     /// dimensions, whose row-major enumeration is the layout
     /// `variable::reorder_arrayed_element_tables` gives per-element tables.
-    pub(crate) fn new(to_var: &Variable, target_ast_dims: &[crate::dimensions::Dimension]) -> Self {
+    pub(crate) fn new(
+        to_var: &Variable,
+        target_ast_dims: &[simlin_base::dimensions::Dimension],
+    ) -> Self {
         let kind = Self::classify(to_var, target_ast_dims);
         WithLookupSlotRefs { kind }
     }
 
     fn classify(
         to_var: &Variable,
-        target_ast_dims: &[crate::dimensions::Dimension],
+        target_ast_dims: &[simlin_base::dimensions::Dimension],
     ) -> SlotRefKind {
         let VarKind::Aux {
             tables,
@@ -299,18 +302,23 @@ impl WithLookupSlotRefs {
         }
         // Per-element tables: walk the row-major element enumeration once,
         // keeping the elements whose table slot actually carries a gf.
-        let with_table: IdentSet<crate::common::CanonicalElementName> =
-            crate::dimensions::SubscriptIterator::new(target_ast_dims)
+        let with_table: IdentSet<simlin_base::common::CanonicalElementName> =
+            simlin_base::dimensions::SubscriptIterator::new(target_ast_dims)
                 .enumerate()
                 .filter(|(offset, _)| tables.get(*offset).is_some_and(|t| !t.x.is_empty()))
-                .map(|(_, subscripts)| crate::common::CanonicalElementName::from_parts(&subscripts))
+                .map(|(_, subscripts)| {
+                    simlin_base::common::CanonicalElementName::from_parts(&subscripts)
+                })
                 .collect();
         SlotRefKind::PerElement { quoted, with_table }
     }
 
     /// The `LOOKUP` table reference for target element `elem`, or `None` when
     /// that element's compiled value applies no gf.
-    pub(crate) fn for_element(&self, elem: &crate::common::CanonicalElementName) -> Option<String> {
+    pub(crate) fn for_element(
+        &self,
+        elem: &simlin_base::common::CanonicalElementName,
+    ) -> Option<String> {
         match &self.kind {
             SlotRefKind::NoGf => None,
             SlotRefKind::Shared(reference) => Some(reference.clone()),

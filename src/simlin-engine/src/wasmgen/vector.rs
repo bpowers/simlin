@@ -38,7 +38,7 @@
 //!
 //! An input view that a dynamic subscript (Phase-5 Task 4) made invalid at
 //! runtime takes the VM's short-circuit: the whole destination temp region is
-//! filled with IEEE `f64::NAN` (NOT the finite `crate::float::NA` sentinel) via
+//! filled with IEEE `f64::NAN` (NOT the finite `simlin_base::float::NA` sentinel) via
 //! [`super::lower::emit_fill_temp_nan`], while `VectorSelect` pushes a single
 //! NaN. The validity gate is only emitted when an input view actually carries a
 //! runtime validity flag; in the common case (static / temp / full-var views)

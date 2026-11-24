@@ -6,12 +6,12 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::result::Result as StdResult;
 
-use crate::ast::{BinaryOp, Expr0, UnaryOp};
-use crate::common::{EquationError, EquationResult, ErrorCode, UnitError};
-use crate::datamodel::{SimSpecs, Unit, UnitMap};
-use crate::float::approx_eq;
-use crate::lexer::LexerType;
-use crate::{canonicalize, eqn_err};
+use simlin_base::ast::{BinaryOp, Expr0, UnaryOp};
+use simlin_base::common::{EquationError, EquationResult, ErrorCode, UnitError};
+use simlin_base::datamodel::{SimSpecs, Unit, UnitMap};
+use simlin_base::float::approx_eq;
+use simlin_base::lexer::LexerType;
+use simlin_base::{canonicalize, eqn_err};
 
 /// Units is used to distinguish between explicit units (and explicit
 /// dimensionless-ness) and dimensionless-ness that comes from computing
@@ -745,7 +745,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
             // alias resolution, the dimensionless spellings, and the
             // unknown-name base-unit fallback all live in `resolve_name`
             // (shared with the synthetic time variable).
-            ctx.resolve_name(&crate::common::canonicalize(id.as_str()))
+            ctx.resolve_name(&simlin_base::common::canonicalize(id.as_str()))
         }
         Expr0::App(_, loc) => {
             return eqn_err!(NoAppInUnits, loc.start, loc.end);
@@ -1163,7 +1163,7 @@ fn test_basic_unit_parsing() {
         assert_eq!(*output, result);
     }
 
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
 
     let negative_cases = &[
         ("2 / time", ErrorCode::ExpectedIntegerOne),
@@ -1211,7 +1211,7 @@ fn test_const_int_eval() {
         assert_eq!(*output, const_int_eval(&expr).unwrap());
     }
 
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
 
     let negative_cases = &["3.5", "foo", "if 1 then 2 else 3", "bar[2]", "foo(1, 2)"];
 
@@ -1456,9 +1456,9 @@ fn test_conflicting_unit_declarations_are_still_errors() {
 /// of them on such an edit.
 #[test]
 fn a_run_spec_edit_parses_no_variable_again() {
-    use crate::datamodel::{Dt, SimMethod};
     use crate::db::exec_probe::ProbedDb;
     use crate::db::{LtmOverlay, collect_all_diagnostics, compile_project_incremental};
+    use simlin_base::datamodel::{Dt, SimMethod};
 
     let mut project = crate::test_common::TestProject::new("specs")
         .with_sim_time(0.0, 20.0, 0.25)
@@ -1468,7 +1468,7 @@ fn a_run_spec_edit_parses_no_variable_again() {
         .aux("lifetime", "4", Some("month"))
         .build_datamodel();
     let mut probed = ProbedDb::new();
-    let parses_after = |project: &crate::datamodel::Project, probed: &mut ProbedDb| {
+    let parses_after = |project: &simlin_base::datamodel::Project, probed: &mut ProbedDb| {
         let source = probed.db_mut().sync(project);
         probed.reset();
         collect_all_diagnostics(probed.db(), source, LtmOverlay::Off);
@@ -1484,7 +1484,7 @@ fn a_run_spec_edit_parses_no_variable_again() {
         "the first compile parses"
     );
 
-    type Edit = fn(&mut crate::datamodel::SimSpecs);
+    type Edit = fn(&mut simlin_base::datamodel::SimSpecs);
     let edits: [(&str, Edit); 5] = [
         ("stop", |specs| specs.stop = 40.0),
         ("start", |specs| specs.start = 1.0),

@@ -28,7 +28,7 @@
 //!   step, the same number the dt-resolution run reports at that time; it
 //!   does not re-difference the flows over the saved interval.
 
-use simlin_engine::datamodel::{Project, SimMethod};
+use simlin_base::datamodel::{Project, SimMethod};
 use simlin_engine::ltm_post;
 use simlin_engine::test_common::TestProject;
 

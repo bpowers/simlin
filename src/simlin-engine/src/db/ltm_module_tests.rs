@@ -8,9 +8,9 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::datamodel;
 use crate::test_common::TestProject;
 use crate::testutils::{x_aux, x_flow, x_model, x_module, x_module_named, x_stock};
+use simlin_base::datamodel;
 
 /// AC1.1: A model with SMTH1 in a feedback loop generates LTM synthetic
 /// variables including link_score entries when LTM is enabled, and the
@@ -1317,7 +1317,7 @@ fn test_clearn_results_offsets_agree_with_layout() {
     source_project.set_ltm_discovery_mode(&mut db).to(true);
     let source_model = source_project
         .models(&db)
-        .get(crate::canonicalize("main").as_ref())
+        .get(simlin_base::canonicalize("main").as_ref())
         .copied()
         .expect("main model");
 

@@ -5,8 +5,8 @@
 //! The dimension an arrayed variable is over, axis by axis, as the reader
 //! decides it from its equations (`ConversionContext::axis_dimension`).
 
-use crate::datamodel::Equation;
 use crate::mdl::parse_mdl;
+use simlin_base::datamodel::Equation;
 
 const CONTROL: &str =
     "INITIAL TIME = 0 ~~|\nFINAL TIME = 2 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = TIME STEP ~~|\n";

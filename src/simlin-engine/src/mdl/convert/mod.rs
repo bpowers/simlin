@@ -38,8 +38,8 @@ use crate::mdl::view::{self, VensimView};
 
 use std::collections::{HashMap, HashSet};
 
-use crate::datamodel::{Dimension, Project, SimMethod, Unit};
 use crate::import_losses::ImportWarning;
+use simlin_base::datamodel::{Dimension, Project, SimMethod, Unit};
 
 use crate::mdl::ast::{Equation as MdlEquation, MdlItem, SubscriptElement};
 
@@ -74,7 +74,7 @@ pub struct ConversionContext<'input> {
     /// spent rebuilding one immutable value. Invalidated by
     /// [`Self::push_dimension`], which is the only way `dimensions` grows, so
     /// the cache cannot go stale by construction rather than by convention.
-    dims_ctx: std::sync::OnceLock<crate::dimensions::DimensionsContext>,
+    dims_ctx: std::sync::OnceLock<simlin_base::dimensions::DimensionsContext>,
     /// Dimension equivalences: source canonical -> target canonical
     equivalences: HashMap<String, String>,
     /// Original (pre-canonicalization) names for equivalence sources
@@ -235,9 +235,10 @@ impl<'input> ConversionContext<'input> {
     /// The canonicalized form of [`Self::dimensions`], built once.
     pub(in crate::mdl::convert) fn dimensions_context(
         &self,
-    ) -> &crate::dimensions::DimensionsContext {
-        self.dims_ctx
-            .get_or_init(|| crate::dimensions::DimensionsContext::from(self.dimensions.as_slice()))
+    ) -> &simlin_base::dimensions::DimensionsContext {
+        self.dims_ctx.get_or_init(|| {
+            simlin_base::dimensions::DimensionsContext::from(self.dimensions.as_slice())
+        })
     }
 
     /// Convert the MDL to a Project, also returning what the file holds that
@@ -309,7 +310,7 @@ impl<'input> ConversionContext<'input> {
         // `MacroSpec`s, which Pass 6 just built; it produces brand-new
         // datamodel variables (a Module + binding Auxes) and the set of LHS
         // symbols whose normal build must be skipped.
-        let macro_models_by_name: HashMap<String, &crate::datamodel::Model> = macro_models
+        let macro_models_by_name: HashMap<String, &simlin_base::datamodel::Model> = macro_models
             .iter()
             .filter(|m| m.macro_spec.is_some())
             .map(|m| (canonical_name(&m.name), m))
@@ -335,7 +336,7 @@ impl<'input> ConversionContext<'input> {
         let owners = element_owners(&self.dimensions);
         let mut elements = HashMap::new();
         for dim in &self.dimensions {
-            let crate::datamodel::DimensionElements::Named(names) = &dim.elements else {
+            let simlin_base::datamodel::DimensionElements::Named(names) = &dim.elements else {
                 continue;
             };
             for element in names {
@@ -506,7 +507,7 @@ pub fn convert_mdl_reporting(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::{Dt, Equation, Variable};
+    use simlin_base::datamodel::{Dt, Equation, Variable};
 
     #[test]
     fn test_simple_conversion() {
@@ -544,7 +545,7 @@ x = 1
         assert_eq!(project.sim_specs.dt, Dt::Dt(0.5));
         assert_eq!(project.sim_specs.save_step, None);
         assert_eq!(
-            crate::results::Specs::from(&project.sim_specs).save_step,
+            simlin_base::results::Specs::from(&project.sim_specs).save_step,
             0.5
         );
     }
@@ -1036,7 +1037,7 @@ $192-192-192,0,Helvetica|10|B|0-0-0|0-0-0|0-0-0|-1--1--1|-1--1--1|96,96,100,0
         assert_eq!(model.views.len(), 1);
 
         // Verify the view contains elements
-        let crate::datamodel::View::StockFlow(sf) = &model.views[0];
+        let simlin_base::datamodel::View::StockFlow(sf) = &model.views[0];
         assert!(!sf.elements.is_empty(), "View should have elements");
     }
 
@@ -1063,7 +1064,7 @@ $font
         let model = &project.models[0];
 
         assert_eq!(model.views.len(), 1);
-        let crate::datamodel::View::StockFlow(sf) = &model.views[0];
+        let simlin_base::datamodel::View::StockFlow(sf) = &model.views[0];
         // Should have at least stock, flow, and maybe link elements
         assert!(
             sf.elements.len() >= 2,
@@ -1106,7 +1107,7 @@ $font
     }
 
     /// Find the (single) macro-marked model with the given name in a project.
-    fn find_macro_model<'a>(project: &'a Project, name: &str) -> &'a crate::datamodel::Model {
+    fn find_macro_model<'a>(project: &'a Project, name: &str) -> &'a simlin_base::datamodel::Model {
         project
             .models
             .iter()

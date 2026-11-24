@@ -20,12 +20,12 @@
 //! and at every point of a grid over the scene the element and the part a hit
 //! lands on must be drawn by the production scene (`build_scene`).
 
-use crate::datamodel::ViewElement;
 use crate::diagram::{ScenePaint, SceneShape, build_scene};
 use crate::editing::test_support::{
     alias, aux, cloud, flow, labeled, link, load, project_of, stock, view_of,
 };
 use crate::json;
+use simlin_base::datamodel::ViewElement;
 
 use super::*;
 

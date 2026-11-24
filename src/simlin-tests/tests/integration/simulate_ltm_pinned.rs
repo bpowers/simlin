@@ -11,14 +11,15 @@
 //! no per-loop score variables at all. The VM is the correctness oracle: a pinned loop's
 //! loop_score must equal the product of its links' scores.
 
-use simlin_engine::datamodel;
+use simlin_base::canonicalize;
+use simlin_base::datamodel;
+use simlin_engine::Vm;
 use simlin_engine::db::{
     DetectedLoopPolarity, LtmMode, LtmSyntheticVar, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, model_detected_loops, model_ltm_mode, model_ltm_variables,
     set_project_ltm_discovery_mode, sync_from_datamodel_incremental,
 };
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{Vm, canonicalize};
 
 /// Assign a fresh UID to every variable in the model so `LoopMetadata` can
 /// reference them (UIDs are how the diagram-level loop-naming primitive
@@ -94,7 +95,7 @@ fn two_loop_population() -> datamodel::Project {
 fn run_ltm(
     project: &datamodel::Project,
 ) -> (
-    simlin_engine::Results,
+    simlin_base::Results,
     simlin_engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     LtmMode,
 ) {
@@ -114,7 +115,7 @@ fn run_ltm(
 
 /// Assert a loop_score series equals the product of its constituent
 /// link-score series at every saved step (the VM correctness oracle).
-fn assert_loop_score_is_link_product(results: &simlin_engine::Results, loop_id: &str) {
+fn assert_loop_score_is_link_product(results: &simlin_base::Results, loop_id: &str) {
     let loop_var = format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{loop_id}");
     let loop_off = *results
         .offsets
@@ -434,7 +435,7 @@ fn two_region_population() -> datamodel::Project {
 fn run_ltm_discovery(
     project: &datamodel::Project,
 ) -> (
-    simlin_engine::Results,
+    simlin_base::Results,
     simlin_engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     Vec<LtmSyntheticVar>,
 ) {
@@ -1207,7 +1208,8 @@ fn pinned_scalar_feeder_agg_loop_dedups_in_exhaustive_mode() {
 #[test]
 #[ignore = "C-LEARN compiled and run under LTM with a pinned loop; run under the gates profile"]
 fn clearn_pinned_climate_loop_is_scored() {
-    use simlin_engine::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
+    use simlin_base::{ModelOperation, ModelPatch, ProjectPatch};
+    use simlin_engine::apply_patch;
 
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let contents = std::fs::read_to_string(mdl_path)

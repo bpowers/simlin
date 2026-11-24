@@ -6,10 +6,10 @@
 //! model can be compared by: every loop score series and the LTM
 //! diagnostics.
 
-use crate::datamodel::Project;
 use crate::db::{
     SimlinDb, collect_all_diagnostics, compile_project_incremental, sync_from_datamodel_incremental,
 };
+use simlin_base::datamodel::Project;
 
 const LOOP_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
 

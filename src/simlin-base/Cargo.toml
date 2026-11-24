@@ -1,0 +1,27 @@
+[package]
+name = "simlin-base"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "What every simlin crate is built on: the data model, identifiers and the equation AST"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+# Compiles in the test helpers other crates' tests use. Consumers add it through
+# a `[dev-dependencies]` edge, so a normal `cargo build` never sees it.
+test-support = []
+
+[dependencies]
+unicode-xid = "0.2"
+smallvec = { version = "1", features = ["union"] }
+# Fast, deterministic (fixed-seed) hasher for hot internal maps. Wasm-safe (no
+# getrandom). FxHash's fixed seed keeps map iteration deterministic where it is
+# intentionally not order-leaking.
+rustc-hash = "2"
+
+[dev-dependencies]
+proptest = "1.5"
+sha2 = "0.10"

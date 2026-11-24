@@ -61,7 +61,7 @@ pub(crate) const MAX_EQUATION_DEPTH: usize = 100;
 /// bound, which [`MAX_EQUATION_DEPTH`] is measured in. A token the lexer
 /// refuses is passed over: the parser reports it.
 pub(crate) fn equation_depth(text: &str) -> usize {
-    use crate::lexer::{Lexer, LexerType, Token};
+    use simlin_base::lexer::{Lexer, LexerType, Token};
     let mut operators = 0;
     let mut open: Vec<usize> = Vec::new();
     let (mut at, mut deepest) = (0usize, 0usize);

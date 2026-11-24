@@ -9,22 +9,22 @@ use crate::datamodel::{Dt, SimMethod, SimSpecs};
 
 /// The slots every row of a run begins with: the clock's, which a model's own
 /// variables come after. Both backends keep them in these places.
-pub(crate) const TIME_OFF: usize = 0;
-pub(crate) const DT_OFF: usize = 1;
-pub(crate) const INITIAL_TIME_OFF: usize = 2;
-pub(crate) const FINAL_TIME_OFF: usize = 3;
-pub(crate) const IMPLICIT_VAR_COUNT: usize = 4;
+pub const TIME_OFF: usize = 0;
+pub const DT_OFF: usize = 1;
+pub const INITIAL_TIME_OFF: usize = 2;
+pub const FINAL_TIME_OFF: usize = 3;
+pub const IMPLICIT_VAR_COUNT: usize = 4;
 
 /// The names of the run's clock slots, by canonical name: the time, the time
 /// step, and the initial and final time. A bare word of these is the builtin
 /// (`Expr0::new` makes a call of it), and a variable a model declares under
 /// one takes that slot's results key, so a rename does not give a variable
 /// one (`patch::apply_rename_variable`).
-pub(crate) const IMPLICIT_GLOBALS: [&str; IMPLICIT_VAR_COUNT] =
+pub const IMPLICIT_GLOBALS: [&str; IMPLICIT_VAR_COUNT] =
     ["time", "dt", "initial_time", "final_time"];
 
 /// Whether `name`, a canonical name, is one of [`IMPLICIT_GLOBALS`].
-pub(crate) fn is_implicit_global(name: &str) -> bool {
+pub fn is_implicit_global(name: &str) -> bool {
     IMPLICIT_GLOBALS.contains(&name)
 }
 
@@ -48,7 +48,7 @@ pub enum Method {
 /// under a millionth of DT. Where a time's own last place is coarser than
 /// that (a start of `1e9` with a DT of `1e-3`, where an f64 holds times to
 /// about `1e-7`), a time typed as a step's can read as the step before.
-pub(crate) const STEP_TOLERANCE: f64 = 1e-6;
+pub const STEP_TOLERANCE: f64 = 1e-6;
 
 /// The specs a run is made under, on the step grid.
 ///
@@ -237,7 +237,7 @@ impl Specs {
 /// (`1e-320`, `6.51e63`), in the fewest digits that read back as `x`. A
 /// plain `{}` writes every digit of the expansion: 320 of them for a DT of
 /// `1e-320`.
-pub(crate) fn written(x: f64) -> String {
+pub fn written(x: f64) -> String {
     if x == 0.0 || !x.is_finite() || (1e-4..1e15).contains(&x.abs()) {
         format!("{x}")
     } else {
@@ -249,7 +249,7 @@ pub(crate) fn written(x: f64) -> String {
 /// it three significant ones (`4e18`), since a float holds no more of so
 /// large a count than that and its last digits would be noise
 /// (`4.0000000000000005e18`).
-pub(crate) fn written_count(count: f64) -> String {
+pub fn written_count(count: f64) -> String {
     if count.abs() < 1e15 {
         written(count.round())
     } else {
@@ -260,7 +260,7 @@ pub(crate) fn written_count(count: f64) -> String {
 /// A count of rows as a person writes it, the count a run's rows saturate
 /// at (`usize::MAX`, `Specs::n_chunks` for a run whose rows cannot be
 /// counted) named as what it is.
-pub(crate) fn written_rows(rows: usize) -> String {
+pub fn written_rows(rows: usize) -> String {
     if rows == usize::MAX {
         "more rows than can be counted".to_string()
     } else {
@@ -371,88 +371,6 @@ impl Results {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A standalone lookup table keeps a layout slot but has no key in the
-    /// offsets map (GH #606), so a run over one has more slots than names.
-    /// The TSV is the map's columns and nothing else: the header lists every
-    /// key in slot order and no other column, every row has that many cells,
-    /// and the comparison form prefixes a `series` column and pairs each
-    /// step's `reference` and `simlin` rows.
-    #[test]
-    fn tsv_prints_the_offset_maps_columns_and_no_unnamed_slot() {
-        use crate::test_common::TestProject;
-
-        let table = crate::datamodel::GraphicalFunction {
-            kind: crate::datamodel::GraphicalFunctionKind::Continuous,
-            x_points: Some(vec![0.0, 1.0, 2.0]),
-            y_points: vec![0.0, 5.0, 10.0],
-            x_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
-            y_scale: crate::datamodel::GraphicalFunctionScale {
-                min: 0.0,
-                max: 10.0,
-            },
-        };
-        let tp = TestProject::new("tsv_columns")
-            .with_sim_time(0.0, 2.0, 1.0)
-            .aux_with_gf("table", "", table)
-            .aux("y", "LOOKUP(table, TIME)", None);
-        let compiled = tp.compile_incremental().expect("compiles");
-        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
-        vm.run_to_end().expect("runs");
-        let results = vm.into_results();
-        assert!(
-            results.step_size > results.offsets.len(),
-            "the table's slot must be unnamed, or this run exercises nothing"
-        );
-        let mut expected: Vec<(String, usize)> = results
-            .offsets
-            .iter()
-            .map(|(name, off)| (name.to_string(), *off))
-            .collect();
-        expected.sort_by_key(|(_, off)| *off);
-        let expected_header: Vec<String> = expected.into_iter().map(|(name, _)| name).collect();
-        assert!(expected_header.contains(&"y".to_string()));
-
-        let mut out = Vec::new();
-        results.write_tsv(&mut out, None).expect("writes");
-        let text = String::from_utf8(out).expect("utf-8");
-        let rows: Vec<Vec<&str>> = text.lines().map(|l| l.split('\t').collect()).collect();
-        assert_eq!(
-            rows[0], expected_header,
-            "the header is the map's keys in slot order"
-        );
-        assert_eq!(rows.len(), 1 + results.step_count, "one row per saved step");
-        for row in &rows[1..] {
-            assert_eq!(
-                row.len(),
-                expected_header.len(),
-                "every row has one cell per column"
-            );
-        }
-        let y = expected_header
-            .iter()
-            .position(|n| n == "y")
-            .expect("y column");
-        assert_eq!(rows[2][y], "5", "y = LOOKUP(table, 1) at step 1");
-
-        let mut out = Vec::new();
-        results.write_tsv(&mut out, Some(&results)).expect("writes");
-        let text = String::from_utf8(out).expect("utf-8");
-        let rows: Vec<Vec<&str>> = text.lines().map(|l| l.split('\t').collect()).collect();
-        let mut header = vec!["series".to_string()];
-        header.extend(expected_header.iter().cloned());
-        assert_eq!(rows[0], header);
-        assert_eq!(rows.len(), 1 + 2 * results.step_count);
-        for pair in rows[1..].chunks(2) {
-            assert_eq!(pair[0][0], "reference");
-            assert_eq!(pair[1][0], "simlin");
-            assert_eq!(
-                pair[0][1..],
-                pair[1][1..],
-                "a run compared with itself agrees"
-            );
-        }
-    }
 
     #[test]
     fn specs_from_dt_value() {

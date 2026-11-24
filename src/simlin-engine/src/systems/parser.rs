@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use super::ast::{Expr, FlowType, SystemsFlow, SystemsModel, SystemsStock};
 use super::lexer::{ExplicitFlowType, LexError, Line, RateExpr, StockRef, lex_lines};
-use crate::common::{Error, ErrorCode, ErrorKind, Result};
+use simlin_base::common::{Error, ErrorCode, ErrorKind, Result};
 
 /// Default initial value for a stock: `Int(0)`.
 fn default_initial() -> Expr {
@@ -918,7 +918,7 @@ mod tests {
             "[A] > {}(0, 5) @ 2",
             "A > {}",
         ];
-        for clock in crate::results::IMPLICIT_GLOBALS {
+        for clock in simlin_base::results::IMPLICIT_GLOBALS {
             let mut title = clock.to_string();
             title[..1].make_ascii_uppercase();
             for name in [clock.to_string(), clock.to_uppercase(), title] {

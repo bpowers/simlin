@@ -6,7 +6,7 @@
 
 use smallvec::SmallVec;
 
-use crate::datamodel::view_element::Flow;
+use simlin_base::datamodel::view_element::Flow;
 
 use super::geometry::{
     Axis, FlowEnd, GEOMETRY_EPSILON, MIN_SEGMENT, MIN_SINK_SEGMENT, Obstacles, Path, Point, clamp,

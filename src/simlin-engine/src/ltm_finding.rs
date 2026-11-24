@@ -33,12 +33,12 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::common::{Canonical, Ident, IdentMap, IdentSet, Result};
-use crate::datamodel;
 use crate::db::LtmSyntheticVar;
 use crate::ltm::{CausalGraph, CyclePartitions, Link, LinkPolarity, Loop, LoopPolarity};
 use crate::ltm_post::{NormGroup, group_totals, relative_series};
-use crate::results::Results;
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet, Result};
+use simlin_base::datamodel;
+use simlin_base::results::Results;
 
 // Union-graph circuit enumeration: discovery's primary candidate generator
 // (docs/design-plans/2026-08-17-ltm-discovery-exact.md). A sibling file
@@ -146,9 +146,9 @@ pub struct LinkExpansionContext {
     /// Canonical variable name -> declared dimensions, in declared order.
     /// Holds BOTH endpoints of every Bare A2A edge (the from-side projection
     /// reads the from-var's dims, the to-side offset map reads the to-var's).
-    pub declared_dims: IdentMap<Ident<Canonical>, Vec<crate::dimensions::Dimension>>,
+    pub declared_dims: IdentMap<Ident<Canonical>, Vec<simlin_base::dimensions::Dimension>>,
     /// Dimension-mapping element correspondence for the mapped (#527) leg.
-    pub dim_ctx: crate::dimensions::DimensionsContext,
+    pub dim_ctx: simlin_base::dimensions::DimensionsContext,
     /// The structural `(flow, stock)` edges: a flow feeds its stock through
     /// the wiring's axis pairing (`db::BareSpelling::StockFlow`), every other
     /// Bare link through the equation's.
@@ -651,7 +651,7 @@ fn parse_link_offsets(
     let ltm_var_map: HashMap<String, &LtmSyntheticVar> = ltm_vars
         .iter()
         .filter(|v| v.name.contains(LINK_SCORE_PREFIX))
-        .map(|v| (crate::common::canonicalize(&v.name).into_owned(), v))
+        .map(|v| (simlin_base::common::canonicalize(&v.name).into_owned(), v))
         .collect();
 
     // Phase 1: parse every variable into one or more `(LinkOffset,
@@ -961,10 +961,11 @@ fn resolve_dim_element_tuples(
     let dim_elements: Vec<Vec<String>> = var_dims
         .iter()
         .filter_map(|dim_name| {
-            let canonical_dim_name = crate::common::canonicalize(dim_name);
+            let canonical_dim_name = simlin_base::common::canonicalize(dim_name);
             dims.iter()
                 .find(|d| {
-                    crate::common::canonicalize(d.name()).as_ref() == canonical_dim_name.as_ref()
+                    simlin_base::common::canonicalize(d.name()).as_ref()
+                        == canonical_dim_name.as_ref()
                 })
                 .map(datamodel_dim_element_names)
         })
@@ -1009,7 +1010,7 @@ fn datamodel_dim_element_names(dim: &datamodel::Dimension) -> Vec<String> {
     match &dim.elements {
         datamodel::DimensionElements::Named(names) => names
             .iter()
-            .map(|n| crate::common::canonicalize(n).into_owned())
+            .map(|n| simlin_base::common::canonicalize(n).into_owned())
             .collect(),
         datamodel::DimensionElements::Indexed(size) => (1..=*size).map(|i| i.to_string()).collect(),
     }
@@ -3181,9 +3182,9 @@ pub(crate) fn discover_loops_with_deadlines(
         for link in &links {
             let offset = link_offset_map
                 .get(&(link.from.clone(), link.to.clone()))
-                .ok_or_else(|| crate::common::Error {
-                    kind: crate::common::ErrorKind::Model,
-                    code: crate::common::ErrorCode::NotSimulatable,
+                .ok_or_else(|| simlin_base::common::Error {
+                    kind: simlin_base::common::ErrorKind::Model,
+                    code: simlin_base::common::ErrorCode::NotSimulatable,
                     details: Some(format!(
                         "Link score variable not found for {} -> {}. \
                          The simulation may not have been compiled with ltm_discovery_mode enabled.",
@@ -3271,7 +3272,7 @@ pub(crate) fn discover_loops_with_deadlines(
         let mut abs_any_inf = false;
 
         for step in 0..step_count {
-            let time = results.data[step * results.step_size + crate::results::TIME_OFF];
+            let time = results.data[step * results.step_size + simlin_base::results::TIME_OFF];
 
             // Compute signed loop score = product of signed link scores
             let mut loop_score = 1.0;

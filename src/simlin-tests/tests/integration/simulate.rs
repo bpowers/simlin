@@ -2,17 +2,18 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use simlin_engine::common::IdentMap;
+use simlin_base::common::IdentMap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 
+use simlin_base::{ErrorCode, Method, Results, SimSpecs as Specs};
 use simlin_engine::FilesystemDataProvider;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::queue_compile::build_vm;
 use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::wasmgen::{WasmGenError, compile_datamodel_to_artifact};
-use simlin_engine::{ErrorCode, Method, Results, SimSpecs as Specs, Vm, project_io};
+use simlin_engine::{Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
 use crate::test_helpers::{
@@ -178,7 +179,7 @@ corpus_tests! {
 /// Compile a datamodel project to a VM simulation using the incremental
 /// salsa-backed path.
 fn compile_vm(
-    datamodel_project: &simlin_engine::datamodel::Project,
+    datamodel_project: &simlin_base::datamodel::Project,
 ) -> std::sync::Arc<simlin_engine::CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel_project, None);
@@ -336,7 +337,7 @@ fn classify_vdf_ident(
     vdf_off: usize,
     sim_off: usize,
 ) -> VdfIdentStats {
-    let na = simlin_engine::float::NA;
+    let na = simlin_base::float::NA;
     let step_count = vdf_expected.step_count;
 
     // Per-series peak reference magnitude drives the absolute floor for the
@@ -369,7 +370,7 @@ fn classify_vdf_ident(
         // -2^109 sentinel) is Vensim's "missing data", rendered as 0 in the
         // VDF. Reconcile it against a near-zero reference; flag it as a real
         // mismatch against a genuinely non-zero reference.
-        if simlin_engine::float::approx_eq(actual, na) {
+        if simlin_base::float::approx_eq(actual, na) {
             if expected.abs() <= atol {
                 stats.na_reconciled += 1;
             } else {
@@ -588,7 +589,7 @@ fn min_matched(vdf_var_count: usize) -> usize {
 /// columns are laid out densely in argument order (so `step_size == names.len()`).
 #[cfg(test)]
 fn synthetic_results(columns: &[(&str, Vec<f64>)]) -> Results {
-    use simlin_engine::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     let step_count = columns.first().map(|(_, s)| s.len()).unwrap_or(0);
     for (name, series) in columns {
@@ -648,7 +649,7 @@ fn synthetic_results(columns: &[(&str, Vec<f64>)]) -> Results {
 /// test; the realistic NaN-vs-`:NA:` case has finite tail steps and is partial.)
 #[test]
 fn classify_vdf_ident_nan_vs_na_skips_without_failing() {
-    let na = simlin_engine::float::NA;
+    let na = simlin_base::float::NA;
     // `float::NA` is the finite Vensim `:NA:` sentinel, NOT IEEE NaN.
     assert!(na.is_finite(), "the :NA: sentinel must be finite, not NaN");
     assert!(
@@ -669,8 +670,8 @@ fn classify_vdf_ident_nan_vs_na_skips_without_failing() {
         // finite, SIM matches it (within 1%).
         vec![na, na, na, 2.5, 5.0, 7.5],
     )]);
-    let vdf_off = vdf.offsets[&simlin_engine::common::Ident::new("synthetic_nan_na_series")];
-    let sim_off = sim.offsets[&simlin_engine::common::Ident::new("synthetic_nan_na_series")];
+    let vdf_off = vdf.offsets[&simlin_base::common::Ident::new("synthetic_nan_na_series")];
+    let sim_off = sim.offsets[&simlin_base::common::Ident::new("synthetic_nan_na_series")];
 
     let stats = classify_vdf_ident(&vdf, &sim, vdf_off, sim_off);
 
@@ -717,9 +718,9 @@ fn classify_vdf_ident_nan_vs_na_skips_without_failing() {
     let all_na_sim =
         synthetic_results(&[("synthetic_all_nan_series", vec![na, na, na, na, na, na])]);
     let all_nan_off =
-        all_nan_vdf.offsets[&simlin_engine::common::Ident::new("synthetic_all_nan_series")];
+        all_nan_vdf.offsets[&simlin_base::common::Ident::new("synthetic_all_nan_series")];
     let all_na_sim_off =
-        all_na_sim.offsets[&simlin_engine::common::Ident::new("synthetic_all_nan_series")];
+        all_na_sim.offsets[&simlin_base::common::Ident::new("synthetic_all_nan_series")];
     let all_nan_stats = classify_vdf_ident(&all_nan_vdf, &all_na_sim, all_nan_off, all_na_sim_off);
     // `all_nan` alone flips the `failures > 0 || all_nan` membership predicate,
     // so this series WOULD enter the residual set -- it is NOT covered by the
@@ -811,7 +812,7 @@ fn ensure_vdf_results_rejects_vacuous_comparisons() {
 }
 
 fn run_vacuous_comparison_scenarios() {
-    let na = simlin_engine::float::NA;
+    let na = simlin_base::float::NA;
 
     // A broad VDF reference: many variables, several steps each. The matched
     // floor is a fraction of this count, so a comparison that shares almost no
@@ -948,7 +949,7 @@ fn run_vacuous_comparison_scenarios() {
 /// `Results`, used as the `expected` baseline the focused `ensure_wasm_matches`
 /// tests compare wasm output against. Mirrors the corpus VM path
 /// (`compile_vm` -> `Vm::new` -> `run_to_end`).
-fn vm_results(datamodel: &simlin_engine::datamodel::Project) -> Results {
+fn vm_results(datamodel: &simlin_base::datamodel::Project) -> Results {
     let compiled = compile_vm(datamodel);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
@@ -986,7 +987,7 @@ fn ensure_wasm_matches_runs_supported_scalar_model() {
 /// default twins start at the input's `t0` value, the explicit ones at 7.
 #[test]
 fn delayn_and_smthn_omitted_initial_values_are_the_input_on_both_backends() {
-    use simlin_engine::common::Ident;
+    use simlin_base::common::Ident;
 
     let datamodel = simlin_engine::test_common::TestProject::new("alias_init")
         .with_sim_time(0.0, 10.0, 0.5)
@@ -1126,7 +1127,7 @@ fn transposed_star_range_over_a_noncontiguous_subdimension_reads_its_own_selecti
     let at = |name: &str| -> f64 {
         let off = *expected
             .offsets
-            .get(&simlin_engine::common::Ident::new(name))
+            .get(&simlin_base::common::Ident::new(name))
             .unwrap_or_else(|| panic!("{name} missing from results"));
         last[off]
     };
@@ -1168,7 +1169,7 @@ fn transposed_star_range_over_a_noncontiguous_subdimension_reads_its_own_selecti
 /// The axis-matching pins below assert single CELLS rather than whole rows:
 /// what each pins is which source element one target element reads, and naming
 /// the cell in the assertion is what makes a failure say which pairing moved.
-fn vm_last_row(datamodel: &simlin_engine::datamodel::Project) -> HashMap<String, f64> {
+fn vm_last_row(datamodel: &simlin_base::datamodel::Project) -> HashMap<String, f64> {
     let results = vm_results(datamodel);
     let last = results.iter().next_back().unwrap().to_vec();
     results
@@ -1700,8 +1701,8 @@ fn ensure_wasm_matches_skips_unsupported_model() {
 /// same absolute slot the VM reads), so this guards both execution paths.
 #[test]
 fn two_arg_ramp_in_submodule_reads_root_final_time() {
-    use simlin_engine::common::Ident;
-    use simlin_engine::datamodel;
+    use simlin_base::common::Ident;
+    use simlin_base::datamodel;
 
     let sim_specs = datamodel::SimSpecs {
         start: 0.0,
@@ -1834,7 +1835,7 @@ fn two_arg_ramp_in_submodule_reads_root_final_time() {
 }
 
 type CompileFn =
-    fn(&simlin_engine::datamodel::Project) -> std::sync::Arc<simlin_engine::CompiledSimulation>;
+    fn(&simlin_base::datamodel::Project) -> std::sync::Arc<simlin_engine::CompiledSimulation>;
 
 fn simulate_path(xmile_path: &str) {
     simulate_path_with(xmile_path, compile_vm);
@@ -1962,7 +1963,7 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
 /// fixtures that neither backend can simulate are listed, with the `ErrorCode`
 /// that blocks each, in [`BLOCKED_CONVEYOR_FIXTURES`].
 fn wasm_parity_hook(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     expected: &Results,
     excluded: &[&str],
 ) {
@@ -2518,7 +2519,7 @@ fn except_defaults_survive_a_protobuf_round_trip() {
         let buf = serialize(&project).unwrap().encode_to_vec();
         let decoded = deserialize(project_io::Project::decode_from_slice(&buf).unwrap()).unwrap();
 
-        let run = |project: &simlin_engine::datamodel::Project| {
+        let run = |project: &simlin_base::datamodel::Project| {
             let mut vm = Vm::new(compile_vm(project)).unwrap();
             vm.run_to_end().unwrap();
             vm.into_results()
@@ -2566,7 +2567,7 @@ TIME STEP = 1 ~~|
     let results = vm.into_results();
 
     let get = |name: &str| -> f64 {
-        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        let ident = simlin_base::common::Ident::<simlin_base::common::Canonical>::new(name);
         let off = results.offsets[&ident];
         results.iter().next().unwrap()[off]
     };
@@ -2602,7 +2603,7 @@ TIME STEP = 1 ~~|
         .iter()
         .filter_map(|d| match &d.error {
             simlin_engine::db::DiagnosticError::Model(e)
-                if e.code == simlin_engine::common::ErrorCode::MissingElementEquation
+                if e.code == simlin_base::common::ErrorCode::MissingElementEquation
                     && d.variable.as_deref() == Some("h") =>
             {
                 Some((d.element(), e.get_details().unwrap_or_default()))
@@ -2678,14 +2679,14 @@ TIME STEP = 1 ~~|
     let results = vm.into_results();
 
     let off = |name: &str| -> usize {
-        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        let ident = simlin_base::common::Ident::<simlin_base::common::Canonical>::new(name);
         results.offsets[&ident]
     };
     let at =
         |name: &str, step: usize| -> f64 { results.data[step * results.step_size + off(name)] };
 
     // The single canonical Vensim `:NA:` sentinel: a finite number, never NaN.
-    let na = simlin_engine::float::NA;
+    let na = simlin_base::float::NA;
     assert!(na.is_finite(), ":NA: sentinel must be finite");
 
     // 11 saved steps for Time 0..=10.
@@ -2963,7 +2964,7 @@ fn a_vensim_lookup_listed_out_of_x_order_is_imported_in_x_order() {
             .iter()
             .find(|v| v.get_ident() == name)
             .unwrap_or_else(|| panic!("{name} is imported"));
-        let simlin_engine::datamodel::Variable::Aux(aux) = variable else {
+        let simlin_base::datamodel::Variable::Aux(aux) = variable else {
             panic!("{name} is an auxiliary");
         };
         let gf = aux.gf.as_ref().expect("its table is imported");
@@ -2979,7 +2980,7 @@ fn a_vensim_lookup_listed_out_of_x_order_is_imported_in_x_order() {
 
     // The curve through the points: -1 at 0, -4 at 0.5, -7 at 1, -5 at 1.5.
     let results = vm_results(&datamodel);
-    let reader = results.offsets[&simlin_engine::common::Ident::new("reader")];
+    let reader = results.offsets[&simlin_base::common::Ident::new("reader")];
     let series: Vec<f64> = results.iter().map(|row| row[reader]).collect();
     assert_eq!(series, [-1.0, -4.0, -7.0, -5.0, -3.0]);
 
@@ -3457,7 +3458,7 @@ fn simulates_wrld3_03() {
 /// `(invariant_offset_count, violation_count)`: the number of distinct slots the
 /// invariant prefix writes, and how many of them are NOT bit-constant across all
 /// saved steps. A sound classifier yields `violations == 0`.
-fn invariance_oracle(datamodel: &simlin_engine::datamodel::Project) -> (usize, usize) {
+fn invariance_oracle(datamodel: &simlin_base::datamodel::Project) -> (usize, usize) {
     let compiled = compile_vm(datamodel);
     // Snapshot the invariant offsets before `Vm::new` consumes the sim.
     let invariant_offsets = compiled.invariant_flow_offsets();
@@ -3699,7 +3700,7 @@ fn oracle_corpus_sir() {
 /// invariant-classified offsets equal the prefix-written offsets.
 #[test]
 fn partition_places_invariant_vars_before_dynamic() {
-    use simlin_engine::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     // `k` and `derived` are constant-derived (invariant); `ramping` is
     // TIME-dependent and `from_stock` reads the stock (both dynamic).
@@ -4029,7 +4030,7 @@ fn simulates_clearn() {
 /// path ([`run_clearn_vs_vdf`]) and the wasm twin ([`simulates_clearn_wasm`]) so
 /// both compile the byte-identical model. Heavy (C-LEARN is ~53k lines / 1.4 MB,
 /// ~5s just to parse on release).
-fn clearn_datamodel() -> simlin_engine::datamodel::Project {
+fn clearn_datamodel() -> simlin_base::datamodel::Project {
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
 
     eprintln!("model (vensim mdl): {mdl_path}");
@@ -4278,7 +4279,7 @@ TIME STEP = 1 ~~|
 
 /// Read a `[t1]/[t2]/[t3]`-style element series out of a `Results`.
 fn element_series(results: &Results, name: &str) -> Vec<f64> {
-    let id = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+    let id = simlin_base::common::Ident::<simlin_base::common::Canonical>::new(name);
     let off = *results.offsets.get(&id).unwrap_or_else(|| {
         panic!(
             "{name:?} absent; have {:?}",
@@ -4308,7 +4309,7 @@ fn compile_diags(mdl: &str) -> (bool, Vec<simlin_engine::db::Diagnostic>) {
     (is_err, collect_project_diagnostics(&dm))
 }
 
-fn diag_code(d: &simlin_engine::db::Diagnostic) -> Option<simlin_engine::common::ErrorCode> {
+fn diag_code(d: &simlin_engine::db::Diagnostic) -> Option<simlin_base::common::ErrorCode> {
     use simlin_engine::db::DiagnosticError;
     match &d.error {
         DiagnosticError::Equation(e) => Some(e.code),
@@ -4347,7 +4348,7 @@ fn diag_code(d: &simlin_engine::db::Diagnostic) -> Option<simlin_engine::common:
 /// `.dat`, so the series is asserted in-test via `element_series`.
 #[test]
 fn self_recurrence_resolves_and_no_self_token_leak() {
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
 
     let mdl = std::fs::read_to_string(
         "../../test/sdeverywhere/models/self_recurrence/self_recurrence.mdl",
@@ -4413,7 +4414,7 @@ fn self_recurrence_resolves_and_no_self_token_leak() {
 /// CLAUDE.md hard rule).
 #[test]
 fn genuine_cycles_still_rejected() {
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
 
     // (1) Scalar 2-cycle `a=b+1; b=a+1`: a true algebraic loop, no `self`
     // token involved at all -> `CircularDependency`, stable before and
@@ -4699,7 +4700,7 @@ fn interleaved_mdl_element_interleave_simulates() {
 ///   cs[t1]=1, cs[t2]=3, cs[t3]=5, ecs[t1]=2, ecs[t2]=4, ecs[t3]=6.
 #[test]
 fn init_recurrence_mdl_multi_member_init_scc_simulates() {
-    use simlin_engine::common::Ident;
+    use simlin_base::common::Ident;
     use simlin_engine::db::{ModuleInputSet, SccPhase, model_dependency_graph};
     use std::collections::BTreeSet;
 
@@ -4830,7 +4831,7 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
 /// ecc[t3]=INITIAL(ecc[t2]*2)=4.
 #[test]
 fn helper_recurrence_mdl_synthetic_helper_in_scc_simulates() {
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     use simlin_engine::db::{
         ModuleInputSet, SccPhase, model_dependency_graph, model_implicit_var_info,
     };
@@ -5021,7 +5022,7 @@ fn simulates_passthrough_init_macro_element_recurrence() {
 ///     name" failure mode.
 #[test]
 fn ref_interleaved_inter_variable_cycles_simulate_no_circular_no_leak() {
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     for path in [
         "../../test/sdeverywhere/models/ref/ref.mdl",
         "../../test/sdeverywhere/models/interleaved/interleaved.mdl",
@@ -5074,7 +5075,7 @@ fn ref_interleaved_inter_variable_cycles_simulate_no_circular_no_leak() {
 /// `flux2d[*,L1]`(1) = 1 per step into `stock1d` (init 0): [0, 1].
 #[test]
 fn simulates_subscript_pinned_higher_rank_flow() {
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let mdl = "\
 {UTF-8}
 scenario: s1, s2 ~~|
@@ -5132,7 +5133,7 @@ TIME STEP = 1 ~~|
 /// no such cycle.
 #[test]
 fn simulates_synthetic_net_flow_shape() {
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let mdl = "\
 {UTF-8}
 scenario: s1, s2 ~~|
@@ -5180,7 +5181,7 @@ TIME STEP = 1 ~~|
 /// #559 fixtures never caught it).
 #[test]
 fn simulates_piecewise_subrange_stock_net_flow() {
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let mdl = "\
 {UTF-8}
 Level: Retailer, Wholesaler, Factory ~~|
@@ -5221,7 +5222,7 @@ TIME STEP = 1 ~~|
 /// synthesized net-flow entry names a declared element combination.
 #[test]
 fn beer_game_import_has_no_unknown_element_subscripts() {
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let mdl = std::fs::read_to_string("../../test/metasd/beer-game/RealBeer4-Sterman13.mdl")
         .expect("beer-game model must be readable");
     let (_compile_err, diags) = compile_diags(&mdl);
@@ -5391,7 +5392,7 @@ SAVEPER = TIME STEP ~~|
     let results = vm.into_results();
 
     let get = |name: &str| -> Vec<f64> {
-        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        let ident = simlin_base::common::Ident::<simlin_base::common::Canonical>::new(name);
         let off = results.offsets[&ident];
         results.iter().map(|row| row[off]).collect()
     };
@@ -5453,7 +5454,7 @@ SAVEPER = TIME STEP ~~|
     let results = vm.into_results();
 
     let get = |name: &str| -> f64 {
-        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        let ident = simlin_base::common::Ident::<simlin_base::common::Canonical>::new(name);
         let off = results.offsets[&ident];
         results.iter().next().unwrap()[off]
     };
@@ -5496,7 +5497,7 @@ SAVEPER = TIME STEP ~~|
     let results = vm.into_results();
 
     let get = |name: &str, step: usize| -> f64 {
-        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        let ident = simlin_base::common::Ident::<simlin_base::common::Canonical>::new(name);
         let off = results.offsets[&ident];
         results.iter().nth(step).unwrap()[off]
     };
@@ -5613,7 +5614,7 @@ fn mark2_mdl_simulates_with_ltm_under_rk4() {
 /// Read a scalar variable's value at simulation step `step` (0-based) from a
 /// `Results`. Panics with a clear message if the variable is absent.
 fn macro_test_value_at(results: &Results, name: &str, step: usize) -> f64 {
-    let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+    let ident = simlin_base::common::Ident::<simlin_base::common::Canonical>::new(name);
     let off = *results.offsets.get(&ident).unwrap_or_else(|| {
         panic!(
             "variable {name:?} not in results; present: {:?}",
@@ -5791,19 +5792,19 @@ fn simulates_macro_clearn_ramp_from_to_mdl() {
 #[derive(Debug, Clone, PartialEq)]
 struct MacroDef {
     name: String,
-    spec: simlin_engine::datamodel::MacroSpec,
-    body: Vec<(String, Option<simlin_engine::datamodel::Equation>)>,
+    spec: simlin_base::datamodel::MacroSpec,
+    body: Vec<(String, Option<simlin_base::datamodel::Equation>)>,
 }
 
 /// Collect every macro-marked model in `project` as a `MacroDef`, sorted by
 /// macro name.
-fn collect_macro_defs(project: &simlin_engine::datamodel::Project) -> Vec<MacroDef> {
+fn collect_macro_defs(project: &simlin_base::datamodel::Project) -> Vec<MacroDef> {
     let mut defs: Vec<MacroDef> = project
         .models
         .iter()
         .filter_map(|m| {
             m.macro_spec.as_ref().map(|spec| {
-                let mut body: Vec<(String, Option<simlin_engine::datamodel::Equation>)> = m
+                let mut body: Vec<(String, Option<simlin_base::datamodel::Equation>)> = m
                     .variables
                     .iter()
                     .map(|v| (v.get_ident().to_string(), v.get_equation().cloned()))
@@ -5864,13 +5865,13 @@ fn macro_cross_format_mdl_to_xmile_to_datamodel_preserves_macro() {
 
     // The invocation is preserved: the `main` model's invocation aux reads
     // the same macro call equation before and after the cross-format trip.
-    let invocation_eqn = |p: &simlin_engine::datamodel::Project| -> String {
+    let invocation_eqn = |p: &simlin_base::datamodel::Project| -> String {
         let main = p.get_model("main").expect("project has a `main` model");
         let v = main
             .get_variable("macro output")
             .expect("`main` has the `macro output` invocation variable");
         match v.get_equation() {
-            Some(simlin_engine::datamodel::Equation::Scalar(s)) => s.clone(),
+            Some(simlin_base::datamodel::Equation::Scalar(s)) => s.clone(),
             other => panic!("expected a scalar invocation equation, got {other:?}"),
         }
     };
@@ -6388,7 +6389,7 @@ TIME STEP = 1 ~~|
 
 /// All `Diagnostic`s for a datamodel project, via the salsa pipeline.
 fn collect_project_diagnostics(
-    dm: &simlin_engine::datamodel::Project,
+    dm: &simlin_base::datamodel::Project,
 ) -> Vec<simlin_engine::db::Diagnostic> {
     use simlin_engine::db::{
         SimlinDb, collect_all_diagnostics, compile_project_incremental,
@@ -6444,10 +6445,10 @@ fn is_module_output_binding(equation: &str, module_ident: &str) -> bool {
 /// `<module>.<output>` binding form (ASCII period -- the datamodel
 /// separator). Returns `(module_count, binding_aux_count)`.
 fn count_materialized_macro(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
     macro_model: &str,
 ) -> (usize, usize) {
-    use simlin_engine::datamodel::{Equation, Variable};
+    use simlin_base::datamodel::{Equation, Variable};
     let main = project.get_model("main").expect("project has a main model");
     let module_idents: Vec<String> = main
         .variables
@@ -6568,7 +6569,7 @@ fn corpus_sstats_multi_output_materializes() {
     // blockers are the unrelated unresolved `*_data` GET-DIRECT
     // references; the SSTATS macro itself must not produce
     // UnknownBuiltin/BadModelName/BadBuiltinArgs/DuplicateMacroName).
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     use simlin_engine::db::DiagnosticError;
     let macro_codes = [
         ErrorCode::UnknownBuiltin,
@@ -6640,10 +6641,10 @@ fn corpus_sstats_multi_output_materializes() {
 ///    macro-attributable; the classifier must not mistake it for a macro
 ///    error.
 fn macro_attributable_diagnostics<'a>(
-    dm: &simlin_engine::datamodel::Project,
+    dm: &simlin_base::datamodel::Project,
     diags: &'a [simlin_engine::db::Diagnostic],
 ) -> Vec<&'a simlin_engine::db::Diagnostic> {
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     use simlin_engine::db::{DiagnosticError, DiagnosticSeverity};
 
     let macro_models: std::collections::BTreeSet<&str> = dm
@@ -6724,7 +6725,7 @@ fn macro_attributable_diagnostics<'a>(
 /// it is not brittle to `datamodel::Project` struct changes.
 #[test]
 fn macro_attributable_classifier_separates_macro_from_nonmacro() {
-    use simlin_engine::common::{Error, ErrorCode, ErrorKind};
+    use simlin_base::common::{Error, ErrorCode, ErrorKind};
     use simlin_engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     // A real macro-marked model named `m` (single-output macro `M`).
@@ -6753,7 +6754,7 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
         .clone();
 
     let eq = |code: ErrorCode| {
-        DiagnosticError::Equation(simlin_engine::common::EquationError::new(code, 0, 0))
+        DiagnosticError::Equation(simlin_base::common::EquationError::new(code, 0, 0))
     };
     let model_err =
         |code: ErrorCode| DiagnosticError::Model(Error::new(ErrorKind::Model, code, None));
@@ -7337,7 +7338,7 @@ fn clearn_ltm_partials_all_parse() {
 #[test]
 #[ignore = "C-LEARN compiled and run with no numeric comparison, a second C-LEARN compile the default suite does not need; run under the gates profile"]
 fn compiles_and_runs_clearn_structural() {
-    use simlin_engine::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
 
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
 
@@ -7746,7 +7747,7 @@ fn each_occurrence_of_a_repeated_active_dimension_reads_its_own_axis() {
     let at = |name: &str| -> f64 {
         let off = *expected
             .offsets
-            .get(&simlin_engine::common::Ident::new(name))
+            .get(&simlin_base::common::Ident::new(name))
             .unwrap_or_else(|| panic!("{name} missing from results"));
         last[off]
     };
@@ -7819,7 +7820,7 @@ fn a_subrange_subscript_reads_the_element_it_names() {
     let at = |name: &str| -> f64 {
         let off = *results
             .offsets
-            .get(&simlin_engine::common::Ident::new(name))
+            .get(&simlin_base::common::Ident::new(name))
             .unwrap_or_else(|| panic!("{name} missing from results"));
         last[off]
     };
@@ -7856,7 +7857,7 @@ fn a_subrange_subscript_reads_the_element_it_names() {
 /// fixture through `open_xmile`, on the VM and on wasm.
 #[test]
 fn a_subrange_dimension_reference_reads_by_name_in_every_spelling() {
-    let xmile = |probe: &str| -> simlin_engine::datamodel::Project {
+    let xmile = |probe: &str| -> simlin_base::datamodel::Project {
         let text = format!(
             r#"<?xml version="1.0" encoding="utf-8"?>
 <xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
@@ -7898,7 +7899,7 @@ fn a_subrange_dimension_reference_reads_by_name_in_every_spelling() {
     let at = |name: &str| -> f64 {
         let off = *results
             .offsets
-            .get(&simlin_engine::common::Ident::new(name))
+            .get(&simlin_base::common::Ident::new(name))
             .unwrap_or_else(|| panic!("{name} missing from results"));
         last[off]
     };
@@ -8048,7 +8049,7 @@ fn a_shared_materialization_inside_a_recurrence_scc_precedes_every_reader() {
                 let cell = format!("{var}[t{}]", i + 1);
                 let off = *results
                     .offsets
-                    .get(&simlin_engine::common::Ident::new(&cell))
+                    .get(&simlin_base::common::Ident::new(&cell))
                     .unwrap_or_else(|| panic!("{what}: {cell} missing from results"));
                 assert_eq!(row[off], *want, "{what}: {cell} at step {step}");
             }
@@ -8122,7 +8123,7 @@ fn two_arms_each_materializing_a_temp_inside_a_recurrence_compile_in_both_orders
                 let cell = format!("a[d{}]", i + 1);
                 let off = *results
                     .offsets
-                    .get(&simlin_engine::common::Ident::new(&cell))
+                    .get(&simlin_base::common::Ident::new(&cell))
                     .unwrap_or_else(|| panic!("{what}: {cell} missing from results"));
                 assert_eq!(row[off], *want, "{what}: {cell} at step {step}");
             }
@@ -8192,7 +8193,7 @@ fn a_private_materialization_beside_a_shared_one_stays_in_its_element() {
                 let cell = format!("a[d{}]", i + 1);
                 let off = *results
                     .offsets
-                    .get(&simlin_engine::common::Ident::new(&cell))
+                    .get(&simlin_base::common::Ident::new(&cell))
                     .unwrap_or_else(|| panic!("{what}: {cell} missing from results"));
                 assert_eq!(row[off], *want, "{what}: {cell} at step {step}");
             }
@@ -8252,7 +8253,7 @@ fn a_temp_axis_the_target_does_not_name_is_read_through_the_declared_corresponde
         for (cell, want) in cells.iter().zip([1.0, 2.0, 0.0]) {
             let off = *results
                 .offsets
-                .get(&simlin_engine::common::Ident::new(cell))
+                .get(&simlin_base::common::Ident::new(cell))
                 .unwrap_or_else(|| panic!("{what}: {cell} missing from results"));
             assert_eq!(last[off], want, "{what}: {cell}");
         }

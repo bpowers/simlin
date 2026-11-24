@@ -2,16 +2,16 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::common::{Error, ErrorCode, ErrorKind, Result};
-use crate::datamodel::{
+use crate::project_io;
+use buffa::{EnumValue, MessageField};
+use simlin_base::common::{Error, ErrorCode, ErrorKind, Result};
+use simlin_base::datamodel::{
     Aux, Compat, Conveyor, DataSource, DataSourceKind, Dimension, DimensionElements,
     DimensionMapping, Dt, Equation, Extension, Flow, GraphicalFunction, GraphicalFunctionKind,
     GraphicalFunctionScale, Leakage, LoopMetadata, MacroSpec, Model, ModelGroup, Module,
     ModuleReference, Project, Queue, Rect, SimMethod, SimSpecs, Source, SpreadFlow, Stock,
     StockFlow, Unit, Variable, View, ViewElement, Visibility, view_element,
 };
-use crate::project_io;
-use buffa::{EnumValue, MessageField};
 
 /// Repair a pre-#559 2022-era stored identifier so it survives the
 /// salsa-boundary re-canonicalization unchanged (issue #690).
@@ -661,7 +661,7 @@ impl TryFrom<project_io::variable::Equation> for Equation {
                                 // Migrated like the declaration (#690), then
                                 // stored as the element key's canonical
                                 // spelling (`from_subscript`, the one owner).
-                                crate::common::CanonicalElementName::from_subscript(
+                                simlin_base::common::CanonicalElementName::from_subscript(
                                     &migrate_stored_ident(e.subscript),
                                 )
                                 .as_str()
@@ -2388,7 +2388,7 @@ impl TryFrom<project_io::View> for View {
             },
             elements: elements.into(),
             view_box: view_box.map(Rect::from).unwrap_or_default(),
-            zoom: if crate::float::approx_eq(zoom, 0.0) {
+            zoom: if simlin_base::float::approx_eq(zoom, 0.0) {
                 1.0
             } else {
                 zoom
@@ -2510,7 +2510,7 @@ fn test_view_deserialize_keeps_nonempty_name_without_presence_flag() {
 
 impl From<Model> for project_io::Model {
     fn from(mut model: Model) -> Self {
-        use crate::canonicalize;
+        use simlin_base::canonicalize;
 
         // Sort ALL variables by their canonical identifier for deterministic ordering
         // This ensures consistent proto serialization regardless of file order or variable type
@@ -2661,7 +2661,7 @@ impl TryFrom<project_io::Model> for Model {
     type Error = Error;
 
     fn try_from(model: project_io::Model) -> Result<Self> {
-        use crate::canonicalize;
+        use simlin_base::canonicalize;
 
         let in_this_model = || within(format!("model '{}'", model.name));
         let mut variables = model
@@ -3110,7 +3110,7 @@ pub fn deserialize_graphical_function(
 
 #[cfg(test)]
 fn make_test_project(variables: Vec<Variable>, dimensions: Vec<Dimension>) -> Project {
-    use crate::datamodel::{self, SimMethod};
+    use simlin_base::datamodel::{self, SimMethod};
     Project {
         name: "test".to_string(),
         sim_specs: SimSpecs {

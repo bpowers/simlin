@@ -117,8 +117,8 @@ pub use verify::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::datamodel;
 use crate::db::{SimlinDb, SourceModel, SourceProject};
+use simlin_base::datamodel;
 
 /// What a tool call reads: a project, the salsa database synced to it, and the
 /// project's revision.
@@ -493,7 +493,7 @@ fn checkpointed<T>(ws: Workspace<'_>, answer: impl FnOnce(&mut Workspace<'_>) ->
 /// A run's series for a host to chart, and what the host needs to say of
 /// them.
 pub struct RunResults {
-    pub results: crate::Results,
+    pub results: simlin_base::Results,
     /// The revision the run was made at.
     pub revision: u64,
     /// Whether the model has changed since, beyond its diagrams.
@@ -759,7 +759,7 @@ pub(crate) fn resolve_model<'p>(
             "the project has not been compiled; the host must sync it before calling a tool",
         )
     })?;
-    let canonical = crate::canonicalize(&model.name);
+    let canonical = simlin_base::canonicalize(&model.name);
     let source_model = source_project
         .models(db)
         .get(canonical.as_ref())

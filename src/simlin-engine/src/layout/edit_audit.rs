@@ -46,12 +46,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::common::canonicalize;
-use crate::datamodel::view_element::{Flow, FlowPoint, LinkShape};
-use crate::datamodel::{self, StockFlow, Variable, ViewElement};
 use crate::diagram::common::Rect;
 use crate::editing::invariants::{Mode, check_flow_invariants};
-use crate::project_patch::{ModelOperation, ModelPatch};
+use simlin_base::common::canonicalize;
+use simlin_base::datamodel::view_element::{Flow, FlowPoint, LinkShape};
+use simlin_base::datamodel::{self, StockFlow, Variable, ViewElement};
+use simlin_base::project_patch::{ModelOperation, ModelPatch};
 
 use super::compute_dependency_metadata;
 use super::config::LayoutConfig;

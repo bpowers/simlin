@@ -61,8 +61,8 @@
 
 use wasm_encoder::{BlockType, Function, Instruction as I};
 
-use crate::common::ErrorCode;
 use crate::conveyor_compile::ConveyorPlan;
+use simlin_base::common::ErrorCode;
 
 /// Index of the error-code global. It follows the seven globals `module.rs`
 /// reserves (three immutable geometry globals, `use_prev_fallback`, and the

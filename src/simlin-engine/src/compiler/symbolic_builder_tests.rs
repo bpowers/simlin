@@ -18,7 +18,7 @@ use super::*;
 /// so all these assertions need is that distinct operands stay distinguishable
 /// and survive fusion intact.
 fn v(n: u16) -> SymVarRef {
-    SymVarRef::base(crate::common::Ident::new(&format!("v{n}")))
+    SymVarRef::base(simlin_base::common::Ident::new(&format!("v{n}")))
 }
 
 #[test]

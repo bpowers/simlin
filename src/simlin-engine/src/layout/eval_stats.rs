@@ -308,7 +308,7 @@ fn wilcoxon_normal_p(n: usize, w_plus_doubled: usize, tie_term: f64) -> f64 {
 /// (max absolute error ~1.5e-7) -- ample accuracy for a significance verdict.
 ///
 /// A small local copy keeps this module self-contained and independently
-/// testable (the VM-internal `crate::alloc::erfc_approx`/`normal_cdf` are an
+/// testable (the VM-internal `simlin_base::alloc::erfc_approx`/`normal_cdf` are an
 /// implementation detail of the allocation opcodes).
 fn erf(x: f64) -> f64 {
     // A&S 7.1.26 is stated for x >= 0; erf is odd, so reflect for x < 0.

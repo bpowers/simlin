@@ -8,8 +8,8 @@
 //! (GH #645).
 
 use super::*;
-use crate::datamodel;
 use crate::testutils::feedback_loop_project;
+use simlin_base::datamodel;
 // ── PREVIOUS/INIT opcode verification tests ──────────────────────────
 
 /// 1-arg PREVIOUS(x) compiles to the LoadPrev opcode. Verify that
@@ -80,7 +80,7 @@ fn test_init_opcode_vm() {
 /// stdlib model registry.
 #[test]
 fn test_previous_removed_from_stdlib_model_names() {
-    let names = crate::stdlib::MODEL_NAMES;
+    let names = simlin_base::stdlib::MODEL_NAMES;
     assert!(
         !names.contains(&"previous"),
         "'previous' should no longer be in MODEL_NAMES"
@@ -1070,9 +1070,7 @@ fn test_with_lookup_link_polarity_and_score_gf_aware() {
     let score_name = "$\u{205A}ltm\u{205A}link_score\u{205A}input\u{2192}effect";
     let offset = *compiled
         .offsets
-        .get(&crate::common::Ident::<crate::common::Canonical>::new(
-            score_name,
-        ))
+        .get(&simlin_base::common::Ident::<simlin_base::common::Canonical>::new(score_name))
         .unwrap_or_else(|| {
             panic!(
                 "missing {score_name} in compiled offsets: {:?}",
@@ -1198,7 +1196,7 @@ fn test_with_lookup_arrayed_link_scores_gf_aware() {
     for (elem_off, elem) in ["r1", "r2"].iter().enumerate() {
         let offset = *compiled
             .offsets
-            .get(&crate::common::Ident::<crate::common::Canonical>::new(base))
+            .get(&simlin_base::common::Ident::<simlin_base::common::Canonical>::new(base))
             .unwrap_or_else(|| panic!("missing {base} in compiled offsets"))
             + elem_off;
         let series: Vec<f64> = results.iter().map(|row| row[offset]).collect();
@@ -1219,9 +1217,7 @@ fn test_with_lookup_arrayed_link_scores_gf_aware() {
         let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}input[{elem}]\u{2192}effect2");
         let base_off = *compiled
             .offsets
-            .get(&crate::common::Ident::<crate::common::Canonical>::new(
-                &name,
-            ))
+            .get(&simlin_base::common::Ident::<simlin_base::common::Canonical>::new(&name))
             .unwrap_or_else(|| {
                 panic!(
                     "missing {name} in compiled offsets: {:?}",
@@ -1260,12 +1256,12 @@ fn shallow_decreasing_gf(x_max: f64) -> datamodel::GraphicalFunction {
 /// Read a link score's per-step series out of a compiled+run LTM model.
 fn ltm_score_series(
     compiled: &crate::CompiledSimulation,
-    results: &crate::results::Results,
+    results: &simlin_base::results::Results,
     name: &str,
 ) -> Vec<f64> {
     let offset = *compiled
         .offsets
-        .get(&crate::common::Ident::<crate::common::Canonical>::new(name))
+        .get(&simlin_base::common::Ident::<simlin_base::common::Canonical>::new(name))
         .unwrap_or_else(|| {
             panic!(
                 "missing {name} in compiled offsets: {:?}",
@@ -1976,7 +1972,7 @@ fn test_smooth3_stock_input_initialization() {
     vm.run_to_end().expect("VM should run");
     let vm_results = vm.into_results();
 
-    let smoothed_ident = crate::common::Ident::new("smoothed");
+    let smoothed_ident = simlin_base::common::Ident::new("smoothed");
     let vm_off = vm_results.offsets[&smoothed_ident];
     let vm_step0 = vm_results.data[vm_off];
     assert_eq!(
@@ -2126,10 +2122,10 @@ fn test_previous_of_module_backed_variable_compiles_correctly() {
     vm.run_to_end().expect("simulation should run");
 
     let x_series = vm
-        .get_series(&crate::common::Ident::new("x"))
+        .get_series(&simlin_base::common::Ident::new("x"))
         .expect("x missing");
     let y_series = vm
-        .get_series(&crate::common::Ident::new("y"))
+        .get_series(&simlin_base::common::Ident::new("y"))
         .expect("y missing");
     assert_eq!(x_series.len(), y_series.len());
 

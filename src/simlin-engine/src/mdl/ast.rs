@@ -5,7 +5,7 @@
 //! AST types for the Vensim MDL parser.
 //!
 //! These types are produced by the recursive descent parser from normalized
-//! tokens and later converted to `crate::datamodel` structures.
+//! tokens and later converted to `simlin_base::datamodel` structures.
 
 use std::borrow::Cow;
 
@@ -145,7 +145,7 @@ pub enum Expr<'input> {
     /// This matches xmutil's `vpyy_literal_expression("?")` behavior.
     Literal(Cow<'input, str>, Loc),
     /// Vensim's `:NA:` constant: the finite "missing data" sentinel `-2^109`
-    /// (see `crate::float::NA`), NOT IEEE NaN. Both lowering paths -- the
+    /// (see `simlin_base::float::NA`), NOT IEEE NaN. Both lowering paths -- the
     /// expression formatter (`xmile_compat`) and the data-list number parser --
     /// route it to that single sentinel.
     Na(Loc),

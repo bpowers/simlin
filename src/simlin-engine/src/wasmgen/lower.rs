@@ -55,7 +55,7 @@
 //! ## Emitted helper functions
 //!
 //! Equality and truthiness route through a single emitted wasm helper,
-//! `approx_eq(a: f64, b: f64) -> i32`, that reproduces `crate::float::approx_eq`
+//! `approx_eq(a: f64, b: f64) -> i32`, that reproduces `simlin_base::float::approx_eq`
 //! bit-faithfully, so the backend takes the same branch the VM does. Helper functions are assembled into the module ahead of
 //! the per-program functions ([`build_helpers`] returns their bodies and a
 //! [`HelperFns`] index registry); `module.rs` places them at function indices
@@ -66,7 +66,7 @@
 //! corresponding body in [`build_helpers`]; no helper index is hard-coded
 //! elsewhere, so the per-program offset adjusts automatically.
 
-use crate::common::IdentMap;
+use simlin_base::common::IdentMap;
 
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 
@@ -297,8 +297,8 @@ impl EmitCtx<'_> {
 // The clock's slots (absolute, module-independent) as the immediates a global
 // load takes. `Apply` reads `curr[TIME_OFF]` / `curr[DT_OFF]` for the
 // time-driven builtins.
-const TIME_OFF: u16 = crate::results::TIME_OFF as u16;
-const DT_OFF: u16 = crate::results::DT_OFF as u16;
+const TIME_OFF: u16 = simlin_base::results::TIME_OFF as u16;
+const DT_OFF: u16 = simlin_base::results::DT_OFF as u16;
 
 pub(crate) fn memarg(addr: u64) -> MemArg {
     MemArg {
@@ -333,7 +333,7 @@ pub(crate) fn f64_const(v: f64) -> Instruction<'static> {
 #[derive(Clone, Copy)]
 pub(crate) struct HelperFns {
     /// `approx_eq(a: f64, b: f64) -> i32` (1 = approximately equal, else 0),
-    /// reproducing `crate::float::approx_eq`.
+    /// reproducing `simlin_base::float::approx_eq`.
     pub approx_eq: u32,
     /// `mod_euclid(l: f64, r: f64) -> f64`, reproducing `f64::rem_euclid` (the
     /// VM's `Op2::Mod`): a result in `[0, |r|)`. A self-contained helper (rather
@@ -385,7 +385,7 @@ pub(crate) struct HelperFns {
     /// which is false for NaN), reproducing the VM's stable
     /// `sort_by(partial_cmp(..).unwrap_or(Equal))`.
     pub stable_sort: u32,
-    /// Allocation helpers (`super::alloc`), porting `crate::alloc`
+    /// Allocation helpers (`super::alloc`), porting `simlin_base::alloc`
     /// bit-faithfully for the `AllocateAvailable`/`AllocateByPriority` opcodes:
     /// - `erfc_approx(z: f64) -> f64` (Abramowitz-Stegun 26.2.17; `call`s
     ///   [`exp`](Self::exp) for the `(-z*z).exp()` factor),
@@ -630,10 +630,10 @@ const AE_ABS: u32 = 6; // abs(diff) before saturation
 const AE_LOCAL_COUNT: u32 = 5; // declared i64 locals (indices 2..=6)
 
 /// Build the body of the `approx_eq(a: f64, b: f64) -> i32` helper, reproducing
-/// `crate::float::approx_eq` (margin `epsilon = f64::EPSILON`, `ulps = 4`)
+/// `simlin_base::float::approx_eq` (margin `epsilon = f64::EPSILON`, `ulps = 4`)
 /// bit-faithfully.
 ///
-/// The Rust reference (`crate::float`) is the short-circuiting OR of three
+/// The Rust reference (`simlin_base::float`) is the short-circuiting OR of three
 /// total, trap-free checks (exact equality / ±inf, absolute-epsilon, ULP):
 ///
 /// ```text
@@ -647,7 +647,7 @@ const AE_LOCAL_COUNT: u32 = 5; // declared i64 locals (indices 2..=6)
 /// evaluating them eagerly and OR-ing the i32 results is bit-identical to the
 /// Rust short-circuit; the fast path is only a performance shortcut, not a
 /// semantic difference. Notably this makes `approx_eq(NaN, NaN) == true`
-/// (identical bits -> 0 ULPs) and keeps the finite `crate::float::NA` sentinel
+/// (identical bits -> 0 ULPs) and keeps the finite `simlin_base::float::NA` sentinel
 /// distinct from ordinary values (its exponent is far from theirs).
 fn emit_approx_eq() -> Function {
     use Instruction as Ins;
@@ -714,7 +714,7 @@ fn emit_approx_eq() -> Function {
 
 /// Append the wasm sequence that pushes `ordered(local)` onto the stack, where
 /// `ordered(f) = { let bits = f.to_bits() as i64; if bits < 0 { !bits } else
-/// { bits ^ i64::MIN } }` (`crate::float`'s sign-magnitude -> monotonic map). `bits`
+/// { bits ^ i64::MIN } }` (`simlin_base::float`'s sign-magnitude -> monotonic map). `bits`
 /// is materialized once into `bits_local` (i64) and reused for the two branch
 /// values and the sign test; `select` chooses between them. `i64::MIN` is the
 /// `1 << 63` sign mask as a signed `i64`, and `!bits` is `bits ^ -1`.
@@ -823,7 +823,7 @@ fn emit_pulse() -> Function {
     // parameter's local is reused).
     f.instruction(&Ins::LocalGet(PU_TIME));
     f.instruction(&Ins::LocalGet(PU_DT));
-    f.instruction(&f64_const(crate::results::STEP_TOLERANCE));
+    f.instruction(&f64_const(simlin_base::results::STEP_TOLERANCE));
     f.instruction(&Ins::F64Mul);
     f.instruction(&Ins::F64Add);
     f.instruction(&Ins::LocalSet(PU_TIME));
@@ -889,7 +889,7 @@ fn emit_pulse() -> Function {
 
 /// Push `call approx_eq` for two f64 operands already on the wasm stack
 /// (`[a, b]`); leaves an i32 (1 = approximately equal) on the stack. Mirrors a
-/// `crate::float::approx_eq(a, b)` call.
+/// `simlin_base::float::approx_eq(a, b)` call.
 fn emit_call_approx_eq(ctx: &EmitCtx, f: &mut Function) {
     f.instruction(&Instruction::Call(ctx.helpers.approx_eq));
 }
@@ -2650,7 +2650,7 @@ pub(crate) fn temp_element_byte_addr(
 }
 
 /// Emit the wasm analogue of the VM's `fill_temp_nan` (`vm.rs:2866-2881`): store
-/// IEEE `f64::NAN` (NOT the finite `crate::float::NA` sentinel) into every slot
+/// IEEE `f64::NAN` (NOT the finite `simlin_base::float::NA` sentinel) into every slot
 /// of temp `temp_id`'s region, `temp_storage[temp_offsets[temp_id] ..
 /// temp_offsets[temp_id + 1]]` (or `.. temp_total_size` for the last temp).
 ///

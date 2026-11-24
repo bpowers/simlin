@@ -229,7 +229,7 @@ fn a_stock_that_goes_negative_says_when_and_one_at_rest_does_not() {
 fn an_oscillation_lists_its_turning_points_up_to_six() {
     let project = TestProject::new("oscillator")
         .with_sim_time(0.0, 80.0, 0.0625)
-        .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
+        .with_sim_method(simlin_base::datamodel::SimMethod::RungeKutta4)
         .stock("x", "0", &["dx"], &[], None)
         .stock("v", "0", &["dv"], &[], None)
         .flow("dx", "v", None)

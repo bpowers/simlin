@@ -11,8 +11,8 @@
 
 use proptest::prelude::*;
 
-use crate::datamodel;
 use crate::json_sdai::*;
+use simlin_base::datamodel;
 
 // Strategy helpers for generating valid identifiers and equations
 

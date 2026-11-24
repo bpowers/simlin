@@ -13,9 +13,9 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use super::tests::{corpus, edit, operations, read, refused};
-use crate::datamodel;
 use crate::tools::Session;
 use crate::tools::test_support::Host;
+use simlin_base::datamodel;
 
 /// Every series of the run of the project's model `model` that belongs to a
 /// variable of the model (`save_check::column_variable`: the compiler's own
@@ -27,7 +27,7 @@ fn series(host: &mut Host, model: &str) -> BTreeMap<(String, String), Vec<f64>> 
             .expect("the model")
             .variables
             .iter()
-            .map(|var| crate::canonicalize(var.get_ident()).into_owned())
+            .map(|var| simlin_base::canonicalize(var.get_ident()).into_owned())
             .collect();
     let mut session = Session::new(model);
     let run = session

@@ -21,11 +21,11 @@
 use std::collections::HashSet;
 
 use super::*;
-use crate::ast::{Expr0, print_eqn};
 use crate::capture::ImplicitVar;
-use crate::common::ErrorCode;
-use crate::lexer::LexerType;
 use crate::test_common::{TestProject, implicit_vars_of};
+use simlin_base::ast::{Expr0, print_eqn};
+use simlin_base::common::ErrorCode;
+use simlin_base::lexer::LexerType;
 
 /// How the row's equation is attached to the model, which is what decides
 /// whether the parse walks it once or once per element, and hence whether a
@@ -600,10 +600,10 @@ fn every_module_call_shape_carries_its_idents_model_and_wiring() {
 /// agreeing with a dangling reference.
 #[test]
 fn every_synthesized_module_targets_a_real_stdlib_model_and_port() {
-    let stdlib: HashMap<String, HashSet<String>> = crate::stdlib::MODEL_NAMES
+    let stdlib: HashMap<String, HashSet<String>> = simlin_base::stdlib::MODEL_NAMES
         .iter()
         .filter_map(|name| {
-            let model = crate::stdlib::get(name)?;
+            let model = simlin_base::stdlib::get(name)?;
             let inputs: HashSet<String> = model
                 .variables
                 .iter()
@@ -658,7 +658,7 @@ fn every_synthesized_module_targets_a_real_stdlib_model_and_port() {
 /// as rewritten by the row table.
 #[test]
 fn a_hoisted_argument_holds_the_argument_subtree_itself() {
-    use crate::builtins::UntypedBuiltinFn;
+    use simlin_base::builtins::UntypedBuiltinFn;
 
     /// Does the walk rewrite this argument -- a nested call anywhere in it?
     fn has_call(e: &Expr0) -> bool {

@@ -25,7 +25,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::datamodel::{self, ViewElement};
 use crate::diagram::common::{
     self, Point, Rect, display_name, merge_bounds, rect_area, rect_overlap_area,
     segment_clip_interval_in_rect,
@@ -35,6 +34,7 @@ use crate::diagram::elements::{
     aux_shape_bounds, cloud_bounds, module_shape_bounds, stock_shape_bounds,
 };
 use crate::diagram::label::{LabelProps, label_bounds};
+use simlin_base::datamodel::{self, ViewElement};
 
 use super::annealing::segment_intersection;
 use super::build_view_segments;
@@ -437,7 +437,7 @@ pub(crate) fn pipe_rects(flow: &datamodel::view_element::Flow) -> Vec<Rect> {
 
 /// The bare shape box of an alias: the aux-radius circle `render_alias` draws,
 /// centered on the alias position.
-pub(crate) fn alias_shape_box(alias: &crate::datamodel::view_element::Alias) -> Rect {
+pub(crate) fn alias_shape_box(alias: &simlin_base::datamodel::view_element::Alias) -> Rect {
     use crate::diagram::constants::AUX_RADIUS;
     circle_box(alias.x, alias.y, AUX_RADIUS)
 }
@@ -445,9 +445,9 @@ pub(crate) fn alias_shape_box(alias: &crate::datamodel::view_element::Alias) -> 
 /// The label an alias renders: its SOURCE element's display name (resolved
 /// through `alias_of_uid`), positioned like an aux label.
 pub(crate) fn alias_label_props_for(
-    alias: &crate::datamodel::view_element::Alias,
+    alias: &simlin_base::datamodel::view_element::Alias,
     source_name: &str,
-    side: crate::datamodel::view_element::LabelSide,
+    side: simlin_base::datamodel::view_element::LabelSide,
 ) -> LabelProps {
     use crate::diagram::constants::AUX_RADIUS;
     LabelProps::new(alias.x, alias.y, side, display_name(source_name))
@@ -485,7 +485,7 @@ pub(crate) fn alias_source_names<'a>(
 /// against the identical geometry this metric uses.
 pub(crate) fn element_label_props_for(
     element: &ViewElement,
-    side: crate::datamodel::view_element::LabelSide,
+    side: simlin_base::datamodel::view_element::LabelSide,
 ) -> Option<LabelProps> {
     use crate::diagram::constants::{
         AUX_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
@@ -518,7 +518,9 @@ pub(crate) fn element_label_props_for(
 /// The element's own current label side, or `None` for kinds that render no
 /// label of their own name (the set `element_label_props_for` returns `Some`
 /// for, plus aliases).
-fn element_label_side(element: &ViewElement) -> Option<crate::datamodel::view_element::LabelSide> {
+fn element_label_side(
+    element: &ViewElement,
+) -> Option<simlin_base::datamodel::view_element::LabelSide> {
     match element {
         ViewElement::Aux(a) => Some(a.label_side),
         ViewElement::Stock(s) => Some(s.label_side),

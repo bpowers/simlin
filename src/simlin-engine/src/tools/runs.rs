@@ -46,13 +46,13 @@ use indexmap::IndexMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Canonical, Ident};
-use crate::datamodel::{self, Equation, Variable};
 use crate::db::{
     DiagnosticSeverity, LtmOverlay, SimlinDb, SourceProject, collect_all_diagnostics,
     simulation_key,
 };
-use crate::results::{Results, written, written_count, written_rows};
+use simlin_base::common::{Canonical, Ident};
+use simlin_base::datamodel::{self, Equation, Variable};
+use simlin_base::results::{Results, written, written_count, written_rows};
 
 use super::evidence::{QUOTE_CHARS, window};
 use super::loops::LoopAnalysis;
@@ -371,7 +371,7 @@ impl Run {
 
     /// The saved times.
     pub(crate) fn times(&self) -> Vec<f64> {
-        self.series(crate::results::TIME_OFF)
+        self.series(simlin_base::results::TIME_OFF)
     }
 
     /// The series at a results offset, over the rows the run saved.
@@ -916,8 +916,8 @@ fn simulate(
     overlay: LtmOverlay,
     waiting: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> Result<Results, RunFailure> {
-    let own = crate::results::Specs::from(specs);
-    let run = crate::results::Specs::from(&plan.specs.applied_to(specs));
+    let own = simlin_base::results::Specs::from(specs);
+    let run = simlin_base::results::Specs::from(&plan.specs.applied_to(specs));
     // Specs a plan changed are an agent's; the model's own run as they are.
     if let Some(reason) = no_run(&run).filter(|_| !plan.specs.is_empty()) {
         return Err(RunFailure::from(format!("under its specs, {reason}")));
@@ -1104,7 +1104,7 @@ impl Slices<'_> {
 /// Why a VM was not built.
 pub(crate) enum Unbuilt {
     /// The model does not compile.
-    Compile(crate::common::Error),
+    Compile(simlin_base::common::Error),
     /// The run would cost more than a run may ([`over_budget`]).
     Cost(String),
 }
@@ -1118,7 +1118,7 @@ pub(crate) fn build_vm(
     project: &datamodel::Project,
     model_name: &str,
     overlay: LtmOverlay,
-    own: &crate::results::Specs,
+    own: &simlin_base::results::Specs,
 ) -> Result<crate::vm::Vm, Unbuilt> {
     build_vm_under(db, source_project, project, model_name, overlay, own, None)
 }
@@ -1132,8 +1132,8 @@ fn build_vm_under(
     project: &datamodel::Project,
     model_name: &str,
     overlay: LtmOverlay,
-    own: &crate::results::Specs,
-    run: Option<crate::results::Specs>,
+    own: &simlin_base::results::Specs,
+    run: Option<simlin_base::results::Specs>,
 ) -> Result<crate::vm::Vm, Unbuilt> {
     let build = crate::queue_compile::compile_sim(db, source_project, project, model_name, overlay)
         .map_err(Unbuilt::Compile)?;
@@ -1156,8 +1156,8 @@ fn build_vm_under(
 /// Why no run can be made under `specs`, or `None`: a start, stop or DT that
 /// is no finite number, what both backends refuse (`Specs::refusal`), and a DT
 /// longer than the run, which would take no step past its start.
-pub(crate) fn no_run(specs: &crate::results::Specs) -> Option<String> {
-    let number = crate::results::written;
+pub(crate) fn no_run(specs: &simlin_base::results::Specs) -> Option<String> {
+    let number = simlin_base::results::written;
     let span = specs.stop - specs.start;
     if !(specs.start.is_finite() && specs.stop.is_finite() && specs.dt.is_finite())
         || !span.is_finite()
@@ -1192,12 +1192,12 @@ pub(crate) fn no_run(specs: &crate::results::Specs) -> Option<String> {
 /// (`own`) cost, so the model as it stands always runs, and only a change of
 /// specs can be refused.
 pub(crate) fn over_budget(
-    specs: &crate::results::Specs,
+    specs: &simlin_base::results::Specs,
     slots: usize,
-    own: &crate::results::Specs,
+    own: &simlin_base::results::Specs,
 ) -> Option<String> {
     let slots = slots.max(1);
-    let steps = |specs: &crate::results::Specs| specs.final_step() as f64;
+    let steps = |specs: &simlin_base::results::Specs| specs.final_step() as f64;
     let span = specs.stop - specs.start;
     let slots_f = slots as f64;
     let save = specs.save_step.max(specs.dt);
@@ -1428,14 +1428,14 @@ fn refusal_reason(
     db: &SimlinDb,
     source_project: SourceProject,
     model_name: &str,
-    err: &crate::common::Error,
+    err: &simlin_base::common::Error,
 ) -> String {
-    let model = crate::canonicalize(model_name);
+    let model = simlin_base::canonicalize(model_name);
     let reasons: Vec<String> = collect_all_diagnostics(db, source_project, LtmOverlay::Off)
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Error
-                && (d.model.is_empty() || crate::canonicalize(&d.model) == model)
+                && (d.model.is_empty() || simlin_base::canonicalize(&d.model) == model)
         })
         .map(|d| {
             let variable = d.owner.as_deref().or(d.variable.as_deref());
@@ -1455,8 +1455,8 @@ fn refusal_reason(
 }
 
 /// An engine error in words: the raising site's reason, else what its code
-/// means ([`crate::common::Error::reason`]).
-fn describe(err: &crate::common::Error) -> String {
+/// means ([`simlin_base::common::Error::reason`]).
+fn describe(err: &simlin_base::common::Error) -> String {
     err.reason().to_string()
 }
 

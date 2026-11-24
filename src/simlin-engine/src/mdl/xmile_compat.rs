@@ -140,7 +140,8 @@ impl XmileFormatter {
         let element = space_to_underbar(element);
         // A part that needs quoting has no qualified spelling; it stays the
         // name it was.
-        if crate::ast::needs_quoting(&dimension) || crate::ast::needs_quoting(&element) {
+        if simlin_base::ast::needs_quoting(&dimension) || simlin_base::ast::needs_quoting(&element)
+        {
             return None;
         }
         Some(format!("{dimension}.{element}"))
@@ -227,7 +228,7 @@ impl XmileFormatter {
             // `NAN` keyword, which would lower to a poisoning NaN. (The `NAN`
             // literal emitted elsewhere for the `A FUNCTION OF` placeholder is a
             // separate, structural "no equation" marker and stays NaN.)
-            Expr::Na(_) => format_number(crate::float::NA),
+            Expr::Na(_) => format_number(simlin_base::float::NA),
         }
     }
 
@@ -363,7 +364,7 @@ impl XmileFormatter {
     /// The MDL importer writes equation text into `datamodel::Equation`, and
     /// that text is read back by *our* equation lexer -- so the quoting rule
     /// here belongs to the equation language, not to MDL, and it is
-    /// [`crate::ast::needs_quoting`]: the same predicate `ast::print_ident` and
+    /// [`simlin_base::ast::needs_quoting`]: the same predicate `ast::print_ident` and
     /// `ltm_augment::quote_ident` use. This used to be
     /// [`quoted_space_to_underbar`], which quotes only on `.`, and that missed
     /// every other name our lexer cannot read bare (GH #976). Two examples from
@@ -423,10 +424,10 @@ impl XmileFormatter {
         // STEP` in Theil_2011.mdl) is quoted so it reads the variable; an
         // undeclared one stays the builtin. The engine's reading, unverified
         // against Vensim.
-        if crate::builtins::is_0_arity_builtin_fn_ci(&result) && !self.declares(name) {
+        if simlin_base::builtins::is_0_arity_builtin_fn_ci(&result) && !self.declares(name) {
             return result;
         }
-        if crate::ast::needs_quoting(&result) {
+        if simlin_base::ast::needs_quoting(&result) {
             format!("\"{}\"", result)
         } else {
             result
@@ -2376,11 +2377,11 @@ mod tests {
         let formatter = XmileFormatter::new();
         let expr = Expr::Na(loc());
         let formatted = formatter.format_expr(&expr);
-        assert_eq!(formatted, format_number(crate::float::NA));
+        assert_eq!(formatted, format_number(simlin_base::float::NA));
         assert_ne!(formatted, "NAN");
         assert_eq!(
             formatted.parse::<f64>().unwrap().to_bits(),
-            crate::float::NA.to_bits()
+            simlin_base::float::NA.to_bits()
         );
     }
 

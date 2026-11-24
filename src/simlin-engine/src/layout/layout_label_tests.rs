@@ -26,7 +26,7 @@
 //! label side must produce the same label side.
 
 use super::*;
-use crate::datamodel::{self, view_element::LabelSide};
+use simlin_base::datamodel::{self, view_element::LabelSide};
 
 const ALL_SIDES: [LabelSide; 4] = [
     LabelSide::Top,
@@ -227,7 +227,7 @@ fn assert_element_kinds(view: &datamodel::StockFlow) {
 /// directions -- the case where re-optimizing existing labels would move them.
 fn add_dependent_aux(
     project: &datamodel::Project,
-) -> (datamodel::Project, crate::project_patch::ModelPatch) {
+) -> (datamodel::Project, simlin_base::project_patch::ModelPatch) {
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
     let new_aux = datamodel::Aux {
@@ -262,11 +262,11 @@ fn add_dependent_aux(
             _ => None,
         })
         .unwrap();
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::UpsertAux(new_aux),
-            crate::project_patch::ModelOperation::UpsertFlow(births),
+            simlin_base::project_patch::ModelOperation::UpsertAux(new_aux),
+            simlin_base::project_patch::ModelOperation::UpsertFlow(births),
         ],
     };
     (patched, patch)
@@ -311,7 +311,7 @@ fn incremental_layout_preserves_untouched_label_sides() {
 /// existing elements, and a deletion of a leaf aux.
 fn connector_only_patch(
     project: &datamodel::Project,
-) -> (datamodel::Project, crate::project_patch::ModelPatch) {
+) -> (datamodel::Project, simlin_base::project_patch::ModelPatch) {
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
     let mut updated = None;
@@ -326,9 +326,9 @@ fn connector_only_patch(
             }
         }
     });
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::UpsertAux(
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertAux(
             updated.expect("birth_rate in fixture"),
         )],
     };
@@ -337,7 +337,7 @@ fn connector_only_patch(
 
 fn delete_only_patch(
     project: &datamodel::Project,
-) -> (datamodel::Project, crate::project_patch::ModelPatch) {
+) -> (datamodel::Project, simlin_base::project_patch::ModelPatch) {
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
     model.variables.retain(|v| v.get_ident() != "birth_rate");
@@ -350,9 +350,9 @@ fn delete_only_patch(
             }
         }
     });
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::DeleteVariable {
+        ops: vec![simlin_base::project_patch::ModelOperation::DeleteVariable {
             ident: "birth_rate".to_string(),
         }],
     };
@@ -365,7 +365,10 @@ fn early_return_path_preserves_untouched_label_sides() {
     let base_view = generate_layout(&project, TEST_MODEL, None).expect("initial layout");
     assert_element_kinds(&base_view);
 
-    let cases: [(&str, (datamodel::Project, crate::project_patch::ModelPatch)); 2] = [
+    let cases: [(
+        &str,
+        (datamodel::Project, simlin_base::project_patch::ModelPatch),
+    ); 2] = [
         ("connector-only", connector_only_patch(&project)),
         ("delete-only", delete_only_patch(&project)),
     ];
@@ -490,9 +493,9 @@ fn incremental_layout_preserves_label_side_across_rename() {
             }
         }
     });
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::RenameVariable {
+        ops: vec![simlin_base::project_patch::ModelOperation::RenameVariable {
             from: "birth_rate".to_string(),
             to: "fertility".to_string(),
         }],
@@ -533,7 +536,7 @@ fn side_flow_project() -> datamodel::Project {
 
 fn add_waste_c(
     project: &datamodel::Project,
-) -> (datamodel::Project, crate::project_patch::ModelPatch) {
+) -> (datamodel::Project, simlin_base::project_patch::ModelPatch) {
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
     model.variables.rewrite(|variables| {
@@ -550,11 +553,11 @@ fn add_waste_c(
     let datamodel::Variable::Flow(waste_c) = waste_c else {
         unreachable!()
     };
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::UpsertFlow(waste_c),
-            crate::project_patch::ModelOperation::UpdateStockFlows {
+            simlin_base::project_patch::ModelOperation::UpsertFlow(waste_c),
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
                 ident: "stock_a".to_string(),
                 inflows: vec![],
                 outflows: vec![
@@ -604,13 +607,13 @@ fn chain_and_waste_project() -> datamodel::Project {
 
 fn delete_sink_stock(
     project: &datamodel::Project,
-) -> (datamodel::Project, crate::project_patch::ModelPatch) {
+) -> (datamodel::Project, simlin_base::project_patch::ModelPatch) {
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
     model.variables.retain(|v| v.get_ident() != "stock_b");
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::DeleteVariable {
+        ops: vec![simlin_base::project_patch::ModelOperation::DeleteVariable {
             ident: "stock_b".to_string(),
         }],
     };
@@ -619,7 +622,7 @@ fn delete_sink_stock(
 
 fn remove_chain(
     project: &datamodel::Project,
-) -> (datamodel::Project, crate::project_patch::ModelPatch) {
+) -> (datamodel::Project, simlin_base::project_patch::ModelPatch) {
     let mut patched = project.clone();
     let model = patched.get_model_mut(TEST_MODEL).unwrap();
     model
@@ -634,16 +637,16 @@ fn remove_chain(
             }
         }
     });
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::DeleteVariable {
+            simlin_base::project_patch::ModelOperation::DeleteVariable {
                 ident: "chain_flow".to_string(),
             },
-            crate::project_patch::ModelOperation::DeleteVariable {
+            simlin_base::project_patch::ModelOperation::DeleteVariable {
                 ident: "stock_b".to_string(),
             },
-            crate::project_patch::ModelOperation::UpdateStockFlows {
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
                 ident: "stock_a".to_string(),
                 inflows: vec![],
                 outflows: vec!["waste_flow".to_string()],
@@ -725,9 +728,11 @@ fn kind_changed_element_rechooses_label_side() {
     model
         .variables
         .push(datamodel::Variable::Stock(new_stock.clone()));
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::UpsertStock(new_stock)],
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertStock(
+            new_stock,
+        )],
     };
 
     let mut chosen = Vec::new();

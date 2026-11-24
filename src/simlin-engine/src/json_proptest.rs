@@ -12,8 +12,8 @@
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 
-use crate::datamodel;
 use crate::json::*;
+use simlin_base::datamodel;
 
 // Strategy helpers for generating valid identifiers and equations
 
@@ -1874,7 +1874,7 @@ mod protobuf_roundtrip_tests {
     /// re-materialized them as None/false via `..Default::default()`.
     #[test]
     fn test_compat_extensions_survive_datamodel_json_roundtrip() {
-        use crate::datamodel::{
+        use simlin_base::datamodel::{
             Compat as DmCompat, Conveyor, Equation, Leakage, Queue, SpreadFlow, Visibility,
         };
 
@@ -1988,7 +1988,7 @@ mod protobuf_roundtrip_tests {
     /// payload carried in the adjacently-tagged JSON representation.
     #[test]
     fn test_spreadflow_variants_survive_datamodel_json_roundtrip() {
-        use crate::datamodel::{Compat as DmCompat, Equation, SpreadFlow};
+        use simlin_base::datamodel::{Compat as DmCompat, Equation, SpreadFlow};
 
         for sf in [
             SpreadFlow::Beginning,

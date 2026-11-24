@@ -36,16 +36,16 @@
 //!   thousands (`PROPTEST_CASES`).
 
 use super::*;
-use crate::ast::{Loc, print_eqn};
-use crate::builtins::UntypedBuiltinFn;
-use crate::common::RawIdent;
-use crate::datamodel::{
+use crate::mdl::{parse_mdl, project_to_mdl, project_to_mdl_with_warnings};
+use proptest::prelude::*;
+use simlin_base::ast::{Loc, print_eqn};
+use simlin_base::builtins::UntypedBuiltinFn;
+use simlin_base::common::RawIdent;
+use simlin_base::datamodel::{
     self, Aux, Compat, Dimension, DimensionElements, Dt, Equation, Flow, GraphicalFunction,
     GraphicalFunctionKind, GraphicalFunctionScale, Model, Project, SimMethod, SimSpecs, Stock,
     Variable,
 };
-use crate::mdl::{parse_mdl, project_to_mdl, project_to_mdl_with_warnings};
-use proptest::prelude::*;
 use std::collections::BTreeMap;
 
 // ---- shared helpers ----
@@ -194,27 +194,27 @@ fn const_leaf() -> impl Strategy<Value = Expr0> {
     prop_oneof![
         (0i64..1000).prop_map(|n| Expr0::Const(
             n.to_string(),
-            crate::ast::Literal::new(n as f64),
+            simlin_base::ast::Literal::new(n as f64),
             Loc::default()
         )),
         Just(Expr0::Const(
             "0.5".to_owned(),
-            crate::ast::Literal::new(0.5),
+            simlin_base::ast::Literal::new(0.5),
             Loc::default()
         )),
         Just(Expr0::Const(
             "1.5".to_owned(),
-            crate::ast::Literal::new(1.5),
+            simlin_base::ast::Literal::new(1.5),
             Loc::default()
         )),
         Just(Expr0::Const(
             "3.5".to_owned(),
-            crate::ast::Literal::new(3.5),
+            simlin_base::ast::Literal::new(3.5),
             Loc::default()
         )),
         Just(Expr0::Const(
             "2.25".to_owned(),
-            crate::ast::Literal::new(2.25),
+            simlin_base::ast::Literal::new(2.25),
             Loc::default()
         )),
     ]
@@ -656,11 +656,13 @@ fn defined_elements(project: &Project) -> BTreeMap<String, (&'static str, Vec<St
         project
             .dimensions
             .iter()
-            .find(|d| crate::common::canonicalize(&d.name) == crate::common::canonicalize(dim))
+            .find(|d| {
+                simlin_base::common::canonicalize(&d.name) == simlin_base::common::canonicalize(dim)
+            })
             .map(|d| match &d.elements {
                 DimensionElements::Named(names) => names
                     .iter()
-                    .map(|e| crate::common::canonicalize(e).into_owned())
+                    .map(|e| simlin_base::common::canonicalize(e).into_owned())
                     .collect(),
                 DimensionElements::Indexed(n) => (1..=*n).map(|i| i.to_string()).collect(),
             })
@@ -681,7 +683,7 @@ fn defined_elements(project: &Project) -> BTreeMap<String, (&'static str, Vec<St
     };
     let key_of = |key: &str| -> Vec<String> {
         key.split(',')
-            .map(|p| crate::common::canonicalize(p.trim()).into_owned())
+            .map(|p| simlin_base::common::canonicalize(p.trim()).into_owned())
             .collect()
     };
     let mut out = BTreeMap::new();
@@ -696,7 +698,7 @@ fn defined_elements(project: &Project) -> BTreeMap<String, (&'static str, Vec<St
         // the equation and its initial.
         let active = |eqn: &str| -> (String, Option<String>) {
             if let Ok(Some(Expr0::App(UntypedBuiltinFn(f, args), _))) =
-                Expr0::new(eqn, crate::lexer::LexerType::Equation)
+                Expr0::new(eqn, simlin_base::lexer::LexerType::Equation)
                 && f == "init"
                 && let [equation, initial] = &args[..]
             {
@@ -733,12 +735,12 @@ fn defined_elements(project: &Project) -> BTreeMap<String, (&'static str, Vec<St
         let dims: Vec<String> = match var.get_equation() {
             Some(Equation::ApplyToAll(dims, _)) | Some(Equation::Arrayed(dims, ..)) => dims
                 .iter()
-                .map(|d| crate::common::canonicalize(d).into_owned())
+                .map(|d| simlin_base::common::canonicalize(d).into_owned())
                 .collect(),
             _ => Vec::new(),
         };
         out.insert(
-            crate::common::canonicalize(var.get_ident()).into_owned(),
+            simlin_base::common::canonicalize(var.get_ident()).into_owned(),
             (kind, dims, elements),
         );
     }
@@ -927,7 +929,7 @@ proptest! {
     #[test]
     fn equation_write_reparse_is_fixpoint(expr in expr0_strategy()) {
         let xmile_eqn = print_eqn(&expr);
-        let reparsed = Expr0::new(&xmile_eqn, crate::lexer::LexerType::Equation);
+        let reparsed = Expr0::new(&xmile_eqn, simlin_base::lexer::LexerType::Equation);
         prop_assert!(
             matches!(reparsed, Ok(Some(_))),
             "print_eqn output is not a valid datamodel equation: {}",

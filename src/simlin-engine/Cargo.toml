@@ -40,6 +40,7 @@ test-support = []
 layout_eval = []
 
 [dependencies]
+simlin-base = { path = "../simlin-base" }
 unicode-xid = "0.2"
 # Protobuf runtime for the checked-in `src/project_io.gen.rs`. The generator in
 # scripts/gen-rust-protobufs.sh pins buffa-build to the version Cargo.lock
@@ -84,6 +85,7 @@ rand = { version = "0.9", default-features = false, features = ["std_rng"] }
 rayon = "1"
 
 [dev-dependencies]
+simlin-base = { path = "../simlin-base", features = ["test-support"] }
 # `file_io` keeps the `csv` dependency (and filesystem access) out of the wasm
 # bundle: it is a production dependency gate, not a test-coverage gate. The code
 # it gates is `cfg(any(test, feature = "file_io"))`, with the crate it needs

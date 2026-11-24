@@ -137,7 +137,7 @@ fn a_qualified_element_and_a_modules_output_are_known() {
     let mut sub = project.models[0].clone();
     sub.name = "sub".to_string();
     sub.variables =
-        crate::shared_vec::SharedVec::from(vec![datamodel::Variable::Aux(datamodel::Aux {
+        simlin_base::shared_vec::SharedVec::from(vec![datamodel::Variable::Aux(datamodel::Aux {
             ident: "output".to_string(),
             equation: Equation::Scalar("2".to_string()),
             documentation: String::new(),

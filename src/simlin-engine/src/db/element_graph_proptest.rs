@@ -802,7 +802,7 @@ fn cross_product(sources: &[String], targets: &[String]) -> Vec<(String, String)
 /// tests, which hand-pin literal edge names against a fixed slice.
 fn expected_agg_routings(
     spec: &ProjectSpec,
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Vec<ExpectedAggRouting> {
     use crate::ltm_agg::AxisRead;
     let elems: Vec<String> = ELEM_NAMES
@@ -893,7 +893,7 @@ fn expected_agg_routings(
 /// names, both axis orders) is the mixed family's SOLE independent oracle.
 fn expected_mixed_edges(
     spec: &ProjectSpec,
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> BTreeSet<(String, String)> {
     use crate::ltm_agg::AxisRead;
     let Some(mixed) = &spec.mixed_ref_target else {
@@ -979,7 +979,7 @@ fn has_element_edge(elem_edges: &ElementCausalEdgesResult, from: &str, to: &str)
 /// the agg-hop existence half alone would miss (subset semantics).
 fn check_spec_agg_expectations(
     spec: &ProjectSpec,
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
     elem_edges: &ElementCausalEdgesResult,
 ) -> Result<(), String> {
     let agg_nodes: BTreeSet<&str> = elem_edges

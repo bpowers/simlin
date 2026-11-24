@@ -6,8 +6,8 @@ use std::ffi::CString;
 use std::ptr;
 
 use simlin::*;
+use simlin_base::datamodel;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{self as engine, datamodel};
 
 use crate::common::open_project_from_datamodel;
 
@@ -34,7 +34,7 @@ fn test_diagram_sync_sir_model() {
         let model = datamodel_locked.get_model("main").unwrap();
         assert_eq!(model.views.len(), 1);
         match &model.views[0] {
-            engine::datamodel::View::StockFlow(sf) => {
+            simlin_base::datamodel::View::StockFlow(sf) => {
                 assert!(
                     !sf.elements.is_empty(),
                     "layout should produce view elements"
@@ -56,7 +56,8 @@ fn test_diagram_sync_keeps_every_view_but_the_first() {
         .stock("population", "100", &["births"], &[], None)
         .flow("births", "population * 0.02", None)
         .build_datamodel();
-    let laid_out = engine::layout::generate_best_layout(&datamodel, "main", None).expect("layout");
+    let laid_out =
+        simlin_engine::layout::generate_best_layout(&datamodel, "main", None).expect("layout");
     let overview = datamodel::View::StockFlow(datamodel::StockFlow {
         zoom: 0.5,
         ..laid_out
@@ -113,7 +114,7 @@ fn test_diagram_sync_test_project() {
         let model = datamodel_locked.get_model("main").unwrap();
         assert_eq!(model.views.len(), 1);
         match &model.views[0] {
-            engine::datamodel::View::StockFlow(sf) => {
+            simlin_base::datamodel::View::StockFlow(sf) => {
                 assert!(
                     !sf.elements.is_empty(),
                     "layout should produce view elements"
@@ -151,7 +152,7 @@ fn test_diagram_sync_preserves_zoom() {
         {
             let mut datamodel_locked = (*proj).datamodel.lock().unwrap();
             let model = datamodel_locked.get_model_mut("main").unwrap();
-            if let Some(engine::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
+            if let Some(simlin_base::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
                 sf.zoom = 2.0;
             }
         }
@@ -164,7 +165,7 @@ fn test_diagram_sync_preserves_zoom() {
         let datamodel_locked = (*proj).datamodel.lock().unwrap();
         let model = datamodel_locked.get_model("main").unwrap();
         match &model.views[0] {
-            engine::datamodel::View::StockFlow(sf) => {
+            simlin_base::datamodel::View::StockFlow(sf) => {
                 assert!(
                     (sf.zoom - 2.0).abs() < f64::EPSILON,
                     "zoom should be preserved, got {}",
@@ -303,16 +304,16 @@ fn test_ac7_2_incremental_layout_via_patch_json() {
             let model = dm.get_model("main").unwrap();
             assert_eq!(model.views.len(), 1);
             match &model.views[0] {
-                engine::datamodel::View::StockFlow(sf) => {
+                simlin_base::datamodel::View::StockFlow(sf) => {
                     assert!(!sf.elements.is_empty());
                     sf.elements
                         .iter()
                         .filter_map(|e| {
                             let name = e.get_name()?.to_string();
                             let (x, y) = match e {
-                                engine::datamodel::ViewElement::Aux(a) => (a.x, a.y),
-                                engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
-                                engine::datamodel::ViewElement::Flow(f) => (f.x, f.y),
+                                simlin_base::datamodel::ViewElement::Aux(a) => (a.x, a.y),
+                                simlin_base::datamodel::ViewElement::Stock(s) => (s.x, s.y),
+                                simlin_base::datamodel::ViewElement::Flow(f) => (f.x, f.y),
                                 _ => return None,
                             };
                             Some((name, x, y))
@@ -360,7 +361,7 @@ fn test_ac7_2_incremental_layout_via_patch_json() {
             let model = dm.get_model("main").unwrap();
             assert_eq!(model.views.len(), 1);
             match &model.views[0] {
-                engine::datamodel::View::StockFlow(sf) => {
+                simlin_base::datamodel::View::StockFlow(sf) => {
                     let has_extra = sf
                         .elements
                         .iter()
@@ -376,9 +377,9 @@ fn test_ac7_2_incremental_layout_via_patch_json() {
                             panic!("element '{name}' must still be in the view")
                         });
                         let (x, y) = match elem {
-                            engine::datamodel::ViewElement::Aux(a) => (a.x, a.y),
-                            engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
-                            engine::datamodel::ViewElement::Flow(f) => (f.x, f.y),
+                            simlin_base::datamodel::ViewElement::Aux(a) => (a.x, a.y),
+                            simlin_base::datamodel::ViewElement::Stock(s) => (s.x, s.y),
+                            simlin_base::datamodel::ViewElement::Flow(f) => (f.x, f.y),
                             _ => panic!("unexpected element type for '{name}'"),
                         };
                         assert!(
@@ -460,11 +461,11 @@ fn test_diagram_sync_main_alias_empty_model_name_patch() {
         {
             let mut dm = (*proj).datamodel.lock().unwrap();
             let model = dm.get_model_mut("main").unwrap();
-            if let Some(engine::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
+            if let Some(simlin_base::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
                 sf.elements.edit_where(
-                    |elem| matches!(elem, engine::datamodel::ViewElement::Stock(s) if s.name == "level"),
+                    |elem| matches!(elem, simlin_base::datamodel::ViewElement::Stock(s) if s.name == "level"),
                     |elem| {
-                        if let engine::datamodel::ViewElement::Stock(s) = elem {
+                        if let simlin_base::datamodel::ViewElement::Stock(s) = elem {
                             s.x = MARKER_X;
                             s.y = MARKER_Y;
                         }
@@ -511,7 +512,7 @@ fn test_diagram_sync_main_alias_empty_model_name_patch() {
             let dm = (*proj).datamodel.lock().unwrap();
             let model = dm.get_model("main").unwrap();
             match &model.views[0] {
-                engine::datamodel::View::StockFlow(sf) => {
+                simlin_base::datamodel::View::StockFlow(sf) => {
                     let has_extra = sf
                         .elements
                         .iter()
@@ -527,7 +528,7 @@ fn test_diagram_sync_main_alias_empty_model_name_patch() {
                         .find(|e| e.get_name().is_some_and(|n| n == "level"))
                         .expect("'level' must still be in the view");
                     let (x, y) = match level {
-                        engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
+                        simlin_base::datamodel::ViewElement::Stock(s) => (s.x, s.y),
                         _ => panic!("'level' should be a Stock"),
                     };
                     assert!(
@@ -570,11 +571,11 @@ fn test_diagram_sync_preserves_layout_when_patch_has_no_ops_for_model() {
         {
             let mut dm = (*proj).datamodel.lock().unwrap();
             let model = dm.get_model_mut("main").unwrap();
-            if let Some(engine::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
+            if let Some(simlin_base::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
                 sf.elements.edit_where(
-                    |elem| matches!(elem, engine::datamodel::ViewElement::Stock(s) if s.name == "level"),
+                    |elem| matches!(elem, simlin_base::datamodel::ViewElement::Stock(s) if s.name == "level"),
                     |elem| {
-                        if let engine::datamodel::ViewElement::Stock(s) = elem {
+                        if let simlin_base::datamodel::ViewElement::Stock(s) = elem {
                             s.x = MARKER_X;
                             s.y = MARKER_Y;
                         }
@@ -606,14 +607,14 @@ fn test_diagram_sync_preserves_layout_when_patch_has_no_ops_for_model() {
             let dm = (*proj).datamodel.lock().unwrap();
             let model = dm.get_model("main").unwrap();
             match &model.views[0] {
-                engine::datamodel::View::StockFlow(sf) => {
+                simlin_base::datamodel::View::StockFlow(sf) => {
                     let level = sf
                         .elements
                         .iter()
                         .find(|e| e.get_name().is_some_and(|n| n == "level"))
                         .expect("'level' must still be in the view");
                     let (x, y) = match level {
-                        engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
+                        simlin_base::datamodel::ViewElement::Stock(s) => (s.x, s.y),
                         _ => panic!("'level' should be a Stock"),
                     };
                     assert!(

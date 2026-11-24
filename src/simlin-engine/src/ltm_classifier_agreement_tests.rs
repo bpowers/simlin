@@ -50,7 +50,7 @@
 //!   `model_ltm_reference_sites` is built on -- no reimplementation), and
 //! * the **Expr0** multiset comes from classifying each occurrence of `from`
 //!   in the target equation *printed with the production print path
-//!   (`crate::ast::expr2_to_string`) and reparsed to `Expr0`* via
+//!   (`simlin_base::ast::expr2_to_string`) and reparsed to `Expr0`* via
 //!   `classify_expr0_subscript_shape`, with the SAME `IteratedDimCtx` /
 //!   `source_dim_elements` the production caller (`shaped_link_score`
 //!   -> `generate_link_score_equation_for_link`) builds.
@@ -144,8 +144,6 @@
 //! empty compared multiset is asserted to be intentional exactly where it is.
 
 use super::*;
-use crate::ast::Ast;
-use crate::common::{Canonical, Ident};
 use crate::db::ltm_ir::{
     OccurrenceRef, OccurrenceSite, ReferenceSite, collect_all_reference_sites,
     model_ltm_reference_sites,
@@ -154,10 +152,12 @@ use crate::db::{
     DiagnosticSeverity, SimlinDb, collect_all_diagnostics, model_lowered_variables,
     project_dimensions_context, sync_from_datamodel,
 };
-use crate::dimensions::{Dimension, DimensionsContext};
 use crate::ltm_agg::{AxisRead, ReducerKind, reducer_kind_from_name};
 use crate::test_common::TestProject;
 use crate::variable::Variable;
+use simlin_base::ast::Ast;
+use simlin_base::common::{Canonical, Ident};
+use simlin_base::dimensions::{Dimension, DimensionsContext};
 use std::collections::BTreeMap;
 
 /// One occurrence of a source variable found in a target equation's reparsed
@@ -313,7 +313,7 @@ fn collect_expr0_occurrences(
             let lname = name.to_ascii_lowercase();
             let child_in_reducer = in_reducer || expr0_routes_through_agg(&lname, args.len());
             let skip_first =
-                crate::builtins::BuiltinSig::name_reads_a_table(&lname) && !args.is_empty();
+                simlin_base::builtins::BuiltinSig::name_reads_a_table(&lname) && !args.is_empty();
             for (i, arg) in args.iter().enumerate() {
                 if skip_first && i == 0 {
                     continue;
@@ -422,7 +422,7 @@ fn classify_expr0_occurrence(
 
 /// The reparsed `Expr0` occurrences of every model variable in one target
 /// equation, built from the target's Expr2 AST printed with the PRODUCTION
-/// print path (`crate::ast::expr2_to_string`) and reparsed -- the same text
+/// print path (`simlin_base::ast::expr2_to_string`) and reparsed -- the same text
 /// `shaped_link_score` feeds the Expr0 partial builder. An
 /// `Ast::Arrayed` target is printed and walked per element slot (plus the
 /// default), mirroring `build_arrayed_link_score_equation`'s per-slot
@@ -444,12 +444,12 @@ fn expr0_occurrences_for_target(
     // `slot` is the first `SiteId` path element (`walk_all_in_expr`: slot 0 for
     // a scalar/A2A body, the sorted element index for each `Ast::Arrayed` slot,
     // then the default slot after the last element).
-    let mut walk_slot = |slot: u16, expr: &crate::ast::Expr2| {
+    let mut walk_slot = |slot: u16, expr: &simlin_base::ast::Expr2| {
         // Every fixture slot doubles as a corpus sample for the round-trip
         // fidelity property the print->reparse deletion rests on.
         assert_lowering_matches_reparse(&format!("target '{to_name}' slot {slot}"), expr);
-        let text = crate::ast::expr2_to_string(expr);
-        let parsed = Expr0::new(&text, crate::lexer::LexerType::Equation).unwrap_or_else(|e| {
+        let text = simlin_base::ast::expr2_to_string(expr);
+        let parsed = Expr0::new(&text, simlin_base::lexer::LexerType::Equation).unwrap_or_else(|e| {
             panic!("target '{to_name}' printed text failed to reparse (GH #913 drift class): text={text:?}, err={e:?}")
         });
         if let Some(expr0) = parsed {
@@ -497,7 +497,7 @@ fn expr0_occurrences_for_target(
 ///   `print_ident` (which canonicalizes), so the two spellings are the same
 ///   identifier everywhere it matters -- including in the emitted text.
 fn strip_locs(expr: &Expr0) -> Expr0 {
-    let d = crate::ast::Loc::default();
+    let d = simlin_base::ast::Loc::default();
     match expr {
         Expr0::Const(s, v, _) => Expr0::Const(s.clone(), *v, d),
         Expr0::Var(id, _) => Expr0::Var(canonical_raw(id), d),
@@ -525,12 +525,12 @@ fn strip_locs(expr: &Expr0) -> Expr0 {
 
 /// The canonical spelling of a raw identifier, as every `Expr0` consumer reads
 /// it. See [`strip_locs`] for why spelling is normalized away.
-fn canonical_raw(id: &crate::common::RawIdent) -> crate::common::RawIdent {
-    crate::common::RawIdent::new_from_str(canonicalize(id.as_str()).as_ref())
+fn canonical_raw(id: &simlin_base::common::RawIdent) -> simlin_base::common::RawIdent {
+    simlin_base::common::RawIdent::new_from_str(canonicalize(id.as_str()).as_ref())
 }
 
 fn strip_index_locs(index: &IndexExpr0) -> IndexExpr0 {
-    let d = crate::ast::Loc::default();
+    let d = simlin_base::ast::Loc::default();
     match index {
         IndexExpr0::Wildcard(_) => IndexExpr0::Wildcard(d),
         IndexExpr0::StarRange(id, _) => IndexExpr0::StarRange(canonical_raw(id), d),
@@ -560,10 +560,10 @@ fn strip_index_locs(index: &IndexExpr0) -> IndexExpr0 {
 /// therefore reports a print/reparse infidelity in TODAY's path, not a defect in
 /// the replacement.
 #[track_caller]
-fn assert_lowering_matches_reparse(what: &str, expr: &crate::ast::Expr2) {
-    let lowered = crate::ast::expr2_to_expr0(expr);
-    let text = crate::ast::print_eqn(&lowered);
-    let reparsed = Expr0::new(&text, crate::lexer::LexerType::Equation)
+fn assert_lowering_matches_reparse(what: &str, expr: &simlin_base::ast::Expr2) {
+    let lowered = simlin_base::ast::expr2_to_expr0(expr);
+    let text = simlin_base::ast::print_eqn(&lowered);
+    let reparsed = Expr0::new(&text, simlin_base::lexer::LexerType::Equation)
         .unwrap_or_else(|e| panic!("{what}: printed text {text:?} failed to reparse: {e:?}"))
         .unwrap_or_else(|| panic!("{what}: printed text {text:?} parsed to nothing"));
     assert_eq!(
@@ -817,7 +817,7 @@ fn assert_lowering_matches_reparse_everywhere(tp: &TestProject) -> usize {
         let Some(ast) = variables[name].ast() else {
             continue;
         };
-        let mut check = |slot: &str, expr: &crate::ast::Expr2| {
+        let mut check = |slot: &str, expr: &simlin_base::ast::Expr2| {
             assert_lowering_matches_reparse(&format!("{name} {slot}"), expr);
             slots += 1;
         };

@@ -2,14 +2,14 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::ast::{Ast, BinaryOp, Expr2};
-use crate::builtins::{BuiltinFn, Loc};
-use crate::common::{
-    Canonical, EquationError, ErrorCode, Ident, IdentMap, IdentSet, UnitError, UnitResult,
-};
-use crate::datamodel::UnitMap;
 use crate::units::{Context, UnitOp, Units, combine};
 use crate::variable::{LoweredVariableMap, VarKind, Variable};
+use simlin_base::ast::{Ast, BinaryOp, Expr2};
+use simlin_base::builtins::{BuiltinFn, Loc};
+use simlin_base::common::{
+    Canonical, EquationError, ErrorCode, Ident, IdentMap, IdentSet, UnitError, UnitResult,
+};
+use simlin_base::datamodel::UnitMap;
 
 // Type alias to reduce complexity
 type UnitErrorList = Vec<(Ident<Canonical>, UnitError)>;
@@ -41,7 +41,7 @@ pub(crate) struct UnitModel {
 /// `None` for anything non-literal.
 /// Shared with `units_infer`, which applies the same `^` unit semantics.
 pub(crate) fn literal_exponent(expr: &Expr2) -> Option<f64> {
-    use crate::ast::UnaryOp;
+    use simlin_base::ast::UnaryOp;
     match expr {
         Expr2::Const(_, lit, _) => Some(lit.value()),
         Expr2::Op1(UnaryOp::Negative, inner, _, _) => literal_exponent(inner).map(|n| -n),
@@ -549,7 +549,7 @@ pub fn evaluate_expr_units(
 /// `err`, raised in the own equation of `element` of an arrayed variable, as
 /// an error about that element: its span indexes that element's text. Only a
 /// consistency error has such a span; the others are left as they are.
-fn in_element(err: UnitError, element: &crate::common::CanonicalElementName) -> UnitError {
+fn in_element(err: UnitError, element: &simlin_base::common::CanonicalElementName) -> UnitError {
     match err {
         UnitError::ConsistencyError(code, loc, details, _) => {
             UnitError::ConsistencyError(code, loc, details, Some(element.as_str().to_string()))

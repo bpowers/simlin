@@ -8,12 +8,13 @@ use std::fs::File;
 use std::io::BufReader;
 use std::result::Result as StdResult;
 
-use simlin_engine::common::{Canonical, Ident, IdentMap};
+use simlin_base::common::{Canonical, Ident, IdentMap};
 // `model_element_loop_circuits` is `#[deprecated]` for new LTM callers;
 // the integration tests below drive it directly to compare the legacy
 // element-Johnson surface against the tiered enumerator's output. The
 // allow keeps the deprecation lint clean for tests pinning the legacy
 // contract while preserving the warning for accidental new uses.
+use simlin_base::Results;
 #[allow(deprecated)]
 use simlin_engine::db::model_element_loop_circuits;
 use simlin_engine::db::{
@@ -27,14 +28,14 @@ use simlin_engine::db::{
 };
 use simlin_engine::indexmap::IndexMap;
 use simlin_engine::xmile;
-use simlin_engine::{CompiledSimulation, Results, Vm, json, ltm_finding, ltm_post};
+use simlin_engine::{CompiledSimulation, Vm, json, ltm_finding, ltm_post};
 
 const LTM_TOLERANCE: f64 = 0.05;
 
 /// Compile a datamodel project to a VM simulation using the incremental
 /// salsa path with LTM enabled (exhaustive mode).
 fn compile_ltm_incremental(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> std::sync::Arc<CompiledSimulation> {
     compile_ltm_incremental_with_partitions(project).0
 }
@@ -44,7 +45,7 @@ fn compile_ltm_incremental(
 /// scores post-sim (relative scores are not VM variables; see
 /// docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).
 fn compile_ltm_incremental_with_partitions(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> (
     std::sync::Arc<CompiledSimulation>,
     IndexMap<String, Vec<Option<usize>>>,
@@ -64,7 +65,7 @@ fn compile_ltm_incremental_with_partitions(
 /// Compile a datamodel project to a VM simulation using the incremental
 /// salsa path with LTM in discovery mode (scores for every causal edge).
 fn compile_ltm_discovery_incremental(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
@@ -528,7 +529,7 @@ fn hero_culture_loop_sign_continuity() {
     let f = File::open("../../test/hero_culture_ltm/hero_culture.sd.json").unwrap();
     let reader = BufReader::new(f);
     let json_project = json::Project::from_reader(reader).unwrap();
-    let datamodel_project: simlin_engine::datamodel::Project = json_project.into();
+    let datamodel_project: simlin_base::datamodel::Project = json_project.into();
 
     // VM path for simulation
     let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&datamodel_project);
@@ -1570,7 +1571,7 @@ fn test_passthrough_module_ltm_vm() {
 /// score for the input port.
 #[test]
 fn test_user_defined_module_ltm_vm() {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
 
     let project = datamodel::Project {
         name: "user_module_ltm".to_string(),
@@ -1843,7 +1844,7 @@ fn test_user_defined_module_ltm_vm() {
 ///   Sub-model "processor": input -> smoothed (SMTH1) -> output
 #[test]
 fn test_nested_module_ltm_vm() {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
 
     let project = datamodel::Project {
         name: "nested_module_ltm".to_string(),
@@ -2338,7 +2339,7 @@ fn arrayed_isolated_loop_raw_score_is_one_per_element() {
 /// per-element link score values for capacity -> gap.
 #[test]
 fn test_scalar_to_arrayed_link_score() {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     let project = datamodel::Project {
         name: "scalar_to_arrayed".to_string(),
@@ -2499,7 +2500,7 @@ fn test_scalar_to_arrayed_link_score() {
 /// per-element computation uses element-specific values.
 #[test]
 fn test_a2a_independent_per_element_computation() {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     let n_elements: usize = 3;
 
@@ -2682,8 +2683,8 @@ fn build_arrayed_to_scalar_model(
     name: &str,
     reducer_equation: &str,
     target_var_name: &str,
-) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     datamodel::Project {
         name: name.to_string(),
@@ -3032,8 +3033,8 @@ fn test_cross_dim_stddev_expansion() {
 /// degenerate `1` whenever `Δtotal ≠ 0`). The closed loop is `s[r] → total
 /// → update[r] → s[r]` per element, plus the cross-element
 /// `s[r] → total → update[r'] → s[r']`.
-fn build_stddev_feedback_model(c: f64) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_stddev_feedback_model(c: f64) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
     datamodel::Project {
         name: "stddev_feedback".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -3128,8 +3129,8 @@ fn build_stddev_feedback_model(c: f64) -> simlin_engine::datamodel::Project {
 /// `update` has no `total` dependency, so there is no feedback loop;
 /// discovery mode (which scores every causal edge) emits the `s[d]→total`
 /// link scores anyway.
-fn build_stddev_invariant_model(k: f64) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_stddev_invariant_model(k: f64) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
     datamodel::Project {
         name: "stddev_invariant".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -3465,8 +3466,8 @@ fn test_cross_dim_compound_nonlinear() {
 /// `pop[r]`) so the elements grow at different relative rates and `ratio`
 /// keeps changing -- a proportional flow would freeze `ratio` and the
 /// agg→ratio link scores would all be zeroed by the Δtarget=0 guard.
-fn build_two_reducer_target_model(c: f64) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_two_reducer_target_model(c: f64) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
     datamodel::Project {
         name: "two_reducer".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -3724,7 +3725,7 @@ fn test_cross_dim_size_skipped() {
 /// total delta, matching the SUM algebraic shortcut.
 #[test]
 fn test_cross_dim_sum_vs_explicit_cross_validation() {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     // Model A: arrayed source with SUM reducer
     let project_a =
@@ -4558,7 +4559,7 @@ fn test_mixed_loop_scalar_per_element_scores() {
 
 /// Run the full discovery pipeline for a model and return the discovered loops.
 fn discover_loops_element_level(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> Vec<ltm_finding::FoundLoop> {
     run_discovery(project).1
 }
@@ -4576,7 +4577,7 @@ fn discover_loops_element_level(
 /// 4. Calls `discover_loops_with_graph` with LTM var metadata and dims
 ///    so that A2A link scores are expanded into per-element edges
 fn run_discovery(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> (Results, Vec<ltm_finding::FoundLoop>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
@@ -4590,7 +4591,7 @@ fn run_discovery(
     let results = vm.into_results();
 
     // Build element-level causal graph
-    let canonical_name = simlin_engine::canonicalize("main");
+    let canonical_name = simlin_base::canonicalize("main");
     let source_model = sync
         .project
         .models(&db)
@@ -4933,7 +4934,7 @@ fn test_discovery_threshold_filters_negligible_loops() {
 // cross-element migration feedback.
 
 /// Load an XMILE model from a file path, returning the parsed datamodel project.
-fn load_xmile_model(path: &str) -> simlin_engine::datamodel::Project {
+fn load_xmile_model(path: &str) -> simlin_base::datamodel::Project {
     let f = File::open(path).unwrap_or_else(|e| panic!("failed to open {}: {}", path, e));
     let mut f = BufReader::new(f);
     xmile::project_from_reader(&mut f)
@@ -5342,7 +5343,7 @@ fn test_arrayed_population_ltm_exhaustive() {
     // loops from structural analysis.
     let mut db2 = SimlinDb::default();
     let sync2 = sync_from_datamodel_incremental(&mut db2, &datamodel_project, None);
-    let canonical_name = simlin_engine::canonicalize("main");
+    let canonical_name = simlin_base::canonicalize("main");
     let source_model2 = sync2
         .project
         .models(&db2)
@@ -5403,7 +5404,7 @@ fn test_arrayed_population_ltm_discovery() {
     // loop patterns.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    let canonical_name = simlin_engine::canonicalize("main");
+    let canonical_name = simlin_base::canonicalize("main");
     let source_model = sync
         .project
         .models(&db)
@@ -5462,7 +5463,7 @@ fn test_cross_element_ltm_exhaustive() {
     // Verify cross-element loops are detected via structural analysis.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    let canonical_name = simlin_engine::canonicalize("main");
+    let canonical_name = simlin_base::canonicalize("main");
     let source_model = sync
         .project
         .models(&db)
@@ -5662,7 +5663,7 @@ fn test_cross_element_ltm_edge_set_truthful() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    let canonical_name = simlin_engine::canonicalize("main");
+    let canonical_name = simlin_base::canonicalize("main");
     let source_model = sync
         .project
         .models(&db)
@@ -5805,8 +5806,8 @@ fn test_cross_element_link_score_migration_in_arrayed_partials() {
         .find(|d| d.name() == "region")
         .expect("Region dimension should exist");
     let region_elems: Vec<String> = match &region_dim.elements {
-        simlin_engine::datamodel::DimensionElements::Named(names) => names.clone(),
-        simlin_engine::datamodel::DimensionElements::Indexed(_) => {
+        simlin_base::datamodel::DimensionElements::Named(names) => names.clone(),
+        simlin_base::datamodel::DimensionElements::Indexed(_) => {
             panic!("Region should be a named dimension")
         }
     };
@@ -6439,8 +6440,8 @@ fn find_partial_reduce_offset(
 /// `matrix[d1,d2] -> row_sum[d1] -> total -> growth[d1,d2] -> matrix[d1,d2]`.
 /// The assertions require that a real partial-reduce link score is emitted,
 /// carries non-degenerate values, and is referenced by some loop score.
-fn build_partial_reduce_model(name: &str) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_partial_reduce_model(name: &str) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     datamodel::Project {
         name: name.to_string(),
@@ -6710,8 +6711,8 @@ fn test_partial_reduce_cross_element_loop() {
 /// `PREVIOUS`-wrapped `Subscript` (the `"PREVIOUS requires a variable
 /// reference after helper rewriting"` codegen error). The structural
 /// `inflow -> level` edge closes the loop.
-fn build_iterated_dim_subscript_model(name: &str) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_iterated_dim_subscript_model(name: &str) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     datamodel::Project {
         name: name.to_string(),
@@ -7042,8 +7043,8 @@ fn test_iterated_dim_subscript_loop_score_matches_hand_calc() {
 /// each reference some `source[m]` and/or `source[n]`. There is no closed
 /// loop (the disjoint dims make a `target -> source` reduction impossible),
 /// so the test compiles in discovery mode (which scores every causal edge).
-fn build_disjoint_dim_arrayed_target_model(name: &str) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_disjoint_dim_arrayed_target_model(name: &str) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     datamodel::Project {
         name: name.to_string(),
@@ -7143,8 +7144,8 @@ fn build_disjoint_dim_arrayed_target_model(name: &str) -> simlin_engine::datamod
 /// numeric index variable is a valid subscript). `source[D3]` is a stock;
 /// `idx` is a scalar aux (= 1); `target[D1,D2]`'s per-element equations
 /// reference `source[idx]`.
-fn build_disjoint_dim_unscoreable_model(name: &str) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_disjoint_dim_unscoreable_model(name: &str) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     datamodel::Project {
         name: name.to_string(),
@@ -8080,8 +8081,8 @@ fn test_no_duplicate_ltm_vars_with_agg_routed_and_direct_edge() {
 /// curvature keeps discovery's loop scores non-degenerate). The
 /// reducer `SUM(pop[*])` is a subexpression, so Phase 5 hoists it into
 /// `$⁚ltm⁚agg⁚0`.
-fn build_heterogeneous_share_model(c: f64) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_heterogeneous_share_model(c: f64) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
     datamodel::Project {
         name: "het_share".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -8306,7 +8307,7 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    let canonical_name = simlin_engine::canonicalize("main");
+    let canonical_name = simlin_base::canonicalize("main");
     let source_model = sync
         .project
         .models(&db)
@@ -8524,8 +8525,8 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
 /// salsa compilation path in `assemble_module` re-derives it with
 /// `RefShape::Bare`, wrapping the whole subscript in PREVIOUS and collapsing
 /// the numerator to `PREVIOUS(total) - PREVIOUS(total) ≈ 0`.
-fn build_dynamic_index_into_scalar_model() -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_dynamic_index_into_scalar_model() -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     datamodel::Project {
         name: "dyn_index_into_scalar".to_string(),
@@ -8692,8 +8693,8 @@ fn test_dynamic_index_into_scalar_link_score_nondegenerate() {
 /// `idx` is a plain scalar aux (not a `Region` element name), so `pop[idx]`
 /// classifies as `RefShape::DynamicIndex` at the `Expr2` level regardless
 /// of its constant value.
-fn build_mixed_reducer_and_dynamic_index_model() -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_mixed_reducer_and_dynamic_index_model() -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     datamodel::Project {
         name: "mixed_reducer_dyn_index".to_string(),
@@ -8884,8 +8885,8 @@ fn test_mixed_reducer_and_dynamic_index_keeps_direct_reference() {
 /// is registered first -- the case that used to make the inline use reuse
 /// it. A feedback flow `grow[r] = share[r] * pop[r] * c` feeds `pop`, so
 /// `share`'s reducer is part of a loop.
-fn build_var_backed_and_inline_same_reducer_model() -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_var_backed_and_inline_same_reducer_model() -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     datamodel::Project {
         name: "var_backed_and_inline".to_string(),
@@ -9046,7 +9047,7 @@ fn test_inline_reducer_gets_synthetic_agg_despite_var_backed_sibling() {
 /// step.
 #[test]
 fn test_four_petal_canonical_loop_score_is_link_score_product() {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     let regions = ["A", "B", "C", "D"];
     let c = 0.01_f64;
@@ -9272,8 +9273,8 @@ fn test_four_petal_canonical_loop_score_is_link_score_product() {
 /// scalar synthetic agg, and every element forms a single petal
 /// (`pop[e] -> agg -> growth[e] -> pop[e]`). Heterogeneous initials keep the
 /// per-element link scores distinct so loops don't degenerate to zero.
-fn build_reducer_feedback_model(name: &str, elems: &[&str]) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_reducer_feedback_model(name: &str, elems: &[&str]) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
     datamodel::Project {
         name: name.to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -9629,8 +9630,8 @@ fn clearn_with_ltm_simulates_model_vars_identically() {
 ///
 ///   population (stock) -> birth_multiplier (via LOOKUP) -> births -> population
 ///   population -> births (direct reference)               -> population
-fn build_lookup_table_feedback_model() -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel::{self, Equation, Variable};
+fn build_lookup_table_feedback_model() -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Equation, Variable};
     datamodel::Project {
         name: "lookup_feedback".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -9832,8 +9833,8 @@ fn test_lookup_table_link_score_is_nonzero() {
 /// gain the modules introduce. With a non-unity gain on `mod_b` the
 /// invariant still holds -- a link score, unlike the gain dz/dx, is
 /// normalized so the gain cancels around the loop.
-fn two_module_isolated_loop_project(mod_b_gain: f64) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel;
+fn two_module_isolated_loop_project(mod_b_gain: f64) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel;
 
     let passthrough_model = |name: &str, gain: f64| datamodel::Model {
         name: name.to_string(),
@@ -9965,8 +9966,8 @@ fn two_module_isolated_loop_project(mod_b_gain: f64) -> simlin_engine::datamodel
 /// transfer scores against `neg`, whose sign is opposite `pos`). POST-FIX:
 /// the per-exit-port pathway selection scores `s -> m` against the `pos`
 /// pathway the loop actually traverses, so the score is +1.
-fn multi_output_passthrough_loop_project() -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel;
+fn multi_output_passthrough_loop_project() -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel;
 
     // Sub-model `m`: a stockless passthrough exposing two outputs of
     // opposing sign. `input_val` is the input port; `pos` and `neg` are
@@ -10220,8 +10221,8 @@ fn discovery_multi_output_loop_polarity_matches_exhaustive() {
 /// rising arm of the parabola (s grows from 100, slowly, staying well below the
 /// vertex at 500), so the runtime loop score is single-signed (+1, reinforcing)
 /// at every active step.
-fn parabola_through_module_loop_project() -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel;
+fn parabola_through_module_loop_project() -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel;
 
     let passthrough = datamodel::Model {
         name: "passthrough".to_string(),
@@ -10413,7 +10414,7 @@ fn exhaustive_module_loop_polarity_reclassified_from_runtime() {
 /// branch, rather than short-circuiting at the missing-offset early-continue.
 #[test]
 fn exhaustive_never_active_loop_keeps_structural_polarity() {
-    use simlin_engine::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     let datamodel_project = TestProject::new("goal_seeking")
         .with_sim_time(0.0, 10.0, 1.0)
@@ -10462,7 +10463,7 @@ fn exhaustive_never_active_loop_keeps_structural_polarity() {
         data: data.into_boxed_slice(),
         step_size,
         step_count,
-        specs: simlin_engine::SimSpecs::from(&datamodel_project.sim_specs),
+        specs: simlin_base::SimSpecs::from(&datamodel_project.sim_specs),
         is_vensim: false,
     };
 
@@ -10523,7 +10524,7 @@ fn exhaustive_never_active_loop_keeps_structural_polarity() {
 /// kind of quantity that convention can be WRONG about: the runtime
 /// reclassification demonstrates runtime evidence overriding a conventional
 /// structural sign.
-fn mixed_sign_dominant_loop_project() -> simlin_engine::datamodel::Project {
+fn mixed_sign_dominant_loop_project() -> simlin_base::datamodel::Project {
     TestProject::new("rux_mixed_sign")
         .with_sim_time(0.0, 110.0, 0.25)
         .aux("g", "IF TIME < 100 THEN 0.02 ELSE -0.0001", None)
@@ -10624,7 +10625,7 @@ fn exhaustive_lone_loop_sign_flip_confidence_is_its_time_share() {
 /// r ~= (N - 8) * 2/3 ~= 288, |b| ~= 8 * 0.0099 = 0.08, confidence
 /// (288 - 0.08) / 288.1 = 0.9994 for any N near 440: above the gate and
 /// below 1, `Mostly*`.
-fn competing_sign_flip_project(flipping: &str) -> simlin_engine::datamodel::Project {
+fn competing_sign_flip_project(flipping: &str) -> simlin_base::datamodel::Project {
     let (inflow_gain, outflow_gain) = if flipping == "inflow" {
         ("g", "d")
     } else {
@@ -10886,7 +10887,7 @@ fn exhaustive_mixed_sign_balanced_loop_stays_undetermined() {
 fn discovery_classification_matches_exhaustive_on_the_relative_base() {
     use simlin_engine::ltm::LoopPolarity;
 
-    let exhaustive = |project: &simlin_engine::datamodel::Project, flow: &str| {
+    let exhaustive = |project: &simlin_base::datamodel::Project, flow: &str| {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, project, None);
         let source_model = sync.models["main"].source_model;
@@ -10902,7 +10903,7 @@ fn discovery_classification_matches_exhaustive_on_the_relative_base() {
             .find(|l| l.variables.iter().any(|v| v == flow))
             .expect("the loop through the flow")
     };
-    let discovered = |project: &simlin_engine::datamodel::Project, flow: &str| {
+    let discovered = |project: &simlin_base::datamodel::Project, flow: &str| {
         let (_results, found) = run_discovery(project);
         found
             .into_iter()

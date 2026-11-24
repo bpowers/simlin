@@ -36,7 +36,7 @@ fn try_detect_ltm_loops_incremental(
 
     // Phase 1: Model lookup and loop detection.
     let (source_model, detected) = {
-        let canonical_name = crate::canonicalize(&actual_name_owned);
+        let canonical_name = simlin_base::canonicalize(&actual_name_owned);
         let source_model = *source_project.models(db).get(canonical_name.as_ref())?;
         let detected = crate::db::model_detected_loops(db, source_model, source_project);
         (source_model, detected)
@@ -148,7 +148,7 @@ fn try_detect_ltm_loops_incremental(
 
     let times = results
         .iter()
-        .map(|row| row[crate::results::TIME_OFF])
+        .map(|row| row[simlin_base::results::TIME_OFF])
         .collect();
     Some((feedback_loops, times))
 }

@@ -79,7 +79,7 @@ impl Expr {
             }
             // Spelled as an equation spells a name: a stock named `pi` is
             // read as the stock only quoted.
-            Expr::Ref(name) => crate::ast::print_ident(name),
+            Expr::Ref(name) => simlin_base::ast::print_ident(name),
             Expr::Inf => "inf()".to_string(),
             Expr::Paren(inner) => format!("({})", inner.to_equation_string()),
             Expr::BinOp(left, op, right) => {

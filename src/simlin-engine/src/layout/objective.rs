@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::LayoutState;
 use super::graph::{Layout, Position};
-use crate::datamodel::view_element::LabelSide;
+use simlin_base::datamodel::view_element::LabelSide;
 
 /// Minimum center-to-center distance between two point nodes (auxes/modules)
 /// before the annealing's cost charges them as piled up. Two auxes need at

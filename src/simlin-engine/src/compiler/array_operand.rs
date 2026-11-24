@@ -22,8 +22,8 @@
 //! This pass discharges all of it, and it is the only one: [`super::Var::new`]
 //! runs it once over the fully lowered, constant-folded fragment, where every
 //! subscript is resolved and every view is concrete, and it is the only caller
-//! of [`crate::ast::TempAllocator::alloc`] in the crate. Positions are read off
-//! [`crate::builtins::BuiltinFn::signature`] -- `ArgKind::Array` says which
+//! of [`simlin_base::ast::TempAllocator::alloc`] in the crate. Positions are read off
+//! [`simlin_base::builtins::BuiltinFn::signature`] -- `ArgKind::Array` says which
 //! operands codegen wants as views, `ResultKind::Array` says which calls write
 //! a temp -- so a new builtin is classified in the table rather than in a
 //! second hand-maintained list here.
@@ -50,7 +50,7 @@
 //! id for the whole equation. A per-element body takes one id that every
 //! element REUSES, because such a temp is written and read inside one element's
 //! code and is dead before the next element runs
-//! ([`crate::ast::TempAllocator::element_scopes`]) -- which is what keeps a
+//! ([`simlin_base::ast::TempAllocator::element_scopes`]) -- which is what keeps a
 //! 300-element equation at one temp slot rather than 300, the bytecode `TempId`
 //! being a `u8`. A temp read through a static VIEW carries the `u32` and is
 //! rejected at resolution above 255 (`symbolic::resolve_static_view`); that
@@ -117,10 +117,10 @@
 //!   SORT ORDER(vals[*], 1)` asks for a whole array in one slot -- so it is
 //!   left for codegen to reject with a diagnostic.
 
-use crate::ast::{ArrayView, TempAllocator};
-use crate::builtins::{ArgKind, ResultKind};
 use crate::compiler::expr::{BuiltinFn, Expr, SubscriptIndex, VarRef};
-use crate::dimensions::DimensionsContext;
+use simlin_base::ast::{ArrayView, TempAllocator};
+use simlin_base::builtins::{ArgKind, ResultKind};
+use simlin_base::dimensions::DimensionsContext;
 
 /// The arrayed variable whose per-element slots an equation's assignments
 /// write, for the one position that needs to know WHICH element it is: an
@@ -303,7 +303,10 @@ pub(super) fn materialize_computed_array_operands(
 /// The `AssignTemp` that writes site `id`, taking its body. `id` is the site's
 /// index, like every other temp id in the pass's output.
 fn take_assignment(site: &mut Site, id: usize) -> Expr {
-    let body = std::mem::replace(&mut site.body, Expr::Const(0.0, crate::ast::Loc::default()));
+    let body = std::mem::replace(
+        &mut site.body,
+        Expr::Const(0.0, simlin_base::ast::Loc::default()),
+    );
     Expr::AssignTemp(id as u32, Box::new(body), site.view.clone())
 }
 

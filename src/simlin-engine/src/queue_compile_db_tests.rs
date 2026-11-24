@@ -13,9 +13,9 @@
 //! included via `#[path]` so `use super::*` still resolves private items.
 
 use super::*;
-use crate::common::{ErrorCode, Ident};
 use crate::db::{ModuleInputSet, SimlinDb, collect_all_diagnostics, compile_var_fragment};
 use salsa::plumbing::AsId;
+use simlin_base::common::{ErrorCode, Ident};
 use std::io::BufReader;
 
 fn parse(xml: &str) -> datamodel::Project {

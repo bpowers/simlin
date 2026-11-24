@@ -499,7 +499,7 @@ fn main() {
     };
     for dim in &datamodel.dimensions {
         tables.dims.insert(dim.name.to_lowercase());
-        if let simlin_engine::datamodel::DimensionElements::Named(names) = &dim.elements {
+        if let simlin_base::datamodel::DimensionElements::Named(names) = &dim.elements {
             for elem in names {
                 tables.elements.insert(elem.to_lowercase());
             }
@@ -840,9 +840,9 @@ fn main() {
         let kind = match source_vars.get(to_base) {
             None => "target not a model variable",
             Some(sv) => match sv.equation(&db) {
-                simlin_engine::datamodel::Equation::Scalar(..) => "target: Scalar equation",
-                simlin_engine::datamodel::Equation::ApplyToAll(..) => "target: ApplyToAll equation",
-                simlin_engine::datamodel::Equation::Arrayed(..) => {
+                simlin_base::datamodel::Equation::Scalar(..) => "target: Scalar equation",
+                simlin_base::datamodel::Equation::ApplyToAll(..) => "target: ApplyToAll equation",
+                simlin_base::datamodel::Equation::Arrayed(..) => {
                     "target: Arrayed (per-element) equation"
                 }
             },

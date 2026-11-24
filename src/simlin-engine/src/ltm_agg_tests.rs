@@ -1347,8 +1347,8 @@ fn whole_rhs_broadcast_pinned_mix_mints_synthetic_agg() {
 /// source element with several preimages has no single agg slot).
 #[test]
 fn iterated_axis_slot_elements_cases() {
-    use crate::datamodel::{Dimension as DmDimension, DimensionMapping};
-    use crate::dimensions::DimensionsContext;
+    use simlin_base::datamodel::{Dimension as DmDimension, DimensionMapping};
+    use simlin_base::dimensions::DimensionsContext;
 
     let named = |name: &str, elems: &[&str], mappings: Vec<DimensionMapping>| {
         let mut d = DmDimension::named(
@@ -1849,13 +1849,13 @@ fn resolve_dims(
     db: &SimlinDb,
     project: crate::db::SourceProject,
     names: &[&str],
-) -> Vec<crate::dimensions::Dimension> {
+) -> Vec<simlin_base::dimensions::Dimension> {
     let dim_ctx = crate::db::project_dimensions_context(db, project);
     names
         .iter()
         .map(|n| {
             dim_ctx
-                .get(&crate::common::CanonicalDimensionName::from_raw(n))
+                .get(&simlin_base::common::CanonicalDimensionName::from_raw(n))
                 .unwrap_or_else(|| panic!("dimension {n} resolves"))
                 .clone()
         })
@@ -2763,7 +2763,7 @@ fn every_reducer_carries_its_classification_on_the_agg_node() {
         // The body is the reducer's array argument, taken from the AST the
         // enumerator walked rather than parsed from `reducer_key`.
         assert_eq!(
-            crate::ast::print_eqn(&classified.body),
+            simlin_base::ast::print_eqn(&classified.body),
             "pop[*]",
             "{equation}: body"
         );
@@ -2771,13 +2771,13 @@ fn every_reducer_carries_its_classification_on_the_agg_node() {
 }
 
 /// GH #983: the carried reducer is stored in
-/// [`crate::ast::Expr2::strip_loc_and_bounds`] form, so a `Loc`-only edit
+/// [`simlin_base::ast::Expr2::strip_loc_and_bounds`] form, so a `Loc`-only edit
 /// leaves the salsa-cached `AggNodesResult` equal.
 ///
 /// **This is one of the two ways the backdating claim can fail, and it
 /// measures only this one.** The other is float non-reflexivity on a NaN
 /// literal, which normalization cannot touch and which is closed at the
-/// root by [`crate::ast::Literal`]'s bit-pattern equality;
+/// root by [`simlin_base::ast::Literal`]'s bit-pattern equality;
 /// [`a_nan_literal_in_a_reducer_does_not_defeat_agg_backdating`] pins that
 /// arm.
 ///
@@ -2814,8 +2814,8 @@ fn every_reducer_carries_its_classification_on_the_agg_node() {
 /// slice -- plus a nested reducer, which `reducer_expr0` projects recursively.
 #[test]
 fn the_typed_reducer_is_the_parse_of_its_key() {
-    use crate::ast::{Expr0, print_eqn};
-    use crate::lexer::LexerType;
+    use simlin_base::ast::{Expr0, print_eqn};
+    use simlin_base::lexer::LexerType;
 
     let nodes = agg_nodes(
         &TestProject::new("typed_reducer")
@@ -2883,7 +2883,7 @@ fn the_carried_reducer_is_normalized_so_offset_only_edits_backdate() {
     assert_eq!(
         agg.reducer
             .clone()
-            .map(crate::ast::Expr2::strip_loc_and_bounds)
+            .map(simlin_base::ast::Expr2::strip_loc_and_bounds)
             .strip_own_locs(),
         agg.reducer,
         "the stored reducer must already be normalized"
@@ -2995,9 +2995,9 @@ fn a_nan_literal_in_a_reducer_does_not_defeat_agg_backdating() {
 /// disturb.
 #[test]
 fn classify_axis_access_resolves_a_colliding_name_element_first() {
-    use crate::ast::{Expr2, IndexExpr2, Loc};
-    use crate::common::{CanonicalDimensionName, Ident};
-    use crate::datamodel;
+    use simlin_base::ast::{Expr2, IndexExpr2, Loc};
+    use simlin_base::common::{CanonicalDimensionName, Ident};
+    use simlin_base::datamodel;
 
     // `bucket`'s FIRST element is named `region`, exactly like the `region`
     // DIMENSION the target iterates. `mapped` decides whether `bucket` also
@@ -3024,7 +3024,7 @@ fn classify_axis_access_resolves_a_colliding_name_element_first() {
             target: "region".to_string(),
             element_map: vec![],
         }];
-        crate::dimensions::DimensionsContext::from(
+        simlin_base::dimensions::DimensionsContext::from(
             [
                 datamodel::Dimension::named(
                     "region".to_string(),
@@ -3042,7 +3042,7 @@ fn classify_axis_access_resolves_a_colliding_name_element_first() {
             .as_slice(),
         )
     };
-    let bucket_axis = |ctx: &crate::dimensions::DimensionsContext| {
+    let bucket_axis = |ctx: &simlin_base::dimensions::DimensionsContext| {
         ctx.get(&CanonicalDimensionName::from_raw("bucket"))
             .expect("the fixture declares `bucket`")
             .clone()
@@ -3157,12 +3157,12 @@ fn classify_axis_access_resolves_a_colliding_name_element_first() {
             &IndexExpr2::Range(
                 Expr2::Const(
                     "1".to_string(),
-                    crate::ast::Literal::new(1.0),
+                    simlin_base::ast::Literal::new(1.0),
                     Loc::default()
                 ),
                 Expr2::Const(
                     "2".to_string(),
-                    crate::ast::Literal::new(2.0),
+                    simlin_base::ast::Literal::new(2.0),
                     Loc::default()
                 ),
                 Loc::default()
@@ -3188,7 +3188,7 @@ fn classify_axis_access_resolves_a_colliding_name_element_first() {
         classify_axis_access(
             &IndexExpr2::Expr(Expr2::Const(
                 "2".to_string(),
-                crate::ast::Literal::new(2.0),
+                simlin_base::ast::Literal::new(2.0),
                 Loc::default()
             )),
             &region_axis,
@@ -3202,11 +3202,11 @@ fn classify_axis_access_resolves_a_colliding_name_element_first() {
     assert_eq!(
         classify_axis_access(
             &IndexExpr2::Expr(Expr2::Op2(
-                crate::ast::BinaryOp::Add,
+                simlin_base::ast::BinaryOp::Add,
                 Box::new(Expr2::Var(Ident::new("idx"), None, Loc::default())),
                 Box::new(Expr2::Const(
                     "1".to_string(),
-                    crate::ast::Literal::new(1.0),
+                    simlin_base::ast::Literal::new(1.0),
                     Loc::default()
                 )),
                 None,

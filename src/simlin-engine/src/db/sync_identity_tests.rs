@@ -9,8 +9,8 @@
 use super::*;
 use crate::db::exec_probe::ProbedDb;
 use crate::patch::apply_patch;
-use crate::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 use crate::test_common::TestProject;
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 
 fn base() -> datamodel::Project {
     TestProject::new("identity")

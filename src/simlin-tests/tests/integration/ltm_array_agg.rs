@@ -62,7 +62,9 @@
 //! is now fixed at the source. `subscripted_arrayed_nested_previous_matches_scalar`
 //! is the companion that pins the explicitly subscripted form.
 
-use simlin_engine::datamodel::{self, Dimension};
+use simlin_base::Results;
+use simlin_base::datamodel::{self, Dimension};
+use simlin_engine::Vm;
 use simlin_engine::db::{
     DetectedLoopPolarity, DiagnosticError, DiagnosticSeverity, LtmEquation, LtmSyntheticVar,
     SimlinDb, collect_all_diagnostics, compile_project_incremental, model_detected_loops,
@@ -71,7 +73,6 @@ use simlin_engine::db::{
 };
 use simlin_engine::open_vensim;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{Results, Vm};
 
 /// Canonical prefixes of the two LTM score-variable families. The
 /// separator is U+205A (TWO DOT PUNCTUATION), the character LTM uses to

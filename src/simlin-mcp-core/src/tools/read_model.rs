@@ -214,7 +214,7 @@ pub async fn read_model<A: ProjectAccess>(
 /// pattern: Functional Core -- pure over its inputs (no I/O).
 fn format_model_diagnostics(
     diagnostics: &[simlin_engine::db::Diagnostic],
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> (Vec<ErrorOutput>, Vec<ErrorOutput>) {
     use simlin_engine::db::DiagnosticSeverity;

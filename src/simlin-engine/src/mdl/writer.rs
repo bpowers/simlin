@@ -15,12 +15,16 @@ use std::fmt::Write;
 
 use super::builtins::{SymbolClass, classify_symbol, to_lower_space};
 use super::convert::is_external_data_placeholder;
-use crate::ast::{BinaryOp, Expr0, IndexExpr0, NodeShape, UnaryOp, Visitor, paren_if_necessary};
-use crate::builtins::UntypedBuiltinFn;
-use crate::common::{Error, ErrorCode, ErrorKind, Result};
-use crate::datamodel::view_element::{self, LinkPolarity, LinkShape};
-use crate::datamodel::{self, DimensionElements, Equation, GraphicalFunction, View, ViewElement};
-use crate::lexer::LexerType;
+use simlin_base::ast::{
+    BinaryOp, Expr0, IndexExpr0, NodeShape, UnaryOp, Visitor, paren_if_necessary,
+};
+use simlin_base::builtins::UntypedBuiltinFn;
+use simlin_base::common::{Error, ErrorCode, ErrorKind, Result};
+use simlin_base::datamodel::view_element::{self, LinkPolarity, LinkShape};
+use simlin_base::datamodel::{
+    self, DimensionElements, Equation, GraphicalFunction, View, ViewElement,
+};
+use simlin_base::lexer::LexerType;
 use unicode_xid::UnicodeXID;
 
 /// Replace underscores with spaces -- the reverse of `space_to_underbar()`.
@@ -333,13 +337,13 @@ fn views_named_as_defined(model: &datamodel::Model) -> Vec<View> {
         .variables
         .iter()
         .filter(|var| has_display_newline(var.get_ident()))
-        .map(|var| crate::common::canonicalize(var.get_ident()).into_owned())
+        .map(|var| simlin_base::common::canonicalize(var.get_ident()).into_owned())
         .collect();
     // The name an element is written under, when that is not the name it has.
     let named_as_defined = |name: &str| {
         let mut written = name.to_string();
         if has_display_newline(&written)
-            && !broken.contains(crate::common::canonicalize(&written).as_ref())
+            && !broken.contains(simlin_base::common::canonicalize(&written).as_ref())
         {
             written = collapse_display_newlines(&written);
         }
@@ -420,7 +424,7 @@ fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
                 ViewElement::Flow(f) => &f.name,
                 _ => continue,
             };
-            let canonical = crate::common::canonicalize(name).into_owned();
+            let canonical = simlin_base::common::canonicalize(name).into_owned();
             map.entry(canonical)
                 .or_insert_with(|| underbar_to_space(name));
         }
@@ -431,7 +435,7 @@ fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
 /// The display name for an ident: a view element's spelling of it, or the
 /// ident itself when no view element draws it.
 fn display_name_for_ident(ident: &str, display_names: &HashMap<String, String>) -> String {
-    match display_names.get(crate::common::canonicalize(ident).as_ref()) {
+    match display_names.get(simlin_base::common::canonicalize(ident).as_ref()) {
         Some(name) if needs_mdl_quoting(name) => {
             format!("\"{}\"", escape_mdl_quoted_ident(name))
         }
@@ -565,8 +569,8 @@ pub struct WriterContext {
     /// The project's dimensions, in declared order.
     dimensions: Vec<datamodel::Dimension>,
     /// The same dimensions as the compiler resolves them, for a read across
-    /// a mapping ([`crate::dimensions::DimensionsContext::resolve_mapped_read`]).
-    pub(super) dims: crate::dimensions::DimensionsContext,
+    /// a mapping ([`simlin_base::dimensions::DimensionsContext::resolve_mapped_read`]).
+    pub(super) dims: simlin_base::dimensions::DimensionsContext,
     /// Each variable of the model, by canonical name, with the name as its
     /// definition is written ([`WriterContext::reference`]).
     written_names: HashMap<String, String>,
@@ -589,7 +593,7 @@ impl WriterContext {
         for var in &model.variables {
             // A reader other than MDL's keeps a name as its file spells it
             // (`A_Values`), and every lookup here is by canonical name.
-            let ident = crate::common::canonicalize(var.get_ident()).into_owned();
+            let ident = simlin_base::common::canonicalize(var.get_ident()).into_owned();
             if let Some(dims) = declared_dims(var) {
                 var_dims.insert(ident.clone(), dims);
             }
@@ -601,7 +605,7 @@ impl WriterContext {
         let mut dim_elements = HashMap::new();
         let mut indexed_dims = HashMap::new();
         for dim in dimensions {
-            let canonical: String = crate::common::canonicalize(&dim.name).into();
+            let canonical: String = simlin_base::common::canonicalize(&dim.name).into();
             match &dim.elements {
                 DimensionElements::Named(elems) => {
                     dim_elements.insert(canonical, elems.clone());
@@ -629,7 +633,7 @@ impl WriterContext {
             element_owners,
             macros: HashSet::new(),
             dimensions: dimensions.to_vec(),
-            dims: crate::dimensions::DimensionsContext::from(dimensions),
+            dims: simlin_base::dimensions::DimensionsContext::from(dimensions),
             // As a definition is written with no view to name it;
             // `with_written_names` gives each the name its view draws.
             written_names: model
@@ -637,7 +641,7 @@ impl WriterContext {
                 .iter()
                 .map(|var| {
                     (
-                        crate::common::canonicalize(var.get_ident()).into_owned(),
+                        simlin_base::common::canonicalize(var.get_ident()).into_owned(),
                         display_name_for_ident(var.get_ident(), &HashMap::new()),
                     )
                 })
@@ -657,7 +661,7 @@ impl WriterContext {
     fn reference(&self, ident: &str) -> String {
         match self
             .written_names
-            .get(crate::common::canonicalize(ident).as_ref())
+            .get(simlin_base::common::canonicalize(ident).as_ref())
         {
             Some(defined) => defined.clone(),
             None => format_mdl_ident(ident),
@@ -673,7 +677,7 @@ impl WriterContext {
     ) -> Self {
         for var in &model.variables {
             self.written_names.insert(
-                crate::common::canonicalize(var.get_ident()).into_owned(),
+                simlin_base::common::canonicalize(var.get_ident()).into_owned(),
                 display_name_for_ident(var.get_ident(), display_names),
             );
         }
@@ -686,7 +690,7 @@ impl WriterContext {
             .models
             .iter()
             .filter(|model| model.macro_spec.is_some())
-            .map(|model| crate::common::canonicalize(&model.name).into_owned())
+            .map(|model| simlin_base::common::canonicalize(&model.name).into_owned())
             .collect();
         self
     }
@@ -695,7 +699,7 @@ impl WriterContext {
     /// is one Vensim reads: a function the reader's table holds, a macro of
     /// the project, or a call of one of the model's own tables.
     fn vensim_reads_call(&self, function: &str, mdl_name: &str) -> bool {
-        let canonical = crate::common::canonicalize(function);
+        let canonical = simlin_base::common::canonicalize(function);
         !matches!(classify_symbol(mdl_name), SymbolClass::Regular)
             || self.macros.contains(canonical.as_ref())
             || self.is_variable(&canonical)
@@ -707,7 +711,7 @@ impl WriterContext {
     fn indexed_element(&self, dim: &str, position: &str) -> Option<String> {
         let (name, size) = self
             .indexed_dims
-            .get(crate::common::canonicalize(dim).as_ref())?;
+            .get(simlin_base::common::canonicalize(dim).as_ref())?;
         let position: usize = position.parse().ok()?;
         (1..=*size)
             .contains(&position)
@@ -734,7 +738,7 @@ impl WriterContext {
     /// dimension that holds it at another position (a subrange) is written as
     /// the number it is.
     fn element_value(&self, ident: &str) -> Option<String> {
-        let canonical = crate::common::canonicalize(ident);
+        let canonical = simlin_base::common::canonicalize(ident);
         if self.is_variable(&canonical) {
             return None;
         }
@@ -746,13 +750,13 @@ impl WriterContext {
         };
         let at = elements
             .iter()
-            .position(|e| crate::common::canonicalize(e) == element)?;
+            .position(|e| simlin_base::common::canonicalize(e) == element)?;
         let owner = self.element_owners.get(&to_lower_space(&elements[at]))?;
         let position_in_owner = self
             .dim_elements
-            .get(crate::common::canonicalize(owner).as_ref())?
+            .get(simlin_base::common::canonicalize(owner).as_ref())?
             .iter()
-            .position(|e| crate::common::canonicalize(e) == element)?;
+            .position(|e| simlin_base::common::canonicalize(e) == element)?;
         if position_in_owner == at {
             Some(format_mdl_ident(&elements[at]))
         } else {
@@ -763,26 +767,26 @@ impl WriterContext {
     /// How `dim` spells its element `element` (any spelling of it), written;
     /// `None` when `dim` is not a named dimension holding it.
     fn declared_element(&self, dim: &str, element: &str) -> Option<String> {
-        let canonical = crate::common::canonicalize(element.trim());
+        let canonical = simlin_base::common::canonicalize(element.trim());
         self.dim_named_elements(dim)?
             .iter()
-            .find(|e| crate::common::canonicalize(e) == canonical)
+            .find(|e| simlin_base::common::canonicalize(e) == canonical)
             .map(|e| format_mdl_ident(e))
     }
 
     /// The project's dimension `name` (any spelling).
     fn dimension(&self, name: &str) -> Option<&datamodel::Dimension> {
-        let name = crate::common::canonicalize(name);
+        let name = simlin_base::common::canonicalize(name);
         self.dimensions
             .iter()
-            .find(|d| crate::common::canonicalize(&d.name) == name)
+            .find(|d| simlin_base::common::canonicalize(&d.name) == name)
     }
 
     /// The named elements (display form, declared order) of dimension `name`,
     /// or `None` for an unknown or indexed dimension.
     fn dim_named_elements(&self, name: &str) -> Option<&[String]> {
         self.dim_elements
-            .get(crate::common::canonicalize(name).as_ref())
+            .get(simlin_base::common::canonicalize(name).as_ref())
             .map(Vec::as_slice)
     }
 
@@ -889,7 +893,7 @@ fn collect_lookup_refs(
                 && args.len() == 2
                 && let Expr0::Var(table, _) = &args[0]
             {
-                let canon = crate::common::canonicalize(table.as_str());
+                let canon = simlin_base::common::canonicalize(table.as_str());
                 if extrapolate_lookups.contains(canon.as_ref()) {
                     referenced.insert(canon.into());
                 }
@@ -1051,7 +1055,7 @@ fn is_call(expr: &Expr0, name: &str) -> bool {
 /// canonical name, however the reference spells it (the reader's SAMPLE IF
 /// TRUE expansion writes `SELF`).
 fn is_var(expr: &Expr0, name: &str) -> bool {
-    matches!(expr, Expr0::Var(id, _) if crate::common::canonicalize(id.as_str()) == name)
+    matches!(expr, Expr0::Var(id, _) if simlin_base::common::canonicalize(id.as_str()) == name)
 }
 
 /// Returns true when `expr` is the constant `v`, bit for bit: a recognizer
@@ -1578,7 +1582,9 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
                     // kind through the round trip (#854).
                     if self
                         .ctx
-                        .is_extrapolating_lookup(&crate::common::canonicalize(table_ident.as_str()))
+                        .is_extrapolating_lookup(&simlin_base::common::canonicalize(
+                            table_ident.as_str(),
+                        ))
                     {
                         return format!("TABXL({table_name}, {input})");
                     }
@@ -1630,7 +1636,7 @@ impl Visitor<String> for MdlPrintVisitor<'_> {
                 // Canonicalize the subscripted variable's ident once so the
                 // wildcard-recovery lookup keys the same way `WriterContext`
                 // indexed the model's variables.
-                let canonical = crate::common::canonicalize(id.as_str());
+                let canonical = simlin_base::common::canonicalize(id.as_str());
                 let args: Vec<String> = args
                     .iter()
                     .enumerate()
@@ -1970,7 +1976,7 @@ fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
 /// body)`. Delegates to the shared predicate so the writer, the MDL converter,
 /// and the compiler all agree on what counts as lookup-only (issue #606).
 fn is_lookup_only_equation(eqn: &str) -> bool {
-    crate::datamodel::is_empty_or_sentinel(eqn)
+    simlin_base::datamodel::is_empty_or_sentinel(eqn)
 }
 
 /// Format f64 for MDL output: omit trailing `.0` for whole numbers.
@@ -2228,7 +2234,7 @@ fn warn_unrepresentable_gf_kinds(
         // emitted and its kind clamps to Continuous on re-import; that must
         // warn rather than be silently suppressed (#856).
         let preserved_by_tabxl = is_standalone
-            && !ctx.is_unreferenced_extrapolating_lookup(&crate::common::canonicalize(ident));
+            && !ctx.is_unreferenced_extrapolating_lookup(&simlin_base::common::canonicalize(ident));
         match gf.kind {
             Discrete => warnings.push(discrete_gf_warning(name)),
             Extrapolate if !is_standalone => warnings.push(embedded_extrapolate_gf_warning(name)),

@@ -15,7 +15,7 @@
 
 use std::borrow::Cow;
 
-use crate::datamodel::Model;
+use simlin_base::datamodel::Model;
 
 use crate::mdl::ast::{Equation as MdlEquation, Expr, FullEquation, Lhs, Loc, MdlItem};
 
@@ -104,7 +104,7 @@ impl<'input> ConversionContext<'input> {
         macro_name: &str,
         parameters: &[String],
         equations: &[FullEquation<'input>],
-    ) -> Result<Vec<crate::datamodel::Variable>, ConvertError> {
+    ) -> Result<Vec<simlin_base::datamodel::Variable>, ConvertError> {
         let mut items: Vec<MdlItem<'input>> =
             Vec::with_capacity(parameters.len() + equations.len());
 
@@ -131,7 +131,7 @@ impl<'input> ConversionContext<'input> {
             self.formatter.clone(),
             self.data_provider,
             super::types::SimSpecsBuilder::default(),
-            crate::datamodel::SimMethod::default(),
+            simlin_base::datamodel::SimMethod::default(),
             Vec::new(),
             Vec::new(),
             std::collections::HashMap::new(),

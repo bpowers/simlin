@@ -9,10 +9,10 @@
 //! (Reinforcing / Balancing / Undetermined) is then derived by counting
 //! negative links per cycle in `graph.rs`.
 
-use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
-use crate::builtins::BuiltinFn;
-use crate::common::{Canonical, Ident};
 use crate::variable::{VarKind, Variable};
+use simlin_base::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
+use simlin_base::builtins::BuiltinFn;
+use simlin_base::common::{Canonical, Ident};
 
 use super::types::{LinkPolarity, normalize_module_ref};
 
@@ -176,8 +176,8 @@ fn substitute_subexpr_in_expr2(
     target_text: &str,
     replacement: &Ident<Canonical>,
 ) -> Expr2 {
-    if crate::ast::expr2_to_string(expr) == target_text {
-        return Expr2::Var(replacement.clone(), None, crate::ast::Loc::default());
+    if simlin_base::ast::expr2_to_string(expr) == target_text {
+        return Expr2::Var(replacement.clone(), None, simlin_base::ast::Loc::default());
     }
     match expr {
         Expr2::Const(..) | Expr2::Var(..) => expr.clone(),
@@ -651,8 +651,8 @@ pub(super) fn analyze_expr_polarity_with_context(
             let operand_pol =
                 analyze_expr_polarity_with_context(operand, from_var, current_polarity, variables);
             match op {
-                crate::ast::UnaryOp::Not => flip_polarity(operand_pol),
-                crate::ast::UnaryOp::Negative => flip_polarity(operand_pol),
+                simlin_base::ast::UnaryOp::Not => flip_polarity(operand_pol),
+                simlin_base::ast::UnaryOp::Negative => flip_polarity(operand_pol),
                 _ => LinkPolarity::Unknown,
             }
         }
@@ -751,7 +751,7 @@ pub(super) fn literal_sign(expr: &Expr2) -> Option<bool> {
                 None
             }
         }
-        Expr2::Op1(crate::ast::UnaryOp::Negative, inner, _, _) => {
+        Expr2::Op1(simlin_base::ast::UnaryOp::Negative, inner, _, _) => {
             literal_sign(inner).map(|sign| !sign)
         }
         _ => None,
@@ -771,7 +771,7 @@ pub(super) fn provable_value_sign(
         return Some(sign);
     }
     match expr {
-        Expr2::Op1(crate::ast::UnaryOp::Negative, inner, _, _) => {
+        Expr2::Op1(simlin_base::ast::UnaryOp::Negative, inner, _, _) => {
             provable_value_sign(inner, variables).map(|sign| !sign)
         }
         Expr2::Var(ident, _, _) => {
@@ -803,7 +803,7 @@ fn cofactor_value_sign(
         return Some(sign);
     }
     match expr {
-        Expr2::Op1(crate::ast::UnaryOp::Negative, inner, _, _) => {
+        Expr2::Op1(simlin_base::ast::UnaryOp::Negative, inner, _, _) => {
             cofactor_value_sign(inner, variables).map(|sign| !sign)
         }
         Expr2::Var(..) | Expr2::Subscript(..) => Some(true),
@@ -1037,7 +1037,8 @@ fn lookup_table_polarity(
     };
     match table_expr {
         Expr2::Var(name, _, _) => {
-            let Some(var) = variables.get(&*crate::common::canonicalize(name.as_str())) else {
+            let Some(var) = variables.get(&*simlin_base::common::canonicalize(name.as_str()))
+            else {
                 return LinkPolarity::Unknown;
             };
             let VarKind::Aux { tables, .. } = &var.kind else {
@@ -1060,7 +1061,8 @@ fn lookup_table_polarity(
             }
         }
         Expr2::Subscript(name, indices, _, _) => {
-            let Some(var) = variables.get(&*crate::common::canonicalize(name.as_str())) else {
+            let Some(var) = variables.get(&*simlin_base::common::canonicalize(name.as_str()))
+            else {
                 return LinkPolarity::Unknown;
             };
             let VarKind::Aux { tables, .. } = &var.kind else {
@@ -1087,7 +1089,7 @@ fn lookup_table_polarity(
                 | IndexExpr2::Range(_, _, _) => LinkPolarity::Unknown,
                 IndexExpr2::Expr(Expr2::Var(elem, _, _)) => {
                     if let Some(offset) = dim.get_offset(
-                        &crate::common::CanonicalElementName::from_raw(elem.as_str()),
+                        &simlin_base::common::CanonicalElementName::from_raw(elem.as_str()),
                     ) {
                         // `LOOKUP(curve[NYC], x)`: the polarity of NYC's
                         // specific table.

@@ -173,14 +173,14 @@ fn a_first_query_waits_for_the_datamodel_and_builds_from_the_contents_it_is_rele
         let before = latex.run_plainly(unedited);
         simlin_project_unref(unedited);
         let mut held = (*proj).datamodel.lock().unwrap();
-        let project: &mut simlin_engine::datamodel::Project = &mut held;
+        let project: &mut simlin_base::datamodel::Project = &mut held;
         let births = project.models[0]
             .variables
             .find_mut(|v| v.get_ident() == "births")
             .expect("births is a variable");
-        if let simlin_engine::datamodel::Variable::Flow(flow) = births {
+        if let simlin_base::datamodel::Variable::Flow(flow) = births {
             flow.equation =
-                simlin_engine::datamodel::Equation::Scalar("population * rate * 2".to_string());
+                simlin_base::datamodel::Equation::Scalar("population * rate * 2".to_string());
         }
         let proj_addr = proj as usize;
         let (tx, rx) = mpsc::channel();

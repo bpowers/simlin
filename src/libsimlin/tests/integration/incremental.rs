@@ -7,7 +7,6 @@ use std::ptr;
 
 use simlin::*;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{self as engine};
 
 use crate::common::open_project_from_datamodel;
 
@@ -554,7 +553,7 @@ fn test_ac3_4_snapshot_isolation() {
 /// resulting in a generic "not initialised" message.
 #[test]
 fn test_incremental_compile_error_preserved_in_sim() {
-    use engine::datamodel;
+    use simlin_base::datamodel;
 
     let project = datamodel::Project {
         name: "bad_model".to_string(),

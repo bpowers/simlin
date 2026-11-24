@@ -14,12 +14,12 @@
 //! row does not depend on the defect the finding reports.
 
 use super::*;
-use crate::datamodel::view_element::{self, LabelSide};
 use crate::layout::edit_scenarios::{
     Scenario, ScenarioKind, build_scenario, first_difference, run_scenario, sync_view,
 };
 use crate::patch::apply_patch;
-use crate::project_patch::ProjectPatch;
+use simlin_base::datamodel::view_element::{self, LabelSide};
+use simlin_base::project_patch::ProjectPatch;
 
 const MODEL: &str = "main";
 const POPULATION: &str = "default_projects/population/model.xmile";

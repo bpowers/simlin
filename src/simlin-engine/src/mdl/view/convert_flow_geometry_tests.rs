@@ -9,8 +9,8 @@
 //! geometry must satisfy `diagram::flow_geometry`'s invariants on that box.
 
 use crate::compat::open_vensim;
-use crate::datamodel::{self, ViewElement, view_element};
 use crate::diagram::flow_geometry::flow_invariant_violations;
+use simlin_base::datamodel::{self, ViewElement, view_element};
 
 fn main_view(project: &datamodel::Project) -> &datamodel::StockFlow {
     let datamodel::View::StockFlow(sf) = &project.models[0].views[0];

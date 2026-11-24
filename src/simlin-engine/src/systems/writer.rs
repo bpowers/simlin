@@ -11,8 +11,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use crate::common::Result;
-use crate::datamodel::{Equation, Module, Project, Stock, Variable};
+use simlin_base::common::Result;
+use simlin_base::datamodel::{Equation, Module, Project, Stock, Variable};
 
 /// Systems-format module model name prefix (U+205A two dot punctuation).
 const SYSTEMS_PREFIX: &str = "stdlib\u{205A}systems_";
@@ -57,9 +57,9 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
         .get_model("main")
         .or_else(|| project.models.first())
         .ok_or_else(|| {
-            crate::common::Error::new(
-                crate::common::ErrorKind::Import,
-                crate::common::ErrorCode::Generic,
+            simlin_base::common::Error::new(
+                simlin_base::common::ErrorKind::Import,
+                simlin_base::common::ErrorCode::Generic,
                 Some("no model found in project".to_owned()),
             )
         })?;
@@ -977,7 +977,7 @@ mod tests {
 
         // Compare stock values at each timestep
         for stock in &["a", "b", "x", "y", "z"] {
-            let ident = crate::common::Ident::new(stock);
+            let ident = simlin_base::common::Ident::new(stock);
             let off1 = results1.offsets[&ident];
             let off2 = results2.offsets[&ident];
             for (step, (row1, row2)) in results1.iter().zip(results2.iter()).enumerate() {

@@ -15,7 +15,7 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use simlin_engine::rapidhash::{hash_bytes, hash_u32_slice};
+use simlin_base::rapidhash::{hash_bytes, hash_u32_slice};
 
 // Back this harness with mimalloc, the allocator every native binary that
 // embeds the engine installs. The compile path is allocation-bound, so timing

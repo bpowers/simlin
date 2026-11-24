@@ -20,10 +20,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::FlowPoint;
 use crate::diagram::constants::{CLOUD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
 use crate::diagram::flow_geometry::{CORNER_CLEARANCE, PIPE_SPACING};
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::FlowPoint;
 
 const EPS: f64 = 1e-6;
 
@@ -466,7 +466,7 @@ fn separate_created_clouds(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::view_element::{self, LabelSide};
+    use simlin_base::datamodel::view_element::{self, LabelSide};
 
     /// Rows, one per arm of `slot_on_face`: an empty face gives its center;
     /// one occupant, with the target on each side of it, gives the nearest

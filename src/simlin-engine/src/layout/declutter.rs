@@ -25,10 +25,10 @@
 
 use std::collections::HashMap;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::LabelSide;
 use crate::diagram::common::{Rect, merge_bounds};
 use crate::diagram::label::label_bounds;
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::LabelSide;
 
 use super::metrics::{
     COMFORTABLE_CLEARANCE, LabelScene, MetricWeights, alias_label_props_for, alias_source_names,
@@ -1235,11 +1235,11 @@ mod tests {
             target,
             aux_at(2, -200.0, y, "a"),
             aux_at(3, 600.0, y, "b"),
-            ViewElement::Link(crate::datamodel::view_element::Link {
+            ViewElement::Link(simlin_base::datamodel::view_element::Link {
                 uid: 10,
                 from_uid: 2,
                 to_uid: 3,
-                shape: crate::datamodel::view_element::LinkShape::Straight,
+                shape: simlin_base::datamodel::view_element::LinkShape::Straight,
                 polarity: None,
             }),
         ];
@@ -1318,11 +1318,11 @@ mod tests {
             aux_at(2, -300.0, y, "a"),
             aux_at(3, 900.0, y, "b"),
             aux_at(4, 500.0, 0.0, "another long name"),
-            ViewElement::Link(crate::datamodel::view_element::Link {
+            ViewElement::Link(simlin_base::datamodel::view_element::Link {
                 uid: 10,
                 from_uid: 2,
                 to_uid: 3,
-                shape: crate::datamodel::view_element::LinkShape::Straight,
+                shape: simlin_base::datamodel::view_element::LinkShape::Straight,
                 polarity: None,
             }),
         ];
@@ -1359,10 +1359,10 @@ mod tests {
             aux_at(4, 118.0, 122.0, "fourth name"),
         ];
         declutter_view(&mut elements);
-        let view = crate::datamodel::StockFlow {
+        let view = simlin_base::datamodel::StockFlow {
             name: None,
             elements: elements.into(),
-            view_box: crate::datamodel::Rect::default(),
+            view_box: simlin_base::datamodel::Rect::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
@@ -1504,12 +1504,12 @@ mod tests {
 
     #[test]
     fn test_ghost_labels_get_decluttered() {
-        use crate::datamodel::view_element::Alias;
+        use simlin_base::datamodel::view_element::Alias;
         // A ghost (alias) parked right next to an aux, both with Bottom labels
         // that overlap. The declutter must separate them -- ghosts are movable
         // free-floating nodes whose labels participate like any other.
         let mut elements = vec![
-            ViewElement::Aux(crate::datamodel::view_element::Aux {
+            ViewElement::Aux(simlin_base::datamodel::view_element::Aux {
                 name: "consumer variable".to_string(),
                 uid: 1,
                 x: 100.0,
@@ -1552,7 +1552,7 @@ mod tests {
     // ── zoom + flow re-attachment (the fix for the original revert) ──
 
     fn stock_at(uid: i32, x: f64, y: f64) -> ViewElement {
-        ViewElement::Stock(crate::datamodel::view_element::Stock {
+        ViewElement::Stock(simlin_base::datamodel::view_element::Stock {
             name: format!("stock_{uid}"),
             uid,
             x,
@@ -1569,7 +1569,7 @@ mod tests {
         attached_to: i32,
         free_end: (f64, f64),
     ) -> ViewElement {
-        use crate::datamodel::view_element::{Flow, FlowPoint};
+        use simlin_base::datamodel::view_element::{Flow, FlowPoint};
         ViewElement::Flow(Flow {
             name: format!("flow_{uid}"),
             uid,
@@ -1658,7 +1658,7 @@ mod tests {
     // ── compaction ──
 
     fn aux_at(uid: i32, x: f64, y: f64, name: &str) -> ViewElement {
-        ViewElement::Aux(crate::datamodel::view_element::Aux {
+        ViewElement::Aux(simlin_base::datamodel::view_element::Aux {
             name: name.to_string(),
             uid,
             x,

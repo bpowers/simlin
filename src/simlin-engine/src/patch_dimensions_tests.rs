@@ -9,11 +9,11 @@
 
 use std::collections::HashMap;
 
-use crate::common::ErrorCode;
-use crate::datamodel::{self, Dimension, Equation, Project};
 use crate::patch::apply_patch;
-use crate::project_patch::{ProjectOperation, ProjectPatch};
 use crate::test_common::TestProject;
+use simlin_base::common::ErrorCode;
+use simlin_base::datamodel::{self, Dimension, Equation, Project};
+use simlin_base::project_patch::{ProjectOperation, ProjectPatch};
 
 fn apply(project: &Project, ops: Vec<ProjectOperation>) -> Result<Project, (ErrorCode, String)> {
     let mut edited = project.clone();

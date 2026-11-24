@@ -27,14 +27,14 @@
 //! still compiles and computes something else. The last tests pin it over the
 //! builtin table.
 
-use crate::common::{ErrorCode, Ident};
-use crate::datamodel;
 use crate::db::{
     SimlinDb, collect_all_diagnostics, compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::patch::apply_patch;
-use crate::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 use crate::test_common::TestProject;
+use simlin_base::common::{ErrorCode, Ident};
+use simlin_base::datamodel;
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 
 /// The equation-language keywords in their `name=` spelling.
 ///
@@ -437,7 +437,10 @@ fn renaming_to_an_unspellable_name_is_refused() {
 
     let (result, project) = rename_to("x\"y");
     let err = result.expect_err("a rename to a `\"`-bearing name must be refused");
-    assert_eq!(crate::common::ErrorCode::UnclosedQuotedIdent, err.code);
+    assert_eq!(
+        simlin_base::common::ErrorCode::UnclosedQuotedIdent,
+        err.code
+    );
     assert_compiles_clean(&project, "the model a refused rename left alone");
     assert!(
         project.models[0]
@@ -465,7 +468,7 @@ fn renaming_to_an_unspellable_name_is_refused() {
 /// Every zero-argument builtin's name and alias, from the signature table, so
 /// a builtin added there has a row in the two tests below.
 fn nullary_builtin_names() -> Vec<&'static str> {
-    crate::builtins::BuiltinSig::ALL
+    simlin_base::builtins::BuiltinSig::ALL
         .iter()
         .filter(|sig| sig.max_args == Some(0))
         .flat_map(|sig| std::iter::once(sig.name).chain(sig.aliases.iter().copied()))
@@ -754,7 +757,7 @@ fn a_variable_named_for_a_clock_slot_takes_its_results_key() {
         assert_eq!(column, [42.0, 42.0, 42.0], "{name}");
         let clock: Vec<f64> = results
             .iter()
-            .map(|row| row[crate::results::TIME_OFF])
+            .map(|row| row[simlin_base::results::TIME_OFF])
             .collect();
         assert_eq!(clock, [1.0, 2.0, 3.0], "{name}");
     }

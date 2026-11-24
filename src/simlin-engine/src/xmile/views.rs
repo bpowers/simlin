@@ -7,13 +7,13 @@ use std::collections::HashMap;
 use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Result, canonicalize};
-use crate::datamodel;
-use crate::datamodel::{Rect, ViewElement};
 use crate::xmile::model::Model;
 use crate::xmile::variables::Var;
 use crate::xmile::view_element::LinkEnd;
 use crate::xmile::{ToXml, XmlWriter, write_tag_end, write_tag_start_with_attrs};
+use simlin_base::common::{Result, canonicalize};
+use simlin_base::datamodel;
+use simlin_base::datamodel::{Rect, ViewElement};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,16 +39,16 @@ pub mod view_element {
     use std::collections::HashMap;
 
     use super::super::datamodel;
-    use crate::common::Result;
-    #[cfg(test)]
-    use crate::datamodel::StockFlow;
-    use crate::datamodel::view_element::LinkShape;
     use crate::xmile::{
         ToXml, XmlWriter, write_tag, write_tag_end, write_tag_start, write_tag_start_with_attrs,
         write_tag_text, write_tag_with_attrs,
     };
     use quick_xml::Writer;
     use serde::{Deserialize, Deserializer, Serialize};
+    use simlin_base::common::Result;
+    #[cfg(test)]
+    use simlin_base::datamodel::StockFlow;
+    use simlin_base::datamodel::view_element::LinkShape;
 
     /// Normalize an angle to the range [0, 360).
     /// Use this to sanitize angles read from XMILE files before conversion.
@@ -2113,7 +2113,7 @@ impl From<datamodel::View> for View {
 
 #[test]
 fn test_view_roundtrip() {
-    use crate::datamodel::Rect;
+    use simlin_base::datamodel::Rect;
     let cases: &[_] = &[datamodel::View::StockFlow(datamodel::StockFlow {
         name: None,
         elements: vec![datamodel::ViewElement::Stock(
@@ -2160,8 +2160,8 @@ mod flow_geometry_tests;
 mod zoom_unit_tests {
     use std::io::BufReader;
 
-    use crate::datamodel;
     use crate::xmile::{project_from_reader, project_to_xmile};
+    use simlin_base::datamodel;
 
     fn project_with_view(view_attrs: &str) -> datamodel::Project {
         let xml = format!(

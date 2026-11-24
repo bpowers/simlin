@@ -28,7 +28,7 @@ use super::{
     SYSTEM_NAMES, VDF_SECTION6_OT_CODE_STOCK, VdfFile, VdfRecord, VdfSection3Directory,
     VdfSection3DirectoryEntry, is_lookupish_name, is_owner_ot_class_code,
 };
-use crate::common::{Canonical, Ident};
+use simlin_base::common::{Canonical, Ident};
 
 /// One direct record -> name -> OT-span fact.
 ///

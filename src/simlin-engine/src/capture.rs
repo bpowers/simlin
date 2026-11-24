@@ -50,12 +50,12 @@
 
 use indexmap::IndexMap;
 
-use crate::ast::{Ast, Expr0, Loc};
-use crate::common::{Canonical, EquationError, ErrorCode, Ident};
-use crate::datamodel;
-use crate::dimensions::DimensionsContext;
 use crate::model::ParsedVariable;
 use crate::variable::{ElementScope, VarKind, Variable, get_dimensions};
+use simlin_base::ast::{Ast, Expr0, Loc};
+use simlin_base::common::{Canonical, EquationError, ErrorCode, Ident};
+use simlin_base::datamodel;
+use simlin_base::dimensions::DimensionsContext;
 
 /// The name a synthesized helper of `parent` is filed under.
 ///
@@ -604,12 +604,12 @@ impl ImplicitVar {
         let ImplicitVar::Module(module) = self else {
             return None;
         };
-        let source = crate::common::canonicalize(source);
+        let source = simlin_base::common::canonicalize(source);
         module
             .references
             .iter()
             .zip(&module.argument_locs)
-            .find(|(reference, _)| crate::common::canonicalize(&reference.src) == source)
+            .find(|(reference, _)| simlin_base::common::canonicalize(&reference.src) == source)
             .map(|(_, loc)| *loc)
     }
 

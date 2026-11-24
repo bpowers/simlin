@@ -47,7 +47,7 @@ impl BinaryOp {
     /// these numbers. Every operator here is left-associative EXCEPT `Exp`,
     /// which is right-to-left; the printers special-case that rather than
     /// encoding it in the table.
-    pub(crate) fn precedence(&self) -> u8 {
+    pub fn precedence(&self) -> u8 {
         match self {
             BinaryOp::Or => 1,
             BinaryOp::And => 2,
@@ -128,8 +128,8 @@ impl IndexExpr0 {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn strip_loc(self) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn strip_loc(self) -> Self {
         let loc = Loc::default();
         match self {
             IndexExpr0::Wildcard(_loc) => IndexExpr0::Wildcard(loc),
@@ -146,7 +146,7 @@ impl IndexExpr0 {
 impl Expr0 {
     /// Returns the source location of the first reference to the given
     /// canonical identifier, or None if the identifier is not referenced.
-    pub(crate) fn get_var_loc(&self, canonical_ident: &str) -> Option<Loc> {
+    pub fn get_var_loc(&self, canonical_ident: &str) -> Option<Loc> {
         match self {
             Expr0::Const(..) => None,
             Expr0::Var(raw, loc) => {
@@ -269,8 +269,8 @@ impl Expr0 {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn strip_loc(self) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn strip_loc(self) -> Self {
         let loc = Loc::default();
         match self {
             Expr0::Const(s, n, _loc) => Expr0::Const(s, n, loc),
@@ -319,12 +319,12 @@ impl Expr0 {
     /// per element, and the dt and initial passes walk one equation twice, so
     /// that question is asked on every model with a capture in an arrayed
     /// equation, which is why it allocates nothing. See
-    /// [`crate::capture::Capture::same_definition`].
+    /// `simlin_engine::capture::Capture::same_definition`.
     ///
     /// A constant is the VALUE it denotes: `2` and `2.0` compute the same thing,
     /// so a helper minted from each is one helper. Its spelling matters only to
     /// the printer and the diagnostics, which `PartialEq` still covers.
-    pub(crate) fn eq_ignoring_loc(&self, other: &Expr0) -> bool {
+    pub fn eq_ignoring_loc(&self, other: &Expr0) -> bool {
         match (self, other) {
             (Expr0::Const(_, ln, _), Expr0::Const(_, rn, _)) => ln == rn,
             (Expr0::Var(l, _), Expr0::Var(r, _)) => same_name(l, r),
@@ -352,7 +352,7 @@ impl Expr0 {
         }
     }
 
-    pub(crate) fn get_loc(&self) -> Loc {
+    pub fn get_loc(&self) -> Loc {
         match self {
             Expr0::Const(_, _, loc) => *loc,
             Expr0::Var(_, loc) => *loc,

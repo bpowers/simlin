@@ -1502,7 +1502,7 @@ mod tests {
                     assert_eq!(nums.len(), 3);
                     assert_eq!(nums[0], 1.0);
                     // `:NA:` is the finite sentinel -2^109 (was -1e38, corrected).
-                    assert_eq!(nums[1], crate::float::NA);
+                    assert_eq!(nums[1], simlin_base::float::NA);
                     assert_eq!(nums[2], 3.0);
                 } else {
                     panic!("Expected NumberList, got {:?}", eq.equation);
@@ -1522,7 +1522,7 @@ mod tests {
                 if let Equation::NumberList(_, nums) = &eq.equation {
                     assert_eq!(nums.len(), 3);
                     // `:NA:` is the finite sentinel -2^109 (was -1e38, corrected).
-                    assert_eq!(nums[0], crate::float::NA);
+                    assert_eq!(nums[0], simlin_base::float::NA);
                     assert_eq!(nums[1], 2.0);
                     assert_eq!(nums[2], 3.0);
                 } else {
@@ -1543,7 +1543,7 @@ mod tests {
                 if let Equation::NumberList(_, nums) = &eq.equation {
                     assert_eq!(nums.len(), 3);
                     // `:NA:` is the finite sentinel -2^109 (was -1e38, corrected).
-                    assert!(nums.iter().all(|&n| n == crate::float::NA));
+                    assert!(nums.iter().all(|&n| n == simlin_base::float::NA));
                 } else {
                     panic!("Expected NumberList, got {:?}", eq.equation);
                 }

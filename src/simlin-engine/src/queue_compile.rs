@@ -68,7 +68,6 @@
 
 use std::collections::HashMap;
 
-use crate::common::{Canonical, DimensionName, ErrorCode, Ident, IdentMap};
 use crate::conveyor_compile::{
     ContainerMeta, ContainerNaming, ContainerPlan, ContainerVarSpec, canon,
     container_value_from_slice, element_offset, element_subscripts_for_dims, equation_dims,
@@ -76,7 +75,8 @@ use crate::conveyor_compile::{
     resolve_container_plans, rewrite_model_container_equations, set_variable_equation,
     synthesize_container_stocks,
 };
-use crate::datamodel::{self, Equation};
+use simlin_base::common::{Canonical, DimensionName, ErrorCode, Ident, IdentMap};
+use simlin_base::datamodel::{self, Equation};
 
 /// The downstream target a queue outflow drains into (docs/design/queues.md §4).
 /// [`expand_queues`] produces only [`QueueOutflowKind::Unconstrained`]; the
@@ -951,12 +951,12 @@ pub fn build_compiled(
     db: &mut crate::db::SimlinDb,
     project: &datamodel::Project,
     main_model: &str,
-) -> crate::common::Result<(
+) -> simlin_base::common::Result<(
     std::sync::Arc<crate::vm::CompiledSimulation>,
     Vec<crate::conveyor_compile::ConveyorPlan>,
     Vec<QueuePlan>,
 )> {
-    use crate::common::{Error, ErrorKind};
+    use simlin_base::common::{Error, ErrorKind};
 
     // Every stock's lists as the sets the engine integrates
     // (`datamodel::distinct_stock_flows`), taken before anything below reads
@@ -977,15 +977,16 @@ pub fn build_compiled(
     // is checked (non-main models pass through expansion untouched), matching
     // the project-level scan the ordinary compile path performs.
     for model in &project.models {
-        if let Some((canonical, spellings)) =
-            crate::common::duplicate_variable_groups(model.variables.iter().map(|v| v.get_ident()))
-                .into_iter()
-                .next()
+        if let Some((canonical, spellings)) = simlin_base::common::duplicate_variable_groups(
+            model.variables.iter().map(|v| v.get_ident()),
+        )
+        .into_iter()
+        .next()
         {
             return Err(Error::new(
                 ErrorKind::Simulation,
                 ErrorCode::DuplicateVariable,
-                Some(crate::common::duplicate_variable_message(
+                Some(simlin_base::common::duplicate_variable_message(
                     &model.name,
                     &canonical,
                     &spellings,
@@ -1474,7 +1475,7 @@ impl CouplingTable {
 /// this delegates to the two independent passes, byte-identical to the
 /// pre-coupling behavior.
 ///
-/// Errors ([`ErrorCode::ConveyorTransitTooLong`](crate::common::ErrorCode::ConveyorTransitTooLong))
+/// Errors ([`ErrorCode::ConveyorTransitTooLong`](simlin_base::common::ErrorCode::ConveyorTransitTooLong))
 /// when a conveyor's mid-run `<sample>` re-latch would exceed the slat-count
 /// bound (§4.1, surfaced from [`crate::conveyor_compile::run_phase_a`]); the VM
 /// aborts the run with a simulation error.
@@ -1494,7 +1495,7 @@ pub fn run_coupled_passes(
     time: f64,
     start: f64,
     last_unit: &mut i64,
-) -> Result<(), (crate::common::ErrorCode, String)> {
+) -> Result<(), (simlin_base::common::ErrorCode, String)> {
     use crate::conveyor_compile as cc;
 
     // The coupling is compile-time constant, so the caller derives `coupling`
@@ -1599,7 +1600,7 @@ pub fn run_coupled_passes(
 pub fn build_vm(
     project: &datamodel::Project,
     main_model: &str,
-) -> crate::common::Result<crate::vm::Vm> {
+) -> simlin_base::common::Result<crate::vm::Vm> {
     let mut db = crate::db::SimlinDb::default();
     let (compiled, conveyor_plans, queue_plans) = build_compiled(&mut db, project, main_model)?;
     let mut vm = crate::vm::Vm::new(compiled)?;
@@ -1615,7 +1616,7 @@ pub fn build_vm(
 pub(crate) fn build_compiled_fresh(
     project: &datamodel::Project,
     main_model: &str,
-) -> crate::common::Result<(
+) -> simlin_base::common::Result<(
     std::sync::Arc<crate::vm::CompiledSimulation>,
     Vec<crate::conveyor_compile::ConveyorPlan>,
     Vec<QueuePlan>,
@@ -1686,7 +1687,7 @@ pub fn compile_sim(
     datamodel: &datamodel::Project,
     main_model: &str,
     overlay: crate::db::LtmOverlay,
-) -> crate::common::Result<SimBuild> {
+) -> simlin_base::common::Result<SimBuild> {
     if crate::conveyor_compile::project_has_conveyor(datamodel, main_model)
         || project_has_queue(datamodel, main_model)
     {
@@ -1735,7 +1736,7 @@ pub fn build_sim(
     datamodel: &datamodel::Project,
     main_model: &str,
     overlay: crate::db::LtmOverlay,
-) -> crate::common::Result<crate::vm::Vm> {
+) -> simlin_base::common::Result<crate::vm::Vm> {
     let build = compile_sim(db, source_project, datamodel, main_model, overlay)?;
     let mut vm = crate::vm::Vm::new(build.compiled)?;
     // Attaching empty plan sets is semantically a no-op, but the ordinary path
@@ -1759,7 +1760,7 @@ mod db_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Ident;
+    use simlin_base::common::Ident;
     use std::io::BufReader;
 
     fn parse(xml: &str) -> datamodel::Project {
@@ -1816,7 +1817,10 @@ mod tests {
             crate::db::LtmOverlay::Off,
         )
         .expect_err("ordinary compile must reject an un-expanded queue");
-        assert_eq!(guard_err.code, crate::common::ErrorCode::QueueNotExpanded);
+        assert_eq!(
+            guard_err.code,
+            simlin_base::common::ErrorCode::QueueNotExpanded
+        );
 
         // `build_sim` routes around it via the special build path and produces a
         // runnable VM whose queue stock simulates.
@@ -1993,7 +1997,7 @@ mod tests {
 
     /// Compile `project` through `build_sim` (the shared engine dispatch every
     /// caller other than `simlin_sim_new` uses) and return the expected error.
-    fn build_sim_err(project: &datamodel::Project) -> crate::common::Error {
+    fn build_sim_err(project: &datamodel::Project) -> simlin_base::common::Error {
         let main = project
             .models
             .iter()
@@ -2192,7 +2196,7 @@ mod tests {
             let err = vm.set_value(&Ident::new(name), 999.0).unwrap_err();
             assert_eq!(
                 err.code,
-                crate::common::ErrorCode::BadOverride,
+                simlin_base::common::ErrorCode::BadOverride,
                 "set_value('{name}') must be rejected"
             );
         }
@@ -3253,7 +3257,7 @@ mod tests {
     // stock from its side table. Rejected loudly at coupling-detection time.
 
     /// Build a queue model through the special path and return the rejection.
-    fn build_vm_reject(xml: &str) -> crate::common::Error {
+    fn build_vm_reject(xml: &str) -> simlin_base::common::Error {
         let project = parse(xml);
         let main = project.models[0].name.clone();
         build_vm(&project, &main).expect_err("model must be rejected")
@@ -4450,7 +4454,7 @@ mod tests {
         let project = parse(DUPLICATE_FLOW_CONVEYOR);
         let err = build_compiled_fresh(&project, "main")
             .expect_err("a duplicate canonical ident pair must be rejected before expansion");
-        assert_eq!(err.code, crate::common::ErrorCode::DuplicateVariable);
+        assert_eq!(err.code, simlin_base::common::ErrorCode::DuplicateVariable);
         let details = err.details.expect("a diagnostic message");
         assert!(
             details.contains("'Attrition'") && details.contains("'attrition'"),
@@ -4473,6 +4477,6 @@ mod tests {
             crate::db::LtmOverlay::Off,
         )
         .expect_err("build_sim must reject the duplicate pair");
-        assert_eq!(err.code, crate::common::ErrorCode::DuplicateVariable);
+        assert_eq!(err.code, simlin_base::common::ErrorCode::DuplicateVariable);
     }
 }

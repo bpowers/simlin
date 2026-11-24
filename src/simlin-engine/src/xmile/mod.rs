@@ -5,12 +5,12 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Cursor, Write};
 
-use crate::common::{Result, canonicalize};
-use crate::datamodel;
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+use simlin_base::common::{Result, canonicalize};
+use simlin_base::datamodel;
 
 pub mod dimensions;
 pub mod model;
@@ -36,7 +36,7 @@ pub(crate) type XmlWriter = Cursor<Vec<u8>>;
 
 macro_rules! import_err(
     ($code:tt, $str:expr) => {{
-        use crate::common::{Error, ErrorCode, ErrorKind};
+        use simlin_base::common::{Error, ErrorCode, ErrorKind};
         Err(Error::new(ErrorKind::Model, ErrorCode::$code, Some($str)))
     }}
 );
@@ -666,8 +666,8 @@ pub struct Header {
     pub includes: Option<Includes>,
 }
 
-pub(crate) fn xml_error(err: std::io::Error) -> crate::common::Error {
-    use crate::common::{Error, ErrorCode, ErrorKind};
+pub(crate) fn xml_error(err: std::io::Error) -> simlin_base::common::Error {
+    use simlin_base::common::{Error, ErrorCode, ErrorKind};
 
     Error::new(
         ErrorKind::Import,
@@ -1476,7 +1476,7 @@ pub fn project_to_xmile(project: &datamodel::Project) -> Result<String> {
 
     let result = writer.into_inner().into_inner();
 
-    use crate::common::{Error, ErrorCode, ErrorKind};
+    use simlin_base::common::{Error, ErrorCode, ErrorKind};
     String::from_utf8(result).map_err(|_err| {
         Error::new(
             ErrorKind::Import,
@@ -1573,7 +1573,7 @@ fn macro_to_datamodel(mac: Macro) -> Result<datamodel::Model> {
     // the documented unsupported limitation. The field is parsed for
     // round-trip completeness, but a present value is rejected.
     if mac.sim_specs.is_some() {
-        use crate::common::{Error, ErrorCode, ErrorKind};
+        use simlin_base::common::{Error, ErrorCode, ErrorKind};
         return Err(Error::new(
             ErrorKind::Import,
             ErrorCode::BadSimSpecs,
@@ -1619,7 +1619,7 @@ fn macro_to_datamodel(mac: Macro) -> Result<datamodel::Model> {
         .any(|v| canonicalize(v.get_ident()) == macro_name);
     if !has_primary_body {
         let eqn = mac.eqn.clone().ok_or_else(|| {
-            use crate::common::{Error, ErrorCode, ErrorKind};
+            use simlin_base::common::{Error, ErrorCode, ErrorKind};
             Error::new(
                 ErrorKind::Import,
                 ErrorCode::Generic,
@@ -1688,7 +1688,7 @@ fn macro_to_datamodel(mac: Macro) -> Result<datamodel::Model> {
 
 #[test]
 fn test_xmile_roundtrips_except_equation() {
-    use crate::datamodel::{Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
+    use simlin_base::datamodel::{Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
     use std::io::BufReader;
 
     let project = datamodel::Project {
@@ -1754,7 +1754,7 @@ fn test_xmile_roundtrips_except_equation() {
 
 #[test]
 fn test_xmile_roundtrips_indexed_subdimension_parent() {
-    use crate::datamodel::{DimensionElements, Dt, SimMethod, SimSpecs};
+    use simlin_base::datamodel::{DimensionElements, Dt, SimMethod, SimSpecs};
     use std::io::BufReader;
 
     let project = datamodel::Project {
@@ -1815,7 +1815,7 @@ fn test_xmile_roundtrips_indexed_subdimension_parent() {
 
 #[test]
 fn test_xmile_roundtrips_element_level_dimension_mapping() {
-    use crate::datamodel::{DimensionElements, DimensionMapping, Dt, SimMethod, SimSpecs};
+    use simlin_base::datamodel::{DimensionElements, DimensionMapping, Dt, SimMethod, SimSpecs};
     use std::io::BufReader;
 
     let project = datamodel::Project {
@@ -1872,7 +1872,7 @@ fn test_xmile_roundtrips_element_level_dimension_mapping() {
 
 #[test]
 fn test_xmile_roundtrips_multi_target_mappings() {
-    use crate::datamodel::{DimensionElements, DimensionMapping, Dt, SimMethod, SimSpecs};
+    use simlin_base::datamodel::{DimensionElements, DimensionMapping, Dt, SimMethod, SimSpecs};
     use std::io::BufReader;
 
     let project = datamodel::Project {
@@ -1926,7 +1926,7 @@ fn test_xmile_roundtrips_multi_target_mappings() {
 
 #[test]
 fn test_xmile_roundtrips_data_source() {
-    use crate::datamodel::{
+    use simlin_base::datamodel::{
         Aux, Compat, DataSource, DataSourceKind, Dt, Equation, SimMethod, SimSpecs, Variable,
     };
     use std::io::BufReader;
@@ -1995,7 +1995,7 @@ fn test_xmile_roundtrips_data_source() {
 
 #[test]
 fn test_xmile_roundtrips_loop_metadata() {
-    use crate::datamodel::{Dt, LoopMetadata, SimMethod, SimSpecs};
+    use simlin_base::datamodel::{Dt, LoopMetadata, SimMethod, SimSpecs};
     use std::io::BufReader;
 
     let project = datamodel::Project {
@@ -2112,7 +2112,7 @@ fn free_text_attribute_escapes_are_a_fixpoint() {
 #[cfg(test)]
 mod macro_tests {
     use super::*;
-    use crate::datamodel::{Equation, Variable};
+    use simlin_base::datamodel::{Equation, Variable};
     use std::io::BufReader;
 
     /// Find the (single) macro-marked model in a project, by macro name.
@@ -2308,7 +2308,7 @@ mod macro_tests {
         let idents: Vec<String> = m
             .variables
             .iter()
-            .map(|v| crate::canonicalize(v.get_ident()).into_owned())
+            .map(|v| simlin_base::canonicalize(v.get_ident()).into_owned())
             .collect();
         let mut sorted = idents.clone();
         sorted.sort();
@@ -2350,7 +2350,7 @@ mod macro_tests {
         );
     }
 
-    use crate::datamodel::{Aux, Compat, Dt, Model, SimMethod, SimSpecs};
+    use simlin_base::datamodel::{Aux, Compat, Dt, Model, SimMethod, SimSpecs};
 
     fn base_sim_specs() -> SimSpecs {
         SimSpecs {
@@ -2516,7 +2516,7 @@ mod macro_tests {
         );
     }
 
-    use crate::datamodel::{Module, ModuleReference};
+    use simlin_base::datamodel::{Module, ModuleReference};
 
     /// A project with a multi-output macro `add3(a,b,c : minval, maxval)` and
     /// the Phase-4-materialized invocation cluster
@@ -3067,7 +3067,7 @@ mod options_tests {
             .variables
             .iter()
             .find_map(|v| match v {
-                crate::datamodel::Variable::Stock(s) if s.ident == "belt" => Some(s),
+                simlin_base::datamodel::Variable::Stock(s) if s.ident == "belt" => Some(s),
                 _ => None,
             })
             .expect("belt stock");

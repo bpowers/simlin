@@ -5,7 +5,7 @@
 //! Vensim MDL file parser.
 //!
 //! This module provides a pure Rust implementation for parsing Vensim MDL files
-//! directly into `crate::datamodel::Project` structures.
+//! directly into `simlin_base::datamodel::Project` structures.
 //!
 //! See `CLAUDE.md` in this directory for implementation context and goals.
 
@@ -36,9 +36,9 @@ mod xmile_compat;
 // out-of-module consumer are re-exported here.
 pub use writer::ExportWarning;
 
-use crate::common::{Error, ErrorCode, ErrorKind, Result};
-use crate::datamodel::{Project, Variable};
 use crate::import_losses::ImportWarning;
+use simlin_base::common::{Error, ErrorCode, ErrorKind, Result};
+use simlin_base::datamodel::{Project, Variable};
 
 use convert::{convert_mdl_reporting, convert_mdl_with_data};
 use writer::MdlWriter;
@@ -163,7 +163,7 @@ pub fn project_to_mdl_with_warnings(project: &Project) -> Result<(String, Vec<Ex
 /// loud, non-indexing assertion of that invariant rather than a panicking
 /// index. This is the shared lookup so the gate, `write_project`, and
 /// `write_equations_section` all agree on which model is the body.
-pub(crate) fn main_model(project: &Project) -> Option<&crate::datamodel::Model> {
+pub(crate) fn main_model(project: &Project) -> Option<&simlin_base::datamodel::Model> {
     project.models.iter().find(|m| m.macro_spec.is_none())
 }
 
@@ -273,7 +273,7 @@ outflow = 5
         assert!(!project.models[0].variables.is_empty());
 
         // Verify stock has inflows/outflows
-        use crate::datamodel::Variable;
+        use simlin_base::datamodel::Variable;
         let stock = project.models[0]
             .variables
             .iter()
@@ -295,10 +295,10 @@ outflow = 5
     /// simulate to 3.
     #[test]
     fn stacked_unary_minus_imports_reparses_compiles_and_simulates() {
-        use crate::datamodel::{Equation, Variable};
         use crate::db::{compile_project_incremental, sync_from_datamodel_incremental};
-        use crate::lexer::LexerType;
         use crate::vm::Vm;
+        use simlin_base::datamodel::{Equation, Variable};
+        use simlin_base::lexer::LexerType;
 
         let mdl = "x = - -3
 ~ Dmnl
@@ -322,7 +322,7 @@ outflow = 5
         // The invariant every stored datamodel equation must satisfy.
         assert!(
             matches!(
-                crate::ast::Expr0::new(eqn, LexerType::Equation),
+                simlin_base::ast::Expr0::new(eqn, LexerType::Equation),
                 Ok(Some(_))
             ),
             "the importer's own output must re-parse: {eqn:?}"

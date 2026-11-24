@@ -14,14 +14,14 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 
-use crate::common::canonicalize;
-use crate::datamodel::view_element::{Flow, FlowPoint, Stock};
-use crate::datamodel::{self, Variable, ViewElement};
 use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
 use crate::json;
 use crate::patch::apply_patch;
-use crate::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 use crate::test_common::TestProject;
+use simlin_base::common::canonicalize;
+use simlin_base::datamodel::view_element::{Flow, FlowPoint, Stock};
+use simlin_base::datamodel::{self, Variable, ViewElement};
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 
 use super::base::BaseView;
 use super::gesture::ViewEdit;

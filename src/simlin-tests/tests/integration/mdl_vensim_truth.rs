@@ -27,11 +27,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use simlin_base::Results;
 use simlin_engine::db::{
     DiagnosticSeverity, LtmOverlay, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{FilesystemDataProvider, Results, Vm, load_csv, load_dat};
+use simlin_engine::{FilesystemDataProvider, Vm, load_csv, load_dat};
 
 use crate::test_helpers::series_that_differ;
 

@@ -5,9 +5,9 @@
 //! The importer holds a lookup's points in x order (`points_in_x_order`)
 //! whichever way the MDL file writes the lookup.
 
-use crate::datamodel::{Equation as Defined, GraphicalFunction, Variable};
 use crate::mdl::ast::{Equation, LookupTable, MdlItem};
 use crate::mdl::reader::EquationReader;
+use simlin_base::datamodel::{Equation as Defined, GraphicalFunction, Variable};
 
 /// The equations that carry a table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

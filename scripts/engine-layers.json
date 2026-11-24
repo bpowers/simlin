@@ -1,33 +1,19 @@
 {
   "source": "src/simlin-engine/src",
-  "test_features": ["test-support"],
+  "test_features": [
+    "test-support"
+  ],
   "layers": {
-    "base": {
+    "diagram": {
       "uses": [],
       "modules": [
-        "alloc",
-        "ast",
-        "builtins",
-        "common",
-        "datamodel",
-        "dimensions",
-        "float",
-        "lexer",
-        "module_functions",
-        "parser",
-        "project_patch",
-        "rapidhash",
-        "results",
-        "shared_vec",
-        "stdlib"
+        "diagram"
       ]
     },
-    "diagram": {
-      "uses": ["base"],
-      "modules": ["diagram"]
-    },
     "formats": {
-      "uses": ["base", "diagram"],
+      "uses": [
+        "diagram"
+      ],
       "modules": [
         "compat",
         "data_provider",
@@ -45,7 +31,7 @@
       ]
     },
     "compiler": {
-      "uses": ["base"],
+      "uses": [],
       "modules": [
         "ai_info",
         "builtins_visitor",
@@ -78,20 +64,50 @@
       ]
     },
     "edit": {
-      "uses": ["base", "diagram", "formats"],
-      "modules": ["editing", "equation_view", "patch", "patch_dimensions", "patch_fields"]
+      "uses": [
+        "diagram",
+        "formats"
+      ],
+      "modules": [
+        "editing",
+        "equation_view",
+        "patch",
+        "patch_dimensions",
+        "patch_fields"
+      ]
     },
     "wasmgen": {
-      "uses": ["base", "compiler"],
-      "modules": ["wasmgen"]
+      "uses": [
+        "compiler"
+      ],
+      "modules": [
+        "wasmgen"
+      ]
     },
     "layout": {
-      "uses": ["base", "diagram", "compiler", "edit"],
-      "modules": ["layout"]
+      "uses": [
+        "diagram",
+        "compiler",
+        "edit"
+      ],
+      "modules": [
+        "layout"
+      ]
     },
     "tools": {
-      "uses": ["base", "diagram", "formats", "compiler", "edit", "wasmgen", "layout"],
-      "modules": ["analysis", "save_check", "tools"]
+      "uses": [
+        "diagram",
+        "formats",
+        "compiler",
+        "edit",
+        "wasmgen",
+        "layout"
+      ],
+      "modules": [
+        "analysis",
+        "save_check",
+        "tools"
+      ]
     }
   }
 }

@@ -35,8 +35,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::FlowPoint;
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::FlowPoint;
 
 use super::constants::{FLOW_ARROWHEAD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
 

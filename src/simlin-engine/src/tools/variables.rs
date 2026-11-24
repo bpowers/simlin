@@ -31,8 +31,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
-use crate::datamodel::{self, Equation, Variable};
 use crate::ltm::LinkPolarity;
+use simlin_base::datamodel::{self, Equation, Variable};
 
 use super::evidence::{DiagnosticReport, display_name, window};
 use super::outline::{AuxKind, aux_kind, dimensions};
@@ -214,9 +214,9 @@ pub enum StockOptionName {
     LeakZoneEnd,
 }
 
-impl From<crate::datamodel::StockOption> for StockOptionName {
-    fn from(option: crate::datamodel::StockOption) -> StockOptionName {
-        use crate::datamodel::StockOption;
+impl From<simlin_base::datamodel::StockOption> for StockOptionName {
+    fn from(option: simlin_base::datamodel::StockOption) -> StockOptionName {
+        use simlin_base::datamodel::StockOption;
         match option {
             StockOption::TransitTime => StockOptionName::TransitTime,
             StockOption::Capacity => StockOptionName::Capacity,
@@ -419,7 +419,7 @@ pub(crate) fn read_variables(
         match names::resolve_reference(ws.project, model, name) {
             Ok((var, element)) => {
                 let key = (
-                    crate::canonicalize(var.get_ident()).into_owned(),
+                    simlin_base::canonicalize(var.get_ident()).into_owned(),
                     element.clone(),
                 );
                 if read.insert(key) {
@@ -448,7 +448,7 @@ pub(crate) fn read_variables(
     let variables: Vec<VariableRecord> = records
         .into_iter()
         .map(|(var, element)| {
-            let canonical = crate::canonicalize(var.get_ident()).into_owned();
+            let canonical = simlin_base::canonicalize(var.get_ident()).into_owned();
             let neighbor = |name: &str, read: &crate::analysis::ModelRead| LinkRef {
                 name: display_name(model, name),
                 polarity: read.polarity.into(),
@@ -479,7 +479,7 @@ pub(crate) fn read_variables(
                 .filter(|d| {
                     d.variable
                         .as_deref()
-                        .is_some_and(|v| crate::canonicalize(v) == canonical)
+                        .is_some_and(|v| simlin_base::canonicalize(v) == canonical)
                 })
                 .map(|d| DiagnosticReport {
                     variable: None,
@@ -519,7 +519,7 @@ pub(crate) fn read_variables(
 /// Narrow a record of an arrayed variable to one element: its equation (a
 /// stock's initial value) is that element's.
 fn narrow_to_element(record: &mut VariableRecord, var: &Variable, element: &str) {
-    let key = |text: &str| crate::canonicalize(&text.replace(' ', "")).into_owned();
+    let key = |text: &str| simlin_base::canonicalize(&text.replace(' ', "")).into_owned();
     let text = match var.get_equation() {
         Some(Equation::Scalar(text)) | Some(Equation::ApplyToAll(_, text)) => Some(text.clone()),
         Some(Equation::Arrayed(_, elements, default, _)) => elements
@@ -753,14 +753,14 @@ fn definition(model: &datamodel::Model, var: &Variable) -> VariableRecord {
             record.dimensions = dimensions(&flow.equation);
             record.lookup = flow.gf.as_ref().map(lookup);
             record.non_negative = flow.compat.non_negative;
-            let flow_name = crate::canonicalize(&flow.ident);
+            let flow_name = simlin_base::canonicalize(&flow.ident);
             for other in &model.variables {
                 if let Variable::Stock(stock) = other {
                     let names = |flows: &[String]| {
                         datamodel::distinct_stock_flows(flows)
                             .flows
                             .iter()
-                            .any(|f| crate::canonicalize(f) == flow_name)
+                            .any(|f| simlin_base::canonicalize(f) == flow_name)
                     };
                     if names(&stock.inflows) {
                         record.fills.push(stock.ident.clone());

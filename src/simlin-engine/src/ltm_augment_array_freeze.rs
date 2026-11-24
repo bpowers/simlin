@@ -75,10 +75,10 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Expr0, IndexExpr0};
-use crate::builtins::UntypedBuiltinFn;
-use crate::common::canonicalize;
-use crate::dimensions::{Dimension, DimensionsContext};
+use simlin_base::ast::{Expr0, IndexExpr0};
+use simlin_base::builtins::UntypedBuiltinFn;
+use simlin_base::common::canonicalize;
+use simlin_base::dimensions::{Dimension, DimensionsContext};
 
 use super::quote_ident;
 
@@ -164,7 +164,7 @@ fn classify_axis(
             // (`compiler::subscript::normalize_subscripts3`), so a `None`
             // here is a slice the simulation cannot read either.
             let sub_dim_name =
-                crate::common::CanonicalDimensionName::from_raw(sub_canonical.as_ref());
+                simlin_base::common::CanonicalDimensionName::from_raw(sub_canonical.as_ref());
             dims_ctx.get_subdimension_relation(&sub_dim_name, axis.canonical_name())?;
             let sub_dim = dims_ctx.get(&sub_dim_name)?;
             let (arm_elements, arm_indices) = match (sub_dim, axis) {
@@ -261,7 +261,7 @@ fn static_index_text(e: &Expr0, axis: &Dimension, dims_ctx: &DimensionsContext) 
                 return Some(canonical.into_owned());
             }
             if let Dimension::Named(axis_name, named) = axis {
-                let elem = crate::common::CanonicalElementName::from_raw(&canonical);
+                let elem = simlin_base::common::CanonicalElementName::from_raw(&canonical);
                 if named.indexed_elements.contains_key(&elem) {
                     return Some(format!("{}\u{B7}{}", axis_name.as_str(), elem.as_str()));
                 }
@@ -295,7 +295,7 @@ fn is_direct_slice_subscript(expr: &Expr0) -> bool {
 /// (`codegen::full_source_len` of a subscript is the whole variable's
 /// extent, and the helper's extent equals the dep's).
 fn materialize_whole_dep(
-    base: &crate::common::RawIdent,
+    base: &simlin_base::common::RawIdent,
     fallback: Option<&Expr0>,
     dep_dims: &HashMap<String, Vec<Dimension>>,
 ) -> Option<ArrayFreezeHelper> {
@@ -340,7 +340,7 @@ fn materialize_whole_dep(
 /// the call as-is (the caller's existing doom checks / compile failures keep
 /// their behavior).
 fn materialize_one(
-    base: &crate::common::RawIdent,
+    base: &simlin_base::common::RawIdent,
     indices: &[IndexExpr0],
     fallback: Option<&Expr0>,
     dep_dims: &HashMap<String, Vec<Dimension>>,
@@ -584,7 +584,7 @@ fn materialize_inner(
                     },
                 ) {
                     let helper_ref = Expr0::Subscript(
-                        crate::common::RawIdent::new_from_str(&helper.name),
+                        simlin_base::common::RawIdent::new_from_str(&helper.name),
                         indices.clone(),
                         loc,
                     );
@@ -613,7 +613,7 @@ fn materialize_inner(
                     // included), which is the contract the materialization
                     // exists to satisfy.
                     let helper_ref = Expr0::Subscript(
-                        crate::common::RawIdent::new_from_str(&helper.name),
+                        simlin_base::common::RawIdent::new_from_str(&helper.name),
                         helper
                             .dims
                             .iter()
@@ -653,7 +653,7 @@ fn materialize_inner(
             };
             match materialized {
                 Some(helper) => {
-                    let helper_ident = crate::common::RawIdent::new_from_str(&helper.name);
+                    let helper_ident = simlin_base::common::RawIdent::new_from_str(&helper.name);
                     let helper_ref = match &args[0] {
                         Expr0::Subscript(_, indices, _) => {
                             Expr0::Subscript(helper_ident, indices.clone(), loc)
@@ -734,8 +734,8 @@ pub(crate) fn helper_summary(helper: &ArrayFreezeHelper) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Expr0, print_eqn};
-    use crate::lexer::LexerType;
+    use simlin_base::ast::{Expr0, print_eqn};
+    use simlin_base::lexer::LexerType;
 
     fn parse(text: &str) -> Expr0 {
         Expr0::new(text, LexerType::Equation)
@@ -744,15 +744,15 @@ mod tests {
     }
 
     fn dims_fixture() -> (HashMap<String, Vec<Dimension>>, DimensionsContext) {
-        let target = crate::datamodel::Dimension::named(
+        let target = simlin_base::datamodel::Dimension::named(
             "Target".to_string(),
             vec!["t1".to_string(), "t2".to_string(), "t3".to_string()],
         );
-        let subx = crate::datamodel::Dimension::named(
+        let subx = simlin_base::datamodel::Dimension::named(
             "SubX".to_string(),
             vec!["t3".to_string(), "t1".to_string()],
         );
-        let cop = crate::datamodel::Dimension::named(
+        let cop = simlin_base::datamodel::Dimension::named(
             "COP".to_string(),
             vec!["a".to_string(), "b".to_string()],
         );

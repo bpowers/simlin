@@ -25,9 +25,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::{Cloud, Flow, FlowPoint, Stock};
 use crate::diagram::constants::{FLOW_ARROWHEAD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::{Cloud, Flow, FlowPoint, Stock};
 
 pub(crate) const CORNER_CLEARANCE: f64 = 3.0;
 pub(crate) const MIN_SEGMENT: f64 = 10.0;

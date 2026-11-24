@@ -7,7 +7,7 @@
 //! `layout::taste` for the degradations.
 
 use serde::{Deserialize, Serialize};
-use simlin_engine::datamodel::StockFlow;
+use simlin_base::datamodel::StockFlow;
 use simlin_engine::layout::config::LayoutConfig;
 use simlin_engine::layout::metrics::{LayoutMetrics, MetricWeights, compute_layout_metrics};
 use simlin_engine::layout::taste::{Degradation, degrade};

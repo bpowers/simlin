@@ -188,9 +188,9 @@
 //! agreement directly, since it is the thing a change to either route is most
 //! likely to break without noticing.
 
-use crate::common::ErrorCode;
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::common::ErrorCode;
+use simlin_base::datamodel;
 
 /// How the reference to the `Region`-declared source is written.
 #[derive(Copy, Clone)]
@@ -534,7 +534,7 @@ fn run_cell(
         .target_elements()
         .iter()
         .map(|elem| {
-            let key = format!("target[{}]", crate::canonicalize(elem));
+            let key = format!("target[{}]", simlin_base::canonicalize(elem));
             *results
                 .get(&key)
                 .unwrap_or_else(|| panic!("no series for {key}"))
@@ -842,7 +842,7 @@ fn assert_no_mapping_cases(
                 let got: Vec<f64> = target_elements
                     .iter()
                     .map(|elem| {
-                        *results[&format!("target[{}]", crate::canonicalize(elem))]
+                        *results[&format!("target[{}]", simlin_base::canonicalize(elem))]
                             .last()
                             .expect("empty series")
                     })
@@ -1104,7 +1104,7 @@ fn verdict(project: &TestProject, target_elements: &[&str]) -> Verdict {
             target_elements
                 .iter()
                 .map(|elem| {
-                    *results[&format!("target[{}]", crate::canonicalize(elem))]
+                    *results[&format!("target[{}]", simlin_base::canonicalize(elem))]
                         .last()
                         .expect("empty series")
                 })

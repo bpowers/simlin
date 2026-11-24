@@ -19,7 +19,7 @@
 //!   unit diagnostic may cite `resource_unit` and `resource_units` as
 //!   distinct units.
 
-use simlin_engine::common::UnitError;
+use simlin_base::common::UnitError;
 use simlin_engine::db::{
     Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
 };
@@ -74,7 +74,7 @@ fn contains_token(haystack: &str, needle: &str) -> bool {
     false
 }
 
-fn load_wrld3() -> simlin_engine::datamodel::Project {
+fn load_wrld3() -> simlin_base::datamodel::Project {
     let mdl_content = std::fs::read_to_string("../../test/metasd/WRLD3-03/wrld3-03.mdl").expect(
         "failed to read wrld3-03.mdl -- run tests from the repo root or the simlin-tests crate",
     );

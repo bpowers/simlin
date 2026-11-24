@@ -255,7 +255,7 @@ fn test_get_incoming_links() {
 /// parent-scope spelling `.driver` (resolved to `driver`) as the bare `k`.
 #[test]
 fn test_get_incoming_links_lists_variables_of_the_model_not_module_reads() {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
 
     let incoming = |project: &datamodel::Project, var: &str| -> Vec<String> {
         let xmile = simlin_engine::to_xmile(project).unwrap();
@@ -1398,7 +1398,7 @@ fn test_rel_loop_score_partition_sums_to_one_for_in_partition_loops() {
 /// engine's full-sweep `NormGroup::Solo` grouping.
 #[test]
 fn test_rel_loop_score_unpartitioned_loops_do_not_cross_normalize() {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
 
     // Two disjoint module-internal-stock loops:
     //   driver{i} -> sub{i}(internal INTEG) -> reader{i} -> driver{i}
@@ -2200,7 +2200,7 @@ fn test_get_loop_element_count_arrayed_vs_scalar() {
 // i.e. a round trip through the C API preserves the per-slot partitions.
 
 /// Build the two-A2A-subsystem datamodel project.
-fn two_a2a_subsystems_project() -> simlin_engine::datamodel::Project {
+fn two_a2a_subsystems_project() -> simlin_base::datamodel::Project {
     TestProject::new("two_a2a")
         .with_sim_time(0.0, 5.0, 1.0)
         .named_dimension("Region", &["a", "b", "c"])
@@ -2217,7 +2217,7 @@ fn two_a2a_subsystems_project() -> simlin_engine::datamodel::Project {
 /// snapshots): compile with LTM, run the VM, then call the production
 /// post-simulation normalizer.  Returns `(rel_per_element, n_slots_by_loop)`.
 fn engine_reference_rel_per_element(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> (
     std::collections::HashMap<String, Vec<f64>>,
     std::collections::HashMap<String, usize>,
@@ -2935,7 +2935,7 @@ fn collapsed_macro_edge_carries_composite_score() {
 /// The pinned `a<->b` loop is the LOOPSCORE escape hatch: it must still be
 /// surfaced and readable through the FFI.
 fn build_discovery_with_pin_protobuf() -> Vec<u8> {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
 
     let mut builder = TestProject::new("discovery_pin").with_sim_time(0.0, 5.0, 0.25);
     const RING: usize = 60;
@@ -2968,11 +2968,11 @@ fn build_discovery_with_pin_protobuf() -> Vec<u8> {
     let uids: Vec<i32> = pin_vars
         .iter()
         .map(|v| {
-            let canon = simlin_engine::canonicalize(v);
+            let canon = simlin_base::canonicalize(v);
             model
                 .variables
                 .iter()
-                .find(|var| simlin_engine::canonicalize(var.get_ident()) == canon)
+                .find(|var| simlin_base::canonicalize(var.get_ident()) == canon)
                 .and_then(|var| match var {
                     datamodel::Variable::Stock(s) => s.uid,
                     datamodel::Variable::Flow(f) => f.uid,

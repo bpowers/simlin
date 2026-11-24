@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::datamodel::view_element::FlowPoint;
+use simlin_base::datamodel::view_element::FlowPoint;
 
 use super::graph::Position;
 
@@ -100,7 +100,7 @@ pub fn calculate_loop_arc_angle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::view_element::FlowPoint;
+    use simlin_base::datamodel::view_element::FlowPoint;
 
     #[test]
     fn test_compute_flow_orientation_horizontal() {

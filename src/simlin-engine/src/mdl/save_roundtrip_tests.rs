@@ -13,10 +13,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::ast::{Expr0, print_eqn};
-use crate::datamodel::{Equation, Project, Variable};
-use crate::lexer::LexerType;
 use crate::mdl::{parse_mdl, project_to_mdl};
+use simlin_base::ast::{Expr0, print_eqn};
+use simlin_base::datamodel::{Equation, Project, Variable};
+use simlin_base::lexer::LexerType;
 
 /// An equation's text as its parsed tree prints, so two spellings of one
 /// tree compare equal: the reader keeps the parentheses a file writes, and
@@ -106,7 +106,7 @@ pub(in crate::mdl) fn first_difference(a: &Project, b: &Project) -> Option<Strin
         return Some(format!("{} models -> {}", a.models.len(), b.models.len()));
     }
     for (ma, mb) in a.models.iter().zip(&b.models) {
-        let vars = |m: &crate::datamodel::Model| -> BTreeMap<String, Variable> {
+        let vars = |m: &simlin_base::datamodel::Model| -> BTreeMap<String, Variable> {
             m.variables
                 .iter()
                 .map(|v| (v.get_ident().to_owned(), v.clone()))

@@ -11,7 +11,7 @@
 // module separator and corrupt the identity (simlin-engine issue #559). Mapping
 // it to a dedicated sentinel keeps canonicalize idempotent while preserving the
 // literal-period-vs-module-separator distinction. Mirrors
-// simlin-engine/src/common.rs `LITERAL_PERIOD_SENTINEL`.
+// simlin-base/src/common.rs `LITERAL_PERIOD_SENTINEL`.
 const LITERAL_PERIOD_SENTINEL = '\u{2024}';
 
 // The module-hierarchy separator: an unquoted `.` (e.g. `model.variable`) maps
@@ -27,7 +27,7 @@ const MODULE_SEPARATOR = '\u{00B7}';
  * surrounding quotes so the caller can detect it. Escaped quotes (`\"`) inside
  * a quoted section do not close it.
  *
- * Faithful port of Rust's `IdentifierPartIterator` (simlin-engine/src/common.rs):
+ * Faithful port of Rust's `IdentifierPartIterator` (simlin-base/src/common.rs):
  * matches the regex `[^"]+|"((\\")|[^"])*"`.
  */
 function splitIdentifierParts(s: string): Array<string> {
@@ -115,7 +115,7 @@ function replaceWhitespaceWithUnderscore(s: string): string {
 /**
  * Canonicalize a variable/model name into the engine's normalized form.
  *
- * Reproduces Rust `simlin-engine/src/common.rs` `canonicalize` exactly so that
+ * Reproduces Rust `simlin-base/src/common.rs` `canonicalize` exactly so that
  * a raw caller name resolves to the same canonical key the wasm `WasmLayout`
  * (and the VM's `get_var_names`) uses. The steps, per quote-aware part:
  *   1. trim the whole input;

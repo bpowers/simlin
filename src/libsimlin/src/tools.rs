@@ -487,7 +487,7 @@ pub unsafe extern "C" fn simlin_tool_session_forget_run(
 fn snapshot(
     project: &crate::SimlinProject,
 ) -> (
-    std::sync::Arc<simlin_engine::datamodel::Project>,
+    std::sync::Arc<simlin_base::datamodel::Project>,
     u64,
     crate::DbLock<'_>,
 ) {

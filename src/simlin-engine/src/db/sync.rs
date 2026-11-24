@@ -291,7 +291,7 @@ fn declared_variable_idents(model: &datamodel::Model) -> Vec<String> {
 /// Build the immutable stdlib model inputs ONCE, for `SimlinDb::stdlib_models`.
 ///
 /// Creates a `SourceModel`/`SourceVariable` salsa input set for every
-/// `crate::stdlib::MODEL_NAMES` entry (SMOOTH/DELAY/TREND/systems_*), exactly
+/// `simlin_base::stdlib::MODEL_NAMES` entry (SMOOTH/DELAY/TREND/systems_*), exactly
 /// as the old per-sync stdlib loop did, returning the `PersistentModelState`
 /// handles keyed by canonical name plus the ordered `(canonical, display)`
 /// name list. Stdlib models are never macros (the
@@ -299,12 +299,13 @@ fn declared_variable_idents(model: &datamodel::Model) -> Vec<String> {
 /// `stdlib_descriptor`), so each `macro_spec` is `None`.
 pub(crate) fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
     let mut by_canonical: HashMap<String, PersistentModelState> = HashMap::new();
-    let mut ordered: Vec<(String, String)> = Vec::with_capacity(crate::stdlib::MODEL_NAMES.len());
+    let mut ordered: Vec<(String, String)> =
+        Vec::with_capacity(simlin_base::stdlib::MODEL_NAMES.len());
 
-    for stdlib_name in crate::stdlib::MODEL_NAMES {
+    for stdlib_name in simlin_base::stdlib::MODEL_NAMES {
         let full_name = format!("stdlib\u{205A}{stdlib_name}");
         let canonical = canonicalize(&full_name).into_owned();
-        let dm_model = crate::stdlib::get(stdlib_name).unwrap();
+        let dm_model = simlin_base::stdlib::get(stdlib_name).unwrap();
 
         let mut variables = HashMap::new();
         let mut source_var_map = HashMap::new();

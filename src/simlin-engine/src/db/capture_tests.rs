@@ -12,10 +12,10 @@
 //! `builtins_visitor::walk` and both branches of its `hoist_capture`.
 
 use super::*;
-use crate::ast::{Expr0, print_eqn};
 use crate::capture::{Capture, CaptureKind, ImplicitVar};
-use crate::lexer::LexerType;
 use crate::test_common::{TestProject, implicit_vars_of};
+use simlin_base::ast::{Expr0, print_eqn};
+use simlin_base::lexer::LexerType;
 
 /// How the row's equation is attached to the model, which is what decides
 /// whether the parse walks it once or once per element.
@@ -325,12 +325,12 @@ fn an_apply_to_all_captures_slots_are_keyed_per_element() {
     vm.run_to_end().expect("runs");
     let results = vm.into_results();
 
-    let base = results.offsets[&crate::common::Ident::new("$⁚out⁚0⁚arg0[e1]")];
+    let base = results.offsets[&simlin_base::common::Ident::new("$⁚out⁚0⁚arg0[e1]")];
     for (i, element) in ["e1", "e2", "e3"].into_iter().enumerate() {
         assert_eq!(
             results
                 .offsets
-                .get(&crate::common::Ident::new(&format!(
+                .get(&simlin_base::common::Ident::new(&format!(
                     "$⁚out⁚0⁚arg0[{element}]"
                 )))
                 .copied(),
@@ -341,7 +341,7 @@ fn an_apply_to_all_captures_slots_are_keyed_per_element() {
     assert!(
         !results
             .offsets
-            .contains_key(&crate::common::Ident::new("$⁚out⁚0⁚arg0")),
+            .contains_key(&simlin_base::common::Ident::new("$⁚out⁚0⁚arg0")),
         "an arrayed helper has no bare key: {:?}",
         results.offsets.keys().collect::<Vec<_>>()
     );
@@ -378,7 +378,7 @@ fn a_capture_holds_the_argument_subtree_itself() {
     /// The first `PREVIOUS`/`INIT` argument reachable from `expr`, in walk
     /// order.
     fn first_snapshot_arg(expr: &Expr0) -> Option<&Expr0> {
-        use crate::builtins::UntypedBuiltinFn;
+        use simlin_base::builtins::UntypedBuiltinFn;
         match expr {
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
                 if (func == "previous" || func == "init") && !args.is_empty() {

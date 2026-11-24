@@ -19,7 +19,7 @@ use serde::Serialize;
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
-use crate::datamodel::{self, Variable};
+use simlin_base::datamodel::{self, Variable};
 
 /// The most names a change list carries; the rest are counted.
 pub(crate) const MAX_CHANGED_NAMES: usize = 30;
@@ -259,7 +259,12 @@ impl ReadSnapshot {
             variables: model
                 .variables
                 .iter()
-                .map(|v| (crate::canonicalize(v.get_ident()).into_owned(), v.clone()))
+                .map(|v| {
+                    (
+                        simlin_base::canonicalize(v.get_ident()).into_owned(),
+                        v.clone(),
+                    )
+                })
                 .collect(),
             specs: effective_specs(project, model).clone(),
             loops: model.loop_metadata.clone(),
@@ -299,7 +304,7 @@ impl ReadSnapshot {
             .get(model)?
             .variables
             .iter()
-            .find(|v| crate::canonicalize(v.get_ident()).as_ref() == name)
+            .find(|v| simlin_base::canonicalize(v.get_ident()).as_ref() == name)
     }
 
     /// Hold the variable named `name` (canonically) as `record` (none:
@@ -325,7 +330,7 @@ impl ReadSnapshot {
         let at = contents
             .variables
             .iter()
-            .position(|v| crate::canonicalize(v.get_ident()).as_ref() == name);
+            .position(|v| simlin_base::canonicalize(v.get_ident()).as_ref() == name);
         match (at, record.map(without_provenance)) {
             (Some(at), Some(record)) => contents.variables.replace(at, record),
             (Some(at), None) => {
@@ -382,7 +387,7 @@ pub(crate) fn diff(
     let now: BTreeMap<String, &Variable> = model
         .variables
         .iter()
-        .map(|v| (crate::canonicalize(v.get_ident()).into_owned(), v))
+        .map(|v| (simlin_base::canonicalize(v.get_ident()).into_owned(), v))
         .collect();
     let mut added = Vec::new();
     let mut changed = Vec::new();

@@ -279,7 +279,7 @@ pub enum Equation {
 impl Equation {
     /// An arrayed equation from its default and arms, in its smallest form: no
     /// arms left and a default every element follows is apply-to-all.
-    pub(crate) fn arrayed(
+    pub fn arrayed(
         dims: Vec<DimensionName>,
         arms: Vec<(
             ElementName,
@@ -327,13 +327,13 @@ impl Equation {
 /// marker ([`is_empty_or_sentinel`]) for models already serialized with it.
 /// The MDL writer recognises both the empty and sentinel forms to emit native
 /// Vensim `name(body)` syntax instead of `name = WITH LOOKUP(input, body)`.
-pub(crate) const LOOKUP_SENTINEL: &str = "0+0";
+pub const LOOKUP_SENTINEL: &str = "0+0";
 
 /// An equation string with no functional content: empty/whitespace-only (the
 /// canonical lookup-only form) or exactly the MDL lookup sentinel `"0+0"` (a
 /// legacy back-compat read-shim -- older serialized models may still carry it).
 /// The trimmed comparison mirrors `mdl::writer::is_lookup_only_equation`.
-pub(crate) fn is_empty_or_sentinel(equation: &str) -> bool {
+pub fn is_empty_or_sentinel(equation: &str) -> bool {
     let trimmed = equation.trim();
     trimmed.is_empty() || trimmed == LOOKUP_SENTINEL
 }
@@ -672,7 +672,7 @@ impl Variable {
 
     /// The variable's UID, or `None` if it has not been assigned one yet. A
     /// `LoopMetadata` names its variables by these.
-    pub(crate) fn get_uid(&self) -> Option<i32> {
+    pub fn get_uid(&self) -> Option<i32> {
         match self {
             Variable::Stock(stock) => stock.uid,
             Variable::Flow(flow) => flow.uid,
@@ -1869,7 +1869,7 @@ impl Model {
     /// - `primary_output` is set to `macro_name` without validating that a
     ///   body equation defines it (a missing primary-output equation
     ///   surfaces later, in the compiler).
-    pub(crate) fn new_macro(
+    pub fn new_macro(
         macro_name: &str,
         parameters: &[String],
         additional_outputs: &[String],
@@ -2203,7 +2203,7 @@ pub struct Project {
 }
 
 /// Unicode TWO DOT PUNCTUATION used as a separator in stdlib model names.
-pub(crate) const STDLIB_PREFIX: &str = "stdlib\u{205A}";
+pub const STDLIB_PREFIX: &str = "stdlib\u{205A}";
 
 impl Project {
     /// Ensures the project's `models` vec contains definitions for every

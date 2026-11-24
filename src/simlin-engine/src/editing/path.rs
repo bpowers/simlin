@@ -8,7 +8,7 @@
 
 use smallvec::SmallVec;
 
-use crate::datamodel::view_element::Flow;
+use simlin_base::datamodel::view_element::Flow;
 
 use super::geometry::{FlowEnd, GEOMETRY_EPSILON, Point, Positioned, VALVE_CLAMP_MARGIN, clamp};
 

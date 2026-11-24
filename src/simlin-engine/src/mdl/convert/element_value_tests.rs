@@ -8,8 +8,8 @@
 //! reader writes it as `Dimension.Element`, which the engine reads as that
 //! position.
 
-use crate::datamodel::Equation;
 use crate::mdl::parse_mdl;
+use simlin_base::datamodel::Equation;
 
 const CONTROL: &str =
     "INITIAL TIME = 0 ~~|\nFINAL TIME = 2 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = TIME STEP ~~|\n";

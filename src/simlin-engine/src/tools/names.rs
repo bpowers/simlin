@@ -18,7 +18,7 @@
 //! never from what a model names: in a phrase they carry nothing, but a name's
 //! every word is part of it ("stock a" and "stock b" are two variables).
 
-use crate::datamodel::{Model, Variable};
+use simlin_base::datamodel::{Model, Variable};
 
 /// The least similarity a suggestion for an unresolved name needs.
 pub(crate) const SUGGESTION_THRESHOLD: f64 = 0.6;
@@ -57,7 +57,7 @@ pub(crate) struct Unresolved {
 /// What `reference` names: a variable, or with a subscript one element of an
 /// arrayed variable, spelled as the project's dimensions spell it.
 pub(crate) fn resolve_reference<'a>(
-    project: &crate::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
     model: &'a Model,
     reference: &str,
 ) -> Result<(&'a Variable, Option<String>), Unresolved> {
@@ -76,10 +76,10 @@ pub(crate) fn resolve_reference<'a>(
     let var = resolve(model, base).map_err(unknown)?;
     let dims = match var.get_equation() {
         Some(
-            crate::datamodel::Equation::ApplyToAll(dims, _)
-            | crate::datamodel::Equation::Arrayed(dims, ..),
+            simlin_base::datamodel::Equation::ApplyToAll(dims, _)
+            | simlin_base::datamodel::Equation::Arrayed(dims, ..),
         ) => dims.as_slice(),
-        Some(crate::datamodel::Equation::Scalar(_)) | None => &[],
+        Some(simlin_base::datamodel::Equation::Scalar(_)) | None => &[],
     };
     resolve_element(project, dims, &subscripts)
         .map(|element| (var, Some(element)))
@@ -107,7 +107,7 @@ pub(crate) fn split_subscript(query: &str) -> Option<(&str, Vec<&str>)> {
 /// named. A subscript matches an element case, spaces and underscores aside,
 /// and an indexed dimension's elements are its numbers from 1.
 pub(crate) fn resolve_element(
-    project: &crate::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
     dims: &[String],
     subscripts: &[&str],
 ) -> Result<String, String> {
@@ -128,13 +128,13 @@ pub(crate) fn resolve_element(
         let dim = project
             .dimensions
             .iter()
-            .find(|d| crate::canonicalize(&d.name) == crate::canonicalize(dim_name));
+            .find(|d| simlin_base::canonicalize(&d.name) == simlin_base::canonicalize(dim_name));
         let found = match dim.map(|d| &d.elements) {
-            Some(crate::datamodel::DimensionElements::Named(elements)) => elements
+            Some(simlin_base::datamodel::DimensionElements::Named(elements)) => elements
                 .iter()
-                .find(|e| crate::canonicalize(e) == crate::canonicalize(subscript))
+                .find(|e| simlin_base::canonicalize(e) == simlin_base::canonicalize(subscript))
                 .cloned(),
-            Some(crate::datamodel::DimensionElements::Indexed(size)) => subscript
+            Some(simlin_base::datamodel::DimensionElements::Indexed(size)) => subscript
                 .parse::<u32>()
                 .ok()
                 .filter(|i| (1..=*size).contains(i))
@@ -143,7 +143,7 @@ pub(crate) fn resolve_element(
         };
         let Some(element) = found else {
             let known = match dim.map(|d| &d.elements) {
-                Some(crate::datamodel::DimensionElements::Named(elements)) => {
+                Some(simlin_base::datamodel::DimensionElements::Named(elements)) => {
                     let shown: Vec<&str> = elements.iter().take(12).map(String::as_str).collect();
                     let more = elements.len().saturating_sub(shown.len());
                     format!(
@@ -156,7 +156,9 @@ pub(crate) fn resolve_element(
                         }
                     )
                 }
-                Some(crate::datamodel::DimensionElements::Indexed(size)) => format!("1 to {size}"),
+                Some(simlin_base::datamodel::DimensionElements::Indexed(size)) => {
+                    format!("1 to {size}")
+                }
                 None => "none the project defines".to_string(),
             };
             return Err(format!(
@@ -216,7 +218,7 @@ fn score(query: &[String], var: &Variable) -> f64 {
 /// The words of a name or text: canonicalized (lowercase, spaces and
 /// underscores alike) and split on anything that is not a letter or a digit.
 pub(crate) fn words(text: &str) -> Vec<String> {
-    crate::canonicalize(text)
+    simlin_base::canonicalize(text)
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
         .map(str::to_string)

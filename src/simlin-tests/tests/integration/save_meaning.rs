@@ -33,10 +33,11 @@ use std::fs;
 use std::io::BufReader;
 use std::path::PathBuf;
 
+use simlin_base::Results;
+use simlin_base::datamodel::Project;
 use simlin_engine::buffa::Message;
-use simlin_engine::datamodel::Project;
+use simlin_engine::queue_compile;
 use simlin_engine::save_check::{ChangeKind, SaveFormat, check_save, column_variable};
-use simlin_engine::{Results, queue_compile};
 
 use Cause::{Defect, Format};
 use SaveFormat::{Json, Mdl, Protobuf, Xmile};
@@ -225,7 +226,7 @@ fn open(path: &str) -> Option<Project> {
 }
 
 /// The model a host simulates: `main`, or else the first that is not a macro.
-fn main_model(project: &Project) -> Option<&simlin_engine::datamodel::Model> {
+fn main_model(project: &Project) -> Option<&simlin_base::datamodel::Model> {
     project
         .models
         .iter()
@@ -286,7 +287,7 @@ fn columns(project: &Project, results: &Results) -> BTreeMap<String, Vec<u64>> {
             model
                 .variables
                 .iter()
-                .map(|var| simlin_engine::canonicalize(var.get_ident()).into_owned())
+                .map(|var| simlin_base::canonicalize(var.get_ident()).into_owned())
                 .collect()
         })
         .unwrap_or_default();

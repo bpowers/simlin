@@ -4,8 +4,6 @@
 
 use std::f64::consts::PI;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element;
 use crate::diagram::arrowhead::{
     ArrowheadGeometry, ArrowheadType, arrowhead_geometry, render_arrowhead_geometry,
 };
@@ -15,6 +13,8 @@ use crate::diagram::common::{
 };
 use crate::diagram::constants::*;
 use crate::diagram::label::{LabelProps, label_bounds, render_label};
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element;
 
 /// How far the pipe's last vertex backs off from the arrowhead tip, along the
 /// final segment's cardinal direction, so the pipe ends under the arrowhead
@@ -243,7 +243,7 @@ pub fn flow_bounds(element: &view_element::Flow) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::view_element::{FlowPoint, LabelSide};
+    use simlin_base::datamodel::view_element::{FlowPoint, LabelSide};
 
     fn make_flow(
         cx: f64,

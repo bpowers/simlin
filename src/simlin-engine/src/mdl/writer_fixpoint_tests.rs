@@ -9,17 +9,16 @@
 //! decides between.
 
 use super::*;
-use crate::datamodel::{self, ViewElement};
 use crate::mdl::builtins::BUILTINS;
 use crate::mdl::view::processing::{ANGLE_EPSILON_DEGREES, angle_between, connector_shape};
 use crate::mdl::{parse_mdl, project_to_mdl};
+use simlin_base::datamodel::{self, ViewElement};
 
 /// The variable named `name` (canonically) in a project's first model.
 fn variable<'a>(project: &'a datamodel::Project, name: &str) -> Option<&'a datamodel::Variable> {
-    project.models[0]
-        .variables
-        .iter()
-        .find(|v| crate::common::canonicalize(v.get_ident()) == crate::common::canonicalize(name))
+    project.models[0].variables.iter().find(|v| {
+        simlin_base::common::canonicalize(v.get_ident()) == simlin_base::common::canonicalize(name)
+    })
 }
 
 /// A variable with its equation text lowercased.

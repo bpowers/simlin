@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use super::test_support::Host;
 use super::{OUTLINE_BUDGET, Session, ToolName, ToolOutput, catalog_json};
-use crate::datamodel;
+use simlin_base::datamodel;
 
 /// Every model file under the repository's `test` directory, in order.
 fn corpus() -> Vec<PathBuf> {
@@ -393,7 +393,7 @@ fn most_read(model: &datamodel::Model) -> Option<String> {
         .iter()
         .max_by_key(|var| {
             counts
-                .get(&*crate::canonicalize(var.get_ident()))
+                .get(&*simlin_base::canonicalize(var.get_ident()))
                 .copied()
                 .unwrap_or(0)
         })

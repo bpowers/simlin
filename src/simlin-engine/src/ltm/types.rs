@@ -6,7 +6,7 @@
 //! truncation marker. These are the user-visible vocabulary the rest of the
 //! LTM submodules build on.
 
-use crate::common::{Canonical, Ident};
+use simlin_base::common::{Canonical, Ident};
 
 /// Marker returned by circuit-enumeration helpers when the DFS bailed
 /// out because it would have exceeded the caller-supplied `max_circuits`

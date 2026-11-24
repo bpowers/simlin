@@ -30,14 +30,14 @@
 //! `LOOKUP(g, Time)` yields the table's y-values step by step: `[y@2000,
 //! y@2001, y@2002]`, with clamp-to-endpoint outside the x-domain.
 
-use crate::common::ErrorCode;
-use crate::datamodel;
-use crate::datamodel::LOOKUP_SENTINEL;
 use crate::db::{
     DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use crate::vm::Vm;
+use simlin_base::common::ErrorCode;
+use simlin_base::datamodel;
+use simlin_base::datamodel::LOOKUP_SENTINEL;
 
 /// A 3-point continuous graphical function keyed on `x = [2000, 2001, 2002]`.
 /// Evaluated at integer years 2000..=2002 it returns `y2000`, `y2001`, `y2002`
@@ -476,7 +476,7 @@ fn bare_reference_to_lookup_only_is_compile_error() {
         d.variable.as_deref() == Some("y")
             && matches!(
                 &d.error,
-                DiagnosticError::Model(crate::common::Error {
+                DiagnosticError::Model(simlin_base::common::Error {
                     code: ErrorCode::LookupReferencedWithoutArgument,
                     ..
                 })
@@ -538,7 +538,7 @@ fn module_input_wired_from_lookup_only_is_compile_error() {
             d.variable.as_deref() == Some("m")
                 && matches!(
                     &d.error,
-                    DiagnosticError::Model(crate::common::Error {
+                    DiagnosticError::Model(simlin_base::common::Error {
                         code: ErrorCode::LookupReferencedWithoutArgument,
                         ..
                     })

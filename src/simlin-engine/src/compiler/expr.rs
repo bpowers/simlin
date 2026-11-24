@@ -4,9 +4,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{ArrayView, BinaryOp, Loc};
-use crate::common::{Canonical, Ident, Result};
-use crate::sim_err;
+use simlin_base::ast::{ArrayView, BinaryOp, Loc};
+use simlin_base::common::{Canonical, Ident, Result};
+use simlin_base::sim_err;
 
 use super::dimensions::UnaryOp;
 
@@ -93,7 +93,7 @@ pub struct Table {
     pub data: Vec<(f64, f64)>,
     /// The graphical function's kind, which a plain application of the table
     /// is read by (`Compiler::lookup_mode`).
-    pub kind: crate::datamodel::GraphicalFunctionKind,
+    pub kind: simlin_base::datamodel::GraphicalFunctionKind,
 }
 
 impl Table {
@@ -102,7 +102,7 @@ impl Table {
     pub(crate) fn empty() -> Self {
         Self {
             data: vec![],
-            kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+            kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         }
     }
 
@@ -124,7 +124,7 @@ impl Table {
     }
 }
 
-pub(crate) type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
+pub(crate) type BuiltinFn = simlin_base::builtins::BuiltinFn<Expr>;
 
 /// Represents a single subscript index in a dynamic Subscript expression.
 /// This enum distinguishes between single-element access and range access,

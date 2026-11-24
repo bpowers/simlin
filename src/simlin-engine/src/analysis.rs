@@ -17,10 +17,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::db::{SimlinDb, SourceProject};
+use crate::json;
 use crate::json_sdai::{Polarity, Relationship};
 use crate::ltm::LinkPolarity;
 use crate::ltm_dominance::{self, DominantPeriod, FeedbackLoop};
-use crate::{datamodel, json};
+use simlin_base::datamodel;
 
 /// Summary of a feedback loop discovered via LTM analysis.
 pub struct LoopSummary {
@@ -274,7 +275,7 @@ pub fn build_sub_model_output_ports(
         .iter()
         .map(|(name, model)| {
             (
-                crate::common::Ident::new(name.as_ref()),
+                simlin_base::common::Ident::new(name.as_ref()),
                 crate::db::sub_model_output_ports(db, *model, source_project),
             )
         })
@@ -305,7 +306,7 @@ pub fn build_link_expansion_context(
         .iter()
         .map(|(name, var)| {
             (
-                crate::common::Ident::new(name.as_str()),
+                simlin_base::common::Ident::new(name.as_str()),
                 crate::db::variable_dimensions(db, *var, source_project).clone(),
             )
         })
@@ -316,11 +317,17 @@ pub fn build_link_expansion_context(
         .iter()
         .filter(|(_, var)| var.kind(db) == crate::variable::SourceVariableKind::Stock)
         .flat_map(|(stock, var)| {
-            let stock = crate::common::Ident::<crate::common::Canonical>::new(stock.as_str());
+            let stock =
+                simlin_base::common::Ident::<simlin_base::common::Canonical>::new(stock.as_str());
             var.inflows(db)
                 .iter()
                 .chain(var.outflows(db).iter())
-                .map(move |flow| (crate::common::Ident::new(flow.as_str()), stock.clone()))
+                .map(move |flow| {
+                    (
+                        simlin_base::common::Ident::new(flow.as_str()),
+                        stock.clone(),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -374,7 +381,8 @@ fn run_ltm_pipeline(
     budget: Option<std::time::Duration>,
 ) -> Result<Option<PipelineResult>, String> {
     let matched_model = project.models.iter().find(|m| {
-        crate::canonicalize(&m.name).as_ref() == crate::canonicalize(model_name).as_ref()
+        simlin_base::canonicalize(&m.name).as_ref()
+            == simlin_base::canonicalize(model_name).as_ref()
     });
     let Some(dm_model) = matched_model.or_else(|| project.models.first()) else {
         return Ok(None);
@@ -383,7 +391,7 @@ fn run_ltm_pipeline(
     // Original name for datamodel lookups (get_model does exact matching);
     // canonical name for salsa map lookups (models(db) uses canonical keys).
     let original_name = &dm_model.name;
-    let canonical_name = crate::canonicalize(original_name).into_owned();
+    let canonical_name = simlin_base::canonicalize(original_name).into_owned();
 
     let uid_to_loop_name = build_uid_to_loop_name(project, original_name);
 
@@ -481,7 +489,7 @@ pub fn discover_run_loops(
     db: &dyn crate::db::Db,
     source_project: SourceProject,
     model_name: &str,
-    results: &crate::results::Results,
+    results: &simlin_base::results::Results,
     budget: Option<std::time::Duration>,
 ) -> Option<crate::ltm_finding::DiscoveryResult> {
     // Build an element-level CausalGraph for loop discovery. This ensures
@@ -502,10 +510,10 @@ pub fn discover_run_loops(
         element_edges,
     );
 
-    let stocks: Vec<crate::common::Ident<crate::common::Canonical>> = element_edges
+    let stocks: Vec<simlin_base::common::Ident<simlin_base::common::Canonical>> = element_edges
         .stocks
         .iter()
-        .map(|s| crate::common::Ident::new(s))
+        .map(|s| simlin_base::common::Ident::new(s))
         .collect();
 
     // Get LTM variable metadata and project dimensions for A2A link
@@ -708,11 +716,12 @@ pub(crate) fn persisted_loop_name(
         .models
         .iter()
         .filter(|m| {
-            crate::canonicalize(&m.name).as_ref() == crate::canonicalize(model_name).as_ref()
+            simlin_base::canonicalize(&m.name).as_ref()
+                == simlin_base::canonicalize(model_name).as_ref()
         })
         .flat_map(|m| &m.variables)
         .filter_map(|var| {
-            let ident = crate::canonicalize(match var {
+            let ident = simlin_base::canonicalize(match var {
                 datamodel::Variable::Stock(s) => &s.ident,
                 datamodel::Variable::Flow(f) => &f.ident,
                 datamodel::Variable::Aux(a) => &a.ident,
@@ -742,10 +751,10 @@ pub(crate) fn persisted_loop_name(
 /// The time of each saved row, read from the rows: a save step that is not a
 /// whole number of DTs saves rows that are not evenly spaced
 /// (`results::Specs`).
-fn build_time_array(results: &crate::results::Results) -> Vec<f64> {
+fn build_time_array(results: &simlin_base::results::Results) -> Vec<f64> {
     results
         .iter()
-        .map(|row| row[crate::results::TIME_OFF])
+        .map(|row| row[simlin_base::results::TIME_OFF])
         .collect()
 }
 
@@ -767,7 +776,10 @@ pub fn generate_relationships(
         .iter()
         .map(|v| {
             let authored = v.get_ident();
-            (crate::common::canonicalize(authored).into_owned(), authored)
+            (
+                simlin_base::common::canonicalize(authored).into_owned(),
+                authored,
+            )
         })
         .collect();
 
@@ -779,16 +791,16 @@ pub fn generate_relationships(
     let mut stock_flow_edges: HashSet<(String, String)> = HashSet::new();
     for var in &model.variables {
         if let datamodel::Variable::Stock(stock) = var {
-            let stock_ident = crate::common::canonicalize(&stock.ident).into_owned();
+            let stock_ident = simlin_base::common::canonicalize(&stock.ident).into_owned();
             for inflow in &stock.inflows {
                 stock_flow_edges.insert((
-                    crate::common::canonicalize(inflow).into_owned(),
+                    simlin_base::common::canonicalize(inflow).into_owned(),
                     stock_ident.clone(),
                 ));
             }
             for outflow in &stock.outflows {
                 stock_flow_edges.insert((
-                    crate::common::canonicalize(outflow).into_owned(),
+                    simlin_base::common::canonicalize(outflow).into_owned(),
                     stock_ident.clone(),
                 ));
             }
@@ -886,7 +898,7 @@ pub fn model_links(
     db: &dyn crate::db::Db,
     model: crate::db::SourceModel,
     project: SourceProject,
-    results: Option<&crate::results::Results>,
+    results: Option<&simlin_base::results::Results>,
     include_internal: bool,
 ) -> Vec<ModelLink> {
     let causal = crate::db::model_causal_edges(db, model, project);
@@ -909,7 +921,7 @@ pub fn model_links(
             let score = results.and_then(|r| {
                 let link_score_var =
                     format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}");
-                let var_ident = crate::canonicalize(&link_score_var);
+                let var_ident = simlin_base::canonicalize(&link_score_var);
                 r.offsets
                     .get(&*var_ident)
                     .map(|&off| r.iter().map(|row| row[off]).collect::<Vec<f64>>())
@@ -939,8 +951,8 @@ pub fn model_links(
     let collapsible: Vec<crate::ltm_finding::CollapsibleLink> = raw
         .into_iter()
         .map(|l| crate::ltm_finding::CollapsibleLink {
-            from: crate::common::Ident::new(&l.from),
-            to: crate::common::Ident::new(&l.to),
+            from: simlin_base::common::Ident::new(&l.from),
+            to: simlin_base::common::Ident::new(&l.to),
             polarity: l.polarity,
             score: l.score,
         })
@@ -1025,7 +1037,7 @@ pub struct ModelRead {
     /// the pair is in one (a conveyor's transit time, a leak's fraction):
     /// the engine reads it in the special-stock build, outside `to`'s
     /// equation.
-    pub option: Option<crate::datamodel::StockOption>,
+    pub option: Option<simlin_base::datamodel::StockOption>,
     /// Whether every read of the pair is in the text of an equation the
     /// compiler cannot read (an unknown builtin, a wrong argument count): the
     /// name is written there, and the equation reads it once it compiles.
@@ -1037,7 +1049,7 @@ pub struct ModelRead {
 struct ReadMade {
     at_start: bool,
     table: bool,
-    option: Option<crate::datamodel::StockOption>,
+    option: Option<simlin_base::datamodel::StockOption>,
     unchecked: bool,
 }
 
@@ -1098,9 +1110,9 @@ pub fn model_reads(
 ) -> Vec<ModelRead> {
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-    use crate::common::{Canonical, Ident};
     use crate::db::{DepRefs, ImplicitVarDeps, SourceVariable};
     use crate::variable::SourceVariableKind;
+    use simlin_base::common::{Canonical, Ident};
 
     /// The reads found so far, for one reader at a time.
     struct Reads<'a> {
@@ -1153,7 +1165,7 @@ pub fn model_reads(
         /// read of the instance. `false` for a text that does not parse.
         fn text(
             &mut self,
-            dimensions: &crate::dimensions::DimensionsContext,
+            dimensions: &simlin_base::dimensions::DimensionsContext,
             reader: &str,
             text: &str,
             made: ReadMade,
@@ -1165,7 +1177,7 @@ pub fn model_reads(
                 let name = reference.as_str();
                 let name = name.strip_prefix("self\u{00B7}").unwrap_or(name);
                 let head = name.split('\u{00B7}').next().unwrap_or(name);
-                let element = crate::common::CanonicalElementName::from_raw(head);
+                let element = simlin_base::common::CanonicalElementName::from_raw(head);
                 if site == crate::patch::Site::Index
                     && dimensions.is_element_of_any_dimension(&element)
                 {
@@ -1247,7 +1259,7 @@ pub fn model_reads(
         // A stock's or a flow's options are expressions the special-stock
         // build reads, outside the dependency set.
         for (role, text) in source_var.compat(db).expression_texts() {
-            if let crate::datamodel::ExpressionRole::Option(option) = role {
+            if let simlin_base::datamodel::ExpressionRole::Option(option) = role {
                 reads.text(
                     dimensions,
                     name,
@@ -1288,7 +1300,7 @@ pub fn model_reads(
                 .iter()
                 .chain(source_var.outflows(db).iter())
             {
-                reads.note(&crate::canonicalize(flow), name, false, false);
+                reads.note(&simlin_base::canonicalize(flow), name, false, false);
             }
         }
         let mut visited = HashSet::new();
@@ -1337,14 +1349,14 @@ fn equation_is_read(
     db: &dyn crate::db::Db,
     var: crate::db::SourceVariable,
     project: SourceProject,
-    dimensions: &crate::dimensions::DimensionsContext,
+    dimensions: &simlin_base::dimensions::DimensionsContext,
 ) -> bool {
     if var.kind(db) == crate::variable::SourceVariableKind::Module {
         return true;
     }
     let parsed = &crate::db::parse_source_variable(db, var, project).variable;
-    let typed = |ast: Option<&crate::ast::Ast<crate::ast::Expr0>>| {
-        ast.is_none_or(|ast| crate::ast::typed_ast(ast, dimensions).is_ok())
+    let typed = |ast: Option<&simlin_base::ast::Ast<simlin_base::ast::Expr0>>| {
+        ast.is_none_or(|ast| simlin_base::ast::typed_ast(ast, dimensions).is_ok())
     };
     let written = var
         .equation(db)
@@ -1422,7 +1434,7 @@ mod tests {
             .build_datamodel();
         project.sim_specs.save_step = Some(datamodel::Dt::Dt(0.3));
         // The rows a save step of 0.3 saves at a DT of 0.25.
-        let specs = crate::results::Specs::from(&project.sim_specs);
+        let specs = simlin_base::results::Specs::from(&project.sim_specs);
         let rows: Vec<f64> = (0..specs.n_chunks as u64)
             .map(|row| specs.time_at(specs.saved_row_step(row) as u64))
             .collect();
@@ -1460,7 +1472,7 @@ mod tests {
             .flow("deaths", "population * population / 1000", None)
             .build_datamodel();
         project.sim_specs.save_step = Some(datamodel::Dt::Dt(0.3));
-        let specs = crate::results::Specs::from(&project.sim_specs);
+        let specs = simlin_base::results::Specs::from(&project.sim_specs);
         let rows: Vec<f64> = (0..specs.n_chunks as u64)
             .map(|row| specs.time_at(specs.saved_row_step(row) as u64))
             .collect();
@@ -2521,7 +2533,7 @@ mod tests {
         let mut vm = crate::vm::Vm::new(compiled).expect("vm");
         vm.run_to_end().expect("run");
         let results = vm.into_results();
-        let off = results.offsets[&crate::common::Ident::new(name)];
+        let off = results.offsets[&simlin_base::common::Ident::new(name)];
         let last = results.step_count - 1;
         results.data[last * results.step_size + off]
     }

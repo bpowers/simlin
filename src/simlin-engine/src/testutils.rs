@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::datamodel::{self, ModuleReference};
+use simlin_base::datamodel::{self, ModuleReference};
 
 #[cfg(test)]
 fn optional_vec(slice: &[&str]) -> Vec<String> {
@@ -161,8 +161,8 @@ pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::
 }
 
 #[cfg(test)]
-pub(crate) fn sim_specs_with_units(time_units: &str) -> crate::datamodel::SimSpecs {
-    crate::datamodel::SimSpecs {
+pub(crate) fn sim_specs_with_units(time_units: &str) -> simlin_base::datamodel::SimSpecs {
+    simlin_base::datamodel::SimSpecs {
         start: 0.0,
         stop: 0.0,
         dt: Default::default(),
@@ -175,37 +175,37 @@ pub(crate) fn sim_specs_with_units(time_units: &str) -> crate::datamodel::SimSpe
 /// A minimal single-stock feedback loop project used across multiple test modules.
 /// Contains population (stock), births (flow), and birth_rate (aux) in a positive loop.
 #[cfg(test)]
-pub(crate) fn feedback_loop_project() -> crate::datamodel::Project {
-    crate::datamodel::Project {
+pub(crate) fn feedback_loop_project() -> simlin_base::datamodel::Project {
+    simlin_base::datamodel::Project {
         name: "feedback".to_string(),
-        sim_specs: crate::datamodel::SimSpecs {
+        sim_specs: simlin_base::datamodel::SimSpecs {
             start: 0.0,
             stop: 10.0,
-            dt: crate::datamodel::Dt::Dt(1.0),
+            dt: simlin_base::datamodel::Dt::Dt(1.0),
             save_step: None,
-            sim_method: crate::datamodel::SimMethod::Euler,
+            sim_method: simlin_base::datamodel::SimMethod::Euler,
             time_units: None,
         },
         dimensions: vec![],
         units: vec![],
-        models: vec![crate::datamodel::Model {
+        models: vec![simlin_base::datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
             variables: vec![
-                crate::datamodel::Variable::Stock(crate::datamodel::Stock {
+                simlin_base::datamodel::Variable::Stock(simlin_base::datamodel::Stock {
                     ident: "population".to_string(),
-                    equation: crate::datamodel::Equation::Scalar("100".to_string()),
+                    equation: simlin_base::datamodel::Equation::Scalar("100".to_string()),
                     documentation: String::new(),
                     units: None,
                     inflows: vec!["births".to_string()],
                     outflows: vec![],
                     ai_state: None,
                     uid: None,
-                    compat: crate::datamodel::Compat::default(),
+                    compat: simlin_base::datamodel::Compat::default(),
                 }),
-                crate::datamodel::Variable::Flow(crate::datamodel::Flow {
+                simlin_base::datamodel::Variable::Flow(simlin_base::datamodel::Flow {
                     ident: "births".to_string(),
-                    equation: crate::datamodel::Equation::Scalar(
+                    equation: simlin_base::datamodel::Equation::Scalar(
                         "population * birth_rate".to_string(),
                     ),
                     documentation: String::new(),
@@ -213,17 +213,17 @@ pub(crate) fn feedback_loop_project() -> crate::datamodel::Project {
                     gf: None,
                     ai_state: None,
                     uid: None,
-                    compat: crate::datamodel::Compat::default(),
+                    compat: simlin_base::datamodel::Compat::default(),
                 }),
-                crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+                simlin_base::datamodel::Variable::Aux(simlin_base::datamodel::Aux {
                     ident: "birth_rate".to_string(),
-                    equation: crate::datamodel::Equation::Scalar("0.1".to_string()),
+                    equation: simlin_base::datamodel::Equation::Scalar("0.1".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
                     ai_state: None,
                     uid: None,
-                    compat: crate::datamodel::Compat::default(),
+                    compat: simlin_base::datamodel::Compat::default(),
                 }),
             ]
             .into(),

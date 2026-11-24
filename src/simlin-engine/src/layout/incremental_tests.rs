@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::layout::metrics::compute_layout_metrics;
-use crate::project_patch::{ModelOperation, ModelPatch};
+use simlin_base::project_patch::{ModelOperation, ModelPatch};
 
 const TEST_MODEL: &str = "main";
 
@@ -87,7 +87,7 @@ fn sync(
         vec![datamodel::View::StockFlow(old_view.clone())];
     crate::patch::apply_patch(
         &mut patched,
-        crate::project_patch::ProjectPatch {
+        simlin_base::project_patch::ProjectPatch {
             project_ops: vec![],
             models: vec![patch.clone()],
         },

@@ -650,8 +650,8 @@ pub enum ErrorCode {
     /// one type (docs/design/queues.md §10.7). The two markers are independent
     /// optional fields the reader/proto carry side by side, and the two expansion
     /// passes each clear only their OWN marker
-    /// ([`crate::conveyor_compile::expand_conveyors`] clears the conveyor block,
-    /// [`crate::queue_compile::expand_queues`] clears the queue marker), so a
+    /// (`simlin_engine::conveyor_compile::expand_conveyors` clears the conveyor block,
+    /// `simlin_engine::queue_compile::expand_queues` clears the queue marker), so a
     /// both-marked stock would be expanded TWICE -- given both a `ConveyorPlan`
     /// AND a `QueuePlan` over the same stock and shared outflow slot -- and the two
     /// runtime passes would each drive the shared flow (the last writer winning
@@ -1644,7 +1644,7 @@ fn push_whitespace_folded_lowercase(out: &mut String, part: &str) {
 /// reject the model loudly instead. Group order follows the first occurrence
 /// of each colliding canonical so diagnostics are deterministic for a given
 /// declaration order.
-pub(crate) fn duplicate_variable_groups<'a, I>(idents: I) -> Vec<(String, Vec<String>)>
+pub fn duplicate_variable_groups<'a, I>(idents: I) -> Vec<(String, Vec<String>)>
 where
     I: IntoIterator<Item = &'a str>,
 {
@@ -1652,7 +1652,7 @@ where
 }
 
 /// [`duplicate_variable_groups`] under the name `key` gives each spelling.
-pub(crate) fn duplicate_groups_by<'a, I>(
+pub fn duplicate_groups_by<'a, I>(
     idents: I,
     key: impl Fn(&'a str) -> Cow<'a, str>,
 ) -> Vec<(String, Vec<String>)>
@@ -1682,7 +1682,7 @@ where
 /// the hard compile error (`compile_project_incremental`,
 /// `queue_compile::build_compiled`) and the accumulated diagnostic
 /// (`model_all_diagnostics`) so every surface reports identical text.
-pub(crate) fn duplicate_variable_message(
+pub fn duplicate_variable_message(
     model_name: &str,
     canonical: &str,
     spellings: &[String],
@@ -1705,7 +1705,7 @@ pub(crate) fn duplicate_variable_message(
 /// (`collect_all_diagnostics`) so every surface reports identical text. No
 /// patch operation renames or removes a model, so the remedy it names is the
 /// file's.
-pub(crate) fn duplicate_model_message(canonical: &str, spellings: &[String]) -> String {
+pub fn duplicate_model_message(canonical: &str, spellings: &[String]) -> String {
     let list = spellings
         .iter()
         .map(|s| format!("'{s}'"))
@@ -1723,7 +1723,7 @@ pub(crate) fn duplicate_model_message(canonical: &str, spellings: &[String]) -> 
 /// `'a', 'b', and 'c'`. Long lists are truncated to the first three names
 /// plus a count, so a macro-instantiated conflict with dozens of sources
 /// stays readable.
-pub(crate) fn join_quoted_names(names: &[&str]) -> String {
+pub fn join_quoted_names(names: &[&str]) -> String {
     match names {
         [] => String::new(),
         [a] => format!("'{a}'"),

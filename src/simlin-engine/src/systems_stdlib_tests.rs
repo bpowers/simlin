@@ -8,9 +8,9 @@
 //! wires input values, reads outputs, and verifies numeric results match the Python
 //! `systems` package semantics.
 
-use crate::datamodel::{self, Compat, Equation, Module, ModuleReference, Variable};
 use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use crate::vm::Vm;
+use simlin_base::datamodel::{self, Compat, Equation, Module, ModuleReference, Variable};
 
 /// Build a `Variable::Module` for a systems stdlib module.
 ///
@@ -71,7 +71,7 @@ fn run_and_get(project: &datamodel::Project, var_name: &str) -> f64 {
     let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e:?}"));
     vm.run_to_end()
         .unwrap_or_else(|e| panic!("VM run failed: {e:?}"));
-    let ident = crate::common::Ident::new(var_name);
+    let ident = simlin_base::common::Ident::new(var_name);
     let series = vm
         .get_series(&ident)
         .unwrap_or_else(|| panic!("variable {var_name} not found in results"));

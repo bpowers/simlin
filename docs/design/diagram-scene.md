@@ -72,7 +72,7 @@ One canvas unit is one point at zoom 1.
 | `aux`    | 5       | canonical name                           | yes              | yes          |
 | `alias`  | 5       | canonical name of the aliased variable, `null` when the target is missing | yes when `ident` is non-null | yes |
 
-- `ident` is the canonical identifier (`simlin_engine::common::canonicalize`) of the variable whose simulation series the element displays.
+- `ident` is the canonical identifier (`simlin_base::common::canonicalize`) of the variable whose simulation series the element displays.
   An alias displays its target's series, exactly as the web canvas does.
 - `isArrayed` is true when the variable has an apply-to-all or arrayed equation; the shapes already include the stacked copies.
   An alias is never arrayed and draws one circle whatever its target's equation, as the web canvas's `Alias.tsx` draws it.

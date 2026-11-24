@@ -27,7 +27,7 @@ Hand-written recursive descent parser (mdl/parser.rs)
     |
 minimal internal representations private to this package
     |
-simlin_engine::datamodel::Project  <-- target output
+simlin_base::datamodel::Project  <-- target output
     |
 (optional) xmile::project_to_xmile()  <-- "free" XMILE export
 ```

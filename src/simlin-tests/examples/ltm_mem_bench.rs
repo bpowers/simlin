@@ -39,7 +39,7 @@ use std::fs;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use simlin_engine::common::{Canonical, Ident, IdentMap, IdentSet};
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet};
 use simlin_engine::db::{
     CausalEdgesResult, SimlinDb, causal_graph_from_edges, model_causal_edges, sync_from_datamodel,
 };

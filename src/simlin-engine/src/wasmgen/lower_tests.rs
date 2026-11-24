@@ -8,8 +8,8 @@
 //! still resolves the lowering module's private items.
 
 use super::*;
-use crate::common::IdentMap;
 use checked::Store;
+use simlin_base::common::IdentMap;
 use wasm::validate;
 use wasm_encoder::{
     CodeSection, ExportKind, ExportSection, FunctionSection, MemorySection, MemoryType, Module,
@@ -1429,16 +1429,16 @@ fn run_approx_eq(a: f64, b: f64) -> i32 {
         .expect("eq invocation must succeed")
 }
 
-/// Assert the emitted helper agrees with the Rust `crate::float::approx_eq`
+/// Assert the emitted helper agrees with the Rust `simlin_base::float::approx_eq`
 /// oracle for both argument orders (the function is symmetric).
 fn assert_approx_eq_matches_oracle(a: f64, b: f64) {
-    let oracle = crate::float::approx_eq(a, b) as i32;
+    let oracle = simlin_base::float::approx_eq(a, b) as i32;
     assert_eq!(
         run_approx_eq(a, b),
         oracle,
         "approx_eq({a:?}, {b:?}) disagreed with oracle {oracle}"
     );
-    let oracle_swapped = crate::float::approx_eq(b, a) as i32;
+    let oracle_swapped = simlin_base::float::approx_eq(b, a) as i32;
     assert_eq!(
         run_approx_eq(b, a),
         oracle_swapped,
@@ -1456,7 +1456,7 @@ fn nudge_ulps(x: f64, k: i64) -> f64 {
 #[test]
 fn approx_eq_matches_oracle_curated() {
     // The exact edge cases the task enumerates.
-    let na = crate::float::NA; // finite -2^109 sentinel, NOT NaN.
+    let na = simlin_base::float::NA; // finite -2^109 sentinel, NOT NaN.
     let cases: &[(f64, f64)] = &[
         // exact-equal
         (1.0, 1.0),
@@ -1573,7 +1573,7 @@ fn op2_eq_matches_vm_for_ulp_adjacent_operands() {
 fn op2_eq_matches_vm_oracle_over_sample() {
     // The whole-expression Eq lowering must agree with the VM's eval_op2 Eq
     // (= approx_eq as f64) across the curated edge values.
-    let na = crate::float::NA;
+    let na = simlin_base::float::NA;
     let cases: &[(f64, f64)] = &[
         (1.0, nudge_ulps(1.0, 3)),
         (1.0, nudge_ulps(1.0, 4)),
@@ -1586,7 +1586,7 @@ fn op2_eq_matches_vm_oracle_over_sample() {
         (f64::INFINITY, f64::NEG_INFINITY),
     ];
     for &(l, r) in cases {
-        let expected = crate::float::approx_eq(l, r) as i8 as f64;
+        let expected = simlin_base::float::approx_eq(l, r) as i8 as f64;
         assert_eq!(eval_eq(l, r), expected, "Eq({l:?}, {r:?})");
     }
 }
@@ -1606,7 +1606,7 @@ fn eval_logical(op: Op2, l: f64, r: f64) -> f64 {
 
 /// The VM's truthiness: `is_truthy(n) = !approx_eq(n, 0.0)`.
 fn vm_is_truthy(n: f64) -> bool {
-    !crate::float::approx_eq(n, 0.0)
+    !simlin_base::float::approx_eq(n, 0.0)
 }
 
 #[test]
@@ -4593,7 +4593,7 @@ fn lookup_array_invalid_view_fills_temp_with_nan() {
 // These run the emitted opcode programs under DLR-FT and cross-check the
 // written temp region against the VM's own arm logic (`vm.rs:2631-2794`),
 // which gathers requests/profiles from the views and calls
-// `crate::alloc::allocate_available`. The oracle below reproduces that gather
+// `simlin_base::alloc::allocate_available`. The oracle below reproduces that gather
 // (the `pp_cols`/defaults for AllocateAvailable, the rectangular-profile
 // synthesis for AllocateByPriority) and calls the same `allocate_available`,
 // so a passing test proves the wasm opcode == the VM opcode element-for-element.
@@ -4658,7 +4658,7 @@ fn run_allocate_by_priority(
 /// The VM `AllocateAvailable` oracle (`vm.rs:2631-2721`): gather requests +
 /// the flattened profile array from the views, build the per-requester
 /// `(ptype, ppriority, pwidth, pextra)` tuples via the `pp_cols`/defaults logic,
-/// then call `crate::alloc::allocate_available`.
+/// then call `simlin_base::alloc::allocate_available`.
 fn vm_allocate_available_oracle(
     requests_view: &StaticArrayView,
     profile_view: &StaticArrayView,
@@ -4685,12 +4685,12 @@ fn vm_allocate_available_oracle(
             (g(0, 0.0), g(1, 0.0), g(2, 1.0), g(3, 0.0))
         })
         .collect();
-    crate::alloc::allocate_available(&requests, &profiles, avail)
+    simlin_base::alloc::allocate_available(&requests, &profiles, avail)
 }
 
 /// The VM `AllocateByPriority` oracle (`vm.rs:2723-2794`): gather requests +
 /// priorities, synthesize rectangular profiles `(1, priorities[i] or 0, width,
-/// 0)`, then call `crate::alloc::allocate_available` with `supply`.
+/// 0)`, then call `simlin_base::alloc::allocate_available` with `supply`.
 fn vm_allocate_by_priority_oracle(
     requests_view: &StaticArrayView,
     priority_view: &StaticArrayView,
@@ -4708,7 +4708,7 @@ fn vm_allocate_by_priority_oracle(
     let profiles: Vec<(f64, f64, f64, f64)> = (0..n)
         .map(|i| (1.0, priorities.get(i).copied().unwrap_or(0.0), width, 0.0))
         .collect();
-    crate::alloc::allocate_available(&requests, &profiles, supply)
+    simlin_base::alloc::allocate_available(&requests, &profiles, supply)
 }
 
 /// Assert the emitted `AllocateAvailable` matches the VM oracle (NaN as NaN,

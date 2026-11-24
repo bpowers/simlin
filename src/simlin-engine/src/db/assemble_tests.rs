@@ -24,9 +24,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use crate::bytecode::{ModuleDeclaration, Opcode};
-use crate::common::{Canonical, Ident, canonicalize};
 use crate::compiler::symbolic::VariableLayout;
-use crate::datamodel;
 use crate::db::{
     ModuleInputSet, SccPhase, SimlinDb, SourceProject, SyncResult, assemble_module,
     assemble_simulation, compute_layout, model_dependency_graph, model_flows_invariant,
@@ -36,6 +34,8 @@ use crate::testutils::{
     x_arrayed, x_aux, x_flow, x_model, x_module, x_module_named, x_project, x_stock,
 };
 use crate::vm::Vm;
+use simlin_base::common::{Canonical, Ident, canonicalize};
+use simlin_base::datamodel;
 
 fn sim_specs() -> datamodel::SimSpecs {
     datamodel::SimSpecs {

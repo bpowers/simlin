@@ -15,8 +15,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::{self, LabelSide};
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::{self, LabelSide};
 
 use super::config::LayoutConfig;
 use super::graph::Position;

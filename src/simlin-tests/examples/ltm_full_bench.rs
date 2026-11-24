@@ -235,7 +235,7 @@ fn main() {
         .first()
         .map(|m| m.name.as_str())
         .expect("datamodel must contain at least one model");
-    let root_canonical = simlin_engine::canonicalize(root_name).into_owned();
+    let root_canonical = simlin_base::canonicalize(root_name).into_owned();
     let root_source_model = sync
         .models
         .get(&root_canonical)

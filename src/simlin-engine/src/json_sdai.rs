@@ -13,7 +13,7 @@
 //!
 //! let json_str = r#"{"variables": [...], "specs": {...}}"#;
 //! let sdai_model: json_sdai::SdaiModel = serde_json::from_str(json_str)?;
-//! let datamodel_proj: simlin_engine::datamodel::Project = sdai_model.into();
+//! let datamodel_proj: simlin_base::datamodel::Project = sdai_model.into();
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -21,7 +21,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::datamodel;
+use simlin_base::datamodel;
 
 fn is_none<T>(val: &Option<T>) -> bool {
     val.is_none()
@@ -382,13 +382,13 @@ impl From<SdaiModel> for datamodel::Project {
 }
 
 impl std::str::FromStr for SdaiModel {
-    type Err = crate::common::Error;
+    type Err = simlin_base::common::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         serde_json::from_str(s).map_err(|err| {
-            crate::common::Error::new(
-                crate::common::ErrorKind::Import,
-                crate::common::ErrorCode::Generic,
+            simlin_base::common::Error::new(
+                simlin_base::common::ErrorKind::Import,
+                simlin_base::common::ErrorCode::Generic,
                 Some(format!("Failed to parse SDAI JSON model: {}", err)),
             )
         })
@@ -397,11 +397,11 @@ impl std::str::FromStr for SdaiModel {
 
 impl SdaiModel {
     /// Parse an SdaiModel from a reader
-    pub fn from_reader(reader: impl std::io::Read) -> crate::common::Result<Self> {
+    pub fn from_reader(reader: impl std::io::Read) -> simlin_base::common::Result<Self> {
         serde_json::from_reader(reader).map_err(|err| {
-            crate::common::Error::new(
-                crate::common::ErrorKind::Import,
-                crate::common::ErrorCode::Generic,
+            simlin_base::common::Error::new(
+                simlin_base::common::ErrorKind::Import,
+                simlin_base::common::ErrorCode::Generic,
                 Some(format!("Failed to parse SDAI JSON model: {}", err)),
             )
         })

@@ -14,10 +14,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::common::canonicalize;
-use crate::datamodel::{self, Equation, StockFlow, Variable, ViewElement};
 use crate::patch::apply_patch;
-use crate::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
+use simlin_base::common::canonicalize;
+use simlin_base::datamodel::{self, Equation, StockFlow, Variable, ViewElement};
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 
 use super::edit_audit::{Displacement, EditAudit, EditInput, Finding, FindingKind, audit_edit};
 use super::metadata::ComputedMetadata;
@@ -414,7 +414,7 @@ fn stock(ident: &str, equation: &str, inflows: &[String], outflows: &[String]) -
 /// it parses as some other expression, so the scenario would audit a different
 /// edit from the one it names.
 fn eqn_text(ident: &str) -> String {
-    crate::ast::print_ident(ident)
+    simlin_base::ast::print_ident(ident)
 }
 
 fn upsert(v: Variable) -> ModelOperation {

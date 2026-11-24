@@ -12,9 +12,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::BufReader;
 
 use super::*;
-use crate::datamodel::{Compat, Equation, view_element};
-use crate::project_patch::ModelPatch;
 use crate::test_common::TestProject;
+use simlin_base::datamodel::{Compat, Equation, view_element};
+use simlin_base::project_patch::ModelPatch;
 
 fn rename_in(model: &str, from: &str, to: &str) -> ProjectPatch {
     ProjectPatch {
@@ -2041,7 +2041,7 @@ fn a_rename_of_a_variable_named_for_a_global_leaves_the_equations_reading_it() {
 #[test]
 fn a_rename_to_a_clock_name_is_refused() {
     let display = |name: &str| name.replace('_', " ").to_uppercase();
-    for clock in crate::results::IMPLICIT_GLOBALS {
+    for clock in simlin_base::results::IMPLICIT_GLOBALS {
         for to in [clock.to_string(), display(clock)] {
             let base = reads_x();
             let mut project = base.clone();
@@ -2147,7 +2147,7 @@ fn renamed_tree(expr: &Expr0, renamed: &Respelling<'_>) -> Expr0 {
     Walk {
         text: "",
         renamed,
-        spell: &|name| crate::ast::print_ident(name.as_str()),
+        spell: &|name| simlin_base::ast::print_ident(name.as_str()),
         splices: Vec::new(),
         ambiguity: None,
     }
@@ -2470,7 +2470,7 @@ fn check_renames_change_no_series(project: &datamodel::Project, limit: usize) ->
             }
             let mut after = outcome(&renamed)
                 .unwrap_or_else(|err| panic!("renamed {ident}, and the project {err}"));
-            if crate::results::is_implicit_global(&canonicalize(ident)) {
+            if simlin_base::results::is_implicit_global(&canonicalize(ident)) {
                 // The run saves the global under that name, and the variable
                 // has no series of its own until the rename gives it one:
                 // every series that was saved is saved as it was.

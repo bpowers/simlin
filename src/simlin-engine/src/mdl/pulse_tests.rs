@@ -8,12 +8,12 @@
 //! (vensim.com/documentation/fn_pulse.html, fn_pulse_train.html; the
 //! `xmile_compat` arms cite the rules).
 
-use crate::datamodel::{Equation, Project};
 use crate::db::{
     LtmOverlay, SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::mdl::{parse_mdl, project_to_mdl};
 use crate::vm::Vm;
+use simlin_base::datamodel::{Equation, Project};
 
 /// The project an MDL file defining `p` (and the variables `w`, a pulse
 /// width of 0, and `two`) reads as, run from 0 to `stop` by `dt`.

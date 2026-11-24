@@ -29,8 +29,8 @@
 
 use std::collections::HashMap;
 
-use crate::common::{Canonical, Ident};
 use crate::db::{Db, RefShape, SourceModel, SourceProject, model_lowered_variables};
+use simlin_base::common::{Canonical, Ident};
 
 // ── AST-walker helpers (moved from db/analysis.rs) ─────────────────────────
 
@@ -93,7 +93,7 @@ pub(crate) struct ReferenceSite {
 ///   `dimension·element` reference that `Expr1::constify_dimensions` already
 ///   turned into its 1-based position -- resolves POSITIONALLY against the axis
 ///   at this index's own position, via
-///   [`crate::dimensions::resolve_axis_index_position`].
+///   [`simlin_base::dimensions::resolve_axis_index_position`].
 ///
 /// The positional half is why `position` is a parameter. Reading a constant by
 /// NAME (canonicalizing `"region·north"` and hunting for an element so called)
@@ -112,16 +112,16 @@ pub(crate) struct ReferenceSite {
 /// resolves by neither rule classifies defensively as `DynamicIndex`, so the
 /// worst case stays over-conservative (full cross-product) edges.
 fn resolve_literal_index(
-    idx: &crate::ast::IndexExpr2,
+    idx: &simlin_base::ast::IndexExpr2,
     position: usize,
-    source_dims: &[crate::dimensions::Dimension],
+    source_dims: &[simlin_base::dimensions::Dimension],
 ) -> Option<String> {
-    use crate::ast::{Expr2, IndexExpr2};
+    use simlin_base::ast::{Expr2, IndexExpr2};
 
     let canonical = match idx {
         IndexExpr2::Expr(Expr2::Var(ident, _, _)) => ident.as_str().to_string(),
         IndexExpr2::Expr(Expr2::Const(_, value, _)) => {
-            return crate::dimensions::resolve_axis_index_position(
+            return simlin_base::dimensions::resolve_axis_index_position(
                 value.value(),
                 source_dims.get(position)?,
             );
@@ -130,7 +130,7 @@ fn resolve_literal_index(
     };
 
     for dim in source_dims {
-        if let crate::dimensions::Dimension::Named(_, named) = dim
+        if let simlin_base::dimensions::Dimension::Named(_, named) = dim
             && named.elements.iter().any(|e| e.as_str() == canonical)
         {
             return Some(canonical);
@@ -170,10 +170,10 @@ fn resolve_literal_index(
 ///    shape is routing-irrelevant: a documented residual, not a behavior
 ///    gap.)
 fn classify_subscript_shape(
-    indices: &[crate::ast::IndexExpr2],
-    source_dims: &[crate::dimensions::Dimension],
+    indices: &[simlin_base::ast::IndexExpr2],
+    source_dims: &[simlin_base::dimensions::Dimension],
 ) -> RefShape {
-    use crate::ast::IndexExpr2;
+    use simlin_base::ast::IndexExpr2;
 
     if indices.iter().any(|i| matches!(i, IndexExpr2::Wildcard(_))) {
         return RefShape::Wildcard;
@@ -247,11 +247,11 @@ fn classify_subscript_shape(
 /// Returns `None` when the subscript is not statically describable per
 /// axis; the caller then falls back to [`classify_subscript_shape`].
 fn classify_iterated_dim_shape(
-    indices: &[crate::ast::IndexExpr2],
-    source_dims: &[crate::dimensions::Dimension],
-    target_dims: &[crate::dimensions::Dimension],
+    indices: &[simlin_base::ast::IndexExpr2],
+    source_dims: &[simlin_base::dimensions::Dimension],
+    target_dims: &[simlin_base::dimensions::Dimension],
     target_iterated_dims: &[String],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Option<RefShape> {
     use crate::ltm_agg::{AxisRead, classify_axis_access};
 
@@ -357,8 +357,8 @@ struct WalkCtx<'a> {
     target_iterated_dims: Vec<String>,
     /// The same dimensions as declared, for `bare_axis_pairing` (the
     /// `Bare`-vs-`PerElement` decision of `classify_iterated_dim_shape`).
-    target_dims: &'a [crate::dimensions::Dimension],
-    dim_ctx: &'a crate::dimensions::DimensionsContext,
+    target_dims: &'a [simlin_base::dimensions::Dimension],
+    dim_ctx: &'a simlin_base::dimensions::DimensionsContext,
 }
 
 /// Walk a target's AST once and bucket every reference to a model variable
@@ -388,8 +388,8 @@ struct WalkCtx<'a> {
 pub(crate) fn collect_all_reference_sites(
     target_var: &crate::variable::Variable,
     variables: &crate::variable::LoweredVariableMap,
-    dim_ctx: &crate::dimensions::DimensionsContext,
-    lookup_dims: &mut impl FnMut(&str) -> Vec<crate::dimensions::Dimension>,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
+    lookup_dims: &mut impl FnMut(&str) -> Vec<simlin_base::dimensions::Dimension>,
 ) -> HashMap<String, Vec<ReferenceSite>> {
     collect_all_reference_sites_and_occurrences(target_var, variables, dim_ctx, lookup_dims).0
 }
@@ -553,10 +553,10 @@ pub(crate) struct SiteWidthRejection {
 /// sound in the other direction: descending where NEITHER side goes could only
 /// over-reject a node no path names, never miss one.
 fn ast_site_width_rejection(
-    ast: &crate::ast::Ast<crate::ast::Expr2>,
+    ast: &simlin_base::ast::Ast<simlin_base::ast::Expr2>,
     limit: usize,
 ) -> Option<(SiteWidthAxis, usize)> {
-    use crate::ast::Ast;
+    use simlin_base::ast::Ast;
 
     match ast {
         Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => expr_site_width_rejection(expr, limit),
@@ -591,11 +591,11 @@ fn ast_site_width_rejection(
 /// The `match` is exhaustive with no catch-all arm, so a new `Expr2` variant is
 /// a compile error here rather than a silently unchecked axis.
 fn expr_site_width_rejection(
-    expr: &crate::ast::Expr2,
+    expr: &simlin_base::ast::Expr2,
     limit: usize,
 ) -> Option<(SiteWidthAxis, usize)> {
-    use crate::ast::{Expr2, IndexExpr2};
-    use crate::builtins::{BuiltinContents, walk_builtin_expr};
+    use simlin_base::ast::{Expr2, IndexExpr2};
+    use simlin_base::builtins::{BuiltinContents, walk_builtin_expr};
 
     match expr {
         Expr2::Const(..) | Expr2::Var(..) => None,
@@ -762,8 +762,8 @@ type WalkedTarget = (
 fn collect_all_reference_sites_and_occurrences(
     target_var: &crate::variable::Variable,
     variables: &crate::variable::LoweredVariableMap,
-    dim_ctx: &crate::dimensions::DimensionsContext,
-    lookup_dims: &mut impl FnMut(&str) -> Vec<crate::dimensions::Dimension>,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
+    lookup_dims: &mut impl FnMut(&str) -> Vec<simlin_base::dimensions::Dimension>,
 ) -> WalkedTarget {
     let mut sites: HashMap<String, Vec<ReferenceSite>> = HashMap::new();
     let mut occurrences: Vec<RawOccurrence> = Vec::new();
@@ -774,9 +774,10 @@ fn collect_all_reference_sites_and_occurrences(
     let width_rejection = ast_site_width_rejection(ast, site_children_limit());
     // The target equation's iterated dimensions drive the #511 iterated-
     // subscript recognition; `Ast::Scalar` has none.
-    let target_dims: &[crate::dimensions::Dimension] = match ast {
-        crate::ast::Ast::Scalar(_) => &[],
-        crate::ast::Ast::ApplyToAll(dims, _) | crate::ast::Ast::Arrayed(dims, _, _, _) => dims,
+    let target_dims: &[simlin_base::dimensions::Dimension] = match ast {
+        simlin_base::ast::Ast::Scalar(_) => &[],
+        simlin_base::ast::Ast::ApplyToAll(dims, _)
+        | simlin_base::ast::Ast::Arrayed(dims, _, _, _) => dims,
     };
     let target_iterated_dims: Vec<String> =
         target_dims.iter().map(|d| d.name().to_string()).collect();
@@ -796,7 +797,7 @@ fn collect_all_reference_sites_and_occurrences(
             record_occurrences: width_rejection.is_none(),
         };
         match ast {
-            crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
+            simlin_base::ast::Ast::Scalar(expr) | simlin_base::ast::Ast::ApplyToAll(_, expr) => {
                 // Slot 0: the single body of a scalar / apply-to-all target.
                 let mut reducer_keys = Vec::new();
                 acc.path.push(0);
@@ -811,7 +812,7 @@ fn collect_all_reference_sites_and_occurrences(
                 );
                 acc.path.pop();
             }
-            crate::ast::Ast::Arrayed(_, subscript_map, default_expr, _) => {
+            simlin_base::ast::Ast::Arrayed(_, subscript_map, default_expr, _) => {
                 // Per-element expressions: visit slots in canonical element-key
                 // order so the per-source site Vecs (and the occurrence stream /
                 // its `SiteId`s) are deterministic. The slot index is the first
@@ -888,13 +889,13 @@ fn module_output_parts(ident: &str, ctx: &WalkCtx<'_>) -> Option<(String, String
 /// An index that overflows the source's declared arity is handled the same
 /// way (an extra iterated-dim name is an arity mismatch, else dynamic).
 fn classify_occurrence_axes(
-    indices: &[crate::ast::IndexExpr2],
-    source_dims: &[crate::dimensions::Dimension],
+    indices: &[simlin_base::ast::IndexExpr2],
+    source_dims: &[simlin_base::dimensions::Dimension],
     target_iterated_dims: &[String],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Vec<OccurrenceAxis> {
-    use crate::ast::{Expr2, IndexExpr2};
     use crate::ltm_agg::classify_axis_access;
+    use simlin_base::ast::{Expr2, IndexExpr2};
 
     // Mirror `classify_axis_access`'s iterated-dim recognition (a bare `Var`
     // whose name is one of the target's iterated dims) so a position-mismatch
@@ -940,16 +941,16 @@ fn classify_occurrence_axes(
 /// becomes sticky-true once we descend into a subscript index expression.
 #[allow(clippy::too_many_arguments)]
 fn walk_all_in_expr(
-    expr: &crate::ast::Expr2,
+    expr: &simlin_base::ast::Expr2,
     ctx: &WalkCtx<'_>,
-    lookup_dims: &mut impl FnMut(&str) -> Vec<crate::dimensions::Dimension>,
+    lookup_dims: &mut impl FnMut(&str) -> Vec<simlin_base::dimensions::Dimension>,
     target_element: Option<&str>,
     reducer_keys: &mut Vec<String>,
     index_nested: bool,
     acc: &mut WalkAccum,
 ) {
-    use crate::ast::{Expr2, IndexExpr2};
-    use crate::builtins::{BuiltinContents, walk_builtin_expr};
+    use simlin_base::ast::{Expr2, IndexExpr2};
+    use simlin_base::builtins::{BuiltinContents, walk_builtin_expr};
 
     match expr {
         Expr2::Const(..) => {}
@@ -1153,7 +1154,7 @@ fn walk_all_in_expr(
         Expr2::App(builtin, _, _) => {
             let pushed_reducer_key = crate::ltm_agg::builtin_routes_through_agg(builtin);
             if pushed_reducer_key {
-                reducer_keys.push(crate::ast::expr2_to_string(expr));
+                reducer_keys.push(simlin_base::ast::expr2_to_string(expr));
             }
             // Builtin arity is one of the three child counts not bounded by the
             // AST node's own shape (`BuiltinFn::Mean` is the only variadic
@@ -1759,8 +1760,8 @@ pub(crate) fn model_ltm_reference_sites(
 
     // Per-source dimension lookup, cached: a source's dims are needed to
     // resolve literal subscripts and are reused across many edges.
-    let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
-    let mut lookup_dims = |name: &str| -> Vec<crate::dimensions::Dimension> {
+    let mut dim_cache: HashMap<String, Vec<simlin_base::dimensions::Dimension>> = HashMap::new();
+    let mut lookup_dims = |name: &str| -> Vec<simlin_base::dimensions::Dimension> {
         if let Some(dims) = dim_cache.get(name) {
             return dims.clone();
         }

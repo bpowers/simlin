@@ -60,7 +60,7 @@ fn error<T>(code: ErrorCode, start: usize, end: usize) -> Result<T, EquationErro
     Err(EquationError::new(code, start as u16, end as u16))
 }
 
-pub type Spanned<T> = (usize, T, usize);
+pub(crate) type Spanned<T> = (usize, T, usize);
 
 pub struct Lexer<'input> {
     text: &'input str,
@@ -97,7 +97,7 @@ const KEYWORDS: &[(&str, Token<'static>)] = &[
 /// allocating nothing on the printer path; the one place `str::to_lowercase`
 /// differs from the char-wise mapping is the Greek final-sigma rule, and a
 /// lowercase form containing `ς` matches no keyword either way.
-pub(crate) fn is_reserved_word(word: &str) -> bool {
+pub fn is_reserved_word(word: &str) -> bool {
     KEYWORDS.iter().any(|(keyword, _)| {
         word.chars()
             .flat_map(char::to_lowercase)

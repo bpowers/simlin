@@ -34,9 +34,9 @@
 
 use std::collections::HashMap;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::FlowPoint;
 use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::FlowPoint;
 
 /// Tolerance (in diagram units) for deciding whether two coordinates are equal
 /// (a segment is axis-aligned) or a point sits on a stock face.
@@ -235,7 +235,7 @@ pub(crate) fn flow_bend_count(points: &[FlowPoint]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::view_element::{Flow, LabelSide, Stock};
+    use simlin_base::datamodel::view_element::{Flow, LabelSide, Stock};
 
     fn fp(x: f64, y: f64, attached: Option<i32>) -> FlowPoint {
         FlowPoint {

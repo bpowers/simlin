@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use simlin_engine::datamodel;
+use simlin_base::datamodel;
 use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::test_support::{TestFileSystemAccess, chain_scc_project_json};
@@ -720,7 +720,7 @@ fn edit_input(path: &Path, operations: Vec<EditOperation>) -> EditModelInput {
 fn aux_element(project: &datamodel::Project, name: &str) -> Option<(i32, f64, f64)> {
     project.models[0].views.iter().find_map(|v| match v {
         datamodel::View::StockFlow(sf) => sf.elements.iter().find_map(|e| match e {
-            datamodel::ViewElement::Aux(a) if simlin_engine::canonicalize(&a.name) == name => {
+            datamodel::ViewElement::Aux(a) if simlin_base::canonicalize(&a.name) == name => {
                 Some((a.uid, a.x, a.y))
             }
             _ => None,
@@ -732,9 +732,7 @@ fn aux_element(project: &datamodel::Project, name: &str) -> Option<(i32, f64, f6
 fn link_uid_into(project: &datamodel::Project, from: i32, to: &str) -> Option<i32> {
     let datamodel::View::StockFlow(sf) = &project.models[0].views[0];
     let to_uid = sf.elements.iter().find_map(|e| match e {
-        datamodel::ViewElement::Flow(f) if simlin_engine::canonicalize(&f.name) == to => {
-            Some(f.uid)
-        }
+        datamodel::ViewElement::Flow(f) if simlin_base::canonicalize(&f.name) == to => Some(f.uid),
         _ => None,
     })?;
     sf.elements.iter().find_map(|e| match e {

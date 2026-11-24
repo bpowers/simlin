@@ -5,15 +5,15 @@
 use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Canonical, Ident, Result, canonicalize};
-use crate::datamodel;
-use crate::datamodel::Visibility;
 use crate::xmile::variables::{Var, ai_state_from};
 use crate::xmile::views::{View, ViewType};
 use crate::xmile::{
     SimSpecs, ToXml, XmlWriter, write_tag, write_tag_end, write_tag_start,
     write_tag_start_with_attrs, write_tag_with_attrs,
 };
+use simlin_base::common::{Canonical, Ident, Result, canonicalize};
+use simlin_base::datamodel;
+use simlin_base::datamodel::Visibility;
 
 /// Vendor extension for persisting named feedback loop metadata.
 /// Serialized as `<simlin:loop-metadata>` within a `<model>` element.
@@ -579,7 +579,7 @@ impl From<Model> for datamodel::Model {
 
         // Sort variables by canonical identifier for deterministic ordering.
         variables.sort_by(|a, b| {
-            crate::canonicalize(a.get_ident()).cmp(&crate::canonicalize(b.get_ident()))
+            simlin_base::canonicalize(a.get_ident()).cmp(&simlin_base::canonicalize(b.get_ident()))
         });
 
         datamodel::Model {

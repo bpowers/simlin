@@ -3,8 +3,8 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::datamodel;
 use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+use simlin_base::datamodel;
 
 /// A shipped, hand-authored default project's main view -- the realistic input
 /// the eval harness degrades (the as-loaded view production would score).

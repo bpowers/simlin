@@ -38,6 +38,7 @@ agent_tools = ["simlin-engine/agent_tools"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
+simlin-base = { path = "../simlin-base" }
 simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }

@@ -8,7 +8,7 @@
 use super::{parse_layout, run_and_stride, ParsedLayout};
 use crate::common::{expect_no_error, open_project_from_datamodel};
 use simlin::*;
-use simlin_engine::{self as engine, db::exec_probe::ProbedDb, test_common::TestProject};
+use simlin_engine::{db::exec_probe::ProbedDb, test_common::TestProject};
 use std::{ffi::CStr, ptr};
 
 struct Fixture {
@@ -17,7 +17,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(datamodel: &engine::datamodel::Project) -> Self {
+    fn new(datamodel: &simlin_base::datamodel::Project) -> Self {
         let project = open_project_from_datamodel(datamodel);
         unsafe {
             let mut error = ptr::null_mut();
@@ -70,7 +70,7 @@ impl Fixture {
     fn set_discovery(&self, value: bool) {
         let mut db = unsafe { &*self.project }.lock_db();
         let source = db.current_source_project().unwrap();
-        engine::db::set_project_ltm_discovery_mode(&mut db, source, value);
+        simlin_engine::db::set_project_ltm_discovery_mode(&mut db, source, value);
     }
 
     fn swap_db(&self, probe: &mut ProbedDb) {
@@ -87,7 +87,7 @@ impl Drop for Fixture {
     }
 }
 
-fn feedback_model() -> engine::datamodel::Project {
+fn feedback_model() -> simlin_base::datamodel::Project {
     TestProject::new("wasm_incremental")
         .with_sim_time(0.0, 3.0, 1.0)
         .aux("rate", "0.1", None)
@@ -111,7 +111,7 @@ fn compile_to_wasm_reuses_project_queries_across_overlay_toggles() {
         // The same sync entry point project constructors use supplies real source
         // inputs; the probe changes only salsa's event sink, not the input shape.
         let source = probe.db_mut().sync(&datamodel);
-        engine::db::set_project_ltm_discovery_mode(probe.db_mut(), source, discovery);
+        simlin_engine::db::set_project_ltm_discovery_mode(probe.db_mut(), source, discovery);
         for (ltm, cold) in [
             (false, true),
             (false, false),
@@ -277,7 +277,8 @@ fn compile_to_wasm_latches_special_stock_ltm_diagnostics() {
             "queue stock",
         ),
     ] {
-        let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes())).unwrap();
+        let datamodel =
+            simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes())).unwrap();
         let fixture = Fixture::new(&datamodel);
         for (request, expected) in [(false, false), (true, true), (false, true)] {
             fixture.compile(request, false).unwrap();

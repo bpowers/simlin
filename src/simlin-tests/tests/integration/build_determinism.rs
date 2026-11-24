@@ -23,8 +23,8 @@ use std::fs;
 use std::io::BufReader;
 use std::path::PathBuf;
 
+use simlin_base::datamodel::Project;
 use simlin_engine::buffa::Message;
-use simlin_engine::datamodel::Project;
 use simlin_engine::db::{
     LtmOverlay, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel_incremental,
@@ -127,7 +127,7 @@ fn artifacts(path: &str, bytes: &[u8]) -> Option<BTreeMap<&'static str, Vec<u8>>
         && let Some(model) = sync
             .project
             .models(&db)
-            .get(simlin_engine::canonicalize(&main).as_ref())
+            .get(simlin_base::canonicalize(&main).as_ref())
     {
         for (name, internal) in [("links", false), ("links (internal)", true)] {
             let links =

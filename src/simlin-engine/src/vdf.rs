@@ -20,11 +20,11 @@
 //! - The two `#`-signature stdlib-call encodings via
 //!   [`VdfFile::output_signatures`] and [`VdfFile::new_style_alias_signatures`].
 
-use crate::common::IdentMap;
+use simlin_base::common::IdentMap;
 use std::collections::{HashMap, HashSet};
 use std::{error::Error, result::Result as StdResult};
 
-use crate::{
+use simlin_base::{
     common::{Canonical, Ident},
     results::{Method, Results, Specs},
 };
@@ -3014,7 +3014,7 @@ mod tests {
 
     fn assert_result_column_matches_ot(
         label: &str,
-        results: &crate::Results,
+        results: &simlin_base::Results,
         vdf_data: &VdfData,
         name: &str,
         expected_ot: usize,

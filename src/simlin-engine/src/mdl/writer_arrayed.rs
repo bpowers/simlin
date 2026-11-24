@@ -32,10 +32,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use crate::ast::{Expr0, IndexExpr0, UnaryOp};
-use crate::builtins::UntypedBuiltinFn;
-use crate::datamodel::{self, GraphicalFunction};
-use crate::lexer::LexerType;
+use simlin_base::ast::{Expr0, IndexExpr0, UnaryOp};
+use simlin_base::builtins::UntypedBuiltinFn;
+use simlin_base::datamodel::{self, GraphicalFunction};
+use simlin_base::lexer::LexerType;
 
 use super::{
     ExportWarning, WriterContext, equation_to_mdl, format_mdl_element_key, format_mdl_ident,
@@ -79,7 +79,7 @@ pub(super) struct Arrayed<'a> {
 /// An element key's canonical parts, one per dimension.
 fn key_parts(key: &str) -> Vec<String> {
     key.split(',')
-        .map(|part| crate::common::canonicalize(part.trim()).into_owned())
+        .map(|part| simlin_base::common::canonicalize(part.trim()).into_owned())
         .collect()
 }
 
@@ -91,13 +91,13 @@ fn axis_keys(dim: &str, ctx: &WriterContext) -> Option<Vec<String>> {
         return Some(
             elements
                 .iter()
-                .map(|e| crate::common::canonicalize(e).into_owned())
+                .map(|e| simlin_base::common::canonicalize(e).into_owned())
                 .collect(),
         );
     }
     let (_, size) = ctx
         .indexed_dims
-        .get(crate::common::canonicalize(dim).as_ref())?;
+        .get(simlin_base::common::canonicalize(dim).as_ref())?;
     Some((1..=*size).map(|position| position.to_string()).collect())
 }
 
@@ -340,7 +340,7 @@ fn dims_read_back(var: &Arrayed<'_>, slots: &[Slot], ctx: &WriterContext) -> Opt
         let declared: std::collections::BTreeSet<String> = ctx
             .dim_named_elements(dim)?
             .iter()
-            .map(|e| crate::common::canonicalize(e).into_owned())
+            .map(|e| simlin_base::common::canonicalize(e).into_owned())
             .collect();
         let defined: std::collections::BTreeSet<String> = keys
             .iter()
@@ -356,7 +356,8 @@ fn dims_read_back(var: &Arrayed<'_>, slots: &[Slot], ctx: &WriterContext) -> Opt
             .collect();
         let holding =
             super::super::convert::smallest_dimension_holding(&ctx.dimensions, &reader_names)?;
-        changed |= crate::common::canonicalize(&holding.name) != crate::common::canonicalize(dim);
+        changed |= simlin_base::common::canonicalize(&holding.name)
+            != simlin_base::common::canonicalize(dim);
         read_back.push(holding.name.clone());
     }
     changed.then_some(read_back)
@@ -497,7 +498,7 @@ fn except_equations(
     let dims: Vec<String> = var
         .dims
         .iter()
-        .map(|d| crate::common::canonicalize(d).into_owned())
+        .map(|d| simlin_base::common::canonicalize(d).into_owned())
         .collect();
     let lhs = narrowed_to_subranges(&dims, &ranges_named(&default_ast, ctx), ctx);
     let plan = except_plan(&default_ast, default, slots, lhs, ctx)?;
@@ -519,7 +520,8 @@ fn ranges_named(expr: &Expr0, ctx: &WriterContext) -> Vec<String> {
                 for index in indices {
                     match index {
                         IndexExpr0::Expr(Expr0::Var(name, _)) => {
-                            let name = crate::common::canonicalize(name.as_str()).into_owned();
+                            let name =
+                                simlin_base::common::canonicalize(name.as_str()).into_owned();
                             if ctx.dimension(&name).is_some() {
                                 out.push(name);
                             }
@@ -654,7 +656,7 @@ fn except_plan(
 /// Whether `expr` names any of `dims` (canonical), as a subscript or a
 /// value.
 fn names_any_of(expr: &Expr0, dims: &[String]) -> bool {
-    let named = |name: &str| dims.contains(&crate::common::canonicalize(name).into_owned());
+    let named = |name: &str| dims.contains(&simlin_base::common::canonicalize(name).into_owned());
     match expr {
         Expr0::Const(..) => false,
         Expr0::Var(name, _) => named(name.as_str()),
@@ -742,7 +744,7 @@ pub(in crate::mdl) fn same_equation(a: &str, b: &str) -> bool {
 /// numbers by value.
 fn same_with_elements(default: &Expr0, slot: &Expr0, dims: &[String], key: &[String]) -> bool {
     let same = |a: &Expr0, b: &Expr0| same_with_elements(a, b, dims, key);
-    let canon = |name: &str| crate::common::canonicalize(name).into_owned();
+    let canon = |name: &str| simlin_base::common::canonicalize(name).into_owned();
     // PI is written as its value: Vensim has no PI function.
     let is_pi = |e: &Expr0| matches!(e, Expr0::App(UntypedBuiltinFn(f, args), _) if f == "pi" && args.is_empty());
     match (default, slot) {
@@ -1009,7 +1011,7 @@ pub(super) fn per_element_for_vensim(
     };
     let names: Vec<String> = dims
         .iter()
-        .map(|d| crate::common::canonicalize(d).into_owned())
+        .map(|d| simlin_base::common::canonicalize(d).into_owned())
         .collect();
     let needs = |text: &str| {
         Expr0::new(text, LexerType::Equation)
@@ -1043,7 +1045,7 @@ pub(super) fn per_element_for_vensim(
             ctx,
             reads_nothing: std::cell::Cell::new(false),
         };
-        let written = crate::ast::print_eqn(&element.expr(&expr));
+        let written = simlin_base::ast::print_eqn(&element.expr(&expr));
         if element.reads_nothing.get() {
             reads_nothing.borrow_mut().push(key.join(","));
         }
@@ -1210,7 +1212,7 @@ fn reads_a_position(expr: &Expr0, names: &[String]) -> bool {
     let is_dim = |name: &str| {
         names
             .iter()
-            .any(|n| *n == crate::common::canonicalize(name))
+            .any(|n| *n == simlin_base::common::canonicalize(name))
     };
     match expr {
         Expr0::Const(..) => false,
@@ -1251,7 +1253,7 @@ struct Element<'a> {
 impl Element<'_> {
     /// Which of the variable's dimensions `name` is.
     fn dimension(&self, name: &str) -> Option<usize> {
-        let name = crate::common::canonicalize(name);
+        let name = simlin_base::common::canonicalize(name);
         self.names.iter().position(|n| *n == name)
     }
 
@@ -1268,14 +1270,14 @@ impl Element<'_> {
                 loc,
             ),
             Expr0::Subscript(ident, indexes, _) => {
-                let source = crate::common::canonicalize(ident.as_str());
+                let source = simlin_base::common::canonicalize(ident.as_str());
                 let mut written = Vec::with_capacity(indexes.len());
                 for (position, index) in indexes.iter().enumerate() {
                     let index = match index {
                         IndexExpr0::Expr(Expr0::Var(name, var_loc)) => {
                             match self.dimension(name.as_str()) {
                                 Some(k) => IndexExpr0::Expr(Expr0::Var(
-                                    crate::common::RawIdent::new(
+                                    simlin_base::common::RawIdent::new(
                                         self.read_on(&source, position, k),
                                     ),
                                     *var_loc,
@@ -1331,11 +1333,10 @@ impl Element<'_> {
     fn read_on(&self, source: &str, position: usize, k: usize) -> String {
         let key = &self.keys[k];
         let dims = &self.ctx.dims;
-        let axis = self
-            .ctx
-            .dim_at(source, position)
-            .and_then(|name| dims.get(&crate::common::CanonicalDimensionName::from_raw(name)));
-        let reader = dims.get(&crate::common::CanonicalDimensionName::from_raw(
+        let axis = self.ctx.dim_at(source, position).and_then(|name| {
+            dims.get(&simlin_base::common::CanonicalDimensionName::from_raw(name))
+        });
+        let reader = dims.get(&simlin_base::common::CanonicalDimensionName::from_raw(
             &self.names[k],
         ));
         match (axis, reader) {
@@ -1343,7 +1344,7 @@ impl Element<'_> {
                 .resolve_mapped_read(
                     axis,
                     reader,
-                    &crate::common::CanonicalElementName::from_raw(key),
+                    &simlin_base::common::CanonicalElementName::from_raw(key),
                 )
                 .map_or_else(|| key.clone(), |element| element.as_str().to_string()),
             _ => key.clone(),
@@ -1361,7 +1362,7 @@ impl Element<'_> {
         let key = &keys[place as usize - 1];
         let loc = index.get_loc();
         Some(Some(match self.ctx.dim_named_elements(dimension) {
-            Some(_) => Expr0::Var(crate::common::RawIdent::new(key.clone()), loc),
+            Some(_) => Expr0::Var(simlin_base::common::RawIdent::new(key.clone()), loc),
             None => number(place, loc),
         }))
     }
@@ -1369,7 +1370,7 @@ impl Element<'_> {
     /// The value of a computed index at this element: numbers, the
     /// variable's dimensions as positions, and arithmetic on them.
     fn value(&self, expr: &Expr0) -> Option<f64> {
-        use crate::ast::BinaryOp;
+        use simlin_base::ast::BinaryOp;
         match expr {
             Expr0::Const(_, value, _) => Some(value.value()),
             Expr0::Var(name, _) => {
@@ -1392,14 +1393,14 @@ impl Element<'_> {
     }
 }
 
-fn number(value: f64, loc: crate::builtins::Loc) -> Expr0 {
+fn number(value: f64, loc: simlin_base::builtins::Loc) -> Expr0 {
     Expr0::Const(
         if value.is_nan() {
             "NaN".to_string()
         } else {
-            crate::results::written(value)
+            simlin_base::results::written(value)
         },
-        crate::ast::Literal::new(value),
+        simlin_base::ast::Literal::new(value),
         loc,
     )
 }

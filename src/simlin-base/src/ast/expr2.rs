@@ -340,7 +340,7 @@ impl Expr2 {
     /// not reflexive on NaN, so a NaN-bearing expression compares unequal to
     /// itself however it is normalized. See `ltm_agg::AggNode::reducer` for
     /// that residual and the root fix it waits on.
-    pub(crate) fn strip_loc_and_bounds(self) -> Self {
+    pub fn strip_loc_and_bounds(self) -> Self {
         let loc = Loc::default();
         match self {
             Expr2::Const(text, value, _) => Expr2::Const(text, value, loc),
@@ -383,7 +383,7 @@ impl Expr2 {
 
     /// The array bounds of this node: `None` on a scalar node, always on a
     /// `Const`.
-    pub(crate) fn get_array_bounds(&self) -> Option<&ArrayBounds> {
+    pub fn get_array_bounds(&self) -> Option<&ArrayBounds> {
         match self {
             Expr2::Const(_, _, _) => None,
             Expr2::Var(_, array_bounds, _) => array_bounds.as_deref(),
@@ -855,7 +855,7 @@ impl Expr2 {
         Ok(expr)
     }
 
-    pub(crate) fn get_loc(&self) -> Loc {
+    pub fn get_loc(&self) -> Loc {
         match self {
             Expr2::Const(_, _, loc) => *loc,
             Expr2::Var(_, _, loc) => *loc,

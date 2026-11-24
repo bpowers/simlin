@@ -36,7 +36,7 @@ use crate::{datamodel, model_err};
 /// serving both stdlib functions and project macros.
 //
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModuleFunctionDescriptor {
+pub struct ModuleFunctionDescriptor {
     /// The `datamodel::Model.name` of the target model -- `"stdlib⁚smth1"`
     /// for a stdlib function, or the macro's canonical model name.
     pub model_name: String,
@@ -69,7 +69,7 @@ pub(crate) struct ModuleFunctionDescriptor {
 /// `name` is expected to already be a canonical stdlib model name (the
 /// caller normalizes `delay`/`delayn`/`smthn` aliases via
 /// `rewrite_alias_module_call` *before* consulting this).
-pub(crate) fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
+pub fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
     let args: &'static [&'static str] = match name {
         "smth1" | "smth3" | "delay1" | "delay3" | "trend" => {
             &["input", "delay_time", "initial_value"]
@@ -234,7 +234,7 @@ fn classify_macro_passthrough(model: &datamodel::Model, spec: &datamodel::MacroS
 /// Called *after* `rewrite_alias_module_call` has normalized aliases, so
 /// `name` is already a canonical stdlib model name. Returns `None` for any
 /// name that is not a stdlib module-function.
-pub(crate) fn stdlib_descriptor(name: &str) -> Option<ModuleFunctionDescriptor> {
+pub fn stdlib_descriptor(name: &str) -> Option<ModuleFunctionDescriptor> {
     let ports = stdlib_args(name)?;
     Some(ModuleFunctionDescriptor {
         // U+205A (TWO DOT PUNCTUATION) is the engine-canonical model-name
@@ -259,7 +259,7 @@ pub(crate) fn stdlib_descriptor(name: &str) -> Option<ModuleFunctionDescriptor> 
 /// `RenamedBuiltinSelfCall` is the enclosing macro's own importer-renamed
 /// builtin (GH #554), which is the builtin and takes the builtin's arity; and
 /// `Unresolved` is a name no project macro claims.
-pub(crate) enum MacroCallResolution<'a> {
+pub enum MacroCallResolution<'a> {
     Expand(&'a ModuleFunctionDescriptor),
     Passthrough(&'a ModuleFunctionDescriptor),
     RenamedBuiltinSelfCall,
@@ -270,7 +270,7 @@ pub(crate) enum MacroCallResolution<'a> {
 /// project's models. Answers "is this call name a project macro, and if so
 /// what is its [`ModuleFunctionDescriptor`]?".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct MacroRegistry {
+pub struct MacroRegistry {
     /// canonical macro name -> descriptor
     macros: HashMap<String, ModuleFunctionDescriptor>,
 }
@@ -297,7 +297,7 @@ impl MacroRegistry {
     /// cycle safety** -- see the note on the `Err` return path in
     /// `db::macro_registry::project_macro_registry`, which is where the empty
     /// registry is actually materialized for the pipeline.
-    pub(crate) fn build(models: &[datamodel::Model]) -> Result<MacroRegistry, Error> {
+    pub fn build(models: &[datamodel::Model]) -> Result<MacroRegistry, Error> {
         let mut macros: HashMap<String, ModuleFunctionDescriptor> = HashMap::new();
 
         // Pass 1: collect macro descriptors, rejecting duplicate macro names.
@@ -516,7 +516,7 @@ impl MacroRegistry {
     }
 
     /// Look up a call name (canonicalized) in the macro registry.
-    pub(crate) fn resolve_macro(&self, call_name: &str) -> Option<&ModuleFunctionDescriptor> {
+    pub fn resolve_macro(&self, call_name: &str) -> Option<&ModuleFunctionDescriptor> {
         let canonical = canonicalize(call_name);
         self.macros.get(canonical.as_ref())
     }
@@ -550,7 +550,7 @@ impl MacroRegistry {
     /// be named after a builtin still resolves (so `init -> previous -> init`
     /// is still a rejected cycle), and a self-recursive macro whose name is not
     /// a renamed builtin (`foo = foo(x)`) still resolves to itself.
-    pub(crate) fn resolve_call(
+    pub fn resolve_call(
         &self,
         call_name: &str,
         enclosing_model: Option<&str>,

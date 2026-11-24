@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::common::{Canonical, Ident};
+use simlin_base::common::{Canonical, Ident};
 
 // ============================================================================
 // Type Aliases
@@ -152,8 +152,8 @@ impl LookupMode {
     ///   check the last two points: where they differ, the last point's y is
     ///   what the table answers at its last x and beyond, and the one before
     ///   it up to there.
-    pub(crate) fn of_kind(kind: crate::datamodel::GraphicalFunctionKind) -> LookupMode {
-        use crate::datamodel::GraphicalFunctionKind;
+    pub(crate) fn of_kind(kind: simlin_base::datamodel::GraphicalFunctionKind) -> LookupMode {
+        use simlin_base::datamodel::GraphicalFunctionKind;
         match kind {
             GraphicalFunctionKind::Continuous => LookupMode::Interpolate,
             GraphicalFunctionKind::Extrapolate => LookupMode::Extrapolate,
@@ -1461,7 +1461,7 @@ impl StaticArrayView {
 /// `PartialEq`, not by bit pattern: a NaN makes this value unequal to a
 /// bit-identical rebuild and so unable to backdate, and two tables differing
 /// only in a zero's sign compare equal. Both are accepted, knowingly -- see the
-/// "Float equality in this crate" section on [`crate::ast::Literal`] for the
+/// "Float equality in this crate" section on [`simlin_base::ast::Literal`] for the
 /// position, the corrected premise behind GH #642, and what would change the
 /// decision.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1581,7 +1581,7 @@ impl ByteCodeContext {
 /// bit pattern: a NaN makes this value unequal to a bit-identical rebuild and
 /// so unable to backdate, and two pools differing only in a zero's sign compare
 /// equal. Both are accepted, knowingly -- see the "Float equality in this
-/// crate" section on [`crate::ast::Literal`] for the position, the corrected
+/// crate" section on [`simlin_base::ast::Literal`] for the position, the corrected
 /// premise behind GH #642, and what would change the decision.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ByteCode {

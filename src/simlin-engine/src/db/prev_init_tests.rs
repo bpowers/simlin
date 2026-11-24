@@ -4,10 +4,10 @@
 
 use super::*;
 use crate::capture::CaptureKind;
-use crate::common::ErrorCode;
-use crate::datamodel;
 use crate::db::dep_graph::{RunlistMembership, implicit_var_runlist_membership};
 use crate::test_common::TestProject;
+use simlin_base::common::ErrorCode;
+use simlin_base::datamodel;
 
 #[test]
 fn test_model_dependency_graph_prunes_lagged_deps_for_implicit_helpers() {
@@ -1852,7 +1852,7 @@ fn module_snapshot_arguments_are_resolved_at_lowering() {
                 .filter(|d| d.model == "main" && d.variable.as_deref() == Some("probe"))
                 .filter_map(|d| match d.error {
                     DiagnosticError::Equation(err)
-                        if err.code == crate::common::ErrorCode::NotSimulatable =>
+                        if err.code == simlin_base::common::ErrorCode::NotSimulatable =>
                     {
                         err.details
                     }

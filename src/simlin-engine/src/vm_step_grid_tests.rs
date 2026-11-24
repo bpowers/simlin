@@ -7,8 +7,8 @@
 //! Included via `#[path]` so `use super::*` resolves vm's private items.
 
 use super::*;
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::datamodel;
 
 /// A stock filled at one unit a time unit, so its value is the time elapsed,
 /// with a constant an override can set.

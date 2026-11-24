@@ -19,8 +19,6 @@ use std::sync::OnceLock;
 
 use serde::Serialize;
 
-use crate::common::canonicalize;
-use crate::datamodel;
 use crate::diagram::arrowhead::{
     ARROWHEAD_BACK_LARGE_ARC, ARROWHEAD_BACK_SWEEP, ArrowheadGeometry, arrowhead_geometry,
 };
@@ -40,6 +38,8 @@ use crate::diagram::flow::flow_geometry;
 use crate::diagram::label::{LabelProps, TextAnchor, label_bounds, label_lines};
 use crate::diagram::path::{PathBuilder, control_point_bounds, parse_absolute_svg_path};
 use crate::diagram::resolve::{LINK_LAYER, ResolvedElement, resolve_view};
+use simlin_base::common::canonicalize;
+use simlin_base::datamodel;
 
 /// The contract version a consumer checks before reading a scene.
 pub const SCENE_VERSION: u32 = 1;

@@ -43,7 +43,7 @@ use super::{
     Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, MIN_CONTRIBUTION, MemoryMeter, expired,
     is_active,
 };
-use crate::results::Results;
+use simlin_base::results::Results;
 
 /// Closure consulted by [`score_steps`] whenever a circuit edge's target is a
 /// module-instance node: `(from_node, module_node, next_node) ->

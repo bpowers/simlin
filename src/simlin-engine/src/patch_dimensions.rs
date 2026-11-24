@@ -18,10 +18,10 @@
 
 use std::collections::BTreeSet;
 
-use crate::common::{Canonical, ErrorCode, Ident, Result, canonicalize};
-use crate::datamodel::{self, DimensionElements, Equation, Variable};
 use crate::patch::{Site, respelled_text};
 use crate::patch_fields::{Arm, elements_of, in_dimension_order, refuse};
+use simlin_base::common::{Canonical, ErrorCode, Ident, Result, canonicalize};
+use simlin_base::datamodel::{self, DimensionElements, Equation, Variable};
 
 /// What joins a dimension's name to one of its elements in an equation
 /// (`Age.young`, canonical `age·young`), the element's position.
@@ -383,7 +383,9 @@ pub(crate) fn upsert_dimension(
 /// written `_`, where that reads back bare, and otherwise in quotes.
 pub(crate) fn spelled(name: &str) -> String {
     let bare = name.split_whitespace().collect::<Vec<_>>().join("_");
-    if !bare.is_empty() && !bare.contains('.') && crate::ast::print_ident(&bare) == canonical(&bare)
+    if !bare.is_empty()
+        && !bare.contains('.')
+        && simlin_base::ast::print_ident(&bare) == canonical(&bare)
     {
         bare
     } else if !name.contains(['"', '\\']) {
@@ -392,7 +394,7 @@ pub(crate) fn spelled(name: &str) -> String {
         // canonical form.
         format!("\"{}\"", name.trim())
     } else {
-        crate::ast::print_ident(name)
+        simlin_base::ast::print_ident(name)
     }
 }
 
@@ -434,7 +436,7 @@ fn respell_texts(
             let new = respelled(text, respell)?;
             if unreadable.is_none()
                 && !matches!(
-                    crate::ast::Expr0::new(&new, crate::lexer::LexerType::Equation),
+                    simlin_base::ast::Expr0::new(&new, simlin_base::lexer::LexerType::Equation),
                     Ok(Some(_))
                 )
             {

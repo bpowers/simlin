@@ -12,10 +12,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::print_ident;
-use crate::canonicalize;
-use crate::common::Result;
-use crate::datamodel::{
+use simlin_base::ast::print_ident;
+use simlin_base::canonicalize;
+use simlin_base::common::Result;
+use simlin_base::datamodel::{
     Aux, Compat, Dt, Equation, Flow, Model, Module, ModuleReference, Project, SimMethod, SimSpecs,
     Stock, Variable,
 };
@@ -727,16 +727,16 @@ mod tests {
         // `inf` is left out: the systems format's own lexer reads it as
         // infinity (`Token::Inf`), so no systems model can name a stock `inf`
         // in an expression.
-        let (clock, names): (Vec<&str>, Vec<&str>) = crate::builtins::BuiltinSig::ALL
+        let (clock, names): (Vec<&str>, Vec<&str>) = simlin_base::builtins::BuiltinSig::ALL
             .iter()
             .filter(|sig| sig.max_args == Some(0))
             .flat_map(|sig| std::iter::once(sig.name).chain(sig.aliases.iter().copied()))
             .filter(|name| *name != "inf")
-            .partition(|name| crate::results::is_implicit_global(name));
+            .partition(|name| simlin_base::results::is_implicit_global(name));
         // Every clock name is a builtin's, so the partition saw each of them.
         assert_eq!(
             clock.iter().collect::<HashSet<_>>(),
-            crate::results::IMPLICIT_GLOBALS
+            simlin_base::results::IMPLICIT_GLOBALS
                 .iter()
                 .collect::<HashSet<_>>()
         );
@@ -1679,8 +1679,8 @@ mod tests {
         let results = vm.into_results();
 
         // After 1 step: A should lose 3 (1+2), B should gain 3
-        let a_offset = results.offsets[&crate::common::Ident::new("a")];
-        let b_offset = results.offsets[&crate::common::Ident::new("b")];
+        let a_offset = results.offsets[&simlin_base::common::Ident::new("a")];
+        let b_offset = results.offsets[&simlin_base::common::Ident::new("b")];
         let rows: Vec<&[f64]> = results.iter().collect();
         // Row 0 is initial (t=0), Row 1 is after first step (t=1)
         assert_eq!(rows[1][a_offset], 7.0, "A should be 10-3=7 after step 1");
@@ -1825,7 +1825,7 @@ mod tests {
         vm.run_to_end().unwrap();
         let results = vm.into_results();
 
-        let b_off = results.offsets[&crate::common::Ident::new("b")];
+        let b_off = results.offsets[&simlin_base::common::Ident::new("b")];
         let rows: Vec<&[f64]> = results.iter().collect();
 
         // Step 1: B = 0 + 5 + 5 = 10 (each flow capped at dest_cap=5)

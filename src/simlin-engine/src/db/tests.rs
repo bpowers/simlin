@@ -3,8 +3,8 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::datamodel;
 use salsa::plumbing::AsId;
+use simlin_base::datamodel;
 
 /// The variable's parse (test convenience).
 fn parse_var_no_module_ctx(
@@ -86,7 +86,7 @@ fn test_sync_simple_project() {
     // 1 user model + the remaining stdlib models (PREVIOUS/INIT are intrinsic).
     assert_eq!(
         result.project.model_names(&db).len(),
-        1 + crate::stdlib::MODEL_NAMES.len()
+        1 + simlin_base::stdlib::MODEL_NAMES.len()
     );
 
     let sim_specs = result.project.sim_specs(&db);
@@ -164,7 +164,10 @@ fn test_sync_multi_model() {
     };
 
     let result = sync_from_datamodel(&db, &project);
-    assert_eq!(result.models.len(), 2 + crate::stdlib::MODEL_NAMES.len(),);
+    assert_eq!(
+        result.models.len(),
+        2 + simlin_base::stdlib::MODEL_NAMES.len(),
+    );
     assert!(result.models.contains_key("main"));
     assert!(result.models.contains_key("submodel"));
 
@@ -407,8 +410,8 @@ fn test_sync_sim_specs_dt_reciprocal() {
 
 #[test]
 fn test_parse_source_variable_scalar() {
-    use crate::ast::Expr0;
     use crate::variable::VarKind;
+    use simlin_base::ast::Expr0;
 
     let db = SimlinDb::default();
     let project = simple_project();
@@ -424,8 +427,8 @@ fn test_parse_source_variable_scalar() {
     // Should have a valid AST with a constant 100.0
     let ast = parsed.variable.ast();
     assert!(ast.is_some());
-    if let Some(crate::ast::Ast::Scalar(Expr0::Const(_, val, _))) = ast {
-        assert_eq!(*val, crate::ast::Literal::new(100.0));
+    if let Some(simlin_base::ast::Ast::Scalar(Expr0::Const(_, val, _))) = ast {
+        assert_eq!(*val, simlin_base::ast::Literal::new(100.0));
     } else {
         panic!("Expected Scalar(Const(100.0)), got {:?}", ast);
     }
@@ -581,10 +584,10 @@ fn test_incrementality_unchanged_variable_not_reparsed() {
     let beta_result_2 = parse_var_no_module_ctx(&db, beta_src, source_project);
 
     // Alpha's parse result should reflect the new equation
-    if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
+    if let Some(simlin_base::ast::Ast::Scalar(simlin_base::ast::Expr0::Const(_, val, _))) =
         alpha_result_2.variable.ast()
     {
-        assert_eq!(*val, crate::ast::Literal::new(42.0));
+        assert_eq!(*val, simlin_base::ast::Literal::new(42.0));
     } else {
         panic!(
             "Expected alpha to parse as Const(42.0), got {:?}",
@@ -1204,7 +1207,7 @@ fn test_model_dependency_graph_circular_emits_diagnostic() {
     assert!(
         diags.iter().any(|d| d.is(
             DiagnosticCategory::Model,
-            crate::common::ErrorCode::CircularDependency
+            simlin_base::common::ErrorCode::CircularDependency
         )),
         "circular dependency between a and b should emit a diagnostic: {diags:?}"
     );
@@ -1339,11 +1342,11 @@ fn test_model_causal_edges_feedback_loop() {
 /// an expression (a hoisted helper).
 #[test]
 fn a_builtins_initial_value_argument_is_no_causal_edge() {
-    let mut with_initial_value: Vec<&str> = crate::stdlib::MODEL_NAMES
+    let mut with_initial_value: Vec<&str> = simlin_base::stdlib::MODEL_NAMES
         .iter()
         .copied()
         .filter(|name| {
-            crate::stdlib::get(name).is_some_and(|model| {
+            simlin_base::stdlib::get(name).is_some_and(|model| {
                 model
                     .variables
                     .iter()
@@ -2464,7 +2467,8 @@ fn test_accumulator_parity_with_struct_fields() {
     let accum_diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     // Collect from struct fields (parse results)
-    let mut field_equation_errors: HashSet<(String, crate::common::EquationError)> = HashSet::new();
+    let mut field_equation_errors: HashSet<(String, simlin_base::common::EquationError)> =
+        HashSet::new();
     for (var_name, synced_var) in &sync.models["main"].variables {
         let parsed = parse_var_no_module_ctx(&db, synced_var.source, sync.project);
         for diagnostic in &parsed.variable.diagnostics {
@@ -2475,7 +2479,8 @@ fn test_accumulator_parity_with_struct_fields() {
     }
 
     // Extract equation errors from accumulator
-    let mut accum_equation_errors: HashSet<(String, crate::common::EquationError)> = HashSet::new();
+    let mut accum_equation_errors: HashSet<(String, simlin_base::common::EquationError)> =
+        HashSet::new();
     for d in &accum_diags {
         if let DiagnosticError::Equation(err) = &d.error
             && let Some(var) = &d.variable
@@ -2766,10 +2771,10 @@ fn test_incremental_sync_preserves_cache_for_unchanged_variable() {
     // Alpha's parse result should reflect the new equation
     let alpha_src2 = state2.models["main"].variables["alpha"].source_var;
     let alpha_result = parse_var_no_module_ctx(&db, alpha_src2, state2.project);
-    if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
+    if let Some(simlin_base::ast::Ast::Scalar(simlin_base::ast::Expr0::Const(_, val, _))) =
         alpha_result.variable.ast()
     {
-        assert_eq!(*val, crate::ast::Literal::new(42.0));
+        assert_eq!(*val, simlin_base::ast::Literal::new(42.0));
     } else {
         panic!(
             "Expected alpha to parse as Const(42.0), got {:?}",
@@ -2945,10 +2950,10 @@ fn test_incremental_sync_successive_patches() {
 
     // Parse should reflect the new equation
     let result = parse_var_no_module_ctx(&db, pop_src2, state2.project);
-    if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
+    if let Some(simlin_base::ast::Ast::Scalar(simlin_base::ast::Expr0::Const(_, val, _))) =
         result.variable.ast()
     {
-        assert_eq!(*val, crate::ast::Literal::new(999.0));
+        assert_eq!(*val, simlin_base::ast::Literal::new(999.0));
     } else {
         panic!("Expected Const(999.0), got {:?}", result.variable.ast());
     }
@@ -3130,7 +3135,7 @@ fn variable_source_producers_agree_for_every_source_variable_kind() {
     use crate::variable::{ParseContext, VarKind, VariableSource, parse_var};
     use std::collections::{HashMap, HashSet};
 
-    type ParsedVar = crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0>;
+    type ParsedVar = crate::variable::Variable<datamodel::ModuleReference, simlin_base::ast::Expr0>;
 
     fn lookup_table() -> datamodel::GraphicalFunction {
         datamodel::GraphicalFunction {
@@ -3226,7 +3231,7 @@ fn variable_source_producers_agree_for_every_source_variable_kind() {
     let synced = sync_from_datamodel(&db, &project);
 
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let dim_ctx = crate::dimensions::DimensionsContext::default();
+    let dim_ctx = simlin_base::dimensions::DimensionsContext::default();
     let ctx = ParseContext::new(&dim_ctx, &units_ctx);
 
     let mut seen: HashSet<SourceVariableKind> = HashSet::new();

@@ -5,12 +5,12 @@
 use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Result, canonicalize};
-use crate::datamodel;
 use crate::xmile::{
     ToXml, XmlWriter, push_attribute, write_tag, write_tag_end, write_tag_start_with_attrs,
     xml_error,
 };
+use simlin_base::common::{Result, canonicalize};
+use simlin_base::datamodel;
 
 use quick_xml::events::{BytesStart, Event};
 

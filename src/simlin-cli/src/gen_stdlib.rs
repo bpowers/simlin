@@ -7,7 +7,7 @@ use std::io::{BufReader, Write};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
-use simlin_engine::datamodel::{
+use simlin_base::datamodel::{
     self, Dt, Equation, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
     LoopMetadata, Model, ModelGroup, Rect, SimMethod, SimSpecs, StockFlow, View, ViewElement,
     Visibility,

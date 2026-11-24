@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::datamodel::{self, Dimension, DimensionElements};
+use simlin_base::datamodel::{self, Dimension, DimensionElements};
 
 use crate::mdl::ast::{Equation as MdlEquation, MdlItem, SubscriptElement};
 use crate::mdl::xmile_compat::space_to_underbar;
@@ -528,7 +528,7 @@ pub(in crate::mdl) fn element_owners(dimensions: &[Dimension]) -> HashMap<String
 mod tests {
     use super::super::convert_mdl;
     use super::*;
-    use crate::datamodel::Variable;
+    use simlin_base::datamodel::Variable;
 
     #[test]
     fn test_element_ownership_larger_dimension_wins() {
@@ -773,7 +773,7 @@ x[DimA] = 1
             // expansion is no longer visible as element slots (see
             // `convert::apply_to_all_tests`).
             match &a.equation {
-                crate::datamodel::Equation::ApplyToAll(dims, eq) => {
+                simlin_base::datamodel::Equation::ApplyToAll(dims, eq) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(eq, "1");
                 }
@@ -808,7 +808,7 @@ x[b1] = 2
 
         if let Variable::Aux(a) = x {
             match &a.equation {
-                crate::datamodel::Equation::Arrayed(dims, elements, _default_eq, _) => {
+                simlin_base::datamodel::Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
 

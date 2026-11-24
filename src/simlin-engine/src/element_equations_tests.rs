@@ -4,8 +4,8 @@
 
 //! An MDL file's per-element copies opened as one equation.
 
-use crate::datamodel::{Equation, Project};
 use crate::test_common::TestProject;
+use simlin_base::datamodel::{Equation, Project};
 
 const CONTROL: &str =
     "INITIAL TIME = 0 ~~|\nFINAL TIME = 2 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = 1 ~~|\n";

@@ -27,7 +27,7 @@
 //! a silent misclassification. A builtin's class is its signature's
 //! `Invariance`, so adding a builtin means stating its class in the table.
 
-use crate::builtins::{BuiltinFn, Invariance};
+use simlin_base::builtins::{BuiltinFn, Invariance};
 
 use super::expr::{Expr, SubscriptIndex};
 
@@ -121,13 +121,13 @@ fn builtin_is_invariant(builtin: &BuiltinFn<Expr>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{BinaryOp, Loc};
-    use crate::builtins::BuiltinSig;
     use crate::compiler::VarRef;
     use crate::compiler::dimensions::UnaryOp;
+    use simlin_base::ast::{BinaryOp, Loc};
+    use simlin_base::builtins::BuiltinSig;
 
     fn vref(n: usize) -> VarRef {
-        VarRef::base(crate::common::Ident::new(&format!("v{n}")))
+        VarRef::base(simlin_base::common::Ident::new(&format!("v{n}")))
     }
 
     fn lit(n: f64) -> Expr {
@@ -154,7 +154,7 @@ mod tests {
     /// variant subscript index.
     #[test]
     fn every_expr_variant_has_its_local_verdict() {
-        let view = crate::ast::ArrayView::contiguous(vec![3]);
+        let view = simlin_base::ast::ArrayView::contiguous(vec![3]);
         let sum = |arg: Expr| Expr::App(BuiltinFn::Sum(Box::new(arg)), Loc::default());
         let rows: Vec<(&str, Expr, bool)> = vec![
             ("Const", assign(lit(3.0)), true),
@@ -208,8 +208,8 @@ mod tests {
             (
                 "EvalModule",
                 Expr::EvalModule(
-                    crate::common::Ident::new("m"),
-                    crate::common::Ident::new("sub"),
+                    simlin_base::common::Ident::new("m"),
+                    simlin_base::common::Ident::new("sub"),
                     std::collections::BTreeSet::new(),
                     vec![],
                 ),

@@ -99,7 +99,7 @@ impl Expr0 {
 /// The module-function expansion (`builtins_visitor`) and the canonical form
 /// both ask this, so what the engine rewrites and what compares as the same
 /// equation are one list.
-pub(crate) fn operator_for_call<T>(func: &str, args: Vec<T>) -> Result<(BinaryOp, T, T), Vec<T>> {
+pub fn operator_for_call<T>(func: &str, args: Vec<T>) -> Result<(BinaryOp, T, T), Vec<T>> {
     if func != "modulo" {
         return Err(args);
     }
@@ -109,9 +109,9 @@ pub(crate) fn operator_for_call<T>(func: &str, args: Vec<T>) -> Result<(BinaryOp
 
 /// The constant a zero-argument call pushes: `PI()` and `INF()`
 /// (`compiler::codegen`'s `BuiltinFn::Pi` and `BuiltinFn::Inf` arm, which
-/// `the_constant_calls_are_the_constants_the_engine_pushes` holds this to).
+/// `canonical_value_tests` holds this to).
 /// `func` is the builtin's own name, its aliases resolved.
-fn constant_for_call(func: &str, arg_count: usize) -> Option<f64> {
+pub fn constant_for_call(func: &str, arg_count: usize) -> Option<f64> {
     if arg_count != 0 {
         return None;
     }

@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::datamodel;
+use simlin_base::datamodel;
 
 // Tests for code review feedback fixes
 
@@ -283,10 +283,10 @@ fn test_incremental_flow_endpoints_rebuilt_after_topology_change() {
         }
     });
 
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::UpsertStock(datamodel::Stock {
+            simlin_base::project_patch::ModelOperation::UpsertStock(datamodel::Stock {
                 ident: "stock_a".to_string(),
                 equation: datamodel::Equation::Scalar("100".to_string()),
                 documentation: String::new(),
@@ -297,7 +297,7 @@ fn test_incremental_flow_endpoints_rebuilt_after_topology_change() {
                 ai_state: None,
                 uid: Some(1),
             }),
-            crate::project_patch::ModelOperation::UpsertStock(datamodel::Stock {
+            simlin_base::project_patch::ModelOperation::UpsertStock(datamodel::Stock {
                 ident: "stock_b".to_string(),
                 equation: datamodel::Equation::Scalar("50".to_string()),
                 documentation: String::new(),
@@ -447,9 +447,9 @@ fn test_incremental_flow_endpoint_stock_to_cloud() {
             }
         }
     });
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::UpsertStock(
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertStock(
             datamodel::Stock {
                 ident: "stock_b".to_string(),
                 equation: datamodel::Equation::Scalar("200".to_string()),
@@ -588,9 +588,9 @@ fn test_incremental_flow_endpoint_cloud_to_stock() {
             }
         }
     });
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::UpsertStock(
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertStock(
             datamodel::Stock {
                 ident: "stock_b".to_string(),
                 equation: datamodel::Equation::Scalar("50".to_string()),
@@ -715,9 +715,9 @@ fn test_incremental_kind_change_aux_to_stock_no_delete() {
             uid: Some(1),
         }));
     // Only UpsertStock -- no explicit DeleteVariable
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::UpsertStock(
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertStock(
             datamodel::Stock {
                 ident: "foo".to_string(),
                 equation: datamodel::Equation::Scalar("0".to_string()),
@@ -823,9 +823,9 @@ fn test_incremental_kind_change_stock_to_aux_no_delete() {
             uid: Some(1),
         }));
     // Only UpsertAux -- no explicit DeleteVariable
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::UpsertAux(
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertAux(
             datamodel::Aux {
                 ident: "tank".to_string(),
                 equation: datamodel::Equation::Scalar("100".to_string()),
@@ -1042,9 +1042,9 @@ fn test_incremental_kind_change_preserves_display_name() {
             ai_state: None,
             uid: Some(1),
         }));
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::UpsertStock(
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertStock(
             datamodel::Stock {
                 ident: "Growth Rate".to_string(),
                 equation: datamodel::Equation::Scalar("0".to_string()),
@@ -1318,15 +1318,15 @@ fn test_incremental_new_flow_cloud_positions_recorded() {
     };
     let patched_project = test_project(patched_model);
 
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::UpdateStockFlows {
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
                 ident: "tank".to_string(),
                 inflows: vec![],
                 outflows: vec!["drain".to_string()],
             },
-            crate::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
                 ident: "drain".to_string(),
                 equation: datamodel::Equation::Scalar("10".to_string()),
                 documentation: String::new(),
@@ -1484,9 +1484,9 @@ fn test_incremental_kind_change_stock_to_aux_resets_attached_flows() {
             ai_state: None,
             uid: Some(1),
         }));
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::UpsertAux(
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertAux(
             datamodel::Aux {
                 ident: "tank".to_string(),
                 equation: datamodel::Equation::Scalar("100".to_string()),
@@ -1696,9 +1696,9 @@ fn test_incremental_layout_view_only_patch_returns_unchanged() {
     });
 
     // Create a view-only patch
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::UpsertView {
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertView {
             index: 0,
             view: datamodel::View::StockFlow(old_view.clone()),
         }],
@@ -1790,9 +1790,9 @@ fn test_incremental_layout_keeps_the_viewport() {
             uid: None,
         }));
     let new_project = test_project(new_model);
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
-        ops: vec![crate::project_patch::ModelOperation::UpsertAux(
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertAux(
             datamodel::Aux {
                 ident: "far_away".to_string(),
                 equation: datamodel::Equation::Scalar("1".to_string()),
@@ -1896,10 +1896,10 @@ fn test_incremental_new_side_flow_valve_on_pipe() {
             uid: None,
         }));
 
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
                 ident: "waste_flow".to_string(),
                 equation: datamodel::Equation::Scalar("5".to_string()),
                 documentation: String::new(),
@@ -1909,7 +1909,7 @@ fn test_incremental_new_side_flow_valve_on_pipe() {
                 ai_state: None,
                 uid: None,
             }),
-            crate::project_patch::ModelOperation::UpdateStockFlows {
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
                 ident: "stock_a".to_string(),
                 inflows: vec![],
                 outflows: vec!["chain_flow".to_string(), "waste_flow".to_string()],
@@ -2073,10 +2073,10 @@ fn test_incremental_add_second_side_flow_takes_its_own_face() {
             uid: None,
         }));
 
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
                 ident: "waste_b".to_string(),
                 equation: datamodel::Equation::Scalar("2".to_string()),
                 documentation: String::new(),
@@ -2086,7 +2086,7 @@ fn test_incremental_add_second_side_flow_takes_its_own_face() {
                 ai_state: None,
                 uid: None,
             }),
-            crate::project_patch::ModelOperation::UpdateStockFlows {
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
                 ident: "stock_a".to_string(),
                 inflows: vec![],
                 outflows: vec![
@@ -2236,16 +2236,16 @@ fn test_incremental_remove_chain_keeps_cloud_flow_in_place() {
         }
     });
 
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::DeleteVariable {
+            simlin_base::project_patch::ModelOperation::DeleteVariable {
                 ident: "chain_flow".to_string(),
             },
-            crate::project_patch::ModelOperation::DeleteVariable {
+            simlin_base::project_patch::ModelOperation::DeleteVariable {
                 ident: "stock_b".to_string(),
             },
-            crate::project_patch::ModelOperation::UpdateStockFlows {
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
                 ident: "stock_a".to_string(),
                 inflows: vec![],
                 outflows: vec!["waste_flow".to_string()],
@@ -2497,10 +2497,10 @@ fn test_incremental_chain_flow_seeded_between_stocks() {
             uid: None,
         }));
 
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
                 ident: "chain_flow".to_string(),
                 equation: datamodel::Equation::Scalar("10".to_string()),
                 documentation: String::new(),
@@ -2510,12 +2510,12 @@ fn test_incremental_chain_flow_seeded_between_stocks() {
                 ai_state: None,
                 uid: None,
             }),
-            crate::project_patch::ModelOperation::UpdateStockFlows {
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
                 ident: "stock_a".to_string(),
                 inflows: vec![],
                 outflows: vec!["chain_flow".to_string()],
             },
-            crate::project_patch::ModelOperation::UpdateStockFlows {
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
                 ident: "stock_b".to_string(),
                 inflows: vec!["chain_flow".to_string()],
                 outflows: vec![],
@@ -2739,10 +2739,10 @@ fn test_incremental_add_side_flow_keeps_reordered_siblings_in_place() {
             uid: None,
         }));
 
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
                 ident: "waste_d".to_string(),
                 equation: datamodel::Equation::Scalar("1".to_string()),
                 documentation: String::new(),
@@ -2752,7 +2752,7 @@ fn test_incremental_add_side_flow_keeps_reordered_siblings_in_place() {
                 ai_state: None,
                 uid: None,
             }),
-            crate::project_patch::ModelOperation::UpdateStockFlows {
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
                 ident: "stock_a".to_string(),
                 inflows: vec![],
                 outflows: vec![
@@ -2887,13 +2887,13 @@ fn test_incremental_delete_flow_without_update_stock_flows() {
     });
 
     // Patch has ONLY DeleteVariable, no UpdateStockFlows
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::DeleteVariable {
+            simlin_base::project_patch::ModelOperation::DeleteVariable {
                 ident: "chain_flow".to_string(),
             },
-            crate::project_patch::ModelOperation::DeleteVariable {
+            simlin_base::project_patch::ModelOperation::DeleteVariable {
                 ident: "stock_b".to_string(),
             },
         ],
@@ -3100,10 +3100,10 @@ fn test_incremental_add_second_chain_preserves_first() {
             uid: None,
         }));
 
-    let patch = crate::project_patch::ModelPatch {
+    let patch = simlin_base::project_patch::ModelPatch {
         name: TEST_MODEL.to_string(),
         ops: vec![
-            crate::project_patch::ModelOperation::UpsertStock(datamodel::Stock {
+            simlin_base::project_patch::ModelOperation::UpsertStock(datamodel::Stock {
                 ident: "stock_c".to_string(),
                 equation: datamodel::Equation::Scalar("0".to_string()),
                 documentation: String::new(),
@@ -3114,7 +3114,7 @@ fn test_incremental_add_second_chain_preserves_first() {
                 ai_state: None,
                 uid: None,
             }),
-            crate::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
                 ident: "chain_ac".to_string(),
                 equation: datamodel::Equation::Scalar("5".to_string()),
                 documentation: String::new(),
@@ -3124,7 +3124,7 @@ fn test_incremental_add_second_chain_preserves_first() {
                 ai_state: None,
                 uid: None,
             }),
-            crate::project_patch::ModelOperation::UpdateStockFlows {
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
                 ident: "stock_a".to_string(),
                 inflows: vec![],
                 outflows: vec!["chain_ab".to_string(), "chain_ac".to_string()],

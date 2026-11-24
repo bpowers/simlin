@@ -109,16 +109,17 @@
 
 use std::time::{Duration, Instant};
 
+use simlin_base::Results;
+use simlin_base::common::{Canonical, Ident};
+use simlin_base::datamodel;
 use simlin_engine::analysis::{LoopSummary, analyze_model};
-use simlin_engine::common::{Canonical, Ident};
-use simlin_engine::datamodel;
 use simlin_engine::db::{
     LtmSyntheticVar, SimlinDb, compile_project_incremental, set_project_ltm_discovery_mode,
     sync_from_datamodel_incremental,
 };
 use simlin_engine::ltm::CausalGraph;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{Results, ltm_finding, open_vensim};
+use simlin_engine::{ltm_finding, open_vensim};
 
 use crate::test_helpers::ltm_discovery_inputs;
 

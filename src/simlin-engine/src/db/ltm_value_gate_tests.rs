@@ -28,8 +28,8 @@
 //! everything nobody thought to name.
 
 use super::*;
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::datamodel;
 
 /// The three ways a per-element link-score arm can be wrong about whether it is
 /// a structural zero, in one model.
@@ -124,7 +124,7 @@ fn ltm_slot_series(project: &datamodel::Project) -> Vec<LtmSlotSeries> {
     let mut vars: Vec<&crate::db::LtmSyntheticVar> = ltm.vars.iter().collect();
     vars.sort_by(|a, b| a.name.cmp(&b.name));
     for var in vars {
-        let Some(&base) = offsets.get(&crate::common::Ident::new(&var.name)) else {
+        let Some(&base) = offsets.get(&simlin_base::common::Ident::new(&var.name)) else {
             // A variable with no layout slot is a real defect, but it is
             // `model_ltm_fragment_diagnostics`' to report; this gate is about
             // values, so record it loudly rather than skipping it silently.
@@ -134,7 +134,7 @@ fn ltm_slot_series(project: &datamodel::Project) -> Vec<LtmSlotSeries> {
             .dimensions
             .iter()
             .map(|d| {
-                let canonical = crate::common::CanonicalDimensionName::from_raw(d);
+                let canonical = simlin_base::common::CanonicalDimensionName::from_raw(d);
                 dim_ctx.get(&canonical).map(|dim| dim.len()).unwrap_or(1)
             })
             .product::<usize>()

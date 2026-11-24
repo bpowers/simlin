@@ -43,8 +43,8 @@ use std::hash::Hash;
 
 use indexmap::IndexMap;
 
-use crate::common::{Canonical, Ident};
-use crate::results::Results;
+use simlin_base::common::{Canonical, Ident};
+use simlin_base::results::Results;
 
 /// The normalization group one member of a relative-score computation
 /// belongs to (GH #750).
@@ -421,7 +421,7 @@ impl LoopElementIndex {
     /// empty subscript list and returns offset 0.  Any subscripted
     /// access on a scalar loop yields `DimCountMismatch`.
     pub fn resolve(&self, subscripts: &[&str]) -> Result<usize, ResolveError> {
-        use crate::canonicalize;
+        use simlin_base::canonicalize;
 
         if subscripts.len() != self.dimensions.len() {
             return Err(ResolveError::DimCountMismatch {
@@ -481,7 +481,7 @@ const LOOP_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
 /// out (they're not exposed as loop IDs to FFI consumers).
 ///
 /// Dimensions and element names are canonicalized via
-/// [`crate::canonicalize`] so the FFI resolver can do direct string
+/// [`simlin_base::canonicalize`] so the FFI resolver can do direct string
 /// comparisons against user input that's also been canonicalized.
 /// Dimensions referenced by an LTM var that aren't present in
 /// `project_dims` are silently skipped: in practice this only
@@ -489,14 +489,14 @@ const LOOP_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
 /// (n_slots reflects only the resolved dims).
 pub fn build_loop_element_index(
     ltm_vars: &[crate::db::LtmSyntheticVar],
-    project_dims: &[crate::datamodel::Dimension],
+    project_dims: &[simlin_base::datamodel::Dimension],
 ) -> HashMap<String, LoopElementIndex> {
-    use crate::canonicalize;
+    use simlin_base::canonicalize;
 
     // Pre-canonicalize project dimension names + elements once so each
     // LTM var's lookup is O(d) instead of re-canonicalizing per dim per
     // entry.
-    let dim_lookup: HashMap<String, &crate::datamodel::Dimension> = project_dims
+    let dim_lookup: HashMap<String, &simlin_base::datamodel::Dimension> = project_dims
         .iter()
         .map(|d| (canonicalize(d.name()).into_owned(), d))
         .collect();
@@ -518,7 +518,7 @@ pub fn build_loop_element_index(
             let elements: Vec<String> = if dim.is_indexed() {
                 Vec::new()
             } else {
-                use crate::datamodel::DimensionElements;
+                use simlin_base::datamodel::DimensionElements;
                 match &dim.elements {
                     DimensionElements::Named(names) => {
                         names.iter().map(|n| canonicalize(n).into_owned()).collect()
@@ -763,10 +763,10 @@ pub fn rel_link_group_sizes(links: &[RelLinkInput<'_>]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::IdentMap;
-    use crate::datamodel::{Dt, SimMethod, SimSpecs};
-    use crate::results::Specs;
     use proptest::prelude::*;
+    use simlin_base::common::IdentMap;
+    use simlin_base::datamodel::{Dt, SimMethod, SimSpecs};
+    use simlin_base::results::Specs;
 
     /// Build a minimal `Results` from a list of `(loop_id, series)` pairs.
     /// The data layout matches the VM's: row-major, one chunk per saved step,
@@ -1711,7 +1711,7 @@ mod tests {
             dimensions: vec![],
             compile_directly: false,
         }];
-        let project_dims: Vec<crate::datamodel::Dimension> = vec![];
+        let project_dims: Vec<simlin_base::datamodel::Dimension> = vec![];
 
         let index = build_loop_element_index(&ltm_vars, &project_dims);
         let entry = index.get("r1").expect("r1 should be indexed");
@@ -1733,7 +1733,7 @@ mod tests {
             dimensions: vec!["Region".to_string()],
             compile_directly: false,
         }];
-        let project_dims = vec![crate::datamodel::Dimension::named(
+        let project_dims = vec![simlin_base::datamodel::Dimension::named(
             "Region".to_string(),
             vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
         )];
@@ -1764,11 +1764,11 @@ mod tests {
             compile_directly: false,
         }];
         let project_dims = vec![
-            crate::datamodel::Dimension::named(
+            simlin_base::datamodel::Dimension::named(
                 "Region".to_string(),
                 vec!["NYC".to_string(), "Boston".to_string()],
             ),
-            crate::datamodel::Dimension::indexed("Cohort".to_string(), 4),
+            simlin_base::datamodel::Dimension::indexed("Cohort".to_string(), 4),
         ];
 
         let index = build_loop_element_index(&ltm_vars, &project_dims);
@@ -1799,7 +1799,7 @@ mod tests {
             dimensions: vec!["Region".to_string()],
             compile_directly: false,
         }];
-        let project_dims = vec![crate::datamodel::Dimension::named(
+        let project_dims = vec![simlin_base::datamodel::Dimension::named(
             "Region".to_string(),
             vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
         )];
@@ -1824,11 +1824,11 @@ mod tests {
             compile_directly: false,
         }];
         let project_dims = vec![
-            crate::datamodel::Dimension::named(
+            simlin_base::datamodel::Dimension::named(
                 "Region".to_string(),
                 vec!["NYC".to_string(), "Boston".to_string()],
             ),
-            crate::datamodel::Dimension::indexed("Cohort".to_string(), 4),
+            simlin_base::datamodel::Dimension::indexed("Cohort".to_string(), 4),
         ];
         let index = build_loop_element_index(&ltm_vars, &project_dims);
         let r1 = index.get("r1").unwrap();
@@ -1854,7 +1854,7 @@ mod tests {
             dimensions: vec![],
             compile_directly: false,
         }];
-        let project_dims: Vec<crate::datamodel::Dimension> = vec![];
+        let project_dims: Vec<simlin_base::datamodel::Dimension> = vec![];
         let index = build_loop_element_index(&ltm_vars, &project_dims);
         let r1 = index.get("r1").unwrap();
         // Bare access on scalar loop: offset 0.
@@ -1878,7 +1878,7 @@ mod tests {
             dimensions: vec!["Region".to_string()],
             compile_directly: false,
         }];
-        let project_dims = vec![crate::datamodel::Dimension::named(
+        let project_dims = vec![simlin_base::datamodel::Dimension::named(
             "Region".to_string(),
             vec!["NYC".to_string(), "Boston".to_string()],
         )];
@@ -1911,7 +1911,7 @@ mod tests {
             dimensions: vec!["Region".to_string()],
             compile_directly: false,
         }];
-        let project_dims = vec![crate::datamodel::Dimension::named(
+        let project_dims = vec![simlin_base::datamodel::Dimension::named(
             "Region".to_string(),
             vec!["NYC".to_string(), "Boston".to_string()],
         )];
@@ -1935,7 +1935,7 @@ mod tests {
             dimensions: vec!["Cohort".to_string()],
             compile_directly: false,
         }];
-        let project_dims = vec![crate::datamodel::Dimension::indexed(
+        let project_dims = vec![simlin_base::datamodel::Dimension::indexed(
             "Cohort".to_string(),
             3,
         )];
@@ -1981,7 +1981,7 @@ mod tests {
                 compile_directly: false,
             },
         ];
-        let project_dims: Vec<crate::datamodel::Dimension> = vec![];
+        let project_dims: Vec<simlin_base::datamodel::Dimension> = vec![];
         let index = build_loop_element_index(&ltm_vars, &project_dims);
         assert_eq!(index.len(), 1);
         assert!(index.contains_key("r1"));

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use super::structure;
-use crate::datamodel::{
+use simlin_base::datamodel::{
     AiInformation, AiState, AiStatus, Aux, Compat, Conveyor, DataSource, DataSourceKind, Dimension,
     DimensionElements, DimensionMapping, Dt, Equation, Extension, Flow, GraphicalFunction,
     GraphicalFunctionKind, GraphicalFunctionScale, Leakage, LoopMetadata, MacroSpec, Model,

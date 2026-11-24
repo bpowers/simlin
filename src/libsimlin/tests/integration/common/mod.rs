@@ -44,7 +44,7 @@ pub unsafe fn expect_error_code(err: *mut SimlinError, expected: SimlinErrorCode
 }
 
 pub fn open_project_from_datamodel(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> *mut SimlinProject {
     let buf = engine_serde::serialize(project).unwrap().encode_to_vec();
     unsafe {

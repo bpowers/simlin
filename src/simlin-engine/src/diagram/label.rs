@@ -2,13 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::datamodel::view_element::LabelSide;
 use crate::diagram::common::{
     Rect, escape_xml_attr, escape_xml_text, js_format_number, merge_bounds,
 };
 use crate::diagram::constants::{
     AUX_RADIUS, LABEL_FONT_SIZE, LABEL_FONT_WEIGHT, LABEL_PADDING, LINE_SPACING,
 };
+use simlin_base::datamodel::view_element::LabelSide;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAnchor {

@@ -12,8 +12,8 @@
 
 use smallvec::SmallVec;
 
-use crate::datamodel::view_element::FlowPoint;
 use crate::diagram::constants::{FLOW_ARROWHEAD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
+use simlin_base::datamodel::view_element::FlowPoint;
 
 /// A pipe's points. 98.8% of imported flows have two points and none has four
 /// or more; routing builds at most five-segment paths and a preserved tail adds

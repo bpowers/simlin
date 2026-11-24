@@ -20,10 +20,11 @@ use std::result::Result as StdResult;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use simlin_base::common::ErrorKind;
+use simlin_base::datamodel::Project as DatamodelProject;
+use simlin_base::{Error, ErrorCode, Result, Results, datamodel};
 use simlin_engine::buffa::Message;
-use simlin_engine::common::ErrorKind;
 use simlin_engine::data_provider::FilesystemDataProvider;
-use simlin_engine::datamodel::Project as DatamodelProject;
 use simlin_engine::db::{
     LtmOverlay, PersistentSyncState, SimlinDb, SourceProject, collect_all_diagnostics,
     compile_project_incremental, model_detected_loops, parse_source_variable, sync_from_datamodel,
@@ -33,7 +34,7 @@ use simlin_engine::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
     format_simulation_error,
 };
-use simlin_engine::{Error, ErrorCode, Result, Results, build_sim, datamodel, project_io, serde};
+use simlin_engine::{build_sim, project_io, serde};
 use simlin_engine::{
     load_csv, load_dat, open_vensim, open_vensim_with_data, open_xmile, to_mdl_with_warnings,
     to_xmile,
@@ -143,7 +144,7 @@ enum Command {
         stdlib_dir: PathBuf,
 
         /// Output file path
-        #[arg(long, short, default_value = "src/simlin-engine/src/stdlib.gen.rs")]
+        #[arg(long, short, default_value = "src/simlin-base/src/stdlib.gen.rs")]
         output: PathBuf,
     },
 
@@ -392,7 +393,7 @@ fn print_filtered_tsv(results: &Results, visible: &VisibleStocks) {
 /// Each timestep produces two rows: "reference" and "simlin", showing
 /// the reference and simulation values side by side for visible stocks only.
 fn print_filtered_tsv_comparison(results: &Results, reference: &Results, visible: &VisibleStocks) {
-    use simlin_engine::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     // Build columns: (display_name, sim_offset, ref_offset) triples.
     // Time is always at offset 0 in the engine's results layout, and no
@@ -660,7 +661,7 @@ fn print_equations(project: &DatamodelProject, output: Option<PathBuf>) {
     let models = sync.project.models(&db);
 
     for model_name in model_names.iter() {
-        let canonical_name = simlin_engine::canonicalize(model_name);
+        let canonical_name = simlin_base::canonicalize(model_name);
         let source_model = match models.get(canonical_name.as_ref()) {
             Some(m) => *m,
             None => continue,
@@ -1013,7 +1014,7 @@ mod render_tests {
 #[cfg(test)]
 mod open_vensim_model_tests {
     use super::*;
-    use simlin_engine::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     /// Compile and run a datamodel project to completion, returning the
     /// first row of results. Mirrors the CLI's non-LTM `run_simulation`

@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
-use crate::common::{Canonical, Ident};
-use crate::datamodel;
+use simlin_base::common::{Canonical, Ident};
+use simlin_base::datamodel;
 
 use super::behavior::{BehaviorMode, magnitude, shape_at};
 use super::evidence::display_name;
@@ -144,7 +144,7 @@ impl SeriesCore {
 /// `analyze_loops` can then report a share for a loop whose stocks move only
 /// by rounding.
 pub(crate) fn scale_in_run(
-    results: &crate::results::Results,
+    results: &simlin_base::results::Results,
     model: &datamodel::Model,
     plan: &super::runs::RunPlan,
     key: &str,
@@ -182,7 +182,7 @@ pub(crate) fn scale_in_run(
     // element `pinned` names, else at this series' element, else as a
     // scalar.
     let reaches = |name: &str, pinned: Option<&str>| -> f64 {
-        let canonical = crate::canonicalize(name).into_owned();
+        let canonical = simlin_base::canonicalize(name).into_owned();
         pinned
             .and_then(|pinned| series(&format!("{canonical}[{pinned}]")))
             .or_else(|| element.and_then(|element| series(&format!("{canonical}[{element}]"))))
@@ -210,7 +210,7 @@ pub(crate) fn scale_in_run(
             None => None,
         };
         text.and_then(|text| {
-            crate::ast::Expr0::new(text, crate::lexer::LexerType::Equation)
+            simlin_base::ast::Expr0::new(text, simlin_base::lexer::LexerType::Equation)
                 .ok()
                 .flatten()
         })
@@ -240,7 +240,7 @@ pub(crate) fn declared(model: &datamodel::Model) -> std::collections::BTreeSet<S
     model
         .variables
         .iter()
-        .map(|var| crate::canonicalize(var.get_ident()).into_owned())
+        .map(|var| simlin_base::canonicalize(var.get_ident()).into_owned())
         .collect()
 }
 
@@ -289,10 +289,10 @@ pub(crate) fn compared_scales(
 /// for any other equation. `reaches` is what a variable reaches, at the
 /// element a subscript of plain names pins when it has one.
 fn scale_of_a_sum(
-    equation: &crate::ast::Expr0,
+    equation: &simlin_base::ast::Expr0,
     reaches: &impl Fn(&str, Option<&str>) -> f64,
 ) -> f64 {
-    use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
+    use simlin_base::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
     fn terms<'a>(expr: &'a Expr0, into: &mut Vec<&'a Expr0>) {
         match expr {
             Expr0::Op2(BinaryOp::Add | BinaryOp::Sub, left, right, _) => {
@@ -320,7 +320,7 @@ fn scale_of_a_sum(
                     .iter()
                     .map(|index| match index {
                         IndexExpr0::Expr(Expr0::Var(index, _)) => {
-                            Some(crate::canonicalize(index.as_str()).into_owned())
+                            Some(simlin_base::canonicalize(index.as_str()).into_owned())
                         }
                         _ => None,
                     })
@@ -483,7 +483,7 @@ pub(crate) fn keyed_series_upto(
     element: Option<&str>,
     limit: usize,
 ) -> (Vec<KeyedSeries>, usize) {
-    let canonical = crate::canonicalize(variable).into_owned();
+    let canonical = simlin_base::canonicalize(variable).into_owned();
     let display = display_name(model, &canonical);
     let offsets = &run.results.offsets;
     if let Some(element) = element {
@@ -531,14 +531,14 @@ pub(crate) struct VariableColumn<'a> {
 /// `$` itself is no prefix of another's. A module instance's columns are its
 /// model's variables', reached through it, and are not the instance's own.
 pub(crate) fn variable_columns<'a>(
-    results: &'a crate::Results,
+    results: &'a simlin_base::Results,
     model: &datamodel::Model,
     canonical: &str,
 ) -> Vec<VariableColumn<'a>> {
     let declared: std::collections::BTreeSet<String> = model
         .variables
         .iter()
-        .map(|var| crate::canonicalize(var.get_ident()).into_owned())
+        .map(|var| simlin_base::canonicalize(var.get_ident()).into_owned())
         .collect();
     let mut columns: Vec<VariableColumn<'a>> = results
         .offsets
@@ -559,7 +559,7 @@ pub(crate) fn variable_columns<'a>(
 pub(crate) fn element_key(element: &str) -> String {
     element
         .split(',')
-        .map(|part| crate::canonicalize(part.trim()).into_owned())
+        .map(|part| simlin_base::canonicalize(part.trim()).into_owned())
         .collect::<Vec<_>>()
         .join(",")
 }

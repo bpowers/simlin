@@ -17,7 +17,6 @@
 //! pins the expected series independently -- a VM-vs-wasm diff alone would pass
 //! vacuously if both backends were wrong the same way.
 
-use crate::common::{Canonical, ErrorCode, Ident};
 use crate::conveyor::SlatBoundGuard;
 use crate::conveyor_compile::ConveyorPlan;
 use crate::db::{SimlinDb, sync_from_datamodel_incremental};
@@ -26,6 +25,7 @@ use crate::wasmgen::{
     WasmArtifact, WasmGenError, compile_datamodel_to_artifact, reconstruct_error,
 };
 use checked::{Store, Stored, StoredValue};
+use simlin_base::common::{Canonical, ErrorCode, Ident};
 use std::io::BufReader;
 use wasm::addrs::ModuleAddr;
 use wasm::validate;
@@ -43,7 +43,7 @@ const EPS: f64 = 1e-9;
 
 // ── drivers ──────────────────────────────────────────────────────────────────
 
-fn parse(xml: &str) -> crate::datamodel::Project {
+fn parse(xml: &str) -> simlin_base::datamodel::Project {
     crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("parse xmile")
 }
 
@@ -55,16 +55,16 @@ fn parse(xml: &str) -> crate::datamodel::Project {
 /// file lowers a conveyor model through exactly the path production does. That
 /// is what replaced the up-front conveyor reject GH #924 removed; there is no
 /// `#[cfg(test)]` seam below it.
-fn lower(project: &crate::datamodel::Project) -> Result<WasmArtifact, WasmGenError> {
+fn lower(project: &simlin_base::datamodel::Project) -> Result<WasmArtifact, WasmGenError> {
     let main = project.models[0].name.clone();
     compile_datamodel_to_artifact(project, &main, false, false)
 }
 
-fn artifact_for(project: &crate::datamodel::Project) -> WasmArtifact {
+fn artifact_for(project: &simlin_base::datamodel::Project) -> WasmArtifact {
     lower(project).expect("a core conveyor model must lower to wasm")
 }
 
-fn lower_err(project: &crate::datamodel::Project) -> WasmGenError {
+fn lower_err(project: &simlin_base::datamodel::Project) -> WasmGenError {
     match lower(project) {
         Ok(_) => panic!("an out-of-scope conveyor feature must be rejected"),
         Err(e) => e,
@@ -74,7 +74,7 @@ fn lower_err(project: &crate::datamodel::Project) -> WasmGenError {
 /// The conveyor plan list `queue_compile::compile_sim` resolves -- the SAME plans
 /// the VM attaches, so `reconstruct_error` reads the belt names and slot offsets
 /// the VM used.
-fn conveyor_plans(project: &crate::datamodel::Project) -> Vec<ConveyorPlan> {
+fn conveyor_plans(project: &simlin_base::datamodel::Project) -> Vec<ConveyorPlan> {
     let main = project.models[0].name.clone();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
@@ -213,7 +213,7 @@ fn run_artifact(artifact: &WasmArtifact) -> Vec<f64> {
     })
 }
 
-fn vm_slab(project: &crate::datamodel::Project) -> crate::Results {
+fn vm_slab(project: &simlin_base::datamodel::Project) -> simlin_base::Results {
     let main = project.models[0].name.clone();
     let mut vm = build_vm(project, &main).expect("VM must build the conveyor model");
     vm.run_to_end().expect("VM must run the conveyor model");
@@ -222,7 +222,10 @@ fn vm_slab(project: &crate::datamodel::Project) -> crate::Results {
 
 /// Assert every variable in `artifact.layout` matches the VM's series, NaN-aware.
 /// Returns the number of variables compared.
-fn assert_slab_matches_vm(project: &crate::datamodel::Project, artifact: &WasmArtifact) -> usize {
+fn assert_slab_matches_vm(
+    project: &simlin_base::datamodel::Project,
+    artifact: &WasmArtifact,
+) -> usize {
     let wasm_data = run_artifact(artifact);
     let vm = vm_slab(project);
 
@@ -425,12 +428,12 @@ fn leaky_belt_xmile(spec: BeltXmile<'_>, leaks: &[Leak]) -> String {
 /// isee toggle). No XMILE spelling for it is confirmed, so the reader hard-codes
 /// `false` (`xmile/variables.rs`) and the flag is reachable only from the datamodel --
 /// which is exactly what both backends consume, so parity is still testable.
-fn set_ignore_earlier_zone_losses(project: &mut crate::datamodel::Project) {
+fn set_ignore_earlier_zone_losses(project: &mut simlin_base::datamodel::Project) {
     let mut flipped = 0usize;
     for model in project.models.iter_mut() {
         model.variables.rewrite(|variables| {
             for v in variables.iter_mut() {
-                if let crate::datamodel::Variable::Stock(s) = v
+                if let simlin_base::datamodel::Variable::Stock(s) = v
                     && let Some(c) = s.compat.conveyor.as_mut()
                 {
                     c.ignore_earlier_zone_losses = true;
@@ -4614,7 +4617,7 @@ fn covid_leak_fixture_is_blocked_by_the_driven_flow_read_rule() {
 /// distinguishes "the shared dispatch refuses this real model" from "the wasm backend has
 /// a conveyor gap": a blanket reject on the public entry satisfies `is_err()` and would
 /// leave a bare-`is_err()` assertion green.
-fn assert_shared_dispatch_refusal(project: &crate::datamodel::Project, code: ErrorCode) {
+fn assert_shared_dispatch_refusal(project: &simlin_base::datamodel::Project, code: ErrorCode) {
     let main = project.models[0].name.clone();
     let err = build_vm(project, &main).expect_err("the VM must refuse this fixture");
     assert_eq!(

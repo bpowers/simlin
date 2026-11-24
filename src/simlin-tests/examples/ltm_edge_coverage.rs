@@ -228,9 +228,9 @@ fn main() {
     let main_name: String = datamodel
         .models
         .iter()
-        .map(|m| simlin_engine::canonicalize(&m.name).into_owned())
+        .map(|m| simlin_base::canonicalize(&m.name).into_owned())
         .find(|n| n == "main")
-        .unwrap_or_else(|| simlin_engine::canonicalize(&datamodel.models[0].name).into_owned());
+        .unwrap_or_else(|| simlin_base::canonicalize(&datamodel.models[0].name).into_owned());
     let source_model = sync
         .models
         .get(main_name.as_str())
@@ -402,7 +402,7 @@ fn main() {
         let mut owner: HashMap<usize, &str> = HashMap::new();
         for var in ltm.vars.iter() {
             let ident =
-                simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(&var.name);
+                simlin_base::common::Ident::<simlin_base::common::Canonical>::new(&var.name);
             let Some(&base) = results.offsets.get(&ident) else {
                 continue;
             };
@@ -414,7 +414,7 @@ fn main() {
                         .dimensions
                         .iter()
                         .find(|dm| {
-                            simlin_engine::canonicalize(dm.name()) == simlin_engine::canonicalize(d)
+                            simlin_base::canonicalize(dm.name()) == simlin_base::canonicalize(d)
                         })
                         .map(|dm| dm.len())
                         .unwrap_or(1)

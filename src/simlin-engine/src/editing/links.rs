@@ -15,11 +15,11 @@
 use std::collections::HashMap;
 use std::f64::consts::PI;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::{FlowPoint, LabelSide, Link, LinkShape};
 use crate::diagram::common::is_zero;
 use crate::diagram::connector::get_visual_center;
 use crate::diagram::constants::STRAIGHT_LINE_MAX;
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::{FlowPoint, LabelSide, Link, LinkShape};
 
 use super::base::{BaseView, position_of};
 use super::geometry::Point;

@@ -5,7 +5,7 @@
 use super::*;
 use crate::tools::test_support::inventory;
 
-fn model() -> crate::datamodel::Model {
+fn model() -> simlin_base::datamodel::Model {
     inventory().build_datamodel().models.remove(0)
 }
 

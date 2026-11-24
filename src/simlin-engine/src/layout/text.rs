@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::datamodel::view_element::LabelSide;
+use simlin_base::datamodel::view_element::LabelSide;
 
 const LINE_HEIGHT: f64 = 14.0;
 const LABEL_PADDING: f64 = 4.0;

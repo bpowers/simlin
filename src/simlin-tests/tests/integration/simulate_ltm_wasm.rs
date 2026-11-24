@@ -16,7 +16,7 @@
 use std::fs::File;
 use std::io::BufReader;
 
-use simlin_engine::datamodel;
+use simlin_base::datamodel;
 use simlin_engine::db::{SimlinDb, model_ltm_variables, sync_from_datamodel_incremental};
 use simlin_engine::ltm_finding::{self, FoundLoop};
 use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_datamodel_to_artifact};
@@ -155,7 +155,7 @@ fn assert_ltm_series_match(model_rel_path: &str) {
 /// included -- is the same series on both backends.
 #[test]
 fn an_init_only_capture_is_no_ltm_node_and_every_key_matches_wasm() {
-    use simlin_engine::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
     use simlin_engine::db::{model_causal_edges, sync_from_datamodel_incremental};
     use simlin_engine::test_common::TestProject;
 
@@ -197,7 +197,7 @@ fn an_init_only_capture_is_no_ltm_node_and_every_key_matches_wasm() {
         vm.offsets.keys().all(|key| !key.as_str().contains(capture)),
         "neither the capture nor a score naming it is a results key"
     );
-    let series = |results: &simlin_engine::Results, key: &Ident<Canonical>| -> Vec<f64> {
+    let series = |results: &simlin_base::Results, key: &Ident<Canonical>| -> Vec<f64> {
         let off = results.offsets[key];
         (0..results.step_count)
             .map(|step| results.data[step * results.step_size + off])

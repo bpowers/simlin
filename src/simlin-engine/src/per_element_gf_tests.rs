@@ -19,11 +19,11 @@
 //! elements in sorted order, where position == dim-index, and assert only
 //! order-invariant sums).
 
-use crate::datamodel;
 use crate::db::{
     SimlinDb, compile_project_incremental, sync_from_datamodel_incremental, variable_tables,
 };
 use crate::vm::Vm;
+use simlin_base::datamodel;
 
 /// A monotone-increasing two-point GF whose two y-values are
 /// `(base, base + slope)` over x in [0, 1]. Evaluated at x = `time` (with
@@ -1076,7 +1076,7 @@ fn gf_only_element_without_default_evaluates_gf_of_fabricated_zero() {
         !diagnostics.iter().any(|d| matches!(
             &d.error,
             crate::db::DiagnosticError::Model(e)
-                if e.code == crate::common::ErrorCode::MissingElementEquation
+                if e.code == simlin_base::common::ErrorCode::MissingElementEquation
         )),
         "a gf-only element has an arm and is not reported as missing: {diagnostics:?}"
     );
@@ -1541,7 +1541,7 @@ fn every_lookup_builtin_applies_each_elements_table_under_a_vector_builtin() {
         }
     }
 
-    for reader in crate::builtins::BuiltinSig::table_readers() {
+    for reader in simlin_base::builtins::BuiltinSig::table_readers() {
         for (mask, pick) in [(["1", "0"], 0), (["0", "1"], 1)] {
             let mut project = arrayed_gf_vector_select_project(
                 "Dim",
@@ -1645,12 +1645,12 @@ fn a_lookup_over_every_element_passes_over_an_element_with_no_table() {
 /// by a dimension. Read per element, each element reads the one table.
 #[test]
 fn one_table_applies_at_every_element() {
-    let gf = crate::datamodel::GraphicalFunction {
-        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+    let gf = simlin_base::datamodel::GraphicalFunction {
+        kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         x_points: Some(vec![0.0, 2.0]),
         y_points: vec![0.0, 2.0],
-        x_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
-        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+        x_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+        y_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
     };
     let mut project = crate::test_common::TestProject::new("one_table")
         .with_sim_time(0.0, 1.0, 1.0)
@@ -1658,9 +1658,13 @@ fn one_table_applies_at_every_element() {
         .aux_with_gf("g", "0", gf)
         .array_aux("y[Region]", "LOOKUP(g, 1.5)")
         .build_datamodel();
-    if let Some(crate::datamodel::Variable::Aux(aux)) = project.models[0].get_variable_mut("g") {
-        aux.equation =
-            crate::datamodel::Equation::ApplyToAll(vec!["Region".to_string()], "0".to_string());
+    if let Some(simlin_base::datamodel::Variable::Aux(aux)) =
+        project.models[0].get_variable_mut("g")
+    {
+        aux.equation = simlin_base::datamodel::Equation::ApplyToAll(
+            vec!["Region".to_string()],
+            "0".to_string(),
+        );
     }
     let run = crate::test_common::TestProject::from_datamodel(project)
         .run_vm()
@@ -1674,12 +1678,12 @@ fn one_table_applies_at_every_element() {
 /// before the first element, which is NaN, as any read past a dimension is.
 #[test]
 fn one_table_keeps_the_bounds_check() {
-    let gf = crate::datamodel::GraphicalFunction {
-        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+    let gf = simlin_base::datamodel::GraphicalFunction {
+        kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         x_points: Some(vec![0.0, 2.0]),
         y_points: vec![0.0, 2.0],
-        x_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
-        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+        x_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+        y_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
     };
     let mut project = crate::test_common::TestProject::new("one_table_bounds")
         .with_sim_time(0.0, 1.0, 1.0)
@@ -1687,9 +1691,11 @@ fn one_table_keeps_the_bounds_check() {
         .aux_with_gf("g", "0", gf)
         .array_aux("y[Age]", "LOOKUP(g[Age - 1], 1.5)")
         .build_datamodel();
-    if let Some(crate::datamodel::Variable::Aux(aux)) = project.models[0].get_variable_mut("g") {
+    if let Some(simlin_base::datamodel::Variable::Aux(aux)) =
+        project.models[0].get_variable_mut("g")
+    {
         aux.equation =
-            crate::datamodel::Equation::ApplyToAll(vec!["Age".to_string()], "0".to_string());
+            simlin_base::datamodel::Equation::ApplyToAll(vec!["Age".to_string()], "0".to_string());
     }
     let run = crate::test_common::TestProject::from_datamodel(project)
         .run_vm()
@@ -1725,7 +1731,7 @@ fn an_element_with_no_arm_is_missing_beside_a_variable_table() {
             .iter()
             .filter(|d| {
                 matches!(&d.error, crate::db::DiagnosticError::Model(e)
-                    if e.code == crate::common::ErrorCode::MissingElementEquation)
+                    if e.code == simlin_base::common::ErrorCode::MissingElementEquation)
             })
             .map(|d| d.element().map(str::to_owned))
             .collect();

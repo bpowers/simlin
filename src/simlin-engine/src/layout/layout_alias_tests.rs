@@ -13,7 +13,7 @@
 //! Vensim corpus are ghosts, every one of them a pure input).
 
 use super::*;
-use crate::datamodel;
+use simlin_base::datamodel;
 
 const TEST_MODEL: &str = "test";
 

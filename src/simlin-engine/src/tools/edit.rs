@@ -56,10 +56,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
-use crate::common::CanonicalElementName;
-use crate::datamodel::{self, AiState, Equation, Variable};
 use crate::db::{LtmOverlay, SourceProject, collect_all_diagnostics};
-use crate::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
+use simlin_base::common::CanonicalElementName;
+use simlin_base::datamodel::{self, AiState, Equation, Variable};
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
 
 use super::changes::{ChangedField, ReadSnapshot, changed_fields, effective_specs, same_record};
 use super::evidence::{Described, DiagnosticIdentity, describe, display_name};
@@ -564,7 +564,7 @@ fn by_name(model: &datamodel::Model) -> BTreeMap<String, &Variable> {
     model
         .variables
         .iter()
-        .map(|v| (crate::canonicalize(v.get_ident()).into_owned(), v))
+        .map(|v| (simlin_base::canonicalize(v.get_ident()).into_owned(), v))
         .collect()
 }
 
@@ -1147,7 +1147,7 @@ fn no_loop(
     name: &str,
     variables: &[String],
 ) -> Option<String> {
-    let canonical = crate::canonicalize(model_name);
+    let canonical = simlin_base::canonicalize(model_name);
     let model = project.models(db).get(canonical.as_ref()).copied()?;
     let pinned = crate::db::model_pinned_loops(db, model, project);
     if pinned.loops.iter().any(|pin| pin.name == name)
@@ -1158,7 +1158,7 @@ fn no_loop(
     let listed = variables.join(", ");
     let members: BTreeSet<String> = variables
         .iter()
-        .map(|v| crate::canonicalize(v).into_owned())
+        .map(|v| simlin_base::canonicalize(v).into_owned())
         .collect();
     if members.len() < 2 {
         return Some(format!(
@@ -1170,14 +1170,14 @@ fn no_loop(
     let reads = |reader: &str, read: &str| {
         graph
             .edges
-            .get(&crate::common::Ident::<crate::common::Canonical>::new(read))
+            .get(&simlin_base::common::Ident::<simlin_base::common::Canonical>::new(read))
             .is_some_and(|to| to.iter().any(|t| t.as_str() == reader))
     };
     // In the order given, so the link named is the first a reader of the
     // refusal would look for.
     for (spelled, member) in variables
         .iter()
-        .map(|v| (v, crate::canonicalize(v).into_owned()))
+        .map(|v| (v, simlin_base::canonicalize(v).into_owned()))
     {
         if !members
             .iter()
@@ -1212,13 +1212,13 @@ fn no_loop(
 fn rename_map(renames: &[(String, String)]) -> BTreeMap<String, String> {
     let mut renamed: BTreeMap<String, String> = BTreeMap::new();
     for (from, to) in renames {
-        let from = crate::canonicalize(from).into_owned();
+        let from = simlin_base::canonicalize(from).into_owned();
         let origin = renamed
             .iter()
             .find(|(_, now)| **now == from)
             .map(|(origin, _)| origin.clone())
             .unwrap_or(from);
-        renamed.insert(origin, crate::canonicalize(to).into_owned());
+        renamed.insert(origin, simlin_base::canonicalize(to).into_owned());
     }
     renamed
 }
@@ -1352,7 +1352,7 @@ impl<'a> Builder<'a> {
     /// What the edit did to the variable named `ident`, to note more of.
     fn touch(&mut self, ident: &str) -> &mut Touch {
         self.touched
-            .entry(crate::canonicalize(ident).into_owned())
+            .entry(simlin_base::canonicalize(ident).into_owned())
             .or_default()
     }
 
@@ -1400,7 +1400,7 @@ impl<'a> Builder<'a> {
                 .model()?
                 .variables
                 .iter()
-                .find(|v| crate::canonicalize(v.get_ident()).as_ref() == name.as_str())
+                .find(|v| simlin_base::canonicalize(v.get_ident()).as_ref() == name.as_str())
                 .cloned()
             else {
                 continue;
@@ -1451,20 +1451,20 @@ impl<'a> Builder<'a> {
             .strip_prefix('"')
             .and_then(|inner| inner.strip_suffix('"'))
             .map_or(name, str::trim);
-        let canonical = crate::canonicalize(name).into_owned();
+        let canonical = simlin_base::canonicalize(name).into_owned();
         let words = canonical.chars().all(|c| c.is_alphanumeric() || c == '_');
         let reads_as_itself = matches!(
-            crate::ast::Expr0::new(
-                &crate::ast::print_ident(&canonical),
-                crate::lexer::LexerType::Equation
+            simlin_base::ast::Expr0::new(
+                &simlin_base::ast::print_ident(&canonical),
+                simlin_base::lexer::LexerType::Equation
             ),
-            Ok(Some(crate::ast::Expr0::Var(ref raw, _)))
+            Ok(Some(simlin_base::ast::Expr0::Var(ref raw, _)))
                 if raw.canonicalize().as_str() == canonical
         );
         if name.is_empty()
             || !words
             || !reads_as_itself
-            || crate::lexer::is_reserved_word(&canonical)
+            || simlin_base::lexer::is_reserved_word(&canonical)
             // A number in quotes reads as a variable, and is no name.
             || canonical.parse::<f64>().is_ok()
         {
@@ -1761,8 +1761,8 @@ impl<'a> Builder<'a> {
                 let ident = var.get_ident().to_string();
                 let to = self.named(&to)?;
                 let (old, new) = (
-                    crate::canonicalize(&ident).into_owned(),
-                    crate::canonicalize(&to).into_owned(),
+                    simlin_base::canonicalize(&ident).into_owned(),
+                    simlin_base::canonicalize(&to).into_owned(),
                 );
                 // A name that differs only in how it is written is the same
                 // name: the patch restamps it and rewrites nothing.
@@ -1788,7 +1788,8 @@ impl<'a> Builder<'a> {
                         self.touch(&stock.ident);
                     }
                 }
-                self.touched.remove(crate::canonicalize(&ident).as_ref());
+                self.touched
+                    .remove(simlin_base::canonicalize(&ident).as_ref());
                 self.apply(vec![ModelOperation::DeleteVariable { ident }])
             }
             EditOperation::NameLoop {
@@ -1870,11 +1871,11 @@ impl<'a> Builder<'a> {
 
     /// The project's dimension `name`, by canonical name.
     fn dimension(&self, name: &str) -> Option<datamodel::Dimension> {
-        let canonical = crate::canonicalize(name.trim());
+        let canonical = simlin_base::canonicalize(name.trim());
         self.working
             .dimensions
             .iter()
-            .find(|d| crate::canonicalize(d.name()) == canonical)
+            .find(|d| simlin_base::canonicalize(d.name()) == canonical)
             .cloned()
     }
 
@@ -1897,7 +1898,7 @@ impl<'a> Builder<'a> {
 
     /// The stocks that list the flow `ident` among their flows.
     fn stocks_with(&self, ident: &str) -> Result<Vec<datamodel::Stock>, ToolError> {
-        let canonical = crate::canonicalize(ident);
+        let canonical = simlin_base::canonicalize(ident);
         Ok(self
             .model()?
             .variables
@@ -1908,7 +1909,7 @@ impl<'a> Builder<'a> {
                         .inflows
                         .iter()
                         .chain(&stock.outflows)
-                        .any(|f| crate::canonicalize(f) == canonical) =>
+                        .any(|f| simlin_base::canonicalize(f) == canonical) =>
                 {
                     Some(stock.clone())
                 }
@@ -1925,11 +1926,11 @@ impl<'a> Builder<'a> {
         from: Option<&str>,
         to: Option<&str>,
     ) -> Result<(), ToolError> {
-        let canonical = crate::canonicalize(ident).into_owned();
+        let canonical = simlin_base::canonicalize(ident).into_owned();
         let from = from.map(|name| self.stock(name)).transpose()?;
         let to = to.map(|name| self.stock(name)).transpose()?;
         if let (Some(from), Some(to)) = (&from, &to)
-            && crate::canonicalize(&from.ident) == crate::canonicalize(&to.ident)
+            && simlin_base::canonicalize(&from.ident) == simlin_base::canonicalize(&to.ident)
         {
             return Err(ToolError::new(format!(
                 "a flow cannot drain and fill the same stock, '{}'",
@@ -1938,23 +1939,23 @@ impl<'a> Builder<'a> {
         }
         let mut stocks: Vec<datamodel::Stock> = self.stocks_with(ident)?;
         for stock in from.iter().chain(&to) {
-            if !stocks
-                .iter()
-                .any(|s| crate::canonicalize(&s.ident) == crate::canonicalize(&stock.ident))
-            {
+            if !stocks.iter().any(|s| {
+                simlin_base::canonicalize(&s.ident) == simlin_base::canonicalize(&stock.ident)
+            }) {
                 stocks.push(stock.clone());
             }
         }
         let is = |stock: &datamodel::Stock, side: &Option<datamodel::Stock>| {
-            side.as_ref()
-                .is_some_and(|s| crate::canonicalize(&s.ident) == crate::canonicalize(&stock.ident))
+            side.as_ref().is_some_and(|s| {
+                simlin_base::canonicalize(&s.ident) == simlin_base::canonicalize(&stock.ident)
+            })
         };
         let mut ops = Vec::new();
         for stock in &stocks {
             self.touch(&stock.ident);
             let keep = |list: &[String]| -> Vec<String> {
                 list.iter()
-                    .filter(|f| crate::canonicalize(f).as_ref() != canonical)
+                    .filter(|f| simlin_base::canonicalize(f).as_ref() != canonical)
                     .cloned()
                     .collect()
             };
@@ -2078,7 +2079,7 @@ impl<'a> Builder<'a> {
                 "the stop time must come after the start time",
             ));
         }
-        if let Some(reason) = super::runs::no_run(&crate::results::Specs::from(&specs)) {
+        if let Some(reason) = super::runs::no_run(&simlin_base::results::Specs::from(&specs)) {
             return Err(ToolError::new(reason));
         }
         if let Some(method) = method {
@@ -2145,7 +2146,7 @@ fn element_names(project: &datamodel::Project, dims: &[String]) -> Vec<String> {
         let Some(dim) = project
             .dimensions
             .iter()
-            .find(|d| crate::canonicalize(&d.name) == crate::canonicalize(dim))
+            .find(|d| simlin_base::canonicalize(&d.name) == simlin_base::canonicalize(dim))
         else {
             return vec![];
         };
@@ -2539,11 +2540,11 @@ fn findings(
     collect_all_diagnostics(db, source_project, LtmOverlay::Off)
         .iter()
         .map(|d| {
-            let canonical = crate::canonicalize(&d.model);
+            let canonical = simlin_base::canonicalize(&d.model);
             let model = project
                 .models
                 .iter()
-                .find(|m| !d.model.is_empty() && crate::canonicalize(&m.name) == canonical);
+                .find(|m| !d.model.is_empty() && simlin_base::canonicalize(&m.name) == canonical);
             Finding {
                 model: model.map_or_else(|| d.model.clone(), |m| m.name.clone()),
                 described: describe(d, project, model.unwrap_or(fallback)),
@@ -2567,8 +2568,8 @@ fn run_of(
     source_project: SourceProject,
     project: &datamodel::Project,
     model_name: &str,
-    own: &crate::results::Specs,
-) -> Result<crate::Results, NoRun> {
+    own: &simlin_base::results::Specs,
+) -> Result<simlin_base::Results, NoRun> {
     match build_vm(
         db,
         source_project,
@@ -2690,7 +2691,7 @@ fn set_aside(
 fn gate(
     ws: &mut Workspace<'_>,
     edit: &Edit<'_>,
-    base: Option<&crate::Results>,
+    base: Option<&simlin_base::Results>,
 ) -> Result<Gate, ToolError> {
     let session_model = edit.model.name.as_str();
     let working_model = edit.working.get_model(session_model).ok_or_else(|| {
@@ -2713,7 +2714,7 @@ fn gate(
     let own = |project: &datamodel::Project, name: &str| {
         project
             .get_model(name)
-            .map(|m| crate::results::Specs::from(effective_specs(project, m)))
+            .map(|m| simlin_base::results::Specs::from(effective_specs(project, m)))
     };
 
     let before = findings(ws.db, source_project, ws.project, edit.model);
@@ -2729,7 +2730,7 @@ fn gate(
     let staging = Staging::new(ws.db, ws.project, edit.working);
     let staged = staging.source_project;
     let after = findings(staging.db, staged, edit.working, working_model);
-    let mut judged: Vec<(Option<&str>, Option<&crate::Results>)> = vec![(None, base)];
+    let mut judged: Vec<(Option<&str>, Option<&simlin_base::Results>)> = vec![(None, base)];
     if let Some(root) = root {
         judged.push((Some(root), root_base.as_ref()));
     }
@@ -2846,7 +2847,7 @@ fn gate(
         .iter()
         .filter(|f| f.model == session_model && f.described.severity == Severity::Error)
         .filter_map(|f| f.described.variable.clone())
-        .map(|name| crate::canonicalize(&name).into_owned())
+        .map(|name| simlin_base::canonicalize(&name).into_owned())
         .collect();
     let unwritten_broken: BTreeSet<String> = broken
         .iter()
@@ -3175,7 +3176,7 @@ fn spelling_hint(
             format!(
                 "'{}' is one variable: write it {} in an equation",
                 ident.replace("\\n", " "),
-                crate::canonicalize(ident)
+                simlin_base::canonicalize(ident)
             )
         })
 }
@@ -3200,8 +3201,8 @@ struct NonFinite {
 /// it through module instances; any other is named in the run's model, which
 /// the finding names.
 fn newly_non_finite(
-    results: &crate::Results,
-    base: Option<&crate::Results>,
+    results: &simlin_base::Results,
+    base: Option<&simlin_base::Results>,
     project: &datamodel::Project,
     run_model: &datamodel::Model,
     model: &datamodel::Model,
@@ -3216,7 +3217,7 @@ fn newly_non_finite(
     let declared: BTreeSet<String> = run_model
         .variables
         .iter()
-        .map(|var| crate::canonicalize(var.get_ident()).into_owned())
+        .map(|var| simlin_base::canonicalize(var.get_ident()).into_owned())
         .collect();
     // The model a path of instances (`a·b·`) leads to from the run's model.
     let through = |path: &str| {
@@ -3261,10 +3262,9 @@ fn newly_non_finite(
         };
         let was_finite = base
             .and_then(|base| {
-                base.offsets
-                    .get(&crate::common::Ident::<crate::common::Canonical>::new(
-                        &base_key,
-                    ))
+                base.offsets.get(
+                    &simlin_base::common::Ident::<simlin_base::common::Canonical>::new(&base_key),
+                )
             })
             .is_none_or(|&offset| base_rows.iter().all(|r| r[offset].is_finite()));
         if was_finite {
@@ -3279,7 +3279,7 @@ fn newly_non_finite(
             found.push(NonFinite {
                 variable,
                 model: model_name,
-                time: crate::tools::series::round(row[crate::results::TIME_OFF]),
+                time: crate::tools::series::round(row[simlin_base::results::TIME_OFF]),
             });
         }
     }
@@ -3288,14 +3288,14 @@ fn newly_non_finite(
 
 /// A module's input wiring by port: the source each port takes.
 fn wiring(module: &datamodel::Module) -> BTreeMap<String, String> {
-    let prefix = format!("{}\u{00B7}", crate::canonicalize(&module.ident));
+    let prefix = format!("{}\u{00B7}", simlin_base::canonicalize(&module.ident));
     module
         .references
         .iter()
         .map(|reference| {
-            let dst = crate::canonicalize(&reference.dst).into_owned();
+            let dst = simlin_base::canonicalize(&reference.dst).into_owned();
             let port = dst.strip_prefix(&prefix).unwrap_or(&dst).to_string();
-            let src = crate::canonicalize(&reference.src);
+            let src = simlin_base::canonicalize(&reference.src);
             (port, src.trim_start_matches('\u{00B7}').to_string())
         })
         .collect()
@@ -3321,7 +3321,8 @@ fn unwired_inputs(
         let was = old.variables.iter().find_map(|v| match v {
             Variable::Module(was)
                 if (was.uid.is_some() && was.uid == is.uid)
-                    || crate::canonicalize(&was.ident) == crate::canonicalize(&is.ident) =>
+                    || simlin_base::canonicalize(&was.ident)
+                        == simlin_base::canonicalize(&is.ident) =>
             {
                 Some(was)
             }
@@ -3461,7 +3462,7 @@ fn change_lines(
     if let Some(old_specs) = &delta.specs {
         let new_specs = &after.sim_specs;
         let mut specs = Vec::new();
-        let number = crate::results::written;
+        let number = simlin_base::results::written;
         for (field, was, is) in [
             ("start", old_specs.start, new_specs.start),
             ("stop", old_specs.stop, new_specs.stop),
@@ -3513,9 +3514,9 @@ fn dimension_lines(
     after: &[datamodel::Dimension],
 ) -> Vec<ChangeLine> {
     let find = |dims: &[datamodel::Dimension], name: &str| {
-        let canonical = crate::canonicalize(name);
+        let canonical = simlin_base::canonicalize(name);
         dims.iter()
-            .find(|d| crate::canonicalize(d.name()) == canonical)
+            .find(|d| simlin_base::canonicalize(d.name()) == canonical)
             .cloned()
     };
     let listed = |dim: &datamodel::Dimension| match &dim.elements {
@@ -3594,7 +3595,7 @@ fn lookup_detail(var: &Variable) -> Option<String> {
         Variable::Stock(_) | Variable::Module(_) => None,
     }?;
     let points = gf.y_points.len();
-    let number = crate::results::written;
+    let number = simlin_base::results::written;
     let range = |values: &mut dyn Iterator<Item = f64>| {
         let (low, high) = values.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), v| {
             (low.min(v), high.max(v))
@@ -3805,7 +3806,9 @@ fn element_equations_detail(
     }
     fn own<'a>(arms: &[(&str, &'a str)], key: &str) -> Option<&'a str> {
         arms.iter()
-            .find(|(element, _)| crate::canonicalize(element) == crate::canonicalize(key))
+            .find(|(element, _)| {
+                simlin_base::canonicalize(element) == simlin_base::canonicalize(key)
+            })
             .map(|(_, text)| *text)
     }
     let mut keys: Vec<&str> = is_own.iter().map(|(key, _)| *key).collect();
@@ -3844,7 +3847,7 @@ fn every_name(dims: &[String], dimensions: &[datamodel::Dimension]) -> String {
         .map(|dim| {
             dimensions
                 .iter()
-                .find(|d| crate::canonicalize(d.name()) == crate::canonicalize(dim))
+                .find(|d| simlin_base::canonicalize(d.name()) == simlin_base::canonicalize(dim))
                 .map_or(dim.as_str(), |d| d.name())
         })
         .collect();
@@ -3884,14 +3887,16 @@ fn spelled_element(key: &str, dims: &[String], dimensions: &[datamodel::Dimensio
             let part = part.trim();
             dims.get(axis)
                 .and_then(|dim| {
-                    dimensions
-                        .iter()
-                        .find(|d| crate::canonicalize(d.name()) == crate::canonicalize(dim))
+                    dimensions.iter().find(|d| {
+                        simlin_base::canonicalize(d.name()) == simlin_base::canonicalize(dim)
+                    })
                 })
                 .and_then(|dimension| match &dimension.elements {
                     datamodel::DimensionElements::Named(names) => names
                         .iter()
-                        .find(|name| crate::canonicalize(name) == crate::canonicalize(part))
+                        .find(|name| {
+                            simlin_base::canonicalize(name) == simlin_base::canonicalize(part)
+                        })
                         .cloned(),
                     datamodel::DimensionElements::Indexed(_) => None,
                 })

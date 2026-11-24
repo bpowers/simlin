@@ -19,8 +19,8 @@
 //! [`Diagnostic::is`]) rather than by matching the sum, and
 //! `errors::FormattedError` is its one presentation adapter.
 
-use crate::builtins::Loc;
-use crate::common::{EquationError, Error, ErrorCode, UnitError};
+use simlin_base::builtins::Loc;
+use simlin_base::common::{EquationError, Error, ErrorCode, UnitError};
 
 /// Whether a diagnostic stops compilation or describes a degraded result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -132,7 +132,7 @@ impl DiagnosticError {
 
     /// The dimension a subscript runs off, and which end, for a
     /// `SubscriptOutOfRange` error ([`EquationError::read_past`]).
-    pub fn read_past(&self) -> Option<&crate::common::ReadPast> {
+    pub fn read_past(&self) -> Option<&simlin_base::common::ReadPast> {
         match self {
             DiagnosticError::Equation(err) => err.read_past.as_ref(),
             _ => None,
@@ -142,7 +142,7 @@ impl DiagnosticError {
     /// The variable a reference reads and the dimensions that disagree, for
     /// a `MismatchedDimensions` refusal of one reference
     /// ([`EquationError::mismatched_read`]).
-    pub fn mismatched_read(&self) -> Option<&crate::common::MismatchedRead> {
+    pub fn mismatched_read(&self) -> Option<&simlin_base::common::MismatchedRead> {
         match self {
             DiagnosticError::Equation(err) => err.mismatched_read.as_deref(),
             _ => None,
@@ -210,13 +210,13 @@ impl Diagnostic {
 
     /// The dimension a subscript runs off, and which end
     /// ([`DiagnosticError::read_past`]).
-    pub fn read_past(&self) -> Option<&crate::common::ReadPast> {
+    pub fn read_past(&self) -> Option<&simlin_base::common::ReadPast> {
         self.error.read_past()
     }
 
     /// The variable a refused reference reads and the dimensions that
     /// disagree ([`DiagnosticError::mismatched_read`]).
-    pub fn mismatched_read(&self) -> Option<&crate::common::MismatchedRead> {
+    pub fn mismatched_read(&self) -> Option<&simlin_base::common::MismatchedRead> {
         self.error.mismatched_read()
     }
 

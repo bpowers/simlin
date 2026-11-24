@@ -24,20 +24,18 @@ pub use indexmap;
 
 #[cfg(feature = "ai_info")]
 pub mod ai_info;
-mod alloc;
 pub mod analysis;
 #[cfg(test)]
 mod array_operand_materialization_tests;
 #[cfg(test)]
 mod array_tests;
-mod ast;
 #[cfg(test)]
 mod builtin_signature_tests;
-pub mod builtins;
 mod builtins_visitor;
 mod bytecode;
+#[cfg(test)]
+mod canonical_value_tests;
 mod capture;
-pub mod common;
 pub mod compat;
 mod compiler;
 pub mod conveyor;
@@ -45,16 +43,13 @@ pub mod conveyor_compile;
 #[cfg(test)]
 mod conveyor_tests;
 pub mod data_provider;
-pub mod datamodel;
 pub mod db;
 mod diagnostic;
 pub mod diagram;
-mod dimensions;
 pub mod editing;
 mod element_equations;
 pub mod equation_view;
 pub mod errors;
-pub mod float;
 mod import_losses;
 pub mod io;
 pub mod json;
@@ -66,7 +61,6 @@ mod json_sdai_proptest;
 #[cfg(test)]
 mod keyword_ident_tests;
 pub mod layout;
-mod lexer;
 #[cfg(test)]
 mod lookup_only_tests;
 pub mod ltm;
@@ -87,8 +81,6 @@ pub mod mdl;
 #[cfg(test)]
 mod mismatched_read_tests;
 mod model;
-mod module_functions;
-mod parser;
 mod patch;
 mod patch_dimensions;
 mod patch_fields;
@@ -105,12 +97,10 @@ mod per_element_gf_tests;
 )]
 #[path = "project_io.gen.rs"]
 pub mod project_io;
-mod project_patch;
 pub mod queue;
 pub mod queue_compile;
-#[doc(hidden)]
-pub mod rapidhash;
-mod results;
+#[cfg(test)]
+mod results_tsv_tests;
 #[cfg(test)]
 mod rk_integration_tests;
 #[cfg(test)]
@@ -119,10 +109,7 @@ pub mod save_check;
 pub mod serde;
 #[cfg(test)]
 mod serde_proptest;
-mod shared_vec;
 mod snapshot_arg;
-#[path = "stdlib.gen.rs"]
-mod stdlib;
 #[cfg(test)]
 mod subscript_out_of_range_tests;
 pub mod systems;
@@ -160,14 +147,11 @@ mod vm_vector_sort_order;
 pub mod wasmgen;
 pub mod xmile;
 
-pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
 pub use self::import_losses::ImportWarning;
 pub use self::patch::{
     PatchReport, Renamed, VariableRef, apply_patch, apply_patch_reporting, is_view_only_patch,
 };
-pub use self::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
 pub use self::queue_compile::build_sim;
-pub use self::results::{Method, Results, Specs as SimSpecs};
 pub use self::variable::{DepClassification, DepLag, DepOccurrence, SourceVariableKind, Variable};
 pub use self::vm::{CompiledSimulation, Vm};
 pub use self::vm_profile::BytecodeProfile;
@@ -217,60 +201,6 @@ mod protobuf_freshness_tests {
             recorded_hash, current_hash,
             "project_io.proto has changed since project_io.gen.rs was generated.\n\
              Run `pnpm build:gen-protobufs` to regenerate the Rust protobuf code."
-        );
-    }
-}
-
-#[cfg(test)]
-mod stdlib_freshness_tests {
-    use sha2::{Digest, Sha256};
-    use std::fs;
-
-    const GEN_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/stdlib.gen.rs");
-    const STDLIB_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib");
-
-    fn extract_hash_from_gen_file(content: &str) -> Option<&str> {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("// Stdlib SHA256: ") {
-                return Some(rest.trim());
-            }
-        }
-        None
-    }
-
-    #[test]
-    fn stdlib_gen_is_up_to_date() {
-        let gen_content = fs::read_to_string(GEN_FILE)
-            .expect("failed to read stdlib.gen.rs - run `pnpm rebuild-stdlib`");
-
-        let recorded_hash = extract_hash_from_gen_file(&gen_content)
-            .expect("stdlib.gen.rs is missing SHA256 hash header");
-
-        let mut hasher = Sha256::new();
-        let mut entries: Vec<_> = fs::read_dir(STDLIB_DIR)
-            .expect("failed to read stdlib directory")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("failed to read directory entry")
-            .into_iter()
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "stmx"))
-            .collect();
-        entries.sort_by_key(|e| e.path());
-
-        for entry in entries {
-            let path = entry.path();
-            let file_stem = path
-                .file_stem()
-                .expect("stmx file should have a file stem")
-                .to_string_lossy();
-            hasher.update(file_stem.as_bytes());
-            hasher.update(fs::read(&path).expect("failed to read stmx file"));
-        }
-        let current_hash = format!("{:x}", hasher.finalize());
-
-        assert_eq!(
-            recorded_hash, current_hash,
-            "stdlib/*.stmx files have changed since stdlib.gen.rs was generated.\n\
-             Run `pnpm rebuild-stdlib` to regenerate."
         );
     }
 }

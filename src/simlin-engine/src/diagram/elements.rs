@@ -2,13 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::datamodel::view_element;
 use crate::diagram::common::{
     Circle, Frame, Point, Rect, arrayed_offsets, display_name, escape_xml_attr, escape_xml_text,
     js_format_number, svg_circle,
 };
 use crate::diagram::constants::*;
 use crate::diagram::label::{LabelProps, element_with_label_bounds, render_label};
+use simlin_base::datamodel::view_element;
 
 /// The cloud outline, in its own 55-unit design box. Both renderers draw this
 /// one path: the SVG as a `matrix` transform over it, the scene with the same
@@ -455,7 +455,7 @@ pub fn group_bounds(element: &view_element::Group) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::view_element::LabelSide;
+    use simlin_base::datamodel::view_element::LabelSide;
 
     fn make_aux(x: f64, y: f64, name: &str) -> view_element::Aux {
         view_element::Aux {

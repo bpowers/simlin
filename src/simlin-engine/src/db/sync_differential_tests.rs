@@ -23,8 +23,8 @@ use std::io::BufReader;
 
 use super::*;
 use crate::patch::apply_patch;
-use crate::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 use crate::test_common::TestProject;
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 
 /// What one input holds, read back field by field. The struct literal names
 /// every field of `SourceVariableFields`, so a field added to the extraction
@@ -469,7 +469,7 @@ fn pool() -> Vec<(&'static str, datamodel::Project)> {
     let mut stdlib_own = base.clone();
     stdlib_own
         .models
-        .push(crate::stdlib::get("smth1").expect("the stdlib has smth1"));
+        .push(simlin_base::stdlib::get("smth1").expect("the stdlib has smth1"));
     add("the stdlib model's own definition", stdlib_own);
     let mut shadow_respelled = base.clone();
     shadow_respelled

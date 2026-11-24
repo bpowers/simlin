@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::dimensions::{
+use simlin_base::dimensions::{
     Axis, Dimension, DimensionsContext, NoAxisRelations, match_axes, match_axes_partial,
 };
 
@@ -11,7 +11,7 @@ use crate::dimensions::{
 /// reference -- or `None` when some dimension no active axis supplies, which is
 /// the compiler's `MismatchedDimensions`.
 ///
-/// The allocation itself is [`crate::dimensions::match_axes`], the engine's one
+/// The allocation itself is [`simlin_base::dimensions::match_axes`], the engine's one
 /// axis-matching precedence; this is the projection that drops HOW each axis
 /// matched and keeps only WHICH active axis supplies it. Read that function for
 /// the precedence and for the two properties every caller depends on
@@ -47,11 +47,11 @@ pub(crate) fn allocate_implicit_axes(
 
 /// The permutation that reads `source_names`'s axes in `target_names`'s order:
 /// `result[i]` is the source axis that belongs at target position `i`, the
-/// form `@N` subscripts and [`crate::ast::ArrayView::reorder_dimensions`] take.
+/// form `@N` subscripts and [`simlin_base::ast::ArrayView::reorder_dimensions`] take.
 ///
 /// Reordering is a RELABELLING of one shape, so the two lists must name the
 /// same axes: equal arity, and every target axis supplied by a distinct source
-/// axis. That is [`crate::dimensions::match_axes_partial`] run from the target
+/// axis. That is [`simlin_base::dimensions::match_axes_partial`] run from the target
 /// side with no declared relations available -- these are dimension NAMES off
 /// an `ArrayView` or an `ArrayBounds`, and pairing `[DimA]` with `[DimB]`
 /// through a declared mapping would silently transpose one operand of an
@@ -82,11 +82,10 @@ pub enum UnaryOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::ArrayView;
-    use crate::common::CanonicalDimensionName;
-    use crate::dimensions::axes_of;
+    use simlin_base::common::CanonicalDimensionName;
+    use simlin_base::dimensions::axes_of;
 
-    /// The partial allocation -- [`crate::dimensions::match_axes_partial`]
+    /// The partial allocation -- [`simlin_base::dimensions::match_axes_partial`]
     /// with the match kind dropped -- so the precedence pins below read as
     /// position lists.
     fn allocate_partial(
@@ -94,7 +93,7 @@ mod tests {
         active_dims: &[Dimension],
         ctx: &DimensionsContext,
     ) -> Vec<Option<usize>> {
-        crate::dimensions::match_axes_partial(&axes_of(dims), &axes_of(active_dims), ctx)
+        simlin_base::dimensions::match_axes_partial(&axes_of(dims), &axes_of(active_dims), ctx)
             .into_iter()
             .map(|m| m.map(|(active_idx, _)| active_idx))
             .collect()
@@ -129,7 +128,7 @@ mod tests {
     /// was added afterwards and reintroduced the hazard it was written against.
     #[test]
     fn a_mapping_match_does_not_steal_a_later_name_match() {
-        use crate::datamodel;
+        use simlin_base::datamodel;
 
         let cop = datamodel::Dimension::named(
             "COP".to_string(),
@@ -148,7 +147,7 @@ mod tests {
                 ("r2".to_string(), "c2".to_string()),
             ],
         }];
-        let ctx = crate::dimensions::DimensionsContext::from(&[cop, agg]);
+        let ctx = simlin_base::dimensions::DimensionsContext::from(&[cop, agg]);
         let cop_d = ctx
             .get(&CanonicalDimensionName::from_raw("COP"))
             .expect("cop")
@@ -194,14 +193,14 @@ mod tests {
     /// holds for two of its three rungs is one a reader cannot rely on.
     #[test]
     fn a_size_match_does_not_steal_a_later_mapping_match() {
-        use crate::datamodel;
+        use simlin_base::datamodel;
 
         let ia = datamodel::Dimension::indexed("IA".to_string(), 2);
         let ib = datamodel::Dimension::indexed("IB".to_string(), 2);
         let mut y =
             datamodel::Dimension::named("Y".to_string(), vec!["y1".to_string(), "y2".to_string()]);
         y.set_maps_to("IA".to_string());
-        let ctx = crate::dimensions::DimensionsContext::from(&[ia, ib, y]);
+        let ctx = simlin_base::dimensions::DimensionsContext::from(&[ia, ib, y]);
         let get = |n: &str| {
             ctx.get(&CanonicalDimensionName::from_raw(n))
                 .unwrap_or_else(|| panic!("{n}"))
@@ -270,154 +269,12 @@ mod tests {
     }
 
     #[test]
-    fn test_array_view_contiguous() {
-        // Test creating a contiguous 2D array view
-        let view = ArrayView::contiguous(vec![3, 4]);
-
-        assert_eq!(view.dims, vec![3, 4]);
-        assert_eq!(view.strides, vec![4, 1]); // Row-major order
-        assert_eq!(view.offset, 0);
-        assert_eq!(view.size(), 12);
-        assert!(view.is_contiguous());
-    }
-
-    #[test]
-    fn test_array_view_contiguous_1d() {
-        // Test creating a contiguous 1D array view
-        let view = ArrayView::contiguous(vec![5]);
-
-        assert_eq!(view.dims, vec![5]);
-        assert_eq!(view.strides, vec![1]);
-        assert_eq!(view.offset, 0);
-        assert_eq!(view.size(), 5);
-        assert!(view.is_contiguous());
-    }
-
-    #[test]
-    fn test_array_view_contiguous_3d() {
-        // Test creating a contiguous 3D array view
-        let view = ArrayView::contiguous(vec![2, 3, 4]);
-
-        assert_eq!(view.dims, vec![2, 3, 4]);
-        assert_eq!(view.strides, vec![12, 4, 1]); // Row-major: 3*4, 4, 1
-        assert_eq!(view.offset, 0);
-        assert_eq!(view.size(), 24);
-        assert!(view.is_contiguous());
-    }
-
-    #[test]
-    fn test_array_view_apply_range_first_dim() {
-        // Test applying a range to the first dimension
-        let view = ArrayView::contiguous(vec![5, 3]);
-        let sliced = view.apply_range_subscript(0, 2, 5).unwrap();
-
-        assert_eq!(sliced.dims, vec![3, 3]); // [2:5] gives 3 elements
-        assert_eq!(sliced.strides, vec![3, 1]); // Same strides
-        assert_eq!(sliced.offset, 6); // Skip first 2 rows (2 * 3 = 6)
-        assert_eq!(sliced.size(), 9);
-        assert!(!sliced.is_contiguous()); // No longer contiguous due to offset
-    }
-
-    #[test]
-    fn test_array_view_apply_range_second_dim() {
-        // Test applying a range to the second dimension
-        let view = ArrayView::contiguous(vec![3, 5]);
-        let sliced = view.apply_range_subscript(1, 1, 3).unwrap();
-
-        assert_eq!(sliced.dims, vec![3, 2]); // [1:3] gives 2 elements
-        assert_eq!(sliced.strides, vec![5, 1]); // Row stride unchanged
-        assert_eq!(sliced.offset, 1); // Skip first column
-        assert_eq!(sliced.size(), 6);
-        assert!(!sliced.is_contiguous());
-    }
-
-    #[test]
-    fn test_array_view_apply_range_1d() {
-        // Test applying a range to a 1D array (like source[3:5])
-        let view = ArrayView::contiguous(vec![5]);
-        let sliced = view.apply_range_subscript(0, 2, 5).unwrap(); // 0-based: [2:5)
-
-        assert_eq!(sliced.dims, vec![3]); // Elements at indices 2, 3, 4
-        assert_eq!(sliced.strides, vec![1]);
-        assert_eq!(sliced.offset, 2);
-        assert_eq!(sliced.size(), 3);
-        assert!(!sliced.is_contiguous()); // Has non-zero offset
-    }
-
-    #[test]
-    fn test_array_view_range_bounds_checking() {
-        let view = ArrayView::contiguous(vec![5, 3]);
-
-        // Test out of bounds dimension index
-        assert!(view.apply_range_subscript(2, 0, 1).is_err());
-
-        // Test invalid range (start >= end)
-        assert!(view.apply_range_subscript(0, 3, 3).is_err());
-        assert!(view.apply_range_subscript(0, 4, 2).is_err());
-
-        // Test range exceeding dimension size
-        assert!(view.apply_range_subscript(0, 0, 6).is_err());
-        assert!(view.apply_range_subscript(0, 4, 6).is_err());
-    }
-
-    #[test]
-    fn test_array_view_empty_array() {
-        // Test edge case of empty array
-        let view = ArrayView::contiguous(vec![]);
-
-        assert_eq!(view.dims, Vec::<usize>::new());
-        assert_eq!(view.strides, Vec::<isize>::new());
-        assert_eq!(view.offset, 0);
-        assert_eq!(view.size(), 1); // Empty product is 1
-        assert!(view.is_contiguous());
-    }
-
-    #[test]
-    fn test_array_view_is_contiguous() {
-        // Test various cases for is_contiguous
-
-        // Contiguous: fresh array
-        let view1 = ArrayView::contiguous(vec![3, 4]);
-        assert!(view1.is_contiguous());
-
-        // Not contiguous: has offset
-        let view2 = ArrayView {
-            dims: vec![3, 4],
-            strides: vec![4, 1],
-            offset: 5,
-            sparse: Vec::new(),
-            dim_names: vec![String::new(), String::new()],
-        };
-        assert!(!view2.is_contiguous());
-
-        // Not contiguous: wrong strides for row-major
-        let view3 = ArrayView {
-            dims: vec![3, 4],
-            strides: vec![1, 3], // Column-major strides
-            offset: 0,
-            sparse: Vec::new(),
-            dim_names: vec![String::new(), String::new()],
-        };
-        assert!(!view3.is_contiguous());
-
-        // Contiguous: manually constructed but correct
-        let view4 = ArrayView {
-            dims: vec![2, 3, 4],
-            strides: vec![12, 4, 1],
-            offset: 0,
-            sparse: Vec::new(),
-            dim_names: vec![String::new(), String::new(), String::new()],
-        };
-        assert!(view4.is_contiguous());
-    }
-
-    #[test]
     fn test_dimension_metadata_population() {
-        use crate::datamodel::{
+        use crate::test_common::TestProject;
+        use simlin_base::datamodel::{
             self, Aux as DatamodelAux, Model as DatamodelModel, SimMethod, SimSpecs,
             Variable as DatamodelVariable, Visibility,
         };
-        use crate::test_common::TestProject;
 
         // Create a datamodel project with a named dimension
         let datamodel_project = datamodel::Project {
@@ -530,11 +387,11 @@ mod tests {
 
     #[test]
     fn test_indexed_dimension_metadata() {
-        use crate::datamodel::{
+        use crate::test_common::TestProject;
+        use simlin_base::datamodel::{
             self, Aux as DatamodelAux, Model as DatamodelModel, SimMethod, SimSpecs,
             Variable as DatamodelVariable, Visibility,
         };
-        use crate::test_common::TestProject;
 
         // Create a datamodel project with an indexed dimension
         let datamodel_project = datamodel::Project {

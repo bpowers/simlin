@@ -57,13 +57,13 @@ IDENT_ROWS = [
         "identifier interner (intern, and a payload's drop)",
         [
             "CanonicalStorage>::intern",
-            "simlin_engine::common::Interned",
-            "simlin_engine::common::Interner",
+            "simlin_base::common::Interned",
+            "simlin_base::common::Interner",
         ],
         [],
     ),
     ("Arc refcounts, every Arc (alloc/src/sync.rs)", [], ["alloc/src/sync.rs"]),
-    ("canonicalize", ["simlin_engine::common::canonicalize", "is_canonical"], []),
+    ("canonicalize", ["simlin_base::common::canonicalize", "is_canonical"], []),
 ]
 
 

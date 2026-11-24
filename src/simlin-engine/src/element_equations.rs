@@ -32,11 +32,11 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Expr0, IndexExpr0, print_eqn};
-use crate::builtins::UntypedBuiltinFn;
-use crate::common::{CanonicalElementName, RawIdent, canonicalize};
-use crate::datamodel::{self, DimensionElements, Equation, Project, Variable};
-use crate::lexer::LexerType;
+use simlin_base::ast::{Expr0, IndexExpr0, print_eqn};
+use simlin_base::builtins::UntypedBuiltinFn;
+use simlin_base::common::{CanonicalElementName, RawIdent, canonicalize};
+use simlin_base::datamodel::{self, DimensionElements, Equation, Project, Variable};
+use simlin_base::lexer::LexerType;
 
 fn canonical(name: &str) -> String {
     canonicalize(name).into_owned()
@@ -108,11 +108,13 @@ impl Model {
 /// back bare, and otherwise as the printer spells it.
 fn spelled(name: &str) -> String {
     let bare = name.split_whitespace().collect::<Vec<_>>().join("_");
-    if !bare.is_empty() && !bare.contains('.') && crate::ast::print_ident(&bare) == canonical(&bare)
+    if !bare.is_empty()
+        && !bare.contains('.')
+        && simlin_base::ast::print_ident(&bare) == canonical(&bare)
     {
         bare
     } else {
-        crate::ast::print_ident(name)
+        simlin_base::ast::print_ident(name)
     }
 }
 
@@ -389,9 +391,11 @@ fn is_number(text: &str) -> bool {
     fn number(expr: &Expr0) -> bool {
         match expr {
             Expr0::Const(..) => true,
-            Expr0::Op1(crate::ast::UnaryOp::Negative | crate::ast::UnaryOp::Positive, inner, _) => {
-                number(inner)
-            }
+            Expr0::Op1(
+                simlin_base::ast::UnaryOp::Negative | simlin_base::ast::UnaryOp::Positive,
+                inner,
+                _,
+            ) => number(inner),
             _ => false,
         }
     }

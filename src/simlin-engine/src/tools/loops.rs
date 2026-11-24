@@ -56,7 +56,6 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
-use crate::datamodel::{self, Variable};
 use crate::db::{
     LtmMode, LtmOverlay, SimlinDb, SourceModel, SourceProject, set_project_ltm_discovery_mode,
 };
@@ -64,7 +63,8 @@ use crate::ltm::{
     LinkPolarity, LoopPolarity, canonical_rotation, is_synthetic_node_name, strip_subscript,
 };
 use crate::ltm_dominance::{LEAD_TIE, MeanShares, leader_by_step, leader_timeline, strongest};
-use crate::results::Results;
+use simlin_base::datamodel::{self, Variable};
+use simlin_base::results::Results;
 
 use super::evidence::Evidence;
 use super::runs::{self, CURRENT, Run, RunPlan, RunStore};
@@ -1003,7 +1003,7 @@ fn analyze(
         .db
         .current_source_project()
         .ok_or_else(|| unanalyzable("the project has not been compiled"))?;
-    let canonical = crate::canonicalize(&model.name).into_owned();
+    let canonical = simlin_base::canonicalize(&model.name).into_owned();
     let source_model = source_project
         .models(ws.db)
         .get(&canonical)
@@ -1124,7 +1124,7 @@ fn read_loops(
         Some(waiting) if waiting() => Err(ToolError::interrupted()),
         _ => Ok(()),
     };
-    let canonical = crate::canonicalize(&model.name).into_owned();
+    let canonical = simlin_base::canonicalize(&model.name).into_owned();
     let source_model = source_project
         .models(db)
         .get(&canonical)
@@ -1208,7 +1208,7 @@ fn read_loops(
             basis: LoopBasis::Run,
             times: results
                 .iter()
-                .map(|row| row[crate::results::TIME_OFF])
+                .map(|row| row[simlin_base::results::TIME_OFF])
                 .collect(),
             loops,
             partitions: discovery
@@ -1262,7 +1262,7 @@ fn stocks_move_by_residue(model: &datamodel::Model, plan: &RunPlan, results: &Re
         let Variable::Stock(stock) = var else {
             continue;
         };
-        let canonical = crate::canonicalize(&stock.ident).into_owned();
+        let canonical = simlin_base::canonicalize(&stock.ident).into_owned();
         for column in super::series::variable_columns(results, model, &canonical) {
             any = true;
             let series: Vec<f64> = results.iter().map(|row| row[column.offset]).collect();
@@ -1615,7 +1615,7 @@ impl<'a> ModelNames<'a> {
             by_ident: model
                 .variables
                 .iter()
-                .map(|var| (crate::canonicalize(var.get_ident()).into_owned(), var))
+                .map(|var| (simlin_base::canonicalize(var.get_ident()).into_owned(), var))
                 .collect(),
         }
     }
@@ -1853,7 +1853,7 @@ fn report(
     let names = ModelNames::new(model);
     let through_ident = through
         .as_deref()
-        .map(|name| crate::canonicalize(name).into_owned());
+        .map(|name| simlin_base::canonicalize(name).into_owned());
     let selection = Selection::new(analysis, through_ident.as_deref());
     let answer = |units: usize, rivals: bool, id: &mut dyn FnMut(&[String]) -> String| {
         let body = selection.build(units, rivals, id, analysis, &names);

@@ -66,12 +66,12 @@ use self::placement::{
 use self::sfdp::{SfdpConfig, compute_layout_from_initial_with_callback, should_trigger_annealing};
 use self::text::{estimate_label_bounds, format_label_with_line_breaks};
 use self::uid::UidManager;
-use crate::common::canonicalize;
-use crate::datamodel;
-use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
-use crate::datamodel::{Rect, ViewElement};
 use crate::diagram::flow_geometry::clamp_to_face_span;
 use crate::ltm_dominance::{FeedbackLoop, LoopPolarity, PartitionSurface};
+use simlin_base::common::canonicalize;
+use simlin_base::datamodel;
+use simlin_base::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
+use simlin_base::datamodel::{Rect, ViewElement};
 
 /// A queued element during chain layout BFS traversal.
 struct WorkItem {

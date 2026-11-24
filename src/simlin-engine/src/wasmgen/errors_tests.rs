@@ -21,7 +21,6 @@
 
 use super::*;
 
-use crate::common::ErrorCode;
 use crate::conveyor::SlatBoundGuard;
 use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use crate::queue_compile::{build_vm, compile_sim};
@@ -29,6 +28,7 @@ use crate::vm::{CompiledSimulation, Vm};
 use crate::wasmgen::WasmArtifact;
 use crate::wasmgen::module::{compile_simulation, compile_simulation_with_fault};
 use checked::{Store, Stored, StoredValue};
+use simlin_base::common::ErrorCode;
 use std::io::BufReader;
 use wasm::addrs::ModuleAddr;
 use wasm::validate;
@@ -38,7 +38,7 @@ type Inst = Stored<ModuleAddr>;
 
 // ── drivers ──────────────────────────────────────────────────────────────────
 
-fn compile(datamodel: &crate::datamodel::Project) -> std::sync::Arc<CompiledSimulation> {
+fn compile(datamodel: &simlin_base::datamodel::Project) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
     compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
@@ -166,7 +166,7 @@ fn layout_offset(artifact: &WasmArtifact, name: &str) -> usize {
 /// A minimal scalar Euler model: `level` integrates a constant `inflow_rate` of 2
 /// from t=0 to t=5 at dt=1, so `run` saves six rows (t = 0..=5) whose `level`
 /// values are `0, 2, 4, 6, 8, 10`.
-fn ramp_fixture() -> crate::datamodel::Project {
+fn ramp_fixture() -> simlin_base::datamodel::Project {
     crate::test_common::TestProject::new("errchan")
         .with_sim_time(0.0, 5.0, 1.0)
         .aux("inflow_rate", "2", None)
@@ -199,7 +199,7 @@ fn over_bound_conveyor_xmile(len_eqn: &str) -> String {
 /// These are the SAME plans the VM attaches, so a reconstruction driven by them is
 /// driven by the belt names and slot offsets the VM used.
 fn conveyor_plans(
-    project: &crate::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> Vec<crate::conveyor_compile::ConveyorPlan> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
@@ -418,7 +418,9 @@ fn step_fault_reports_error_and_saves_no_row() {
     // The VM's clean series, as the oracle for the rows that did complete.
     let mut vm = Vm::new(compile(&datamodel)).expect("vm");
     vm.run_to_end().expect("vm runs the fault-free model");
-    let vm_level = vm.get_series(&crate::common::Ident::new("level")).unwrap();
+    let vm_level = vm
+        .get_series(&simlin_base::common::Ident::new("level"))
+        .unwrap();
 
     with_instance(&artifact, |store, inst| {
         call_void(store, inst, "run");
@@ -731,7 +733,9 @@ fn an_init_flows_evaluation_leaves_the_run_at_vm_parity() {
 
     let mut vm = Vm::new(compile(&datamodel)).expect("vm");
     vm.run_to_end().expect("vm run");
-    let vm_level = vm.get_series(&crate::common::Ident::new("level")).unwrap();
+    let vm_level = vm
+        .get_series(&simlin_base::common::Ident::new("level"))
+        .unwrap();
 
     with_instance(&artifact, |store, inst| {
         call_void(store, inst, "run");
@@ -889,7 +893,9 @@ fn an_unraised_fault_leaves_the_run_untouched() {
 
     let mut vm = Vm::new(compile(&datamodel)).expect("vm");
     vm.run_to_end().expect("vm run");
-    let vm_level = vm.get_series(&crate::common::Ident::new("level")).unwrap();
+    let vm_level = vm
+        .get_series(&simlin_base::common::Ident::new("level"))
+        .unwrap();
 
     with_instance(&artifact, |store, inst| {
         call_void(store, inst, "run");

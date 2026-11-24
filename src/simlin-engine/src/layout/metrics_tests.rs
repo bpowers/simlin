@@ -3,11 +3,11 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::datamodel::view_element::{self, LabelSide, LinkShape};
 use crate::diagram::common::segment_length_in_rect;
 use crate::diagram::constants::{AUX_RADIUS, STOCK_WIDTH};
 use crate::layout::taste::{Degradation, degrade};
 use proptest::prelude::*;
+use simlin_base::datamodel::view_element::{self, LabelSide, LinkShape};
 
 // --- fixture helpers ---
 
@@ -1475,7 +1475,7 @@ fn test_label_scene_cost_equals_a_full_scan() {
     // the whole scene charges -- bit for bit, since the chooser compares costs
     // with a tie tolerance. Rows: every label side of every named element in
     // the shipped exemplar diagrams, against the other labels as drawn.
-    use crate::datamodel::view_element::LabelSide;
+    use simlin_base::datamodel::view_element::LabelSide;
     let weights = MetricWeights::default();
     for dir in ["logistic-growth", "population", "fishbanks", "reliability"] {
         let view = default_project_view(dir);

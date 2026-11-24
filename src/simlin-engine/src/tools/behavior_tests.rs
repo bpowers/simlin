@@ -6,8 +6,8 @@
 //! the invariances a mode must have.
 
 use super::*;
-use crate::datamodel::SimMethod;
 use crate::test_common::TestProject;
+use simlin_base::datamodel::SimMethod;
 
 /// Simulate `project` and return the saved times and `variable`'s series.
 fn simulate(project: TestProject, variable: &str) -> (Vec<f64>, Vec<f64>) {
@@ -846,7 +846,7 @@ fn series_from_real_models_are_named_as_a_modeler_names_them() {
 }
 
 /// A model of the corpus, run: a Vensim model, or an XMILE one.
-fn corpus_run(path: &str) -> crate::results::Results {
+fn corpus_run(path: &str) -> simlin_base::results::Results {
     let full = format!("{}/../../test/{path}", env!("CARGO_MANIFEST_DIR"));
     let contents = std::fs::read_to_string(&full).unwrap_or_else(|err| panic!("{full}: {err}"));
     let project = if path.ends_with(".mdl") {
@@ -1422,7 +1422,7 @@ fn the_classifier_names_labeled_series_as_a_modeler_does() {
     let mut models: Vec<&str> = LABELED.iter().map(|row| row.0).collect();
     models.sort_unstable();
     models.dedup();
-    let runs: Vec<(&str, crate::results::Results)> = models
+    let runs: Vec<(&str, simlin_base::results::Results)> = models
         .into_iter()
         .map(|path| (path, corpus_run(path)))
         .collect();
@@ -1433,7 +1433,7 @@ fn the_classifier_names_labeled_series_as_a_modeler_does() {
             .unwrap_or_else(|| panic!("{model} is a labeled model"));
         let offset = *results
             .offsets
-            .get(&crate::common::Ident::new(variable))
+            .get(&simlin_base::common::Ident::new(variable))
             .unwrap_or_else(|| panic!("{model} has no {variable}"));
         (
             results.iter().map(|row| row[0]).collect(),

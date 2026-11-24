@@ -21,10 +21,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::canonicalize;
-use crate::datamodel::Project;
 use crate::mdl::ast::{Equation, Expr, MdlItem, Subscript};
 use crate::mdl::reader::EquationReader;
+use simlin_base::common::canonicalize;
+use simlin_base::datamodel::Project;
 
 /// Each equation of the MDL text `mdl` that names a subscript range on its
 /// right-hand side that its left-hand side neither holds nor has a range

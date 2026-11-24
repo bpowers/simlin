@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use super::types::{VensimElement, VensimValve, VensimVariable, VensimView};
-use crate::datamodel::view_element::LinkShape;
+use simlin_base::datamodel::view_element::LinkShape;
 
 /// Calculate angle from three points (AngleFromPoints from xmutil).
 ///

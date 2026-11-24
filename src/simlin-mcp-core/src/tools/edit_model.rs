@@ -483,15 +483,15 @@ pub async fn edit_model<A: ProjectAccess>(
 /// fails the edit -- the model data is correct -- but the agent has to know
 /// the diagram no longer matches it.
 fn sync_diagram(
-    project: &mut simlin_engine::datamodel::Project,
+    project: &mut simlin_base::datamodel::Project,
     model_name: &str,
-    model_patch: Option<&simlin_engine::ModelPatch>,
+    model_patch: Option<&simlin_base::ModelPatch>,
 ) -> Option<ErrorOutput> {
     let old_view = project
         .get_model(model_name)
         .and_then(|m| m.views.first())
         .map(|v| match v {
-            simlin_engine::datamodel::View::StockFlow(sf) => sf,
+            simlin_base::datamodel::View::StockFlow(sf) => sf,
         });
 
     let synced = if let (Some(old_sf), Some(patch)) = (old_view, model_patch) {
@@ -519,15 +519,15 @@ fn sync_diagram(
 /// reason, so the agent learns the diagram still shows the model as it was
 /// before this edit rather than reading a stale diagram as current.
 fn install_synced_view(
-    project: &mut simlin_engine::datamodel::Project,
+    project: &mut simlin_base::datamodel::Project,
     model_name: &str,
-    synced: Result<simlin_engine::datamodel::StockFlow, String>,
+    synced: Result<simlin_base::datamodel::StockFlow, String>,
 ) -> Option<ErrorOutput> {
     let mut layout = match synced {
         Ok(layout) => layout,
         Err(reason) => {
             return Some(ErrorOutput {
-                code: simlin_engine::common::ErrorCode::Generic.to_string(),
+                code: simlin_base::common::ErrorCode::Generic.to_string(),
                 message: format!(
                     "diagram sync: {reason}; the edit was applied, but the diagram was not \
                      updated and still shows the model as it was before this edit"
@@ -540,7 +540,7 @@ fn install_synced_view(
     };
     let model = project.get_model_mut(model_name)?;
     match model.views.first_mut() {
-        Some(simlin_engine::datamodel::View::StockFlow(first)) => {
+        Some(simlin_base::datamodel::View::StockFlow(first)) => {
             if first.zoom > 0.0 {
                 layout.zoom = first.zoom;
             }
@@ -548,7 +548,7 @@ fn install_synced_view(
         }
         None => model
             .views
-            .push(simlin_engine::datamodel::View::StockFlow(layout)),
+            .push(simlin_base::datamodel::View::StockFlow(layout)),
     }
     None
 }
@@ -561,12 +561,12 @@ fn build_patch(
     model_name: &str,
     sim_specs: Option<ejson::SimSpecs>,
     operations: Option<Vec<EditOperation>>,
-) -> simlin_engine::ProjectPatch {
+) -> simlin_base::ProjectPatch {
     let project_ops = sim_specs
-        .map(|ss| vec![simlin_engine::ProjectOperation::SetSimSpecs(ss.into())])
+        .map(|ss| vec![simlin_base::ProjectOperation::SetSimSpecs(ss.into())])
         .unwrap_or_default();
 
-    let model_ops: Vec<simlin_engine::ModelOperation> = operations
+    let model_ops: Vec<simlin_base::ModelOperation> = operations
         .unwrap_or_default()
         .into_iter()
         .map(convert_operation)
@@ -575,13 +575,13 @@ fn build_patch(
     let models = if model_ops.is_empty() {
         vec![]
     } else {
-        vec![simlin_engine::ModelPatch {
+        vec![simlin_base::ModelPatch {
             name: model_name.to_string(),
             ops: model_ops,
         }]
     };
 
-    simlin_engine::ProjectPatch {
+    simlin_base::ProjectPatch {
         project_ops,
         models,
     }
@@ -619,7 +619,7 @@ fn convert_arrayed_equation(a: ArrayedEquationInput) -> ejson::ArrayedEquation {
 ///
 /// Excluded fields (`uid`, `ai_state`, `compat`) are filled with engine
 /// defaults (0 / None).
-fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
+fn convert_operation(op: EditOperation) -> simlin_base::ModelOperation {
     match op {
         EditOperation::UpsertStock(s) => {
             let json_stock = ejson::Stock {
@@ -637,7 +637,7 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
                 can_be_module_input: false,
                 is_public: false,
             };
-            simlin_engine::ModelOperation::UpsertStock(json_stock.into())
+            simlin_base::ModelOperation::UpsertStock(json_stock.into())
         }
         EditOperation::UpsertFlow(f) => {
             let json_flow = ejson::Flow {
@@ -654,7 +654,7 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
                 can_be_module_input: false,
                 is_public: false,
             };
-            simlin_engine::ModelOperation::UpsertFlow(json_flow.into())
+            simlin_base::ModelOperation::UpsertFlow(json_flow.into())
         }
         EditOperation::UpsertAuxiliary(a) => {
             let json_aux = ejson::Auxiliary {
@@ -670,16 +670,16 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
                 can_be_module_input: false,
                 is_public: false,
             };
-            simlin_engine::ModelOperation::UpsertAux(json_aux.into())
+            simlin_base::ModelOperation::UpsertAux(json_aux.into())
         }
         EditOperation::RemoveVariable(r) => {
-            simlin_engine::ModelOperation::DeleteVariable { ident: r.name }
+            simlin_base::ModelOperation::DeleteVariable { ident: r.name }
         }
-        EditOperation::RenameVariable(r) => simlin_engine::ModelOperation::RenameVariable {
+        EditOperation::RenameVariable(r) => simlin_base::ModelOperation::RenameVariable {
             from: r.from,
             to: r.to,
         },
-        EditOperation::SetLoopName(input) => simlin_engine::ModelOperation::SetLoopName {
+        EditOperation::SetLoopName(input) => simlin_base::ModelOperation::SetLoopName {
             variables: input.variables,
             name: input.name,
             description: input.description,
@@ -699,7 +699,7 @@ mod tests {
     /// is what this layer owes the agent whatever the reason.
     #[test]
     fn install_synced_view_arms() {
-        use simlin_engine::datamodel::View;
+        use simlin_base::datamodel::View;
         let mut project = build_empty_project(default_sim_specs());
         simlin_engine::apply_patch(
             &mut project,
@@ -719,12 +719,12 @@ mod tests {
         .expect("the patch applies");
         let synced =
             simlin_engine::layout::generate_best_layout(&project, "main", None).expect("layout");
-        let first = simlin_engine::datamodel::StockFlow {
+        let first = simlin_base::datamodel::StockFlow {
             elements: Vec::new().into(),
             zoom: 2.0,
             ..synced.clone()
         };
-        let second = simlin_engine::datamodel::StockFlow {
+        let second = simlin_base::datamodel::StockFlow {
             zoom: 0.5,
             ..synced.clone()
         };
@@ -734,7 +734,7 @@ mod tests {
             View::StockFlow(second.clone()),
         ];
         assert!(install_synced_view(&mut project, "main", Ok(synced.clone())).is_none());
-        let kept_zoom = simlin_engine::datamodel::StockFlow {
+        let kept_zoom = simlin_base::datamodel::StockFlow {
             zoom: 2.0,
             ..synced.clone()
         };
@@ -812,7 +812,7 @@ mod tests {
     /// catch-all -- reaching it means an arm mapped to the wrong family.
     #[test]
     fn convert_operation_maps_every_edit_operation() {
-        use simlin_engine::ModelOperation;
+        use simlin_base::ModelOperation;
 
         let ops = vec![
             EditOperation::UpsertStock(UpsertStockInput {

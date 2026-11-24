@@ -4,7 +4,7 @@
 
 // pattern: Functional Core
 // Pure transformation: each emitter builds the body of one self-contained wasm
-// helper function mirroring the matching `crate::alloc` function. No I/O; the
+// helper function mirroring the matching `simlin_base::alloc` function. No I/O; the
 // only side effect is in `#[cfg(test)]` (which lives in `lower_tests.rs`
 // alongside the rest of the lowering harness).
 
@@ -12,18 +12,18 @@
 //! (`AllocateAvailable`/`AllocateByPriority`) to WebAssembly (Phase 6).
 //!
 //! These opcodes route through four self-contained wasm helper functions that
-//! port `crate::alloc` *bit-faithfully* -- exact constants, exact Horner
+//! port `simlin_base::alloc` *bit-faithfully* -- exact constants, exact Horner
 //! evaluation order, exact branch structure, and the exact bisection loop +
 //! relative-convergence break -- so the emitted module takes the same numerical
 //! path the VM does:
 //!
-//! - [`emit_erfc_approx`] -- `crate::alloc::erfc_approx` (Abramowitz-Stegun
+//! - [`emit_erfc_approx`] -- `simlin_base::alloc::erfc_approx` (Abramowitz-Stegun
 //!   26.2.17), `call`ing the Phase-2 `exp` helper for the `(-z*z).exp()` factor.
-//! - [`emit_normal_cdf`] -- `crate::alloc::normal_cdf`
+//! - [`emit_normal_cdf`] -- `simlin_base::alloc::normal_cdf`
 //!   (`0.5 * erfc_approx(-x / SQRT_2)`).
-//! - [`emit_alloc_curve`] -- `crate::alloc::alloc_curve` (all six `ptype % 10`
+//! - [`emit_alloc_curve`] -- `simlin_base::alloc::alloc_curve` (all six `ptype % 10`
 //!   curve branches + the `ptype >= 10` floor flag).
-//! - [`emit_allocate_available`] -- `crate::alloc::allocate_available` (the
+//! - [`emit_allocate_available`] -- `simlin_base::alloc::allocate_available` (the
 //!   `total_demand` short-circuits, the per-type search-range computation, the
 //!   100-iteration bisection, and the final per-requester `alloc_curve`).
 //!
@@ -76,7 +76,7 @@ const AS_P: f64 = 0.3275911;
 const ERFC_Z: u32 = 0;
 const ERFC_T: u32 = 1;
 
-/// Emit `erfc_approx(z: f64) -> f64`, porting `crate::alloc::erfc_approx`
+/// Emit `erfc_approx(z: f64) -> f64`, porting `simlin_base::alloc::erfc_approx`
 /// (Abramowitz-Stegun 26.2.17) bit-faithfully.
 ///
 /// For `z < 0` returns `2.0 - erfc_approx(-z)` (the symmetry the Rust reference
@@ -150,7 +150,7 @@ fn emit_erfc_kernel(f: &mut Function, exp_idx: u32) {
 
 const NCDF_X: u32 = 0;
 
-/// Emit `normal_cdf(x: f64) -> f64`, porting `crate::alloc::normal_cdf`:
+/// Emit `normal_cdf(x: f64) -> f64`, porting `simlin_base::alloc::normal_cdf`:
 /// `if x.is_nan() { NaN } else { 0.5 * erfc_approx(-x / SQRT_2) }`. `erfc_idx`
 /// is [`emit_erfc_approx`]'s assigned function index.
 pub(crate) fn emit_normal_cdf(erfc_idx: u32) -> Function {
@@ -195,7 +195,7 @@ const CURVE_Z: u32 = 9; // f64 the exponential branch `z`
 const CURVE_Q: u32 = 10; // f64 the CES branch `q`
 
 /// Emit `alloc_curve(p, request, ptype, ppriority, pwidth, pextra) -> f64`,
-/// porting `crate::alloc::alloc_curve` bit-faithfully.
+/// porting `simlin_base::alloc::alloc_curve` bit-faithfully.
 ///
 /// `request <= 0` returns 0 immediately. Otherwise the survival `fraction` is
 /// selected by `ptype % 10` across all six branches (0 fixed, 1 rectangular,
@@ -559,7 +559,7 @@ const PROFILE_BYTES: i32 = 32;
 const SLOT_BYTES: i32 = 8;
 
 /// Emit `allocate_available(requests_ptr, n, profiles_ptr, avail, out_ptr)`,
-/// porting `crate::alloc::allocate_available` bit-faithfully over scratch-memory
+/// porting `simlin_base::alloc::allocate_available` bit-faithfully over scratch-memory
 /// arrays.
 ///
 /// The three short-circuits (`n == 0` -> nothing written; `avail >=
@@ -1286,18 +1286,18 @@ mod tests {
         MemorySection, MemoryType, Module, TypeSection, ValType,
     };
 
-    // The allocation helpers are bit-faithful ports of `crate::alloc`. Their
+    // The allocation helpers are bit-faithful ports of `simlin_base::alloc`. Their
     // leaf transcendental helpers (`exp`/`pow`) are NOT bit-identical to the
     // VM's libm -- they are the open-coded approximations of Phase 2, pinned in
     // `super::super::math` to abs 0.0 / rel ~1e-12 vs `f64`. So the alloc helpers
-    // can only match the Rust `crate::alloc` reference (which uses libm) to that
+    // can only match the Rust `simlin_base::alloc` reference (which uses libm) to that
     // leaf tolerance, propagated through the curves and the bisection.
     //
     // Documented tolerances (all far inside the corpus bar of abs 2e-3 /
     // rel 5e-6):
     // - erfc_approx / normal_cdf: abs 1e-12 OR rel 1e-12. erfc's only
     //   transcendental is one `exp` call (rel ~1e-12); the polynomial is exact
-    //   arithmetic, so the wasm result tracks `crate::alloc::erfc_approx` to the
+    //   arithmetic, so the wasm result tracks `simlin_base::alloc::erfc_approx` to the
     //   exp helper's tolerance.
     // - alloc_curve: abs 1e-9 OR rel 1e-9 across all six branches. Most use at
     //   most one exp/normal_cdf (rel ~1e-12); CES adds a `pow = exp(y*ln x)`
@@ -1486,7 +1486,7 @@ mod tests {
             .expect("invoke")
     }
 
-    // ── erfc_approx parity vs crate::alloc::erfc_approx (AC7.1) ──────────────
+    // ── erfc_approx parity vs simlin_base::alloc::erfc_approx (AC7.1) ──────────────
 
     #[test]
     fn erfc_approx_matches_rust_over_sampled_range() {
@@ -1496,7 +1496,7 @@ mod tests {
         // tracks it to the `exp` helper's tolerance.
         for z in linspace(-6.0, 6.0, 400) {
             let got = run_unary(Which::Erfc, z);
-            let want = crate::alloc::erfc_approx(z);
+            let want = simlin_base::alloc::erfc_approx(z);
             assert_close(&format!("erfc_approx({z})"), got, want, ERFC_ABS, ERFC_REL);
         }
         // Anchor at z=0 (t=1): the wasm result tracks the Rust reference, which
@@ -1505,19 +1505,19 @@ mod tests {
         assert_close(
             "erfc_approx(0)",
             run_unary(Which::Erfc, 0.0),
-            crate::alloc::erfc_approx(0.0),
+            simlin_base::alloc::erfc_approx(0.0),
             ERFC_ABS,
             ERFC_REL,
         );
     }
 
-    // ── normal_cdf parity vs crate::alloc::normal_cdf (AC7.1) ────────────────
+    // ── normal_cdf parity vs simlin_base::alloc::normal_cdf (AC7.1) ────────────────
 
     #[test]
     fn normal_cdf_matches_rust_over_sampled_range() {
         for x in linspace(-6.0, 6.0, 400) {
             let got = run_unary(Which::NormalCdf, x);
-            let want = crate::alloc::normal_cdf(x);
+            let want = simlin_base::alloc::normal_cdf(x);
             assert_close(&format!("normal_cdf({x})"), got, want, ERFC_ABS, ERFC_REL);
         }
         // NaN propagates (the explicit `x.is_nan()` guard).
@@ -1525,11 +1525,11 @@ mod tests {
         // normal_cdf(0) tracks the Rust reference. (The A-S 26.2.17 erfc
         // polynomial is ~0.4999999995 at x=0, NOT exactly 0.5 -- the ~1.5e-7
         // approximation error is a property of the reference itself, so parity
-        // is judged against `crate::alloc::normal_cdf`, not ideal math.)
+        // is judged against `simlin_base::alloc::normal_cdf`, not ideal math.)
         assert_close(
             "normal_cdf(0)",
             run_unary(Which::NormalCdf, 0.0),
-            crate::alloc::normal_cdf(0.0),
+            simlin_base::alloc::normal_cdf(0.0),
             ERFC_ABS,
             ERFC_REL,
         );
@@ -1537,13 +1537,13 @@ mod tests {
 
     // ── alloc_curve parity for each of the 6 profile types + the >=10 floor ──
 
-    /// Assert the emitted `alloc_curve` matches `crate::alloc::alloc_curve` over
+    /// Assert the emitted `alloc_curve` matches `simlin_base::alloc::alloc_curve` over
     /// a grid of prices for one profile `(ptype, ppriority, pwidth, pextra)` and
     /// a fixed positive request.
     fn assert_curve_matches(ptype: i32, pp: f64, pw: f64, pe: f64, request: f64) {
         for p in linspace(-3.0, 8.0, 120) {
             let got = run_alloc_curve(p, request, ptype, pp, pw, pe);
-            let want = crate::alloc::alloc_curve(p, request, ptype, pp, pw, pe);
+            let want = simlin_base::alloc::alloc_curve(p, request, ptype, pp, pw, pe);
             assert_close(
                 &format!("alloc_curve(p={p}, ptype={ptype}, pp={pp}, pw={pw}, pe={pe})"),
                 got,
@@ -1615,14 +1615,14 @@ mod tests {
         for &request in &[0.0, -1.0, -100.0] {
             for ptype in 0..6 {
                 let got = run_alloc_curve(1.0, request, ptype, 2.0, 1.0, 1.0);
-                let want = crate::alloc::alloc_curve(1.0, request, ptype, 2.0, 1.0, 1.0);
+                let want = simlin_base::alloc::alloc_curve(1.0, request, ptype, 2.0, 1.0, 1.0);
                 assert_eq!(got, want, "request {request}, ptype {ptype}");
                 assert_eq!(got, 0.0);
             }
         }
     }
 
-    // ── allocate_available parity vs crate::alloc::allocate_available ────────
+    // ── allocate_available parity vs simlin_base::alloc::allocate_available ────────
 
     // Scratch byte layout for the `allocate_available` helper test: the i32
     // requester count at N_ADDR, requests at REQ_BASE, profiles at PROF_BASE
@@ -1701,7 +1701,7 @@ mod tests {
     }
 
     /// Run the emitted `allocate_available` over `requests`/`profiles` and read
-    /// back the `n` result slots; compare against `crate::alloc::allocate_available`.
+    /// back the `n` result slots; compare against `simlin_base::alloc::allocate_available`.
     fn assert_allocate_matches(requests: &[f64], profiles: &[(f64, f64, f64, f64)], avail: f64) {
         assert_eq!(requests.len(), profiles.len());
         let n = requests.len();
@@ -1752,7 +1752,7 @@ mod tests {
                 })
                 .collect()
         });
-        let want = crate::alloc::allocate_available(requests, profiles, avail);
+        let want = simlin_base::alloc::allocate_available(requests, profiles, avail);
         assert_eq!(want.len(), n);
         for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
             assert_close(

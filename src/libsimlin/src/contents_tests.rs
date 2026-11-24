@@ -67,14 +67,14 @@ fn a_mutable_borrow_drops_every_index_and_a_shared_borrow_keeps_them() {
             contents.hit_index(name).expect("the model has a view");
         }
         let revision = contents.revision();
-        let _: &simlin_engine::datamodel::Project = &contents;
+        let _: &simlin_base::datamodel::Project = &contents;
         assert!(contents.has_hit_index("main") && contents.has_hit_index("other"));
         assert_eq!(
             contents.revision(),
             revision,
             "a shared borrow keeps the revision"
         );
-        let _: &mut simlin_engine::datamodel::Project = &mut contents;
+        let _: &mut simlin_base::datamodel::Project = &mut contents;
         assert!(!contents.has_hit_index("main") && !contents.has_hit_index("other"));
         assert_eq!(
             contents.revision(),

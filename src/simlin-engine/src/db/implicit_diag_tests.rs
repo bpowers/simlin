@@ -105,8 +105,8 @@ fn implicit_helper_codegen_failure_is_attributed() {
 /// equation.
 #[test]
 fn implicit_helper_lowering_failure_is_an_equation_error_on_the_parent() {
-    use crate::common::ErrorCode;
-    use crate::datamodel;
+    use simlin_base::common::ErrorCode;
+    use simlin_base::datamodel;
 
     let mut project = TestProject::new("implicit_lowering");
     project.dimensions = vec![

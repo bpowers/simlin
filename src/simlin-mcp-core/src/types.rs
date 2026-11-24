@@ -10,7 +10,8 @@
 //! wire-format choices preserved from the pre-refactor `simlin-mcp`.
 
 use serde::Serialize;
-use simlin_engine::{datamodel, json as ejson};
+use simlin_base::datamodel;
+use simlin_engine::json as ejson;
 
 /// Identifies how a model file was parsed so write-back can use the same
 /// format.  `Xmile` covers `.stmx`, `.xmile`, and `.xml`; `Mdl` is a Vensim
@@ -55,7 +56,7 @@ pub(crate) fn mdl_export_warnings_to_outputs(
 /// with the violated invariant named, rather than an opaque write failure.
 fn mdl_export_error_to_output(
     project: &datamodel::Project,
-    err: &simlin_engine::Error,
+    err: &simlin_base::Error,
 ) -> ErrorOutput {
     let detail = err.details.as_deref().unwrap_or("export failed");
     mdl_export_output(project, strip_mdl_export_lead_in(detail))
@@ -78,7 +79,7 @@ fn mdl_export_output(project: &datamodel::Project, message: &str) -> ErrorOutput
         .find(|m| m.macro_spec.is_none())
         .map(|m| m.name.clone());
     ErrorOutput {
-        code: simlin_engine::common::ErrorCode::Generic.to_string(),
+        code: simlin_base::common::ErrorCode::Generic.to_string(),
         message: format!("MDL export: {message}"),
         model_name,
         variable_name: None,
@@ -351,9 +352,9 @@ mod tests {
         let specs = &project.sim_specs;
         assert_eq!(specs.start, 0.0);
         assert_eq!(specs.stop, 100.0);
-        assert_eq!(specs.dt, simlin_engine::datamodel::Dt::Dt(0.25));
-        assert_eq!(specs.save_step, Some(simlin_engine::datamodel::Dt::Dt(1.0)));
-        assert_eq!(specs.sim_method, simlin_engine::datamodel::SimMethod::Euler);
+        assert_eq!(specs.dt, simlin_base::datamodel::Dt::Dt(0.25));
+        assert_eq!(specs.save_step, Some(simlin_base::datamodel::Dt::Dt(1.0)));
+        assert_eq!(specs.sim_method, simlin_base::datamodel::SimMethod::Euler);
     }
 
     #[test]
@@ -369,10 +370,10 @@ mod tests {
         let project = build_empty_project(custom);
         assert_eq!(project.sim_specs.start, 5.0);
         assert_eq!(project.sim_specs.stop, 50.0);
-        assert_eq!(project.sim_specs.dt, simlin_engine::datamodel::Dt::Dt(0.5));
+        assert_eq!(project.sim_specs.dt, simlin_base::datamodel::Dt::Dt(0.5));
         assert_eq!(
             project.sim_specs.sim_method,
-            simlin_engine::datamodel::SimMethod::RungeKutta4
+            simlin_base::datamodel::SimMethod::RungeKutta4
         );
         assert_eq!(project.sim_specs.time_units.as_deref(), Some("weeks"));
     }
@@ -473,7 +474,7 @@ mod tests {
     /// missing detail gets a generic body.
     #[test]
     fn mdl_export_error_to_output_does_not_double_the_prefix() {
-        use simlin_engine::common::{ErrorCode, ErrorKind};
+        use simlin_base::common::{ErrorCode, ErrorKind};
         let project = build_empty_project(default_sim_specs());
         let cases = [
             (
@@ -488,7 +489,7 @@ mod tests {
             (None, "MDL export: export failed"),
         ];
         for (detail, expected) in cases {
-            let err = simlin_engine::Error::new(
+            let err = simlin_base::Error::new(
                 ErrorKind::Import,
                 ErrorCode::Generic,
                 detail.map(str::to_string),
@@ -595,7 +596,7 @@ mod tests {
 
     #[test]
     fn error_output_from_formatted_error() {
-        use simlin_engine::common::ErrorCode;
+        use simlin_base::common::ErrorCode;
         use simlin_engine::db::DiagnosticSeverity;
         use simlin_engine::errors::{FormattedError, FormattedErrorKind};
 
@@ -635,7 +636,7 @@ mod tests {
     /// reporting the precise string.
     #[test]
     fn error_code_strings_are_the_display_impl() {
-        use simlin_engine::common::ErrorCode;
+        use simlin_base::common::ErrorCode;
         use simlin_engine::db::DiagnosticSeverity;
         use simlin_engine::errors::{FormattedError, FormattedErrorKind};
 

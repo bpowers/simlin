@@ -18,9 +18,9 @@
 //! element's own equation, a partly subscripted reference, and the four
 //! spellings that subscript a variable past its dimensions.
 
-use crate::common::{ErrorCode, MismatchedRead};
 use crate::db::{DiagnosticError, DiagnosticSeverity};
 use crate::test_common::TestProject;
+use simlin_base::common::{ErrorCode, MismatchedRead};
 
 /// One refused read as a host reads it: the reader, the element whose own
 /// equation holds it (if any), the reference's text, and the read.
@@ -160,15 +160,15 @@ fn an_arrayed_operand_beside_the_read_does_not_hide_it() {
 
 #[test]
 fn a_lookup_of_a_split_table_is_told_at_the_table() {
-    let gf = crate::datamodel::GraphicalFunction {
-        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+    let gf = simlin_base::datamodel::GraphicalFunction {
+        kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         x_points: Some(vec![0.0, 10.0]),
         y_points: vec![0.0, 100.0],
-        x_scale: crate::datamodel::GraphicalFunctionScale {
+        x_scale: simlin_base::datamodel::GraphicalFunctionScale {
             min: 0.0,
             max: 10.0,
         },
-        y_scale: crate::datamodel::GraphicalFunctionScale {
+        y_scale: simlin_base::datamodel::GraphicalFunctionScale {
             min: 0.0,
             max: 100.0,
         },
@@ -275,7 +275,7 @@ fn the_reason_names_the_variable_and_the_dimensions() {
         unpaired: unpaired.iter().map(|d| d.to_string()).collect(),
     };
     let reason = |read| {
-        crate::common::EquationError::mismatched_read(0, 0, read)
+        simlin_base::common::EquationError::mismatched_read(0, 0, read)
             .details
             .unwrap()
     };

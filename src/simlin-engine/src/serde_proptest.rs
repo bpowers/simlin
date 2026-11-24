@@ -25,13 +25,13 @@ use buffa::Message;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 
-use crate::common::{CanonicalElementName, canonicalize};
-use crate::datamodel::view_element::{
+use crate::project_io;
+use simlin_base::common::{CanonicalElementName, canonicalize};
+use simlin_base::datamodel::view_element::{
     self, LabelSide, LinkPolarity, LinkShape, LinkSketchCompat, SketchSegmentCompat,
     StockFlowSketchCompat, ViewElementCompat,
 };
-use crate::datamodel::*;
-use crate::project_io;
+use simlin_base::datamodel::*;
 
 fn round_trip(project: &Project) -> Project {
     let bytes = crate::serde::serialize(project).unwrap().encode_to_vec();
@@ -131,7 +131,7 @@ fn normalize(mut project: Project) -> Project {
             variables.sort_by_cached_key(|v| canonicalize(v.get_ident()).into_owned());
         });
         for View::StockFlow(view) in &mut model.views {
-            if crate::float::approx_eq(view.zoom, 0.0) {
+            if simlin_base::float::approx_eq(view.zoom, 0.0) {
                 view.zoom = 1.0;
             }
             view.elements.rewrite(|elements| {
@@ -1086,8 +1086,8 @@ fn setting_the_sim_specs_of_a_stored_project_changes_its_run() {
     specs.stop = 20.0;
     crate::apply_patch(
         &mut stored,
-        crate::ProjectPatch {
-            project_ops: vec![crate::ProjectOperation::SetSimSpecs(specs)],
+        simlin_base::ProjectPatch {
+            project_ops: vec![simlin_base::ProjectOperation::SetSimSpecs(specs)],
             models: vec![],
         },
     )

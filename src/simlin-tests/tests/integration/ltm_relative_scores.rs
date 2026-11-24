@@ -18,14 +18,15 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
 
+use simlin_base::Results;
 use simlin_engine::db::{
     DetectedLoop, SimlinDb, compile_project_incremental, model_detected_loops, model_ltm_variables,
     sync_from_datamodel_incremental,
 };
 use simlin_engine::indexmap::IndexMap;
-use simlin_engine::{Results, Vm, ltm_post, xmile};
+use simlin_engine::{Vm, ltm_post, xmile};
 
-fn load_xmile_model(path: &str) -> simlin_engine::datamodel::Project {
+fn load_xmile_model(path: &str) -> simlin_base::datamodel::Project {
     let f = File::open(path).unwrap_or_else(|e| panic!("failed to open {path}: {e}"));
     let mut f = BufReader::new(f);
     xmile::project_from_reader(&mut f)
@@ -36,7 +37,7 @@ fn load_xmile_model(path: &str) -> simlin_engine::datamodel::Project {
 /// with the loop list and the per-slot partition map the same derivation
 /// produced -- exactly what production feeds the owner.
 fn simulate_with_ltm(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> (
     Results,
     Vec<DetectedLoop>,

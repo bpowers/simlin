@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
-use crate::common::{Canonical, Ident};
-use crate::datamodel::{self, Variable};
+use simlin_base::common::{Canonical, Ident};
+use simlin_base::datamodel::{self, Variable};
 
 use super::outline::{
     AuxKind, IntegrationMethod, SpecsOutline, aux_kind, constant_value, equation_text,
@@ -339,7 +339,7 @@ pub(crate) fn run_experiment(
             ))
             .with_suggestions(suggestions)
         })?;
-        let canonical = crate::canonicalize(var.get_ident()).into_owned();
+        let canonical = simlin_base::canonicalize(var.get_ident()).into_owned();
         if seen.contains(&canonical) {
             return Err(ToolError::new(format!(
                 "'{}' is changed twice; give it one change",
@@ -562,7 +562,7 @@ pub(crate) fn value_change(
 ) -> Result<(ElementValues, AppliedChange), ToolError> {
     settable(var)?;
     let row = base.row_at(from_time.unwrap_or(base.results.specs.start));
-    let canonical = crate::canonicalize(var.get_ident()).into_owned();
+    let canonical = simlin_base::canonicalize(var.get_ident()).into_owned();
     let offsets = &base.results.offsets;
     let mut keys: Vec<(Ident<Canonical>, usize)> =
         if let Some((key, &offset)) = offsets.get_key_value(&Ident::<Canonical>::new(&canonical)) {
@@ -679,9 +679,9 @@ fn run_specs(run: &Run, model: &datamodel::Model, project: &datamodel::Project) 
         dt: specs.dt,
         save_step: (specs.save_step != specs.dt).then_some(specs.save_step),
         method: match specs.method {
-            crate::results::Method::Euler => IntegrationMethod::Euler,
-            crate::results::Method::RungeKutta2 => IntegrationMethod::Rk2,
-            crate::results::Method::RungeKutta4 => IntegrationMethod::Rk4,
+            simlin_base::results::Method::Euler => IntegrationMethod::Euler,
+            simlin_base::results::Method::RungeKutta2 => IntegrationMethod::Rk2,
+            simlin_base::results::Method::RungeKutta4 => IntegrationMethod::Rk4,
         },
         time_units: super::changes::effective_specs(project, model)
             .time_units

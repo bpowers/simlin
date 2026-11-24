@@ -18,8 +18,9 @@
 //! test and the press planned from its hit read the same contents.
 
 use serde::Serialize;
+use simlin_base::datamodel;
 use simlin_engine::diagram::SceneElement;
-use simlin_engine::{self as engine, datamodel, editing};
+use simlin_engine::editing;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
@@ -246,7 +247,7 @@ struct FrameJson<'a> {
 enum OpJson {
     EditView {
         index: u32,
-        upsert: Vec<engine::json::ViewElement>,
+        upsert: Vec<simlin_engine::json::ViewElement>,
         remove: Vec<i32>,
     },
     RenameVariable {

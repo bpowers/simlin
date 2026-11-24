@@ -28,11 +28,11 @@ ltm_bench = ["simlin-engine/ltm_bench"]
 # `FilesystemDataProvider`). It is asked for here, where nothing can turn it
 # off, and no test in this package is gated on a feature: a gate that is off
 # compiles its test away without a word (GH #925).
+simlin-base = { path = "../simlin-base" }
 simlin-engine = { path = "../simlin-engine", features = ["file_io", "test-support"] }
 buffa = "0.9"
 salsa = "0.28.5"
 rayon = "1"
-rand = { version = "0.9", default-features = false, features = ["std_rng"] }
 # The VDF parity harness (tests/integration/vdf_parity.rs) requires
 # bitwise-exact f64 decoding of tools/vdf_xray.py's JSON output. Without
 # float_roundtrip, serde_json's fast float parser can be off by one ULP,

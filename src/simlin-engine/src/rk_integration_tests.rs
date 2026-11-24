@@ -6,10 +6,10 @@
 //! Verifies accuracy, convergence order, energy conservation, and
 //! correct interaction with PREVIOUS(), INIT(), reset(), and save_step.
 
-use crate::common::Ident;
-use crate::datamodel;
 use crate::test_common::TestProject;
 use crate::vm::{CompiledSimulation, Vm};
+use simlin_base::common::Ident;
+use simlin_base::datamodel;
 
 fn build_compiled(tp: &TestProject) -> std::sync::Arc<CompiledSimulation> {
     tp.compile_incremental()

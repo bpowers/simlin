@@ -20,7 +20,7 @@
 //! are in two halves -- shapes that must collapse, and shapes that must NOT,
 //! each named for the reason it is per-element.
 
-use crate::datamodel::Equation;
+use simlin_base::datamodel::Equation;
 
 /// Import `mdl` and return the named variable's equation.
 fn equation_of(mdl: &str, ident: &str) -> Equation {

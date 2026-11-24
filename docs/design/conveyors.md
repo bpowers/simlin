@@ -1268,7 +1268,7 @@ LTM-through-conveyor attribution is a separate enhancement.
 
 ### 9.8 Errors, units, and lifecycle
 
-**New diagnostics** (added to `ErrorCode` in `src/simlin-engine/src/common.rs`):
+**New diagnostics** (added to `ErrorCode` in `src/simlin-base/src/common.rs`):
 
 | Diagnostic | Severity | Trigger |
 |---|---|---|

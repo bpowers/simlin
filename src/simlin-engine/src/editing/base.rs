@@ -15,12 +15,12 @@ use std::collections::{HashMap, HashSet};
 
 use smallvec::SmallVec;
 
-use crate::common::canonicalize;
-use crate::datamodel::view_element::{Flow, FlowPoint, LabelSide, Link, LinkShape, Stock};
-use crate::datamodel::{self, Equation, SharedVec, StockFlow, Variable, ViewElement};
 use crate::diagram::constants::{
     AUX_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
 };
+use simlin_base::common::canonicalize;
+use simlin_base::datamodel::view_element::{Flow, FlowPoint, LabelSide, Link, LinkShape, Stock};
+use simlin_base::datamodel::{self, Equation, SharedVec, StockFlow, Variable, ViewElement};
 
 use super::geometry::Point;
 

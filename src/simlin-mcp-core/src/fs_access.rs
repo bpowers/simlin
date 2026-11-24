@@ -33,7 +33,7 @@
 use std::io;
 use std::path::Path;
 
-use simlin_engine::datamodel;
+use simlin_base::datamodel;
 use simlin_engine::json as ejson;
 
 use crate::access::{OpenedProject, ProjectAccess, SaveOutcome};
@@ -186,7 +186,7 @@ fn serialize_project(
             if let Some(model_name) = project.models.first().map(|m| m.name.clone()) {
                 let db = simlin_engine::db::SimlinDb::default();
                 let sync = simlin_engine::db::sync_from_datamodel(&db, project);
-                let canonical_name = simlin_engine::canonicalize(&model_name).into_owned();
+                let canonical_name = simlin_base::canonicalize(&model_name).into_owned();
                 if let Some(source_model) = sync.project.models(&db).get(&canonical_name).copied()
                     && let Some(dm_model) = project.get_model(&model_name)
                 {

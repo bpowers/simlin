@@ -245,16 +245,16 @@ impl<T: Clone> IntoIterator for SharedVec<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<T> SharedVec<T> {
     /// Each element's allocation, by position: two vectors share an element
     /// where they hold the same address.
-    pub(crate) fn addresses(&self) -> Vec<usize> {
+    pub fn addresses(&self) -> Vec<usize> {
         self.0.iter().map(|e| Arc::as_ptr(e) as usize).collect()
     }
 
     /// The spine's capacity, which `arc_spine` keeps to its length.
-    pub(crate) fn spine_capacity(&self) -> usize {
+    pub fn spine_capacity(&self) -> usize {
         self.0.capacity()
     }
 }

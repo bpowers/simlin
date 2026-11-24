@@ -5,14 +5,14 @@
 use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Result, canonicalize};
-use crate::datamodel;
-use crate::datamodel::Equation;
 use crate::xmile::dimensions::Gf;
 use crate::xmile::{
     ToXml, VarDimension, VarDimensions, XmlWriter, write_tag, write_tag_empty_with_attrs,
     write_tag_end, write_tag_start, write_tag_start_with_attrs,
 };
+use simlin_base::common::{Result, canonicalize};
+use simlin_base::datamodel;
+use simlin_base::datamodel::Equation;
 
 use super::model::{Module, NonNegative, access_from, can_be_module_input, visibility};
 
@@ -348,7 +348,7 @@ macro_rules! convert_equation(
             let elements = elements.into_iter().map(|e| {
                 // The element key's canonical spelling, the one owner of what a
                 // subscript names (`CanonicalElementName::from_subscript`).
-                let canonical_subscript = crate::common::CanonicalElementName::from_subscript(&e.subscript).as_str().to_string();
+                let canonical_subscript = simlin_base::common::CanonicalElementName::from_subscript(&e.subscript).as_str().to_string();
                 // An eqn-less element (e.g. gf-only, GH #907) gets an empty
                 // equation: with a gf that makes the element a per-element
                 // lookup table; the writer re-emits it without an <eqn> tag.
@@ -1421,8 +1421,8 @@ fn test_module_parsing() {
 
 #[cfg(test)]
 mod conveyor_tests {
-    use crate::datamodel::{self, SpreadFlow};
     use crate::xmile::{project_from_reader, project_to_xmile};
+    use simlin_base::datamodel::{self, SpreadFlow};
     use std::io::BufReader;
 
     /// Wrap variable XML in a minimal, valid XMILE project document.
@@ -1784,8 +1784,8 @@ mod conveyor_tests {
 
 #[cfg(test)]
 mod queue_tests {
-    use crate::datamodel;
     use crate::xmile::{project_from_reader, project_to_xmile};
+    use simlin_base::datamodel;
     use std::io::BufReader;
 
     fn parse(xml: &str) -> datamodel::Project {
@@ -1893,7 +1893,7 @@ mod queue_tests {
 
     /// A stock carrying BOTH a `<conveyor>` block and a `<queue/>` marker is a
     /// type conflict the COMPILER rejects (F12,
-    /// [`crate::common::ErrorCode::StockBothConveyorAndQueue`]), but the READER
+    /// [`simlin_base::common::ErrorCode::StockBothConveyorAndQueue`]), but the READER
     /// must stay faithful: it parses both markers onto the stock and the writer
     /// re-emits both. Rejection is deliberately a compile-time concern, not a
     /// parse-time one, so the reader never silently drops one marker (which would
@@ -1977,8 +1977,8 @@ mod gf_element_tests {
     //! writer must re-emit such elements WITHOUT a spurious empty `<eqn>` so
     //! the round-trip is stable at both the datamodel and the XML level.
 
-    use crate::datamodel;
     use crate::xmile::{project_from_reader, project_to_xmile};
+    use simlin_base::datamodel;
     use std::io::BufReader;
 
     /// Wrap variable XML in a minimal, valid XMILE project with one dimension.

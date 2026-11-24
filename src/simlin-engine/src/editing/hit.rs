@@ -45,7 +45,6 @@
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use crate::datamodel;
 use crate::diagram::ScenePaint;
 use crate::diagram::common::{Circle, Frame, Point as DiagramPoint, Rect};
 use crate::diagram::connector::{
@@ -61,6 +60,7 @@ use crate::diagram::scene::{
     arrowhead_path, circle_shape, cloud_path, element_label, link_line_path, path_shape,
     polyline_path, rect_shape,
 };
+use simlin_base::datamodel;
 
 use super::geometry::Point;
 

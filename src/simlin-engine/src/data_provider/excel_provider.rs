@@ -30,8 +30,8 @@ fn data_to_string(val: &Data) -> Option<String> {
     }
 }
 
-use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::data_provider::{col_index, is_column_only, parse_cell_ref, parse_row_or_cell_ref};
+use simlin_base::common::{Error, ErrorCode, ErrorKind, Result};
 
 use super::csv_provider::FilesystemDataProvider;
 

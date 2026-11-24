@@ -12,7 +12,7 @@ use crate::common::open_project_from_datamodel;
 
 /// A small stock-and-flow datamodel with NO views, as produced by
 /// building a model programmatically (e.g. through the patch API).
-fn viewless_datamodel() -> simlin_engine::datamodel::Project {
+fn viewless_datamodel() -> simlin_base::datamodel::Project {
     TestProject::new("viewless")
         .stock("population", "50", &["net_growth"], &[], None)
         .flow("net_growth", "population * rate", None)

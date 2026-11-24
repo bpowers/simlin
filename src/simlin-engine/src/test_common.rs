@@ -7,8 +7,6 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
-use crate::common::{Canonical, ErrorCode, Ident, IdentMap, UnitError};
-use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 #[cfg(test)]
 use crate::db::sync_from_datamodel;
 use crate::db::{
@@ -16,6 +14,8 @@ use crate::db::{
     compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::vm::{CompiledSimulation, Vm};
+use simlin_base::common::{Canonical, ErrorCode, Ident, IdentMap, UnitError};
+use simlin_base::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 use std::collections::HashMap;
 
 /// The helpers one variable's production parse synthesized, in walk order,
@@ -707,7 +707,7 @@ impl TestProject {
             &db,
             sync.models["main"].source,
             sync.project,
-            &crate::canonicalize(var_name),
+            &simlin_base::canonicalize(var_name),
         )
     }
 }
@@ -767,7 +767,7 @@ impl TestProject {
 
     /// Compile the project via the incremental salsa pipeline, without the
     /// LTM overlay.
-    pub fn compile_incremental(&self) -> crate::Result<std::sync::Arc<CompiledSimulation>> {
+    pub fn compile_incremental(&self) -> simlin_base::Result<std::sync::Arc<CompiledSimulation>> {
         let datamodel = self.build_datamodel();
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
@@ -941,7 +941,7 @@ impl TestProject {
 
 /// Extract variable timeseries from simulation results, including
 /// aggregated base-name entries for arrayed variables.
-pub(crate) fn collect_results(results: &crate::Results) -> HashMap<String, Vec<f64>> {
+pub(crate) fn collect_results(results: &simlin_base::Results) -> HashMap<String, Vec<f64>> {
     let mut output: HashMap<String, Vec<f64>> = HashMap::new();
 
     for (name, &offset) in &results.offsets {

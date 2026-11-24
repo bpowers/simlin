@@ -4,7 +4,7 @@
 
 //! Type definitions for MDL to datamodel conversion.
 
-use crate::datamodel::{Dt, Equation, SimMethod, SimSpecs};
+use simlin_base::datamodel::{Dt, Equation, SimMethod, SimSpecs};
 
 use crate::mdl::ast::FullEquation;
 
@@ -20,7 +20,7 @@ pub enum ConvertError {
     /// Cyclic dimension definition detected (e.g., DimA: DimB, DimB: DimA)
     CyclicDimensionDefinition(String),
     /// External data resolution failure (e.g. missing CSV, bad cell reference)
-    Import(crate::common::Error),
+    Import(simlin_base::common::Error),
     /// Generic error with a descriptive message
     Other(String),
 }
@@ -63,8 +63,8 @@ impl From<crate::mdl::view::ViewError> for ConvertError {
     }
 }
 
-impl From<crate::common::Error> for ConvertError {
-    fn from(e: crate::common::Error) -> Self {
+impl From<simlin_base::common::Error> for ConvertError {
+    fn from(e: simlin_base::common::Error) -> Self {
         ConvertError::Import(e)
     }
 }
@@ -183,9 +183,9 @@ mod tests {
         let view_err = ConvertError::View(ViewError::UnexpectedEndOfInput);
         assert!(view_err.source().is_some());
 
-        let import_err = ConvertError::Import(crate::common::Error::new(
-            crate::common::ErrorKind::Import,
-            crate::common::ErrorCode::Generic,
+        let import_err = ConvertError::Import(simlin_base::common::Error::new(
+            simlin_base::common::ErrorKind::Import,
+            simlin_base::common::ErrorCode::Generic,
             Some("test".to_string()),
         ));
         assert!(import_err.source().is_some());

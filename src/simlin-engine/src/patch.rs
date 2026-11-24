@@ -4,14 +4,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Expr0, IndexExpr0, print_eqn};
-use crate::builtins::{Loc, UntypedBuiltinFn};
-use crate::canonicalize;
-use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, RawIdent, Result};
-use crate::datamodel::{self, NameRole, Variable};
-use crate::dimensions::DimensionsContext;
-use crate::lexer::LexerType;
-use crate::project_patch::{ModelOperation, ProjectOperation, ProjectPatch};
+use simlin_base::ast::{Expr0, IndexExpr0, print_eqn};
+use simlin_base::builtins::{Loc, UntypedBuiltinFn};
+use simlin_base::canonicalize;
+use simlin_base::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, RawIdent, Result};
+use simlin_base::datamodel::{self, NameRole, Variable};
+use simlin_base::dimensions::DimensionsContext;
+use simlin_base::lexer::LexerType;
+use simlin_base::project_patch::{ModelOperation, ProjectOperation, ProjectPatch};
 
 /// Whether applying the patch to `project` changes only views: no project-level
 /// operations, and every model operation an `UpsertView`, a `DeleteView`, or an
@@ -953,7 +953,7 @@ fn apply_rename_variable(
     // stricter than it: a variable of that name takes the slot's key in the
     // results, where every host reads the clock. Another builtin's name
     // (`pi`, `if`) is not refused; the printer quotes it.
-    if crate::results::is_implicit_global(new_ident.as_str()) {
+    if simlin_base::results::is_implicit_global(new_ident.as_str()) {
         return Err(Error::new(
             ErrorKind::Model,
             ErrorCode::DuplicateVariable,
@@ -1211,7 +1211,7 @@ impl<'a> Rename<'a> {
             let name = canonicalize(model_name);
             match models.get(name.as_ref()) {
                 Some(&index) => Instantiates::Model(index),
-                None if crate::stdlib::MODEL_NAMES
+                None if simlin_base::stdlib::MODEL_NAMES
                     .iter()
                     .any(|stdlib| name.strip_prefix(datamodel::STDLIB_PREFIX) == Some(*stdlib)) =>
                 {
@@ -1515,8 +1515,8 @@ impl Reader<'_> {
         let Some(renamed) = self.rename.renamed(self.model, reference, ReadAs::Variable) else {
             return Ok(None);
         };
-        let written = crate::ast::print_ident(reference.as_str());
-        let spelled = crate::ast::print_ident(renamed.as_str());
+        let written = simlin_base::ast::print_ident(reference.as_str());
+        let spelled = simlin_base::ast::print_ident(renamed.as_str());
         if is_identifier && dimensions.lookup(renamed.as_str()).is_some() {
             return Err(Ambiguity(format!(
                 "reads `{written}`, which the rename would spell `{spelled}`, the \
@@ -1577,7 +1577,7 @@ pub(crate) fn renamed_text(
     renamed: &Respelling<'_>,
 ) -> std::result::Result<Option<String>, Ambiguity> {
     respelled_text(text, renamed, &|name| {
-        crate::ast::print_ident(name.as_str())
+        simlin_base::ast::print_ident(name.as_str())
     })
 }
 
@@ -1641,7 +1641,7 @@ pub(crate) fn text_references(text: &str) -> Option<Vec<(Site, Ident<Canonical>)
     let mut walk = Walk {
         text,
         renamed: &record,
-        spell: &|name| crate::ast::print_ident(name.as_str()),
+        spell: &|name| simlin_base::ast::print_ident(name.as_str()),
         splices: Vec::new(),
         ambiguity: None,
     };
@@ -1829,9 +1829,9 @@ mod rename_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::{self, Equation, Visibility};
-    use crate::project_patch::ModelPatch;
     use crate::test_common::TestProject;
+    use simlin_base::datamodel::{self, Equation, Visibility};
+    use simlin_base::project_patch::ModelPatch;
 
     #[test]
     fn upsert_aux_adds_variable() {

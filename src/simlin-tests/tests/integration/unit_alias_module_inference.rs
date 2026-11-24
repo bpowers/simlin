@@ -23,7 +23,7 @@
 //!       formal parameters are unitless), exactly as it already skips stdlib
 //!       models.
 
-use simlin_engine::common::UnitError;
+use simlin_base::common::UnitError;
 use simlin_engine::db::{
     Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
 };
@@ -45,7 +45,7 @@ fn diag_details(d: &Diagnostic) -> String {
 }
 
 /// Collect every diagnostic (across all models) for a built datamodel.
-fn diagnostics_for(project: &simlin_engine::datamodel::Project) -> Vec<Diagnostic> {
+fn diagnostics_for(project: &simlin_base::datamodel::Project) -> Vec<Diagnostic> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::Off)

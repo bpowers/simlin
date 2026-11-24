@@ -13,10 +13,10 @@
 //! `queue_compile::compile_sim` dispatch), runs the blob under the DLR-FT
 //! interpreter, and diffs the two slabs variable-by-variable.
 
-use crate::common::{Canonical, Ident};
 use crate::queue_compile::build_vm;
 use crate::wasmgen::{WasmArtifact, compile_datamodel_to_artifact};
 use checked::{Store, Stored};
+use simlin_base::common::{Canonical, Ident};
 use std::io::BufReader;
 use wasm::addrs::ModuleAddr;
 use wasm::validate;
@@ -32,11 +32,11 @@ type Inst = Stored<ModuleAddr>;
 /// identical too. Anything looser would hide a real divergence.
 const EPS: f64 = 1e-9;
 
-fn parse(xml: &str) -> crate::datamodel::Project {
+fn parse(xml: &str) -> simlin_base::datamodel::Project {
     crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("parse xmile")
 }
 
-fn artifact_for(project: &crate::datamodel::Project) -> WasmArtifact {
+fn artifact_for(project: &simlin_base::datamodel::Project) -> WasmArtifact {
     let main = project.models[0].name.clone();
     compile_datamodel_to_artifact(project, &main, false, false)
         .expect("a queue model must lower to wasm")
@@ -121,7 +121,7 @@ fn run_artifact(artifact: &WasmArtifact) -> Vec<f64> {
 }
 
 /// Run `project` through the bytecode VM's special-stock build path.
-fn vm_slab(project: &crate::datamodel::Project) -> crate::Results {
+fn vm_slab(project: &simlin_base::datamodel::Project) -> simlin_base::Results {
     let main = project.models[0].name.clone();
     let mut vm = build_vm(project, &main).expect("VM must build the queue model");
     vm.run_to_end().expect("VM must run the queue model");
@@ -131,7 +131,10 @@ fn vm_slab(project: &crate::datamodel::Project) -> crate::Results {
 /// Assert every variable in `artifact.layout` matches the VM's series, NaN-aware
 /// (an empty-queue `MEAN`/`MIN`/`MAX`/`STDDEV` and an out-of-range `queue[k]` are
 /// genuinely NaN on both sides). Returns the number of variables compared.
-fn assert_slab_matches_vm(project: &crate::datamodel::Project, artifact: &WasmArtifact) -> usize {
+fn assert_slab_matches_vm(
+    project: &simlin_base::datamodel::Project,
+    artifact: &WasmArtifact,
+) -> usize {
     let wasm_data = run_artifact(artifact);
     let vm = vm_slab(project);
 

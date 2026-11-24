@@ -31,8 +31,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
-use crate::common::CanonicalElementName;
-use crate::datamodel;
+use simlin_base::common::CanonicalElementName;
+use simlin_base::datamodel;
 
 use super::battery::{Outcome, recheck};
 use super::behavior::{ModeKind, NOISE_FRACTION, classify_at};
@@ -379,7 +379,7 @@ fn check(
         Citation::Equation { variable, equation } => {
             let (label, actual) = equation_of(ws.project, model, variable)?;
             let Some(actual) = actual else {
-                return if crate::datamodel::is_empty_or_sentinel(equation) {
+                return if simlin_base::datamodel::is_empty_or_sentinel(equation) {
                     Ok(())
                 } else {
                     Err(format!(
@@ -389,7 +389,7 @@ fn check(
                 };
             };
             let parse = |text: &str| {
-                crate::ast::Expr0::new(text, crate::lexer::LexerType::Equation)
+                simlin_base::ast::Expr0::new(text, simlin_base::lexer::LexerType::Equation)
                     .ok()
                     .flatten()
                     .map(|expr| normal(&expr))
@@ -439,12 +439,12 @@ fn check(
         }
         Citation::Readers { variable, readers } => {
             let var = variable_of(model, variable)?;
-            let ident = crate::canonicalize(var.get_ident()).into_owned();
+            let ident = simlin_base::canonicalize(var.get_ident()).into_owned();
             let cited: std::collections::BTreeSet<String> = readers
                 .iter()
                 .map(|name| {
                     variable_of(model, name)
-                        .map(|v| crate::canonicalize(v.get_ident()).into_owned())
+                        .map(|v| simlin_base::canonicalize(v.get_ident()).into_owned())
                 })
                 .collect::<Result<_, String>>()?;
             let actual: std::collections::BTreeSet<String> = crate::analysis::model_reads(
@@ -514,8 +514,8 @@ fn check(
             let to = variable_of(model, variable)?;
             let from = variable_of(model, reads)?;
             let (to_ident, from_ident) = (
-                crate::canonicalize(to.get_ident()).into_owned(),
-                crate::canonicalize(from.get_ident()).into_owned(),
+                simlin_base::canonicalize(to.get_ident()).into_owned(),
+                simlin_base::canonicalize(from.get_ident()).into_owned(),
             );
             let links = crate::analysis::model_reads(
                 &*ws.db,
@@ -903,7 +903,7 @@ fn within_run(run: &Run, times: &[f64], time: f64) -> Result<(), String> {
             run.name,
             round(start),
             round(stop),
-            crate::results::written(time)
+            simlin_base::results::written(time)
         ))
     }
 }
@@ -997,11 +997,11 @@ fn equation_of(
         Some(element) => format!("{}[{element}]", var.get_ident()),
         None => var.get_ident().to_string(),
     };
-    if table && crate::datamodel::is_empty_or_sentinel(&text) {
+    if table && simlin_base::datamodel::is_empty_or_sentinel(&text) {
         return Ok((label, None));
     }
     // A variable with a table is the table at its equation's value.
-    let canonical = crate::canonicalize(var.get_ident()).into_owned();
+    let canonical = simlin_base::canonicalize(var.get_ident()).into_owned();
     let text = match (table, &element) {
         (true, Some(element)) => format!("LOOKUP({canonical}[{element}], {text})"),
         (true, None) => format!("LOOKUP({canonical}, {text})"),
@@ -1013,11 +1013,11 @@ fn equation_of(
 /// An equation as it reads whatever its spacing, the case of its builtins
 /// and the spelling of its names: what two equations that say the same thing
 /// share.
-fn normal(expr: &crate::ast::Expr0) -> String {
-    use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
+fn normal(expr: &simlin_base::ast::Expr0) -> String {
+    use simlin_base::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
     let index = |index: &IndexExpr0| match index {
         IndexExpr0::Wildcard(_) => "*".to_string(),
-        IndexExpr0::StarRange(dim, _) => format!("*:{}", crate::canonicalize(dim.as_str())),
+        IndexExpr0::StarRange(dim, _) => format!("*:{}", simlin_base::canonicalize(dim.as_str())),
         IndexExpr0::Range(l, r, _) => format!("{}:{}", normal(l), normal(r)),
         IndexExpr0::DimPosition(n, _) => format!("@{n}"),
         IndexExpr0::Expr(e) => normal(e),
@@ -1025,7 +1025,7 @@ fn normal(expr: &crate::ast::Expr0) -> String {
     match expr {
         Expr0::Const(_, n, _) => format!("{}", n.value()),
         Expr0::Var(raw, _) => raw.canonicalize().as_str().to_string(),
-        Expr0::App(crate::builtins::UntypedBuiltinFn(name, args), _) => format!(
+        Expr0::App(simlin_base::builtins::UntypedBuiltinFn(name, args), _) => format!(
             "{}({})",
             name.to_lowercase(),
             args.iter().map(normal).collect::<Vec<_>>().join(",")

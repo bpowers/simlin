@@ -300,7 +300,7 @@ impl QueueState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::float::approx_eq;
+    use simlin_base::float::approx_eq;
 
     // ----- init (§7) -----
 

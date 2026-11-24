@@ -8,12 +8,10 @@
 //! particularly focusing on view management overhead in iteration contexts.
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use simlin_base::datamodel::Project;
+use simlin_base::datamodel::{Aux, Compat, Dimension, Dt, Equation, SimMethod, SimSpecs, Variable};
 use simlin_engine::CompiledSimulation;
 use simlin_engine::Vm;
-use simlin_engine::datamodel::Project;
-use simlin_engine::datamodel::{
-    Aux, Compat, Dimension, Dt, Equation, SimMethod, SimSpecs, Variable,
-};
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 
 // Back this harness with mimalloc, the allocator every native binary that
@@ -38,7 +36,7 @@ fn create_sum_project(array_size: u32) -> Project {
         },
         dimensions: vec![Dimension::indexed(dim_name.to_string(), array_size)],
         units: vec![],
-        models: vec![simlin_engine::datamodel::Model {
+        models: vec![simlin_base::datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
             variables: vec![
@@ -89,7 +87,7 @@ fn create_elementwise_add_project(array_size: u32) -> Project {
         },
         dimensions: vec![Dimension::indexed(dim_name.to_string(), array_size)],
         units: vec![],
-        models: vec![simlin_engine::datamodel::Model {
+        models: vec![simlin_base::datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
             variables: vec![
@@ -160,7 +158,7 @@ fn create_same_array_multi_ref_project(array_size: u32, num_refs: usize) -> Proj
         },
         dimensions: vec![Dimension::indexed(dim_name.to_string(), array_size)],
         units: vec![],
-        models: vec![simlin_engine::datamodel::Model {
+        models: vec![simlin_base::datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
             variables: vec![
@@ -213,7 +211,7 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
             Dimension::indexed("DimB".to_string(), dim2_size),
         ],
         units: vec![],
-        models: vec![simlin_engine::datamodel::Model {
+        models: vec![simlin_base::datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
             variables: vec![

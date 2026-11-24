@@ -12,7 +12,7 @@
  * assert the wrong codepoint and corrupt name resolution.
  *
  * Vectors are taken verbatim from the Rust test vectors in
- * simlin-engine/src/common.rs (test_canonicalize and
+ * simlin-base/src/common.rs (test_canonicalize and
  * test_canonicalize_non_period_idents_byte_unchanged), the oracle this
  * function must reproduce exactly.
  */

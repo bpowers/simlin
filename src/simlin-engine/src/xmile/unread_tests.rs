@@ -325,7 +325,7 @@ fn table(name: &str, attributes: &str) -> String {
 }
 
 /// The kind the reader gave `variable`'s graphical function.
-fn kind_of(file: &str, variable: &str) -> crate::datamodel::GraphicalFunctionKind {
+fn kind_of(file: &str, variable: &str) -> simlin_base::datamodel::GraphicalFunctionKind {
     let project = project_from_reader(&mut file.as_bytes()).expect("the file opens");
     match project.models[0]
         .variables
@@ -333,7 +333,9 @@ fn kind_of(file: &str, variable: &str) -> crate::datamodel::GraphicalFunctionKin
         .find(|v| v.get_ident() == variable)
         .expect("the variable is read")
     {
-        crate::datamodel::Variable::Aux(aux) => aux.gf.as_ref().expect("its table is read").kind,
+        simlin_base::datamodel::Variable::Aux(aux) => {
+            aux.gf.as_ref().expect("its table is read").kind
+        }
         _ => unreachable!("the fixtures are auxiliaries"),
     }
 }
@@ -342,7 +344,7 @@ const NO_WARNINGS: [&str; 0] = [];
 
 #[test]
 fn a_graphical_functions_type_is_read_whatever_its_case_or_padding() {
-    use crate::datamodel::GraphicalFunctionKind::*;
+    use simlin_base::datamodel::GraphicalFunctionKind::*;
     // Every kind, in XMILE's own spelling (1.0 section 3.1.4) and in the
     // spellings a hand or another tool gives it.
     let rows = [
@@ -369,7 +371,7 @@ fn a_graphical_functions_type_is_read_whatever_its_case_or_padding() {
 
 #[test]
 fn a_graphical_function_type_the_reader_does_not_know_opens_as_continuous_and_is_reported() {
-    use crate::datamodel::GraphicalFunctionKind::Continuous;
+    use simlin_base::datamodel::GraphicalFunctionKind::Continuous;
     for unknown in ["stepwise", "", "discrete,", "disc rete"] {
         let attribute = format!("type=\"{unknown}\"");
         let file = file_with(&table("effect", &attribute), "", "");
@@ -418,7 +420,7 @@ fn a_graphical_function_type_the_reader_does_not_know_opens_as_continuous_and_is
 /// reader knows, one it does not) and a `discrete` (none, false, true).
 #[test]
 fn a_graphical_functions_warning_says_the_kind_it_is_read_as() {
-    use crate::datamodel::GraphicalFunctionKind::{self, *};
+    use simlin_base::datamodel::GraphicalFunctionKind::{self, *};
     let default = |attributes: &[&str]| -> Vec<String> {
         let listed: Vec<String> = attributes
             .iter()
@@ -571,8 +573,8 @@ fn file_with_a_table_at(owner: Owner, tag: &str, place: TablePlace) -> String {
 
 /// How many tables the reader gave the variable `v`, wherever it is: its own
 /// and each element's.
-fn tables_read_on_v(project: &crate::datamodel::Project) -> usize {
-    use crate::datamodel::{Equation, Variable};
+fn tables_read_on_v(project: &simlin_base::datamodel::Project) -> usize {
+    use simlin_base::datamodel::{Equation, Variable};
     let per_element = |equation: &Equation| match equation {
         Equation::Arrayed(_, elements, _, _) => {
             elements.iter().filter(|(_, _, _, gf)| gf.is_some()).count()

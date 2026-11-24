@@ -249,6 +249,8 @@ pub fn resolve_axis_index_position(position: f64, axis_dim: &Dimension) -> Optio
 }
 
 impl Dimension {
+    // Nothing asks whether a dimension has no elements.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         match self {
             Dimension::Indexed(_, size) => *size as usize,
@@ -413,7 +415,7 @@ impl PartialEq for DimensionsContext {
 }
 
 impl DimensionsContext {
-    pub(crate) fn from(dimensions: &[datamodel::Dimension]) -> DimensionsContext {
+    pub fn from(dimensions: &[datamodel::Dimension]) -> DimensionsContext {
         // Validate: indexed dimensions should not have mappings set.
         // Dimension mappings only make sense for named dimensions where we can
         // establish positional correspondence between element names.
@@ -472,17 +474,17 @@ impl DimensionsContext {
     /// a name that may not even be a dimension, and every miss leaves a
     /// refcount round trip behind -- on the parse path that is per dimension
     /// reference per variable.
-    pub(crate) fn get_by_raw_name(&self, name: &str) -> Option<&Dimension> {
+    pub fn get_by_raw_name(&self, name: &str) -> Option<&Dimension> {
         self.dimensions
             .get(crate::common::canonicalize(name).as_ref())
     }
 
-    pub(crate) fn is_dimension_name(&self, name: &str) -> bool {
+    pub fn is_dimension_name(&self, name: &str) -> bool {
         self.dimensions
             .contains_key(crate::common::canonicalize(name).as_ref())
     }
 
-    pub(crate) fn lookup(&self, element: &str) -> Option<u32> {
+    pub fn lookup(&self, element: &str) -> Option<u32> {
         if let Some(pos) = element.find('·') {
             let dimension_name = crate::common::canonicalize(&element[..pos]);
             let element_name = crate::common::canonicalize(&element[pos + '·'.len_utf8()..]);
@@ -522,14 +524,14 @@ impl DimensionsContext {
     /// relying on the compiler's own position-matched element resolution
     /// (which always prefers the element interpretation over a variable
     /// reference -- see `compiler::context`'s subscript lowering).
-    pub(crate) fn is_element_of_any_dimension(&self, element: &CanonicalElementName) -> bool {
+    pub fn is_element_of_any_dimension(&self, element: &CanonicalElementName) -> bool {
         self.dimensions.values().any(|dim| match dim {
             Dimension::Named(_, named) => named.indexed_elements.contains_key(element),
             Dimension::Indexed(_, _) => false,
         })
     }
 
-    pub(crate) fn dimension_uniquely_containing_element(
+    pub fn dimension_uniquely_containing_element(
         &self,
         element: &CanonicalElementName,
     ) -> Option<&CanonicalDimensionName> {
@@ -845,7 +847,7 @@ impl DimensionsContext {
     ///   a reference carries decides its ROUTE and never its rule.
     ///
     /// The whole 4-spelling x 5-mapping x 2-direction matrix is measured
-    /// against the VM in `crate::mapped_reference_semantics_tests`, and
+    /// against the VM in `simlin_engine::mapped_reference_semantics_tests`, and
     /// [`Self::executed_read_correspondence`] is this rule projected over one
     /// iterated dimension -- the form the LTM describers read.
     pub fn resolve_mapped_read(
@@ -866,7 +868,7 @@ impl DimensionsContext {
     /// the two are one dimension, or `active_dim` is a subrange of
     /// `source_axis` (for indexed dimensions, as long as `active_dim` is no
     /// longer).
-    pub(crate) fn declares_every_element_of(
+    pub fn declares_every_element_of(
         &self,
         source_axis: &Dimension,
         active_dim: &Dimension,
@@ -1047,7 +1049,7 @@ impl DimensionsContext {
     /// the dependency pins).
     ///
     /// It describes the spellings execution resolves through that rule
-    /// (`crate::mapped_reference_semantics_tests` measures the 4-spelling x
+    /// (`simlin_engine::mapped_reference_semantics_tests` measures the 4-spelling x
     /// 5-mapping x 2-direction matrix against the VM):
     ///
     /// * a subscript naming a dimension the equation ITERATES
@@ -1344,16 +1346,16 @@ pub struct Axis<'a> {
     /// Canonical dimension name, or `""` for an axis that has none. An unnamed
     /// axis never matches by name: there is no name to compare, and two temps'
     /// blank axes are not thereby the same dimension.
-    pub name: &'a str,
+    pub(crate) name: &'a str,
     pub len: usize,
     /// Whether the axis's dimension is an [`Dimension::Indexed`] one, which is
     /// what admits [`AxisMatch::BySize`].
-    pub indexed: bool,
+    pub(crate) indexed: bool,
 }
 
 impl<'a> Axis<'a> {
     /// The axis a declared dimension presents.
-    pub fn of(dim: &'a Dimension) -> Self {
+    pub(crate) fn of(dim: &'a Dimension) -> Self {
         Axis {
             name: dim.name(),
             len: dim.len(),
@@ -2183,7 +2185,7 @@ mod tests {
     // ===== Tests for the two spelling-keyed correspondences (GH #527/#997) =====
     //
     // The rows below are the (mapping kind x spelling) product, and they are
-    // deliberately the SAME kinds `crate::mapped_reference_semantics_tests`
+    // deliberately the SAME kinds `simlin_engine::mapped_reference_semantics_tests`
     // measures against the VM -- that module is the authority for what
     // execution does, and these assert that the two describers report it. A
     // kind measured there and missing here is a describer with no gate.
@@ -3213,7 +3215,7 @@ mod tests {
 ///
 /// For example, given dimensions [A(3), B(2)], produces:
 /// [0,0], [0,1], [1,0], [1,1], [2,0], [2,1]
-pub struct SubscriptOffsetIterator {
+pub(crate) struct SubscriptOffsetIterator {
     n: usize,
     size: usize,
     lengths: Vec<usize>,
@@ -3221,7 +3223,7 @@ pub struct SubscriptOffsetIterator {
 }
 
 impl SubscriptOffsetIterator {
-    pub fn new(arrays: &[Dimension]) -> Self {
+    pub(crate) fn new(arrays: &[Dimension]) -> Self {
         SubscriptOffsetIterator {
             n: 0,
             size: arrays.iter().map(|v| v.len()).product(),

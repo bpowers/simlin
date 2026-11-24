@@ -22,13 +22,14 @@ use std::io::Write;
 use std::time::Instant;
 
 use salsa::Setter;
+use simlin_base::canonicalize;
 use simlin_engine::analysis::analyze_model;
 use simlin_engine::db::{
     SimlinDb, causal_graph_from_element_edges_with_modules, compile_project_incremental,
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{canonicalize, open_vensim, open_xmile};
+use simlin_engine::{open_vensim, open_xmile};
 
 fn phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
     print!("{name:<28} ... ");
@@ -205,10 +206,10 @@ fn main() {
                 let base = |s: &str| s.split('[').next().unwrap_or(s).to_string();
                 let from_off = results
                     .offsets
-                    .get(&simlin_engine::common::Ident::new(&base(from_str)));
+                    .get(&simlin_base::common::Ident::new(&base(from_str)));
                 let to_off = results
                     .offsets
-                    .get(&simlin_engine::common::Ident::new(&base(to_str)));
+                    .get(&simlin_base::common::Ident::new(&base(to_str)));
                 if let (Some(&fo), Some(&to_o)) = (from_off, to_off)
                     && varies(fo)
                     && varies(to_o)
@@ -255,7 +256,7 @@ fn main() {
     let stocks: Vec<_> = element_edges
         .stocks
         .iter()
-        .map(|s| simlin_engine::common::Ident::new(s))
+        .map(|s| simlin_base::common::Ident::new(s))
         .collect();
     let ltm_vars = model_ltm_variables(&db, source_model, source_project);
     let dm_dims = project_datamodel_dims(&db, source_project);

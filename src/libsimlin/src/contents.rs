@@ -41,7 +41,8 @@ use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use simlin_engine::{datamodel, editing};
+use simlin_base::datamodel;
+use simlin_engine::editing;
 
 /// A project's datamodel, its revision, and the indexes derived from it.
 pub struct ProjectContents {

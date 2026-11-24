@@ -24,9 +24,9 @@
 
 use std::collections::HashMap;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::{Cloud, FlowPoint};
 use crate::diagram::constants::{CLOUD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::{Cloud, FlowPoint};
 
 /// How far from the valve a synthesized cloud sits: the pipe half-length the
 /// engine's own layout gives a new cloud-ended flow

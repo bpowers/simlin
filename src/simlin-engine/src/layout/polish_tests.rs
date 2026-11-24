@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::datamodel::view_element::{self, LabelSide, LinkShape};
+use simlin_base::datamodel::view_element::{self, LabelSide, LinkShape};
 
 fn aux(uid: i32, name: &str, x: f64, y: f64) -> ViewElement {
     ViewElement::Aux(view_element::Aux {

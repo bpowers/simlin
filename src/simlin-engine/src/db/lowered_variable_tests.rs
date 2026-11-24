@@ -14,11 +14,11 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use super::*;
-use crate::common::{Canonical, Ident};
 use crate::db::exec_probe::ProbedDb;
 use crate::db::fragment_compile::implicit_fragment_input;
 use crate::db::var_fragment::{ExplicitFragment, explicit_fragment_input};
 use crate::test_common::TestProject;
+use simlin_base::common::{Canonical, Ident};
 
 /// Every variable kind the memos serve: a stock, a flow, an aux, an arrayed
 /// aux, an explicit module instance, a stdlib call (an implicit module plus a

@@ -20,8 +20,8 @@
 //! flow (`db::ltm::link_scores`), not the generators in isolation.
 
 use super::*;
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::datamodel;
 
 /// Render one synthetic variable's equation as a stable, fully-structured
 /// string: `Scalar`/`ApplyToAll` are their diagnostic text; `Arrayed` lists
@@ -2520,9 +2520,9 @@ fn indexed_axis_index_model(index_expr: &str, one_value: &str) -> datamodel::Pro
         .get_mut(0)
         .expect("main model")
         .variables
-        .push(crate::datamodel::Variable::Aux(datamodel::Aux {
+        .push(simlin_base::datamodel::Variable::Aux(datamodel::Aux {
             ident: "q".to_string(),
-            equation: crate::datamodel::Equation::Arrayed(
+            equation: simlin_base::datamodel::Equation::Arrayed(
                 vec!["D".to_string()],
                 vec![
                     ("1".to_string(), "100".to_string(), None, None),

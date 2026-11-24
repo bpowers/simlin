@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::datamodel;
+use simlin_base::datamodel;
 
 fn test_project(model: datamodel::Model) -> datamodel::Project {
     let name = model.name.clone();

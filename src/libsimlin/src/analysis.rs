@@ -7,9 +7,9 @@
 //! Functions for extracting feedback loops, causal links with LTM scores,
 //! and relative loop scores from a simulation.
 
-use simlin_engine::common::{Canonical, Ident, IdentMap};
+use simlin_base::canonicalize;
+use simlin_base::common::{Canonical, Ident, IdentMap};
 use simlin_engine::db::{SourceModel, SourceProject};
-use simlin_engine::{self as engine, canonicalize};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double};
@@ -59,7 +59,7 @@ unsafe fn vec_to_f64_array(v: Option<Vec<f64>>) -> (*mut f64, usize) {
 /// `vec_to_f64_array`) so the existing `simlin_free_links` -> `drop_link` ->
 /// `drop_f64_array` ownership chain frees them correctly.
 pub(crate) unsafe fn owned_links_to_ffi(
-    links: Vec<engine::analysis::ModelLink>,
+    links: Vec<simlin_engine::analysis::ModelLink>,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLinks {
     if links.is_empty() {
@@ -101,8 +101,8 @@ pub(crate) unsafe fn owned_links_to_ffi(
         let (relative_score_ptr, relative_score_len) = vec_to_f64_array(owned.relative_score);
 
         let polarity = match owned.polarity {
-            engine::ltm::LinkPolarity::Positive => SimlinLinkPolarity::Positive,
-            engine::ltm::LinkPolarity::Negative => SimlinLinkPolarity::Negative,
+            simlin_engine::ltm::LinkPolarity::Positive => SimlinLinkPolarity::Positive,
+            simlin_engine::ltm::LinkPolarity::Negative => SimlinLinkPolarity::Negative,
             _ => SimlinLinkPolarity::Unknown,
         };
 
@@ -138,15 +138,19 @@ pub(crate) unsafe fn owned_links_to_ffi(
 /// confidence is 1.0/0.0), but the runtime surface
 /// (`simlin_analyze_get_loops_runtime`) does produce them, and sharing this
 /// mapping is what keeps the two surfaces from drifting.
-fn detected_loop_polarity_to_ffi(polarity: engine::db::DetectedLoopPolarity) -> SimlinLoopPolarity {
+fn detected_loop_polarity_to_ffi(
+    polarity: simlin_engine::db::DetectedLoopPolarity,
+) -> SimlinLoopPolarity {
     match polarity {
-        engine::db::DetectedLoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
-        engine::db::DetectedLoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
-        engine::db::DetectedLoopPolarity::MostlyReinforcing => {
+        simlin_engine::db::DetectedLoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
+        simlin_engine::db::DetectedLoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
+        simlin_engine::db::DetectedLoopPolarity::MostlyReinforcing => {
             SimlinLoopPolarity::MostlyReinforcing
         }
-        engine::db::DetectedLoopPolarity::MostlyBalancing => SimlinLoopPolarity::MostlyBalancing,
-        engine::db::DetectedLoopPolarity::Undetermined => SimlinLoopPolarity::Undetermined,
+        simlin_engine::db::DetectedLoopPolarity::MostlyBalancing => {
+            SimlinLoopPolarity::MostlyBalancing
+        }
+        simlin_engine::db::DetectedLoopPolarity::Undetermined => SimlinLoopPolarity::Undetermined,
     }
 }
 
@@ -166,8 +170,8 @@ fn detected_loop_polarity_to_ffi(polarity: engine::db::DetectedLoopPolarity) -> 
 /// partial allocations are freed via `drop_loops_vec`, a generic error is
 /// reported through `out_error`, and the function returns `ptr::null_mut()`.
 unsafe fn detected_loops_to_ffi(
-    loops: &[engine::db::DetectedLoop],
-    partitions: &[engine::ltm_finding::DiscoveredPartition],
+    loops: &[simlin_engine::db::DetectedLoop],
+    partitions: &[simlin_engine::ltm_finding::DiscoveredPartition],
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLoops {
     if loops.is_empty() {
@@ -340,7 +344,8 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
         }
     };
 
-    let detected = engine::db::model_detected_loops(&*db_locked, source_model, source_project);
+    let detected =
+        simlin_engine::db::model_detected_loops(&*db_locked, source_model, source_project);
     detected_loops_to_ffi(&detected.loops, &detected.partitions, out_error)
 }
 
@@ -440,7 +445,8 @@ pub unsafe extern "C" fn simlin_analyze_get_loops_runtime(
     // Build the exhaustive structural loop set, identical to
     // `simlin_analyze_get_loops` (the detected-loop query has no LTM
     // dependency).
-    let detected = engine::db::model_detected_loops(&*db_locked, source_model, source_project);
+    let detected =
+        simlin_engine::db::model_detected_loops(&*db_locked, source_model, source_project);
     // Partition metadata is structural (independent of the runtime
     // reclassification below), so capture it before the loops are moved out.
     let partitions = detected.partitions;
@@ -464,7 +470,7 @@ pub unsafe extern "C" fn simlin_analyze_get_loops_runtime(
         let state_guard = sim_ref.state.lock().unwrap();
         match state_guard.results.as_ref() {
             Some(results) => {
-                engine::db::reclassify_loops_from_results(
+                simlin_engine::db::reclassify_loops_from_results(
                     &mut loops,
                     results,
                     &state_guard.loop_partitions,
@@ -634,7 +640,7 @@ pub unsafe extern "C" fn simlin_analyze_discover_loops(
         }
     };
 
-    let analysis = match engine::analysis::analyze_model(
+    let analysis = match simlin_engine::analysis::analyze_model(
         &contents,
         &mut db_locked,
         source_project,
@@ -661,7 +667,7 @@ pub unsafe extern "C" fn simlin_analyze_discover_loops(
 /// made so far is freed, a generic error is reported through `out_error`, and
 /// the function returns `ptr::null_mut()`.
 unsafe fn discovery_to_ffi(
-    analysis: engine::analysis::ModelAnalysis,
+    analysis: simlin_engine::analysis::ModelAnalysis,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinDiscoveryResult {
     let mut c_loops: Vec<SimlinDiscoveredLoop> = Vec::with_capacity(analysis.loop_dominance.len());
@@ -925,12 +931,12 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
     // but what it returns is owned, so by the time this function returns to
     // its callers all three locks are dropped along with this scope.
     let state_guard = sim_ref.state.lock().unwrap();
-    let results: Option<&engine::Results> = if sim_ref.enable_ltm {
+    let results: Option<&simlin_base::Results> = if sim_ref.enable_ltm {
         state_guard.results.as_ref()
     } else {
         None
     };
-    let owned = engine::analysis::model_links(
+    let owned = simlin_engine::analysis::model_links(
         &*db_locked,
         source_model,
         source_project,
@@ -974,8 +980,8 @@ pub unsafe extern "C" fn simlin_sim_get_ltm_mode(
     let state = sim_ref.state.lock().unwrap();
     match state.ltm_mode {
         None => SimlinLtmMode::Disabled,
-        Some(engine::db::LtmMode::Exhaustive) => SimlinLtmMode::Exhaustive,
-        Some(engine::db::LtmMode::Discovery) => SimlinLtmMode::Discovery,
+        Some(simlin_engine::db::LtmMode::Exhaustive) => SimlinLtmMode::Exhaustive,
+        Some(simlin_engine::db::LtmMode::Discovery) => SimlinLtmMode::Discovery,
     }
 }
 
@@ -1089,7 +1095,7 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
         return ptr::null_mut();
     }
     let layout_bytes = std::slice::from_raw_parts(layout_ptr, layout_len);
-    let layout = match engine::wasmgen::WasmLayout::deserialize(layout_bytes) {
+    let layout = match simlin_engine::wasmgen::WasmLayout::deserialize(layout_bytes) {
         Some(l) => l,
         None => {
             store_error(
@@ -1150,7 +1156,7 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
         }
     };
 
-    let owned = engine::analysis::model_links(
+    let owned = simlin_engine::analysis::model_links(
         &*db_locked,
         source_model,
         source_project,
@@ -1205,14 +1211,15 @@ pub unsafe extern "C" fn simlin_free_links(links: *mut SimlinLinks) {
 /// and partition vector disagree, which valid compilation never produces);
 /// the FFI shell maps that to a `DoesNotExist` error.
 pub(crate) fn rel_loop_score_series(
-    results: &engine::Results,
-    loop_partitions: &engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
+    results: &simlin_base::Results,
+    loop_partitions: &simlin_engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     cache: &mut Option<HashMap<String, Vec<f64>>>,
     loop_id: &str,
     element_index: Option<usize>,
 ) -> Option<Vec<f64>> {
-    let rel = cache
-        .get_or_insert_with(|| engine::ltm_post::compute_rel_loop_scores(results, loop_partitions));
+    let rel = cache.get_or_insert_with(|| {
+        simlin_engine::ltm_post::compute_rel_loop_scores(results, loop_partitions)
+    });
     let series = rel.get(loop_id)?;
     let step_count = results.step_count;
     match element_index {
@@ -1226,7 +1233,9 @@ pub(crate) fn rel_loop_score_series(
             }
             Some((0..step_count).map(|t| series[t * n_slots + k]).collect())
         }
-        None => Some(engine::ltm_post::argmax_abs_by_step(series, step_count)),
+        None => Some(simlin_engine::ltm_post::argmax_abs_by_step(
+            series, step_count,
+        )),
     }
 }
 
@@ -1262,12 +1271,12 @@ pub(crate) fn rel_loop_score_series(
 /// keep the `Results` value structurally well-formed -- there is no analytic
 /// sensitivity to its contents from these FFIs.
 pub(crate) fn results_from_layout_and_slab(
-    db: &dyn engine::db::Db,
+    db: &dyn simlin_engine::db::Db,
     model: SourceModel,
     project: SourceProject,
-    layout: &engine::wasmgen::WasmLayout,
+    layout: &simlin_engine::wasmgen::WasmLayout,
     slab: &[f64],
-) -> Result<engine::Results, SimlinError> {
+) -> Result<simlin_base::Results, SimlinError> {
     let capacity = layout.n_chunks.checked_mul(layout.n_slots).ok_or_else(|| {
         SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
             "wasm layout geometry overflow: n_chunks={} * n_slots={}",
@@ -1313,9 +1322,9 @@ pub(crate) fn results_from_layout_and_slab(
         Some(ms) => ms,
         None => project.sim_specs(db),
     };
-    let specs = engine::SimSpecs::from(specs_dm);
+    let specs = simlin_base::SimSpecs::from(specs_dm);
 
-    Ok(engine::Results {
+    Ok(simlin_base::Results {
         offsets,
         data: slab.to_vec().into_boxed_slice(),
         step_size: layout.n_slots,
@@ -1335,9 +1344,9 @@ pub(crate) fn results_from_layout_and_slab(
 pub(crate) struct LtmSnapshots {
     /// `IndexMap` to preserve the engine's loop emission order through to the
     /// rel-loop-score denominator summation (GH #468).
-    pub(crate) loop_partitions: engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
-    pub(crate) loop_element_index: HashMap<String, engine::ltm_post::LoopElementIndex>,
-    pub(crate) mode: engine::db::LtmMode,
+    pub(crate) loop_partitions: simlin_engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
+    pub(crate) loop_element_index: HashMap<String, simlin_engine::ltm_post::LoopElementIndex>,
+    pub(crate) mode: simlin_engine::db::LtmMode,
 }
 
 /// Read the [`LtmSnapshots`] of `model` off the LTM derivation at the db's
@@ -1367,15 +1376,15 @@ pub(crate) struct LtmSnapshots {
 /// `loop_partitions.get(loop_id)` lookup and the FFI surfaces that with a
 /// "loop unknown" error.
 pub(crate) fn ltm_snapshots(
-    db: &engine::db::SimlinDb,
+    db: &simlin_engine::db::SimlinDb,
     project: SourceProject,
     model: SourceModel,
     model_name: &str,
 ) -> LtmSnapshots {
-    let ltm_vars = engine::db::model_ltm_variables(db, model, project);
-    let project_dims = engine::db::project_datamodel_dims(db, project);
+    let ltm_vars = simlin_engine::db::model_ltm_variables(db, model, project);
+    let project_dims = simlin_engine::db::project_datamodel_dims(db, project);
     let loop_element_index =
-        engine::ltm_post::build_loop_element_index(&ltm_vars.vars, project_dims);
+        simlin_engine::ltm_post::build_loop_element_index(&ltm_vars.vars, project_dims);
     // The caller has already resolved `model` from `model_name`, so the name
     // has no work to do inside this function.  Assert that the two agree in
     // debug builds to make the invariant machine-checkable.
@@ -1440,8 +1449,8 @@ pub(crate) struct ResolvedLoopQuery<'a> {
 /// the error surface as well as the analytic dispatch.
 pub(crate) fn resolve_loop_query<'a>(
     raw_loop_id: &'a str,
-    loop_partitions: &engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
-    loop_element_index: &HashMap<String, engine::ltm_post::LoopElementIndex>,
+    loop_partitions: &simlin_engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
+    loop_element_index: &HashMap<String, simlin_engine::ltm_post::LoopElementIndex>,
 ) -> Result<ResolvedLoopQuery<'a>, SimlinError> {
     let parsed = match parse_subscripted_loop_id(raw_loop_id) {
         Ok(p) => p,
@@ -1495,7 +1504,7 @@ pub(crate) fn resolve_loop_query<'a>(
             Ok(idx) => Some(idx),
             Err(e) => {
                 let msg = match e {
-                    engine::ltm_post::ResolveError::DimCountMismatch { expected, got } => {
+                    simlin_engine::ltm_post::ResolveError::DimCountMismatch { expected, got } => {
                         if expected == 0 {
                             format!(
                                 "loop '{}' is not arrayed; subscripts are not allowed",
@@ -1508,17 +1517,22 @@ pub(crate) fn resolve_loop_query<'a>(
                             )
                         }
                     }
-                    engine::ltm_post::ResolveError::ElementNotFound { dim, value } => format!(
-                        "loop '{}' dimension '{}' has no element '{}'",
-                        parsed.base, dim, value
-                    ),
-                    engine::ltm_post::ResolveError::IndexOutOfRange { dim, value, max } => {
+                    simlin_engine::ltm_post::ResolveError::ElementNotFound { dim, value } => {
+                        format!(
+                            "loop '{}' dimension '{}' has no element '{}'",
+                            parsed.base, dim, value
+                        )
+                    }
+                    simlin_engine::ltm_post::ResolveError::IndexOutOfRange { dim, value, max } => {
                         format!(
                             "loop '{}' dimension '{}' index '{}' is out of range (1..={max})",
                             parsed.base, dim, value
                         )
                     }
-                    engine::ltm_post::ResolveError::InvalidIntegerSubscript { dim, value } => {
+                    simlin_engine::ltm_post::ResolveError::InvalidIntegerSubscript {
+                        dim,
+                        value,
+                    } => {
                         format!(
                             "loop '{}' dimension '{}' expects a 1-based integer subscript, got '{}'",
                             parsed.base, dim, value
@@ -1637,7 +1651,7 @@ pub unsafe extern "C" fn simlin_analyze_rel_loop_score_from_wasm_results(
     };
 
     let layout_bytes = std::slice::from_raw_parts(layout_ptr, layout_len);
-    let layout = match engine::wasmgen::WasmLayout::deserialize(layout_bytes) {
+    let layout = match simlin_engine::wasmgen::WasmLayout::deserialize(layout_bytes) {
         Some(l) => l,
         None => {
             store_error(
@@ -2015,13 +2029,13 @@ pub unsafe extern "C" fn simlin_analyze_get_loop_score(
     };
 
     let series = match resolved.element_index {
-        Some(k) => engine::ltm_post::compute_raw_loop_score_for_element(
+        Some(k) => simlin_engine::ltm_post::compute_raw_loop_score_for_element(
             results,
             resolved.base,
             resolved.n_slots,
             k,
         ),
-        None => engine::ltm_post::compute_raw_loop_score_argmax_abs(
+        None => simlin_engine::ltm_post::compute_raw_loop_score_argmax_abs(
             results,
             resolved.base,
             resolved.n_slots,

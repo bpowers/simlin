@@ -5,9 +5,9 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::datamodel::Project;
 use crate::tools::Session;
 use crate::tools::test_support::{Host, inventory};
+use simlin_base::datamodel::Project;
 
 fn set_equation(project: &mut Project, name: &str, equation: &str) {
     project.models[0]
@@ -332,8 +332,8 @@ fn a_diagnostic_with_neither_reason_nor_span_says_what_its_code_means() {
         variable: None,
         owner: None,
         severity: crate::db::DiagnosticSeverity::Error,
-        error: crate::db::DiagnosticError::Model(crate::common::Error {
-            kind: crate::common::ErrorKind::Model,
+        error: crate::db::DiagnosticError::Model(simlin_base::common::Error {
+            kind: simlin_base::common::ErrorKind::Model,
             code: ErrorCode::CircularDependency,
             details: None,
             place: None,

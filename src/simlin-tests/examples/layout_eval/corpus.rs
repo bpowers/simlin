@@ -7,7 +7,8 @@
 
 use std::io::BufReader;
 
-use simlin_engine::{datamodel, open_vensim, open_xmile};
+use simlin_base::datamodel;
+use simlin_engine::{open_vensim, open_xmile};
 
 /// The model name the layout pipeline and renderer operate on. `Project::get_model`
 /// maps "main" to the single/main model (matching `tests/integration/layout.rs`).

@@ -14,7 +14,7 @@ use super::enum_tests::{
     discover_project, enum_flow, enum_results, enum_stock, survivor_node_sets,
 };
 use super::*;
-use crate::common::IdentMap;
+use simlin_base::common::IdentMap;
 
 /// Helper to build stock list from names
 fn stock_list(names: &[&str]) -> Vec<Ident<Canonical>> {
@@ -186,12 +186,12 @@ fn test_parse_link_offsets() {
         data: vec![0.0; 9].into_boxed_slice(),
         step_size: 3,
         step_count: 3,
-        specs: crate::results::Specs {
+        specs: simlin_base::results::Specs {
             start: 0.0,
             stop: 2.0,
             dt: 1.0,
             save_step: 1.0,
-            method: crate::results::Method::Euler,
+            method: simlin_base::results::Method::Euler,
             n_chunks: 3,
         },
         is_vensim: false,
@@ -226,12 +226,12 @@ fn test_parse_link_offsets_a2a_expansion() {
         data: vec![0.0; 30].into_boxed_slice(),
         step_size: 30,
         step_count: 1,
-        specs: crate::results::Specs {
+        specs: simlin_base::results::Specs {
             start: 0.0,
             stop: 0.0,
             dt: 1.0,
             save_step: 1.0,
-            method: crate::results::Method::Euler,
+            method: simlin_base::results::Method::Euler,
             n_chunks: 1,
         },
         is_vensim: false,
@@ -263,7 +263,7 @@ fn test_parse_link_offsets_a2a_expansion() {
     // Both A2A endpoints are declared over `[Region]`: the same-dim diagonal
     // projection must reproduce the historical `birth_rate[e] -> births[e]`
     // pairs (the new projection path, not the metadata-absent fallback).
-    let region_dim: crate::dimensions::Dimension = (&dims[0]).into();
+    let region_dim: simlin_base::dimensions::Dimension = (&dims[0]).into();
     let expansion = LinkExpansionContext {
         declared_dims: [
             (Ident::new("birth_rate"), vec![region_dim.clone()]),
@@ -271,7 +271,7 @@ fn test_parse_link_offsets_a2a_expansion() {
         ]
         .into_iter()
         .collect(),
-        dim_ctx: crate::dimensions::DimensionsContext::default(),
+        dim_ctx: simlin_base::dimensions::DimensionsContext::default(),
         flow_to_stock: Default::default(),
     };
 
@@ -328,12 +328,12 @@ fn test_parse_link_offsets_cross_dim_passthrough() {
         data: vec![0.0; 10].into_boxed_slice(),
         step_size: 10,
         step_count: 1,
-        specs: crate::results::Specs {
+        specs: simlin_base::results::Specs {
             start: 0.0,
             stop: 0.0,
             dt: 1.0,
             save_step: 1.0,
-            method: crate::results::Method::Euler,
+            method: simlin_base::results::Method::Euler,
             n_chunks: 1,
         },
         is_vensim: false,
@@ -361,12 +361,12 @@ fn make_results_with_offsets(
         data: vec![0.0; step_size].into_boxed_slice(),
         step_size,
         step_count: 1,
-        specs: crate::results::Specs {
+        specs: simlin_base::results::Specs {
             start: 0.0,
             stop: 0.0,
             dt: 1.0,
             save_step: 1.0,
-            method: crate::results::Method::Euler,
+            method: simlin_base::results::Method::Euler,
             n_chunks: 1,
         },
         is_vensim: false,
@@ -398,7 +398,7 @@ fn test_parse_link_offsets_scalar_source_projects_to_bare() {
         "D1".to_string(),
         vec!["a".to_string(), "b".to_string()],
     )];
-    let d1_dim: crate::dimensions::Dimension = (&dims[0]).into();
+    let d1_dim: simlin_base::dimensions::Dimension = (&dims[0]).into();
     // `scale` scalar, `growth` over `[D1]`.
     let expansion = LinkExpansionContext {
         declared_dims: [
@@ -407,7 +407,7 @@ fn test_parse_link_offsets_scalar_source_projects_to_bare() {
         ]
         .into_iter()
         .collect(),
-        dim_ctx: crate::dimensions::DimensionsContext::default(),
+        dim_ctx: simlin_base::dimensions::DimensionsContext::default(),
         flow_to_stock: Default::default(),
     };
 
@@ -469,8 +469,8 @@ fn test_parse_link_offsets_lower_dim_source_projects_and_broadcasts() {
             vec!["young".to_string(), "old".to_string()],
         ),
     ];
-    let region_dim: crate::dimensions::Dimension = (&dims[0]).into();
-    let age_dim: crate::dimensions::Dimension = (&dims[1]).into();
+    let region_dim: simlin_base::dimensions::Dimension = (&dims[0]).into();
+    let age_dim: simlin_base::dimensions::Dimension = (&dims[1]).into();
     let expansion = LinkExpansionContext {
         declared_dims: [
             (Ident::new("boost"), vec![region_dim.clone()]),
@@ -478,7 +478,7 @@ fn test_parse_link_offsets_lower_dim_source_projects_and_broadcasts() {
         ]
         .into_iter()
         .collect(),
-        dim_ctx: crate::dimensions::DimensionsContext::default(),
+        dim_ctx: simlin_base::dimensions::DimensionsContext::default(),
         flow_to_stock: Default::default(),
     };
 
@@ -751,7 +751,7 @@ fn test_parse_link_offsets_dedupes_a2a_bare_over_fixed_index() {
 
     // `pop` and `share` are both declared over `[Region]`, so the Bare A2A
     // expansion projects the same-dim diagonal (`pop[e] -> share[e]`).
-    let region_dim: crate::dimensions::Dimension = (&dims[0]).into();
+    let region_dim: simlin_base::dimensions::Dimension = (&dims[0]).into();
     let expansion = LinkExpansionContext {
         declared_dims: [
             (Ident::new("pop"), vec![region_dim.clone()]),
@@ -759,7 +759,7 @@ fn test_parse_link_offsets_dedupes_a2a_bare_over_fixed_index() {
         ]
         .into_iter()
         .collect(),
-        dim_ctx: crate::dimensions::DimensionsContext::default(),
+        dim_ctx: simlin_base::dimensions::DimensionsContext::default(),
         flow_to_stock: Default::default(),
     };
 
@@ -2459,12 +2459,12 @@ pub(super) fn synthetic_results(n_offsets: usize, step_count: usize, seed: u64) 
         data: data.into_boxed_slice(),
         step_size,
         step_count,
-        specs: crate::results::Specs {
+        specs: simlin_base::results::Specs {
             start: 0.0,
             stop: (step_count - 1) as f64,
             dt: 1.0,
             save_step: 1.0,
-            method: crate::results::Method::Euler,
+            method: simlin_base::results::Method::Euler,
             n_chunks: step_count,
         },
         is_vensim: false,
@@ -2559,12 +2559,12 @@ fn discovery_graph_stats_reports_structure_and_scores() {
         data: data.into_boxed_slice(),
         step_size: 4,
         step_count: 3,
-        specs: crate::results::Specs {
+        specs: simlin_base::results::Specs {
             start: 0.0,
             stop: 2.0,
             dt: 1.0,
             save_step: 1.0,
-            method: crate::results::Method::Euler,
+            method: simlin_base::results::Method::Euler,
             n_chunks: 3,
         },
         is_vensim: false,
@@ -2624,8 +2624,8 @@ fn discovery_graph_stats_reports_structure_and_scores() {
 /// `growth[r] = SUM(pop[*]) * 0.05` over `elems`: one scalar synthetic agg,
 /// one petal per element, so the cross-agg recovery (GH #696) is exercised.
 fn discover_reducer_feedback(elems: &[&str], candidate_gen: CandidateGen) -> DiscoveryResult {
-    use crate::datamodel::{self, Equation, Variable};
     use salsa::Setter;
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     let project = datamodel::Project {
         name: "reducer_feedback".to_string(),
@@ -2827,8 +2827,8 @@ fn discovery_cross_agg_recovery_respects_budget() {
 /// discovered loop set and the truncation flag are exactly as before.
 #[test]
 fn discovery_no_agg_model_unaffected_by_stitching() {
-    use crate::datamodel::{self, Equation, Variable};
     use salsa::Setter;
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     let project = datamodel::Project {
         name: "no_agg".to_string(),
@@ -3028,9 +3028,9 @@ fn capped_analysis_does_not_reverse_the_dominant_polarity() {
 /// the wrong-signed `neg` composite the `None` fallback would keep.
 #[test]
 fn recompute_strips_element_subscripts_before_port_match() {
-    use crate::datamodel::{self, Equation};
     use crate::ltm::LinkPolarity;
     use salsa::Setter;
+    use simlin_base::datamodel::{self, Equation};
 
     // Sub-model exposing two opposite-signed outputs from one input port.
     let passthrough = datamodel::Model {
@@ -3407,14 +3407,14 @@ struct ModuleFixtureInputs {
     causal_graph: CausalGraph,
     stocks: Vec<Ident<Canonical>>,
     ltm_vars: Vec<LtmSyntheticVar>,
-    dims: Vec<crate::datamodel::Dimension>,
+    dims: Vec<simlin_base::datamodel::Dimension>,
     expansion: LinkExpansionContext,
     ports: SubModelOutputPorts,
 }
 
 fn multi_output_module_feedback_inputs() -> ModuleFixtureInputs {
-    use crate::datamodel::{self, Equation};
     use salsa::Setter;
+    use simlin_base::datamodel::{self, Equation};
 
     let aux = |ident: &str, eqn: &str, is_input: bool| {
         datamodel::Variable::Aux(datamodel::Aux {
@@ -3933,7 +3933,7 @@ fn retention_dedup_prevents_a_borderline_loop_from_being_dropped_by_an_inflated_
 /// wrongly-Competing loop (mean_rel exactly 1.0, the maximum possible) would
 /// rank ahead of both logistic loops instead of behind them.
 fn discover_solo_trimmed_duplicate_and_a_competing_loop() -> DiscoveryResult {
-    use crate::datamodel::{self, Equation, Variable};
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     let project = datamodel::Project {
         name: "solo_dedup_boundary".to_string(),
@@ -4140,8 +4140,8 @@ fn a_solo_trimmed_duplicate_ranks_behind_a_competing_loop_despite_a_perfect_rela
 /// hoisted reducer (the denominator), and the report hides the synthetic
 /// aggregate node that distinguishes them.
 fn discover_share_of_total_feedback(elems: &[&str]) -> DiscoveryResult {
-    use crate::datamodel::{self, Equation, Variable};
     use salsa::Setter;
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     let project = datamodel::Project {
         name: "share_of_total".to_string(),
@@ -4281,8 +4281,8 @@ fn discover_share_of_total_feedback(elems: &[&str]) -> DiscoveryResult {
 /// addition side still works alongside a dropped duplicate in the same
 /// partition.
 fn discover_module_loop_with_a_trimmed_duplicate() -> DiscoveryResult {
-    use crate::datamodel::{self, Equation, Variable};
     use salsa::Setter;
+    use simlin_base::datamodel::{self, Equation, Variable};
 
     let aux = |ident: &str, eqn: &str, is_input: bool| {
         datamodel::Variable::Aux(datamodel::Aux {

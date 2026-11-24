@@ -4,7 +4,7 @@
 
 //! `heal`: repairing a flow an edit is about to route (imported or legacy data).
 
-use crate::datamodel::view_element::Flow;
+use simlin_base::datamodel::view_element::Flow;
 
 use super::geometry::{
     Axis, Bounds, FlowEnd, GEOMETRY_EPSILON, NoObstacles, Obstacles, Path, Point,

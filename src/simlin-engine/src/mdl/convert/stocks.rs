@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::datamodel::{Equation, GraphicalFunction};
+use simlin_base::datamodel::{Equation, GraphicalFunction};
 
 use super::ConversionContext;
 use super::control::Control;
@@ -744,7 +744,7 @@ fn is_zero(expr: &Expr<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::super::convert_mdl;
-    use crate::datamodel::{Equation, GraphicalFunctionKind, Variable};
+    use simlin_base::datamodel::{Equation, GraphicalFunctionKind, Variable};
 
     #[test]
     fn test_top_level_integ_detected_as_stock() {

@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use simlin_engine::common::Ident;
+use simlin_base::common::Ident;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{CompiledSimulation, Vm};

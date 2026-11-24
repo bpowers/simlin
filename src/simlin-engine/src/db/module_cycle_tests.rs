@@ -21,13 +21,13 @@
 //! and assert that the gate is still blind.
 
 use crate::analysis::analyze_model;
-use crate::common::ErrorCode;
-use crate::datamodel::{self, Equation, Variable};
 use crate::db::{
     DiagnosticError, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel,
 };
 use crate::test_common::TestProject;
+use simlin_base::common::ErrorCode;
+use simlin_base::datamodel::{self, Equation, Variable};
 
 fn module_var(ident: &str, target_model: &str) -> Variable {
     Variable::Module(datamodel::Module {

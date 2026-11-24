@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 
-use crate::datamodel::{self, Equation, Variable};
+use simlin_base::datamodel::{self, Equation, Variable};
 
 use super::changes::{Changes, ReadSnapshot, effective_specs};
 use super::evidence::DiagnosticReport;
@@ -351,13 +351,13 @@ fn full_outline(
     let mut ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for report in &diagnostics {
         if let Some(variable) = &report.variable {
-            ids.entry(crate::canonicalize(variable).into_owned())
+            ids.entry(simlin_base::canonicalize(variable).into_owned())
                 .or_default()
                 .push(report.id.clone());
         }
     }
     let ids_of = |var: &Variable| {
-        ids.get(crate::canonicalize(var.get_ident()).as_ref())
+        ids.get(simlin_base::canonicalize(var.get_ident()).as_ref())
             .cloned()
             .unwrap_or_default()
     };

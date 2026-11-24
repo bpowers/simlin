@@ -79,8 +79,8 @@
 //! which "array-valued" could widen to "any `PREVIOUS`" unnoticed and a scalar
 //! `PREVIOUS(s)` would stop broadcasting.
 
-use crate::common::ErrorCode;
 use crate::test_common::TestProject;
+use simlin_base::common::ErrorCode;
 
 /// The shared fixture. Values are chosen so a computed operand's answer
 /// differs from the answer produced by reading either raw input -- see the
@@ -1739,12 +1739,12 @@ fn a_reset_run_reads_the_fallback_again() {
     let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("first run");
     let first = vm
-        .get_series(&crate::common::Ident::new("out[1]"))
+        .get_series(&simlin_base::common::Ident::new("out[1]"))
         .expect("out[1] series");
     vm.reset();
     vm.run_to_end().expect("second run");
     let second = vm
-        .get_series(&crate::common::Ident::new("out[1]"))
+        .get_series(&simlin_base::common::Ident::new("out[1]"))
         .expect("out[1] series");
     assert_close(&first, &[0.0, 60.0, 45.0], "first run");
     assert_close(&second, &first, "a reset run must reproduce the first run");

@@ -30,7 +30,7 @@ use crate::types::{ErrorOutput, SourceFormat};
 /// monotonically increasing version, which callers pass back to `save` for
 /// optimistic locking.
 pub struct OpenedProject {
-    pub project: simlin_engine::datamodel::Project,
+    pub project: simlin_base::datamodel::Project,
     pub source_format: SourceFormat,
     pub version: u64,
 }
@@ -71,7 +71,7 @@ pub trait ProjectAccess: Send + Sync + 'static {
     fn save(
         &self,
         abs_path: &Path,
-        project: &simlin_engine::datamodel::Project,
+        project: &simlin_base::datamodel::Project,
         format: SourceFormat,
         expected_version: Option<u64>,
     ) -> impl Future<Output = Result<SaveOutcome, AccessError>> + Send;
@@ -79,7 +79,7 @@ pub trait ProjectAccess: Send + Sync + 'static {
     fn create(
         &self,
         abs_path: &Path,
-        project: &simlin_engine::datamodel::Project,
+        project: &simlin_base::datamodel::Project,
         format: SourceFormat,
     ) -> impl Future<Output = Result<(), AccessError>> + Send;
 }

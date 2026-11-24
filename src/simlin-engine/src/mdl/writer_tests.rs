@@ -3,14 +3,14 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::ast::{Expr0, IndexExpr0, Loc};
-use crate::common::RawIdent;
-use crate::datamodel::LOOKUP_SENTINEL;
-use crate::datamodel::{
+use simlin_base::ast::{Expr0, IndexExpr0, Loc};
+use simlin_base::common::RawIdent;
+use simlin_base::datamodel::LOOKUP_SENTINEL;
+use simlin_base::datamodel::{
     Aux, Compat, Equation, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
     Rect, SimMethod, Stock, StockFlow, Unit, Variable, view_element,
 };
-use crate::lexer::LexerType;
+use simlin_base::lexer::LexerType;
 
 /// Parse XMILE equation text to Expr0, then convert to MDL and assert.
 fn assert_mdl(xmile_eqn: &str, expected_mdl: &str) {
@@ -929,8 +929,8 @@ fn compat_data_source_reconstructs_get_direct_constants() {
         ai_state: None,
         uid: None,
         compat: Compat {
-            data_source: Some(crate::datamodel::DataSource {
-                kind: crate::datamodel::DataSourceKind::Constants,
+            data_source: Some(simlin_base::datamodel::DataSource {
+                kind: simlin_base::datamodel::DataSourceKind::Constants,
                 file: "workbook.xlsx".to_owned(),
                 tab_or_delimiter: "Sheet1".to_owned(),
                 row_or_col: "A".to_owned(),
@@ -3039,7 +3039,7 @@ fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
         .elements
         .iter()
         .filter_map(|elem| match elem {
-            ViewElement::Aux(a) => Some(crate::common::canonicalize(&a.name).into_owned()),
+            ViewElement::Aux(a) => Some(simlin_base::common::canonicalize(&a.name).into_owned()),
             _ => None,
         })
         .collect();
@@ -3755,8 +3755,8 @@ fn write_arrayed_except_with_omitted_elements_avoids_dimension_default() {
 #[test]
 fn compat_get_direct_equation_does_not_produce_backslash_escapes() {
     let compat = Compat {
-        data_source: Some(crate::datamodel::DataSource {
-            kind: crate::datamodel::DataSourceKind::Constants,
+        data_source: Some(simlin_base::datamodel::DataSource {
+            kind: simlin_base::datamodel::DataSourceKind::Constants,
             file: "data/a.csv".to_string(),
             tab_or_delimiter: ",".to_string(),
             row_or_col: "B2".to_string(),

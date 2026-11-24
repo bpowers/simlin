@@ -18,15 +18,16 @@
 //! boundary explicit.
 
 use checked::Store;
-use simlin_engine::common::{Canonical, Ident};
-use simlin_engine::datamodel;
+use simlin_base::common::{Canonical, Ident};
+use simlin_base::datamodel;
+use simlin_base::float::approx_eq_eps;
+use simlin_base::{Results, SimSpecs};
+use simlin_engine::Vm;
 use simlin_engine::db::LtmSyntheticVar;
-use simlin_engine::float::approx_eq_eps;
 use simlin_engine::ltm::CausalGraph;
 use simlin_engine::wasmgen::{
     WasmGenError, WasmLayout, compile_datamodel_to_artifact, compile_simulation, decode_error_word,
 };
-use simlin_engine::{Results, SimSpecs, Vm};
 use wasm::addrs::ModuleAddr;
 use wasm::validate;
 
@@ -279,7 +280,7 @@ fn wasm_results_from_slab(layout: &WasmLayout, slab: Vec<f64>, specs: SimSpecs) 
 /// C-LEARN wasm twin (which compares against `Ref.vdf` instead).
 #[allow(dead_code)]
 pub fn wasm_results_for(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> Result<Results, String> {
     use simlin_engine::db::{
@@ -321,7 +322,7 @@ pub fn wasm_results_for(
 /// Imperative Shell: drives the salsa compile pipeline and the VM.
 #[allow(dead_code)]
 pub fn vm_results_for_special(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> Results {
     use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
@@ -352,7 +353,7 @@ pub fn vm_results_for_special(
 /// delegating the reshape to the pure [`wasm_results_from_slab`].
 #[allow(dead_code)]
 pub fn wasm_results_for_special(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> Result<Results, String> {
     let artifact = match compile_datamodel_to_artifact(datamodel, model_name, false, false) {
@@ -378,7 +379,7 @@ pub fn wasm_results_for_special(
 /// Imperative Shell: drives the salsa compile pipeline and the VM.
 #[allow(dead_code)]
 pub fn vm_results_for_ltm(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> Results {
     use simlin_engine::db::{
@@ -417,7 +418,7 @@ pub fn vm_results_for_ltm(
 /// interpreter, delegating the reshape to the pure [`wasm_results_from_slab`].
 #[allow(dead_code)]
 pub fn wasm_results_for_ltm(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> Result<Results, String> {
     use simlin_engine::db::{
@@ -535,7 +536,7 @@ pub fn assert_ltm_slabs_match(vm: &Results, wasm: &Results) {
 /// delegating the reshape to the pure [`wasm_results_from_slab`].
 #[allow(dead_code)]
 pub fn wasm_results_for_segmented(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
     targets: &[f64],
 ) -> Result<Results, String> {
@@ -580,7 +581,7 @@ pub fn wasm_results_for_segmented(
 /// [`ensure_results_excluding`].
 #[allow(dead_code)]
 pub fn ensure_wasm_matches(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
     expected: &Results,
     excluded: &[&str],
@@ -747,7 +748,7 @@ pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f
 /// interpreter, delegating the reshape to the pure [`wasm_results_from_slab`].
 #[allow(dead_code)]
 pub fn wasm_results_for_ltm_discovery(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> Result<Results, String> {
     use simlin_engine::db::{
@@ -830,7 +831,7 @@ pub struct LtmDiscoveryInputs {
 /// Imperative Shell: drives the salsa compile pipeline and the VM.
 #[allow(dead_code)]
 pub fn ltm_discovery_inputs(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> LtmDiscoveryInputs {
     use simlin_engine::db::{

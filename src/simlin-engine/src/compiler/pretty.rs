@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::ast::BinaryOp;
+use simlin_base::ast::BinaryOp;
 
 use super::dimensions::UnaryOp;
 use super::expr::{BuiltinFn, Expr, SubscriptIndex};

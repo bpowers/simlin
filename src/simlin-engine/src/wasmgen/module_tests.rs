@@ -8,11 +8,11 @@
 //! `use super::*` still resolves the module's private items.
 
 use super::*;
-use crate::common::{Canonical, Ident};
 use crate::compat::open_xmile;
 use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use crate::vm::Vm;
 use checked::Store;
+use simlin_base::common::{Canonical, Ident};
 use std::io::BufReader;
 use wasm::validate;
 
@@ -23,8 +23,8 @@ const POPULATION_XMILE: &str = concat!(
 
 /// A graphical function whose table is `knots`. `Continuous` kind, with the
 /// x-scale spanning the knots' x-range.
-fn gf_from_knots(knots: &[(f64, f64)]) -> crate::datamodel::GraphicalFunction {
-    use crate::datamodel;
+fn gf_from_knots(knots: &[(f64, f64)]) -> simlin_base::datamodel::GraphicalFunction {
+    use simlin_base::datamodel;
     let x_points: Vec<f64> = knots.iter().map(|&(x, _)| x).collect();
     let y_points: Vec<f64> = knots.iter().map(|&(_, y)| y).collect();
     datamodel::GraphicalFunction {
@@ -331,9 +331,9 @@ fn compile_simulation_gf_lookup_modes_match_vm() {
 /// one another, or the parity would hold for a backend that ignored the kind.
 #[test]
 fn compile_simulation_reads_each_table_by_its_kind() {
-    use crate::datamodel::GraphicalFunctionKind;
+    use simlin_base::datamodel::GraphicalFunctionKind;
     let knots = [(0.0, 10.0), (1.0, 20.0), (2.5, 5.0), (4.0, 40.0)];
-    let of_kind = |kind| crate::datamodel::GraphicalFunction {
+    let of_kind = |kind| simlin_base::datamodel::GraphicalFunction {
         kind,
         ..gf_from_knots(&knots)
     };
@@ -395,7 +395,7 @@ fn compile_simulation_reads_each_table_by_its_kind() {
 /// every mode, below the point, at it and above it.
 #[test]
 fn compile_simulation_one_point_gf_matches_vm() {
-    use crate::datamodel;
+    use simlin_base::datamodel;
     let gf = datamodel::GraphicalFunction {
         kind: datamodel::GraphicalFunctionKind::Continuous,
         x_points: None,
@@ -511,7 +511,7 @@ fn compile_datamodel_to_wasm_validates() {
 /// Build a `CompiledSimulation` for the named model of `datamodel` via the
 /// production incremental pipeline (the same path the VM corpus uses).
 pub(super) fn compile_sim(
-    datamodel: &crate::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
@@ -731,7 +731,7 @@ fn compile_simulation_save_step_cadence_matches_vm() {
         .build_datamodel();
     // `with_sim_time` clears save_step to dt; the builder has no
     // `with_save_step`, so set it directly: save_step = 2, dt = 1.
-    datamodel.sim_specs.save_step = Some(crate::datamodel::Dt::Dt(2.0));
+    datamodel.sim_specs.save_step = Some(simlin_base::datamodel::Dt::Dt(2.0));
 
     let sim = compile_sim(&datamodel, "main");
     let artifact = compile_simulation(&sim).expect("wasm codegen");
@@ -1158,7 +1158,10 @@ fn compile_simulation_init_capture_without_flow_refresh_matches_vm_and_reruns() 
 /// nonlinear flow depends on the stock, so RK's trial-point evaluations
 /// genuinely differ from Euler -- a pure-constant flow would let a broken RK
 /// loop pass by coincidence.
-fn logistic_growth(name: &str, method: crate::datamodel::SimMethod) -> crate::datamodel::Project {
+fn logistic_growth(
+    name: &str,
+    method: simlin_base::datamodel::SimMethod,
+) -> simlin_base::datamodel::Project {
     crate::test_common::TestProject::new(name)
         .with_sim_time(0.0, 20.0, 0.5)
         .with_sim_method(method)
@@ -1174,7 +1177,10 @@ fn logistic_growth(name: &str, method: crate::datamodel::SimMethod) -> crate::da
 /// with time juggling + the end-of-step flows re-eval must reproduce it.
 #[test]
 fn compile_simulation_rk4_matches_vm() {
-    let datamodel = logistic_growth("rk4_logistic", crate::datamodel::SimMethod::RungeKutta4);
+    let datamodel = logistic_growth(
+        "rk4_logistic",
+        simlin_base::datamodel::SimMethod::RungeKutta4,
+    );
     let sim = compile_sim(&datamodel, "main");
     let artifact = compile_simulation(&sim).expect("wasm codegen (RK4)");
     let checked = assert_matches_vm(sim, &artifact);
@@ -1185,7 +1191,10 @@ fn compile_simulation_rk4_matches_vm() {
 /// nonlinear model so the two-stage trial step is genuinely exercised.
 #[test]
 fn compile_simulation_rk2_matches_vm() {
-    let datamodel = logistic_growth("rk2_logistic", crate::datamodel::SimMethod::RungeKutta2);
+    let datamodel = logistic_growth(
+        "rk2_logistic",
+        simlin_base::datamodel::SimMethod::RungeKutta2,
+    );
     let sim = compile_sim(&datamodel, "main");
     let artifact = compile_simulation(&sim).expect("wasm codegen (RK2)");
     let checked = assert_matches_vm(sim, &artifact);
@@ -1208,9 +1217,9 @@ fn rk_methods_differ_from_euler_in_vm() {
         let off = *results.offsets.get(&pop).expect("pop offset");
         results.data[(results.step_count - 1) * results.step_size + off]
     };
-    let euler = last_pop(crate::datamodel::SimMethod::Euler);
-    let rk4 = last_pop(crate::datamodel::SimMethod::RungeKutta4);
-    let rk2 = last_pop(crate::datamodel::SimMethod::RungeKutta2);
+    let euler = last_pop(simlin_base::datamodel::SimMethod::Euler);
+    let rk4 = last_pop(simlin_base::datamodel::SimMethod::RungeKutta4);
+    let rk2 = last_pop(simlin_base::datamodel::SimMethod::RungeKutta2);
     assert!(
         (euler - rk4).abs() > 1e-6,
         "RK4 must differ from Euler (euler={euler}, rk4={rk4})"
@@ -1236,7 +1245,10 @@ fn rk_methods_differ_from_euler_in_vm() {
 /// Euler vs RK4/RK2 visibly diverge (asserted by
 /// `multi_stock_coupled_diverges_euler_vs_rk_in_vm`). 100 steps keeps the
 /// un-JITed DLR-FT run well under the per-test budget.
-fn lotka_volterra(name: &str, method: crate::datamodel::SimMethod) -> crate::datamodel::Project {
+fn lotka_volterra(
+    name: &str,
+    method: simlin_base::datamodel::SimMethod,
+) -> simlin_base::datamodel::Project {
     crate::test_common::TestProject::new(name)
         .with_sim_time(0.0, 5.0, 0.05)
         .with_sim_method(method)
@@ -1278,9 +1290,9 @@ fn multi_stock_coupled_diverges_euler_vs_rk_in_vm() {
         };
         (read("prey"), read("predator"))
     };
-    let (e_prey, e_pred) = last_two(crate::datamodel::SimMethod::Euler);
-    let (rk4_prey, rk4_pred) = last_two(crate::datamodel::SimMethod::RungeKutta4);
-    let (rk2_prey, rk2_pred) = last_two(crate::datamodel::SimMethod::RungeKutta2);
+    let (e_prey, e_pred) = last_two(simlin_base::datamodel::SimMethod::Euler);
+    let (rk4_prey, rk4_pred) = last_two(simlin_base::datamodel::SimMethod::RungeKutta4);
+    let (rk2_prey, rk2_pred) = last_two(simlin_base::datamodel::SimMethod::RungeKutta2);
     // Both stocks must move under RK4 and RK2 relative to Euler -- proving
     // the stage math integrates each independently, not just the first.
     assert!(
@@ -1303,7 +1315,7 @@ fn multi_stock_coupled_diverges_euler_vs_rk_in_vm() {
 /// pins that both stocks (not just `prey`) reached parity.
 #[test]
 fn compile_simulation_two_stock_coupled_rk4_matches_vm() {
-    let datamodel = lotka_volterra("lv_rk4", crate::datamodel::SimMethod::RungeKutta4);
+    let datamodel = lotka_volterra("lv_rk4", simlin_base::datamodel::SimMethod::RungeKutta4);
     let sim = compile_sim(&datamodel, "main");
     let artifact = compile_simulation(&sim).expect("wasm codegen (two-stock RK4)");
     let checked = assert_matches_vm(sim, &artifact);
@@ -1325,7 +1337,7 @@ fn compile_simulation_two_stock_coupled_rk4_matches_vm() {
 /// the two-stage trial step over two coupled stocks matches the VM.
 #[test]
 fn compile_simulation_two_stock_coupled_rk2_matches_vm() {
-    let datamodel = lotka_volterra("lv_rk2", crate::datamodel::SimMethod::RungeKutta2);
+    let datamodel = lotka_volterra("lv_rk2", simlin_base::datamodel::SimMethod::RungeKutta2);
     let sim = compile_sim(&datamodel, "main");
     let artifact = compile_simulation(&sim).expect("wasm codegen (two-stock RK2)");
     let checked = assert_matches_vm(sim, &artifact);
@@ -1343,7 +1355,7 @@ fn compile_simulation_two_stock_coupled_rk2_matches_vm() {
 fn compile_simulation_rk4_with_previous_and_init_matches_vm() {
     let datamodel = crate::test_common::TestProject::new("rk4_prev_init")
         .with_sim_time(0.0, 10.0, 0.5)
-        .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
+        .with_sim_method(simlin_base::datamodel::SimMethod::RungeKutta4)
         .aux("rate", "0.3", None)
         .aux("capacity", "1000", None)
         .stock("pop", "10", &["growth"], &[], None)
@@ -1381,13 +1393,13 @@ fn compile_simulation_rk4_with_previous_and_init_matches_vm() {
 /// so this is built as an explicit datamodel.
 pub(super) fn submodel_project(
     name: &str,
-    method: crate::datamodel::SimMethod,
+    method: simlin_base::datamodel::SimMethod,
     in_value: &str,
     body: &str,
     body_is_stock: bool,
     n_instances: usize,
-) -> crate::datamodel::Project {
-    use crate::datamodel;
+) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel;
     let mut main_vars: Vec<datamodel::Variable> = vec![datamodel::Variable::Aux(datamodel::Aux {
         ident: "in_value".to_string(),
         equation: datamodel::Equation::Scalar(in_value.to_string()),
@@ -1522,8 +1534,8 @@ fn submodel_with_constant_project(
     in_value: &str,
     k_default: &str,
     n_instances: usize,
-) -> crate::datamodel::Project {
-    use crate::datamodel;
+) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel;
     let mut main_vars: Vec<datamodel::Variable> = vec![datamodel::Variable::Aux(datamodel::Aux {
         ident: "in_value".to_string(),
         equation: datamodel::Equation::Scalar(in_value.to_string()),
@@ -1636,7 +1648,7 @@ fn submodel_with_constant_project(
 fn compile_simulation_submodel_matches_vm() {
     let datamodel = submodel_project(
         "submod",
-        crate::datamodel::SimMethod::Euler,
+        simlin_base::datamodel::SimMethod::Euler,
         "TIME + 1",
         "in * 2",
         false,
@@ -1668,7 +1680,7 @@ fn compile_simulation_submodel_matches_vm() {
 fn compile_simulation_submodel_loadmoduleinput_reads_right_input() {
     let datamodel = submodel_project(
         "passthru",
-        crate::datamodel::SimMethod::Euler,
+        simlin_base::datamodel::SimMethod::Euler,
         "TIME * 3 + 1",
         "in", // out == in: a pure pass-through of the module input
         false,
@@ -1713,7 +1725,7 @@ fn compile_simulation_submodel_loadmoduleinput_reads_right_input() {
 fn compile_simulation_two_instances_same_module_matches_vm() {
     let datamodel = submodel_project(
         "twice",
-        crate::datamodel::SimMethod::Euler,
+        simlin_base::datamodel::SimMethod::Euler,
         "TIME + 2",
         "in * 10",
         false,
@@ -1885,7 +1897,7 @@ fn compile_simulation_two_instances_same_value_override_matches_vm() {
 fn compile_simulation_submodel_nested_stock_euler_matches_vm() {
     let datamodel = submodel_project(
         "nested_stock",
-        crate::datamodel::SimMethod::Euler,
+        simlin_base::datamodel::SimMethod::Euler,
         "2",
         "in", // grow = in (= 2); out integrates by 2 each step
         true,
@@ -1928,7 +1940,7 @@ fn compile_simulation_submodel_nested_stock_rk4_matches_vm() {
     // a first-order approach to a steady state, evaluated at trial points.
     let datamodel = submodel_project(
         "nested_stock_rk4",
-        crate::datamodel::SimMethod::RungeKutta4,
+        simlin_base::datamodel::SimMethod::RungeKutta4,
         "5",
         "in - out / 10",
         true,
@@ -1999,7 +2011,7 @@ fn compile_simulation_smooth_macro_matches_vm() {
 fn compile_simulation_delay3_macro_rk4_matches_vm() {
     let datamodel = crate::test_common::TestProject::new("delay3")
         .with_sim_time(0.0, 8.0, 0.25)
-        .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
+        .with_sim_method(simlin_base::datamodel::SimMethod::RungeKutta4)
         .aux("input", "TIME", None)
         .aux("delayed", "DELAY3(input, 2)", None)
         .build_datamodel();
@@ -2937,7 +2949,7 @@ fn compile_simulation_set_value_override_in_initials_matches_vm() {
 /// A small stock + constant-flow fixture with `n_chunks` save points spanning
 /// `[0, stop]` at `dt`/`save_step` = 1. `level` integrates `inflow_rate` per
 /// step, so a wrong cursor or guard diverges immediately and visibly.
-fn resumable_fixture(stop: f64) -> crate::datamodel::Project {
+fn resumable_fixture(stop: f64) -> simlin_base::datamodel::Project {
     crate::test_common::TestProject::new("resumable")
         .with_sim_time(0.0, stop, 1.0)
         .aux("inflow_rate", "2", None)
@@ -3272,7 +3284,7 @@ fn run_to_at_save_and_between_save_points() {
 /// and through PULSE and STEP), so a clock that differed by a bit would show.
 #[test]
 fn both_backends_save_the_same_rows_for_any_specs() {
-    use crate::datamodel::SimMethod;
+    use simlin_base::datamodel::SimMethod;
     for method in [
         SimMethod::Euler,
         SimMethod::RungeKutta2,
@@ -3311,7 +3323,7 @@ fn both_backends_save_the_same_rows_for_any_specs() {
                     None,
                 )
                 .build_datamodel();
-            project.sim_specs.save_step = save_step.map(crate::datamodel::Dt::Dt);
+            project.sim_specs.save_step = save_step.map(simlin_base::datamodel::Dt::Dt);
             let what = format!("{method:?} {start}..{stop} by {dt}, save {save_step:?}");
 
             let sim = compile_sim(&project, "main");
@@ -3354,7 +3366,7 @@ fn a_run_of_more_steps_than_the_counter_holds_is_refused() {
             .stock("s", "0", &["f"], &[], None)
             .flow("f", "1", None)
             .build_datamodel();
-        project.sim_specs.save_step = Some(crate::datamodel::Dt::Dt(1e308));
+        project.sim_specs.save_step = Some(simlin_base::datamodel::Dt::Dt(1e308));
         project
     };
     let counted = compile_sim(&project(2_147_483_646.0), "main");
@@ -3434,7 +3446,7 @@ fn the_blob_refuses_the_specs_the_vm_refuses() {
 /// it, under every method.
 #[test]
 fn where_a_run_rests_on_each_backend() {
-    use crate::datamodel::SimMethod;
+    use simlin_base::datamodel::SimMethod;
     // A target, where the VM rests after running to it, and where the blob
     // does.
     type Rests = (f64, f64, f64);
@@ -3480,7 +3492,7 @@ fn where_a_run_rests_on_each_backend() {
                 .flow("f", "s / 4 + TIME / 10", None)
                 .aux("lagged", "PREVIOUS(s, 0)", None)
                 .build_datamodel();
-            project.sim_specs.save_step = save_step.map(crate::datamodel::Dt::Dt);
+            project.sim_specs.save_step = save_step.map(simlin_base::datamodel::Dt::Dt);
             let sim = compile_sim(&project, "main");
             let artifact = compile_simulation(&sim).expect("wasm codegen");
             let n_slots = artifact.layout.n_slots;

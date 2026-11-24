@@ -13,13 +13,13 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::common::canonicalize;
-use crate::datamodel::{self, Equation, View, ViewElement, view_element};
 use crate::diagram::common::{Rect, calc_view_box};
 use crate::diagram::elements::{
     alias_bounds, aux_bounds, cloud_bounds, group_bounds, module_bounds, stock_bounds,
 };
 use crate::diagram::flow::flow_bounds;
+use simlin_base::common::canonicalize;
+use simlin_base::datamodel::{self, Equation, View, ViewElement, view_element};
 
 /// One element a diagram draws, with the neighbours its drawing needs.
 #[derive(Debug)]

@@ -201,7 +201,7 @@ fn test_override_by_offset_out_of_bounds_returns_error() {
     let compiled = build_compiled(&rate_model());
     let mut vm = Vm::new(compiled).unwrap();
     let err = vm.set_value_by_offset(99999, 1.0).unwrap_err();
-    assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
+    assert_eq!(err.code, simlin_base::common::ErrorCode::BadOverride);
 }
 
 #[test]
@@ -221,7 +221,7 @@ fn test_set_value_non_constant_variable_returns_error() {
 
     // births is a computed flow (not a constant), so set_value should fail
     let err = vm.set_value(&Ident::new("births"), 42.0).unwrap_err();
-    assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
+    assert_eq!(err.code, simlin_base::common::ErrorCode::BadOverride);
 }
 
 #[test]
@@ -238,11 +238,11 @@ fn test_set_value_non_constant_returns_error() {
 
     // "computed" depends on "rate", so it's not a simple constant
     let err = vm.set_value(&Ident::new("computed"), 5.0).unwrap_err();
-    assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
+    assert_eq!(err.code, simlin_base::common::ErrorCode::BadOverride);
 
     // Stocks also cannot be set via set_value
     let err = vm.set_value(&Ident::new("pop"), 500.0).unwrap_err();
-    assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
+    assert_eq!(err.code, simlin_base::common::ErrorCode::BadOverride);
 }
 
 #[test]
@@ -319,7 +319,7 @@ fn test_set_value_module_stock_returns_error() {
     );
     // Stocks are not simple constants, so set_value should fail
     let err = vm.set_value(&hares_ident, 500.0).unwrap_err();
-    assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
+    assert_eq!(err.code, simlin_base::common::ErrorCode::BadOverride);
 }
 
 #[test]

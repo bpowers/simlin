@@ -19,8 +19,8 @@
 //!
 //! Verifies: macros.AC1.1, macros.AC1.6, macros.AC1.7.
 
-use crate::datamodel::{Equation, Model, Project, Variable};
 use crate::mdl::reader::ReaderError;
+use simlin_base::datamodel::{Equation, Model, Project, Variable};
 
 use super::{ConvertError, convert_mdl};
 
@@ -525,8 +525,8 @@ const MACRO_MULTI_OUTPUT: &str = include_str!(
 );
 
 /// Find the (single) `Variable::Module` in a model.
-fn the_module(model: &Model) -> &crate::datamodel::Module {
-    let modules: Vec<&crate::datamodel::Module> = model
+fn the_module(model: &Model) -> &simlin_base::datamodel::Module {
+    let modules: Vec<&simlin_base::datamodel::Module> = model
         .variables
         .iter()
         .filter_map(|v| match v {

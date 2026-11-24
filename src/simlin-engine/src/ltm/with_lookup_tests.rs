@@ -18,17 +18,17 @@ use super::*;
 fn with_lookup_scalar_aux(
     ident: &str,
     equation: &str,
-    gf: Option<crate::datamodel::GraphicalFunction>,
-) -> crate::datamodel::Variable {
-    crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+    gf: Option<simlin_base::datamodel::GraphicalFunction>,
+) -> simlin_base::datamodel::Variable {
+    simlin_base::datamodel::Variable::Aux(simlin_base::datamodel::Aux {
         ident: ident.to_string(),
-        equation: crate::datamodel::Equation::Scalar(equation.to_string()),
+        equation: simlin_base::datamodel::Equation::Scalar(equation.to_string()),
         documentation: String::new(),
         units: None,
         gf,
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     })
 }
 
@@ -39,11 +39,11 @@ fn with_lookup_a2a_aux(
     ident: &str,
     dim: &str,
     equation: &str,
-    gf: crate::datamodel::GraphicalFunction,
-) -> crate::datamodel::Variable {
-    crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+    gf: simlin_base::datamodel::GraphicalFunction,
+) -> simlin_base::datamodel::Variable {
+    simlin_base::datamodel::Variable::Aux(simlin_base::datamodel::Aux {
         ident: ident.to_string(),
-        equation: crate::datamodel::Equation::ApplyToAll(
+        equation: simlin_base::datamodel::Equation::ApplyToAll(
             vec![dim.to_string()],
             equation.to_string(),
         ),
@@ -52,7 +52,7 @@ fn with_lookup_a2a_aux(
         gf: Some(gf),
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     })
 }
 
@@ -64,21 +64,30 @@ fn with_lookup_a2a_aux(
 fn with_lookup_arrayed_aux(
     ident: &str,
     dim: &str,
-    elements: &[(&str, &str, Option<crate::datamodel::GraphicalFunction>)],
-) -> crate::datamodel::Variable {
+    elements: &[(
+        &str,
+        &str,
+        Option<simlin_base::datamodel::GraphicalFunction>,
+    )],
+) -> simlin_base::datamodel::Variable {
     let arrayed = elements
         .iter()
         .map(|(elem, eqn, gf)| (elem.to_string(), eqn.to_string(), None, gf.clone()))
         .collect();
-    crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+    simlin_base::datamodel::Variable::Aux(simlin_base::datamodel::Aux {
         ident: ident.to_string(),
-        equation: crate::datamodel::Equation::Arrayed(vec![dim.to_string()], arrayed, None, false),
+        equation: simlin_base::datamodel::Equation::Arrayed(
+            vec![dim.to_string()],
+            arrayed,
+            None,
+            false,
+        ),
         documentation: String::new(),
         units: None,
         gf: None,
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     })
 }
 
@@ -88,7 +97,7 @@ fn test_with_lookup_scalar_polarity_composes_gf() {
     // `LOOKUP(effect_gf, input)` -- the link polarity must compose the raw
     // input polarity with the gf's monotonicity even though the equation
     // text contains no LOOKUP call.
-    let run = |eqn: &str, gf: Option<crate::datamodel::GraphicalFunction>| {
+    let run = |eqn: &str, gf: Option<simlin_base::datamodel::GraphicalFunction>| {
         let polarities = link_polarities_for(
             "region",
             &["nyc", "boston"],
@@ -127,12 +136,12 @@ fn test_with_lookup_scalar_polarity_composes_gf() {
     );
     // A zero-point gf is treated as absent by the compiler
     // (`apply_implicit_with_lookup`): the raw input polarity stands.
-    let empty_gf = crate::datamodel::GraphicalFunction {
-        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+    let empty_gf = simlin_base::datamodel::GraphicalFunction {
+        kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         x_points: Some(vec![]),
         y_points: vec![],
-        x_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
-        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        x_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        y_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
     };
     assert_eq!(
         run("input", Some(empty_gf)),
@@ -177,7 +186,11 @@ fn test_with_lookup_arrayed_per_element_polarity() {
     // Per-element-equation arrayed WITH LOOKUP (GH #909): each element's
     // input equation is wrapped by that element's OWN table; a gf-less
     // element keeps its raw input equation.
-    let run = |elements: &[(&str, &str, Option<crate::datamodel::GraphicalFunction>)]| {
+    let run = |elements: &[(
+        &str,
+        &str,
+        Option<simlin_base::datamodel::GraphicalFunction>,
+    )]| {
         let polarities = link_polarities_for(
             "region",
             &["nyc", "boston"],

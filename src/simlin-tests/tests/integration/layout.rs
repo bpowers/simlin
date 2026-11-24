@@ -6,8 +6,8 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
 
-use simlin_engine::common::canonicalize;
-use simlin_engine::datamodel::ViewElement;
+use simlin_base::common::canonicalize;
+use simlin_base::datamodel::ViewElement;
 use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
 use simlin_engine::layout::LayoutState;
 use simlin_engine::layout::config::LayoutConfig;
@@ -21,7 +21,7 @@ use simlin_engine::open_xmile;
 /// `Project::get_model` maps "main" to the first model when the name is empty.
 const MAIN_MODEL: &str = "main";
 
-fn load_project(path: &str) -> simlin_engine::datamodel::Project {
+fn load_project(path: &str) -> simlin_base::datamodel::Project {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -37,8 +37,8 @@ fn load_project(path: &str) -> simlin_engine::datamodel::Project {
 
 /// Shared verification for all layout results.
 fn verify_layout(
-    view: &simlin_engine::datamodel::StockFlow,
-    model: &simlin_engine::datamodel::Model,
+    view: &simlin_base::datamodel::StockFlow,
+    model: &simlin_base::datamodel::Model,
     label: &str,
 ) {
     // Every model variable should have a corresponding view element.
@@ -1266,7 +1266,7 @@ fn test_from_existing_view_flow_templates() {
 /// renderable diagram with ViewElement::Module for each Variable::Module.
 #[test]
 fn test_systems_format_layout_with_modules() {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
 
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1326,7 +1326,7 @@ fn test_systems_format_layout_with_modules() {
 
 /// Helper: extract element position by canonical ident from a StockFlow view.
 fn find_element_position(
-    view: &simlin_engine::datamodel::StockFlow,
+    view: &simlin_base::datamodel::StockFlow,
     canonical_ident: &str,
 ) -> Option<(f64, f64)> {
     let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
@@ -1353,7 +1353,7 @@ fn find_element_position(
 /// Collect all variable element positions from a view as a map of
 /// canonical ident -> (x, y).
 fn collect_element_positions(
-    view: &simlin_engine::datamodel::StockFlow,
+    view: &simlin_base::datamodel::StockFlow,
 ) -> std::collections::HashMap<String, (f64, f64)> {
     let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
     let mut positions = std::collections::HashMap::new();
@@ -1379,9 +1379,9 @@ fn collect_element_positions(
 
 #[test]
 fn test_incremental_add_aux() {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
+    use simlin_base::{ModelOperation, ModelPatch};
     use simlin_engine::layout::incremental_layout;
-    use simlin_engine::{ModelOperation, ModelPatch};
 
     // Load SIR model and generate initial layout
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
@@ -1467,7 +1467,7 @@ fn test_incremental_add_aux() {
 }
 
 /// Helper: collect all Link elements as (from_uid, to_uid) pairs.
-fn collect_links(view: &simlin_engine::datamodel::StockFlow) -> HashSet<(i32, i32)> {
+fn collect_links(view: &simlin_base::datamodel::StockFlow) -> HashSet<(i32, i32)> {
     view.elements
         .iter()
         .filter_map(|e| match e {
@@ -1479,7 +1479,7 @@ fn collect_links(view: &simlin_engine::datamodel::StockFlow) -> HashSet<(i32, i3
 
 /// Helper: find the UID of a named view element.
 fn find_element_uid(
-    view: &simlin_engine::datamodel::StockFlow,
+    view: &simlin_base::datamodel::StockFlow,
     canonical_ident: &str,
 ) -> Option<i32> {
     let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
@@ -1497,9 +1497,10 @@ fn find_element_uid(
 
 #[test]
 fn test_incremental_combined_ops() {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
+    use simlin_base::{ModelOperation, ModelPatch, ProjectPatch};
+    use simlin_engine::apply_patch;
     use simlin_engine::layout::incremental_layout;
-    use simlin_engine::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
 
     // SIR model variables:
     //   stocks: susceptible, infectious, recovered
@@ -1694,8 +1695,8 @@ fn test_incremental_combined_ops() {
 
 #[test]
 fn test_incremental_fallback_to_full_layout() {
-    use simlin_engine::ModelPatch;
-    use simlin_engine::datamodel;
+    use simlin_base::ModelPatch;
+    use simlin_base::datamodel;
     use simlin_engine::layout::incremental_layout;
 
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
@@ -1868,9 +1869,9 @@ fn test_layout_hiring_no_flow_overlap() {
 /// flow should position the waste flow below the stock (not overlapping).
 #[test]
 fn test_incremental_add_waste_flow_goes_below() {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
+    use simlin_base::{ModelOperation, ModelPatch};
     use simlin_engine::layout::incremental_layout;
-    use simlin_engine::{ModelOperation, ModelPatch};
 
     // Start with a simple chain: stock_a -> chain_flow -> stock_b
     let initial_model = datamodel::Model {
@@ -2044,9 +2045,9 @@ fn test_incremental_add_waste_flow_goes_below() {
 /// a free slot on the face instead of landing on it.
 #[test]
 fn test_incremental_add_chain_keeps_existing_cloud_flow() {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
+    use simlin_base::{ModelOperation, ModelPatch};
     use simlin_engine::layout::incremental_layout;
-    use simlin_engine::{ModelOperation, ModelPatch};
 
     // Start with stock_a -> waste_flow -> cloud (only outflow, goes right)
     let initial_model = datamodel::Model {
@@ -2250,8 +2251,8 @@ fn test_incremental_add_chain_keeps_existing_cloud_flow() {
 /// coordinates (and flow `points`), giving an exact byte-for-byte comparison.
 /// Returns `(differing, total)`.
 fn count_layout_differences(
-    a: &simlin_engine::datamodel::StockFlow,
-    b: &simlin_engine::datamodel::StockFlow,
+    a: &simlin_base::datamodel::StockFlow,
+    b: &simlin_base::datamodel::StockFlow,
 ) -> (usize, usize) {
     assert_eq!(
         a.elements.len(),
@@ -2301,9 +2302,9 @@ fn test_layout_deterministic_per_seed() {
 /// nondeterminism in the incremental code paths.
 #[test]
 fn test_incremental_layout_deterministic() {
-    use simlin_engine::datamodel;
+    use simlin_base::datamodel;
+    use simlin_base::{ModelOperation, ModelPatch};
     use simlin_engine::layout::incremental_layout;
-    use simlin_engine::{ModelOperation, ModelPatch};
 
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
     let old_view =
@@ -2472,10 +2473,11 @@ fn test_flow_endpoints_geometrically_attached_to_stocks() {
 /// attribute is normalized to a space on read, silently losing the break.
 #[test]
 fn test_incremental_two_word_label_round_trips_every_format() {
+    use simlin_base::datamodel;
+    use simlin_base::{ModelOperation, ModelPatch};
     use simlin_engine::buffa::Message;
-    use simlin_engine::datamodel;
     use simlin_engine::layout::incremental_layout;
-    use simlin_engine::{ModelOperation, ModelPatch, json, project_io, serde as project_serde};
+    use simlin_engine::{json, project_io, serde as project_serde};
 
     let project = load_project("test/test-models/samples/teacup/teacup_w_diagram.xmile");
     let old_view = match project.get_model(MAIN_MODEL).unwrap().views.first() {

@@ -12,7 +12,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::*;
-use crate::common::{Canonical, Ident};
+use simlin_base::common::{Canonical, Ident};
 
 // ── Interned identifiers ───────────────────────────────────────────────
 
@@ -272,7 +272,7 @@ pub(crate) fn source_var_is_table_only(db: &dyn Db, var: SourceVariable) -> bool
 pub(crate) fn model_is_stdlib(canonical_model_name: &str) -> bool {
     canonical_model_name
         .strip_prefix("stdlib\u{205A}")
-        .is_some_and(|suffix| crate::stdlib::MODEL_NAMES.contains(&suffix))
+        .is_some_and(|suffix| simlin_base::stdlib::MODEL_NAMES.contains(&suffix))
 }
 
 /// [`model_is_stdlib`] for a salsa model handle.

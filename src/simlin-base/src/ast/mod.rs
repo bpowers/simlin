@@ -22,9 +22,10 @@ mod literal;
 mod to_expr0;
 
 pub use array_view::{ArrayView, SparseInfo};
-pub(crate) use canonical::operator_for_call;
-pub use canonical::{Aliases, CanonicalEqn};
-pub(crate) use dep_shape::{DepKind, DepShape, ModelShape, ShapeEntry};
+#[cfg(any(test, feature = "test-support"))]
+pub use canonical::constant_for_call;
+pub use canonical::{Aliases, CanonicalEqn, operator_for_call};
+pub use dep_shape::{DepKind, DepShape, ModelShape, ShapeEntry};
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use expr1::{Expr1, IndexExpr1};
 #[allow(unused_imports)]
@@ -32,7 +33,7 @@ pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2, NodeBounds};
 #[allow(unused_imports)]
 pub use expr3::{Expr3, Expr3LowerContext, IndexExpr3, TempAllocator};
 pub use literal::Literal;
-pub(crate) use to_expr0::{builtin_to_untyped, expr2_to_expr0, expr2_to_string};
+pub use to_expr0::{builtin_to_untyped, expr2_to_expr0, expr2_to_string};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ast<Expr> {
@@ -52,10 +53,7 @@ impl Ast<Expr0> {
     /// every element follows. An arrayed equation's default is searched
     /// first, then each element's own equation in its dimensions' declared
     /// order, so the answer does not depend on how the arms are stored.
-    pub(crate) fn locate_var(
-        &self,
-        canonical_ident: &str,
-    ) -> Option<(Option<CanonicalElementName>, Loc)> {
+    pub fn locate_var(&self, canonical_ident: &str) -> Option<(Option<CanonicalElementName>, Loc)> {
         match self {
             Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
                 expr.get_var_loc(canonical_ident).map(|loc| (None, loc))
@@ -151,7 +149,7 @@ impl Ast<Expr2> {
 /// `model_name` is read by the module arm of `model::lower_variable` alone: a
 /// module's input wiring strips a parent-scope `·` prefix in `main` only
 /// (`db::build_module_inputs`).
-pub(crate) struct LoweringScope<'a> {
+pub struct LoweringScope<'a> {
     pub dimensions: &'a DimensionsContext,
     pub shapes: &'a IdentMap<Ident<Canonical>, DepShape>,
     pub model_name: &'a str,
@@ -240,7 +238,7 @@ impl Expr2Context for ArrayContext<'_> {
 /// The errors one equation's lowering raised: one for a scalar or
 /// apply-to-all equation, and one for each element of an arrayed equation
 /// whose own equation fails, each naming its element.
-pub(crate) type LoweringResult<T> = Result<T, Vec<EquationError>>;
+pub type LoweringResult<T> = Result<T, Vec<EquationError>>;
 
 /// Lower every element arm of an arrayed equation and, when some fail,
 /// report each, named by its element, in the dimensions' declared element
@@ -291,10 +289,7 @@ fn lower_arrayed_arms<A, B>(
 /// An arrayed equation's errors are the default's, then each failing
 /// element arm's ([`lower_arrayed_arms`], in declared order) -- the order the
 /// `Expr2` stage keeps as well.
-pub(crate) fn typed_ast(
-    ast: &Ast<Expr0>,
-    dimensions: &DimensionsContext,
-) -> LoweringResult<Ast<Expr1>> {
+pub fn typed_ast(ast: &Ast<Expr0>, dimensions: &DimensionsContext) -> LoweringResult<Ast<Expr1>> {
     let typed = |expr: &Expr0| Expr1::from(expr).map(|expr| expr.constify_dimensions(dimensions));
     match ast {
         Ast::Scalar(expr) => typed(expr).map(Ast::Scalar).map_err(|e| vec![e]),
@@ -350,7 +345,7 @@ fn arrayed<E>(
 /// dimension name is a reference to be resolved rather than a name that
 /// cannot appear in a scalar equation, and where those dimensions are the
 /// reader's. `None` for every other equation.
-pub(crate) fn lower_ast(
+pub fn lower_ast(
     scope: &LoweringScope,
     ast: &Ast<Expr0>,
     element_scope: Option<&[crate::dimensions::Dimension]>,
@@ -362,7 +357,7 @@ pub(crate) fn lower_ast(
 /// lowered to `Expr2` under `scope`. A caller that typed the equation itself
 /// -- to classify its reads before the shapes it lowers under exist -- lowers
 /// that tree here rather than typing it again.
-pub(crate) fn lower_typed_ast(
+pub fn lower_typed_ast(
     scope: &LoweringScope,
     typed: Ast<Expr1>,
     element_scope: Option<&[crate::dimensions::Dimension]>,
@@ -451,7 +446,7 @@ fn is_prefix_unary(op: &UnaryOp) -> bool {
 /// operator, which one -- never at the operands -- so one classification serves
 /// `Expr0` and `Expr2` alike.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NodeShape {
+pub enum NodeShape {
     /// A `Const`, `Var` or `Subscript`: exactly what `parse_postfix` can reach,
     /// which is why a transpose operand of this shape needs no grouping.
     Atom,
@@ -493,7 +488,7 @@ pub(crate) enum NodeShape {
 /// parentheses go, and "these two arms differ because only one of them has to
 /// be correct" is a distinction no reader of the output can see. Pinned by
 /// `test_latex_printers_agree_on_if_under_an_operator`.
-pub(crate) fn paren_if_necessary(
+pub fn paren_if_necessary(
     parent: NodeShape,
     child: NodeShape,
     is_right_child: bool,
@@ -509,7 +504,7 @@ pub(crate) fn paren_if_necessary(
 /// Whether `child`, written under `parent` (on its right when
 /// `is_right_child`), needs parentheses: the grouping rule every printer
 /// applies, and what `equation_view` draws as a group.
-pub(crate) fn needs_parens(parent: NodeShape, child: NodeShape, is_right_child: bool) -> bool {
+pub fn needs_parens(parent: NodeShape, child: NodeShape, is_right_child: bool) -> bool {
     match parent {
         NodeShape::Atom | NodeShape::Call | NodeShape::If => false,
         NodeShape::Op1(UnaryOp::Transpose) => child != NodeShape::Atom,
@@ -528,7 +523,7 @@ pub(crate) fn needs_parens(parent: NodeShape, child: NodeShape, is_right_child: 
 }
 
 impl Expr0 {
-    pub(crate) fn shape(&self) -> NodeShape {
+    pub fn shape(&self) -> NodeShape {
         match self {
             Expr0::Const(_, _, _) | Expr0::Var(_, _) | Expr0::Subscript(_, _, _) => NodeShape::Atom,
             Expr0::App(_, _) => NodeShape::Call,
@@ -640,7 +635,7 @@ fn binary_op_latex(op: BinaryOp) -> BinaryOpLatex {
 /// implementation drifts -- `quote_ident` previously tested "alphanumeric or
 /// `_`", which a leading digit satisfies, so an LTM equation mixed a
 /// `print_eqn`-quoted `"1stock"` with a bare `1stock` and failed to parse.
-pub(crate) fn needs_quoting(canonical: &str) -> bool {
+pub fn needs_quoting(canonical: &str) -> bool {
     let mut chars = canonical.chars();
     match chars.next() {
         None => return true,
@@ -667,7 +662,7 @@ pub(crate) fn needs_quoting(canonical: &str) -> bool {
 /// character and never the bare path `a.b`. A caller holding a canonical name
 /// passes it as it is: `Ident::to_source_repr` would turn the sentinel into a
 /// period this function could only read as a module separator.
-pub(crate) fn print_ident(raw: &str) -> String {
+pub fn print_ident(raw: &str) -> String {
     let canonical = canonicalize(raw);
     if needs_quoting(&canonical) {
         format!(
@@ -1437,7 +1432,7 @@ fn render_latex<E: LatexTier>(expr: &E, annotate: bool) -> String {
     }
 }
 
-pub fn latex_eqn(expr: &Expr2) -> String {
+pub(crate) fn latex_eqn(expr: &Expr2) -> String {
     render_latex(expr, false)
 }
 
@@ -1446,7 +1441,7 @@ pub fn latex_eqn(expr: &Expr2) -> String {
 /// Variable names are canonicalized (lowercased with underscores) to match
 /// the Expr2-based [`latex_eqn`]. This avoids needing the full lowering
 /// pipeline just for LaTeX display.
-pub fn latex_eqn_expr0(expr: &Expr0) -> String {
+pub(crate) fn latex_eqn_expr0(expr: &Expr0) -> String {
     render_latex(expr, false)
 }
 
@@ -1455,7 +1450,7 @@ pub fn latex_eqn_expr0(expr: &Expr0) -> String {
 ///
 /// This is what the FFI's `simlin_model_get_latex_equation` returns; rendering
 /// the result requires enabling KaTeX's `trust` option, scoped to `\htmlData`.
-pub fn latex_eqn_expr0_annotated(expr: &Expr0) -> String {
+pub(crate) fn latex_eqn_expr0_annotated(expr: &Expr0) -> String {
     render_latex(expr, true)
 }
 

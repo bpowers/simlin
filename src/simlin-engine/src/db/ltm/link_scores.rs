@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::{Canonical, Ident, IdentSet};
+use simlin_base::common::{Canonical, Ident, IdentSet};
 
 use crate::db::{
     Db, LtmArm, LtmEquation, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject,
@@ -84,8 +84,8 @@ fn pinnable_arrayed_deps(
     deps: &IdentSet<Ident<Canonical>>,
     tables: &std::collections::BTreeSet<Ident<Canonical>>,
     keep: impl Fn(&Ident<Canonical>) -> bool,
-) -> Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> {
-    let mut pinnable: Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> = deps
+) -> Vec<(Ident<Canonical>, Vec<simlin_base::dimensions::Dimension>)> {
+    let mut pinnable: Vec<(Ident<Canonical>, Vec<simlin_base::dimensions::Dimension>)> = deps
         .iter()
         .chain(tables.iter())
         .cloned()
@@ -111,7 +111,10 @@ fn pinnable_arrayed_deps(
 /// consumes, because a target may repeat a dimension (`target[D,D]`) and the two
 /// axes then read different coordinates. Empty when the tuple's arity does not
 /// match, which the projection reads as "no axis resolves".
-fn target_element_parts(to_dims: &[crate::dimensions::Dimension], element: &str) -> Vec<String> {
+fn target_element_parts(
+    to_dims: &[simlin_base::dimensions::Dimension],
+    element: &str,
+) -> Vec<String> {
     let parts: Vec<String> = element.split(',').map(|p| p.trim().to_string()).collect();
     if parts.len() == to_dims.len() {
         parts
@@ -137,7 +140,7 @@ fn target_element_parts(to_dims: &[crate::dimensions::Dimension], element: &str)
 /// dimension leaves that dimension out of the map, which the row derivations
 /// read as "not projectable" -- the conservative direction.
 fn target_elem_by_dim_for(
-    to_dims: &[crate::dimensions::Dimension],
+    to_dims: &[simlin_base::dimensions::Dimension],
     dim_element_lists: &[Vec<String>],
     element: &str,
 ) -> HashMap<String, (String, usize)> {
@@ -188,10 +191,11 @@ struct ArrayedSlotMap {
 }
 
 impl ArrayedSlotMap {
-    fn new<E>(ast: &crate::ast::Ast<E>) -> Self {
-        use crate::ast::Ast;
+    fn new<E>(ast: &simlin_base::ast::Ast<E>) -> Self {
+        use simlin_base::ast::Ast;
         let slots = if let Ast::Arrayed(_, per_elem, _, _) = ast {
-            let mut keys: Vec<&crate::common::CanonicalElementName> = per_elem.keys().collect();
+            let mut keys: Vec<&simlin_base::common::CanonicalElementName> =
+                per_elem.keys().collect();
             keys.sort();
             let map = keys
                 .iter()
@@ -212,7 +216,7 @@ impl ArrayedSlotMap {
         match &self.slots {
             None => 0,
             Some((map, default_slot)) => {
-                let ce = crate::common::CanonicalElementName::from_raw(element);
+                let ce = simlin_base::common::CanonicalElementName::from_raw(element);
                 map.get(ce.as_str()).copied().unwrap_or(*default_slot)
             }
         }
@@ -225,15 +229,15 @@ impl ArrayedSlotMap {
 /// datamodel dimensions. A dimension the datamodel does not declare keeps its
 /// canonical name.
 pub(super) fn datamodel_dim_names(
-    dims: &[crate::dimensions::Dimension],
-    dm_dims: &[crate::datamodel::Dimension],
+    dims: &[simlin_base::dimensions::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
 ) -> Vec<String> {
     dims.iter()
         .map(|d| {
             let canonical = d.name();
             dm_dims
                 .iter()
-                .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
+                .find(|dm| simlin_base::common::canonicalize(dm.name()).as_ref() == canonical)
                 .map(|dm| dm.name().to_string())
                 .unwrap_or_else(|| canonical.to_string())
         })
@@ -249,7 +253,7 @@ fn is_structural_flow_to_stock(db: &dyn Db, model: SourceModel, from: &str, to: 
                 .inflows(db)
                 .iter()
                 .chain(var.outflows(db).iter())
-                .any(|flow| crate::common::canonicalize(flow).as_ref() == from)
+                .any(|flow| simlin_base::common::canonicalize(flow).as_ref() == from)
     })
 }
 
@@ -278,7 +282,7 @@ pub(super) fn link_score_dimensions(
     to: &str,
     model: SourceModel,
     project: SourceProject,
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
 ) -> Vec<String> {
     // A module is a scalar node in the causal graph; a helper has the shape
     // its storage has.
@@ -1064,7 +1068,7 @@ fn freeze_dep_dims(
     model: SourceModel,
     project: SourceProject,
     deps: &IdentSet<Ident<Canonical>>,
-) -> HashMap<String, Vec<crate::dimensions::Dimension>> {
+) -> HashMap<String, Vec<simlin_base::dimensions::Dimension>> {
     deps.iter()
         .filter_map(|dep| {
             let dims = endpoint_dimensions(db, model, project, dep.as_str())?;
@@ -1143,8 +1147,8 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
 
     let to_var = lowered_variable_by_name(db, model, project, to)?;
     let ast = to_var.ast()?;
-    use crate::ast::Ast;
-    let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
+    use simlin_base::ast::Ast;
+    let target_ast_dims: &[simlin_base::dimensions::Dimension] = match ast {
         Ast::Scalar(_) => &[],
         Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
     };
@@ -1195,12 +1199,12 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
         // one has a distinct body per slot. After per-element expansion a
         // module-bearing `ApplyToAll` has BECOME `Arrayed`, so this is the arm
         // that runs for an implicit instance.
-        let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
+        let canonical_elem = simlin_base::common::CanonicalElementName::from_raw(element);
         let (elem_eqn, elem_deps, elem_tables) = match ast {
             Ast::ApplyToAll(_, expr) => {
                 let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
                 (
-                    Some(crate::ast::expr2_to_expr0(expr)),
+                    Some(simlin_base::ast::expr2_to_expr0(expr)),
                     class.names(),
                     class.referenced_tables,
                 )
@@ -1214,7 +1218,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                             None,
                         );
                         (
-                            Some(crate::ast::expr2_to_expr0(expr)),
+                            Some(simlin_base::ast::expr2_to_expr0(expr)),
                             class.names(),
                             class.referenced_tables,
                         )
@@ -1370,8 +1374,8 @@ fn emit_broadcast_reduce_link_scores(
     source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
-    from_dims: &[crate::dimensions::Dimension],
-    to_dims: &[crate::dimensions::Dimension],
+    from_dims: &[simlin_base::dimensions::Dimension],
+    to_dims: &[simlin_base::dimensions::Dimension],
     vb_agg: &crate::ltm_agg::AggNode,
     model: SourceModel,
     project: SourceProject,
@@ -1530,7 +1534,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     to: &str,
     model: SourceModel,
     project: SourceProject,
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
     warnings: &mut LtmWarnings,
 ) -> Option<Vec<LtmSyntheticVar>> {
     // Source must be an EXPLICIT scalar variable. A synthesized helper can be
@@ -1655,8 +1659,8 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // In both cases dependency classification is given the target's
     // AST dimensions so explicit element-name subscripts (e.g. `[NYC]`)
     // are recognized as dimension references, not variables.
-    use crate::ast::Ast;
-    let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
+    use simlin_base::ast::Ast;
+    let target_ast_dims: &[simlin_base::dimensions::Dimension] = match ast {
         Ast::Scalar(_) => &[],
         Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
     };
@@ -1710,127 +1714,129 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // score is skipped rather than emitted with a silently non-ceteris-paribus
     // equation. A `None` `elem_eqn` is the legitimate no-slot case (a target
     // hole), scored 0, and is distinct from a failure.
-    let mut build_var = |element: &str,
-                         elem_eqn: Option<&crate::ast::Expr0>,
-                         elem_deps: &IdentSet<Ident<Canonical>>,
-                         pinnable: &[(Ident<Canonical>, Vec<crate::dimensions::Dimension>)],
-                         freeze_out: &mut Vec<LtmSyntheticVar>|
-     -> Option<LtmSyntheticVar> {
-        let name = format!(
-            "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
-            from, to, element
-        );
-        // Test-only seam (GH #780): honour a forced-`PartialEquationError`
-        // edge here too, so the direct (non-salsa) per-element generator
-        // call site is covered by the same override the shaped query uses.
-        #[cfg(test)]
-        if super::compile::force_partial_equation_error(from, to) {
-            let err = crate::ltm_augment::PartialEquationError::new(
-                "<test-forced per-element partial-equation failure (GH #780)>",
+    let mut build_var =
+        |element: &str,
+         elem_eqn: Option<&simlin_base::ast::Expr0>,
+         elem_deps: &IdentSet<Ident<Canonical>>,
+         pinnable: &[(Ident<Canonical>, Vec<simlin_base::dimensions::Dimension>)],
+         freeze_out: &mut Vec<LtmSyntheticVar>|
+         -> Option<LtmSyntheticVar> {
+            let name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
+                from, to, element
             );
-            emit_ltm_partial_equation_warning(warnings, &name, &err);
-            return None;
-        }
-        let equation = if let Some(elem_eqn) = elem_eqn {
-            // GH #910: `elem_eqn` is the target's RAW element equation, but an
-            // implicit WITH-LOOKUP target's compiled value is `gf(elem_eqn)`.
-            // Wrap the per-element partial in THIS element's own table (the
-            // per-element-equation case) or the shared one, so the numerator
-            // and the `Δto[e]` denominator live on the same scale. A gf-less
-            // element (empty placeholder table) keeps its raw partial, exactly
-            // as `apply_implicit_with_lookup` leaves its value unwrapped.
-            let gf_table_ref =
-                slot_refs.for_element(&crate::common::CanonicalElementName::from_raw(element));
-            let occ = slot_occurrences.for_slot(slot_map.slot_for(element));
-            // Each arrayed dep is pinned over ITS OWN declared dimensions,
-            // projected off this target element (GH #974).
-            let deps_to_sub = crate::ltm_augment::dep_element_pins(
-                pinnable,
-                &to_dims,
-                &target_element_parts(&to_dims, element),
-                dim_ctx,
-            );
-            let dep_dims = freeze_dep_dims(db, model, project, elem_deps);
-            let mut raw_freeze_helpers = Vec::new();
-            let eqn_result = crate::ltm_augment::generate_scalar_to_element_equation(
-                from,
-                to,
-                // Equation text uses the qualified `dim·element` form (direct
-                // LoadPrev, no helper auxes); the NAME below keeps the bare form.
-                &crate::ltm_augment::qualify_element_csv(element, &to_dims),
-                elem_eqn,
-                // A true scalar source has no hoisted reducers, so the wrap
-                // holds `from` live as an ident and the post-transform
-                // substitution is a no-op.
-                &std::collections::HashMap::new(),
-                elem_deps,
-                &deps_to_sub,
-                // A true scalar source: the bare `quote_ident(from)`
-                // denominator is correct, and there is no source subscript
-                // to pin in the partial body.
-                None,
-                &[],
-                Some(dim_ctx),
-                gf_table_ref.as_deref(),
-                &occ,
-                Some(&dep_dims),
-                &mut raw_freeze_helpers,
-            );
-            freeze_out.extend(
-                raw_freeze_helpers
-                    .into_iter()
-                    .map(super::compile::freeze_helper_var),
-            );
-            match eqn_result {
-                Ok(eqn) => eqn,
-                Err(err) => {
-                    emit_ltm_partial_equation_warning(warnings, &name, &err);
-                    return None;
-                }
+            // Test-only seam (GH #780): honour a forced-`PartialEquationError`
+            // edge here too, so the direct (non-salsa) per-element generator
+            // call site is covered by the same override the shaped query uses.
+            #[cfg(test)]
+            if super::compile::force_partial_equation_error(from, to) {
+                let err = crate::ltm_augment::PartialEquationError::new(
+                    "<test-forced per-element partial-equation failure (GH #780)>",
+                );
+                emit_ltm_partial_equation_warning(warnings, &name, &err);
+                return None;
             }
-        } else {
-            // A target hole: no per-element slot and no default. Zero is the
-            // right link-score value (no sensitivity).
-            "0".to_string()
+            let equation = if let Some(elem_eqn) = elem_eqn {
+                // GH #910: `elem_eqn` is the target's RAW element equation, but an
+                // implicit WITH-LOOKUP target's compiled value is `gf(elem_eqn)`.
+                // Wrap the per-element partial in THIS element's own table (the
+                // per-element-equation case) or the shared one, so the numerator
+                // and the `Δto[e]` denominator live on the same scale. A gf-less
+                // element (empty placeholder table) keeps its raw partial, exactly
+                // as `apply_implicit_with_lookup` leaves its value unwrapped.
+                let gf_table_ref = slot_refs.for_element(
+                    &simlin_base::common::CanonicalElementName::from_raw(element),
+                );
+                let occ = slot_occurrences.for_slot(slot_map.slot_for(element));
+                // Each arrayed dep is pinned over ITS OWN declared dimensions,
+                // projected off this target element (GH #974).
+                let deps_to_sub = crate::ltm_augment::dep_element_pins(
+                    pinnable,
+                    &to_dims,
+                    &target_element_parts(&to_dims, element),
+                    dim_ctx,
+                );
+                let dep_dims = freeze_dep_dims(db, model, project, elem_deps);
+                let mut raw_freeze_helpers = Vec::new();
+                let eqn_result = crate::ltm_augment::generate_scalar_to_element_equation(
+                    from,
+                    to,
+                    // Equation text uses the qualified `dim·element` form (direct
+                    // LoadPrev, no helper auxes); the NAME below keeps the bare form.
+                    &crate::ltm_augment::qualify_element_csv(element, &to_dims),
+                    elem_eqn,
+                    // A true scalar source has no hoisted reducers, so the wrap
+                    // holds `from` live as an ident and the post-transform
+                    // substitution is a no-op.
+                    &std::collections::HashMap::new(),
+                    elem_deps,
+                    &deps_to_sub,
+                    // A true scalar source: the bare `quote_ident(from)`
+                    // denominator is correct, and there is no source subscript
+                    // to pin in the partial body.
+                    None,
+                    &[],
+                    Some(dim_ctx),
+                    gf_table_ref.as_deref(),
+                    &occ,
+                    Some(&dep_dims),
+                    &mut raw_freeze_helpers,
+                );
+                freeze_out.extend(
+                    raw_freeze_helpers
+                        .into_iter()
+                        .map(super::compile::freeze_helper_var),
+                );
+                match eqn_result {
+                    Ok(eqn) => eqn,
+                    Err(err) => {
+                        emit_ltm_partial_equation_warning(warnings, &name, &err);
+                        return None;
+                    }
+                }
+            } else {
+                // A target hole: no per-element slot and no default. Zero is the
+                // right link-score value (no sensitivity).
+                "0".to_string()
+            };
+            // COMPLETENESS: a scalar per-element partial must select ONE element at
+            // every subscript. An index left as a bare DIMENSION name denotes the
+            // whole axis, so it cannot lower -- and when it sits inside a frozen
+            // subtree `builtins_visitor` hoists it into a `PREVIOUS`-capture helper
+            // that fails on its own WHILE THIS SCORE STILL COMPILES, because the
+            // score only references the helper's slot. The result is not an absent
+            // score but a present one reading part of its own equation as a constant
+            // 0, under a warning worded for something else.
+            //
+            // "No score, warned" beats a wrong score, so decline the edge on the same
+            // `PartialEquationError` contract the GH #311 parse failure and the
+            // GH #743 unfreezable partial use: loops through it drop with a warning.
+            //
+            // Checked on the FINISHED arm -- parsed once, the tree the fragment
+            // compiles -- not predicted from the pin table. A dep the table cannot
+            // cover may still need no pin -- `source[idx]` resolves through its
+            // own runtime index -- so declining whenever a dep is unpinnable
+            // rejects edges that score correctly. Only a surviving dimension-name
+            // index actually breaks.
+            let arm = LtmArm::new(equation);
+            if let Some(offender) = arm
+                .expr
+                .as_deref()
+                .and_then(|expr| crate::ltm_augment::unresolvable_dimension_index(expr, dim_ctx))
+            {
+                let err =
+                    crate::ltm_augment::PartialEquationError::unprojectable_dep(&offender, element);
+                emit_ltm_partial_equation_warning(warnings, &name, &err);
+                return None;
+            }
+            Some(LtmSyntheticVar {
+                name,
+                equation: LtmEquation::Scalar(arm),
+                dimensions: vec![], // scalar -- one variable per target element
+                // bracketed name -> routed direct by `assemble_module`.
+                compile_directly: false,
+            })
         };
-        // COMPLETENESS: a scalar per-element partial must select ONE element at
-        // every subscript. An index left as a bare DIMENSION name denotes the
-        // whole axis, so it cannot lower -- and when it sits inside a frozen
-        // subtree `builtins_visitor` hoists it into a `PREVIOUS`-capture helper
-        // that fails on its own WHILE THIS SCORE STILL COMPILES, because the
-        // score only references the helper's slot. The result is not an absent
-        // score but a present one reading part of its own equation as a constant
-        // 0, under a warning worded for something else.
-        //
-        // "No score, warned" beats a wrong score, so decline the edge on the same
-        // `PartialEquationError` contract the GH #311 parse failure and the
-        // GH #743 unfreezable partial use: loops through it drop with a warning.
-        //
-        // Checked on the FINISHED arm -- parsed once, the tree the fragment
-        // compiles -- not predicted from the pin table. A dep the table cannot
-        // cover may still need no pin -- `source[idx]` resolves through its
-        // own runtime index -- so declining whenever a dep is unpinnable
-        // rejects edges that score correctly. Only a surviving dimension-name
-        // index actually breaks.
-        let arm = LtmArm::new(equation);
-        if let Some(offender) = arm
-            .expr
-            .as_deref()
-            .and_then(|expr| crate::ltm_augment::unresolvable_dimension_index(expr, dim_ctx))
-        {
-            let err =
-                crate::ltm_augment::PartialEquationError::unprojectable_dep(&offender, element);
-            emit_ltm_partial_equation_warning(warnings, &name, &err);
-            return None;
-        }
-        Some(LtmSyntheticVar {
-            name,
-            equation: LtmEquation::Scalar(arm),
-            dimensions: vec![], // scalar -- one variable per target element
-            // bracketed name -> routed direct by `assemble_module`.
-            compile_directly: false,
-        })
-    };
 
     // GH #780: `build_var` returns `None` only on a true per-element
     // `PartialEquationError` (the no-slot case returns `Some("0")`). One
@@ -1849,7 +1855,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         // element-invariant -- compute them once, outside the loop. Only the
         // pin PROJECTION varies per element, and that is `build_var`'s job.
         Ast::ApplyToAll(_, expr) => {
-            let elem_eqn = crate::ast::expr2_to_expr0(expr);
+            let elem_eqn = simlin_base::ast::expr2_to_expr0(expr);
             let elem_dep_class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
             let elem_deps = elem_dep_class.names();
             let pinnable = pinnable_deps(&elem_deps, &elem_dep_class.referenced_tables);
@@ -1876,11 +1882,11 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         // element and must be recomputed inside the loop.
         Ast::Arrayed(_, per_elem, default_expr, _) => {
             for element in &elements {
-                let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
+                let canonical_elem = simlin_base::common::CanonicalElementName::from_raw(element);
                 let slot = per_elem.get(&canonical_elem).or(default_expr.as_ref());
                 #[allow(clippy::type_complexity)]
                 let (elem_eqn, elem_deps, elem_tables): (
-                    Option<crate::ast::Expr0>,
+                    Option<simlin_base::ast::Expr0>,
                     IdentSet<Ident<Canonical>>,
                     std::collections::BTreeSet<Ident<Canonical>>,
                 ) = match slot {
@@ -1891,7 +1897,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                             None,
                         );
                         (
-                            Some(crate::ast::expr2_to_expr0(expr)),
+                            Some(simlin_base::ast::expr2_to_expr0(expr)),
                             class.names(),
                             class.referenced_tables,
                         )
@@ -2396,8 +2402,8 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
     // sub-case is recoverable; a scalar source into an arrayed target is
     // `try_scalar_to_arrayed`'s job.
     let to_var = lowered_variable_by_name(db, model, project, to)?;
-    let to_ast_is_arrayed = matches!(to_var.ast(), Some(crate::ast::Ast::Arrayed(..)));
-    let to_ast_is_a2a = matches!(to_var.ast(), Some(crate::ast::Ast::ApplyToAll(..)));
+    let to_ast_is_arrayed = matches!(to_var.ast(), Some(simlin_base::ast::Ast::Arrayed(..)));
+    let to_ast_is_a2a = matches!(to_var.ast(), Some(simlin_base::ast::Ast::ApplyToAll(..)));
     if !to_ast_is_arrayed && !to_ast_is_a2a {
         return None;
     }
@@ -2560,7 +2566,7 @@ pub(super) fn emit_per_shape_link_scores(
     fallback_shape: RefShape,
     model: SourceModel,
     project: SourceProject,
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
     skip_reducer_shapes: bool,
     vars: &mut Vec<LtmSyntheticVar>,
     warnings: &mut LtmWarnings,
@@ -2702,7 +2708,7 @@ fn emit_shaped_link_scores(
     vars_start: usize,
     model: SourceModel,
     project: SourceProject,
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
     vars: &mut Vec<LtmSyntheticVar>,
     warnings: &mut LtmWarnings,
 ) {
@@ -2880,15 +2886,15 @@ fn emit_per_element_link_scores(
     vars: &mut Vec<LtmSyntheticVar>,
     warnings: &mut LtmWarnings,
 ) -> bool {
-    use crate::ast::Ast;
-    use crate::common::{Canonical, Ident};
+    use simlin_base::ast::Ast;
+    use simlin_base::common::{Canonical, Ident};
 
     /// One target element's equation parts: (body text, full dep set, the
     /// arrayed deps to element-pin with their declared dimensions).
     type ElemEqnParts = (
-        crate::ast::Expr0,
+        simlin_base::ast::Expr0,
         IdentSet<Ident<Canonical>>,
-        Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)>,
+        Vec<(Ident<Canonical>, Vec<simlin_base::dimensions::Dimension>)>,
     );
 
     let Some(from_dims) = endpoint_dimensions(db, model, project, from) else {
@@ -2909,7 +2915,7 @@ fn emit_per_element_link_scores(
     let Some(ast) = to_var.ast() else {
         return false;
     };
-    let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
+    let target_ast_dims: &[simlin_base::dimensions::Dimension] = match ast {
         Ast::Scalar(_) => &[],
         Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
     };
@@ -2954,7 +2960,7 @@ fn emit_per_element_link_scores(
     // Per target element: the body text + dep sets (shared for A2A,
     // per-slot for Arrayed -- mirroring `try_scalar_to_arrayed_link_scores`).
     let a2a_parts: Option<ElemEqnParts> = if let Ast::ApplyToAll(_, expr) = ast {
-        let eqn = crate::ast::expr2_to_expr0(expr);
+        let eqn = simlin_base::ast::expr2_to_expr0(expr);
         let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
         let deps = class.names();
         let pinnable = pinnable_deps(&deps, &class.referenced_tables);
@@ -3010,17 +3016,18 @@ fn emit_per_element_link_scores(
         // while the guard form ratios them against `Δto[e]` -- which is
         // gf-applied. Feed each through this element's own table (`None` for a
         // gf-less element, matching `apply_implicit_with_lookup`).
-        let gf_table_ref =
-            slot_refs.for_element(&crate::common::CanonicalElementName::from_raw(element));
+        let gf_table_ref = slot_refs.for_element(
+            &simlin_base::common::CanonicalElementName::from_raw(element),
+        );
 
         // Per-slot body text / deps for an `Ast::Arrayed` target.
         let slot_parts: Option<ElemEqnParts> = match ast {
             Ast::Arrayed(_, per_elem, default_expr, _) => {
-                let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
+                let canonical_elem = simlin_base::common::CanonicalElementName::from_raw(element);
                 let slot = per_elem.get(&canonical_elem).or(default_expr.as_ref());
                 match slot {
                     Some(expr) => {
-                        let eqn = crate::ast::expr2_to_expr0(expr);
+                        let eqn = simlin_base::ast::expr2_to_expr0(expr);
                         let class = crate::variable::classify_dependencies(
                             &Ast::Scalar(expr.clone()),
                             target_ast_dims,
@@ -3076,9 +3083,9 @@ fn emit_per_element_link_scores(
                     emit_ltm_partial_equation_warning(
                         warnings,
                         &name,
-                        &crate::ltm_augment::PartialEquationError::new(&crate::ast::print_eqn(
-                            body_eqn,
-                        )),
+                        &crate::ltm_augment::PartialEquationError::new(
+                            &simlin_base::ast::print_eqn(body_eqn),
+                        ),
                     );
                 }
                 return true;
@@ -3169,7 +3176,7 @@ fn reducer_body_ctx_parts(
     source_vars: &HashMap<String, SourceVariable>,
     model: SourceModel,
     project: SourceProject,
-    body: &crate::ast::Expr0,
+    body: &simlin_base::ast::Expr0,
 ) -> (HashMap<String, usize>, HashSet<String>) {
     let mut arrayed_dep_dims: HashMap<String, usize> = HashMap::new();
     let mut model_deps: HashSet<String> = HashSet::new();
@@ -3225,7 +3232,7 @@ fn iterated_feeder_row_scores(
     db: &dyn Db,
     project: SourceProject,
     from: &str,
-    from_dims: &[crate::dimensions::Dimension],
+    from_dims: &[simlin_base::dimensions::Dimension],
     agg: &crate::ltm_agg::AggNode,
     warnings: &mut LtmWarnings,
     // The implicit WITH-LOOKUP wrap for the agg's owner (GH #910). Always
@@ -3492,12 +3499,12 @@ pub(super) fn emit_source_to_agg_link_scores(
             }
         }
 
-        let rank_dims: Vec<crate::dimensions::Dimension> = agg
+        let rank_dims: Vec<simlin_base::dimensions::Dimension> = agg
             .result_dims
             .iter()
             .filter_map(|dim| {
                 dim_ctx
-                    .get(&crate::common::CanonicalDimensionName::from_raw(dim))
+                    .get(&simlin_base::common::CanonicalDimensionName::from_raw(dim))
                     .cloned()
             })
             .collect();
@@ -3739,8 +3746,8 @@ pub(super) fn emit_agg_to_target_link_scores(
     // dims and dep set, extended with the agg name (harmless if it never
     // appears).
     let to_dims = endpoint_dimensions(db, model, project, to).unwrap_or_default();
-    use crate::ast::Ast;
-    let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
+    use simlin_base::ast::Ast;
+    let target_ast_dims: &[simlin_base::dimensions::Dimension] = match ast {
         Ast::Scalar(_) => &[],
         Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
     };
@@ -3779,7 +3786,9 @@ pub(super) fn emit_agg_to_target_link_scores(
     let elem_gf_ref = |element: &str| -> Option<String> {
         slot_refs
             .as_ref()?
-            .for_element(&crate::common::CanonicalElementName::from_raw(element))
+            .for_element(&simlin_base::common::CanonicalElementName::from_raw(
+                element,
+            ))
     };
     let base_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
     let mut all_deps = base_deps.clone();
@@ -3814,9 +3823,9 @@ pub(super) fn emit_agg_to_target_link_scores(
     #[derive(Clone)]
     struct AggTargetProjectionAxis {
         target_pos: usize,
-        target_dim: crate::dimensions::Dimension,
-        result_dim: crate::dimensions::Dimension,
-        mapped_elements: Option<Vec<crate::common::CanonicalElementName>>,
+        target_dim: simlin_base::dimensions::Dimension,
+        result_dim: simlin_base::dimensions::Dimension,
+        mapped_elements: Option<Vec<simlin_base::common::CanonicalElementName>>,
     }
     #[derive(Clone)]
     struct AggTargetProjection {
@@ -3832,7 +3841,7 @@ pub(super) fn emit_agg_to_target_link_scores(
     let target_projection_for_result_dims = |result_dims: &[String]| -> AggTargetProjection {
         let mut axes = Vec::with_capacity(result_dims.len());
         for rd in result_dims {
-            let result_canon = crate::common::CanonicalDimensionName::from_raw(rd);
+            let result_canon = simlin_base::common::CanonicalDimensionName::from_raw(rd);
             if let Some((target_pos, target_dim)) = to_dims
                 .iter()
                 .enumerate()
@@ -3889,7 +3898,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                     let target_elem = parts.get(axis.target_pos)?;
                     if let Some(mapped_elements) = &axis.mapped_elements {
                         let target_elem_name =
-                            crate::common::CanonicalElementName::from_raw(target_elem);
+                            simlin_base::common::CanonicalElementName::from_raw(target_elem);
                         let offset = axis.target_dim.get_offset(&target_elem_name)?;
                         mapped_elements
                             .get(offset)
@@ -3946,7 +3955,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 return None;
             }
             let slot = slot_parts.join(",");
-            let result_dims: Vec<crate::dimensions::Dimension> = projection
+            let result_dims: Vec<simlin_base::dimensions::Dimension> = projection
                 .axes
                 .iter()
                 .map(|axis| axis.result_dim.clone())
@@ -4041,7 +4050,7 @@ pub(super) fn emit_agg_to_target_link_scores(
             match crate::ltm_augment::generate_agg_to_scalar_target_equation(
                 &agg.name,
                 to,
-                &crate::ast::expr2_to_expr0(expr),
+                &simlin_base::ast::expr2_to_expr0(expr),
                 &reducer_subst,
                 &all_deps,
                 Some(project_dimensions_context(db, project)),
@@ -4079,7 +4088,7 @@ pub(super) fn emit_agg_to_target_link_scores(
             // `Expr0`); a doomed wrap surfaces on the first element's generator
             // `Err` and dooms the edge once, via the same GH #661 warning path
             // the per-element loop uses.
-            let to_own_eqn = crate::ast::expr2_to_expr0(expr);
+            let to_own_eqn = simlin_base::ast::expr2_to_expr0(expr);
             if to_dims.is_empty() {
                 return;
             }
@@ -4185,7 +4194,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .collect();
             let mut edge_vars: Vec<LtmSyntheticVar> = Vec::new();
             for element in &cartesian_subscripts(&dim_element_lists) {
-                let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
+                let canonical_elem = simlin_base::common::CanonicalElementName::from_raw(element);
                 // Thread the slot expression through directly rather than
                 // relying on the invariant that `substituted.is_empty()`
                 // iff there is no slot expression.
@@ -4220,7 +4229,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             to,
                             // Qualified for equation text; the name keeps the bare form.
                             &crate::ltm_augment::qualify_element_csv(element, &to_dims),
-                            &crate::ast::expr2_to_expr0(slot_expr),
+                            &simlin_base::ast::expr2_to_expr0(slot_expr),
                             &reducer_subst,
                             &slot_deps,
                             &deps_to_subscript(element),
@@ -4327,7 +4336,7 @@ pub(super) fn emit_link_scores_for_edge(
     to: &str,
     model: SourceModel,
     project: SourceProject,
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
     skip_agg_halves: bool,
     vars: &mut Vec<LtmSyntheticVar>,
     warnings: &mut LtmWarnings,

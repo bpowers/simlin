@@ -8,17 +8,17 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::datamodel::{self, Variable};
 use crate::db::DepPhase;
 use crate::ltm::LinkPolarity;
 use crate::test_common::TestProject;
 use crate::variable::DepLag;
+use simlin_base::datamodel::{self, Variable};
 
 /// The reads of `project`'s first model.
 fn reads_of(project: &datamodel::Project) -> Vec<ModelRead> {
     let db = SimlinDb::default();
     let source_project = crate::db::sync_from_datamodel(&db, project).project;
-    let name = crate::canonicalize(&project.models[0].name).into_owned();
+    let name = simlin_base::canonicalize(&project.models[0].name).into_owned();
     let model = source_project.models(&db)[name.as_str()];
     model_reads(&db, model, source_project)
 }
@@ -27,7 +27,7 @@ fn reads_of(project: &datamodel::Project) -> Vec<ModelRead> {
 fn links_of(project: &datamodel::Project) -> BTreeSet<(String, String)> {
     let db = SimlinDb::default();
     let source_project = crate::db::sync_from_datamodel(&db, project).project;
-    let name = crate::canonicalize(&project.models[0].name).into_owned();
+    let name = simlin_base::canonicalize(&project.models[0].name).into_owned();
     let model = source_project.models(&db)[name.as_str()];
     model_links(&db, model, source_project, None, false)
         .into_iter()
@@ -525,8 +525,8 @@ fn a_corpus_conveyor_reads_its_transit_time() {
             continue;
         };
         stocks += 1;
-        let owner = crate::canonicalize(&stock.ident).into_owned();
-        let len = crate::canonicalize(&conveyor.transit_time).into_owned();
+        let owner = simlin_base::canonicalize(&stock.ident).into_owned();
+        let len = simlin_base::canonicalize(&conveyor.transit_time).into_owned();
         assert!(read(&reads, &len, &owner).option.is_some());
     }
     assert!(stocks > 0, "the premise: the model has conveyors");
@@ -594,7 +594,10 @@ fn names_written(text: &str) -> BTreeSet<(String, Written)> {
                 i += 1;
             }
             let name: String = chars[start..i.min(chars.len())].iter().collect();
-            names.insert((crate::canonicalize(&name).into_owned(), Written::Quoted));
+            names.insert((
+                simlin_base::canonicalize(&name).into_owned(),
+                Written::Quoted,
+            ));
             i += 1;
         } else if c == '{' {
             while i < chars.len() && chars[i] != '}' {
@@ -618,7 +621,7 @@ fn names_written(text: &str) -> BTreeSet<(String, Written)> {
             } else {
                 Written::Bare
             };
-            names.insert((crate::canonicalize(&word).into_owned(), written));
+            names.insert((simlin_base::canonicalize(&word).into_owned(), written));
         } else {
             i += 1;
         }
@@ -643,15 +646,19 @@ fn reads_written(
     let declared: BTreeSet<String> = model
         .variables
         .iter()
-        .map(|v| crate::canonicalize(v.get_ident()).into_owned())
+        .map(|v| simlin_base::canonicalize(v.get_ident()).into_owned())
         .collect();
     let subscripts: BTreeSet<String> = project
         .dimensions
         .iter()
         .flat_map(|d| {
-            let mut names = vec![crate::canonicalize(&d.name).into_owned()];
+            let mut names = vec![simlin_base::canonicalize(&d.name).into_owned()];
             if let datamodel::DimensionElements::Named(elements) = &d.elements {
-                names.extend(elements.iter().map(|e| crate::canonicalize(e).into_owned()));
+                names.extend(
+                    elements
+                        .iter()
+                        .map(|e| simlin_base::canonicalize(e).into_owned()),
+                );
             }
             names
         })
@@ -664,20 +671,20 @@ fn reads_written(
             Variable::Flow(flow) => flow.gf.is_some(),
             _ => false,
         })
-        .map(|v| crate::canonicalize(v.get_ident()).into_owned())
+        .map(|v| simlin_base::canonicalize(v.get_ident()).into_owned())
         .collect();
     let mut reads = BTreeSet::new();
     for var in &model.variables {
-        let me = crate::canonicalize(var.get_ident()).into_owned();
+        let me = simlin_base::canonicalize(var.get_ident()).into_owned();
         let mut written: BTreeSet<String> = var
             .expression_texts()
             .into_iter()
             .flat_map(|(_, text)| names_written(text))
             .filter(|(name, written)| match written {
                 Written::Quoted => true,
-                Written::Bare => !crate::builtins::is_0_arity_builtin_fn(name),
+                Written::Bare => !simlin_base::builtins::is_0_arity_builtin_fn(name),
                 Written::Called => {
-                    !crate::builtins::is_0_arity_builtin_fn(name) && tables.contains(name)
+                    !simlin_base::builtins::is_0_arity_builtin_fn(name) && tables.contains(name)
                 }
             })
             .map(|(name, _)| name)
@@ -688,7 +695,7 @@ fn reads_written(
                     .inflows
                     .iter()
                     .chain(&stock.outflows)
-                    .map(|f| crate::canonicalize(f).into_owned()),
+                    .map(|f| simlin_base::canonicalize(f).into_owned()),
             ),
             // A module wired from its own output binds nothing (a Stella
             // import wires those as inputs), so that wire is no read.
@@ -697,7 +704,7 @@ fn reads_written(
                     .references
                     .iter()
                     .map(|r| {
-                        crate::canonicalize(&r.src)
+                        simlin_base::canonicalize(&r.src)
                             .trim_start_matches('\u{00B7}')
                             .to_string()
                     })
@@ -732,7 +739,7 @@ fn reads_against_text(
     let mut db = crate::db::SimlinDb::default();
     db.sync(project);
     let source_project = db.current_source_project().unwrap();
-    let canonical = crate::canonicalize(model_name);
+    let canonical = simlin_base::canonicalize(model_name);
     let source_model = *source_project.models(&db).get(canonical.as_ref()).unwrap();
     // A name a dimension or an element also has may be a subscript in the
     // text, so neither side counts it.
@@ -740,9 +747,13 @@ fn reads_against_text(
         .dimensions
         .iter()
         .flat_map(|d| {
-            let mut names = vec![crate::canonicalize(&d.name).into_owned()];
+            let mut names = vec![simlin_base::canonicalize(&d.name).into_owned()];
             if let datamodel::DimensionElements::Named(elements) = &d.elements {
-                names.extend(elements.iter().map(|e| crate::canonicalize(e).into_owned()));
+                names.extend(
+                    elements
+                        .iter()
+                        .map(|e| simlin_base::canonicalize(e).into_owned()),
+                );
             }
             names
         })

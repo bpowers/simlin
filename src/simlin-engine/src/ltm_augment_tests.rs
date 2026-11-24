@@ -8,17 +8,17 @@
 //! `#[path]` so `use super::*` still resolves the module's private items.
 
 use super::*;
-use crate::common::{CanonicalDimensionName, CanonicalElementName, IdentMap, IdentSet};
 use crate::db::LtmEquation;
 use crate::db::ltm_ir::OccurrenceRef;
-use crate::dimensions::{Dimension, NamedDimension};
+use simlin_base::common::{CanonicalDimensionName, CanonicalElementName, IdentMap, IdentSet};
+use simlin_base::dimensions::{Dimension, NamedDimension};
 
 fn make_named_dimension(name: &str, elements: &[&str]) -> Dimension {
     let canonical_elements: Vec<CanonicalElementName> = elements
         .iter()
         .map(|e| CanonicalElementName::from_raw(e))
         .collect();
-    let indexed: crate::common::IdentMap<CanonicalElementName, usize> = canonical_elements
+    let indexed: simlin_base::common::IdentMap<CanonicalElementName, usize> = canonical_elements
         .iter()
         .enumerate()
         // 1-indexed, matching `impl From<&datamodel::Dimension>` -- production
@@ -95,7 +95,7 @@ fn pin_table_with_completeness(
 /// a parse of the reducer's key is that value up to `Loc`
 /// (`ltm_agg_tests::the_typed_reducer_is_the_parse_of_its_key`).
 fn expr(text: &str) -> Expr0 {
-    Expr0::new(text, crate::lexer::LexerType::Equation)
+    Expr0::new(text, simlin_base::lexer::LexerType::Equation)
         .expect("test equation must lex")
         .expect("test equation must be non-empty")
 }
@@ -133,14 +133,14 @@ fn region_dim_elements() -> Vec<Vec<String>> {
 /// classify as `DynamicIndex`.
 #[test]
 fn classify_expr0_rejects_out_of_range_integer_literal() {
-    use crate::ast::{Expr0, IndexExpr0, Loc};
+    use simlin_base::ast::{Expr0, IndexExpr0, Loc};
 
     // Indexed-style source_dim_elements: position 0 is an indexed
     // dim of size 2 (elements "1", "2"). "999" is out of range.
     let dims = vec![vec!["1".to_string(), "2".to_string()]];
     let indices = vec![IndexExpr0::Expr(Expr0::Const(
         "999".to_string(),
-        crate::ast::Literal::new(999.0),
+        simlin_base::ast::Literal::new(999.0),
         Loc::default(),
     ))];
 
@@ -161,7 +161,7 @@ fn classify_expr0_rejects_out_of_range_integer_literal() {
     // Sanity: the same classifier still accepts an in-range integer.
     let in_range = vec![IndexExpr0::Expr(Expr0::Const(
         "1".to_string(),
-        crate::ast::Literal::new(1.0),
+        simlin_base::ast::Literal::new(1.0),
         Loc::default(),
     ))];
     let in_range_shape = classify_expr0_subscript_shape(&in_range, &dims, None, None);
@@ -184,7 +184,7 @@ fn classify_expr0_rejects_out_of_range_integer_literal() {
 /// wrapped in `PREVIOUS()`, and the link score silently zeros.
 #[test]
 fn classify_expr0_canonicalizes_integer_literal_subscript() {
-    use crate::ast::{Expr0, IndexExpr0, Loc};
+    use simlin_base::ast::{Expr0, IndexExpr0, Loc};
 
     // Indexed-style source_dim_elements: position 0 is an indexed
     // dim of size 5 (elements "1".."5").
@@ -196,7 +196,7 @@ fn classify_expr0_canonicalizes_integer_literal_subscript() {
     ];
     let indices = vec![IndexExpr0::Expr(Expr0::Const(
         "01".to_string(),
-        crate::ast::Literal::new(1.0),
+        simlin_base::ast::Literal::new(1.0),
         Loc::default(),
     ))];
 
@@ -485,8 +485,8 @@ fn test_dimension_element_names_indexed_zero() {
 
 // -- classify_reducer tests --
 
-use crate::ast::{Ast, Expr2, IndexExpr2};
-use crate::builtins::{BuiltinFn, Loc};
+use simlin_base::ast::{Ast, Expr2, IndexExpr2};
+use simlin_base::builtins::{BuiltinFn, Loc};
 
 /// Build a `VarKind::Aux` variable with a hand-built Expr2 AST.
 fn var_with_expr(expr: Expr2) -> Variable {
@@ -587,7 +587,7 @@ fn test_classify_reducer_rank() {
     let inner = subscript_wildcard("population");
     let direction = Expr2::Const(
         "1".to_string(),
-        crate::ast::Literal::new(1.0),
+        simlin_base::ast::Literal::new(1.0),
         Loc::default(),
     );
     let expr = Expr2::App(
@@ -619,7 +619,7 @@ fn test_classify_reducer_size() {
 fn test_classify_reducer_no_reducer() {
     // A plain addition: x + y
     let expr = Expr2::Op2(
-        crate::ast::BinaryOp::Add,
+        simlin_base::ast::BinaryOp::Add,
         Box::new(var_ref("x")),
         Box::new(var_ref("y")),
         None,
@@ -648,23 +648,23 @@ fn test_classify_reducer_nested_in_expression() {
     let sum_expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
     let two = Expr2::Const(
         "2".to_string(),
-        crate::ast::Literal::new(2.0),
+        simlin_base::ast::Literal::new(2.0),
         Loc::default(),
     );
     let one = Expr2::Const(
         "1".to_string(),
-        crate::ast::Literal::new(1.0),
+        simlin_base::ast::Literal::new(1.0),
         Loc::default(),
     );
     let mul = Expr2::Op2(
-        crate::ast::BinaryOp::Mul,
+        simlin_base::ast::BinaryOp::Mul,
         Box::new(two),
         Box::new(sum_expr),
         None,
         Loc::default(),
     );
     let expr = Expr2::Op2(
-        crate::ast::BinaryOp::Add,
+        simlin_base::ast::BinaryOp::Add,
         Box::new(mul),
         Box::new(one),
         None,
@@ -686,7 +686,7 @@ fn test_classify_reducer_nested_in_scalar_max() {
     let sum_expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
     let zero = Expr2::Const(
         "0".to_string(),
-        crate::ast::Literal::new(0.0),
+        simlin_base::ast::Literal::new(0.0),
         Loc::default(),
     );
     let expr = Expr2::App(
@@ -906,7 +906,7 @@ fn test_generate_rank_keeps_delta_ratio() {
 /// [`quote_ident`]'s two conjuncts, and why neither is redundant.
 ///
 /// It quotes when EITHER "every char is alphanumeric or `_`" fails or
-/// [`crate::ast::needs_quoting`] says the name is not bare-spellable. Since
+/// [`simlin_base::ast::needs_quoting`] says the name is not bare-spellable. Since
 /// GH #976 the second conjunct subsumes the leading-digit AND keyword cases, so
 /// the natural next simplification is to delete the first and delegate outright.
 /// That would be a behavior change with no bug behind it: `·` (U+00B7) is
@@ -929,7 +929,7 @@ fn quote_ident_needs_both_of_its_conjuncts() {
         "1stock", "if", "then", "else", "not", "mod", "and", "or", "nan",
     ] {
         assert!(
-            crate::ast::needs_quoting(name),
+            simlin_base::ast::needs_quoting(name),
             "`{name}` must not be bare-spellable"
         );
         assert_eq!(format!("\"{name}\""), quote_ident(name));
@@ -939,7 +939,7 @@ fn quote_ident_needs_both_of_its_conjuncts() {
     // XID_Continue, so `needs_quoting` refuses a synthetic name on its own. Here
     // for coverage of the shape LTM actually mints, not to isolate a conjunct.
     for name in ["$⁚ltm⁚composite⁚out", "$⁚ltm⁚link_score⁚a→b"] {
-        assert!(crate::ast::needs_quoting(name));
+        assert!(simlin_base::ast::needs_quoting(name));
         assert_eq!(
             format!("\"{name}\""),
             quote_ident(name),
@@ -952,7 +952,7 @@ fn quote_ident_needs_both_of_its_conjuncts() {
     // XID_Continue, so `needs_quoting` alone would spell a module-qualified
     // composite bare.
     assert!(
-        !crate::ast::needs_quoting("m·out1"),
+        !simlin_base::ast::needs_quoting("m·out1"),
         "the `·` case must be carried by the alphanumeric conjunct, not by \
          needs_quoting -- if this flips, the conjunct really has become redundant"
     );
@@ -1597,18 +1597,18 @@ fn test_classify_reducer_returns_body_ast() {
     let weight = subscript_wildcard("weight");
     let one = Expr2::Const(
         "1".to_string(),
-        crate::ast::Literal::new(1.0),
+        simlin_base::ast::Literal::new(1.0),
         Loc::default(),
     );
     let coeff = Expr2::Op2(
-        crate::ast::BinaryOp::Sub,
+        simlin_base::ast::BinaryOp::Sub,
         Box::new(one),
         Box::new(weight),
         None,
         Loc::default(),
     );
     let body = Expr2::Op2(
-        crate::ast::BinaryOp::Mul,
+        simlin_base::ast::BinaryOp::Mul,
         Box::new(pop),
         Box::new(coeff),
         None,
@@ -1914,7 +1914,7 @@ fn test_partial_equation_lookup_table_arg_not_wrapped() {
     );
 
     // The same invariant for every builtin that reads a table.
-    for func in crate::builtins::BuiltinSig::table_readers() {
+    for func in simlin_base::builtins::BuiltinSig::table_readers() {
         let equation = format!("{func}(food_table, food_per_capita / subsistence)");
         let partial = build_partial_equation_shaped(
             &equation,
@@ -1966,7 +1966,7 @@ fn test_partial_equation_lookup_table_arg_not_wrapped() {
 #[test]
 fn test_partial_equation_lookup_table_index_is_frozen() {
     // `region`/`nyc` give the static row a real element to be static about.
-    let dims = crate::dimensions::DimensionsContext::from(
+    let dims = simlin_base::dimensions::DimensionsContext::from(
         [datamodel::Dimension::named(
             "region".to_string(),
             vec!["nyc".to_string(), "boston".to_string()],
@@ -1990,7 +1990,7 @@ fn test_partial_equation_lookup_table_index_is_frozen() {
             "g[PREVIOUS(idx, idx)]",
         ),
     ] {
-        for func in crate::builtins::BuiltinSig::table_readers() {
+        for func in simlin_base::builtins::BuiltinSig::table_readers() {
             let equation = format!("{func}({table_arg}, food / subsistence)");
             // Production's dep set for this exact equation, through the exact
             // function production calls.
@@ -2958,11 +2958,11 @@ fn partial_equation_element_index_in_wrapped_dep_not_wrapped() {
     let live = Ident::new("input");
     let shape = RefShape::Bare;
 
-    let dm_dims = vec![crate::datamodel::Dimension::named(
+    let dm_dims = vec![simlin_base::datamodel::Dimension::named(
         "hfc_type".to_string(),
         vec!["hfc134a".to_string(), "hfc125".to_string()],
     )];
-    let dims_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    let dims_ctx = simlin_base::dimensions::DimensionsContext::from(dm_dims.as_slice());
 
     let partial = build_partial_equation_shaped(
         "gwp_of_hfc[hfc134a] * input",
@@ -3011,16 +3011,16 @@ fn partial_equation_ambiguous_element_index_left_verbatim() {
     // `shared` is an element of BOTH dimensions, at different positions
     // (index 1 in dim_a, index 2 in dim_b).
     let dm_dims = vec![
-        crate::datamodel::Dimension::named(
+        simlin_base::datamodel::Dimension::named(
             "dim_a".to_string(),
             vec!["shared".to_string(), "a2".to_string()],
         ),
-        crate::datamodel::Dimension::named(
+        simlin_base::datamodel::Dimension::named(
             "dim_b".to_string(),
             vec!["b1".to_string(), "shared".to_string()],
         ),
     ];
-    let dims_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    let dims_ctx = simlin_base::dimensions::DimensionsContext::from(dm_dims.as_slice());
 
     let partial = build_partial_equation_shaped(
         "arr[shared] * input",
@@ -3063,16 +3063,16 @@ fn partial_equation_same_position_shared_element_qualifies() {
 
     // `shared` is the FIRST element of both dimensions.
     let dm_dims = vec![
-        crate::datamodel::Dimension::named(
+        simlin_base::datamodel::Dimension::named(
             "dim_a".to_string(),
             vec!["shared".to_string(), "a2".to_string()],
         ),
-        crate::datamodel::Dimension::named(
+        simlin_base::datamodel::Dimension::named(
             "dim_b".to_string(),
             vec!["shared".to_string(), "b2".to_string()],
         ),
     ];
-    let dims_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    let dims_ctx = simlin_base::dimensions::DimensionsContext::from(dm_dims.as_slice());
 
     let partial = build_partial_equation_shaped(
         "arr[shared] * input",
@@ -3117,16 +3117,16 @@ fn partial_equation_dimension_name_index_not_wrapped() {
     let shape = RefShape::Bare;
 
     let dm_dims = vec![
-        crate::datamodel::Dimension::named(
+        simlin_base::datamodel::Dimension::named(
             "D1".to_string(),
             vec!["r1".to_string(), "r2".to_string()],
         ),
-        crate::datamodel::Dimension::named(
+        simlin_base::datamodel::Dimension::named(
             "D2".to_string(),
             vec!["c1".to_string(), "c2".to_string()],
         ),
     ];
-    let dims_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    let dims_ctx = simlin_base::dimensions::DimensionsContext::from(dm_dims.as_slice());
 
     let partial = build_partial_equation_shaped(
         "matrix[D1, c1] * frac",
@@ -3160,16 +3160,16 @@ fn partial_equation_wildcard_live_iterated_dim_index_not_wrapped() {
     let shape = RefShape::Wildcard;
 
     let dm_dims = vec![
-        crate::datamodel::Dimension::named(
+        simlin_base::datamodel::Dimension::named(
             "State".to_string(),
             vec!["ca".to_string(), "ny".to_string()],
         ),
-        crate::datamodel::Dimension::named(
+        simlin_base::datamodel::Dimension::named(
             "D2".to_string(),
             vec!["x".to_string(), "y".to_string()],
         ),
     ];
-    let dims_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    let dims_ctx = simlin_base::dimensions::DimensionsContext::from(dm_dims.as_slice());
     // The live source's declared dims (mirroring the #534 counterfactual:
     // `matrix` over State x D2).
     let source_dims = vec![
@@ -3312,11 +3312,11 @@ fn partial_freezes_the_previous_value_of_a_lagged_other_dep() {
 /// and `eqn: Some(Equation::Arrayed)`.
 fn arrayed_var_from_text(
     ident: &str,
-    dims: &[crate::datamodel::Dimension],
+    dims: &[simlin_base::datamodel::Dimension],
     elements: &[(&str, &str)],
     is_flow: bool,
 ) -> Variable {
-    use crate::datamodel::{Aux, Equation as DmEquation, Flow, Variable as DmVariable};
+    use simlin_base::datamodel::{Aux, Equation as DmEquation, Flow, Variable as DmVariable};
 
     let equation = DmEquation::Arrayed(
         dims.iter().map(|d| d.name().to_string()).collect(),
@@ -3336,7 +3336,7 @@ fn arrayed_var_from_text(
             gf: None,
             ai_state: None,
             uid: None,
-            compat: crate::datamodel::Compat::default(),
+            compat: simlin_base::datamodel::Compat::default(),
         })
     } else {
         DmVariable::Aux(Aux {
@@ -3347,7 +3347,7 @@ fn arrayed_var_from_text(
             gf: None,
             ai_state: None,
             uid: None,
-            compat: crate::datamodel::Compat::default(),
+            compat: simlin_base::datamodel::Compat::default(),
         })
     };
 
@@ -3383,8 +3383,8 @@ fn arrayed_slot_names(equation: &crate::db::LtmEquation) -> Vec<String> {
     }
 }
 
-fn region_dm_dimension() -> crate::datamodel::Dimension {
-    crate::datamodel::Dimension::named(
+fn region_dm_dimension() -> simlin_base::datamodel::Dimension {
+    simlin_base::datamodel::Dimension::named(
         "Region".to_string(),
         vec!["NYC".to_string(), "Boston".to_string()],
     )
@@ -3394,7 +3394,7 @@ fn region_dm_dimension() -> crate::datamodel::Dimension {
 /// same way the production path does so the generated `Variable` carries a
 /// real (or, for empty text, absent) AST.
 fn scalar_aux_from_text(ident: &str, eqn_text: &str) -> Variable {
-    use crate::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
+    use simlin_base::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
     let dm_var = DmVariable::Aux(Aux {
         ident: ident.to_string(),
         equation: DmEquation::Scalar(eqn_text.to_string()),
@@ -3403,7 +3403,7 @@ fn scalar_aux_from_text(ident: &str, eqn_text: &str) -> Variable {
         gf: None,
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     });
     lower_dm_var(dm_var, &[])
 }
@@ -3494,13 +3494,13 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
 }
 
 /// A decreasing continuous gf over x in [0, 2].
-fn decreasing_dm_gf() -> crate::datamodel::GraphicalFunction {
-    crate::datamodel::GraphicalFunction {
-        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+fn decreasing_dm_gf() -> simlin_base::datamodel::GraphicalFunction {
+    simlin_base::datamodel::GraphicalFunction {
+        kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         x_points: Some(vec![0.0, 1.0, 2.0]),
         y_points: vec![4.0, 2.0, 0.0],
-        x_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
-        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 4.0 },
+        x_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+        y_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 4.0 },
     }
 }
 
@@ -3509,9 +3509,9 @@ fn decreasing_dm_gf() -> crate::datamodel::GraphicalFunction {
 fn scalar_with_lookup_var(
     ident: &str,
     eqn_text: &str,
-    gf: crate::datamodel::GraphicalFunction,
+    gf: simlin_base::datamodel::GraphicalFunction,
 ) -> Variable {
-    use crate::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
+    use simlin_base::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
     let dm_var = DmVariable::Aux(Aux {
         ident: ident.to_string(),
         equation: DmEquation::Scalar(eqn_text.to_string()),
@@ -3520,7 +3520,7 @@ fn scalar_with_lookup_var(
         gf: Some(gf),
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     });
     lower_dm_var(dm_var, &[])
 }
@@ -3529,11 +3529,11 @@ fn scalar_with_lookup_var(
 /// the arrayed WITH LOOKUP shape sharing one table across all elements.
 fn a2a_with_lookup_var(
     ident: &str,
-    dims: &[crate::datamodel::Dimension],
+    dims: &[simlin_base::datamodel::Dimension],
     eqn_text: &str,
-    gf: crate::datamodel::GraphicalFunction,
+    gf: simlin_base::datamodel::GraphicalFunction,
 ) -> Variable {
-    use crate::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
+    use simlin_base::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
     let dm_var = DmVariable::Aux(Aux {
         ident: ident.to_string(),
         equation: DmEquation::ApplyToAll(
@@ -3545,7 +3545,7 @@ fn a2a_with_lookup_var(
         gf: Some(gf),
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     });
     lower_dm_var(dm_var, dims)
 }
@@ -3555,10 +3555,14 @@ fn a2a_with_lookup_var(
 /// arrayed WITH LOOKUP shape; a gf-less element keeps its raw equation).
 fn arrayed_with_lookup_var(
     ident: &str,
-    dims: &[crate::datamodel::Dimension],
-    elements: &[(&str, &str, Option<crate::datamodel::GraphicalFunction>)],
+    dims: &[simlin_base::datamodel::Dimension],
+    elements: &[(
+        &str,
+        &str,
+        Option<simlin_base::datamodel::GraphicalFunction>,
+    )],
 ) -> Variable {
-    use crate::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
+    use simlin_base::datamodel::{Aux, Equation as DmEquation, Variable as DmVariable};
     let equation = DmEquation::Arrayed(
         dims.iter().map(|d| d.name().to_string()).collect(),
         elements
@@ -3576,7 +3580,7 @@ fn arrayed_with_lookup_var(
         gf: None,
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     });
     lower_dm_var(dm_var, dims)
 }
@@ -3588,8 +3592,8 @@ fn arrayed_with_lookup_var(
 /// references but the project does not declare lowers like any other and a
 /// fixture need declare only the variable under test.
 fn lower_dm_var(
-    dm_var: crate::datamodel::Variable,
-    dims: &[crate::datamodel::Dimension],
+    dm_var: simlin_base::datamodel::Variable,
+    dims: &[simlin_base::datamodel::Dimension],
 ) -> Variable {
     use crate::db::{SimlinDb, model_lowered_variables, sync_from_datamodel};
     use crate::testutils::{sim_specs_with_units, x_model, x_project};
@@ -3923,7 +3927,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
 /// the char goldens, not here.
 #[test]
 fn test_arrayed_link_score_stock_to_flow_per_element_partials() {
-    let dims = vec![crate::datamodel::Dimension::named(
+    let dims = vec![simlin_base::datamodel::Dimension::named(
         "Region".to_string(),
         vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
     )];
@@ -4033,7 +4037,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
 
     // ApplyToAll target.
     let dims = vec![region_dm_dimension()];
-    let a2a_dm = crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+    let a2a_dm = simlin_base::datamodel::Variable::Aux(simlin_base::datamodel::Aux {
         ident: "a2a_target".to_string(),
         equation: Equation::ApplyToAll(vec!["Region".to_string()], "driver * 0.5".to_string()),
         documentation: String::new(),
@@ -4041,7 +4045,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         gf: None,
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     });
     let a2a_to = lower_dm_var(a2a_dm, &dims);
     let to_a2a = Ident::<Canonical>::new("a2a_target");
@@ -4351,8 +4355,8 @@ fn net_flow_equation_is_shaped_like_the_stock() {
 /// tests (these need datamodel dims, not `dimensions::Dimension`, because
 /// the Arrayed slot enumeration reads the project's declared element
 /// order).
-fn dm_named_dimension(name: &str, elements: &[&str]) -> crate::datamodel::Dimension {
-    crate::datamodel::Dimension::named(
+fn dm_named_dimension(name: &str, elements: &[&str]) -> simlin_base::datamodel::Dimension {
+    simlin_base::datamodel::Dimension::named(
         name.to_string(),
         elements.iter().map(|s| s.to_string()).collect(),
     )
@@ -4888,7 +4892,7 @@ fn test_generate_iterated_feeder_to_agg_equation_bails_on_duplicate_dims() {
 #[test]
 fn test_wrap_matching_in_previous_skips_already_lagged() {
     let ast = Expr0::new("sum(arr[*] * scale) + PREVIOUS(scale) + abs(scale)", {
-        crate::lexer::LexerType::Equation
+        simlin_base::lexer::LexerType::Equation
     })
     .unwrap()
     .unwrap();
@@ -4912,9 +4916,12 @@ fn test_wrap_matching_in_previous_skips_already_lagged() {
 /// (value) -- so the test cannot pass by treating every freeze alike.
 #[test]
 fn test_wrap_matching_in_previous_seeds_index_freezes_with_the_unlagged_index() {
-    let ast = Expr0::new("arr[scale] + scale * 2", crate::lexer::LexerType::Equation)
-        .unwrap()
-        .unwrap();
+    let ast = Expr0::new(
+        "arr[scale] + scale * 2",
+        simlin_base::lexer::LexerType::Equation,
+    )
+    .unwrap()
+    .unwrap();
     let wrapped = wrap_matching_in_previous(ast, &Ident::<Canonical>::new("scale"), false);
     assert_eq!(
         print_eqn(&wrapped),
@@ -5236,14 +5243,15 @@ fn sgft(
     source_dim_elements: &[Vec<String>],
     source_dim_names: &[String],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
-    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dims_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
     target_ref: &str,
     gf_table_ref: Option<&str>,
 ) -> Result<String, PartialEquationError> {
     // A genuine text entry point: the tests spell the target equation as a
     // string, so it is parsed here once. Production hands the transform an
     // `Expr0` lowered straight from the target's `Expr2`.
-    let Ok(Some(ast)) = crate::ast::Expr0::new(equation_text, crate::lexer::LexerType::Equation)
+    let Ok(Some(ast)) =
+        simlin_base::ast::Expr0::new(equation_text, simlin_base::lexer::LexerType::Equation)
     else {
         return Err(PartialEquationError::new(equation_text));
     };
@@ -5300,7 +5308,7 @@ fn wrap_missing_live_source_occurrence_is_loud_not_silent_freeze() {
 
     // A correctly-aligned stream, then drop pop's occurrence: the lookup stays
     // non-empty (helper survives) but `pop[nyc]`'s node lookup now misses.
-    let ast = crate::ast::Expr0::new(equation, crate::lexer::LexerType::Equation)
+    let ast = simlin_base::ast::Expr0::new(equation, simlin_base::lexer::LexerType::Equation)
         .expect("the equation parses")
         .expect("the equation is non-empty");
     let desynced: Vec<OccurrenceSite> =

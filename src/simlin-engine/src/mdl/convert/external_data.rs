@@ -10,9 +10,9 @@
 
 use std::collections::HashMap;
 
-use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::data_provider::DataProvider;
-use crate::datamodel::{GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale};
+use simlin_base::common::{Error, ErrorCode, ErrorKind, Result};
+use simlin_base::datamodel::{GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale};
 
 use super::variables::points_in_x_order;
 

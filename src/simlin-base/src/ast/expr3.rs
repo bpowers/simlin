@@ -47,7 +47,7 @@ pub enum IndexExpr3 {
 
 impl IndexExpr3 {
     #[allow(dead_code)] // Used in pass 2
-    pub fn get_loc(&self) -> Loc {
+    pub(crate) fn get_loc(&self) -> Loc {
         match self {
             IndexExpr3::StarRange(_, loc) => *loc,
             IndexExpr3::StaticRange(_, _, loc) => *loc,
@@ -62,7 +62,7 @@ impl IndexExpr3 {
     /// Such expressions cannot be fully resolved until pass 2 when we know
     /// which specific A2A element is being evaluated.
     #[allow(dead_code)] // Used in pass 2
-    pub fn references_a2a_dimension(&self) -> bool {
+    pub(crate) fn references_a2a_dimension(&self) -> bool {
         match self {
             IndexExpr3::Dimension(_, _) => true,
             IndexExpr3::DimPosition(_, _) => true,
@@ -111,7 +111,7 @@ pub enum Expr3 {
 }
 
 impl Expr3 {
-    pub fn get_loc(&self) -> Loc {
+    pub(crate) fn get_loc(&self) -> Loc {
         match self {
             Expr3::Const(_, _, loc) => *loc,
             Expr3::Var(_, _, loc) => *loc,
@@ -139,7 +139,7 @@ impl Expr3 {
     /// Such expressions cannot be fully resolved until pass 2 when we know
     /// which specific A2A element is being evaluated.
     #[allow(dead_code)] // Used in pass 2
-    pub fn references_a2a_dimension(&self) -> bool {
+    pub(crate) fn references_a2a_dimension(&self) -> bool {
         match self {
             Expr3::Const(_, _, _) => false,
             Expr3::Var(_, _, _) => false,

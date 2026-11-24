@@ -487,7 +487,7 @@ unsafe fn open_session(options: &Options) -> Session {
 /// The datamodel and a database synced to it, measured apart.
 unsafe fn open_breakdown(session: &Session) {
     let contents = (*session.project).datamodel.lock().unwrap();
-    let project: &simlin_engine::datamodel::Project = &contents;
+    let project: &simlin_base::datamodel::Project = &contents;
     let before = live();
     let copy = project.clone();
     let datamodel = live() - before;

@@ -43,9 +43,9 @@ use std::sync::LazyLock;
 
 use rayon::prelude::*;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::{Flow, Stock};
 use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::{Flow, Stock};
 
 use super::geometry::{FlowEnd, Point};
 use super::heal::heal;
@@ -243,7 +243,7 @@ fn center(s: &Stock) -> Point {
     Point::new(s.x, s.y)
 }
 
-fn point(p: &crate::datamodel::view_element::FlowPoint) -> Point {
+fn point(p: &simlin_base::datamodel::view_element::FlowPoint) -> Point {
     Point::new(p.x, p.y)
 }
 

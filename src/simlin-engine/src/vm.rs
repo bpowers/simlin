@@ -7,17 +7,17 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::alloc::allocate_available;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode, Op2,
     Opcode, RuntimeView, STACK_CAPACITY, TempId, ViewStorage,
 };
-use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, IdentMap, Result};
-use crate::dimensions::match_dimensions_two_pass;
-use crate::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
+use simlin_base::alloc::allocate_available;
+use simlin_base::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, IdentMap, Result};
+use simlin_base::dimensions::match_dimensions_two_pass;
+use simlin_base::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
 #[allow(unused_imports)]
-pub use crate::results::{Method, Results, Specs};
-use crate::sim_err;
+pub use simlin_base::results::{Method, Results, Specs};
+use simlin_base::sim_err;
 
 /// Key for looking up compiled modules.
 /// A model can have multiple instantiations with different input sets,
@@ -50,7 +50,7 @@ struct IterState {
 }
 
 pub(crate) fn is_truthy(n: f64) -> bool {
-    let is_false = crate::float::approx_eq(n, 0.0);
+    let is_false = simlin_base::float::approx_eq(n, 0.0);
     !is_false
 }
 
@@ -72,7 +72,7 @@ pub(crate) fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
         Op2::Gte => (l >= r) as i8 as f64,
         Op2::Lt => (l < r) as i8 as f64,
         Op2::Lte => (l <= r) as i8 as f64,
-        Op2::Eq => crate::float::approx_eq(l, r) as i8 as f64,
+        Op2::Eq => simlin_base::float::approx_eq(l, r) as i8 as f64,
         Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
         Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
     }
@@ -803,11 +803,11 @@ impl Vm {
                 format!(
                     "a run from {} to {} in steps of {}, saving every {}, saves {}, each of \
                      {n_slots} values: more than can be held in memory",
-                    crate::results::written(specs.start),
-                    crate::results::written(specs.stop),
-                    crate::results::written(specs.dt),
-                    crate::results::written(specs.save_step),
-                    crate::results::written_rows(n_chunks),
+                    simlin_base::results::written(specs.start),
+                    simlin_base::results::written(specs.stop),
+                    simlin_base::results::written(specs.dt),
+                    simlin_base::results::written(specs.save_step),
+                    simlin_base::results::written_rows(n_chunks),
                 )
             )
         };
@@ -940,7 +940,7 @@ impl Vm {
     ///
     /// The step AT `end` is evaluated: a value set after `run_to(t)` takes
     /// effect from the step after `t`. [`Vm::run_until`] is the call that
-    /// stops before a time. A time within [`crate::results::STEP_TOLERANCE`]
+    /// stops before a time. A time within [`simlin_base::results::STEP_TOLERANCE`]
     /// of a step is that step. Steps past the stop time are never run: once
     /// the run is over a further call evaluates nothing.
     ///
@@ -1089,7 +1089,7 @@ impl Vm {
                 let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
                 #[cfg(any(test, feature = "test-support"))]
                 if poison_next {
-                    next[crate::results::IMPLICIT_VAR_COUNT..].fill(POISON_SENTINEL);
+                    next[simlin_base::results::IMPLICIT_VAR_COUNT..].fill(POISON_SENTINEL);
                 }
 
                 if self.conveyor_plans.is_empty() && self.queue_plans.is_empty() {
@@ -3535,7 +3535,7 @@ pub(crate) fn step(time: f64, dt: f64, height: f64, step_time: f64) -> f64 {
 /// expression.)
 #[inline(never)]
 pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval: f64) -> f64 {
-    let time = time + dt * crate::results::STEP_TOLERANCE;
+    let time = time + dt * simlin_base::results::STEP_TOLERANCE;
     if time < first_pulse {
         return 0.0;
     }
@@ -3649,7 +3649,7 @@ pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     // order (a NaN, which `parse_table` refuses), and the first knot is the
     // nearest there is: there is no knot before it to interpolate from.
     let i = low;
-    if i == 0 || crate::float::approx_eq(table[i].0, index) {
+    if i == 0 || simlin_base::float::approx_eq(table[i].0, index) {
         table[i].1
     } else {
         // slope = deltaY/deltaX

@@ -8,8 +8,8 @@
 //! initials), resetting, setting/clearing constant values, and reading values
 //! and time series from simulation results.
 
-use simlin_engine::common::Ident;
-use simlin_engine::{self as engine, Vm};
+use simlin_base::common::Ident;
+use simlin_engine::Vm;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double};
@@ -85,13 +85,13 @@ pub unsafe extern "C" fn simlin_sim_new(
     // sync by apply_patch and project constructors, so this is typically a
     // cache hit when nothing changed since the last patch.
     type CompileSnapshot = (
-        std::result::Result<engine::queue_compile::SimBuild, engine::Error>,
+        std::result::Result<simlin_engine::queue_compile::SimBuild, simlin_base::Error>,
         // An `IndexMap` (not a `HashMap`): the engine emits `loop_partitions`
         // in loop emission order and the post-sim rel-loop-score denominator
         // sums in that order, so the snapshot preserves it (GH #468).
-        engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
-        HashMap<String, engine::ltm_post::LoopElementIndex>,
-        Option<engine::db::LtmMode>,
+        simlin_engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
+        HashMap<String, simlin_engine::ltm_post::LoopElementIndex>,
+        Option<simlin_engine::db::LtmMode>,
     );
     let (
         incremental_result,
@@ -115,12 +115,12 @@ pub unsafe extern "C" fn simlin_sim_new(
             // The unified dispatch: an ordinary model compiles `source_project`
             // incrementally; a conveyor/queue model is expanded and its expanded
             // twin compiled in the db's second input slot, also incrementally.
-            let result = engine::queue_compile::compile_sim(
+            let result = simlin_engine::queue_compile::compile_sim(
                 db,
                 source_project,
                 &contents,
                 &model_ref.model_name,
-                engine::db::LtmOverlay::from(enable_ltm),
+                simlin_engine::db::LtmOverlay::from(enable_ltm),
             );
             // A special-stock build never synthesizes LTM variables: it compiles a
             // DIFFERENT `SourceProject` (the expanded one, always without the
@@ -147,7 +147,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             // them against the loop_score's actual slot layout (issue #463).
             let (loop_partitions, loop_element_index, ltm_mode) =
                 if enable_ltm && !special && result.is_ok() {
-                    let canonical = engine::canonicalize(&model_ref.model_name);
+                    let canonical = simlin_base::canonicalize(&model_ref.model_name);
                     if let Some(sm) = source_project.models(&*db).get(canonical.as_ref()).copied() {
                         let crate::analysis::LtmSnapshots {
                             loop_partitions,
@@ -161,21 +161,29 @@ pub unsafe extern "C" fn simlin_sim_new(
                         );
                         (loop_partitions, loop_element_index, Some(mode))
                     } else {
-                        (engine::indexmap::IndexMap::new(), HashMap::new(), None)
+                        (
+                            simlin_engine::indexmap::IndexMap::new(),
+                            HashMap::new(),
+                            None,
+                        )
                     }
                 } else {
-                    (engine::indexmap::IndexMap::new(), HashMap::new(), None)
+                    (
+                        simlin_engine::indexmap::IndexMap::new(),
+                        HashMap::new(),
+                        None,
+                    )
                 };
             (result, loop_partitions, loop_element_index, ltm_mode)
         } else {
             (
-                Err(engine::Error {
-                    kind: engine::ErrorKind::Simulation,
-                    code: engine::ErrorCode::NotSimulatable,
+                Err(simlin_base::Error {
+                    kind: simlin_base::ErrorKind::Simulation,
+                    code: simlin_base::ErrorCode::NotSimulatable,
                     details: Some("incremental compilation: no sync state available".to_string()),
                     place: None,
                 }),
-                engine::indexmap::IndexMap::new(),
+                simlin_engine::indexmap::IndexMap::new(),
                 HashMap::new(),
                 None,
             )
@@ -187,7 +195,7 @@ pub unsafe extern "C" fn simlin_sim_new(
     // it consumes itself via into_results on run -- and must re-attach the passes.
     let (compiled, vm, vm_error, conveyor_plans, queue_plans) = match incremental_result {
         Ok(build) => {
-            let engine::queue_compile::SimBuild {
+            let simlin_engine::queue_compile::SimBuild {
                 compiled,
                 conveyor_plans,
                 queue_plans,
@@ -588,9 +596,9 @@ pub unsafe extern "C" fn simlin_sim_set_value(
     } else if let Some(ref compiled) = state.compiled {
         if let Some(off) = compiled.get_offset(&canon_name) {
             if !state.is_overridable_offset(off) {
-                let err = engine::Error {
-                    code: engine::ErrorCode::BadOverride,
-                    kind: engine::ErrorKind::Simulation,
+                let err = simlin_base::Error {
+                    code: simlin_base::ErrorCode::BadOverride,
+                    kind: simlin_base::ErrorKind::Simulation,
                     details: Some(format!(
                         "cannot set value of '{}': not a simple constant",
                         canon_name
@@ -683,9 +691,9 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
             // computed columns (flows, stocks, LTM scores, conveyor/queue
             // pass-driven flows) are simulation output, not inputs, and must
             // not be silently rewritable in the saved results.
-            let err = engine::Error {
-                code: engine::ErrorCode::BadOverride,
-                kind: engine::ErrorKind::Simulation,
+            let err = simlin_base::Error {
+                code: simlin_base::ErrorCode::BadOverride,
+                kind: simlin_base::ErrorKind::Simulation,
                 details: Some(format!(
                     "cannot set value of offset {}: not a simple constant",
                     offset

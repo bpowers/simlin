@@ -14,8 +14,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use simlin_engine::Results;
-use simlin_engine::common::{Canonical, Ident};
+use simlin_base::Results;
+use simlin_base::common::{Canonical, Ident};
 use simlin_engine::vdf::{VDF_SENTINEL, VdfData, VdfFile, VdfSection5SetEntry};
 
 fn load_ref_vdf() -> VdfFile {

@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 use resvg::tiny_skia;
 use resvg::usvg;
 
-use crate::datamodel;
+use simlin_base::datamodel;
 
 /// Roboto Light font data, embedded at compile time.
 static ROBOTO_LIGHT: &[u8] = include_bytes!("fonts/Roboto-Light.ttf");
@@ -117,8 +117,8 @@ pub fn svg_to_png(svg_str: &str, opts: &PngRenderOpts) -> Result<Vec<u8>, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
-    use crate::datamodel::{
+    use simlin_base::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
+    use simlin_base::datamodel::{
         Aux as AuxVar, Equation, Flow as FlowVar, SimSpecs, Stock as StockVar, StockFlow, Variable,
         View,
     };

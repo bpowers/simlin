@@ -5,10 +5,12 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::datamodel::{self, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale};
 use crate::test_common::TestProject;
 use crate::tools::Session;
 use crate::tools::test_support::{Host, inventory};
+use simlin_base::datamodel::{
+    self, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
+};
 
 /// Call `analyze_loops`, which must answer, and check the answer against the
 /// output schema the catalog publishes and, for loops from a run, that its
@@ -158,7 +160,7 @@ fn structure_of(host: &mut Host, model_name: &str) -> Option<Structure> {
         .find(|m| m.name == model_name)
         .unwrap()
         .clone();
-    let canonical = crate::canonicalize(&model.name).into_owned();
+    let canonical = simlin_base::canonicalize(&model.name).into_owned();
     let source_model = *source_project.models(&host.db).get(&canonical)?;
     let project = host.project.clone();
     with_discovery_mode(&mut host.db, source_project, false, |db| {

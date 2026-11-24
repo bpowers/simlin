@@ -24,5 +24,6 @@ anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
 
 [dev-dependencies]
+simlin-base = { path = "../simlin-base" }
 tempfile = "3"
 serde_yaml = "0.9"

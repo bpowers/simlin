@@ -25,10 +25,10 @@
 
 use std::io::BufReader;
 
-use crate::common::{ErrorCode, Ident};
-use crate::datamodel::{self, SimSpecs};
 use crate::diagnostic::{DiagnosticCategory, DiagnosticSeverity};
 use crate::test_common::TestProject;
+use simlin_base::common::{ErrorCode, Ident};
+use simlin_base::datamodel::{self, SimSpecs};
 
 fn three_steps() -> SimSpecs {
     SimSpecs {

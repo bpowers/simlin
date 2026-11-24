@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::datamodel::{
+use simlin_base::datamodel::{
     self, Compat, Equation, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
     Model, ModelGroup, Project, Variable, View,
 };
@@ -190,7 +190,7 @@ impl<'input> ConversionContext<'input> {
 
         // Add dimension element names to namespace
         for dim in &self.dimensions {
-            if let crate::datamodel::DimensionElements::Named(names) = &dim.elements {
+            if let simlin_base::datamodel::DimensionElements::Named(names) = &dim.elements {
                 for name in names {
                     namespace.insert(canonical_name(name));
                 }
@@ -964,9 +964,9 @@ impl<'input> ConversionContext<'input> {
         lhs_subscripts: &[String],
         element_parts: &[&str],
     ) -> crate::mdl::xmile_compat::ElementContext {
-        use crate::common::CanonicalDimensionName;
-        use crate::common::CanonicalElementName;
         use crate::mdl::xmile_compat::ElementContext;
+        use simlin_base::common::CanonicalDimensionName;
+        use simlin_base::common::CanonicalElementName;
 
         debug_assert_eq!(
             lhs_subscripts.len(),
@@ -1327,7 +1327,10 @@ impl<'input> ConversionContext<'input> {
     /// Parse GET DIRECT metadata from an expression string for compat persistence.
     /// Resolves file aliases so that roundtripped MDL references actual filenames
     /// rather than alias tokens (e.g. `?data`) that require settings context.
-    fn extract_get_direct_data_source(&self, eq_str: &str) -> Option<crate::datamodel::DataSource> {
+    fn extract_get_direct_data_source(
+        &self,
+        eq_str: &str,
+    ) -> Option<simlin_base::datamodel::DataSource> {
         use super::external_data::{GetDirectCall, parse_get_direct, resolve_file_alias};
 
         let call = parse_get_direct(eq_str)?;
@@ -1337,8 +1340,8 @@ impl<'input> ConversionContext<'input> {
                 tab,
                 time_col,
                 data_cell,
-            } => crate::datamodel::DataSource {
-                kind: crate::datamodel::DataSourceKind::Data,
+            } => simlin_base::datamodel::DataSource {
+                kind: simlin_base::datamodel::DataSourceKind::Data,
                 file: resolve_file_alias(&file, &self.file_aliases),
                 tab_or_delimiter: tab,
                 row_or_col: time_col,
@@ -1349,8 +1352,8 @@ impl<'input> ConversionContext<'input> {
                 tab,
                 row_or_cell,
                 col,
-            } => crate::datamodel::DataSource {
-                kind: crate::datamodel::DataSourceKind::Constants,
+            } => simlin_base::datamodel::DataSource {
+                kind: simlin_base::datamodel::DataSourceKind::Constants,
                 file: resolve_file_alias(&file, &self.file_aliases),
                 tab_or_delimiter: tab,
                 row_or_col: row_or_cell,
@@ -1361,8 +1364,8 @@ impl<'input> ConversionContext<'input> {
                 tab,
                 x_col,
                 y_cell,
-            } => crate::datamodel::DataSource {
-                kind: crate::datamodel::DataSourceKind::Lookups,
+            } => simlin_base::datamodel::DataSource {
+                kind: simlin_base::datamodel::DataSourceKind::Lookups,
                 file: resolve_file_alias(&file, &self.file_aliases),
                 tab_or_delimiter: tab,
                 row_or_col: x_col,
@@ -1374,8 +1377,8 @@ impl<'input> ConversionContext<'input> {
                 first_cell,
                 last_cell,
                 ..
-            } => crate::datamodel::DataSource {
-                kind: crate::datamodel::DataSourceKind::Subscript,
+            } => simlin_base::datamodel::DataSource {
+                kind: simlin_base::datamodel::DataSourceKind::Subscript,
                 file: resolve_file_alias(&file, &self.file_aliases),
                 tab_or_delimiter: tab,
                 row_or_col: first_cell,
@@ -1580,7 +1583,7 @@ mod lookup_order_tests;
 /// parts as the file spells them): what every reader of a datamodel stores
 /// (`CanonicalElementName::from_subscript`, the one owner).
 pub(super) fn canonical_element_key(key: &str) -> String {
-    crate::common::CanonicalElementName::from_subscript(key)
+    simlin_base::common::CanonicalElementName::from_subscript(key)
         .as_str()
         .to_owned()
 }
@@ -1588,9 +1591,9 @@ pub(super) fn canonical_element_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::{convert_mdl, convert_mdl_with_data};
-    use crate::common::Result;
     use crate::data_provider::DataProvider;
-    use crate::datamodel::{DataSourceKind, Equation, Variable};
+    use simlin_base::common::Result;
+    use simlin_base::datamodel::{DataSourceKind, Equation, Variable};
 
     struct ConstantProvider;
 

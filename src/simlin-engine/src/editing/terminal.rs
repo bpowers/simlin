@@ -11,8 +11,8 @@
 
 use smallvec::SmallVec;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::{Flow, FlowPoint};
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::{Flow, FlowPoint};
 
 use super::geometry::{
     Axis, Bounds, CORNER_CLEARANCE, Face, GEOMETRY_EPSILON, HALF_HEIGHT, HALF_WIDTH, Path, Point,

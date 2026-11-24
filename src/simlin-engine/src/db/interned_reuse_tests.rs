@@ -31,8 +31,8 @@ use std::sync::{Arc, Mutex};
 use salsa::{Database, Event, EventKind, IngredientIndex};
 
 use super::{LtmOverlay, SimlinDb, collect_all_diagnostics, compile_project_incremental};
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::datamodel;
 
 /// A database that records which ingredient each reused interned slot belongs
 /// to.

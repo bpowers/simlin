@@ -59,7 +59,7 @@
 //! unrelated blocker, surfaced via the per-model annotations below, NOT a
 //! macro failure.
 
-use simlin_engine::common::ErrorCode;
+use simlin_base::common::ErrorCode;
 use simlin_engine::db::{
     Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel_incremental,

@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde::Serialize;
-use simlin_engine::datamodel::{self, StockFlow};
+use simlin_base::datamodel::{self, StockFlow};
 use simlin_engine::layout::edit_audit::{ChangeKind, Displacement, Finding, view_changes};
 use simlin_engine::layout::edit_scenarios::{ScenarioKind, build_scenario, run_scenario};
 use simlin_engine::layout::generate_best_layout;

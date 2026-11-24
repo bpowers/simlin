@@ -27,11 +27,11 @@
 
 use serde::Serialize;
 
-use crate::ast::{self, Expr0, IndexExpr0, NodeShape};
-use crate::builtins::Loc;
-use crate::common::{CanonicalElementName, canonicalize};
-use crate::datamodel::{self, Equation};
-use crate::lexer::LexerType;
+use simlin_base::ast::{self, Expr0, IndexExpr0, NodeShape};
+use simlin_base::builtins::Loc;
+use simlin_base::common::{CanonicalElementName, canonicalize};
+use simlin_base::datamodel::{self, Equation};
+use simlin_base::lexer::LexerType;
 
 /// One variable's equations.
 #[derive(Debug, Clone, PartialEq, Serialize)]

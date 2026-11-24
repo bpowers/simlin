@@ -4,7 +4,7 @@
 
 //! Rasterize views to PNG at a size a person can actually read.
 
-use simlin_engine::datamodel;
+use simlin_base::datamodel;
 use simlin_engine::diagram::{PngRenderOpts, render_svg, svg_to_png};
 use simlin_engine::layout::config::LayoutConfig;
 use simlin_engine::layout::metrics::{

@@ -5,11 +5,11 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::datamodel::Visibility;
 use crate::test_common::TestProject;
 use crate::tools::Session;
 use crate::tools::behavior::shape;
 use crate::tools::test_support::{Host, inventory};
+use simlin_base::datamodel::Visibility;
 
 /// Call `run_tests`, which must answer, and check the answer against the
 /// output schema the catalog publishes and against its own counts.
@@ -117,12 +117,12 @@ fn workforce() -> TestProject {
 
 #[test]
 fn a_time_constant_is_known_by_its_units_or_its_role() {
-    let table = crate::datamodel::GraphicalFunction {
-        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+    let table = simlin_base::datamodel::GraphicalFunction {
+        kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         x_points: Some(vec![0.0, 1.0]),
         y_points: vec![0.0, 1.0],
-        x_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
-        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        x_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        y_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
     };
     let project = TestProject::new("roles")
         .with_sim_time(0.0, 10.0, 1.0)
@@ -319,12 +319,12 @@ fn a_divisor_in_its_own_numerators_sum_is_a_scale() {
 /// read through a flow with a table or through a table a rate multiplies by.
 #[test]
 fn a_divisor_in_a_tables_input_is_a_scale() {
-    let table = || crate::datamodel::GraphicalFunction {
-        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+    let table = || simlin_base::datamodel::GraphicalFunction {
+        kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         x_points: Some(vec![0.0, 2.0]),
         y_points: vec![0.0, 1.0],
-        x_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
-        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        x_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+        y_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
     };
     let mut project = TestProject::new("tables")
         .with_sim_time(0.0, 10.0, 1.0)
@@ -1104,7 +1104,7 @@ fn integration_error_passes_is_flagged_or_fails_by_the_size_of_its_estimate() {
     // A straight line integrates exactly, under any method.
     let line = TestProject::new("line")
         .with_sim_time(0.0, 10.0, 0.5)
-        .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
+        .with_sim_method(simlin_base::datamodel::SimMethod::RungeKutta4)
         .stock("tank", "0", &["filling"], &[], None)
         .flow("filling", "3", None);
     let mut host = Host::from_test_project(&line);
@@ -1126,7 +1126,7 @@ fn integration_error_passes_is_flagged_or_fails_by_the_size_of_its_estimate() {
 /// enough for its error to show).
 #[test]
 fn the_estimated_error_is_the_runs_true_error_under_each_method() {
-    use crate::datamodel::SimMethod;
+    use simlin_base::datamodel::SimMethod;
     for method in [
         SimMethod::Euler,
         SimMethod::RungeKutta2,
@@ -1135,9 +1135,9 @@ fn the_estimated_error_is_the_runs_true_error_under_each_method() {
         // Per-variant facts: the order each method converges at, and a DT at
         // which a time constant of 2 shows its error.
         let (nominal, results_method, dt) = match method {
-            SimMethod::Euler => (1.0, crate::results::Method::Euler, 0.5),
-            SimMethod::RungeKutta2 => (2.0, crate::results::Method::RungeKutta2, 1.0),
-            SimMethod::RungeKutta4 => (4.0, crate::results::Method::RungeKutta4, 3.0),
+            SimMethod::Euler => (1.0, simlin_base::results::Method::Euler, 0.5),
+            SimMethod::RungeKutta2 => (2.0, simlin_base::results::Method::RungeKutta2, 1.0),
+            SimMethod::RungeKutta4 => (4.0, simlin_base::results::Method::RungeKutta4, 3.0),
         };
         assert_eq!(nominal_order(results_method), nominal);
         let project = TestProject::new("decay")
@@ -1517,7 +1517,7 @@ fn a_finer_run_saves_the_models_own_times() {
 fn damped() -> TestProject {
     TestProject::new("damped")
         .with_sim_time(0.0, 60.0, 0.0625)
-        .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
+        .with_sim_method(simlin_base::datamodel::SimMethod::RungeKutta4)
         .stock("x", "0", &["dx"], &[], None)
         .stock("v", "0", &["dv"], &[], None)
         .flow("dx", "v", None)
@@ -3036,7 +3036,7 @@ fn a_time_constant_declared_dimensionless_is_known_by_its_role() {
                 .is_none_or(|units| ["1", "dmnl"].contains(&units)),
             "{path}: {target} is declared dimensionless: {read}"
         );
-        let canonical = crate::canonicalize(target).into_owned();
+        let canonical = simlin_base::canonicalize(target).into_owned();
         let found = time_constants_in(host.project.clone());
         assert!(
             found.contains(&(canonical, TimeConstantEvidence::DividesARate, 1.0)),
@@ -3641,9 +3641,12 @@ fn arguments(call: &str) -> Vec<Expr0> {
 fn a_delays_time_and_stages_are_known_for_each_function_the_engine_expands() {
     let aliases = ["delay", "delayn", "smthn"];
     for alias in aliases {
-        assert!(crate::builtins::is_stdlib_module_function(alias), "{alias}");
+        assert!(
+            simlin_base::builtins::is_stdlib_module_function(alias),
+            "{alias}"
+        );
     }
-    for name in crate::stdlib::MODEL_NAMES.iter().chain(&aliases) {
+    for name in simlin_base::stdlib::MODEL_NAMES.iter().chain(&aliases) {
         // What each function is, written here independently of the stdlib's
         // models: the argument that is its time, and its order when called
         // with a third argument of 3.
@@ -4176,7 +4179,7 @@ fn a_calls_extremes_name_each_constant_once() {
 fn a_response_shows_an_oscillation_that_grows() {
     let project = TestProject::new("loop")
         .with_sim_time(0.0, 60.0, 0.0625)
-        .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
+        .with_sim_method(simlin_base::datamodel::SimMethod::RungeKutta4)
         .stock("a", "0", &["da"], &[], None)
         .stock("b", "0", &["db"], &[], None)
         .stock("c", "0", &["dc"], &[], None)

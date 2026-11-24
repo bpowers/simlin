@@ -7,9 +7,9 @@ use std::io::BufRead;
 use std::io::BufReader;
 
 #[cfg(any(test, feature = "file_io"))]
-use crate::common::IdentMap;
-use crate::common::Result;
-use crate::datamodel::Project;
+use simlin_base::common::IdentMap;
+use simlin_base::common::Result;
+use simlin_base::datamodel::Project;
 
 #[cfg(any(test, feature = "file_io"))]
 use std::collections::HashMap;
@@ -21,11 +21,11 @@ use std::fs::File;
 use std::result::Result as StdResult;
 
 #[cfg(any(test, feature = "file_io"))]
-use crate::common::{Canonical, Ident};
+use simlin_base::common::{Canonical, Ident};
 #[cfg(any(test, feature = "file_io"))]
-use crate::results::Method;
+use simlin_base::results::Method;
 #[cfg(any(test, feature = "file_io"))]
-use crate::results::{Results, Specs};
+use simlin_base::results::{Results, Specs};
 
 use crate::mdl;
 use crate::systems;
@@ -103,7 +103,7 @@ pub fn open_systems(contents: &str) -> Result<Project> {
 
 #[cfg(any(test, feature = "file_io"))]
 pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
-    use crate::float::approx_eq;
+    use simlin_base::float::approx_eq;
 
     let file = File::open(file_path)?;
 

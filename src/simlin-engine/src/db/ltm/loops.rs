@@ -13,8 +13,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::{Canonical, Ident, IdentSet};
 use crate::ltm::strip_subscript;
+use simlin_base::common::{Canonical, Ident, IdentSet};
 
 use super::endpoint_dimensions;
 
@@ -358,7 +358,7 @@ pub(crate) struct ReadSliceRowParts {
 pub(crate) fn read_slice_row_parts(
     read_slice: &[crate::ltm_agg::AxisRead],
     from_dim_element_lists: &[Vec<String>],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Option<Vec<ReadSliceRowParts>> {
     use crate::ltm_agg::AxisRead;
     if read_slice.len() != from_dim_element_lists.len() {
@@ -400,10 +400,10 @@ pub(crate) fn read_slice_row_parts(
             // read is.
             AxisRead::MappedRead { dim, source_dim } => {
                 let target_dim =
-                    dim_ctx.get(&crate::common::CanonicalDimensionName::from_raw(dim))?;
+                    dim_ctx.get(&simlin_base::common::CanonicalDimensionName::from_raw(dim))?;
                 let corr = dim_ctx.mapped_read_correspondence(
-                    &crate::common::CanonicalDimensionName::from_raw(dim),
-                    &crate::common::CanonicalDimensionName::from_raw(source_dim),
+                    &simlin_base::common::CanonicalDimensionName::from_raw(dim),
+                    &simlin_base::common::CanonicalDimensionName::from_raw(source_dim),
                 )?;
                 let slots = crate::ltm_augment::dimension_element_names(target_dim);
                 if slots.len() != corr.len() {
@@ -506,7 +506,7 @@ fn driver_alternatives(
     group: &[usize],
     per_axis: &[(Vec<String>, Option<Vec<String>>)],
     read_slice: &[crate::ltm_agg::AxisRead],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Option<Vec<Vec<(usize, String, Option<String>)>>> {
     use crate::ltm_agg::AxisRead;
     if let [axis] = group {
@@ -524,7 +524,7 @@ fn driver_alternatives(
         // Only a projected axis is ever grouped with another.
         AxisRead::Pinned(_) | AxisRead::Reduced { .. } => return None,
     };
-    let target_dim = dim_ctx.get(&crate::common::CanonicalDimensionName::from_raw(dim))?;
+    let target_dim = dim_ctx.get(&simlin_base::common::CanonicalDimensionName::from_raw(dim))?;
     crate::ltm_augment::dimension_element_names(target_dim)
         .into_iter()
         .map(|target_elem| {
@@ -563,7 +563,7 @@ pub(crate) struct ReadSliceRow {
 pub(crate) fn read_slice_rows(
     read_slice: &[crate::ltm_agg::AxisRead],
     from_dim_element_lists: &[Vec<String>],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Option<Vec<ReadSliceRow>> {
     let parts = read_slice_row_parts(read_slice, from_dim_element_lists, dim_ctx)?;
     // Group rows by joined slot to build each row's `coreduced` set.
@@ -612,7 +612,7 @@ pub(crate) fn read_slice_rows(
 pub(super) fn build_a2a_loop_stocks(
     var_stocks: &[Ident<Canonical>],
     dimensions: &[String],
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
 ) -> Vec<Ident<Canonical>> {
     if dimensions.is_empty() {
         return var_stocks.to_vec();
@@ -658,11 +658,11 @@ pub(crate) fn build_loops_from_tiered(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
     agg_loop_budget: usize,
 ) -> (Vec<crate::ltm::Loop>, Vec<String>) {
-    use crate::common::{Canonical, Ident};
     use crate::ltm::{Loop, assign_loop_ids};
+    use simlin_base::common::{Canonical, Ident};
 
     let mut all_loops: Vec<Loop> = Vec::new();
 
@@ -711,7 +711,7 @@ pub(crate) fn build_loops_from_tiered(
             .map(|canonical| {
                 let resolved = dm_dims
                     .iter()
-                    .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
+                    .find(|dm| simlin_base::common::canonicalize(dm.name()).as_ref() == canonical)
                     .map(|dm| dm.name().to_string());
                 debug_assert!(
                     resolved.is_some(),
@@ -884,11 +884,11 @@ pub(crate) fn build_element_level_loops(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
     agg_loop_budget: usize,
 ) -> (Vec<crate::ltm::Loop>, Vec<String>) {
-    use crate::common::{Canonical, Ident};
     use crate::ltm::{Loop, assign_loop_ids};
+    use simlin_base::common::{Canonical, Ident};
 
     // Materialize each circuit as a small `Vec<&str>` once so downstream
     // grouping, name stripping, and node-wise comparisons don't pay the
@@ -1117,7 +1117,8 @@ pub(crate) fn build_element_level_loops(
                             dm_dims
                                 .iter()
                                 .find(|dm| {
-                                    crate::common::canonicalize(dm.name()).as_ref() == canonical
+                                    simlin_base::common::canonicalize(dm.name()).as_ref()
+                                        == canonical
                                 })
                                 .map(|dm| dm.name().to_string())
                                 .unwrap_or_else(|| canonical.to_string())
@@ -1760,8 +1761,8 @@ fn recover_cross_agg_loops(
     project: SourceProject,
     agg_loop_budget: usize,
 ) -> (Vec<crate::ltm::Loop>, Vec<String>) {
-    use crate::common::{Canonical, Ident};
     use crate::ltm::{LinkPolarity, Loop, LoopPolarity};
+    use simlin_base::common::{Canonical, Ident};
 
     // agg name -> its (deduped) petals (built as `&str`, then handed to the
     // shared stitching core). Unmetered here: the exhaustive circuit list is
@@ -2021,8 +2022,8 @@ pub(crate) fn recover_agg_hop_polarities(
     model: SourceModel,
     project: SourceProject,
 ) {
-    use crate::common::{Canonical, Ident};
     use crate::ltm::LinkPolarity;
+    use simlin_base::common::{Canonical, Ident};
 
     let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
     // Canonicalize each synthetic agg's name once so it compares directly

@@ -18,7 +18,7 @@
 //! (`xmile::views::flow_geometry_tests`, `mdl::view::convert::flow_geometry_tests`).
 
 use super::*;
-use crate::datamodel::view_element::{Cloud, Flow, LabelSide, Stock};
+use simlin_base::datamodel::view_element::{Cloud, Flow, LabelSide, Stock};
 
 fn stock(uid: i32, x: f64, y: f64) -> ViewElement {
     ViewElement::Stock(Stock {

@@ -74,11 +74,11 @@
 
 use std::collections::HashMap;
 
-use crate::common::{Canonical, DimensionName, ErrorCode, Ident, IdentMap, canonicalize};
 use crate::conveyor::{
     ConveyorState, LeakConfig, PhaseAInputs, PhaseAResult, PhaseBInputs, Placement,
 };
-use crate::datamodel::{self, Equation};
+use simlin_base::common::{Canonical, DimensionName, ErrorCode, Ident, IdentMap, canonicalize};
+use simlin_base::datamodel::{self, Equation};
 
 /// A leak flow's synthesized metadata (names + static zone/integer config).
 #[derive(Clone, Debug, PartialEq)]
@@ -741,7 +741,7 @@ fn parse_zone(expr: &Option<String>, default: f64) -> f64 {
 /// whitespace, comments, and sign forms are classified exactly like the
 /// equation the runtime will evaluate.
 pub(crate) fn const_scalar_expr(expr: &str) -> Option<f64> {
-    use crate::ast::{Expr0, UnaryOp};
+    use simlin_base::ast::{Expr0, UnaryOp};
     fn eval(ast: &Expr0) -> Option<f64> {
         match ast {
             Expr0::Const(_, v, _) => Some(v.value()),
@@ -750,7 +750,7 @@ pub(crate) fn const_scalar_expr(expr: &str) -> Option<f64> {
             _ => None,
         }
     }
-    let ast = Expr0::new(expr, crate::lexer::LexerType::Equation).ok()??;
+    let ast = Expr0::new(expr, simlin_base::lexer::LexerType::Equation).ok()??;
     eval(&ast)
 }
 
@@ -813,7 +813,7 @@ pub(crate) fn probe_init_list(eqn: &str) -> InitListProbe {
             values.push(v);
             continue;
         }
-        match crate::ast::Expr0::new(part, crate::lexer::LexerType::Equation) {
+        match simlin_base::ast::Expr0::new(part, simlin_base::lexer::LexerType::Equation) {
             // A fragment that does not parse means the comma belonged to a
             // larger expression: not a list at all.
             Err(_) => return InitListProbe::NotAList,
@@ -869,9 +869,9 @@ type InitListValues = (Vec<f64>, String);
 /// Canonical comma-joined subscript key for matching an `Equation::Arrayed`
 /// element entry against the row-major [`element_subscripts_for_dims`]
 /// suffixes: the one owner of that key,
-/// [`crate::common::CanonicalElementName::from_subscript`], as a `String`.
+/// [`simlin_base::common::CanonicalElementName::from_subscript`], as a `String`.
 pub(crate) fn canonical_subscript_key(subscript: &str) -> String {
-    crate::common::CanonicalElementName::from_subscript(subscript)
+    simlin_base::common::CanonicalElementName::from_subscript(subscript)
         .as_str()
         .to_string()
 }
@@ -1724,7 +1724,9 @@ fn equation_strings(eqn: &Equation) -> Vec<String> {
 /// (docs/design/conveyors.md §4.3).
 fn first_driven_flow_referenced(equations: &[String], driven_sorted: &[String]) -> Option<String> {
     for eqn in equations {
-        let Ok(Some(ast)) = crate::ast::Expr0::new(eqn, crate::lexer::LexerType::Equation) else {
+        let Ok(Some(ast)) =
+            simlin_base::ast::Expr0::new(eqn, simlin_base::lexer::LexerType::Equation)
+        else {
             continue;
         };
         for driven in driven_sorted {
@@ -1843,10 +1845,10 @@ pub(crate) fn set_variable_equation(v: &mut datamodel::Variable, eqn: Equation) 
 /// expression that merely CONTAINS a belt reference (e.g. `belt / 2`) returns
 /// `None` -- the caller routes that to loud rejection.
 fn direct_belt_reference(
-    expr: &crate::ast::Expr0,
+    expr: &simlin_base::ast::Expr0,
     conveyor_dims: &HashMap<String, usize>,
-) -> Option<(String, Vec<crate::ast::IndexExpr0>)> {
-    use crate::ast::Expr0;
+) -> Option<(String, Vec<simlin_base::ast::IndexExpr0>)> {
+    use simlin_base::ast::Expr0;
     match expr {
         Expr0::Var(raw, _) => {
             let name = canon(raw.as_str());
@@ -1872,8 +1874,8 @@ fn direct_belt_reference(
 
 /// Are all `indices` concrete single-element selectors (`Expr`/`DimPosition`,
 /// no `Wildcard`/`StarRange`/`Range`)?
-fn all_single_element(indices: &[crate::ast::IndexExpr0]) -> bool {
-    use crate::ast::IndexExpr0;
+fn all_single_element(indices: &[simlin_base::ast::IndexExpr0]) -> bool {
+    use simlin_base::ast::IndexExpr0;
     indices
         .iter()
         .all(|i| matches!(i, IndexExpr0::Expr(_) | IndexExpr0::DimPosition(_, _)))
@@ -1882,8 +1884,8 @@ fn all_single_element(indices: &[crate::ast::IndexExpr0]) -> bool {
 /// A compile-time-constant, non-negative, integral slat index `j` (1-based from
 /// the exit, §10), or `None` if the index is not a bare literal integer (a
 /// dynamic/non-constant or fractional slat index is unsupported).
-fn const_slat_index(idx: &crate::ast::IndexExpr0) -> Option<usize> {
-    use crate::ast::{Expr0, IndexExpr0};
+fn const_slat_index(idx: &simlin_base::ast::IndexExpr0) -> Option<usize> {
+    use simlin_base::ast::{Expr0, IndexExpr0};
     let IndexExpr0::Expr(Expr0::Const(_, val, _)) = idx else {
         return None;
     };
@@ -1917,11 +1919,11 @@ fn reduce_kind(name: &str) -> Option<ContainerKind> {
 /// (`conv[*]`, `conv[a,*]`) are deliberately NOT belt references -- they remain
 /// ordinary arrays to reduce over.
 fn subtree_has_belt_reference(
-    expr: &crate::ast::Expr0,
+    expr: &simlin_base::ast::Expr0,
     conveyor_dims: &HashMap<String, usize>,
 ) -> Option<String> {
-    use crate::ast::{Expr0, IndexExpr0};
-    use crate::builtins::UntypedBuiltinFn;
+    use simlin_base::ast::{Expr0, IndexExpr0};
+    use simlin_base::builtins::UntypedBuiltinFn;
     match expr {
         Expr0::Const(..) => None,
         Expr0::Var(raw, _) => {
@@ -1969,8 +1971,8 @@ fn subtree_has_belt_reference(
 /// reduction)? True when it over-subscripts (`indices.len() > ndims`, indexing
 /// into the belt) or fully indexes every array dimension with a concrete,
 /// single-element index (no `Wildcard`/`StarRange`/`Range`).
-fn subscript_selects_single_belt(indices: &[crate::ast::IndexExpr0], ndims: usize) -> bool {
-    use crate::ast::IndexExpr0;
+fn subscript_selects_single_belt(indices: &[simlin_base::ast::IndexExpr0], ndims: usize) -> bool {
+    use simlin_base::ast::IndexExpr0;
     if indices.len() > ndims {
         return true;
     }
@@ -2012,13 +2014,15 @@ pub(crate) fn rewrite_container_equation(
     let rewrite_str = |s: &str,
                        specs: &mut std::collections::BTreeMap<String, ContainerVarSpec>|
      -> Result<Option<String>, (ErrorCode, String)> {
-        let Ok(Some(ast)) = crate::ast::Expr0::new(s, crate::lexer::LexerType::Equation) else {
+        let Ok(Some(ast)) =
+            simlin_base::ast::Expr0::new(s, simlin_base::lexer::LexerType::Equation)
+        else {
             return Ok(None);
         };
         let mut changed = false;
         let new_ast = rewrite_container_in_expr(&ast, conveyor_dims, naming, specs, &mut changed)?;
         if changed {
-            Ok(Some(crate::ast::print_eqn(&new_ast)))
+            Ok(Some(simlin_base::ast::print_eqn(&new_ast)))
         } else {
             Ok(None)
         }
@@ -2071,15 +2075,15 @@ pub(crate) fn rewrite_container_equation(
 /// `specs` and setting `changed` when a substitution is made. Unsupported forms
 /// return `Err`. See [`rewrite_container_equation`] for the equation-level entry.
 fn rewrite_container_in_expr(
-    expr: &crate::ast::Expr0,
+    expr: &simlin_base::ast::Expr0,
     conveyor_dims: &HashMap<String, usize>,
     naming: &ContainerNaming,
     specs: &mut std::collections::BTreeMap<String, ContainerVarSpec>,
     changed: &mut bool,
-) -> Result<crate::ast::Expr0, (ErrorCode, String)> {
-    use crate::ast::{Expr0, IndexExpr0};
-    use crate::builtins::UntypedBuiltinFn;
-    use crate::common::RawIdent;
+) -> Result<simlin_base::ast::Expr0, (ErrorCode, String)> {
+    use simlin_base::ast::{Expr0, IndexExpr0};
+    use simlin_base::builtins::UntypedBuiltinFn;
+    use simlin_base::common::RawIdent;
 
     // Register a container variable and return the AST reference to it: a bare
     // `Var` for a scalar conveyor/queue, or a `Subscript` carrying the element
@@ -2092,7 +2096,7 @@ fn rewrite_container_in_expr(
                 .entry(name.clone())
                 .or_insert(ContainerVarSpec { owner_stock, kind });
             *changed = true;
-            let loc = crate::builtins::Loc::default();
+            let loc = simlin_base::builtins::Loc::default();
             if elem_indices.is_empty() {
                 Expr0::Var(RawIdent::new(name), loc)
             } else {
@@ -2438,7 +2442,7 @@ pub(crate) fn equation_dims(equation: &Equation) -> Vec<DimensionName> {
 }
 
 /// Resolve the named dimensions of an arrayed conveyor/queue to the runtime
-/// [`Dimension`](crate::dimensions::Dimension) list (with element names), in
+/// [`Dimension`](simlin_base::dimensions::Dimension) list (with element names), in
 /// declaration order, then enumerate the per-element subscript suffixes in the
 /// SAME row-major order the compiled offset map uses
 /// (`db::layout::flattened_offsets` drives its element keys off the identical
@@ -2472,9 +2476,9 @@ pub(crate) fn element_subscripts_for_dims(
                     ),
                 )
             })?;
-        dims.push(crate::dimensions::Dimension::from(dim));
+        dims.push(simlin_base::dimensions::Dimension::from(dim));
     }
-    Ok(crate::dimensions::SubscriptIterator::new(&dims)
+    Ok(simlin_base::dimensions::SubscriptIterator::new(&dims)
         .map(|subs| subs.join(","))
         .collect())
 }

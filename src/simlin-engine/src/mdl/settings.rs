@@ -18,8 +18,8 @@
 
 use std::collections::HashMap;
 
-use crate::datamodel::{SimMethod, Unit};
 use crate::import_losses::{ImportWarning, not_kept};
+use simlin_base::datamodel::{SimMethod, Unit};
 
 /// Parsed settings from an MDL file's settings section.
 #[derive(Debug, Default)]

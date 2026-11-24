@@ -8,7 +8,7 @@
 //! one process.
 
 use crate::compat::open_vensim_with_data;
-use crate::datamodel::Project;
+use simlin_base::datamodel::Project;
 
 /// How many times each file is imported.
 const IMPORTS: usize = 13;

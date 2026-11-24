@@ -2,13 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::datamodel;
 use crate::diagram::connector::render_connector;
 use crate::diagram::elements::{
     render_alias, render_aux, render_cloud, render_group, render_module, render_stock,
 };
 use crate::diagram::flow::render_flow;
 use crate::diagram::resolve::{ResolvedElement, resolve_view};
+use simlin_base::datamodel;
 
 // Keep in sync with the TypeScript source of truth: src/diagram/drawing/render-styles.ts
 const RENDER_STYLES: &str = r#"
@@ -289,8 +289,8 @@ pub fn render_svg(project: &datamodel::Project, model_name: &str) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
-    use crate::datamodel::{
+    use simlin_base::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
+    use simlin_base::datamodel::{
         Aux as AuxVar, Equation, Flow as FlowVar, SimSpecs, Stock as StockVar, StockFlow, Variable,
         View, ViewElement,
     };

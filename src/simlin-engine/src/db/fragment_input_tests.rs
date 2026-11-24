@@ -18,11 +18,11 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::ast::DepKind;
 use crate::compiler::fragment::{FragmentInput, lower_fragment};
 use crate::compiler::symbolic::PerVarBytecodes;
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::ast::DepKind;
+use simlin_base::datamodel;
 
 /// `main` holds a three-element `arr[d]`, `src`, a module `sub` instantiating
 /// `producer` (wired `src -> sub.input`), and `usesub`, which reads the module

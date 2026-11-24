@@ -5,10 +5,10 @@
 use serde_json::json;
 
 use super::*;
-use crate::datamodel::{Compat, Equation, GraphicalFunction, GraphicalFunctionKind};
 use crate::test_common::TestProject;
 use crate::tools::Session;
 use crate::tools::test_support::{Host, inventory};
+use simlin_base::datamodel::{Compat, Equation, GraphicalFunction, GraphicalFunctionKind};
 
 fn aux(name: &str, equation: &str) -> Variable {
     TestProject::new("p")

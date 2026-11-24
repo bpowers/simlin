@@ -21,10 +21,10 @@ use std::hash::Hash;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use crate::canonicalize;
-use crate::datamodel::{self, Equation, Project, SharedVec, Variable, View, ViewElement};
 use crate::patch::{apply_patch, apply_patch_in_place};
-use crate::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
+use simlin_base::canonicalize;
+use simlin_base::datamodel::{self, Equation, Project, SharedVec, Variable, View, ViewElement};
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
 
 fn world3() -> Project {
     crate::compat::open_vensim(include_str!("../../../test/metasd/WRLD3-03/wrld3-03.mdl"))

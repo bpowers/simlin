@@ -38,7 +38,7 @@ fn main() {
         let model_name = project.models[0].name.clone();
         let view = simlin_engine::layout::generate_best_layout(&project, &model_name, None)
             .unwrap_or_else(|e| panic!("layout {path}: {e}"));
-        project.models[0].views = vec![simlin_engine::datamodel::View::StockFlow(view)];
+        project.models[0].views = vec![simlin_base::datamodel::View::StockFlow(view)];
         let (rendered, warnings) = simlin_engine::compat::to_mdl_with_warnings(&project)
             .unwrap_or_else(|e| panic!("render {path}: {e}"));
         for w in &warnings {

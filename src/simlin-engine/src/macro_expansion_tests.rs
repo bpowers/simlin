@@ -20,13 +20,13 @@
 // parameters, matching the bundled `macro_*` fixtures (all `(input,
 // parameter)`); this is a pre-existing MDL behavior, not a Phase 3 concern.
 
-use crate::common::ErrorCode;
 use crate::compat::open_vensim;
 use crate::db::{
     DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::vm::Vm;
+use simlin_base::common::ErrorCode;
 
 /// The fixed Vensim control + sketch tail every test `.mdl` shares. Keeps the
 /// per-test source focused on the macro definitions and invocations.
@@ -75,7 +75,7 @@ fn mdl(body: &str) -> String {
 
 /// Compile a `.mdl` source through the production incremental path and
 /// return the compile `Result`.
-fn compile_mdl(source: &str) -> crate::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
+fn compile_mdl(source: &str) -> simlin_base::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
     let project = open_vensim(source).expect("MDL must parse into a datamodel project");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
@@ -267,23 +267,23 @@ out=
 // ── Task 3: BuiltinVisitor macro expansion ─────────────────────────────────
 
 /// A non-macro scalar `datamodel::Aux` body helper for the structural tests.
-fn mk_aux(ident: &str, equation: &str) -> crate::datamodel::Variable {
-    crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+fn mk_aux(ident: &str, equation: &str) -> simlin_base::datamodel::Variable {
+    simlin_base::datamodel::Variable::Aux(simlin_base::datamodel::Aux {
         ident: ident.to_string(),
-        equation: crate::datamodel::Equation::Scalar(equation.to_string()),
+        equation: simlin_base::datamodel::Equation::Scalar(equation.to_string()),
         documentation: String::new(),
         units: None,
         gf: None,
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     })
 }
 
 /// Build a single-macro registry for `MYMACRO(p1, p2)` with primary output
 /// `mymacro` (a `p1 + p2` body).
-fn mymacro_registry() -> crate::module_functions::MacroRegistry {
-    let macro_model = crate::datamodel::Model {
+fn mymacro_registry() -> simlin_base::module_functions::MacroRegistry {
+    let macro_model = simlin_base::datamodel::Model {
         name: "mymacro".to_string(),
         sim_specs: None,
         variables: vec![
@@ -295,13 +295,13 @@ fn mymacro_registry() -> crate::module_functions::MacroRegistry {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
-        macro_spec: Some(crate::datamodel::MacroSpec {
+        macro_spec: Some(simlin_base::datamodel::MacroSpec {
             parameters: vec!["p1".to_string(), "p2".to_string()],
             primary_output: "mymacro".to_string(),
             additional_outputs: vec![],
         }),
     };
-    crate::module_functions::MacroRegistry::build(&[macro_model])
+    simlin_base::module_functions::MacroRegistry::build(&[macro_model])
         .expect("valid single-macro registry")
 }
 
@@ -312,11 +312,11 @@ fn mymacro_registry() -> crate::module_functions::MacroRegistry {
 /// reference to `<module>·<primary_output>`.
 #[test]
 fn macro_call_expands_to_synthetic_module_structurally() {
-    use crate::ast::{Ast, Expr0};
+    use simlin_base::ast::{Ast, Expr0};
 
     let registry = mymacro_registry();
     let ast = Ast::Scalar(
-        Expr0::new("MYMACRO(a, b)", crate::lexer::LexerType::Equation)
+        Expr0::new("MYMACRO(a, b)", simlin_base::lexer::LexerType::Equation)
             .expect("parse")
             .expect("non-empty"),
     );
@@ -386,13 +386,13 @@ fn macro_call_expands_to_synthetic_module_structurally() {
 /// nest one inside another.
 #[test]
 fn apply_to_all_requirements_follow_every_macro_call_resolution_arm() {
-    use crate::ast::Expr0;
     use crate::builtins_visitor::{PerElement, per_element_requirements};
+    use simlin_base::ast::Expr0;
 
     // `mymacro` expands; `init` is a genuine passthrough of the renamed
     // builtin; `delayn` is a macro whose body calls the like-named stdlib
     // alias, which inside its own body is the builtin (GH #554).
-    let macro_model = |name: &str, params: &[&str], body: &str| crate::datamodel::Model {
+    let macro_model = |name: &str, params: &[&str], body: &str| simlin_base::datamodel::Model {
         name: name.to_string(),
         sim_specs: None,
         variables: std::iter::once(mk_aux(name, body))
@@ -401,20 +401,20 @@ fn apply_to_all_requirements_follow_every_macro_call_resolution_arm() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
-        macro_spec: Some(crate::datamodel::MacroSpec {
+        macro_spec: Some(simlin_base::datamodel::MacroSpec {
             parameters: params.iter().map(|p| p.to_string()).collect(),
             primary_output: name.to_string(),
             additional_outputs: vec![],
         }),
     };
-    let registry = crate::module_functions::MacroRegistry::build(&[
+    let registry = simlin_base::module_functions::MacroRegistry::build(&[
         macro_model("mymacro", &["p1", "p2"], "p1 + p2"),
         macro_model("init", &["x"], "init(x)"),
         macro_model("delayn", &["x", "t", "n"], "delayn(x, t, n)"),
     ])
     .expect("valid registry");
     let parse = |s: &str| {
-        Expr0::new(s, crate::lexer::LexerType::Equation)
+        Expr0::new(s, simlin_base::lexer::LexerType::Equation)
             .expect("parse")
             .expect("non-empty")
     };
@@ -845,7 +845,7 @@ frozen = INITIAL(k * 2)
         !has_model_error(&diags, ErrorCode::CircularDependency),
         "the body's renamed INITIAL is not a recursive macro call; diagnostics: {diags:?}"
     );
-    let registry = crate::module_functions::MacroRegistry::build(
+    let registry = simlin_base::module_functions::MacroRegistry::build(
         &open_vensim(&source)
             .expect("the issue's model imports")
             .models,
@@ -923,7 +923,7 @@ fn a_passthrough_macro_keeps_its_declared_arity_at_an_external_call_site() {
         );
         crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE imports")
     };
-    let compile = |project: &crate::datamodel::Project| {
+    let compile = |project: &simlin_base::datamodel::Project| {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, project, None);
         (
@@ -934,7 +934,7 @@ fn a_passthrough_macro_keeps_its_declared_arity_at_an_external_call_site() {
 
     let valid = project_for("input");
     assert!(
-        crate::module_functions::MacroRegistry::build(&valid.models)
+        simlin_base::module_functions::MacroRegistry::build(&valid.models)
             .expect("the registry builds")
             .resolve_macro("previous")
             .expect("the macro is registered")
@@ -1538,7 +1538,7 @@ sibling=
 
     // Structural: the registry resolves BOTH the wrap-own-builtin macro and
     // the sibling (proving the cascade that un-shadowed siblings is gone).
-    let registry = crate::module_functions::MacroRegistry::build(&project.models)
+    let registry = simlin_base::module_functions::MacroRegistry::build(&project.models)
         .expect("registry must build (no false delayn -> delayn recursion)");
     assert!(
         registry.resolve_macro("delayn").is_some(),

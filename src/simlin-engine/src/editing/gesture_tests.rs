@@ -21,8 +21,6 @@
 
 use rayon::prelude::*;
 
-use crate::common::canonicalize;
-use crate::datamodel;
 use crate::diagram::connector::{ConnectorGeometry, connector_geometry};
 use crate::diagram::elements::aux_geometry;
 use crate::diagram::flow::flow_geometry;
@@ -34,6 +32,8 @@ use crate::editing::test_support::{
     project_of, stock, strict_report, view_of,
 };
 use crate::json;
+use simlin_base::common::canonicalize;
+use simlin_base::datamodel;
 
 use super::*;
 

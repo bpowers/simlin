@@ -15,11 +15,11 @@ use std::fmt::Write as _;
 
 use serde_json::{Value, json};
 
-use crate::datamodel::{self, Variable};
 use crate::db::{DiagnosticSeverity, LtmOverlay, SimlinDb, collect_all_diagnostics};
 use crate::test_common::TestProject;
 use crate::tools::test_support::Host;
 use crate::tools::{Session, ToolOutput};
+use simlin_base::datamodel::{self, Variable};
 
 struct Rng(u64);
 impl Rng {
@@ -99,7 +99,7 @@ fn names(project: &datamodel::Project) -> Vec<String> {
 }
 
 fn equation(rng: &mut Rng, names: &[String]) -> String {
-    let n = |rng: &mut Rng| crate::canonicalize(rng.pick(names).as_str()).into_owned();
+    let n = |rng: &mut Rng| simlin_base::canonicalize(rng.pick(names).as_str()).into_owned();
     match rng.below(12) {
         0 => format!("{} * 2", n(rng)),
         1 => format!("{} + {}", n(rng), n(rng)),
@@ -209,7 +209,12 @@ fn differing(before: &datamodel::Project, after: &datamodel::Project) -> BTreeSe
         p.models[0]
             .variables
             .iter()
-            .map(|v| (crate::canonicalize(v.get_ident()).into_owned(), bare(v)))
+            .map(|v| {
+                (
+                    simlin_base::canonicalize(v.get_ident()).into_owned(),
+                    bare(v),
+                )
+            })
             .collect()
     };
     let (a, b) = (map(before), map(after));
@@ -350,11 +355,11 @@ fn run_case(seed: u64, log: &mut String, flags: &mut Vec<String>) {
         let mut covered: BTreeSet<String> = BTreeSet::new();
         for line in &lines {
             let v = line["variable"].as_str().unwrap_or_default();
-            covered.insert(crate::canonicalize(v).into_owned());
+            covered.insert(simlin_base::canonicalize(v).into_owned());
             let detail = line["detail"].as_str().unwrap_or_default();
             if let Some(rest) = detail.strip_prefix("renamed to ") {
                 let to = rest.split(';').next().unwrap_or_default();
-                covered.insert(crate::canonicalize(to).into_owned());
+                covered.insert(simlin_base::canonicalize(to).into_owned());
             }
         }
         let omitted = answer["omitted"].as_u64().unwrap_or(0);
@@ -368,8 +373,8 @@ fn run_case(seed: u64, log: &mut String, flags: &mut Vec<String>) {
             }
             for line in &lines {
                 let action = line["action"].as_str().unwrap_or_default();
-                let v =
-                    crate::canonicalize(line["variable"].as_str().unwrap_or_default()).into_owned();
+                let v = simlin_base::canonicalize(line["variable"].as_str().unwrap_or_default())
+                    .into_owned();
                 if matches!(action, "added" | "changed" | "renamed" | "deleted")
                     && !diff.contains(&v)
                 {

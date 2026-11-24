@@ -45,7 +45,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::datamodel::{self, Aux, Equation, Model, Module, ModuleReference, Variable};
+use simlin_base::datamodel::{self, Aux, Equation, Model, Module, ModuleReference, Variable};
 
 use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation};
 use crate::mdl::xmile_compat::quoted_space_to_underbar;

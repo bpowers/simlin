@@ -16,13 +16,13 @@
 //! input surfaces a Warning while a correct (module-qualified) wiring and empty
 //! placeholder rows stay clean.
 
-use crate::common::{Error, ErrorCode};
-use crate::datamodel::{self, Equation, Variable, Visibility};
 use crate::db::{
     Diagnostic, DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     sync_from_datamodel,
 };
 use crate::test_common::TestProject;
+use simlin_base::common::{Error, ErrorCode};
+use simlin_base::datamodel::{self, Equation, Variable, Visibility};
 
 /// `main` with `local_input`, a `submodel` exposing input port `input_var`, and
 /// a module `m` in `main` whose single reference is `{ src, dst }`.

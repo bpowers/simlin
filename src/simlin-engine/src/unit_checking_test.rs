@@ -529,7 +529,7 @@ mod tests {
         // TIME at dt steps: 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3, 3.25, 3.5, 3.75, 4
         // TIME at save steps: 1, 2, 3, 4
 
-        use crate::datamodel;
+        use simlin_base::datamodel;
 
         // run_vm only returns values at save steps by default,
         // so we set save_step explicitly
@@ -984,13 +984,13 @@ mod tests {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
         let diagnostics = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
-        let umbrella =
-            diagnostics.iter().find_map(|d| match &d.error {
-                DiagnosticError::Unit(crate::common::UnitError::InferenceError {
-                    details, ..
-                }) if d.variable.is_none() => Some(details.clone().unwrap_or_default()),
-                _ => None,
-            });
+        let umbrella = diagnostics.iter().find_map(|d| match &d.error {
+            DiagnosticError::Unit(simlin_base::common::UnitError::InferenceError {
+                details,
+                ..
+            }) if d.variable.is_none() => Some(details.clone().unwrap_or_default()),
+            _ => None,
+        });
         let detail = umbrella.expect("expected a model-level unit inference warning");
         assert!(
             !detail.contains('\n') && !detail.contains("1 =="),

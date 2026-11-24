@@ -31,7 +31,7 @@
 //!   here until it is compared or named as no part of the meaning.
 //!
 //!   Two equations are the same when their canonical forms are
-//!   ([`crate::ast::CanonicalEqn`] under `Aliases::Engine`): names that
+//!   ([`simlin_base::ast::CanonicalEqn`] under `Aliases::Engine`): names that
 //!   canonicalize alike, numbers of one value, and the calls the engine
 //!   itself rewrites (`MODULO(a, b)` and `a mod b`, `PI()` and its value, a
 //!   builtin and its alias). Any other difference is a change, even one that
@@ -64,18 +64,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::BufReader;
 
-use crate::ast::{Aliases, CanonicalEqn, Expr0, UnaryOp};
 use crate::buffa::Message;
-use crate::builtins::UntypedBuiltinFn;
-use crate::common::{CanonicalElementName, Result, canonicalize, join_quoted_names};
 use crate::data_provider::DataProvider;
-use crate::datamodel::{
+use crate::errors::code_and_reason;
+use simlin_base::ast::{Aliases, CanonicalEqn, Expr0, UnaryOp};
+use simlin_base::builtins::UntypedBuiltinFn;
+use simlin_base::common::{CanonicalElementName, Result, canonicalize, join_quoted_names};
+use simlin_base::datamodel::{
     Aux, Compat, Conveyor, DataSource, Dimension, DimensionElements, DimensionMapping, Dt,
     Equation, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale, Leakage,
     MacroSpec, Model, Module, ModuleReference, Project, Queue, SimMethod, SimSpecs, SpreadFlow,
     Stock, Variable,
 };
-use crate::errors::code_and_reason;
 
 #[cfg(test)]
 #[path = "save_check_tests.rs"]
@@ -194,9 +194,9 @@ fn read_back(
 /// writer refuses the project.
 fn write(project: &Project, format: SaveFormat) -> Result<Vec<u8>> {
     let unwritable = |e: serde_json::Error| {
-        crate::common::Error::new(
-            crate::common::ErrorKind::Model,
-            crate::common::ErrorCode::Generic,
+        simlin_base::common::Error::new(
+            simlin_base::common::ErrorKind::Model,
+            simlin_base::common::ErrorCode::Generic,
             Some(e.to_string()),
         )
     };
@@ -990,7 +990,7 @@ impl VariableMeaning {
         }
         if let Some((inflows, outflows)) = flows {
             let flows = |list: &[String]| -> Vec<String> {
-                crate::datamodel::distinct_stock_flows(list)
+                simlin_base::datamodel::distinct_stock_flows(list)
                     .flows
                     .iter()
                     .map(|f| canonicalize(f).into_owned())
@@ -1742,7 +1742,7 @@ fn main_model(project: &Project) -> Option<&str> {
         .map(|m| m.name.as_str())
 }
 
-fn simulate(project: &Project) -> std::result::Result<crate::Results, String> {
+fn simulate(project: &Project) -> std::result::Result<simlin_base::Results, String> {
     let main = main_model(project).ok_or_else(|| "it has no model to simulate".to_string())?;
     let mut vm = crate::queue_compile::build_vm(project, main).map_err(|e| e.to_string())?;
     vm.run_to_end().map_err(|e| e.to_string())?;
@@ -2014,7 +2014,7 @@ fn compare_errors(original: &Project, saved: &Project) -> Vec<MeaningChange> {
 }
 
 /// The values one results column holds, step by step.
-fn series(results: &crate::Results, at: usize) -> impl Iterator<Item = f64> + '_ {
+fn series(results: &simlin_base::Results, at: usize) -> impl Iterator<Item = f64> + '_ {
     results.iter().map(move |row| row[at])
 }
 
@@ -2022,8 +2022,8 @@ fn series(results: &crate::Results, at: usize) -> impl Iterator<Item = f64> + '_
 /// whose series the save simulates differently, with its first difference,
 /// leaving out the control variables a save keeps as its specs.
 fn compare_series(
-    original: &crate::Results,
-    saved: &crate::Results,
+    original: &simlin_base::Results,
+    saved: &simlin_base::Results,
     variables: &BTreeSet<String>,
 ) -> ComparedRuns {
     let mut differing: BTreeMap<String, String> = BTreeMap::new();
@@ -2035,7 +2035,7 @@ fn compare_series(
             saved.step_count, original.step_count
         ));
     } else {
-        let columns = |results: &crate::Results| -> BTreeMap<String, usize> {
+        let columns = |results: &simlin_base::Results| -> BTreeMap<String, usize> {
             results
                 .offsets
                 .iter()
@@ -2072,7 +2072,7 @@ fn compare_series(
                 let is = series(saved, other_at).nth(step).unwrap_or(f64::NAN);
                 // The clock is read from its slot, not its key: a variable
                 // the model declares as `time` takes the key `time`.
-                let when = series(original, crate::results::TIME_OFF)
+                let when = series(original, simlin_base::results::TIME_OFF)
                     .nth(step)
                     .map(|t| format!(" at time {t}"))
                     .unwrap_or_default();

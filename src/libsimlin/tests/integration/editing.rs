@@ -16,7 +16,7 @@ use std::ptr;
 
 use serde_json::{json, Value};
 use simlin::*;
-use simlin_engine::datamodel::{self, Variable, ViewElement};
+use simlin_base::datamodel::{self, Variable, ViewElement};
 use simlin_engine::test_common::TestProject;
 
 use crate::common::{expect_error_code, expect_no_error, open_project_from_datamodel};

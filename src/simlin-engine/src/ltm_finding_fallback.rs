@@ -69,7 +69,7 @@ use super::{
     Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, MemoryMeter, TarjanScratch, expired, is_active,
     tarjan_scc_ids_into,
 };
-use crate::results::Results;
+use simlin_base::results::Results;
 
 /// Edge weight formulation for the fallback's shortest-path search.
 ///

@@ -21,7 +21,7 @@ fn parse_vdf(path: &str) -> VdfFile {
     VdfFile::parse(bytes).unwrap_or_else(|e| panic!("parse {path}: {e}"))
 }
 
-fn load_mdl(path: &str) -> simlin_engine::datamodel::Project {
+fn load_mdl(path: &str) -> simlin_base::datamodel::Project {
     let contents = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     open_vensim(&contents).unwrap_or_else(|e| panic!("parse mdl {path}: {e}"))
 }
@@ -229,13 +229,13 @@ fn old_style_alias_to_output_sig_pair_by_file_order() {
     let mut mdl_aliases: Vec<(String, String)> = Vec::new();
     for var in &model.variables {
         let (ident, equation) = match var {
-            simlin_engine::datamodel::Variable::Aux(a) => (&a.ident, &a.equation),
-            simlin_engine::datamodel::Variable::Flow(f) => (&f.ident, &f.equation),
+            simlin_base::datamodel::Variable::Aux(a) => (&a.ident, &a.equation),
+            simlin_base::datamodel::Variable::Flow(f) => (&f.ident, &f.equation),
             _ => continue,
         };
         let text = match equation {
-            simlin_engine::datamodel::Equation::Scalar(s)
-            | simlin_engine::datamodel::Equation::ApplyToAll(_, s) => s.as_str(),
+            simlin_base::datamodel::Equation::Scalar(s)
+            | simlin_base::datamodel::Equation::ApplyToAll(_, s) => s.as_str(),
             _ => continue,
         };
         if equation_starts_with_stdlib_call(text) {
@@ -314,13 +314,13 @@ fn wrld3_scen01_alias_and_output_sig_counts_agree() {
         .variables
         .iter()
         .filter_map(|v| match v {
-            simlin_engine::datamodel::Variable::Aux(a) => Some(&a.equation),
-            simlin_engine::datamodel::Variable::Flow(f) => Some(&f.equation),
+            simlin_base::datamodel::Variable::Aux(a) => Some(&a.equation),
+            simlin_base::datamodel::Variable::Flow(f) => Some(&f.equation),
             _ => None,
         })
         .filter_map(|eq| match eq {
-            simlin_engine::datamodel::Equation::Scalar(s)
-            | simlin_engine::datamodel::Equation::ApplyToAll(_, s) => Some(s.as_str()),
+            simlin_base::datamodel::Equation::Scalar(s)
+            | simlin_base::datamodel::Equation::ApplyToAll(_, s) => Some(s.as_str()),
             _ => None,
         })
         .filter(|text| equation_starts_with_stdlib_call(text))
@@ -491,22 +491,20 @@ fn alias_to_output_sig_pairing_via_file_order_agrees_on_family() {
     }
 }
 
-fn collect_mdl_alias_equations(
-    project: &simlin_engine::datamodel::Project,
-) -> Vec<(String, String)> {
+fn collect_mdl_alias_equations(project: &simlin_base::datamodel::Project) -> Vec<(String, String)> {
     let Some(model) = project.models.first() else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for var in &model.variables {
         let (ident, equation) = match var {
-            simlin_engine::datamodel::Variable::Aux(a) => (&a.ident, &a.equation),
-            simlin_engine::datamodel::Variable::Flow(f) => (&f.ident, &f.equation),
+            simlin_base::datamodel::Variable::Aux(a) => (&a.ident, &a.equation),
+            simlin_base::datamodel::Variable::Flow(f) => (&f.ident, &f.equation),
             _ => continue,
         };
         let text = match equation {
-            simlin_engine::datamodel::Equation::Scalar(s)
-            | simlin_engine::datamodel::Equation::ApplyToAll(_, s) => s.as_str(),
+            simlin_base::datamodel::Equation::Scalar(s)
+            | simlin_base::datamodel::Equation::ApplyToAll(_, s) => s.as_str(),
             _ => continue,
         };
         if equation_starts_with_stdlib_call(text) {

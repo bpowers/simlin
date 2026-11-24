@@ -20,12 +20,13 @@
 
 use std::collections::HashMap;
 
-use simlin_engine::common::ErrorCode;
+use simlin_base::Results;
+use simlin_base::common::ErrorCode;
 use simlin_engine::db::{
     DiagnosticError, LtmOverlay, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{Results, Vm, json};
+use simlin_engine::{Vm, json};
 
 /// The `sliced_sum` model as Simlin JSON, with the stock's six per-element
 /// subscripts spelled by `subscript`.
@@ -73,13 +74,13 @@ fn sliced_sum_json(subscript: impl Fn(&str, &str) -> String) -> String {
     )
 }
 
-fn load(json_text: &str) -> simlin_engine::datamodel::Project {
+fn load(json_text: &str) -> simlin_base::datamodel::Project {
     let project: json::Project = serde_json::from_str(json_text).expect("valid Simlin JSON");
     project.into()
 }
 
 /// Simulate `project` (no LTM) and return every saved series by name.
-fn simulate(project: &simlin_engine::datamodel::Project) -> (Results, HashMap<String, Vec<f64>>) {
+fn simulate(project: &simlin_base::datamodel::Project) -> (Results, HashMap<String, Vec<f64>>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     let compiled = compile_project_incremental(&db, sync.project, "main", LtmOverlay::Off)
@@ -117,15 +118,15 @@ fn spaced_and_capitalized_subscripts_simulate_like_the_canonical_spelling() {
         format!(" {} , {} ", cap(r), cap(a))
     }));
 
-    let stored_subscripts = |p: &simlin_engine::datamodel::Project| -> Vec<String> {
+    let stored_subscripts = |p: &simlin_base::datamodel::Project| -> Vec<String> {
         let stock = p.models[0]
             .variables
             .iter()
             .find(|v| v.get_ident() == "pop")
             .expect("pop");
         match stock {
-            simlin_engine::datamodel::Variable::Stock(s) => match &s.equation {
-                simlin_engine::datamodel::Equation::Arrayed(_, elements, _, _) => {
+            simlin_base::datamodel::Variable::Stock(s) => match &s.equation {
+                simlin_base::datamodel::Equation::Arrayed(_, elements, _, _) => {
                     elements.iter().map(|(sub, _, _, _)| sub.clone()).collect()
                 }
                 other => panic!("pop is arrayed: {other:?}"),

@@ -16,7 +16,7 @@ fn score_key(from: &str, to: &str) -> String {
     format!("$⁚ltm⁚link_score⁚{from}→{to}")
 }
 
-fn snapshot_project(memory: &str, coefficient: f64) -> simlin_engine::datamodel::Project {
+fn snapshot_project(memory: &str, coefficient: f64) -> simlin_base::datamodel::Project {
     TestProject::new("snapshot_partial")
         .with_sim_time(0.0, 4.0, 1.0)
         .stock("x", "10", &["z"], &[], None)
@@ -62,9 +62,9 @@ fn scoring_snapshots_preserves_the_ordinary_trajectory() {
     };
 
     for method in [
-        simlin_engine::datamodel::SimMethod::Euler,
-        simlin_engine::datamodel::SimMethod::RungeKutta2,
-        simlin_engine::datamodel::SimMethod::RungeKutta4,
+        simlin_base::datamodel::SimMethod::Euler,
+        simlin_base::datamodel::SimMethod::RungeKutta2,
+        simlin_base::datamodel::SimMethod::RungeKutta4,
     ] {
         let mut project = snapshot_project("PREVIOUS(PREVIOUS(g, 17), x)", 0.1);
         project.sim_specs.sim_method = method;
@@ -141,10 +141,10 @@ fn lagged_reducer_input_does_not_credit_a_row_that_never_wins() {
         .build_datamodel();
     project.models[0].variables.rewrite(|variables| {
         for var in variables.iter_mut() {
-            if let simlin_engine::datamodel::Variable::Stock(stock) = var
+            if let simlin_base::datamodel::Variable::Stock(stock) = var
                 && stock.ident == "x"
             {
-                stock.equation = simlin_engine::datamodel::Equation::Arrayed(
+                stock.equation = simlin_base::datamodel::Equation::Arrayed(
                     vec!["Region".to_owned()],
                     vec![
                         ("a".to_owned(), "10".to_owned(), None, None),
@@ -164,9 +164,9 @@ fn lagged_reducer_input_does_not_credit_a_row_that_never_wins() {
 #[test]
 fn proportional_loop_scores_are_invariant_to_the_units_scale() {
     for method in [
-        simlin_engine::datamodel::SimMethod::Euler,
-        simlin_engine::datamodel::SimMethod::RungeKutta2,
-        simlin_engine::datamodel::SimMethod::RungeKutta4,
+        simlin_base::datamodel::SimMethod::Euler,
+        simlin_base::datamodel::SimMethod::RungeKutta2,
+        simlin_base::datamodel::SimMethod::RungeKutta4,
     ] {
         for scale in [1.0, 1e-18] {
             let project = TestProject::new("scaled_loop")
@@ -251,8 +251,8 @@ fn element_reducer_scores_are_invariant_to_the_units_scale() {
 /// form and the element reducer (the two tests above). The input has to be
 /// read per step by something: a port nothing reads per step makes its source
 /// no causal edge at all (`db::model_causal_edges`).
-fn black_box_loop_project(scale: f64) -> simlin_engine::datamodel::Project {
-    use simlin_engine::datamodel;
+fn black_box_loop_project(scale: f64) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel;
 
     let aux = |ident: &str, equation: &str, can_be_module_input: bool| {
         datamodel::Variable::Aux(datamodel::Aux {

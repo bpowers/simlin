@@ -13,10 +13,10 @@
 use std::any::Any;
 
 use super::*;
-use crate::common::ErrorCode;
-use crate::datamodel;
 use crate::test_common::TestProject;
 use crate::testutils::{x_aux, x_flow, x_model, x_module_named, x_stock};
+use simlin_base::common::ErrorCode;
+use simlin_base::datamodel;
 
 // ── shared fixtures ────────────────────────────────────────────────────
 
@@ -189,7 +189,10 @@ fn pin_loop(model: &mut datamodel::Model, name: &str, variables: &[&str]) {
     model.variables.rewrite(|variables| {
         for (index, variable) in variables.iter_mut().enumerate() {
             let uid = (index as i32) + 1;
-            uid_of.insert(crate::canonicalize(variable.get_ident()).into_owned(), uid);
+            uid_of.insert(
+                simlin_base::canonicalize(variable.get_ident()).into_owned(),
+                uid,
+            );
             match variable {
                 datamodel::Variable::Stock(stock) => stock.uid = Some(uid),
                 datamodel::Variable::Flow(flow) => flow.uid = Some(uid),
@@ -1559,8 +1562,8 @@ fn a_cycles_row_follows_its_members_rows() {
 /// every arm's production producer is driven above.
 #[test]
 fn the_projections_read_every_arm() {
-    use crate::builtins::Loc;
-    use crate::common::{EquationError, Error, ErrorKind, UnitError};
+    use simlin_base::builtins::Loc;
+    use simlin_base::common::{EquationError, Error, ErrorKind, UnitError};
 
     type Row = (
         DiagnosticError,

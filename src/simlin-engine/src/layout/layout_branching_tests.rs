@@ -10,7 +10,7 @@
 //! collapsed onto 2 positions).
 
 use super::*;
-use crate::datamodel;
+use simlin_base::datamodel;
 
 /// Name used for test models, matching `project.get_model(TEST_MODEL)`.
 const TEST_MODEL: &str = "test";

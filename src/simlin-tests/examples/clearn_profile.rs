@@ -302,7 +302,7 @@ struct RetainedCompile {
 }
 
 fn compile_retained(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     ltm: bool,
     diagnostics: bool,
 ) -> RetainedCompile {
@@ -326,7 +326,7 @@ fn compile_retained(
 }
 
 fn compile_once(
-    datamodel: &simlin_engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
     ltm: bool,
     diagnostics: bool,
 ) -> std::sync::Arc<CompiledSimulation> {
@@ -349,7 +349,7 @@ fn print_residency(label: &str, baseline: usize) {
 /// (every salsa memo -- the parse and lowering memos, fragments, layouts),
 /// then the sync state. The parsed datamodel stays alive throughout, as it
 /// does in every embedding.
-fn residency_census(datamodel: &simlin_engine::datamodel::Project, ltm: bool, diagnostics: bool) {
+fn residency_census(datamodel: &simlin_base::datamodel::Project, ltm: bool, diagnostics: bool) {
     let baseline = LIVE_BYTES.load(Ordering::Relaxed);
     print_residency("baseline", baseline);
     let retained = compile_retained(datamodel, ltm, diagnostics);

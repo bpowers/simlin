@@ -81,6 +81,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use salsa::Setter;
+use simlin_base::canonicalize;
 use simlin_engine::db::{
     SimlinDb, causal_graph_from_element_edges_with_modules, compile_project_incremental,
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
@@ -90,7 +91,7 @@ use simlin_engine::ltm_finding::{
     CandidateGen, DiscoveryResult, FallbackClosures, FallbackConfig, FallbackSeeds,
     FallbackTieBreak, FallbackWeight, FoundLoop,
 };
-use simlin_engine::{canonicalize, open_vensim, open_xmile};
+use simlin_engine::{open_vensim, open_xmile};
 
 /// Recall is reported at these prefix lengths of the exact ranked list.
 const RECALL_KS: [usize; 5] = [1, 10, 50, 100, 200];
@@ -430,7 +431,7 @@ fn eval_model(path: &str) {
     let stocks: Vec<_> = element_edges
         .stocks
         .iter()
-        .map(|s| simlin_engine::common::Ident::new(s))
+        .map(|s| simlin_base::common::Ident::new(s))
         .collect();
     let ltm_vars = model_ltm_variables(&db, source_model, source_project);
     let dm_dims = project_datamodel_dims(&db, source_project);

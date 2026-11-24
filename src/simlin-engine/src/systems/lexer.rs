@@ -221,13 +221,13 @@ fn validate_stock_name(name: &str, line_num: usize) -> Result<(), LexError> {
             });
         }
     }
-    if crate::results::is_implicit_global(&crate::canonicalize(name)) {
+    if simlin_base::results::is_implicit_global(&simlin_base::canonicalize(name)) {
         return Err(LexError {
             line: line_num,
             message: format!(
                 "stock '{name}' has one of the simulation's clock names ({}), \
                  which a stock cannot take; rename the stock",
-                crate::results::IMPLICIT_GLOBALS.join(", ")
+                simlin_base::results::IMPLICIT_GLOBALS.join(", ")
             ),
         });
     }

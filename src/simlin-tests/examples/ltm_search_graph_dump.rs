@@ -67,12 +67,13 @@
 //!   LTM_DUMP_OUT     output file path (default: stdout)
 
 use salsa::Setter;
+use simlin_base::canonicalize;
 use simlin_engine::db::{
     SimlinDb, causal_graph_from_element_edges_with_modules, compile_project_incremental,
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{canonicalize, open_vensim, open_xmile};
+use simlin_engine::{open_vensim, open_xmile};
 
 /// Encode one score value as JSON, spelling a non-finite value explicitly
 /// (`"nan"` / `"inf"` / `"-inf"`) instead of letting `serde_json` collapse it
@@ -155,7 +156,7 @@ fn main() {
     let stocks: Vec<_> = element_edges
         .stocks
         .iter()
-        .map(|s| simlin_engine::common::Ident::new(s))
+        .map(|s| simlin_base::common::Ident::new(s))
         .collect();
     let ltm_vars = model_ltm_variables(&db, source_model, source_project);
     let dm_dims = project_datamodel_dims(&db, source_project);
@@ -242,7 +243,7 @@ fn main() {
                 let stocks = &found.partitions[p].stocks;
                 cycle_partitions
                     .stock_partition
-                    .get(&simlin_engine::common::Ident::new(&stocks[0]))
+                    .get(&simlin_base::common::Ident::new(&stocks[0]))
                     .copied()
                     .expect("a reported partition's stocks are cycle-partition members")
             });

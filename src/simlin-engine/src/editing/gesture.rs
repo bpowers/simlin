@@ -40,11 +40,11 @@ use std::collections::{HashMap, HashSet};
 
 use smallvec::SmallVec;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::{
+use crate::diagram::constants::AUX_RADIUS;
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::{
     Aux, Cloud, Flow, FlowPoint, LabelSide, Link, LinkShape, Module, Stock,
 };
-use crate::diagram::constants::AUX_RADIUS;
 
 use super::base::{
     BaseView, VariableKind, is_finite, is_link_source, label_side_of, position_of, translated,

@@ -320,7 +320,7 @@ impl ViewDesc {
     /// `offset_for_iter_index(current)` read, bounds-checked against the source
     /// size. Otherwise the broadcast path decomposes `current` into the
     /// iteration's multi-dim indices, matches dimensions through
-    /// [`crate::dimensions::match_dimensions_two_pass`] (exact dim-id match, then
+    /// [`simlin_base::dimensions::match_dimensions_two_pass`] (exact dim-id match, then
     /// the indexed size-fallback), and rebuilds the source indices (bounds-checked
     /// per dimension). `is_indexed` for each dim comes from `ctx.dimensions`,
     /// exactly as the VM resolves it.
@@ -356,7 +356,7 @@ impl ViewDesc {
         let source_is_indexed = dim_indexed(&self.dim_ids);
         let iter_is_indexed = dim_indexed(&iter.dim_ids);
 
-        let source_to_iter = crate::dimensions::match_dimensions_two_pass(
+        let source_to_iter = simlin_base::dimensions::match_dimensions_two_pass(
             &self.dim_ids,
             &self.dims,
             &source_is_indexed,

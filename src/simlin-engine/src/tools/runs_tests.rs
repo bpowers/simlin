@@ -234,7 +234,7 @@ fn a_plan_of_run_specs_alone_stages_nothing() {
     assert_eq!(bodies(&probed), 0, "the host's next run compiles nothing");
     assert_eq!(
         (results.specs.stop, results.specs.dt, results.specs.method),
-        (33.0, 0.125, crate::results::Method::RungeKutta4)
+        (33.0, 0.125, simlin_base::results::Method::RungeKutta4)
     );
 
     // The same specs written into the model.
@@ -376,7 +376,7 @@ fn a_value_at_the_start_time_reaches_initial_values_and_one_between_steps_takes_
 /// time exactly.
 #[test]
 fn a_value_from_a_time_holds_from_the_first_step_at_or_after_it() {
-    use crate::datamodel::SimMethod;
+    use simlin_base::datamodel::SimMethod;
     // (dt, the time, the index of the first step at or after it)
     let rows = [
         (1.0, 2.2, 3usize),
@@ -614,8 +614,8 @@ fn staging_restores_the_database_even_when_the_run_panics() {
 }
 
 /// Specs from `start` to `stop` in steps of `dt`, saved every `save`.
-fn run_specs(start: f64, stop: f64, dt: f64, save: f64) -> crate::results::Specs {
-    crate::results::Specs::from(&datamodel::SimSpecs {
+fn run_specs(start: f64, stop: f64, dt: f64, save: f64) -> simlin_base::results::Specs {
+    simlin_base::results::Specs::from(&datamodel::SimSpecs {
         start,
         stop,
         dt: datamodel::Dt::Dt(dt),

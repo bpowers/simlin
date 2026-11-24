@@ -218,7 +218,7 @@ fn emit_init_search_bounds(f: &mut Function) {
 ///
 /// `approx_eq_idx` is the module function index of the Phase 2 `approx_eq`
 /// helper (`lower::HelperFns::approx_eq`); the at-knot exact-hit test `call`s it
-/// so the backend matches the VM's `crate::float::approx_eq` branch.
+/// so the backend matches the VM's `simlin_base::float::approx_eq` branch.
 pub(crate) fn emit_lookup_interp(approx_eq_idx: u32) -> Function {
     let mut f = Function::new([(3, ValType::I32)]); // LOW/HIGH/MID
 

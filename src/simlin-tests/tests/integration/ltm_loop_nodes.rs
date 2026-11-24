@@ -26,7 +26,7 @@ fn reducer_feedback(
     reducer_var: &str,
     cap: &str,
     auxes: &str,
-) -> simlin_engine::datamodel::Project {
+) -> simlin_base::datamodel::Project {
     reducer_feedback_with_pins(name, reducer_var, cap, auxes, "")
 }
 
@@ -39,7 +39,7 @@ fn reducer_feedback_with_pins(
     cap: &str,
     auxes: &str,
     loop_metadata: &str,
-) -> simlin_engine::datamodel::Project {
+) -> simlin_base::datamodel::Project {
     let text = format!(
         r#"{{
   "name": "{name}",
@@ -78,7 +78,7 @@ fn rotation(nodes: &[String]) -> Vec<String> {
 }
 
 /// Every reported loop's node sequence, rotation-normalized, for `project`.
-fn reported_cycles(project: &simlin_engine::datamodel::Project) -> BTreeSet<Vec<String>> {
+fn reported_cycles(project: &simlin_base::datamodel::Project) -> BTreeSet<Vec<String>> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     let source_model = sync.models["main"].source_model;

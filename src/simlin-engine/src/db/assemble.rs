@@ -25,9 +25,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use indexmap::IndexSet;
 
 use super::*;
-use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::symbolic::Phase;
 use crate::db::var_fragment::{fragment_overlay, implicit_fragment_overlay};
+use simlin_base::common::{Canonical, Ident, IdentMap};
 
 /// The `compiler::Table`s a source variable's graphical function declares,
 /// for the tables map of every fragment that calls it through `LOOKUP`.
@@ -65,15 +65,17 @@ pub(crate) fn variable_tables(
         if has_element_gfs {
             // Parse present element tables, keyed by canonical (comma-joined)
             // subscript name.
-            let mut present: IdentMap<crate::common::CanonicalElementName, crate::compiler::Table> =
-                IdentMap::default();
+            let mut present: IdentMap<
+                simlin_base::common::CanonicalElementName,
+                crate::compiler::Table,
+            > = IdentMap::default();
             for (subscript, _, _, gf) in elements {
                 if let Some(gf) = gf.as_ref()
                     && let Some(var_table) = crate::variable::parse_table(Some(gf)).ok().flatten()
                     && let Ok(table) = crate::compiler::Table::new(ident, &var_table)
                 {
                     present.insert(
-                        crate::common::CanonicalElementName::from_raw(subscript),
+                        simlin_base::common::CanonicalElementName::from_raw(subscript),
                         table,
                     );
                 }
@@ -96,7 +98,9 @@ pub(crate) fn variable_tables(
                     .iter()
                     .map(|(subscript, _, _, _)| {
                         present
-                            .get(&crate::common::CanonicalElementName::from_raw(subscript))
+                            .get(&simlin_base::common::CanonicalElementName::from_raw(
+                                subscript,
+                            ))
                             .cloned()
                             .unwrap_or_else(placeholder)
                     })
@@ -224,7 +228,7 @@ pub(crate) struct VarFragmentResult {
 /// `flow_var` is an `Err` (noninitial lowering failed) or the expression list
 /// is empty.
 pub(crate) fn flow_is_locally_invariant(
-    flow_var: &Result<crate::compiler::Var, crate::common::Error>,
+    flow_var: &Result<crate::compiler::Var, simlin_base::common::Error>,
 ) -> Option<bool> {
     let flow_var = flow_var.as_ref().ok()?;
     if flow_var.ast.is_empty() {
@@ -313,10 +317,10 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
 /// Why a phase's lowered expressions did not emit.
 pub(crate) enum EmitRefusal {
     /// Codegen refused a construct, which the error names: a
-    /// [`crate::common::MismatchedRead`] for a variable's view where one
+    /// [`simlin_base::common::MismatchedRead`] for a variable's view where one
     /// value is consumed, which its reporter files as the reader's equation
     /// error.
-    Codegen(crate::Error),
+    Codegen(simlin_base::Error),
     /// The phase is not one codegen can be handed: it lowered to nothing, or
     /// its temps are not dense.
     Malformed(String),
@@ -1534,7 +1538,7 @@ fn ret_stripped_len(frag: &crate::compiler::symbolic::PerVarBytecodes) -> usize 
 /// The module's dimension table and name pool (`ByteCodeContext::dimensions` /
 /// `names`) from the project's converted dimensions.
 fn dimension_metadata(
-    converted_dims: &[crate::dimensions::Dimension],
+    converted_dims: &[simlin_base::dimensions::Dimension],
 ) -> (Vec<String>, Vec<crate::bytecode::DimensionInfo>) {
     let mut names: Vec<String> = Vec::new();
     let mut infos: Vec<crate::bytecode::DimensionInfo> = Vec::new();
@@ -1548,14 +1552,14 @@ fn dimension_metadata(
     };
     for dim in converted_dims {
         match dim {
-            crate::dimensions::Dimension::Indexed(dim_name, size) => {
+            simlin_base::dimensions::Dimension::Indexed(dim_name, size) => {
                 let name_id = intern(&mut names, dim_name.as_str());
                 infos.push(crate::bytecode::DimensionInfo::indexed(
                     name_id,
                     *size as u16,
                 ));
             }
-            crate::dimensions::Dimension::Named(dim_name, named_dim) => {
+            simlin_base::dimensions::Dimension::Named(dim_name, named_dim) => {
                 let name_id = intern(&mut names, dim_name.as_str());
                 let element_name_ids: smallvec::SmallVec<[crate::bytecode::NameId; 8]> = named_dim
                     .elements
@@ -1775,8 +1779,8 @@ pub fn assemble_simulation(
     main_model_name: String,
     overlay: LtmOverlay,
 ) -> Result<std::sync::Arc<crate::vm::CompiledSimulation>, String> {
-    use crate::common::{Canonical, Ident};
     use crate::vm::CompiledSimulation;
+    use simlin_base::common::{Canonical, Ident};
 
     let project_models = project.models(db);
     let main_model_canonical = canonicalize(&main_model_name);
@@ -1913,7 +1917,7 @@ pub fn enumerate_module_instances(
     project: SourceProject,
     main_model_name: &str,
 ) -> Result<ModuleInstanceMap, String> {
-    use crate::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     let main_ident = Ident::<Canonical>::new(main_model_name);
 

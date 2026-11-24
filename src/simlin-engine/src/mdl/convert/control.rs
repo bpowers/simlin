@@ -15,11 +15,11 @@
 //! ([`ConversionContext::control_losses`]), since a save then writes the
 //! default in its place.
 
-use crate::common::join_quoted_names;
-use crate::datamodel::Dt;
 use crate::import_losses::ImportWarning;
 use crate::mdl::ast::{BinaryOp, Equation as MdlEquation, Expr, UnaryOp};
 use crate::mdl::builtins::eq_lower_space;
+use simlin_base::common::join_quoted_names;
+use simlin_base::datamodel::Dt;
 
 use super::ConversionContext;
 use super::helpers::canonical_name;
@@ -237,7 +237,7 @@ fn names_time_step(expr: &Expr<'_>) -> bool {
 mod tests {
     use super::super::{convert_mdl, convert_mdl_reporting};
     use super::*;
-    use crate::datamodel::SimSpecs;
+    use simlin_base::datamodel::SimSpecs;
 
     /// The specs of a model with these control equations (and one variable).
     fn specs(controls: &str) -> (SimSpecs, Vec<ImportWarning>) {

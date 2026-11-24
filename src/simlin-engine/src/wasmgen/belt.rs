@@ -1126,9 +1126,11 @@ impl<'a> ConveyorPass<'a> {
             f.instruction(&Ins::I32And);
             f.instruction(&Ins::I32Eqz);
             f.instruction(&Ins::If(BlockType::Empty));
-            scope
-                .entered()
-                .raise(f, crate::common::ErrorCode::ConveyorTransitNotPositive, i);
+            scope.entered().raise(
+                f,
+                simlin_base::common::ErrorCode::ConveyorTransitNotPositive,
+                i,
+            );
             f.instruction(&Ins::End);
 
             // §4.1: reject an over-bound slat count BEFORE the ring is allocated.
@@ -1141,7 +1143,7 @@ impl<'a> ConveyorPass<'a> {
             f.instruction(&Ins::If(BlockType::Empty));
             scope
                 .entered()
-                .raise(f, crate::common::ErrorCode::ConveyorTransitTooLong, i);
+                .raise(f, simlin_base::common::ErrorCode::ConveyorTransitTooLong, i);
             f.instruction(&Ins::End);
 
             // The narrowing is safe: the guard above proved `n <= slat_bound()`,
@@ -1339,7 +1341,7 @@ impl<'a> ConveyorPass<'a> {
         };
         // unit = floor(start + round((time - start) / dt) * dt) as i64.
         f.instruction(&f64_const(self.start));
-        emit_load_curr(f, crate::results::TIME_OFF);
+        emit_load_curr(f, simlin_base::results::TIME_OFF);
         f.instruction(&f64_const(self.start));
         f.instruction(&Ins::F64Sub);
         f.instruction(&f64_const(self.dt));
@@ -1469,10 +1471,11 @@ impl<'a> ConveyorPass<'a> {
         f.instruction(&f64_const(crate::conveyor::slat_bound() as f64));
         f.instruction(&Ins::F64Gt);
         f.instruction(&Ins::If(BlockType::Empty));
-        inner
-            .entered()
-            .entered()
-            .raise(f, crate::common::ErrorCode::ConveyorTransitTooLong, i);
+        inner.entered().entered().raise(
+            f,
+            simlin_base::common::ErrorCode::ConveyorTransitTooLong,
+            i,
+        );
         f.instruction(&Ins::End);
         f.instruction(&Ins::I32Const(0));
         f.instruction(&Ins::LocalGet(locals.n_slats));

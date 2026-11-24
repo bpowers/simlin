@@ -4,7 +4,7 @@
 
 use crate::ast::expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 use crate::ast::literal::Literal;
-pub use crate::builtins::Loc;
+pub(crate) use crate::builtins::Loc;
 use crate::builtins::{BuiltinFn, BuiltinSig, UntypedBuiltinFn};
 use crate::common::{Canonical, EquationResult, Ident};
 use crate::dimensions::DimensionsContext;

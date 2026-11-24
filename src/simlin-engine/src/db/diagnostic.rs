@@ -54,7 +54,7 @@
 use salsa::Accumulator;
 
 use super::*;
-use crate::common::{Error, IdentSet, UnitError};
+use simlin_base::common::{Error, IdentSet, UnitError};
 
 /// Per-model tracked function that triggers diagnostic accumulation from
 /// all compilation stages. The salsa accumulator is the sole error source
@@ -336,7 +336,7 @@ pub fn model_all_diagnostics(
 /// the cycle it found, so the modeller sees which equations to break it in.
 #[salsa::tracked]
 pub(crate) fn model_cycle_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    use crate::common::{ErrorCode, ErrorKind};
+    use simlin_base::common::{ErrorCode, ErrorKind};
 
     let dep_graph = model_dependency_graph(db, model, project, ModuleInputSet::empty(db));
     // A cycle's members: its path closes on its first, which it repeats.
@@ -380,12 +380,13 @@ pub(crate) fn model_cycle_diagnostics(db: &dyn Db, model: SourceModel, project: 
         // model computes as it runs may be no circle at all, element by
         // element; it is refused because no order can be fixed before the
         // run, and the index is what the modeller can change.
-        let members: std::collections::BTreeSet<crate::common::Ident<crate::common::Canonical>> =
-            cycle
-                .path
-                .iter()
-                .map(|name| crate::common::Ident::new(name))
-                .collect();
+        let members: std::collections::BTreeSet<
+            simlin_base::common::Ident<simlin_base::common::Canonical>,
+        > = cycle
+            .path
+            .iter()
+            .map(|name| simlin_base::common::Ident::new(name))
+            .collect();
         let phase = if cycle.initial {
             crate::db::SccPhase::Initial
         } else {
@@ -448,7 +449,7 @@ pub(crate) fn model_duplicate_variables(
     db: &dyn Db,
     model: SourceModel,
 ) -> Vec<(String, Vec<String>)> {
-    crate::common::duplicate_variable_groups(
+    simlin_base::common::duplicate_variable_groups(
         model
             .declared_variable_idents(db)
             .iter()
@@ -479,9 +480,9 @@ pub(crate) fn project_duplicate_models(
     db: &dyn Db,
     project: SourceProject,
 ) -> Vec<(String, Vec<String>)> {
-    crate::common::duplicate_groups_by(
+    simlin_base::common::duplicate_groups_by(
         project.model_names(db).iter().map(|s| s.as_str()),
-        crate::datamodel::canonical_model_name,
+        simlin_base::datamodel::canonical_model_name,
     )
 }
 
@@ -492,11 +493,11 @@ pub(crate) fn project_duplicate_models(
 /// `compile_project_incremental`, the special-stock build path) reports
 /// identically.
 fn emit_duplicate_variable_diagnostics(db: &dyn Db, model: SourceModel) {
-    use crate::common::{ErrorCode, ErrorKind};
+    use simlin_base::common::{ErrorCode, ErrorKind};
 
     let model_name = model.name(db);
     for (canonical, spellings) in model_duplicate_variables(db, model) {
-        let msg = crate::common::duplicate_variable_message(model_name, canonical, spellings);
+        let msg = simlin_base::common::duplicate_variable_message(model_name, canonical, spellings);
         Diagnostic {
             model: model_name.clone(),
             variable: Some(canonical.clone()),
@@ -518,7 +519,7 @@ fn emit_duplicate_variable_diagnostics(db: &dyn Db, model: SourceModel) {
 /// deterministically. Carried as a `Model` error with the specific code, so
 /// the advisory never makes the project look non-simulatable.
 fn emit_repeated_stock_flow_warnings(db: &dyn Db, model: SourceModel) {
-    use crate::common::{ErrorCode, ErrorKind};
+    use simlin_base::common::{ErrorCode, ErrorKind};
 
     let mut stocks: Vec<&SourceVariable> = model
         .variables(db)
@@ -593,13 +594,13 @@ fn emit_repeated_stock_flow_warnings(db: &dyn Db, model: SourceModel) {
 fn emit_ltm_degraded_warnings(
     db: &dyn Db,
     model: SourceModel,
-    has_marker: impl Fn(&crate::datamodel::Compat) -> bool,
-    code: crate::common::ErrorCode,
+    has_marker: impl Fn(&simlin_base::datamodel::Compat) -> bool,
+    code: simlin_base::common::ErrorCode,
     noun: &str,
     dynamics_detail: &str,
     doc_ref: &str,
 ) {
-    use crate::common::ErrorKind;
+    use simlin_base::common::ErrorKind;
 
     let mut names: Vec<String> = model
         .variables(db)
@@ -638,7 +639,7 @@ fn emit_conveyor_ltm_degraded_warnings(db: &dyn Db, model: SourceModel) {
         db,
         model,
         |c| c.conveyor.is_some(),
-        crate::common::ErrorCode::ConveyorLtmDegraded,
+        simlin_base::common::ErrorCode::ConveyorLtmDegraded,
         "conveyor",
         "",
         "docs/design/conveyors.md \u{00A7}9.6",
@@ -653,7 +654,7 @@ fn emit_queue_ltm_degraded_warnings(db: &dyn Db, model: SourceModel) {
         db,
         model,
         |c| c.queue.is_some(),
-        crate::common::ErrorCode::QueueLtmDegraded,
+        simlin_base::common::ErrorCode::QueueLtmDegraded,
         "queue",
         " (a FIFO of batches)",
         "docs/design/queues.md \u{00A7}10.5",
@@ -707,11 +708,11 @@ fn emit_queue_ltm_degraded_warnings(db: &dyn Db, model: SourceModel) {
 /// never surfaces as a misleading `NotSimulatable`; conveyors are visited in
 /// sorted-name order for deterministic accumulation.
 fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    use crate::common::{ErrorCode, ErrorKind};
     use crate::conveyor_compile::{
         LEAK_FRACTION_SUM_TOLERANCE, LeakFractionSource, clamp_fraction, const_scalar_expr,
         leak_fraction_source, transit_dt_mismatch,
     };
+    use simlin_base::common::{ErrorCode, ErrorKind};
 
     let source_vars = model.variables(db);
     let mut conveyors: Vec<&SourceVariable> = source_vars
@@ -737,8 +738,8 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
             project.sim_specs(db).dt.clone()
         };
         match dt_spec {
-            crate::datamodel::Dt::Dt(v) => v,
-            crate::datamodel::Dt::Reciprocal(v) => 1.0 / v,
+            simlin_base::datamodel::Dt::Dt(v) => v,
+            simlin_base::datamodel::Dt::Reciprocal(v) => 1.0 / v,
         }
     };
 
@@ -808,7 +809,7 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
                 .filter_map(|out_name| {
                     // Outflow entries carry the display form; the variables
                     // map is keyed canonically.
-                    let canon = crate::canonicalize(out_name);
+                    let canon = simlin_base::canonicalize(out_name);
                     let flow = source_vars.get(canon.as_ref())?;
                     // Resolve which expression carries this flow's fraction
                     // through the SAME helper the runtime expansion uses
@@ -823,8 +824,8 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
                     ) {
                         LeakFractionSource::Explicit(e) => e,
                         LeakFractionSource::FlowEquation(
-                            crate::datamodel::Equation::Scalar(s)
-                            | crate::datamodel::Equation::ApplyToAll(_, s),
+                            simlin_base::datamodel::Equation::Scalar(s)
+                            | simlin_base::datamodel::Equation::ApplyToAll(_, s),
                         ) => s,
                         _ => return None,
                     };
@@ -858,7 +859,7 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
 
 /// Emit the two arrayed-arm advisories for every non-apply-to-all arrayed
 /// variable: one Warning-severity
-/// [`crate::common::ErrorCode::UnknownElementSubscript`]
+/// [`simlin_base::common::ErrorCode::UnknownElementSubscript`]
 /// diagnostic per distinct non-apply-to-all `<element>` entry in `model` whose
 /// subscript names no declared element combination of the variable's
 /// dimensions (GH #905).
@@ -892,7 +893,7 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
 /// consumer does with it.
 ///
 /// The complementary GH #905 shape is the second advisory: one Warning-
-/// severity [`crate::common::ErrorCode::MissingElementEquation`] per declared
+/// severity [`simlin_base::common::ErrorCode::MissingElementEquation`] per declared
 /// element combination no arm covers, in row-major order, each naming its
 /// element (`Error::element`) -- the elements `compiler::expand_per_element`
 /// assigns a fabricated 0. Coverage is `variable::elements_without_an_arm` over the PARSED
@@ -918,7 +919,7 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
 /// in sorted-name order and duplicate unknown keys deduplicated so
 /// accumulation is deterministic.
 fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    use crate::common::{CanonicalElementName, ErrorCode, ErrorKind};
+    use simlin_base::common::{CanonicalElementName, ErrorCode, ErrorKind};
 
     let source_vars = model.variables(db);
     let mut var_names: Vec<&String> = source_vars.keys().collect();
@@ -930,7 +931,7 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
     for var_name in var_names {
         let svar = &source_vars[var_name];
         let equation = svar.equation(db);
-        let crate::datamodel::Equation::Arrayed(dim_names, elements, _, _) = equation else {
+        let simlin_base::datamodel::Equation::Arrayed(dim_names, elements, _, _) = equation else {
             continue;
         };
         if dim_names.is_empty() {
@@ -947,7 +948,7 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
         // `compiler::expand_per_element` expands the arms against --
         // materialized once per arrayed variable.
         let combination_keys: IdentSet<CanonicalElementName> =
-            crate::dimensions::SubscriptIterator::new(&dims)
+            simlin_base::dimensions::SubscriptIterator::new(&dims)
                 .map(|combination| CanonicalElementName::from_parts(&combination))
                 .collect();
 
@@ -1002,7 +1003,7 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
         // An element's own table is an arm; the variable's, which fills the
         // slots of elements without one, is not.
         let own_tables: IdentSet<CanonicalElementName> = match equation {
-            crate::datamodel::Equation::Arrayed(_, arms, _, _) => arms
+            simlin_base::datamodel::Equation::Arrayed(_, arms, _, _) => arms
                 .iter()
                 .filter(|(_, _, _, gf)| gf.is_some())
                 .map(|(subscript, ..)| CanonicalElementName::from_subscript(subscript))
@@ -1043,17 +1044,17 @@ fn emit_element_subscript_warnings(db: &dyn Db, model: SourceModel, project: Sou
 /// Shared by the two arrayed-equation advisories so they cannot drift about what
 /// a dimension name resolves to.
 fn resolve_equation_dimensions(
-    project_dims: &[crate::datamodel::Dimension],
+    project_dims: &[simlin_base::datamodel::Dimension],
     dim_names: &[String],
-) -> Option<Vec<crate::dimensions::Dimension>> {
+) -> Option<Vec<simlin_base::dimensions::Dimension>> {
     dim_names
         .iter()
         .map(|name| {
-            let canonical = crate::canonicalize(name);
+            let canonical = simlin_base::canonicalize(name);
             project_dims
                 .iter()
-                .find(|d| crate::canonicalize(d.name()) == canonical)
-                .map(crate::dimensions::Dimension::from)
+                .find(|d| simlin_base::canonicalize(d.name()) == canonical)
+                .map(simlin_base::dimensions::Dimension::from)
         })
         .collect()
 }
@@ -1073,7 +1074,7 @@ fn parsed_equation_ast(
     db: &dyn Db,
     project: SourceProject,
     var: SourceVariable,
-) -> Option<crate::ast::Ast<crate::ast::Expr0>> {
+) -> Option<simlin_base::ast::Ast<simlin_base::ast::Expr0>> {
     let parsed = parse_source_variable(db, var, project);
     parsed.variable.ast().cloned()
 }
@@ -1121,12 +1122,12 @@ fn equation_is_a_module_input_fallback(
     var.can_be_module_input(db) || source_model_is_stdlib(db, model)
 }
 
-/// Emit one Warning-severity [`crate::common::ErrorCode::UnfilledEquation`]
+/// Emit one Warning-severity [`simlin_base::common::ErrorCode::UnfilledEquation`]
 /// diagnostic per variable in `model` whose equation is nothing but the NaN
 /// literal (`crate::variable::unfilled_arms`).
 ///
 /// What the shape means and why it earns a diagnostic is on the `ErrorCode`
-/// variant and, one level down, on `crate::float`'s module docs. What follows is
+/// variant and, one level down, on `simlin_base::float`'s module docs. What follows is
 /// only what is specific to emitting it HERE.
 ///
 /// Engine-side rather than reader-side on purpose: `compat::open_vensim` returns
@@ -1145,8 +1146,8 @@ fn equation_is_a_module_input_fallback(
 ///
 /// Variables are visited in sorted-name order so accumulation is deterministic.
 fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    use crate::common::{ErrorCode, ErrorKind};
     use crate::variable::{UnfilledArms, may_have_unfilled_arms, unfilled_arms};
+    use simlin_base::common::{ErrorCode, ErrorKind};
 
     let source_vars = model.variables(db);
     let mut var_names: Vec<&String> = source_vars.keys().collect();
@@ -1203,7 +1204,7 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: Sou
         // absorbing through comparisons -- `IF x > 0 THEN 1 ELSE 0` reading a
         // NaN `x` returns a finite 0 -- so "every variable downstream is NaN"
         // would be false guidance for exactly the backward search this
-        // diagnostic exists to shorten (see `crate::float`).
+        // diagnostic exists to shorten (see `simlin_base::float`).
         let msg = format!(
             "{subject}: a NaN literal stands where the formula belongs, so it simulates as NaN, \
              and that NaN spreads through arithmetic into whatever reads it. Vensim's Sketch \
@@ -1247,15 +1248,15 @@ fn fmt_diag_value(v: f64) -> String {
 /// `results::Specs`'s); `None` for specs with no save step, one on the step
 /// grid, or a time step no run can be made with (another diagnostic's
 /// concern).
-fn save_step_warning(specs: &crate::datamodel::SimSpecs) -> Option<DiagnosticError> {
-    let value = |dt: &crate::datamodel::Dt| match dt {
-        crate::datamodel::Dt::Dt(v) => *v,
-        crate::datamodel::Dt::Reciprocal(v) => 1.0 / *v,
+fn save_step_warning(specs: &simlin_base::datamodel::SimSpecs) -> Option<DiagnosticError> {
+    let value = |dt: &simlin_base::datamodel::Dt| match dt {
+        simlin_base::datamodel::Dt::Dt(v) => *v,
+        simlin_base::datamodel::Dt::Reciprocal(v) => 1.0 / *v,
     };
     let dt = value(&specs.dt);
     let declared = value(specs.save_step.as_ref()?);
     if !(dt > 0.0 && dt.is_finite() && declared.is_finite())
-        || crate::results::save_step_is_on_the_step_grid(dt, declared)
+        || simlin_base::results::save_step_is_on_the_step_grid(dt, declared)
     {
         return None;
     }
@@ -1266,8 +1267,8 @@ fn save_step_warning(specs: &crate::datamodel::SimSpecs) -> Option<DiagnosticErr
             .to_string()
     };
     Some(DiagnosticError::Model(Error::new(
-        crate::common::ErrorKind::Model,
-        crate::common::ErrorCode::SaveStepOffTheStepGrid,
+        simlin_base::common::ErrorKind::Model,
+        simlin_base::common::ErrorCode::SaveStepOffTheStepGrid,
         Some(format!(
             "the save step {declared} is not a whole number of time steps of {dt}: {rows}"
         )),
@@ -1311,14 +1312,14 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
         .collect();
     module_names.sort_unstable();
 
-    let emit = |code: crate::common::ErrorCode, message: String| {
+    let emit = |code: simlin_base::common::ErrorCode, message: String| {
         Diagnostic {
             model: model_name.clone(),
             variable: None,
             owner: None,
             severity: DiagnosticSeverity::Warning,
             error: DiagnosticError::Model(Error::new(
-                crate::common::ErrorKind::Model,
+                simlin_base::common::ErrorKind::Model,
                 code,
                 Some(message),
             )),
@@ -1328,7 +1329,7 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
 
     for module_name in module_names {
         let svar = &source_vars[module_name];
-        let child_canonical = crate::canonicalize(svar.model_name(db));
+        let child_canonical = simlin_base::canonicalize(svar.model_name(db));
         let Some(child_model) = project_models.get(child_canonical.as_ref()) else {
             if !child_canonical.is_empty() {
                 Diagnostic {
@@ -1337,8 +1338,8 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
                     owner: None,
                     severity: DiagnosticSeverity::Error,
                     error: DiagnosticError::Model(Error::new(
-                        crate::common::ErrorKind::Model,
-                        crate::common::ErrorCode::BadModelName,
+                        simlin_base::common::ErrorKind::Model,
+                        simlin_base::common::ErrorCode::BadModelName,
                         Some(format!(
                             "module '{module_name}' references model '{}', which is not in the project",
                             svar.model_name(db)
@@ -1353,7 +1354,7 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
         let prefix = crate::db::module_input_prefix(module_name);
 
         for reference in svar.module_refs(db).iter() {
-            let dst = crate::canonicalize(&reference.dst);
+            let dst = simlin_base::canonicalize(&reference.dst);
             let port = if dst.is_empty() {
                 None
             } else {
@@ -1361,7 +1362,7 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
             };
             if !dst.is_empty() && !port.is_some_and(|port| child_vars.contains_key(port)) {
                 emit(
-                    crate::common::ErrorCode::BadModuleInputDst,
+                    simlin_base::common::ErrorCode::BadModuleInputDst,
                     format!(
                         "module '{module_name}' input wiring target '{}' does not name an input of model '{}'",
                         reference.dst, child_canonical
@@ -1369,7 +1370,7 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
                 );
             }
 
-            let src = crate::canonicalize(&reference.src);
+            let src = simlin_base::canonicalize(&reference.src);
             // A reference to one of this instance's own ports whose `src` is
             // inside the instance's namespace binds no port
             // (`db::assemble::bound_port`): the port keeps its default and
@@ -1384,7 +1385,7 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
             // instance, and the `dst` arm above is its report.
             if port.is_some() && src.starts_with(prefix.as_str()) {
                 emit(
-                    crate::common::ErrorCode::BadModuleInputSrc,
+                    simlin_base::common::ErrorCode::BadModuleInputSrc,
                     format!(
                         "module '{module_name}' input source '{}' is inside the module's own \
                          namespace, so the wiring binds no input of model '{}': an input's \
@@ -1399,7 +1400,7 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
                 && !source_vars.contains_key(src.as_ref())
             {
                 emit(
-                    crate::common::ErrorCode::BadModuleInputSrc,
+                    simlin_base::common::ErrorCode::BadModuleInputSrc,
                     format!(
                         "module '{module_name}' input source '{}' does not name a variable in model '{model_name}'",
                         reference.src
@@ -1439,7 +1440,7 @@ fn module_cycle_diagnostic(
             owner: None,
             severity: DiagnosticSeverity::Error,
             error: DiagnosticError::Model(Error::new(
-                crate::common::ErrorKind::Model,
+                simlin_base::common::ErrorKind::Model,
                 code,
                 Some(message),
             )),
@@ -1520,7 +1521,7 @@ pub fn collect_all_diagnostics(
             owner: None,
             severity: DiagnosticSeverity::Error,
             error: DiagnosticError::Model(Error::new(
-                crate::common::ErrorKind::Model,
+                simlin_base::common::ErrorKind::Model,
                 *code,
                 Some(message.clone()),
             )),
@@ -1548,9 +1549,11 @@ pub fn collect_all_diagnostics(
             owner: None,
             severity: DiagnosticSeverity::Error,
             error: DiagnosticError::Model(Error::new(
-                crate::common::ErrorKind::Model,
-                crate::common::ErrorCode::DuplicateVariable,
-                Some(crate::common::duplicate_model_message(canonical, spellings)),
+                simlin_base::common::ErrorKind::Model,
+                simlin_base::common::ErrorCode::DuplicateVariable,
+                Some(simlin_base::common::duplicate_model_message(
+                    canonical, spellings,
+                )),
             )),
         });
     }

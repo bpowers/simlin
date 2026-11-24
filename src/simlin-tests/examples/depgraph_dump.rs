@@ -26,7 +26,7 @@
 //! sweep covers the wired arm, where a with-inputs relation meets the
 //! no-input recurrence resolution. The maps are sorted by key so the file is
 //! a function of the models alone.
-use simlin_engine::common::{Canonical, Ident};
+use simlin_base::common::{Canonical, Ident};
 use simlin_engine::db::{
     ModuleInputSet, SimlinDb, SourceModel, SourceProject, enumerate_module_instances,
     model_dependency_graph, project_module_graph, sync_from_datamodel_incremental,

@@ -302,7 +302,7 @@ fn a_timed_value_over_a_runs_replaced_equation_is_refused_unless_it_is_a_number(
 #[test]
 fn a_run_of_one_row_is_read_by_every_tool() {
     let mut project = inventory().build_datamodel();
-    project.sim_specs.save_step = Some(crate::datamodel::Dt::Dt(1e308));
+    project.sim_specs.save_step = Some(simlin_base::datamodel::Dt::Dt(1e308));
     let mut host = Host::new(project);
     let mut session = Session::new("main");
     let behavior = host.call(
@@ -732,15 +732,15 @@ fn a_knockout_changes_behavior_the_link_it_cut_drove() {
 /// that equation as its value: the knockout an explanation's test rests on.
 #[test]
 fn a_replacement_equation_is_the_value_whatever_table_the_variable_had() {
-    let gf = crate::datamodel::GraphicalFunction {
-        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+    let gf = simlin_base::datamodel::GraphicalFunction {
+        kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         x_points: Some(vec![0.0, 10.0]),
         y_points: vec![0.0, 1.0],
-        x_scale: crate::datamodel::GraphicalFunctionScale {
+        x_scale: simlin_base::datamodel::GraphicalFunctionScale {
             min: 0.0,
             max: 10.0,
         },
-        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        y_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
     };
     let mut project = TestProject::new("tables")
         .with_sim_time(0.0, 4.0, 1.0)
@@ -748,7 +748,7 @@ fn a_replacement_equation_is_the_value_whatever_table_the_variable_had() {
         .aux_with_gf("effect", "s + 5", gf.clone())
         .flow("draining", "s + 5", None)
         .build_datamodel();
-    if let crate::datamodel::Variable::Flow(flow) =
+    if let simlin_base::datamodel::Variable::Flow(flow) =
         project.models[0].get_variable_mut("draining").unwrap()
     {
         flow.gf = Some(gf);
@@ -805,22 +805,22 @@ fn a_table_other_equations_call_has_no_value_to_replace_or_set() {
 /// equation: its value cannot be set like a constant's.
 #[test]
 fn a_flow_with_a_table_is_not_set_like_a_constant() {
-    let gf = crate::datamodel::GraphicalFunction {
-        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+    let gf = simlin_base::datamodel::GraphicalFunction {
+        kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         x_points: Some(vec![0.0, 10.0]),
         y_points: vec![0.0, 1.0],
-        x_scale: crate::datamodel::GraphicalFunctionScale {
+        x_scale: simlin_base::datamodel::GraphicalFunctionScale {
             min: 0.0,
             max: 10.0,
         },
-        y_scale: crate::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        y_scale: simlin_base::datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
     };
     let mut project = TestProject::new("tables")
         .with_sim_time(0.0, 4.0, 1.0)
         .stock("s", "0", &["draining"], &[], None)
         .flow("draining", "5", None)
         .build_datamodel();
-    if let crate::datamodel::Variable::Flow(flow) =
+    if let simlin_base::datamodel::Variable::Flow(flow) =
         project.models[0].get_variable_mut("draining").unwrap()
     {
         flow.gf = Some(gf);

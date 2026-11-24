@@ -4,8 +4,6 @@
 
 use std::f64::consts::PI;
 
-use crate::datamodel::ViewElement;
-use crate::datamodel::view_element::{self, LinkShape};
 use crate::diagram::arrowhead::{
     ArrowheadGeometry, ArrowheadType, arrowhead_geometry, render_arrowhead_geometry,
 };
@@ -14,6 +12,8 @@ use crate::diagram::common::{
     square,
 };
 use crate::diagram::constants::*;
+use simlin_base::datamodel::ViewElement;
+use simlin_base::datamodel::view_element::{self, LinkShape};
 
 /// Number of straight segments used to approximate a drawn arc connector when
 /// producing its polyline for crossing detection and metric computation. 16
@@ -612,7 +612,7 @@ pub fn render_connector(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datamodel::view_element::LabelSide;
+    use simlin_base::datamodel::view_element::LabelSide;
 
     fn make_aux_ve(x: f64, y: f64, name: &str, uid: i32) -> ViewElement {
         ViewElement::Aux(view_element::Aux {

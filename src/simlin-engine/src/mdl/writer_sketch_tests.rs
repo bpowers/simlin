@@ -9,7 +9,7 @@
 
 use super::tests::{make_aux, make_project};
 use super::*;
-use crate::datamodel::{self, ViewElement, view_element};
+use simlin_base::datamodel::{self, ViewElement, view_element};
 
 // ---- Phase 5 Task 1: Sketch element serialization (types 10, 11, 12) ----
 

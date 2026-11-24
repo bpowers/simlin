@@ -9,8 +9,8 @@
 //! resolves the parent's items and callers keep their
 //! `crate::ltm_augment::*` paths); split out only for the per-file line cap.
 
-use crate::ast::{Expr0, IndexExpr0};
-use crate::builtins::UntypedBuiltinFn;
+use simlin_base::ast::{Expr0, IndexExpr0};
+use simlin_base::builtins::UntypedBuiltinFn;
 
 /// A parse failure in a ceteris-paribus partial-equation builder.
 ///

@@ -807,7 +807,7 @@ impl<'input> Parser<'input> {
 /// without paying for one. Note the asymmetry it deliberately keeps: an input
 /// whose first token is a lexical ERROR is reported as having tokens, because
 /// `parse` answers `Err` for it and not `Ok(None)`.
-pub(crate) fn is_token_free(input: &str, lexer_type: LexerType) -> bool {
+pub fn is_token_free(input: &str, lexer_type: LexerType) -> bool {
     Lexer::new(input, lexer_type).next().is_none()
 }
 
@@ -817,7 +817,10 @@ pub(crate) fn is_token_free(input: &str, lexer_type: LexerType) -> bool {
 /// - `Ok(Some(expr))` for valid equations
 /// - `Ok(None)` for empty or comment-only input
 /// - `Err(error)` for parse errors
-pub fn parse(input: &str, lexer_type: LexerType) -> Result<Option<Expr0>, Vec<EquationError>> {
+pub(crate) fn parse(
+    input: &str,
+    lexer_type: LexerType,
+) -> Result<Option<Expr0>, Vec<EquationError>> {
     let lexer = Lexer::new(input, lexer_type);
     let mut parser = match Parser::new(lexer) {
         Ok(p) => p,

@@ -11,7 +11,7 @@ use crate::common::{Canonical, Ident, RawIdent};
 use super::{Expr0, Expr2, IndexExpr0, IndexExpr2, print_eqn};
 
 /// A lowered expression as equation text.
-pub(crate) fn expr2_to_string(expr: &Expr2) -> String {
+pub fn expr2_to_string(expr: &Expr2) -> String {
     let expr0 = expr2_to_expr0(expr);
     print_eqn(&expr0)
 }
@@ -25,7 +25,7 @@ fn raw_ident(ident: &Ident<Canonical>) -> RawIdent {
 }
 
 /// A lowered expression as a parsed one, its array bounds left behind.
-pub(crate) fn expr2_to_expr0(expr: &Expr2) -> Expr0 {
+pub fn expr2_to_expr0(expr: &Expr2) -> Expr0 {
     match expr {
         Expr2::Const(text, value, loc) => Expr0::Const(text.clone(), *value, *loc),
         Expr2::Var(ident, _, loc) => Expr0::Var(raw_ident(ident), *loc),
@@ -71,7 +71,7 @@ fn index_expr2_to_index_expr0(index: &IndexExpr2) -> IndexExpr0 {
 }
 
 /// A typed call as the call by name that a parsed expression holds.
-pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn<Expr0> {
+pub fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn<Expr0> {
     let args: Box<[Expr0]> = match builtin {
         // The identifier payload prints as the bare variable reference it was
         // parsed from.

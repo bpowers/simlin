@@ -24,10 +24,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::canonicalize;
 use crate::capture::CaptureKind;
-use crate::common::{Canonical, Ident, IdentMap, IdentSet};
-use crate::datamodel;
+use simlin_base::canonicalize;
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet};
+use simlin_base::datamodel;
 
 use super::{
     Db, DepPhase, DepRefs, DepTarget, LtmMode, ModuleInputSet, SourceModel, SourceProject,
@@ -250,7 +250,7 @@ pub enum RefShape {
 /// Collect element names from a dimension as owned strings.
 ///
 /// Delegates to the canonical implementation in `ltm_augment`.
-fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
+fn dimension_element_names(dim: &simlin_base::dimensions::Dimension) -> Vec<String> {
     crate::ltm_augment::dimension_element_names(dim)
 }
 
@@ -314,11 +314,11 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 fn emit_edges_for_reference(
     from_name: &str,
     to_name: &str,
-    from_dims: &[crate::dimensions::Dimension],
-    to_dims: &[crate::dimensions::Dimension],
+    from_dims: &[simlin_base::dimensions::Dimension],
+    to_dims: &[simlin_base::dimensions::Dimension],
     shape: &RefShape,
     target_element: Option<&str>,
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
     spelling: BareSpelling,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
@@ -589,7 +589,10 @@ fn emit_edges_for_reference(
 ///
 /// For a single dimension `[D]` where D = {NYC, Boston}, produces:
 /// `["x[NYC]", "x[Boston]"]`.
-fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]) -> Vec<String> {
+fn cartesian_element_names(
+    var_name: &str,
+    dims: &[simlin_base::dimensions::Dimension],
+) -> Vec<String> {
     if dims.is_empty() {
         return vec![var_name.to_string()];
     }
@@ -635,7 +638,7 @@ pub(crate) enum BareAxis {
     /// `reads[i]` is the source element the target's i-th element reads.
     Mapped {
         pos: usize,
-        reads: Vec<crate::common::CanonicalElementName>,
+        reads: Vec<simlin_base::common::CanonicalElementName>,
     },
     /// No target axis supplies it: the axis is collapsed (iterated but not
     /// projected).
@@ -659,7 +662,7 @@ pub(crate) enum BareSpelling {
     /// A read in an equation body -- a bare arrayed name, or an
     /// iterated-dimension subscript. Pass 0 (`compiler::context::lower_pass0`)
     /// and `normalize_subscripts3` pair its axes under
-    /// [`crate::dimensions::DirectMappingsOnly`]: a mapping declared on a
+    /// [`simlin_base::dimensions::DirectMappingsOnly`]: a mapping declared on a
     /// PARENT dimension is withheld, so `y[suba] = SUM(src)` over `src[dimb]`
     /// with `dimb -> dima` and `suba` inside `dima` reads all of `src`.
     Equation,
@@ -682,14 +685,14 @@ pub(crate) enum BareSpelling {
 /// `RefShape::Bare` covers three spellings -- a bare reference in an equation
 /// body, an iterated-dimension subscript, and a structural flow-to-stock edge
 /// -- and the pairing is what the compiler's own axis matcher gives each of
-/// them: [`crate::dimensions::match_axes_partial`] over the two declared
+/// them: [`simlin_base::dimensions::match_axes_partial`] over the two declared
 /// dimension lists (exact name, then a declared mapping, then two indexed
 /// axes of one size; positional and one-to-one, so a repeated dimension pairs
 /// each occurrence with its own axis, as
 /// `compiler::subscript::normalize_subscripts3` allocates the active
 /// positions), under the relations the spelling's own lowering consults
 /// ([`BareSpelling`]). A pair the matcher relates through a declared mapping
-/// reads through [`crate::dimensions::DimensionsContext::executed_read_correspondence`];
+/// reads through [`simlin_base::dimensions::DimensionsContext::executed_read_correspondence`];
 /// a declared relation the executed rule cannot translate (a positional
 /// mapping between different sizes, a common mapping target -- which the
 /// compiler reads by ordinal at equal size, the GH #527 class) leaves the
@@ -704,12 +707,12 @@ pub(crate) enum BareSpelling {
 /// construction, and the edges, the discovery from-nodes and the score's
 /// per-slot reads all name the same rows.
 pub(crate) fn bare_axis_pairing(
-    from_dims: &[crate::dimensions::Dimension],
-    to_dims: &[crate::dimensions::Dimension],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    from_dims: &[simlin_base::dimensions::Dimension],
+    to_dims: &[simlin_base::dimensions::Dimension],
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
     spelling: BareSpelling,
 ) -> Vec<BareAxis> {
-    use crate::dimensions::{
+    use simlin_base::dimensions::{
         AxisMatch, AxisRelations, DirectMappingsOnly, axes_of, match_axes_partial,
     };
     let direct = DirectMappingsOnly(dim_ctx);
@@ -767,9 +770,9 @@ pub(crate) fn bare_axis_pairing(
 pub(crate) fn expand_same_element(
     from_name: &str,
     to_name: &str,
-    from_dims: &[crate::dimensions::Dimension],
-    to_dims: &[crate::dimensions::Dimension],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    from_dims: &[simlin_base::dimensions::Dimension],
+    to_dims: &[simlin_base::dimensions::Dimension],
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
     spelling: BareSpelling,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
@@ -949,11 +952,11 @@ pub(crate) fn expand_same_element(
 fn emit_agg_routed_edges(
     from_name: &str,
     to_name: &str,
-    from_dims: &[crate::dimensions::Dimension],
-    to_dims: &[crate::dimensions::Dimension],
+    from_dims: &[simlin_base::dimensions::Dimension],
+    to_dims: &[simlin_base::dimensions::Dimension],
     agg: &crate::ltm_agg::AggNode,
     target_element: Option<&str>,
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     // The agg's result-axis dimensions (`AggNode::result_dims`, datamodel-
@@ -970,10 +973,10 @@ fn emit_agg_routed_edges(
     // fallback.
     let read_slice = agg.source_read_slice(from_name);
     let read_slice_ok = !from_dims.is_empty() && read_slice.len() == from_dims.len();
-    let resolve_result_dim = |name: &str| -> Option<crate::dimensions::Dimension> {
+    let resolve_result_dim = |name: &str| -> Option<simlin_base::dimensions::Dimension> {
         let canon = canonicalize(name);
         dim_ctx
-            .get(&crate::common::CanonicalDimensionName::from_raw(
+            .get(&simlin_base::common::CanonicalDimensionName::from_raw(
                 canon.as_ref(),
             ))
             .cloned()
@@ -985,7 +988,7 @@ fn emit_agg_routed_edges(
                     .cloned()
             })
     };
-    let iterated_dims: Vec<crate::dimensions::Dimension> = agg
+    let iterated_dims: Vec<simlin_base::dimensions::Dimension> = agg
         .result_dims
         .iter()
         .filter_map(|rd| resolve_result_dim(rd))
@@ -2160,7 +2163,7 @@ pub enum CycleClass {
 pub(crate) fn classify_cycle(
     cycle: &[String],
     edge_shapes: &EdgeShapesResult,
-    dim_lookup: &impl Fn(&str) -> Vec<crate::dimensions::Dimension>,
+    dim_lookup: &impl Fn(&str) -> Vec<simlin_base::dimensions::Dimension>,
 ) -> CycleClass {
     if cycle.is_empty() {
         return CycleClass::PureScalar;
@@ -2282,11 +2285,11 @@ pub fn model_element_causal_edges(
     let dim_ctx = project_dimensions_context(db, project);
 
     // Cache dimension lookups to avoid repeated calls for the same variable
-    let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
+    let mut dim_cache: HashMap<String, Vec<simlin_base::dimensions::Dimension>> = HashMap::new();
 
     let lookup_dims = |name: &str,
-                       cache: &mut HashMap<String, Vec<crate::dimensions::Dimension>>|
-     -> Vec<crate::dimensions::Dimension> {
+                       cache: &mut HashMap<String, Vec<simlin_base::dimensions::Dimension>>|
+     -> Vec<simlin_base::dimensions::Dimension> {
         if let Some(dims) = cache.get(name) {
             return dims.clone();
         }
@@ -2678,7 +2681,7 @@ pub fn model_detected_loops(
     model: SourceModel,
     project: SourceProject,
 ) -> DetectedLoopsResult {
-    use crate::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     if crate::db::project_module_graph(db, project)
         .cycle_error_from(model.name(db))
@@ -3090,7 +3093,7 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// element slots are reduced to one classification.
 pub fn reclassify_loops_from_results(
     loops: &mut [DetectedLoop],
-    results: &crate::Results,
+    results: &simlin_base::Results,
     loop_partitions: &indexmap::IndexMap<String, Vec<Option<usize>>>,
 ) {
     // One normalization for every loop at once; a loop with no emitted
@@ -3170,7 +3173,7 @@ pub fn model_cycle_partitions(
 pub fn causal_graph_from_element_edges(
     result: &ElementCausalEdgesResult,
 ) -> crate::ltm::CausalGraph {
-    use crate::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     let edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>> = result
         .edges
@@ -3371,8 +3374,8 @@ pub fn model_loop_circuits_tiered(
     // can appear in many cycles; the salsa-tracked `variable_dimensions`
     // is itself memoized but the per-call HashMap lookup avoids
     // repeated salsa cache hits.
-    let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
-    let mut lookup_dims = |name: &str| -> Vec<crate::dimensions::Dimension> {
+    let mut dim_cache: HashMap<String, Vec<simlin_base::dimensions::Dimension>> = HashMap::new();
+    let mut lookup_dims = |name: &str| -> Vec<simlin_base::dimensions::Dimension> {
         if let Some(dims) = dim_cache.get(name) {
             return dims.clone();
         }
@@ -3394,11 +3397,12 @@ pub fn model_loop_circuits_tiered(
         // the mutable `dim_cache` borrow during classification. We
         // pre-fetch every cycle node's dimensions into a small map
         // first, then hand the classifier a closure that reads it.
-        let mut cycle_dims: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
+        let mut cycle_dims: HashMap<String, Vec<simlin_base::dimensions::Dimension>> =
+            HashMap::new();
         for v in &cycle {
             cycle_dims.insert(v.clone(), lookup_dims(v));
         }
-        let cycle_lookup = |name: &str| -> Vec<crate::dimensions::Dimension> {
+        let cycle_lookup = |name: &str| -> Vec<simlin_base::dimensions::Dimension> {
             cycle_dims.get(name).cloned().unwrap_or_default()
         };
 
@@ -3480,22 +3484,23 @@ pub fn model_loop_circuits_tiered(
         // Stocks restricted to slow-path variables. Same projection rule:
         // keep an element-stock node only if its variable name is in
         // the slow-path set. (Agg nodes are never stocks.)
-        let sub_stocks: IdentSet<crate::common::Ident<crate::common::Canonical>> = element_edges
-            .stocks
-            .iter()
-            .filter(|s| slow_path_var_nodes.contains(strip_element_subscript(s.as_str())))
-            .map(|s| crate::common::Ident::new(s))
-            .collect();
+        let sub_stocks: IdentSet<simlin_base::common::Ident<simlin_base::common::Canonical>> =
+            element_edges
+                .stocks
+                .iter()
+                .filter(|s| slow_path_var_nodes.contains(strip_element_subscript(s.as_str())))
+                .map(|s| simlin_base::common::Ident::new(s))
+                .collect();
         let sub_edge_idents: IdentMap<
-            crate::common::Ident<crate::common::Canonical>,
-            Vec<crate::common::Ident<crate::common::Canonical>>,
+            simlin_base::common::Ident<simlin_base::common::Canonical>,
+            Vec<simlin_base::common::Ident<simlin_base::common::Canonical>>,
         > = sub_edges
             .into_iter()
             .map(|(from, tos)| {
                 (
-                    crate::common::Ident::new(&from),
+                    simlin_base::common::Ident::new(&from),
                     tos.into_iter()
-                        .map(|t| crate::common::Ident::new(&t))
+                        .map(|t| simlin_base::common::Ident::new(&t))
                         .collect(),
                 )
             })
@@ -3700,7 +3705,7 @@ pub(crate) fn model_written_variables(
     model: SourceModel,
     project: SourceProject,
 ) -> std::sync::Arc<crate::variable::LoweredVariableMap> {
-    use crate::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     let mut variables: crate::variable::LoweredVariableMap = IdentMap::default();
     for (name, source_var) in model.variables(db) {
@@ -3779,7 +3784,7 @@ pub(crate) fn model_lowered_variables(
     model: SourceModel,
     project: SourceProject,
 ) -> std::sync::Arc<crate::variable::LoweredVariableMap> {
-    use crate::common::Ident;
+    use simlin_base::common::Ident;
 
     let written = model_written_variables(db, model, project);
     if crate::db::project_module_graph(db, project)
@@ -3795,7 +3800,7 @@ pub(crate) fn model_lowered_variables(
             [var.ast(), var.init_ast()]
                 .into_iter()
                 .flatten()
-                .any(|ast| !matches!(ast, crate::ast::Ast::Scalar(_)))
+                .any(|ast| !matches!(ast, simlin_base::ast::Ast::Scalar(_)))
         });
         if !arrayed {
             continue;
@@ -3858,17 +3863,15 @@ fn lowered_variable_named(
     var_name: String,
 ) -> Option<std::sync::Arc<crate::variable::Variable>> {
     model_lowered_variables(db, model, project)
-        .get(&crate::common::Ident::<crate::common::Canonical>::new(
-            &var_name,
-        ))
+        .get(&simlin_base::common::Ident::<simlin_base::common::Canonical>::new(&var_name))
         .cloned()
 }
 
 #[cfg(test)]
 mod emit_edges_for_reference_tests {
     use super::*;
-    use crate::common::{CanonicalDimensionName, CanonicalElementName};
-    use crate::dimensions::{Dimension, NamedDimension};
+    use simlin_base::common::{CanonicalDimensionName, CanonicalElementName};
+    use simlin_base::dimensions::{Dimension, NamedDimension};
 
     /// Build a single-dim `Named` dimension from raw element names.
     /// Mirrors `make_named_dimension` in `ltm_augment.rs::tests` -- inlined
@@ -3878,11 +3881,12 @@ mod emit_edges_for_reference_tests {
             .iter()
             .map(|e| CanonicalElementName::from_raw(e))
             .collect();
-        let indexed: crate::common::IdentMap<CanonicalElementName, usize> = canonical_elements
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.clone(), i + 1))
-            .collect();
+        let indexed: simlin_base::common::IdentMap<CanonicalElementName, usize> =
+            canonical_elements
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (e.clone(), i + 1))
+                .collect();
         Dimension::Named(
             CanonicalDimensionName::from_raw(name),
             NamedDimension {
@@ -3896,8 +3900,8 @@ mod emit_edges_for_reference_tests {
 
     /// An empty `DimensionsContext` for tests that don't exercise the
     /// mapped-dimension correspondence.
-    fn empty_dim_ctx() -> crate::dimensions::DimensionsContext {
-        crate::dimensions::DimensionsContext::from(&[])
+    fn empty_dim_ctx() -> simlin_base::dimensions::DimensionsContext {
+        simlin_base::dimensions::DimensionsContext::from(&[])
     }
 
     /// Scalar source -> scalar target with `Bare` shape: a single
@@ -4079,18 +4083,19 @@ mod emit_edges_for_reference_tests {
     #[test]
     fn bare_mapped_dims_project_the_executed_correspondence() {
         // Positional mapping: diagonal.
-        let mut state = crate::datamodel::Dimension::named(
+        let mut state = simlin_base::datamodel::Dimension::named(
             "State".to_string(),
             vec!["s1".to_string(), "s2".to_string()],
         );
         state.set_maps_to("Region".to_string());
-        let region = crate::datamodel::Dimension::named(
+        let region = simlin_base::datamodel::Dimension::named(
             "Region".to_string(),
             vec!["a".to_string(), "b".to_string()],
         );
-        let dim_ctx = crate::dimensions::DimensionsContext::from(&[state.clone(), region.clone()]);
-        let from_dims = vec![crate::dimensions::Dimension::from(&region)];
-        let to_dims = vec![crate::dimensions::Dimension::from(&state)];
+        let dim_ctx =
+            simlin_base::dimensions::DimensionsContext::from(&[state.clone(), region.clone()]);
+        let from_dims = vec![simlin_base::dimensions::Dimension::from(&region)];
+        let to_dims = vec![simlin_base::dimensions::Dimension::from(&state)];
 
         let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
         emit_edges_for_reference(
@@ -4116,11 +4121,11 @@ mod emit_edges_for_reference_tests {
         );
 
         // Explicit element map (permuted s1↦b, s2↦a): the map's rows.
-        let mut state_em = crate::datamodel::Dimension::named(
+        let mut state_em = simlin_base::datamodel::Dimension::named(
             "State".to_string(),
             vec!["s1".to_string(), "s2".to_string()],
         );
-        state_em.mappings = vec![crate::datamodel::DimensionMapping {
+        state_em.mappings = vec![simlin_base::datamodel::DimensionMapping {
             target: "Region".to_string(),
             element_map: vec![
                 ("s1".to_string(), "b".to_string()),
@@ -4128,8 +4133,8 @@ mod emit_edges_for_reference_tests {
             ],
         }];
         let dim_ctx_em =
-            crate::dimensions::DimensionsContext::from(&[state_em.clone(), region.clone()]);
-        let to_dims_em = vec![crate::dimensions::Dimension::from(&state_em)];
+            simlin_base::dimensions::DimensionsContext::from(&[state_em.clone(), region.clone()]);
+        let to_dims_em = vec![simlin_base::dimensions::Dimension::from(&state_em)];
 
         let mut edges_em: HashMap<String, BTreeSet<String>> = HashMap::new();
         emit_edges_for_reference(
@@ -4158,11 +4163,11 @@ mod emit_edges_for_reference_tests {
         // diagonal would be s1->a, s2->b, s3->c): each source element feeds
         // exactly the ONE target the map names, never its ordinal twin and
         // never the third.
-        let mut state3 = crate::datamodel::Dimension::named(
+        let mut state3 = simlin_base::datamodel::Dimension::named(
             "State".to_string(),
             vec!["s1".to_string(), "s2".to_string(), "s3".to_string()],
         );
-        state3.mappings = vec![crate::datamodel::DimensionMapping {
+        state3.mappings = vec![simlin_base::datamodel::DimensionMapping {
             target: "Region".to_string(),
             element_map: vec![
                 ("s1".to_string(), "b".to_string()),
@@ -4170,18 +4175,18 @@ mod emit_edges_for_reference_tests {
                 ("s3".to_string(), "a".to_string()),
             ],
         }];
-        let region3 = crate::datamodel::Dimension::named(
+        let region3 = simlin_base::datamodel::Dimension::named(
             "Region".to_string(),
             vec!["a".to_string(), "b".to_string(), "c".to_string()],
         );
         let dim_ctx3 =
-            crate::dimensions::DimensionsContext::from(&[state3.clone(), region3.clone()]);
+            simlin_base::dimensions::DimensionsContext::from(&[state3.clone(), region3.clone()]);
         let mut edges3: HashMap<String, BTreeSet<String>> = HashMap::new();
         emit_edges_for_reference(
             "x",
             "target",
-            &[crate::dimensions::Dimension::from(&region3)],
-            &[crate::dimensions::Dimension::from(&state3)],
+            &[simlin_base::dimensions::Dimension::from(&region3)],
+            &[simlin_base::dimensions::Dimension::from(&state3)],
             &RefShape::Bare,
             None,
             &dim_ctx3,
@@ -4450,8 +4455,8 @@ mod polarity_confidence_tests {
     /// upgrades the loop to Undetermined.
     #[test]
     fn structural_undetermined_loop_has_zero_confidence() {
-        use crate::datamodel;
         use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
+        use simlin_base::datamodel;
 
         let mut model_vars = vec![
             x_stock("water", "100", &[], &["outflow"], None),
@@ -4639,8 +4644,8 @@ mod polarity_confidence_tests {
 #[cfg(test)]
 mod loop_node_sequence_tests {
     use super::loop_node_sequence;
-    use crate::common::Ident;
     use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+    use simlin_base::common::Ident;
 
     fn link(from: &str, to: &str) -> Link {
         Link {
@@ -5273,8 +5278,8 @@ mod classify_cycle_tests {
     //! both inputs directly without going through the salsa pipeline
     //! so the tests are fast and self-contained.
     use super::*;
-    use crate::common::{CanonicalDimensionName, CanonicalElementName};
-    use crate::dimensions::{Dimension, NamedDimension};
+    use simlin_base::common::{CanonicalDimensionName, CanonicalElementName};
+    use simlin_base::dimensions::{Dimension, NamedDimension};
 
     /// Helper: build a single-dim Named dimension whose elements are
     /// `["a", "b"]`. The `name` is the canonical dimension name.
@@ -5283,7 +5288,7 @@ mod classify_cycle_tests {
             CanonicalElementName::from_raw("a"),
             CanonicalElementName::from_raw("b"),
         ];
-        let indexed: crate::common::IdentMap<CanonicalElementName, usize> = elements
+        let indexed: simlin_base::common::IdentMap<CanonicalElementName, usize> = elements
             .iter()
             .enumerate()
             .map(|(i, e)| (e.clone(), i + 1))

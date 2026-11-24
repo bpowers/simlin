@@ -4244,7 +4244,7 @@ fn the_dimensions_are_edited_with_what_is_over_them() {
     );
     assert_eq!(
         host.project.dimensions[0],
-        crate::datamodel::Dimension::named(
+        simlin_base::datamodel::Dimension::named(
             "Area".to_string(),
             vec!["lower".to_string(), "north".to_string(), "east".to_string()]
         )

@@ -26,7 +26,7 @@ use crate::types::SourceFormat;
 /// projects with a model named "main" and single-model projects imported
 /// from XMILE or Vensim where the model may have a different name.
 pub(crate) fn resolve_model_name<'a>(
-    project: &'a simlin_engine::datamodel::Project,
+    project: &'a simlin_base::datamodel::Project,
     requested: &'a str,
 ) -> &'a str {
     if let Some(m) = project.get_model(requested) {
@@ -53,16 +53,16 @@ pub(crate) fn resolve_model_name<'a>(
 ///
 /// We compute a single high-water-mark across both variable UIDs and view
 /// element UIDs for each model to guarantee uniqueness.
-fn ensure_variable_uids(project: &mut simlin_engine::datamodel::Project) {
+fn ensure_variable_uids(project: &mut simlin_base::datamodel::Project) {
     for model in &mut project.models {
         let max_var_uid = model
             .variables
             .iter()
             .filter_map(|v| match v {
-                simlin_engine::datamodel::Variable::Stock(s) => s.uid,
-                simlin_engine::datamodel::Variable::Flow(f) => f.uid,
-                simlin_engine::datamodel::Variable::Aux(a) => a.uid,
-                simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                simlin_base::datamodel::Variable::Stock(s) => s.uid,
+                simlin_base::datamodel::Variable::Flow(f) => f.uid,
+                simlin_base::datamodel::Variable::Aux(a) => a.uid,
+                simlin_base::datamodel::Variable::Module(m) => m.uid,
             })
             .max()
             .unwrap_or(0);
@@ -70,27 +70,27 @@ fn ensure_variable_uids(project: &mut simlin_engine::datamodel::Project) {
             .views
             .iter()
             .flat_map(|v| match v {
-                simlin_engine::datamodel::View::StockFlow(sf) => sf.elements.iter(),
+                simlin_base::datamodel::View::StockFlow(sf) => sf.elements.iter(),
             })
             .map(|e| e.get_uid())
             .max()
             .unwrap_or(0);
         let mut next_uid = max_var_uid.max(max_view_uid) + 1;
 
-        let has_uid = |var: &simlin_engine::datamodel::Variable| match var {
-            simlin_engine::datamodel::Variable::Stock(s) => s.uid.is_some(),
-            simlin_engine::datamodel::Variable::Flow(f) => f.uid.is_some(),
-            simlin_engine::datamodel::Variable::Aux(a) => a.uid.is_some(),
-            simlin_engine::datamodel::Variable::Module(m) => m.uid.is_some(),
+        let has_uid = |var: &simlin_base::datamodel::Variable| match var {
+            simlin_base::datamodel::Variable::Stock(s) => s.uid.is_some(),
+            simlin_base::datamodel::Variable::Flow(f) => f.uid.is_some(),
+            simlin_base::datamodel::Variable::Aux(a) => a.uid.is_some(),
+            simlin_base::datamodel::Variable::Module(m) => m.uid.is_some(),
         };
         model.variables.edit_where(
             |var| !has_uid(var),
             |var| {
                 match var {
-                    simlin_engine::datamodel::Variable::Stock(s) => s.uid = Some(next_uid),
-                    simlin_engine::datamodel::Variable::Flow(f) => f.uid = Some(next_uid),
-                    simlin_engine::datamodel::Variable::Aux(a) => a.uid = Some(next_uid),
-                    simlin_engine::datamodel::Variable::Module(m) => m.uid = Some(next_uid),
+                    simlin_base::datamodel::Variable::Stock(s) => s.uid = Some(next_uid),
+                    simlin_base::datamodel::Variable::Flow(f) => f.uid = Some(next_uid),
+                    simlin_base::datamodel::Variable::Aux(a) => a.uid = Some(next_uid),
+                    simlin_base::datamodel::Variable::Module(m) => m.uid = Some(next_uid),
                 }
                 next_uid += 1;
             },
@@ -131,7 +131,7 @@ pub fn format_for_extension(path: &Path) -> Option<SourceFormat> {
 pub fn open_project(
     path: &Path,
     contents: &str,
-) -> Result<(simlin_engine::datamodel::Project, SourceFormat), AccessError> {
+) -> Result<(simlin_base::datamodel::Project, SourceFormat), AccessError> {
     let (mut project, format) = match format_for_extension(path) {
         Some(SourceFormat::Xmile) => {
             let mut reader = BufReader::new(contents.as_bytes());
@@ -325,10 +325,10 @@ mod tests {
         for model in &project.models {
             for var in &model.variables {
                 let uid = match var {
-                    simlin_engine::datamodel::Variable::Stock(s) => s.uid,
-                    simlin_engine::datamodel::Variable::Flow(f) => f.uid,
-                    simlin_engine::datamodel::Variable::Aux(a) => a.uid,
-                    simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                    simlin_base::datamodel::Variable::Stock(s) => s.uid,
+                    simlin_base::datamodel::Variable::Flow(f) => f.uid,
+                    simlin_base::datamodel::Variable::Aux(a) => a.uid,
+                    simlin_base::datamodel::Variable::Module(m) => m.uid,
                 };
                 assert!(
                     uid.is_some(),
@@ -355,10 +355,10 @@ mod tests {
                 .variables
                 .iter()
                 .filter_map(|v| match v {
-                    simlin_engine::datamodel::Variable::Stock(s) => s.uid,
-                    simlin_engine::datamodel::Variable::Flow(f) => f.uid,
-                    simlin_engine::datamodel::Variable::Aux(a) => a.uid,
-                    simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                    simlin_base::datamodel::Variable::Stock(s) => s.uid,
+                    simlin_base::datamodel::Variable::Flow(f) => f.uid,
+                    simlin_base::datamodel::Variable::Aux(a) => a.uid,
+                    simlin_base::datamodel::Variable::Module(m) => m.uid,
                 })
                 .collect();
             let unique: std::collections::HashSet<i32> = uids.iter().copied().collect();
@@ -371,12 +371,12 @@ mod tests {
         }
     }
 
-    fn variable_uid(var: &simlin_engine::datamodel::Variable) -> Option<i32> {
+    fn variable_uid(var: &simlin_base::datamodel::Variable) -> Option<i32> {
         match var {
-            simlin_engine::datamodel::Variable::Stock(s) => s.uid,
-            simlin_engine::datamodel::Variable::Flow(f) => f.uid,
-            simlin_engine::datamodel::Variable::Aux(a) => a.uid,
-            simlin_engine::datamodel::Variable::Module(m) => m.uid,
+            simlin_base::datamodel::Variable::Stock(s) => s.uid,
+            simlin_base::datamodel::Variable::Flow(f) => f.uid,
+            simlin_base::datamodel::Variable::Aux(a) => a.uid,
+            simlin_base::datamodel::Variable::Module(m) => m.uid,
         }
     }
 
@@ -462,10 +462,10 @@ mod tests {
             .variables
             .iter()
             .map(|v| match v {
-                simlin_engine::datamodel::Variable::Stock(s) => s.uid,
-                simlin_engine::datamodel::Variable::Flow(f) => f.uid,
-                simlin_engine::datamodel::Variable::Aux(a) => a.uid,
-                simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                simlin_base::datamodel::Variable::Stock(s) => s.uid,
+                simlin_base::datamodel::Variable::Flow(f) => f.uid,
+                simlin_base::datamodel::Variable::Aux(a) => a.uid,
+                simlin_base::datamodel::Variable::Module(m) => m.uid,
             })
             .collect();
 
@@ -484,10 +484,10 @@ mod tests {
             .variables
             .iter()
             .map(|v| match v {
-                simlin_engine::datamodel::Variable::Stock(s) => s.uid,
-                simlin_engine::datamodel::Variable::Flow(f) => f.uid,
-                simlin_engine::datamodel::Variable::Aux(a) => a.uid,
-                simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                simlin_base::datamodel::Variable::Stock(s) => s.uid,
+                simlin_base::datamodel::Variable::Flow(f) => f.uid,
+                simlin_base::datamodel::Variable::Aux(a) => a.uid,
+                simlin_base::datamodel::Variable::Module(m) => m.uid,
             })
             .collect();
 
@@ -520,10 +520,10 @@ mod tests {
             .variables
             .iter()
             .filter_map(|v| match v {
-                simlin_engine::datamodel::Variable::Stock(s) => s.uid,
-                simlin_engine::datamodel::Variable::Flow(f) => f.uid,
-                simlin_engine::datamodel::Variable::Aux(a) => a.uid,
-                simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                simlin_base::datamodel::Variable::Stock(s) => s.uid,
+                simlin_base::datamodel::Variable::Flow(f) => f.uid,
+                simlin_base::datamodel::Variable::Aux(a) => a.uid,
+                simlin_base::datamodel::Variable::Module(m) => m.uid,
             })
             .take(2)
             .collect();
@@ -532,7 +532,7 @@ mod tests {
         // Attach loop metadata using those UIDs
         project.models[0]
             .loop_metadata
-            .push(simlin_engine::datamodel::LoopMetadata {
+            .push(simlin_base::datamodel::LoopMetadata {
                 uids: loop_uids.clone(),
                 deleted: false,
                 name: "Test Loop".to_string(),
@@ -552,10 +552,10 @@ mod tests {
             .variables
             .iter()
             .filter_map(|v| match v {
-                simlin_engine::datamodel::Variable::Stock(s) => s.uid,
-                simlin_engine::datamodel::Variable::Flow(f) => f.uid,
-                simlin_engine::datamodel::Variable::Aux(a) => a.uid,
-                simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                simlin_base::datamodel::Variable::Stock(s) => s.uid,
+                simlin_base::datamodel::Variable::Flow(f) => f.uid,
+                simlin_base::datamodel::Variable::Aux(a) => a.uid,
+                simlin_base::datamodel::Variable::Module(m) => m.uid,
             })
             .take(2)
             .collect();
