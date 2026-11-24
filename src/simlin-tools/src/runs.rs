@@ -79,7 +79,9 @@ pub(crate) const MAX_RUN_STEPS: usize = 200_000_000;
 
 /// The most bytes of results the runs of one batch ([`execute_values`])
 /// hold at once: each run holds its results until it is summarized, so this
-/// bounds how many run at a time, whatever the host's cores.
+/// bounds how many run at a time, whatever the host's cores. A wasm build runs
+/// one at a time, so it has neither this nor [`concurrent_runs`].
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(test)]
@@ -92,6 +94,7 @@ thread_local! {
 
 /// How many runs of `run_bytes` of results each a batch makes at once: as
 /// many as [`MAX_BATCH_BYTES`] holds, and one however large a run is.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn concurrent_runs(run_bytes: usize) -> usize {
     #[cfg(test)]
     let budget = TEST_BATCH_BYTES.with(std::cell::Cell::get);

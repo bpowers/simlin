@@ -62,7 +62,7 @@ dispatch, so the VM never simulates them either.
   unit-consistency errors (`bad_binary_op_in_units`), independent of conveyors.
 
 Both are pinned on their exact `ErrorCode` (in `simulate.rs` and again, at the wasm
-lowering layer, in `src/simlin-engine/src/wasmgen/belt_tests.rs`), so fixing #944 or
+lowering layer, in `src/simlin-wasmgen/src/belt_tests.rs`), so fixing #944 or
 #940 turns those pins red and forces the fixture into the corpus — rather than
 leaving it parked forever as a silently-tolerated "expected failure".
 

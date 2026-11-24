@@ -10,7 +10,7 @@
     "simlin-save-check": ["simlin-base", "simlin-formats", "simlin-engine"],
     "simlin-tools": ["simlin-base", "simlin-edit", "simlin-formats", "simlin-engine", "simlin-layout", "simlin-save-check"],
     "simlin": ["simlin-base", "simlin-diagram", "simlin-formats", "simlin-edit", "simlin-engine", "simlin-wasmgen", "simlin-layout", "simlin-save-check", "simlin-tools"],
-    "simlin-cli": ["simlin-base", "simlin-diagram", "simlin-formats", "simlin-engine", "simlin"],
+    "simlin-cli": ["simlin-base", "simlin-diagram", "simlin-formats", "simlin-engine"],
     "simlin-mcp": ["simlin-mcp-core"],
     "simlin-mcp-core": ["simlin-base", "simlin-formats", "simlin-edit", "simlin-engine", "simlin-layout"],
     "simlin-tests": []

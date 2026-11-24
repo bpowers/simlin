@@ -46,8 +46,9 @@
 //! it under the current weights, compares, and embeds the per-model + paired
 //! aggregate verdicts into `metrics.json` and `index.html`.
 //!
-//! Requires `--features png_render,file_io`: `png_render` for the rasterizer,
-//! and `file_io` so Vensim corpus models that reference external data load.
+//! Draws with simlin-diagram's `png_render` rasterizer and opens models with
+//! simlin-formats' `file_io`, so Vensim corpus models that reference external
+//! data load; this package asks for both.
 
 mod corpus;
 mod edits;

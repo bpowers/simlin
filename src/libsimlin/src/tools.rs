@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// One agent's work on one model: the evidence ids it has been given, what it
-/// last read, and the runs it made (`simlin_engine::tools::Session`), over the
+/// last read, and the runs it made (`simlin_tools::Session`), over the
 /// model it was made for.
 pub struct SimlinToolSession {
     /// Counted: the session keeps its model, and through it the project, alive.
@@ -163,7 +163,7 @@ unsafe fn require_session<'a>(
 /// an exception that ends the agent's turn.
 ///
 /// One entry point, two lock footprints, chosen by the tool's effect
-/// (`simlin_engine::tools::ToolName::effect`) before any lock is taken.
+/// (`simlin_tools::ToolName::effect`) before any lock is taken.
 ///
 /// A tool that reads answers the project as it is when the call starts, at
 /// that revision. It holds the session for the call, and the project's
@@ -188,7 +188,7 @@ unsafe fn require_session<'a>(
 /// `simlin_project_apply_patch` is: it holds the session, the datamodel and
 /// the database for the whole call, so nothing lands between its gate and its
 /// edit, and when the gate passes it makes the edit before it returns
-/// (`simlin_engine::tools::ToolOutput::edited`), the database synced to the
+/// (`simlin_tools::ToolOutput::edited`), the database synced to the
 /// edited project and the contents replaced by it under both locks, which
 /// advances the revision. An edit its gate refuses is a refusal, with
 /// `out_is_error` set; it and an edit that changes nothing leave the project

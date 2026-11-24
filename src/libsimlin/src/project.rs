@@ -884,7 +884,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
 /// opens rather than a variant of each.
 ///
 /// What it covers is what the engine's readers report
-/// (`simlin_engine::ImportWarning`): for MDL the sketch and the file's custom
+/// (`simlin_formats::ImportWarning`): for MDL the sketch and the file's custom
 /// outputs, for XMILE what the reader skips among the variables, the views
 /// and the stories. A NULL report says the file loses none of those, not
 /// that the project holds everything the file says.
@@ -905,7 +905,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
 /// in `out_collected_errors` (NULL when the file loses nothing): for MDL, one
 /// per kind and sketch view for what a modeler put on a view, and one per
 /// kind over the whole sketch for what follows from what the diagram does
-/// not draw (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is
+/// not draw (see `simlin_formats::mdl::parse_mdl_with_warnings`). `message` is
 /// `"MDL import: <reason>"` or `"XMILE import: <reason>"` and `details` the
 /// bare reason, such as `29 comments on view 'View 1' are not kept, such as
 /// 'The World3 Model'` or `2 sliders on interface page 1 are not kept:

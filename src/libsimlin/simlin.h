@@ -211,7 +211,7 @@ typedef enum {
 typedef struct SimlinGesture SimlinGesture;
 
 // One agent's work on one model: the evidence ids it has been given, what it
-// last read, and the runs it made (`simlin_engine::tools::Session`), over the
+// last read, and the runs it made (`simlin_tools::Session`), over the
 // model it was made for.
 typedef struct SimlinToolSession SimlinToolSession;
 
@@ -942,7 +942,7 @@ void simlin_analyze_get_loop_element_count(SimlinSim *sim,
                                            SimlinError **out_error);
 
 // The element and part of the model's diagram that `(x, y)` (model
-// coordinates) lands on, decided in `simlin_engine::editing::HitIndex`'s tiers:
+// coordinates) lands on, decided in `simlin_edit::editing::HitIndex`'s tiers:
 // a body firmly holding the point, else an end handle within reach, else a
 // label holding the point, else the nearest drawing within `tolerance` model
 // units (the host's touch slop divided by the zoom). Writes `*out_hit = false`
@@ -1053,7 +1053,7 @@ void simlin_gesture_unref(SimlinGesture *gesture);
 
 // Plan moving `selection` (`selection_len` uids) by `(dx, dy)` model units,
 // independent of the zoom: the frame a move-selection drag of the selection
-// plans for that travel (`simlin_engine::editing::plan_move`), which a host
+// plans for that travel (`simlin_edit::editing::plan_move`), which a host
 // plans to nudge the selection from the keyboard. Positioned elements move,
 // flows follow their moved ends, a selected flow neither of whose ends moves
 // slides its valve along its pipe, and a link moves only with its endpoints.
@@ -1881,7 +1881,7 @@ SimlinProject *simlin_project_open_vensim(const uint8_t *data,
 // opens rather than a variant of each.
 //
 // What it covers is what the engine's readers report
-// (`simlin_engine::ImportWarning`): for MDL the sketch and the file's custom
+// (`simlin_formats::ImportWarning`): for MDL the sketch and the file's custom
 // outputs, for XMILE what the reader skips among the variables, the views
 // and the stories. A NULL report says the file loses none of those, not
 // that the project holds everything the file says.
@@ -1902,7 +1902,7 @@ SimlinProject *simlin_project_open_vensim(const uint8_t *data,
 // in `out_collected_errors` (NULL when the file loses nothing): for MDL, one
 // per kind and sketch view for what a modeler put on a view, and one per
 // kind over the whole sketch for what follows from what the diagram does
-// not draw (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is
+// not draw (see `simlin_formats::mdl::parse_mdl_with_warnings`). `message` is
 // `"MDL import: <reason>"` or `"XMILE import: <reason>"` and `details` the
 // bare reason, such as `29 comments on view 'View 1' are not kept, such as
 // 'The World3 Model'` or `2 sliders on interface page 1 are not kept:
@@ -2137,7 +2137,7 @@ void simlin_project_serialize_xmile(SimlinProject *project,
 // a model that has a diagram view. The output buffer contains UTF-8 text.
 //
 // The MDL surface cannot represent every Simlin construct. The engine's
-// lossiness contract (`simlin_engine::mdl::project_to_mdl_with_warnings`)
+// lossiness contract (`simlin_formats::mdl::project_to_mdl_with_warnings`)
 // splits the gap in two, and this function surfaces both halves separately:
 //
 // - **Hard errors** (a project with more than one ordinary model, an
@@ -2170,7 +2170,7 @@ void simlin_project_serialize_mdl(SimlinProject *project,
 //
 // Saves the project in `format` (a `SimlinSaveFormat`), reads the save back
 // as a host would open it, and compares the model the save holds with the
-// project's two ways (see `simlin_engine::save_check`):
+// project's two ways (see `simlin_save_check`):
 //
 // - its definition: the simulation specs, each dimension's elements, parent
 //   and mappings, and each variable's kind, dimensions, elements, equations
@@ -2543,7 +2543,7 @@ void simlin_tool_session_unref(SimlinToolSession *session);
 // an exception that ends the agent's turn.
 //
 // One entry point, two lock footprints, chosen by the tool's effect
-// (`simlin_engine::tools::ToolName::effect`) before any lock is taken.
+// (`simlin_tools::ToolName::effect`) before any lock is taken.
 //
 // A tool that reads answers the project as it is when the call starts, at
 // that revision. It holds the session for the call, and the project's
@@ -2568,7 +2568,7 @@ void simlin_tool_session_unref(SimlinToolSession *session);
 // `simlin_project_apply_patch` is: it holds the session, the datamodel and
 // the database for the whole call, so nothing lands between its gate and its
 // edit, and when the gate passes it makes the edit before it returns
-// (`simlin_engine::tools::ToolOutput::edited`), the database synced to the
+// (`simlin_tools::ToolOutput::edited`), the database synced to the
 // edited project and the contents replaced by it under both locks, which
 // advances the revision. An edit its gate refuses is a refusal, with
 // `out_is_error` set; it and an edit that changes nothing leave the project

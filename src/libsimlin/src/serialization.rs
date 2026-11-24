@@ -318,7 +318,7 @@ pub unsafe extern "C" fn simlin_project_serialize_xmile(
 /// a model that has a diagram view. The output buffer contains UTF-8 text.
 ///
 /// The MDL surface cannot represent every Simlin construct. The engine's
-/// lossiness contract (`simlin_engine::mdl::project_to_mdl_with_warnings`)
+/// lossiness contract (`simlin_formats::mdl::project_to_mdl_with_warnings`)
 /// splits the gap in two, and this function surfaces both halves separately:
 ///
 /// - **Hard errors** (a project with more than one ordinary model, an
@@ -400,7 +400,7 @@ pub unsafe extern "C" fn simlin_project_serialize_mdl(
 ///
 /// Saves the project in `format` (a `SimlinSaveFormat`), reads the save back
 /// as a host would open it, and compares the model the save holds with the
-/// project's two ways (see `simlin_engine::save_check`):
+/// project's two ways (see `simlin_save_check`):
 ///
 /// - its definition: the simulation specs, each dimension's elements, parent
 ///   and mappings, and each variable's kind, dimensions, elements, equations
