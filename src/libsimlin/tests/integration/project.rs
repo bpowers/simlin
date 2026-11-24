@@ -531,7 +531,7 @@ fn test_project_json_open_invalid_json() {
         );
 
         assert!(proj.is_null(), "expected null project for invalid JSON");
-        // assert_ne!(err, engine::ErrorCode::NoError as c_int);  // Obsolete assertion from old API
+        // assert_ne!(err, simlin_base::ErrorCode::NoError as c_int);  // Obsolete assertion from old API
     }
 }
 
@@ -543,7 +543,7 @@ fn test_project_json_open_null_input() {
             simlin_project_open_json(ptr::null(), 0, SimlinJsonFormat::Native as u32, &mut err);
 
         assert!(proj.is_null());
-        // assert_eq!(err, engine::ErrorCode::Generic as c_int);  // Obsolete assertion from old API
+        // assert_eq!(err, simlin_base::ErrorCode::Generic as c_int);  // Obsolete assertion from old API
     }
 }
 
@@ -673,7 +673,7 @@ fn test_project_json_open_sdai_invalid() {
             proj.is_null(),
             "expected null project for invalid SDAI JSON"
         );
-        // assert_ne!(err, engine::ErrorCode::NoError as c_int);  // Obsolete assertion from old API
+        // assert_ne!(err, simlin_base::ErrorCode::NoError as c_int);  // Obsolete assertion from old API
     }
 }
 

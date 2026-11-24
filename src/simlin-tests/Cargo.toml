@@ -58,7 +58,7 @@ base64 = "0.22"
 ed25519-dalek = "2"
 
 # The wasm interpreter the wasmgen backend's output is run under, at the commit
-# simlin-engine pins.
+# simlin-wasmgen pins.
 wasm-interpreter = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a" }
 checked = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a", features = ["linker", "interop"] }
 

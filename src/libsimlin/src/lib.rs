@@ -946,7 +946,7 @@ pub struct SimlinSim {
 
 /// Opaque standalone results structure.
 ///
-/// A named-time-series table (an `engine::Results`) that is not tied to any
+/// A named-time-series table (an `simlin_base::Results`) that is not tied to any
 /// project/model/sim. Produced today by `simlin_results_open_vdf` (Vensim VDF
 /// import). The table is immutable after construction, so the accessors need
 /// no lock -- only the refcount is shared mutable state.

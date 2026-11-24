@@ -71,7 +71,7 @@ See [benchmarks.md](benchmarks.md) for profiling instructions.
 ### The engine crates (Rust)
 
 ```bash
-cargo test -p simlin-engine              # Engine unit tests only
+cargo test -p simlin-engine              # One crate's unit tests (the compiler and the VM)
 cargo test -p simlin-formats mdl::       # MDL parser tests
 cargo test -p simlin-tests               # The integration tests
 ```

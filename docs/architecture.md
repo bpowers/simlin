@@ -123,10 +123,6 @@ The allowed dependency graph is enforced by `scripts/check-deps.py` reading from
 - `simlin-cli` -> `simlin-engine`, `simlin-formats`, `simlin-diagram`, `simlin-base`
 - `simlin-tests` -> (none; its dependencies are dev-dependencies, which the policy leaves out)
 
-Inside `simlin-engine`, the crate-root modules form layers, bottom up: `compiler`.
-`scripts/engine-layers.json` lists each layer's modules and the other layers it may use, and `scripts/check-engine-layers.py` enforces it over production code.
-A test may reach above its module's layer.
-
 ### TypeScript
 
 ```

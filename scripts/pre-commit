@@ -20,14 +20,11 @@ cd "$REPO_ROOT"
 
 POLICY_FAIL=0
 DEPS_OUTPUT="$(mktemp)"
-LAYERS_OUTPUT="$(mktemp)"
 DOCS_OUTPUT="$(mktemp)"
 PLINT_OUTPUT="$(mktemp)"
 
 python3 scripts/check-deps.py > "$DEPS_OUTPUT" 2>&1 &
 PID_DEPS=$!
-python3 scripts/check-engine-layers.py > "$LAYERS_OUTPUT" 2>&1 &
-PID_LAYERS=$!
 python3 scripts/check-docs.py > "$DOCS_OUTPUT" 2>&1 &
 PID_DOCS=$!
 bash scripts/lint-project.sh > "$PLINT_OUTPUT" 2>&1 &
@@ -44,18 +41,6 @@ else
     POLICY_FAIL=1
 fi
 rm -f "$DEPS_OUTPUT"
-
-echo -n "Checking engine layers... "
-if wait $PID_LAYERS; then
-    echo -e "${GREEN}✓${NC}"
-else
-    echo -e "${RED}✗${NC}"
-    echo -e "${RED}Engine layer violation:${NC}"
-    cat "$LAYERS_OUTPUT"
-    echo -e "${YELLOW}See docs/architecture.md for the engine's layers${NC}"
-    POLICY_FAIL=1
-fi
-rm -f "$LAYERS_OUTPUT"
 
 echo -n "Checking documentation links... "
 if wait $PID_DOCS; then

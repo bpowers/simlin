@@ -3,7 +3,8 @@
 The simulation engine: it parses, lowers, type-checks, unit-checks, compiles, and simulates system dynamics models.
 The root `CLAUDE.md` holds the development rules; this file is a map of where functionality lives (paths are relative to this crate's `src/`) and of the standing invariants code in this crate keeps.
 It is built on [simlin-base](/src/simlin-base/CLAUDE.md): the data model, identifiers, dimensions, the equation lexer, parser and AST, and the builtin functions.
-The file formats are [simlin-formats](/src/simlin-formats/CLAUDE.md), and the edits to a project [simlin-edit](/src/simlin-edit/CLAUDE.md).
+The file formats ([simlin-formats](/src/simlin-formats/CLAUDE.md)) and the edits to a project ([simlin-edit](/src/simlin-edit/CLAUDE.md)) do not depend on it, and its unit tests use both.
+The diagram layout ([simlin-layout](/src/simlin-layout/CLAUDE.md)), the wasm backend ([simlin-wasmgen](/src/simlin-wasmgen/CLAUDE.md)), the [save check](/src/simlin-save-check/CLAUDE.md) and the [agent tools](/src/simlin-tools/CLAUDE.md) are built on it.
 It is a map, not a history: `git log` and `git blame` are the changelog.
 
 Design references:

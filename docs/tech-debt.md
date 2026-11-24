@@ -639,22 +639,23 @@ Each entry has a description, component, severity, and measurement command.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-08
 
-### 60. No CI feature matrix for `simlin-engine`'s lib-only configurations
+### 60. No CI feature matrix for the engine crates' lib-only configurations
 
-- **Component**: build / CI (`scripts/pre-commit`, `.github/workflows/`, `src/simlin-engine/Cargo.toml`)
+- **Component**: build / CI (`scripts/pre-commit`, `.github/workflows/`, the `Cargo.toml` of each engine crate)
 - **Severity**: low (was medium; the dev-target half of this is now structurally impossible — see below)
-- **Description**: Neither the pre-commit hook nor CI exercises a Cargo **feature matrix** for `simlin-engine`, so feature-gating bugs in the **library** are invisible to the canonical gate. simlin-engine features: `file_io`, `schema`, `ai_info`, `agent_tools` (default = `schema, ai_info, agent_tools`), plus `ext_data`, `png_render`, `ltm_bench`.
+- **Description**: Neither the pre-commit hook nor CI exercises a Cargo **feature matrix** for the engine crates, so feature-gating bugs in a **library** are invisible to the canonical gate.
+  The features: simlin-formats `schema` (default), `file_io`, `ext_data`; simlin-diagram `png_render`; simlin-edit `schema`, `invariants`; simlin-engine `ai_info` (default), `ltm_bench`; simlin-layout `layout_eval`; simlin-tools `schema` (default); and each one's `test-support`.
 
   **Historical failure (no longer reachable).** During Phase 7c of the Vensim macro epic a subagent added `src/simlin-engine/tests/metasd_macros.rs` (which calls the `file_io`-gated `load_dat`/`load_csv`) WITHOUT the mirroring `required-features = ["file_io"]` entry.
   That broke `cargo build -p simlin-engine --all-targets` whenever `file_io` was *not* enabled (`error[E0425]`, `load_dat`/`load_csv` configured out), and survived multiple commits because the workspace build pulls `file_io` into scope via cross-crate feature unification (`simlin-cli` requests `simlin-engine/file_io`).
   The Cargo.toml fix landed in `7cba4ad2`.
-  The underlying hazard (GH #925) is gone: what `file_io` gates is `cfg(any(test, feature = "file_io"))`, and the integration tests, benches and examples are the `simlin-tests` package, whose one edge onto the engine asks for `file_io`.
+  The underlying hazard (GH #925) is gone: what `file_io` gates is `cfg(any(test, feature = "file_io"))`, and the integration tests, benches and examples are the `simlin-tests` package, whose edge onto simlin-formats asks for `file_io`.
   A dev target can no longer break under a missing `file_io` — that entire failure class is gone, and the `#[cfg]`/`required-features` bookkeeping it demanded is gone with it.
 
-  **What remains.** The gap narrows to **lib-only** configurations: nothing gates `cargo check -p simlin-engine --lib --no-default-features` (or other non-default lib feature subsets), where a `#[cfg(feature = ...)]` mistake in `src/` can still break the build.
-  In practice this is caught indirectly by the pre-commit WASM build (src/engine/build.sh's `cargo rustc -p simlin --lib --release --target wasm32-unknown-unknown --crate-type cdylib --no-default-features`, which compiles the engine with `file_io`/`schema`/`png_render` off), but that is one point sample, not a matrix, and it is a *release* build of a different crate.
+  **What remains.** The gap narrows to **lib-only** configurations: nothing gates `cargo check -p <crate> --lib --no-default-features` for the engine crates (or other non-default lib feature subsets), where a `#[cfg(feature = ...)]` mistake in `src/` can still break the build.
+  In practice this is caught indirectly by the pre-commit WASM build (src/engine/build.sh's `cargo rustc -p simlin --lib --release --target wasm32-unknown-unknown --crate-type cdylib --no-default-features`, which compiles the engine crates with `file_io`/`schema`/`png_render` off), but that is one point sample, not a matrix, and it is a *release* build of a different crate.
   A workspace `--all-targets` build unifies the features its targets ask for, so it never type-checks the lib with `file_io` off — a matrix step must be `--lib`-scoped to test anything.
-- **Suspected fix**: Add a lib-scoped feature-matrix check to the pre-commit hook and/or CI: at minimum `cargo check -p simlin-engine --lib --no-default-features` and `cargo check -p simlin-engine --lib --all-features`.
+- **Suspected fix**: Add a lib-scoped feature-matrix check to the pre-commit hook and/or CI: at minimum `cargo check --lib --no-default-features` and `cargo check --lib --all-features` of the engine crates.
   Optionally `cargo hack --feature-powerset --lib` (bounded).
   Keep within the documented test-time budget ([docs/dev/rust.md#test-time-budgets](dev/rust.md)) — a couple of representative lib configurations, not the full powerset, is the pragmatic choice given the 3-minute workspace cap.
 - **Secondary note** (workflow, not a separate item): the original break propagated because multi-agent plan execution structurally trusts the inherited baseline — each subagent verified only its own delta, and several built *with* `file_io` and concluded the base was clean.

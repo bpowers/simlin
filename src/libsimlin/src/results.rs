@@ -4,7 +4,7 @@
 
 //! Standalone simulation-results FFI.
 //!
-//! `SimlinResults` is an opaque handle around an `engine::Results` table that
+//! `SimlinResults` is an opaque handle around an `simlin_base::Results` table that
 //! is not tied to a project/model/sim. Today the only producer is
 //! [`simlin_results_open_vdf`], which imports a Vensim VDF file (run,
 //! sensitivity-run, or dataset container, auto-detected by magic). The

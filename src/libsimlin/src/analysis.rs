@@ -48,7 +48,7 @@ unsafe fn vec_to_f64_array(v: Option<Vec<f64>>) -> (*mut f64, usize) {
     }
 }
 
-/// Convert a model's links (`engine::analysis::model_links`) into the C-ABI
+/// Convert a model's links (`simlin_engine::analysis::model_links`) into the C-ABI
 /// `*mut SimlinLinks`.
 ///
 /// On a `CString::new` failure (interior NUL) the partial allocations are
@@ -1238,7 +1238,7 @@ pub(crate) fn rel_loop_score_series(
     }
 }
 
-/// Reconstruct an `engine::Results` from a wasm-blob result slab and its
+/// Reconstruct an `simlin_base::Results` from a wasm-blob result slab and its
 /// matching `WasmLayout`.
 ///
 /// The slab is the *already-extracted* f64 region the host strided out of the
@@ -1262,10 +1262,10 @@ pub(crate) fn rel_loop_score_series(
 /// is split between `SourceProject::sim_specs` and `SourceModel::model_sim_specs`,
 /// the per-model override path `assemble_simulation` takes); we mirror its
 /// branch here, reading the chosen `datamodel::SimSpecs` off the input and
-/// building `engine::SimSpecs::from` it.  The shape mirrors `Vm::into_results()`:
+/// building `simlin_base::SimSpecs::from` it.  The shape mirrors `Vm::into_results()`:
 /// `offsets` is the layout's canonical-name → slot map, `step_size` is
 /// `n_slots`, `step_count` is `slab.len() / n_slots`, `is_vensim` is false.
-/// Neither analytic core (`engine::analysis::model_links`, `rel_loop_score_series`)
+/// Neither analytic core (`simlin_engine::analysis::model_links`, `rel_loop_score_series`)
 /// reads `results.specs`, so the reconstructed `Specs` is only there to
 /// keep the `Results` value structurally well-formed -- there is no analytic
 /// sensitivity to its contents from these FFIs.
