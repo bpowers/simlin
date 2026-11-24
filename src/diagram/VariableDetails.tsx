@@ -13,7 +13,15 @@ import { Tabs, Tab } from './components/Tabs';
 import katex from 'katex';
 import { Dark2 } from './colors';
 
-import { ViewElement, Variable, GraphicalFunction, EquationError, UnitError, variableGf } from '@simlin/core/datamodel';
+import {
+  ViewElement,
+  Variable,
+  GraphicalFunction,
+  EquationError,
+  UnitError,
+  variableEquation,
+  variableGf,
+} from '@simlin/core/datamodel';
 
 import { defined, Series } from '@simlin/core/common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
@@ -26,14 +34,13 @@ import {
   SpanBox,
 } from './equation-caret';
 import {
-  applyToAllPrefix,
   byteOffsetToUtf16,
   highlightRangeForField,
   highlightSpansForLines,
   slatePointForOffset,
 } from './equation-highlight';
 import { LookupEditor } from './LookupEditor';
-import { variableDetailsView } from './variable-details-display';
+import { elementEquations, equationFieldText, equationNote, variableDetailsView } from './variable-details-display';
 import { isNewlineChord } from './keyboard-shortcuts';
 import { errorCodeDescription } from '@simlin/engine';
 
@@ -202,23 +209,6 @@ function resetEditorDocument(editor: CustomEditor, nodes: CustomElement[]): void
   editor.history = { undos: [], redos: [] };
 }
 
-function scalarEquationFor(variable: Variable): string {
-  if (variable.type === 'module') return '';
-  if (variable.equation.type === 'scalar') {
-    return variable.equation.equation;
-  } else if (variable.equation.type === 'applyToAll') {
-    return applyToAllPrefix + variable.equation.equation;
-  } else {
-    return "{ TODO: arrayed variable editing isn't supported yet}";
-  }
-}
-
-// Engine error offsets are byte offsets into the raw equation; the displayed
-// string may carry the apply-to-all prefix in front of it.
-function rawEquationStart(displayed: string, isUnits: boolean): number {
-  return !isUnits && displayed.startsWith(applyToAllPrefix) ? applyToAllPrefix.length : 0;
-}
-
 // The error/warning underline of one field as a Slate `decorate` function over
 // the field's live document. Decorated from props at render rather than
 // seeded into the document as marks: the panel keeps its editors across edits
@@ -237,13 +227,12 @@ function fieldDecorate(
   if (currentText !== committedText) {
     return () => [];
   }
-  const rawStart = rawEquationStart(committedText, isUnits);
-  const range = highlightRangeForField(committedText.slice(rawStart), errors, unitErrors, isUnits);
+  const range = highlightRangeForField(committedText, errors, unitErrors, isUnits);
   if (range === undefined) {
     return () => [];
   }
   // One Slate element per line, each holding one text node: path [line, 0].
-  const lines = highlightSpansForLines(committedText, rawStart, range);
+  const lines = highlightSpansForLines(committedText, range);
   return ([node, path]) => {
     if (!Text.isText(node) || path.length !== 2 || path[1] !== 0) {
       return [];
@@ -332,11 +321,8 @@ function parseLocAttr(value: string | undefined): readonly [number, number] | un
 // nothing measurable, a coarse proportional mapping over the preview's
 // content box.
 function caretOffsetForPreviewClick(host: HTMLElement, clientX: number, clientY: number, equationStr: string): number {
-  // eqnloc/oploc carry byte offsets into the raw equation; convert to UTF-16
-  // indices in the displayed string (which may be prefixed for apply-to-all
-  // equations) before mapping the click.
-  const rawStart = rawEquationStart(equationStr, false);
-  const raw = equationStr.slice(rawStart);
+  // eqnloc/oploc carry byte offsets into the equation; convert to UTF-16
+  // indices before mapping the click.
   const candidates: Array<{
     el: HTMLElement;
     spanStart: number;
@@ -353,8 +339,8 @@ function caretOffsetForPreviewClick(host: HTMLElement, clientX: number, clientY:
     const r = el.getBoundingClientRect();
     candidates.push({
       el,
-      spanStart: rawStart + byteOffsetToUtf16(raw, range[0]),
-      spanEnd: rawStart + byteOffsetToUtf16(raw, range[1]),
+      spanStart: byteOffsetToUtf16(equationStr, range[0]),
+      spanEnd: byteOffsetToUtf16(equationStr, range[1]),
       isOperatorGap,
       box: { left: r.left, right: r.right, top: r.top, bottom: r.bottom },
     });
@@ -393,8 +379,15 @@ function caretOffsetForPreviewClick(host: HTMLElement, clientX: number, clientY:
 }
 
 export function VariableDetails(props: VariableDetailsProps): React.ReactElement {
-  const { variable, viewElement, getLatexEquation, onDelete, onEquationChange, onTableChange, activeTab } = props;
+  const { variable, viewElement, onDelete, onEquationChange, onTableChange, activeTab } = props;
   const readOnly = !!props.readOnly;
+  const committedEquation = variableEquation(variable);
+  // A per-element variable: its equations are listed, and there is no equation
+  // field to edit or submit.
+  const perElement = committedEquation?.type === 'arrayed' ? committedEquation : undefined;
+  // The engine renders LaTeX for a scalar's equation only (an arrayed one's is a
+  // placeholder), so an apply-to-all variable's preview shows its text.
+  const getLatexEquation = committedEquation?.type === 'scalar' ? props.getLatexEquation : undefined;
 
   // Prefix for the error/warning row ids that aria-describedby on the
   // equation/units editors points at. React.useId (not the variable ident)
@@ -416,7 +409,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   );
   const pendingAtMount = React.useRef(props.pendingSubmission);
   const [equationContents, setEquationContents] = React.useState<Descendant[]>(() =>
-    descendantsFromString(pendingAtMount.current?.equation?.text ?? scalarEquationFor(variable)),
+    descendantsFromString(pendingAtMount.current?.equation?.text ?? equationFieldText(variable)),
   );
   const [unitsEditor] = React.useState<CustomEditor>(
     () => withHistory(withReact(createEditor())) as unknown as CustomEditor,
@@ -437,7 +430,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   // The texts the fields were seeded with, and what this panel last submitted
   // for each (see draftText).
   const [seeded] = React.useState(() => ({
-    equation: scalarEquationFor(variable),
+    equation: equationFieldText(variable),
     units: variable.units,
     docs: variable.documentation,
   }));
@@ -445,7 +438,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
     pendingTexts(pendingAtMount.current),
   );
   const committedTexts: DraftFields<string> = {
-    equation: scalarEquationFor(variable),
+    equation: equationFieldText(variable),
     units: variable.units,
     docs: variable.documentation,
   };
@@ -460,7 +453,10 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   }, []);
   React.useEffect(() => fallBackOnFailedPending(pendingAtMount.current, alive, committedRef, setSubmitted), []);
   const drafts = {
-    equation: draftText(stringFromDescendants(equationContents), submitted.equation ?? seeded.equation),
+    equation:
+      perElement === undefined
+        ? draftText(stringFromDescendants(equationContents), submitted.equation ?? seeded.equation)
+        : undefined,
     units: draftText(stringFromDescendants(unitsContents), submitted.units ?? seeded.units),
     docs: draftText(stringFromDescendants(notesContents), submitted.docs ?? seeded.docs),
   };
@@ -477,7 +473,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
   const equationDecorate = React.useMemo(
     () =>
       fieldDecorate(
-        scalarEquationFor(variable),
+        equationFieldText(variable),
         stringFromDescendants(equationContents),
         variable.errors,
         variable.unitErrors,
@@ -799,9 +795,36 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
       }
     }
 
+    const note = equationNote(variable);
+    const noteId = note !== undefined ? `${fieldIdPrefix}-eqn-note` : undefined;
+    const equationDescribedBy = [noteId, equationErrorIds].filter((id) => id !== undefined).join(' ') || undefined;
+
     return (
       <div className={styles.cardContent}>
-        {showPreview ? (
+        {note !== undefined && (
+          <div id={noteId} className={styles.eqnNote}>
+            {note}
+          </div>
+        )}
+        {perElement !== undefined ? (
+          // Focusable so the keyboard can scroll a long list.
+          <div
+            className={styles.elementEquations}
+            role="group"
+            aria-label="Element equations"
+            aria-describedby={equationDescribedBy}
+            tabIndex={0}
+          >
+            <dl className={styles.elementEquationList}>
+              {elementEquations(perElement).map((row) => (
+                <React.Fragment key={row.element}>
+                  <dt>{row.element}</dt>
+                  <dd>{row.equation}</dd>
+                </React.Fragment>
+              ))}
+            </dl>
+          </div>
+        ) : showPreview ? (
           <div className={styles.eqnPreview} onClick={(e) => handlePreviewClick(e, equationStr)}>
             {latexHTML !== undefined ? (
               <span dangerouslySetInnerHTML={{ __html: latexHTML }} />
@@ -831,7 +854,7 @@ export function VariableDetails(props: VariableDetailsProps): React.ReactElement
               // failure isn't conveyed by the red highlight alone. Slate
               // passes unknown props through to the contenteditable div.
               aria-invalid={detailsView.equationErrors.length > 0 || undefined}
-              aria-describedby={equationErrorIds}
+              aria-describedby={equationDescribedBy}
               onBlur={(e) => {
                 // An intra-panel focus move (to another field or the action
                 // buttons) neither commits nor collapses the raw editor: the

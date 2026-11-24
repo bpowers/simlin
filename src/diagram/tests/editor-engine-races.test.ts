@@ -804,7 +804,8 @@ describeWithEngine('Editor + real engine: edits racing in-flight patches', () =>
     expect({ x: stock.x, y: stock.y }).toEqual({ x: 150, y: 140 });
     // The draft's edit reached the engine before the move.
     const opTypes = m.patches.map((p) => p.models![0].ops[0].type);
-    expect(opTypes.indexOf('upsertStock')).toBeLessThan(opTypes.lastIndexOf('upsertView'));
+    expect(opTypes).toContain('setUnits');
+    expect(opTypes.indexOf('setUnits')).toBeLessThan(opTypes.lastIndexOf('upsertView'));
     expect(document.querySelector('.unitsEditor')?.textContent).toBe('widgets');
   });
 

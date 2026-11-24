@@ -7,7 +7,6 @@ import { describe, it, expect } from '@rstest/core';
 import { EquationError, UnitError, UnitErrorKind, ErrorCode } from '@simlin/core/datamodel';
 
 import {
-  applyToAllPrefix,
   byteOffsetToUtf16,
   highlightRangeForField,
   highlightSpansForLines,
@@ -49,48 +48,37 @@ describe('byteOffsetToUtf16', () => {
 
 describe('highlightSpansForLines', () => {
   it('returns plain lines when there is no range', () => {
-    expect(highlightSpansForLines('a + b\nc', 0, undefined)).toEqual([[{ text: 'a + b' }], [{ text: 'c' }]]);
+    expect(highlightSpansForLines('a + b\nc', undefined)).toEqual([[{ text: 'a + b' }], [{ text: 'c' }]]);
   });
 
   it('marks a range within a single line', () => {
-    const spans = highlightSpansForLines('a + bad_ref', 0, { startByte: 4, endByte: 11, kind: 'error' });
+    const spans = highlightSpansForLines('a + bad_ref', { startByte: 4, endByte: 11, kind: 'error' });
     expect(spans).toEqual([[{ text: 'a + ' }, { text: 'bad_ref', error: true }]]);
   });
 
   it('marks a warning range', () => {
-    const spans = highlightSpansForLines('x * y', 0, { startByte: 0, endByte: 1, kind: 'warning' });
+    const spans = highlightSpansForLines('x * y', { startByte: 0, endByte: 1, kind: 'warning' });
     expect(spans).toEqual([[{ text: 'x', warning: true }, { text: ' * y' }]]);
   });
 
   it('marks a range on the second line of a multi-line equation', () => {
     // Range covers 'bad' on line 1 (offsets are into the whole string).
-    const spans = highlightSpansForLines('a +\nbad + c', 0, { startByte: 4, endByte: 7, kind: 'error' });
+    const spans = highlightSpansForLines('a +\nbad + c', { startByte: 4, endByte: 7, kind: 'error' });
     expect(spans).toEqual([[{ text: 'a +' }], [{ text: 'bad', error: true }, { text: ' + c' }]]);
   });
 
   it('marks a range spanning a newline across two lines', () => {
-    const spans = highlightSpansForLines('ab\ncd', 0, { startByte: 1, endByte: 4, kind: 'error' });
+    const spans = highlightSpansForLines('ab\ncd', { startByte: 1, endByte: 4, kind: 'error' });
     expect(spans).toEqual([
       [{ text: 'a' }, { text: 'b', error: true }],
       [{ text: 'c', error: true }, { text: 'd' }],
     ]);
   });
 
-  it('shifts raw-equation offsets past the apply-to-all prefix', () => {
-    const displayed = applyToAllPrefix + 'rate * 2';
-    // Engine offsets are into the raw equation 'rate * 2'.
-    const spans = highlightSpansForLines(displayed, applyToAllPrefix.length, {
-      startByte: 0,
-      endByte: 4,
-      kind: 'error',
-    });
-    expect(spans).toEqual([[{ text: '{apply-to-all:}' }], [{ text: 'rate', error: true }, { text: ' * 2' }]]);
-  });
-
   it('converts byte offsets in non-ASCII equations to UTF-16 indices', () => {
     // 'é' is 2 UTF-8 bytes: byte range [7, 8] of 'café + b' is just 'b'
     // (c=1,a=2,f=3,é=5,' '=6,+=7 ... offsets: after 'café + ' is byte 8).
-    const spans = highlightSpansForLines('café + b', 0, { startByte: 8, endByte: 9, kind: 'error' });
+    const spans = highlightSpansForLines('café + b', { startByte: 8, endByte: 9, kind: 'error' });
     expect(spans).toEqual([[{ text: 'café + ' }, { text: 'b', error: true }]]);
   });
 });

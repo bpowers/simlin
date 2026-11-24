@@ -562,6 +562,34 @@ export interface UpdateStockFlowsPayload {
 }
 
 /**
+ * Payload for set equation operation: a scalar's equation (a stock's initial
+ * value), or the equation every element of an arrayed variable follows.
+ * Everything else about the variable -- its dimensions, its elements' own
+ * equations -- stays as it is.
+ */
+export interface SetEquationPayload {
+  ident: string;
+  equation: string;
+}
+
+/**
+ * Payload for set units operation; an empty string clears the units.
+ */
+export interface SetUnitsPayload {
+  ident: string;
+  units: string;
+}
+
+/**
+ * Payload for set notes operation: the variable's documentation; an empty
+ * string clears it.
+ */
+export interface SetNotesPayload {
+  ident: string;
+  notes: string;
+}
+
+/**
  * Payload for set sim specs operation.
  */
 export interface SetSimSpecsPayload {
@@ -636,6 +664,21 @@ export interface UpdateStockFlowsOp {
   payload: UpdateStockFlowsPayload;
 }
 
+export interface SetEquationOp {
+  type: 'setEquation';
+  payload: SetEquationPayload;
+}
+
+export interface SetUnitsOp {
+  type: 'setUnits';
+  payload: SetUnitsPayload;
+}
+
+export interface SetNotesOp {
+  type: 'setNotes';
+  payload: SetNotesPayload;
+}
+
 /**
  * Union type for model operations.
  */
@@ -648,7 +691,10 @@ export type JsonModelOperation =
   | RenameVariableOp
   | UpsertViewOp
   | DeleteViewOp
-  | UpdateStockFlowsOp;
+  | UpdateStockFlowsOp
+  | SetEquationOp
+  | SetUnitsOp
+  | SetNotesOp;
 
 /**
  * Union type for project operations.

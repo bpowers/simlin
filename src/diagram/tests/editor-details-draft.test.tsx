@@ -204,9 +204,7 @@ describe('Editor details-panel drafts', () => {
     });
     expect(modelEdits).toHaveLength(1);
     const patch = modelEdits[0].buildPatch(baseProject());
-    const op = patch.models![0].ops[0] as { type: string; payload: { aux: { units?: string } } };
-    expect(op.type).toBe('upsertAux');
-    expect(op.payload.aux.units).toBe('people per year');
+    expect(patch.models![0].ops).toEqual([{ type: 'setUnits', payload: { ident: 'x', units: 'people per year' } }]);
 
     // A second press (or the blur that follows) submits the same pending draft.
     act(() => {
@@ -223,8 +221,7 @@ describe('Editor details-panel drafts', () => {
         fireEvent.pointerUp(getByTestId('canvas'));
       });
     const unitsOf = (i: number) =>
-      (modelEdits[i].buildPatch(baseProject()).models![0].ops[0] as { payload: { aux: { units?: string } } }).payload
-        .aux.units;
+      (modelEdits[i].buildPatch(baseProject()).models![0].ops[0] as { payload: { units: string } }).payload.units;
     await appendUnits(container, ' per year');
     press();
     await appendUnits(container, '!');

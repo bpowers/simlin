@@ -5,24 +5,16 @@
 // Pure helpers for mapping engine-reported source ranges onto the equation
 // text shown in the details panel.
 //
-// Two coordinate mismatches have to be bridged:
-//
-//  1. The Rust engine reports error and `eqnloc` offsets as *byte* offsets
-//     into the UTF-8 encoding of the equation, while JavaScript strings are
-//     indexed by UTF-16 code units. They agree only for pure-ASCII text.
-//  2. The panel sometimes displays a decorated version of the raw equation
-//     (apply-to-all equations are shown with an `{apply-to-all:}` line
-//     prepended), so a raw-equation offset must additionally be shifted to
-//     its position in the displayed string, which may span multiple lines
-//     (one Slate element per line).
+// The Rust engine reports error and `eqnloc` offsets as *byte* offsets into the
+// UTF-8 encoding of the equation, while JavaScript strings are indexed by UTF-16
+// code units (they agree only for pure-ASCII text), and the panel's editor holds
+// the text as one Slate element per line. The fields show the engine's text
+// verbatim, so no other shift is needed; anything the panel says about an
+// equation is rendered beside the field, never in its text.
 
 import type { EquationError, UnitError } from '@simlin/core/datamodel';
 
 import type { FormattedText } from './drawing/SlateEditor';
-
-/** Displayed-string prefix for apply-to-all arrayed equations. Engine offsets
- *  are relative to the raw equation, which begins after this prefix. */
-export const applyToAllPrefix = '{apply-to-all:}\n';
 
 /**
  * Convert a byte offset into the UTF-8 encoding of `s` to a UTF-16 code-unit
@@ -44,34 +36,27 @@ export function byteOffsetToUtf16(s: string, byteOffset: number): number {
 }
 
 export interface HighlightRange {
-  /** byte offset into the raw equation (inclusive) */
+  /** byte offset into the field's text (inclusive) */
   readonly startByte: number;
-  /** byte offset into the raw equation (exclusive) */
+  /** byte offset into the field's text (exclusive) */
   readonly endByte: number;
   readonly kind: 'error' | 'warning';
 }
 
 /**
  * Split `displayed` into lines (one Slate element per line, matching
- * plainDeserialize) and apply `range` -- byte offsets into the raw equation,
- * which begins at UTF-16 index `rawStart` within `displayed` -- as
- * error/warning marks on the covered text. Lines (or line parts) outside the
- * range come back as plain text spans.
+ * plainDeserialize) and apply `range` as error/warning marks on the covered
+ * text. Lines (or line parts) outside the range come back as plain text spans.
  */
-export function highlightSpansForLines(
-  displayed: string,
-  rawStart: number,
-  range: HighlightRange | undefined,
-): FormattedText[][] {
+export function highlightSpansForLines(displayed: string, range: HighlightRange | undefined): FormattedText[][] {
   const lines = displayed.split('\n');
 
   if (!range) {
     return lines.map((line) => [{ text: line }]);
   }
 
-  const raw = displayed.slice(rawStart);
-  const start = rawStart + byteOffsetToUtf16(raw, range.startByte);
-  const end = rawStart + byteOffsetToUtf16(raw, range.endByte);
+  const start = byteOffsetToUtf16(displayed, range.startByte);
+  const end = byteOffsetToUtf16(displayed, range.endByte);
   const mark: Partial<FormattedText> = range.kind === 'error' ? { error: true } : { warning: true };
 
   const result: FormattedText[][] = [];
@@ -100,8 +85,8 @@ export function highlightSpansForLines(
 
 /**
  * Pick the error/warning underline for one details-panel field (the equation
- * editor or the units editor) from the variable's errors. `raw` is the raw
- * field text (the displayed string minus any apply-to-all prefix).
+ * editor or the units editor) from the variable's errors. `raw` is the field's
+ * committed text.
  *
  * Equation field: a fatal equation error wins outright (and suppresses unit
  * underlines even when its own range is empty). Otherwise a unit consistency
