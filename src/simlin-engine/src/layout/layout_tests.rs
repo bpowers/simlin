@@ -1471,7 +1471,7 @@ fn test_layout_emits_a_flow_listed_by_two_stocks_once() {
         assert_eq!(count, 1, "flow {name} must be laid out once");
     }
     assert_eq!(
-        crate::diagram::flow_geometry::flow_invariant_violations(&view.elements.to_vec()),
+        simlin_diagram::flow_geometry::flow_invariant_violations(&view.elements.to_vec()),
         Vec::<String>::new()
     );
 }

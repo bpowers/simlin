@@ -25,16 +25,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::diagram::common::{
+use simlin_base::datamodel::{self, ViewElement};
+use simlin_diagram::common::{
     self, Point, Rect, display_name, merge_bounds, rect_area, rect_overlap_area,
     segment_clip_interval_in_rect,
 };
-use crate::diagram::connector::{ARC_POLYLINE_SAMPLES, connector_polyline, get_visual_center};
-use crate::diagram::elements::{
+use simlin_diagram::connector::{ARC_POLYLINE_SAMPLES, connector_polyline, get_visual_center};
+use simlin_diagram::elements::{
     aux_shape_bounds, cloud_bounds, module_shape_bounds, stock_shape_bounds,
 };
-use crate::diagram::label::{LabelProps, label_bounds};
-use simlin_base::datamodel::{self, ViewElement};
+use simlin_diagram::label::{LabelProps, label_bounds};
 
 use super::annealing::segment_intersection;
 use super::build_view_segments;
@@ -399,7 +399,7 @@ impl DefectSink {
 /// ([`pipe_rects`]). An alias draws an aux-sized circle. Links and groups have
 /// no shape.
 pub(crate) fn node_shape_box(element: &ViewElement) -> Option<Rect> {
-    use crate::diagram::constants::AUX_RADIUS;
+    use simlin_diagram::constants::AUX_RADIUS;
     match element {
         ViewElement::Aux(a) => Some(aux_shape_bounds(a)),
         ViewElement::Stock(s) => Some(stock_shape_bounds(s)),
@@ -438,7 +438,7 @@ pub(crate) fn pipe_rects(flow: &datamodel::view_element::Flow) -> Vec<Rect> {
 /// The bare shape box of an alias: the aux-radius circle `render_alias` draws,
 /// centered on the alias position.
 pub(crate) fn alias_shape_box(alias: &simlin_base::datamodel::view_element::Alias) -> Rect {
-    use crate::diagram::constants::AUX_RADIUS;
+    use simlin_diagram::constants::AUX_RADIUS;
     circle_box(alias.x, alias.y, AUX_RADIUS)
 }
 
@@ -449,7 +449,7 @@ pub(crate) fn alias_label_props_for(
     source_name: &str,
     side: simlin_base::datamodel::view_element::LabelSide,
 ) -> LabelProps {
-    use crate::diagram::constants::AUX_RADIUS;
+    use simlin_diagram::constants::AUX_RADIUS;
     LabelProps::new(alias.x, alias.y, side, display_name(source_name))
         .with_radii(AUX_RADIUS, AUX_RADIUS)
 }
@@ -487,7 +487,7 @@ pub(crate) fn element_label_props_for(
     element: &ViewElement,
     side: simlin_base::datamodel::view_element::LabelSide,
 ) -> Option<LabelProps> {
-    use crate::diagram::constants::{
+    use simlin_diagram::constants::{
         AUX_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
     };
     match element {

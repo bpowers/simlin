@@ -1,9 +1,10 @@
 {
   "rust": {
     "simlin-base": [],
-    "simlin-engine": ["simlin-base"],
-    "simlin": ["simlin-base", "simlin-engine"],
-    "simlin-cli": ["simlin-base", "simlin-engine", "simlin"],
+    "simlin-diagram": ["simlin-base"],
+    "simlin-engine": ["simlin-base", "simlin-diagram"],
+    "simlin": ["simlin-base", "simlin-diagram", "simlin-engine"],
+    "simlin-cli": ["simlin-base", "simlin-diagram", "simlin-engine", "simlin"],
     "simlin-mcp": ["simlin-engine", "simlin-mcp-core"],
     "simlin-mcp-core": ["simlin-base", "simlin-engine"],
     "simlin-tests": []

@@ -3,11 +3,11 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::diagram::common::segment_length_in_rect;
-use crate::diagram::constants::{AUX_RADIUS, STOCK_WIDTH};
 use crate::layout::taste::{Degradation, degrade};
 use proptest::prelude::*;
 use simlin_base::datamodel::view_element::{self, LabelSide, LinkShape};
+use simlin_diagram::common::segment_length_in_rect;
+use simlin_diagram::constants::{AUX_RADIUS, STOCK_WIDTH};
 
 // --- fixture helpers ---
 
@@ -222,7 +222,7 @@ fn test_a_pipe_into_a_stock_through_the_stocks_name_strikes_it() {
         label_side: LabelSide::Top,
         compat: None,
     });
-    let top = 200.0 - crate::diagram::constants::STOCK_HEIGHT / 2.0;
+    let top = 200.0 - simlin_diagram::constants::STOCK_HEIGHT / 2.0;
     let view = make_view(vec![
         s,
         flow_with_points(

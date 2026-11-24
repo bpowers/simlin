@@ -156,7 +156,7 @@ fn convert_views(
         // yet, and each `rewrite` allocates every element afresh.
         let uid_map = sf.elements.rewrite(|elements| {
             route_pending_flows(elements, &pending_routes);
-            crate::diagram::flow_geometry::normalize_flow_geometry(elements);
+            simlin_diagram::flow_geometry::normalize_flow_geometry(elements);
             reassign_uids_sequential(elements)
         });
         if let Some(sketch_compat) = sf.sketch_compat.as_mut() {

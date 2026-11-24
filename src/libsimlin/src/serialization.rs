@@ -814,7 +814,7 @@ pub unsafe extern "C" fn simlin_project_render_svg(
         out_error,
         "SVG",
         |datamodel, model_name| {
-            simlin_engine::diagram::render_svg(datamodel, model_name).map(String::into_bytes)
+            simlin_diagram::render_svg(datamodel, model_name).map(String::into_bytes)
         },
     );
 }
@@ -856,7 +856,7 @@ pub unsafe extern "C" fn simlin_project_render_scene(
         out_error,
         "scene",
         |datamodel, model_name| {
-            simlin_engine::diagram::build_scene(datamodel, model_name)
+            simlin_diagram::build_scene(datamodel, model_name)
                 .and_then(|scene| scene.to_json())
                 .map(String::into_bytes)
         },
@@ -898,7 +898,7 @@ pub unsafe extern "C" fn simlin_project_render_png(
     out_len: *mut usize,
     out_error: *mut *mut SimlinError,
 ) {
-    let opts = simlin_engine::diagram::PngRenderOpts {
+    let opts = simlin_diagram::PngRenderOpts {
         width: if width > 0 { Some(width) } else { None },
         height: if height > 0 { Some(height) } else { None },
     };
@@ -910,8 +910,7 @@ pub unsafe extern "C" fn simlin_project_render_png(
         out_error,
         "PNG",
         |datamodel, model_name| {
-            simlin_engine::diagram::render_png(datamodel, model_name, &opts)
-                .map_err(|err| err.to_string())
+            simlin_diagram::render_png(datamodel, model_name, &opts).map_err(|err| err.to_string())
         },
     );
 }

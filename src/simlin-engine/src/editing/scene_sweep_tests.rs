@@ -43,9 +43,9 @@ use std::sync::LazyLock;
 
 use rayon::prelude::*;
 
-use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
 use simlin_base::datamodel::ViewElement;
 use simlin_base::datamodel::view_element::{Flow, Stock};
+use simlin_diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
 
 use super::geometry::{FlowEnd, Point};
 use super::heal::heal;

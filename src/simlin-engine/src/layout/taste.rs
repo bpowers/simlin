@@ -27,9 +27,9 @@ use std::collections::{HashMap, HashSet};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use crate::diagram::connector::get_visual_center;
 use simlin_base::datamodel::view_element::LinkShape;
 use simlin_base::datamodel::{StockFlow, ViewElement};
+use simlin_diagram::connector::get_visual_center;
 
 use super::declutter::resnap_flow_endpoints_to_stocks;
 

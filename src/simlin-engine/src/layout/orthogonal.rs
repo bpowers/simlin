@@ -34,9 +34,9 @@
 
 use std::collections::HashMap;
 
-use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
 use simlin_base::datamodel::ViewElement;
 use simlin_base::datamodel::view_element::FlowPoint;
+use simlin_diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
 
 /// Tolerance (in diagram units) for deciding whether two coordinates are equal
 /// (a segment is axis-aligned) or a point sits on a stock face.

@@ -17,9 +17,9 @@
 //! - B': a pipe exists, but the stock the model links is not one of its ends.
 
 use crate::compat::open_vensim;
-use crate::diagram::flow_geometry::flow_invariant_violations;
 use simlin_base::common::canonicalize;
 use simlin_base::datamodel::{self, ViewElement, view_element};
+use simlin_diagram::flow_geometry::flow_invariant_violations;
 
 fn main_view(project: &datamodel::Project) -> &datamodel::StockFlow {
     let datamodel::View::StockFlow(sf) = &project.models[0].views[0];

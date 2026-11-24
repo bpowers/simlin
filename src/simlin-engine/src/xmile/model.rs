@@ -509,7 +509,7 @@ impl From<Model> for datamodel::Model {
                 let mut view = datamodel::View::from(v);
                 let datamodel::View::StockFlow(sf) = &mut view;
                 sf.elements.rewrite(|elements| {
-                    crate::diagram::flow_geometry::normalize_flow_geometry(elements)
+                    simlin_diagram::flow_geometry::normalize_flow_geometry(elements)
                 });
                 view
             })

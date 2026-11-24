@@ -17,7 +17,7 @@ publish = false
 # report for a person. Each lists this feature, so a plain `cargo test` links
 # none of them and `cargo clippy --all-targets --all-features` still checks them
 # all.
-instruments = ["simlin-engine/layout_eval", "simlin-engine/png_render"]
+instruments = ["simlin-engine/layout_eval"]
 # The Excel data provider, for the corpus models whose data is in a spreadsheet.
 ext_data = ["simlin-engine/ext_data"]
 # The loop-score tracing `ltm_full_bench` prints.
@@ -29,6 +29,7 @@ ltm_bench = ["simlin-engine/ltm_bench"]
 # off, and no test in this package is gated on a feature: a gate that is off
 # compiles its test away without a word (GH #925).
 simlin-base = { path = "../simlin-base" }
+simlin-diagram = { path = "../simlin-diagram", features = ["png_render", "test-support"] }
 simlin-engine = { path = "../simlin-engine", features = ["file_io", "test-support"] }
 buffa = "0.9"
 salsa = "0.28.5"
@@ -44,6 +45,8 @@ serde = { version = "1", features = ["derive"] }
 # terminal summary, so trim to the bench-runner harness alone.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 csv = "1"
+# To decode the PNGs the diagram tests render.
+resvg = { version = "0.47", default-features = false }
 tempfile = "3"
 base64 = "0.22"
 ed25519-dalek = "2"

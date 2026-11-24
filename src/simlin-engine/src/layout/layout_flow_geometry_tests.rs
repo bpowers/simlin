@@ -8,7 +8,7 @@
 //! whose helpers it reuses.
 
 use super::*;
-use crate::diagram::flow_geometry::flow_invariant_violations;
+use simlin_diagram::flow_geometry::flow_invariant_violations;
 
 /// `resnap_flow_endpoints` keeps an endpoint's position along the face it
 /// snaps to, but never within `CORNER_CLEARANCE` of a corner, on either
@@ -18,7 +18,7 @@ fn test_resnap_keeps_corner_clearance_on_both_approaches() {
     let config = LayoutConfig::default();
     let half_w = config.stock_width / 2.0;
     let half_h = config.stock_height / 2.0;
-    let clearance = crate::diagram::flow_geometry::CORNER_CLEARANCE;
+    let clearance = simlin_diagram::flow_geometry::CORNER_CLEARANCE;
     // (valve, endpoint before resnap, expected endpoint): the preserved
     // coordinate lies beyond the stock's span on each row.
     let rows = [

@@ -57,9 +57,9 @@ pub(super) fn point_node_footprints(
     point_idents: &HashSet<String>,
     var_to_node: &HashMap<String, String>,
     state: &LayoutState,
-) -> HashMap<String, crate::diagram::common::Rect> {
-    use crate::diagram::constants::AUX_RADIUS;
-    use crate::diagram::label::{LabelProps, label_bounds};
+) -> HashMap<String, simlin_diagram::common::Rect> {
+    use simlin_diagram::constants::AUX_RADIUS;
+    use simlin_diagram::label::{LabelProps, label_bounds};
 
     let mut footprints = HashMap::new();
     for ident in point_idents {
@@ -67,13 +67,13 @@ pub(super) fn point_node_footprints(
             continue;
         };
         let elem_name = super::format_label_with_line_breaks(&state.display_name(ident));
-        let metric_text = crate::diagram::common::display_name(&elem_name);
+        let metric_text = simlin_diagram::common::display_name(&elem_name);
         let props = LabelProps::new(0.0, 0.0, LabelSide::Bottom, metric_text)
             .with_radii(AUX_RADIUS, AUX_RADIUS);
         let label_rect = label_bounds(&props);
         footprints.insert(
             node_id.clone(),
-            crate::diagram::common::Rect {
+            simlin_diagram::common::Rect {
                 left: label_rect.left.min(-AUX_RADIUS),
                 right: label_rect.right.max(AUX_RADIUS),
                 top: label_rect.top.min(-AUX_RADIUS),
@@ -97,9 +97,9 @@ pub(super) fn point_node_footprints(
 /// unsorted accumulation would break per-seed layout determinism (#633).
 pub(super) fn point_node_footprint_overlap(
     layout: &Layout<String>,
-    footprints: &HashMap<String, crate::diagram::common::Rect>,
+    footprints: &HashMap<String, simlin_diagram::common::Rect>,
 ) -> f64 {
-    use crate::diagram::common::{Rect as GeomRect, rect_area, rect_overlap_area};
+    use simlin_diagram::common::{Rect as GeomRect, rect_area, rect_overlap_area};
 
     let mut nodes: Vec<(&String, &GeomRect)> = footprints
         .iter()

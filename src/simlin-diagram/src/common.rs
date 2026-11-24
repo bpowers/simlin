@@ -4,7 +4,7 @@
 
 use std::f64::consts::PI;
 
-use crate::diagram::constants::ARRAYED_OFFSET;
+use crate::constants::ARRAYED_OFFSET;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -220,22 +220,22 @@ pub fn rad_to_deg(r: f64) -> f64 {
 // `#[allow(dead_code)]` until a non-test caller needs it.
 
 /// Width of a rect (right - left). May be negative for a degenerate/inverted rect.
-pub(crate) fn rect_width(r: &Rect) -> f64 {
+pub fn rect_width(r: &Rect) -> f64 {
     r.right - r.left
 }
 
 /// Height of a rect (bottom - top).
-pub(crate) fn rect_height(r: &Rect) -> f64 {
+pub fn rect_height(r: &Rect) -> f64 {
     r.bottom - r.top
 }
 
 /// Area of a rect, clamped to >= 0.
-pub(crate) fn rect_area(r: &Rect) -> f64 {
+pub fn rect_area(r: &Rect) -> f64 {
     (rect_width(r).max(0.0)) * (rect_height(r).max(0.0))
 }
 
 /// Area of the axis-aligned intersection of two rects (0 if they do not overlap).
-pub(crate) fn rect_overlap_area(a: &Rect, b: &Rect) -> f64 {
+pub fn rect_overlap_area(a: &Rect, b: &Rect) -> f64 {
     let w = a.right.min(b.right) - a.left.max(b.left);
     let h = a.bottom.min(b.bottom) - a.top.max(b.top);
     if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
@@ -249,11 +249,7 @@ pub(crate) fn rect_overlap_area(a: &Rect, b: &Rect) -> f64 {
 /// `layout::metrics` uses the raw intervals to UNION a connector's coverage
 /// across multiple boxes so each physical sub-length is counted at most once.
 /// Pure; no allocation.
-pub(crate) fn segment_clip_interval_in_rect(
-    p0: &Point,
-    p1: &Point,
-    r: &Rect,
-) -> Option<(f64, f64)> {
+pub fn segment_clip_interval_in_rect(p0: &Point, p1: &Point, r: &Rect) -> Option<(f64, f64)> {
     // Liang-Barsky clip of the parametric segment p0 + t*(p1-p0), t in [0,1],
     // against left/right/top/bottom slabs.
     let dx = p1.x - p0.x;
@@ -298,7 +294,7 @@ pub(crate) fn segment_clip_interval_in_rect(
 /// Returns 0 if the segment never enters r. Pure; no allocation. Delegates to
 /// `segment_clip_interval_in_rect` so the clip math lives in exactly one place.
 #[allow(dead_code)]
-pub(crate) fn segment_length_in_rect(p0: &Point, p1: &Point, r: &Rect) -> f64 {
+pub fn segment_length_in_rect(p0: &Point, p1: &Point, r: &Rect) -> f64 {
     match segment_clip_interval_in_rect(p0, p1, r) {
         Some((t0, t1)) => {
             let dx = p1.x - p0.x;

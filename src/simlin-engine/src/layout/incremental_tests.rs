@@ -342,7 +342,7 @@ fn flow_named(view: &datamodel::StockFlow, name: &str) -> view_element::Flow {
 /// Every pair of shapes that overlap, where one of them is in `uids`.
 fn overlaps_involving(view: &datamodel::StockFlow, uids: &HashSet<i32>) -> Vec<(i32, i32)> {
     use crate::layout::metrics::node_shape_box;
-    let shapes: Vec<(i32, crate::diagram::common::Rect)> = view
+    let shapes: Vec<(i32, simlin_diagram::common::Rect)> = view
         .elements
         .iter()
         .filter_map(|e| node_shape_box(e).map(|r| (e.get_uid(), r)))
@@ -463,7 +463,7 @@ fn deleting_a_middle_stock_leaves_the_flows_through_it_in_place() {
 /// The stocks whose interior a flow's pipe passes through, other than its own
 /// ends.
 fn stocks_crossed(view: &datamodel::StockFlow, flow: &view_element::Flow) -> Vec<String> {
-    use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+    use simlin_diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
     let ends: HashSet<i32> = [flow.points.first(), flow.points.last()]
         .into_iter()
         .flatten()
@@ -1060,7 +1060,7 @@ fn a_created_parameter_left_on_a_shape_moves_to_the_nearest_clear_spot() {
     // included. The composition through production is pinned by the battery's
     // catastrophe fixture, where an inserted intermediate landed on an alias
     // the jammed relaxation could not clear.
-    use crate::diagram::constants::AUX_RADIUS;
+    use simlin_diagram::constants::AUX_RADIUS;
     let aux = |uid: i32, x: f64| {
         ViewElement::Aux(view_element::Aux {
             name: format!("a{uid}"),
@@ -1306,7 +1306,7 @@ fn a_variable_redrawn_as_a_larger_shape_moves_off_its_neighbour() {
     );
     let (x, y) = center_named(&view, "a").expect("a drawn");
     assert!(
-        (x - 100.0).hypot(y - 100.0) <= crate::diagram::constants::STOCK_WIDTH,
+        (x - 100.0).hypot(y - 100.0) <= simlin_diagram::constants::STOCK_WIDTH,
         "a moves only as far as it must: ({x}, {y})"
     );
 }

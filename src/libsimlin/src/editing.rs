@@ -19,7 +19,7 @@
 
 use serde::Serialize;
 use simlin_base::datamodel;
-use simlin_engine::diagram::SceneElement;
+use simlin_diagram::SceneElement;
 use simlin_engine::editing;
 use std::ffi::CStr;
 use std::os::raw::c_char;

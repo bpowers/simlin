@@ -420,14 +420,6 @@ Vensim's unit semantics are cited per rule; an unverified one is marked unverifi
 - What a sync after an edit must do is stated independently of `incremental.rs` by `layout/edit_audit.rs` (scope: untouched elements and surviving links come back as they were; consistency: the view agrees with the model and routed flows hold the strict invariants, charging only what the edit introduced; placement: created elements land on no shape and routed pipes through no foreign stock), and `layout/edit_scenarios.rs` generates the edits an agent makes for any model and drives them through `apply_patch` and the production sync rule.
   The battery (`edit_scenarios_tests.rs`) pins every finding in `KNOWN_DEFECTS`, each row naming its defect: a new finding fails, and so does a row that stops reproducing, so a fix deletes its rows.
   Element order is the view's draw order and what a saved file lists: a sync keeps surviving links and clouds in place and appends what it creates in a deterministic order.
-- `diagram/` renders a model's first stock-and-flow view as SVG (`render_svg`, byte-identical to the TypeScript static renderer; `src/diagram/tests/svg-rendering.test.ts` is that parity test), as PNG (`render_png`, behind `png_render`), and as a scene display list (`build_scene`, whose contract is [the diagram scene](/docs/design/diagram-scene.md)), and exposes the exact geometry the layout metric scores.
-  Every drawing decision has one owner, and both serializers read it:
-  - `resolve::resolve_view` decides which elements are drawn (a link or flow whose endpoints are missing from the view is not), their layer and draw order, whether each is arrayed, an alias's target, and the fit-to-content bounds.
-  - Each element's geometry is one function: `aux_geometry`, `stock_geometry`, `module_geometry`, `alias_geometry`, `group_geometry`, `cloud_transform` (over the shared `CLOUD_PATH`), `flow_geometry`, `connector_geometry`, `arrowhead_geometry`, and `label::label_lines` for per-line label anchors.
-    `render_*` prints from it and `scene.rs` reads it.
-    Never compute a drawn number a second time in either serializer: a hand-maintained twin drifts exactly where the geometry is non-trivial; extend the geometry function instead.
-  - The scene changes representation only: `path::PathBuilder::svg_arc_to` converts every SVG arc to cubic Béziers (SVG 1.1 F.6.5 and F.6.6, at most 30 degrees per cubic, so a cubic stays within 1e-6 of its radius), and transforms are applied to the points.
-    `scene_tests.rs` checks each scene number against the number the SVG prints for the same project.
 
 ## Diagram editing
 
@@ -569,6 +561,6 @@ It is behind the `agent_tools` feature (default on; libsimlin's browser bundle l
 
 ## Cargo features and generated files
 
-Features: `schema`, `ai_info`, `file_io` (CSV/filesystem providers; a production dependency kept out of wasm, which a test build has whatever its features: `cfg(any(test, feature = "file_io"))`), `ext_data`, `png_render`, `ltm_bench`, `test-support`, `layout_eval`.
+Features: `schema`, `ai_info`, `file_io` (CSV/filesystem providers; a production dependency kept out of wasm, which a test build has whatever its features: `cfg(any(test, feature = "file_io"))`), `ext_data`, `ltm_bench`, `test-support`, `layout_eval`.
 
 Generated, do not edit: `src/project_io.gen.rs` from `project_io.proto` (`pnpm build:gen-protobufs`), which carries a hash that a test checks.

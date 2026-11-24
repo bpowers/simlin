@@ -16,10 +16,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::diagram::common::Point as DiagramPoint;
-use crate::diagram::resolve::resolve_element;
-use crate::diagram::scene::{SceneElement, dangling_link_scene_element, scene_element};
 use simlin_base::datamodel::ViewElement;
+use simlin_diagram::common::Point as DiagramPoint;
+use simlin_diagram::resolve::resolve_element;
+use simlin_diagram::scene::{SceneElement, dangling_link_scene_element, scene_element};
 
 use super::base::BaseView;
 use super::gesture::Plan;

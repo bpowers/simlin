@@ -19,25 +19,25 @@ use std::sync::OnceLock;
 
 use serde::Serialize;
 
-use crate::diagram::arrowhead::{
+use crate::arrowhead::{
     ARROWHEAD_BACK_LARGE_ARC, ARROWHEAD_BACK_SWEEP, ArrowheadGeometry, arrowhead_geometry,
 };
-use crate::diagram::common::{Circle, Frame, Point, Rect, merge_bounds, rad_to_deg, rotate_about};
-use crate::diagram::connector::{
+use crate::common::{Circle, Frame, Point, Rect, merge_bounds, rad_to_deg, rotate_about};
+use crate::connector::{
     ConnectorGeometry, connector_geometry, connector_is_dashed, get_visual_center,
     intersect_element_straight,
 };
-use crate::diagram::constants::{
+use crate::constants::{
     ARROWHEAD_RADIUS, GROUP_LABEL_FONT_WEIGHT, LABEL_FONT_SIZE, LABEL_FONT_WEIGHT,
 };
-use crate::diagram::elements::{
+use crate::elements::{
     CLOUD_PATH, alias_geometry, aux_geometry, cloud_transform, group_geometry, module_geometry,
     stock_geometry,
 };
-use crate::diagram::flow::flow_geometry;
-use crate::diagram::label::{LabelProps, TextAnchor, label_bounds, label_lines};
-use crate::diagram::path::{PathBuilder, control_point_bounds, parse_absolute_svg_path};
-use crate::diagram::resolve::{LINK_LAYER, ResolvedElement, resolve_view};
+use crate::flow::flow_geometry;
+use crate::label::{LabelProps, TextAnchor, label_bounds, label_lines};
+use crate::path::{PathBuilder, control_point_bounds, parse_absolute_svg_path};
+use crate::resolve::{LINK_LAYER, ResolvedElement, resolve_view};
 use simlin_base::common::canonicalize;
 use simlin_base::datamodel;
 
@@ -135,7 +135,7 @@ impl SceneShape {
     /// Whether every coordinate is finite. A non-finite one (degenerate
     /// geometry the SVG prints as `NaN` and draws nothing for) has no drawing
     /// to hand a consumer.
-    pub(crate) fn is_finite(&self) -> bool {
+    pub fn is_finite(&self) -> bool {
         match self {
             SceneShape::Rect(r) => [r.x, r.y, r.width, r.height, r.corner_radius]
                 .iter()
@@ -230,7 +230,7 @@ pub struct SceneLabel {
 impl SceneLabel {
     /// Whether every line's anchor is finite; a label with a non-finite anchor
     /// is not drawn.
-    pub(crate) fn is_finite(&self) -> bool {
+    pub fn is_finite(&self) -> bool {
         self.lines
             .iter()
             .all(|l| l.x.is_finite() && l.y.is_finite())
@@ -316,7 +316,7 @@ struct ElementParts {
 
 /// The scene element of one resolved element, `None` where the SVG draws
 /// nothing.
-pub(crate) fn scene_element(
+pub fn scene_element(
     element: &ResolvedElement<'_>,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
 ) -> Option<SceneElement> {
@@ -487,7 +487,7 @@ pub(crate) fn scene_element(
 /// or reattached while its end is over no valid target. A straight connector
 /// from the source's boundary along the bearing of the point, its arrowhead at
 /// the point, drawn as `straight_geometry` draws a link's start and arrowhead.
-pub(crate) fn dangling_link_scene_element(
+pub fn dangling_link_scene_element(
     uid: i32,
     from: &datamodel::ViewElement,
     to: Point,
@@ -552,7 +552,7 @@ fn canonical_ident(name: &str) -> String {
 }
 
 /// An element label, with the halo the SVG's `labelBackground` filter draws.
-pub(crate) fn element_label(props: &LabelProps) -> SceneLabel {
+pub fn element_label(props: &LabelProps) -> SceneLabel {
     let (anchor, lines) = label_lines(props);
     SceneLabel {
         paint: LabelPaint::Label,
@@ -591,7 +591,7 @@ fn cloud_outline() -> &'static PathBuilder {
 }
 
 /// A cloud's outline as the scene draws it: [`CLOUD_PATH`] placed on the cloud.
-pub(crate) fn cloud_path(cloud: &datamodel::view_element::Cloud) -> Vec<f64> {
+pub fn cloud_path(cloud: &datamodel::view_element::Cloud) -> Vec<f64> {
     let transform = cloud_transform(cloud);
     let mut outline = cloud_outline().clone();
     outline.map_points(|p| transform.apply(p));
@@ -600,7 +600,7 @@ pub(crate) fn cloud_path(cloud: &datamodel::view_element::Cloud) -> Vec<f64> {
 
 /// A link's line as the scene draws it: straight from its start to its end, or
 /// the arc between them; empty for an undrawable link, which draws nothing.
-pub(crate) fn link_line_path(geometry: &ConnectorGeometry) -> Vec<f64> {
+pub fn link_line_path(geometry: &ConnectorGeometry) -> Vec<f64> {
     let mut line = PathBuilder::new();
     match geometry {
         ConnectorGeometry::Straight(g) => {
@@ -618,7 +618,7 @@ pub(crate) fn link_line_path(geometry: &ConnectorGeometry) -> Vec<f64> {
 
 /// An arrowhead's outline with its rotation applied: the tip, a line to the
 /// back edge, the back edge's bowing arc, closed.
-pub(crate) fn arrowhead_path(g: &ArrowheadGeometry) -> Vec<f64> {
+pub fn arrowhead_path(g: &ArrowheadGeometry) -> Vec<f64> {
     let mut path = PathBuilder::new();
     path.move_to(g.tip);
     path.line_to(g.back_start);
@@ -636,7 +636,7 @@ pub(crate) fn arrowhead_path(g: &ArrowheadGeometry) -> Vec<f64> {
     path.into_d()
 }
 
-pub(crate) fn polyline_path(points: &[Point]) -> Vec<f64> {
+pub fn polyline_path(points: &[Point]) -> Vec<f64> {
     let mut path = PathBuilder::new();
     if let Some((first, rest)) = points.split_first() {
         path.move_to(*first);
@@ -647,7 +647,7 @@ pub(crate) fn polyline_path(points: &[Point]) -> Vec<f64> {
     path.into_d()
 }
 
-pub(crate) fn rect_shape(frame: &Frame, corner_radius: f64, paint: ScenePaint) -> SceneShape {
+pub fn rect_shape(frame: &Frame, corner_radius: f64, paint: ScenePaint) -> SceneShape {
     SceneShape::Rect(SceneRectangle {
         x: frame.x,
         y: frame.y,
@@ -658,7 +658,7 @@ pub(crate) fn rect_shape(frame: &Frame, corner_radius: f64, paint: ScenePaint) -
     })
 }
 
-pub(crate) fn circle_shape(circle: &Circle, paint: ScenePaint) -> SceneShape {
+pub fn circle_shape(circle: &Circle, paint: ScenePaint) -> SceneShape {
     SceneShape::Circle(SceneCircle {
         cx: circle.x,
         cy: circle.y,
@@ -667,7 +667,7 @@ pub(crate) fn circle_shape(circle: &Circle, paint: ScenePaint) -> SceneShape {
     })
 }
 
-pub(crate) fn path_shape(d: Vec<f64>, paint: ScenePaint) -> SceneShape {
+pub fn path_shape(d: Vec<f64>, paint: ScenePaint) -> SceneShape {
     SceneShape::Path(ScenePath { d, paint })
 }
 
@@ -700,3 +700,6 @@ fn shape_bounds(shape: &SceneShape) -> Option<Rect> {
 #[cfg(test)]
 #[path = "scene_tests.rs"]
 mod scene_tests;
+#[cfg(any(test, feature = "test-support"))]
+#[path = "scene_test_support.rs"]
+pub mod test_support;

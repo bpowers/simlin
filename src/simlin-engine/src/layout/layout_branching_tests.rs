@@ -78,7 +78,7 @@ fn make_model(variables: Vec<datamodel::Variable>) -> datamodel::Model {
 /// annealing cannot either (stocks are not perturbable), so stacking is
 /// permanent.
 fn assert_no_stock_overlap(view: &datamodel::StockFlow) {
-    use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+    use simlin_diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
     let stocks: Vec<(&str, f64, f64)> = view
         .elements
         .iter()
@@ -110,7 +110,7 @@ fn assert_no_stock_overlap(view: &datamodel::StockFlow) {
 /// in `simlin-tests/tests/integration/layout.rs`; repeated here so the unit tests catch a detached
 /// branch flow without needing the corpus models.
 fn assert_flow_endpoints_attached(view: &datamodel::StockFlow) {
-    use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+    use simlin_diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
     const TOLERANCE: f64 = 1.0;
 
     let stock_pos: HashMap<i32, (f64, f64)> = view

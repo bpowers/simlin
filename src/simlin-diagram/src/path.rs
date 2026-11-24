@@ -13,7 +13,7 @@
 
 use std::f64::consts::PI;
 
-use crate::diagram::common::{Point, Rect, deg_to_rad};
+use crate::common::{Point, Rect, deg_to_rad};
 
 /// Move to `x, y`.
 pub(crate) const OP_MOVE: f64 = 0.0;

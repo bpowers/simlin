@@ -28,6 +28,7 @@ mod test_helpers;
 mod build_determinism;
 mod clearn_unit_errors;
 mod compiler_vector;
+mod diagram;
 mod element_subscripts;
 mod import_losses;
 mod json_roundtrip;

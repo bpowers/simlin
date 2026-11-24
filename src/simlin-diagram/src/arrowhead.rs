@@ -2,10 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::diagram::common::{Point, escape_xml_attr, js_format_number};
+use crate::common::{Point, escape_xml_attr, js_format_number};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ArrowheadType {
+pub(crate) enum ArrowheadType {
     Flow,
     Connector,
 }
@@ -21,7 +21,7 @@ pub(crate) const ARROWHEAD_BACK_SWEEP: bool = true;
 /// [`ARROWHEAD_BACK_SWEEP`]. The drawing turns the whole outline
 /// `rotation_deg` degrees about the tip, as SVG `rotate(deg, tip)` does.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ArrowheadGeometry {
+pub struct ArrowheadGeometry {
     pub tip: Point,
     pub back_start: Point,
     pub back_end: Point,

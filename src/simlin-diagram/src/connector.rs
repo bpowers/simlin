@@ -4,14 +4,14 @@
 
 use std::f64::consts::PI;
 
-use crate::diagram::arrowhead::{
+use crate::arrowhead::{
     ArrowheadGeometry, ArrowheadType, arrowhead_geometry, render_arrowhead_geometry,
 };
-use crate::diagram::common::{
+use crate::common::{
     Circle, Point, deg_to_rad, escape_xml_attr, is_inf, is_zero, js_format_number, rad_to_deg,
     square,
 };
-use crate::diagram::constants::*;
+use crate::constants::*;
 use simlin_base::datamodel::ViewElement;
 use simlin_base::datamodel::view_element::{self, LinkShape};
 
@@ -22,7 +22,7 @@ use simlin_base::datamodel::view_element::{self, LinkShape};
 /// radii, which is more than enough to detect whether the arc crosses another
 /// edge. It does not affect rendered SVG (the renderer still emits a single
 /// `A` arc command); it only governs the sampled geometry the metric sees.
-pub(crate) const ARC_POLYLINE_SAMPLES: usize = 16;
+pub const ARC_POLYLINE_SAMPLES: usize = 16;
 
 enum ElementShape {
     Circle { r: f64 },
@@ -112,7 +112,7 @@ fn is_element_arrayed(element: &ViewElement, is_arrayed_fn: &dyn Fn(&str) -> boo
     }
 }
 
-pub(crate) fn get_visual_center(
+pub fn get_visual_center(
     element: &ViewElement,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
 ) -> (f64, f64) {
@@ -295,7 +295,7 @@ pub(crate) fn arc_circle(
 /// elements' boundaries along the bearing of their centers, and that bearing
 /// in degrees for the arrowhead.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct StraightGeometry {
+pub struct StraightGeometry {
     pub start: Point,
     pub end: Point,
     pub arrow_theta: f64,
@@ -303,7 +303,7 @@ pub(crate) struct StraightGeometry {
 
 impl StraightGeometry {
     /// The arrowhead at the segment's end.
-    pub(crate) fn arrowhead(&self) -> ArrowheadGeometry {
+    pub fn arrowhead(&self) -> ArrowheadGeometry {
         arrowhead_geometry(self.end.x, self.end.y, self.arrow_theta, ARROWHEAD_RADIUS)
     }
 }
@@ -366,7 +366,7 @@ fn render_straight_line(g: &StraightGeometry, dashed: bool) -> String {
 /// boundary in `render_arc`, so the SVG string stays byte-for-byte identical
 /// to the pre-factor-out code (and to the TypeScript renderer).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ArcGeometry {
+pub struct ArcGeometry {
     /// SVG path start (= `from_visual`, the source element center).
     pub start: Point,
     /// SVG path end (= `to_visual`, the target element center).
@@ -385,7 +385,7 @@ pub(crate) struct ArcGeometry {
 
 impl ArcGeometry {
     /// The arrowhead where the arc meets the target element.
-    pub(crate) fn arrowhead(&self) -> ArrowheadGeometry {
+    pub fn arrowhead(&self) -> ArrowheadGeometry {
         arrowhead_geometry(self.end.x, self.end.y, self.arrow_theta, ARROWHEAD_RADIUS)
     }
 }
@@ -515,7 +515,7 @@ fn sample_arc(g: &ArcGeometry, samples: usize) -> Vec<Point> {
 /// circle (matching `render_arc`, which draws start=from_visual to
 /// arc_end=to_visual); MultiPoint links return an empty vec because the
 /// renderer draws nothing for them today (known gap).
-pub(crate) fn connector_polyline(
+pub fn connector_polyline(
     element: &view_element::Link,
     from: &ViewElement,
     to: &ViewElement,
@@ -535,13 +535,13 @@ pub(crate) fn connector_polyline(
 /// the one statement of that choice; `render_connector`, the scene, and
 /// `connector_polyline` all read it.
 #[derive(Debug)]
-pub(crate) enum ConnectorGeometry {
+pub enum ConnectorGeometry {
     Straight(StraightGeometry),
     Arc(ArcGeometry),
     Undrawable,
 }
 
-pub(crate) fn connector_geometry(
+pub fn connector_geometry(
     element: &view_element::Link,
     from: &ViewElement,
     to: &ViewElement,
@@ -595,7 +595,7 @@ fn render_arc(g: &ArcGeometry, dashed: bool) -> String {
     svg
 }
 
-pub fn render_connector(
+pub(crate) fn render_connector(
     element: &view_element::Link,
     from: &ViewElement,
     to: &ViewElement,

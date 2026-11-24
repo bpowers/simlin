@@ -45,7 +45,6 @@ mod conveyor_tests;
 pub mod data_provider;
 pub mod db;
 mod diagnostic;
-pub mod diagram;
 pub mod editing;
 mod element_equations;
 pub mod equation_view;

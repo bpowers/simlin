@@ -475,8 +475,8 @@ fn row_for(kind: FindingKind) {
             };
             let (r_uid, rx, ry) = stock("recovered");
             let (s_uid, sx, sy) = stock("susceptible");
-            let half_h = crate::diagram::constants::STOCK_HEIGHT / 2.0;
-            let half_w = crate::diagram::constants::STOCK_WIDTH / 2.0;
+            let half_h = simlin_diagram::constants::STOCK_HEIGHT / 2.0;
+            let half_w = simlin_diagram::constants::STOCK_WIDTH / 2.0;
             let top = ry.min(sy) - 100.0;
             let point = |x: f64, y: f64, uid: Option<i32>| view_element::FlowPoint {
                 x,

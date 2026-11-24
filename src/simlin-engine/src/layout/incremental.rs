@@ -8,7 +8,7 @@
 //! changed, and diff the connectors and clouds.
 
 use super::*;
-use crate::diagram::common::{Rect as Bounds, merge_bounds};
+use simlin_diagram::common::{Rect as Bounds, merge_bounds};
 
 /// Compute initial positions for newly-added elements based on their
 /// dependency connections to existing elements.
@@ -1412,8 +1412,8 @@ fn without(idents: Vec<String>, placed: &HashSet<String>) -> Vec<String> {
 /// The union of what `elements` draw -- shapes, pipes, and labels at their
 /// current sides -- or `None` when they draw nothing.
 fn footprint_bounds(elements: &[ViewElement]) -> Option<Bounds> {
-    use crate::diagram::label::label_bounds;
     use crate::layout::metrics::{element_label_props_for, node_shape_box, pipe_rects};
+    use simlin_diagram::label::label_bounds;
     let mut rects: Vec<Bounds> = Vec::new();
     for elem in elements {
         rects.extend(node_shape_box(elem));
@@ -1495,7 +1495,7 @@ fn clear_of_stocks(
     adjacent: crate::editing::Point,
     stocks: &[crate::editing::Point],
 ) -> crate::editing::Point {
-    use crate::diagram::constants::{CLOUD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
+    use simlin_diagram::constants::{CLOUD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
     const EPS: f64 = 1e-6;
     let (half_w, half_h) = (STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0);
     let Some(center) = stocks
@@ -1530,7 +1530,7 @@ fn clear_of_stocks(
 /// How far past a flow end, along its end segment, a cloud may be set when no
 /// position along the pipe clears: the space a deleted stock took, or open
 /// space off a stock the flow left.
-const MAX_CLOUD_EXTENSION: f64 = 4.0 * crate::diagram::constants::CLOUD_RADIUS;
+const MAX_CLOUD_EXTENSION: f64 = 4.0 * simlin_diagram::constants::CLOUD_RADIUS;
 
 /// Where a flow end that becomes a cloud goes when its cloud would cover
 /// another shape, and how many of the pipe's points it passes: the nearest
@@ -1548,10 +1548,10 @@ const MAX_CLOUD_EXTENSION: f64 = 4.0 * crate::diagram::constants::CLOUD_RADIUS;
 fn clear_along_pipe(
     path: &[crate::editing::Point],
     valve: crate::editing::Point,
-    shapes: &[crate::diagram::common::Rect],
+    shapes: &[simlin_diagram::common::Rect],
 ) -> (crate::editing::Point, usize) {
-    use crate::diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
     use crate::editing::{Point, arc_position, point_at_arc};
+    use simlin_diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
     /// The step, in px, at which candidate positions are tried.
     const STEP: f64 = 1.0;
     const EPS: f64 = 1e-9;
@@ -1636,11 +1636,11 @@ fn retarget_flow(
     expected: [Option<i32>; 2],
     stock_centers: &BTreeMap<i32, crate::editing::Point>,
 ) -> bool {
-    use crate::diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
     use crate::editing::{
         CloudRef, FlowEnd, FlowGeometry, flow_terminals, free_terminal, heal, place_valve, route,
         route_end, target_stock_terminal,
     };
+    use simlin_diagram::constants::{AUX_RADIUS, CLOUD_RADIUS};
     let Some(index) = state
         .elements
         .iter()
@@ -1659,7 +1659,7 @@ fn retarget_flow(
     // Every shape but this flow's own valve and clouds, which a cloud end this
     // pass creates must not cover: another flow's cloud (one an earlier
     // re-attachment made included), a valve, a parameter.
-    let shapes: Vec<crate::diagram::common::Rect> = state
+    let shapes: Vec<simlin_diagram::common::Rect> = state
         .elements
         .iter()
         .filter(|e| match e {
@@ -1900,7 +1900,7 @@ fn crosses_foreign_stock(
     flow: &view_element::Flow,
     stocks: &[(i32, crate::editing::Point)],
 ) -> bool {
-    use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+    use simlin_diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
     const EPS: f64 = 1e-6;
     let ends: [Option<i32>; 2] = [
         flow.points.first().and_then(|p| p.attached_to_uid),
@@ -2010,10 +2010,10 @@ fn route_created_flows_around_stocks(elements: &mut [ViewElement], created: &Has
 /// `VALVE_CLAMP_MARGIN` from the pipe's ends; a pipe with no clear position
 /// keeps its valve.
 fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32>) {
-    use crate::diagram::common::Rect;
-    use crate::diagram::constants::AUX_RADIUS;
     use crate::editing::{VALVE_CLAMP_MARGIN, arc_position, path_length, point_at_arc};
     use crate::layout::metrics::node_shape_box;
+    use simlin_diagram::common::Rect;
+    use simlin_diagram::constants::AUX_RADIUS;
     /// The step, in px of arc length, at which candidate valve positions are
     /// tried.
     const STEP: f64 = 1.0;
@@ -2093,9 +2093,9 @@ fn record_flow_geometry(state: &mut LayoutState, flows: &HashSet<i32>) {
 /// clearance. `moves` accepts the uids this pass created or rebuilt; a stock a
 /// flow attaches to stays, since moving it would tear the pipe.
 fn keep_created_nodes_clear(elements: &mut [ViewElement], moves: impl Fn(i32) -> bool) {
-    use crate::diagram::common::Rect;
-    use crate::diagram::constants::AUX_RADIUS;
     use crate::layout::metrics::node_shape_box;
+    use simlin_diagram::common::Rect;
+    use simlin_diagram::constants::AUX_RADIUS;
     const MAX_RINGS: usize = 24;
     let overlaps = |a: &Rect, b: &Rect| {
         a.right.min(b.right) - a.left.max(b.left) > 0.0
@@ -2169,7 +2169,7 @@ fn element_center(elem: &ViewElement) -> Option<(f64, f64)> {
 /// place that moved off a shape): its takeoff angle turns with the chord
 /// between its ends, so it curves as it did relative to that line.
 fn rebow_moved_links(elements: &mut [ViewElement], old_view: &datamodel::StockFlow) {
-    use crate::diagram::connector::get_visual_center;
+    use simlin_diagram::connector::get_visual_center;
     let not_arrayed = |_: &str| false;
     let centers = |els: &mut dyn Iterator<Item = &ViewElement>| -> HashMap<i32, (f64, f64)> {
         els.filter(|e| !matches!(e, ViewElement::Link(_) | ViewElement::Group(_)))

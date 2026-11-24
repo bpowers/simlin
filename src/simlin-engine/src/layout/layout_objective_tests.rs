@@ -12,8 +12,8 @@ use super::*;
 
 /// A relative footprint rect like `point_node_footprints` builds: a node shape
 /// of radius 9 plus a label box of the given half-width hanging below it.
-fn footprint(label_half_width: f64, label_height: f64) -> crate::diagram::common::Rect {
-    crate::diagram::common::Rect {
+fn footprint(label_half_width: f64, label_height: f64) -> simlin_diagram::common::Rect {
+    simlin_diagram::common::Rect {
         left: -label_half_width.max(9.0),
         right: label_half_width.max(9.0),
         top: -9.0,

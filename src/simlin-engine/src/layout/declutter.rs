@@ -25,10 +25,10 @@
 
 use std::collections::HashMap;
 
-use crate::diagram::common::{Rect, merge_bounds};
-use crate::diagram::label::label_bounds;
 use simlin_base::datamodel::ViewElement;
 use simlin_base::datamodel::view_element::LabelSide;
+use simlin_diagram::common::{Rect, merge_bounds};
+use simlin_diagram::label::label_bounds;
 
 use super::metrics::{
     COMFORTABLE_CLEARANCE, LabelScene, MetricWeights, alias_label_props_for, alias_source_names,
@@ -543,7 +543,7 @@ fn scale_all_positions(elements: &mut [ViewElement], s: f64) {
 /// element slice this module works with. Uses the renderer's stock dimensions
 /// (`diagram::constants`), the geometry attachment is judged against.
 pub(crate) fn resnap_flow_endpoints_to_stocks(elements: &mut [ViewElement]) {
-    use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+    use simlin_diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
 
     let stocks: HashMap<i32, (f64, f64)> = elements
         .iter()
@@ -889,7 +889,7 @@ pub fn declutter_part(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagram::common::{rect_area, rect_overlap_area};
+    use simlin_diagram::common::{rect_area, rect_overlap_area};
 
     fn rect(left: f64, top: f64, right: f64, bottom: f64) -> Rect {
         Rect {
@@ -1262,7 +1262,7 @@ mod tests {
         // nothing overlaps, but the name would jam against the neighbor's
         // circle, which the metric charges as crowding. The chooser must
         // charge it too and put the name elsewhere.
-        use crate::diagram::constants::AUX_RADIUS;
+        use simlin_diagram::constants::AUX_RADIUS;
         let target = aux_at(1, 0.0, 0.0, "name");
         let bottom = current_label_box(&target, &HashMap::new()).expect("aux label");
         let mut elements = vec![
@@ -1378,7 +1378,7 @@ mod tests {
 
     #[test]
     fn test_stock_label_side_avoids_flow_label() {
-        use crate::diagram::label::label_bounds;
+        use simlin_diagram::label::label_bounds;
 
         // A stock with a flow valve right of it. Both default to Bottom labels;
         // the flow's label is wide ("a very long flow name here") so the
@@ -1595,7 +1595,7 @@ mod tests {
 
     #[test]
     fn test_zoom_detaches_and_resnap_reattaches_flow_endpoints() {
-        use crate::diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
+        use simlin_diagram::constants::{STOCK_HEIGHT, STOCK_WIDTH};
         // A stock at (100, 100); a flow leaving its right edge horizontally.
         let edge_x = 100.0 + STOCK_WIDTH / 2.0;
         let mut elements = vec![
@@ -1635,7 +1635,7 @@ mod tests {
 
     #[test]
     fn test_resnap_handles_vertical_attachment() {
-        use crate::diagram::constants::STOCK_HEIGHT;
+        use simlin_diagram::constants::STOCK_HEIGHT;
         // A flow approaching the stock from below (vertical approach).
         let edge_y = 100.0 + STOCK_HEIGHT / 2.0;
         let mut elements = vec![
@@ -1738,7 +1738,7 @@ mod tests {
 
     #[test]
     fn test_compaction_keeps_flow_endpoints_attached() {
-        use crate::diagram::constants::STOCK_WIDTH;
+        use simlin_diagram::constants::STOCK_WIDTH;
         // A stock with a horizontal flow to a far cloud: compaction pulls the
         // cloud in, and the re-snap must keep the source endpoint on the stock.
         let edge_x = 100.0 + STOCK_WIDTH / 2.0;

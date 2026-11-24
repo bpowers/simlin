@@ -2250,6 +2250,7 @@ dependencies = [
  "serde_json",
  "simlin",
  "simlin-base",
+ "simlin-diagram",
  "simlin-engine",
  "wasm-interpreter",
  "wasmalloc",
@@ -2274,8 +2275,20 @@ dependencies = [
  "mimalloc",
  "sha2",
  "simlin-base",
+ "simlin-diagram",
  "simlin-engine",
  "tempfile",
+]
+
+[[package]]
+name = "simlin-diagram"
+version = "0.1.0"
+dependencies = [
+ "resvg",
+ "serde",
+ "serde_json",
+ "simlin-base",
+ "simlin-engine",
 ]
 
 [[package]]
@@ -2294,7 +2307,6 @@ dependencies = [
  "quick-xml 0.41.0",
  "rand 0.9.5",
  "rayon",
- "resvg",
  "rustc-hash",
  "salsa",
  "schemars",
@@ -2302,6 +2314,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "simlin-base",
+ "simlin-diagram",
  "smallvec",
  "tempfile",
  "unicode-xid",
@@ -2353,10 +2366,12 @@ dependencies = [
  "ed25519-dalek",
  "mimalloc",
  "rayon",
+ "resvg",
  "salsa",
  "serde",
  "serde_json",
  "simlin-base",
+ "simlin-diagram",
  "simlin-engine",
  "tempfile",
  "wasm-interpreter",

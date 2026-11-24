@@ -45,22 +45,22 @@
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use crate::diagram::ScenePaint;
-use crate::diagram::common::{Circle, Frame, Point as DiagramPoint, Rect};
-use crate::diagram::connector::{
+use simlin_base::datamodel;
+use simlin_diagram::ScenePaint;
+use simlin_diagram::common::{Circle, Frame, Point as DiagramPoint, Rect};
+use simlin_diagram::connector::{
     ARC_POLYLINE_SAMPLES, ConnectorGeometry, connector_geometry, connector_polyline,
 };
-use crate::diagram::elements::{
+use simlin_diagram::elements::{
     alias_geometry, aux_geometry, cloud_bounds, group_geometry, module_geometry, stock_geometry,
 };
-use crate::diagram::flow::flow_geometry;
-use crate::diagram::label::{LabelProps, label_bounds};
-use crate::diagram::resolve::{ResolvedElement, resolve_view};
-use crate::diagram::scene::{
+use simlin_diagram::flow::flow_geometry;
+use simlin_diagram::label::{LabelProps, label_bounds};
+use simlin_diagram::resolve::{ResolvedElement, resolve_view};
+use simlin_diagram::scene::{
     arrowhead_path, circle_shape, cloud_path, element_label, link_line_path, path_shape,
     polyline_path, rect_shape,
 };
-use simlin_base::datamodel;
 
 use super::geometry::Point;
 

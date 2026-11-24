@@ -8,9 +8,9 @@
 
 use std::io::BufReader;
 
-use crate::diagram::flow_geometry::flow_invariant_violations;
 use crate::xmile::project_from_reader;
 use simlin_base::datamodel::{self, ViewElement, view_element};
+use simlin_diagram::flow_geometry::flow_invariant_violations;
 
 fn import(xml: &str) -> datamodel::Project {
     project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must parse")

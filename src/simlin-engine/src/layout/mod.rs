@@ -66,12 +66,12 @@ use self::placement::{
 use self::sfdp::{SfdpConfig, compute_layout_from_initial_with_callback, should_trigger_annealing};
 use self::text::{estimate_label_bounds, format_label_with_line_breaks};
 use self::uid::UidManager;
-use crate::diagram::flow_geometry::clamp_to_face_span;
 use crate::ltm_dominance::{FeedbackLoop, LoopPolarity, PartitionSurface};
 use simlin_base::common::canonicalize;
 use simlin_base::datamodel;
 use simlin_base::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
 use simlin_base::datamodel::{Rect, ViewElement};
+use simlin_diagram::flow_geometry::clamp_to_face_span;
 
 /// A queued element during chain layout BFS traversal.
 struct WorkItem {
@@ -1487,12 +1487,12 @@ fn park_isolated_nodes(
     // layout-internal `estimate_label_bounds` uses a different (Praxis) text
     // width model and disagrees on long names.
     let label_half_width = |var_ident: &str| -> f64 {
-        use crate::diagram::constants::AUX_RADIUS;
-        use crate::diagram::label::{LabelProps, label_bounds};
+        use simlin_diagram::constants::AUX_RADIUS;
+        use simlin_diagram::label::{LabelProps, label_bounds};
 
         // What the created element will be named, and what the metric measures.
         let elem_name = format_label_with_line_breaks(&state.display_name(var_ident));
-        let metric_text = crate::diagram::common::display_name(&elem_name);
+        let metric_text = simlin_diagram::common::display_name(&elem_name);
         let props = LabelProps::new(0.0, 0.0, LabelSide::Bottom, metric_text)
             .with_radii(AUX_RADIUS, AUX_RADIUS);
         let rect = label_bounds(&props);
@@ -1571,12 +1571,12 @@ fn reciprocal_arc_segments(
             shape: LinkShape::Arc(calc_reciprocal_arc_angle(a_pos, b_pos)),
             polarity: None,
         };
-        let polyline = crate::diagram::connector::connector_polyline(
+        let polyline = simlin_diagram::connector::connector_polyline(
             &link,
             &from_elem,
             &to_elem,
             &not_arrayed,
-            crate::diagram::connector::ARC_POLYLINE_SAMPLES,
+            simlin_diagram::connector::ARC_POLYLINE_SAMPLES,
         );
         let last = polyline.len().saturating_sub(1);
         for (i, w) in polyline.windows(2).enumerate() {
@@ -3024,7 +3024,7 @@ pub fn fresh_layout(
 /// it creates in an incremental one.
 fn finish_flow_geometry(elements: &mut [ViewElement], include: impl Fn(i32) -> bool + Copy) {
     orthogonal::orthogonalize_flow_pipes(elements, include);
-    crate::diagram::flow_geometry::normalize_flow_geometry_where(elements, include);
+    simlin_diagram::flow_geometry::normalize_flow_geometry_where(elements, include);
     let pipes: Vec<(i32, Vec<FlowPoint>)> = elements
         .iter()
         .filter_map(|e| match e {
@@ -3042,7 +3042,7 @@ fn finish_flow_geometry(elements: &mut [ViewElement], include: impl Fn(i32) -> b
                 .map(|(_, points)| points.as_slice())
                 .collect();
             let mut valve = (f.x, f.y);
-            crate::diagram::flow_geometry::settle_laid_out_valve(&f.points, &mut valve, &others);
+            simlin_diagram::flow_geometry::settle_laid_out_valve(&f.points, &mut valve, &others);
             (f.x, f.y) = valve;
         }
     }
@@ -3798,7 +3798,7 @@ fn point_on_segment(
 /// [`count_view_crossings`] and the layout quality metric, so a layout's
 /// crossing score can never disagree with the geometry the renderer draws.
 ///
-/// Connector geometry comes from [`crate::diagram::connector::connector_polyline`],
+/// Connector geometry comes from [`simlin_diagram::connector::connector_polyline`],
 /// the exact polyline the SVG renderer draws: straight links are clipped to
 /// element boundaries, arcs are sampled along their arc circle, and MultiPoint
 /// links contribute nothing (the renderer draws nothing for them today).
@@ -3864,12 +3864,12 @@ pub(crate) fn element_segments(
                     return segments; // an endpoint is genuinely missing
                 };
 
-                let polyline = crate::diagram::connector::connector_polyline(
+                let polyline = simlin_diagram::connector::connector_polyline(
                     link,
                     from,
                     to,
                     &not_arrayed,
-                    crate::diagram::connector::ARC_POLYLINE_SAMPLES,
+                    simlin_diagram::connector::ARC_POLYLINE_SAMPLES,
                 );
                 if polyline.len() < 2 {
                     return segments; // MultiPoint / degenerate: nothing drawn

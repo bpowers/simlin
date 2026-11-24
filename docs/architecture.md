@@ -13,6 +13,9 @@ The one exception: changes to protobuf files must follow standard best practices
 ### `src/simlin-base` (Rust)
 What every simlin crate is built on: the data model and the patches to it, identifiers, errors, dimensions, the equation lexer, parser and AST, the builtin functions, the standard library of module functions, and the results of a run.
 
+### `src/simlin-diagram` (Rust)
+A model's stock-and-flow diagram drawn: as SVG, as PNG and as the scene display list a host draws, with the exact geometry of each element.
+
 ### `src/simlin-engine` (Rust)
 Core simulation engine.
 Compiles, type-checks, unit-checks, and simulates SD models; [src/simlin-engine/CLAUDE.md](/src/simlin-engine/CLAUDE.md) is the map of the crate and its standing invariants.
@@ -88,14 +91,15 @@ The allowed dependency graph is enforced by `scripts/check-deps.py` reading from
 ### Rust
 
 - `simlin-base` -> (none)
-- `simlin-engine` -> `simlin-base`
-- `simlin` (libsimlin) -> `simlin-engine`, `simlin-base`
+- `simlin-diagram` -> `simlin-base`
+- `simlin-engine` -> `simlin-base`, `simlin-diagram`
+- `simlin` (libsimlin) -> `simlin-engine`, `simlin-diagram`, `simlin-base`
 - `simlin-mcp-core` -> `simlin-engine`, `simlin-base`
 - `simlin-mcp` -> `simlin-mcp-core`, `simlin-engine`
-- `simlin-cli` -> `simlin-engine`, `simlin-base`
+- `simlin-cli` -> `simlin-engine`, `simlin-diagram`, `simlin-base`
 - `simlin-tests` -> (none; its dependencies are dev-dependencies, which the policy leaves out)
 
-Inside `simlin-engine`, the crate-root modules form layers, bottom up: `diagram`, `formats`, `compiler`, `edit`, `wasmgen`, `layout`, `tools`.
+Inside `simlin-engine`, the crate-root modules form layers, bottom up: `formats`, `compiler`, `edit`, `wasmgen`, `layout`, `tools`.
 `scripts/engine-layers.json` lists each layer's modules and the other layers it may use, and `scripts/check-engine-layers.py` enforces it over production code.
 A test may reach above its module's layer.
 

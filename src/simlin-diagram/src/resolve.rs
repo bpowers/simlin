@@ -13,17 +13,17 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::diagram::common::{Rect, calc_view_box};
-use crate::diagram::elements::{
+use crate::common::{Rect, calc_view_box};
+use crate::elements::{
     alias_bounds, aux_bounds, cloud_bounds, group_bounds, module_bounds, stock_bounds,
 };
-use crate::diagram::flow::flow_bounds;
+use crate::flow::flow_bounds;
 use simlin_base::common::canonicalize;
 use simlin_base::datamodel::{self, Equation, View, ViewElement, view_element};
 
 /// One element a diagram draws, with the neighbours its drawing needs.
 #[derive(Debug)]
-pub(crate) enum ResolvedElement<'a> {
+pub enum ResolvedElement<'a> {
     Group(&'a view_element::Group),
     /// A connector whose endpoints are both in the view.
     Link {
@@ -95,7 +95,7 @@ impl ResolvedElement<'_> {
 }
 
 /// A model's first stock-and-flow view, resolved for drawing.
-pub(crate) struct ResolvedView<'a> {
+pub struct ResolvedView<'a> {
     pub model: &'a datamodel::Model,
     /// The drawn elements in draw order: ascending layer, and view order
     /// within a layer.
@@ -109,7 +109,7 @@ pub(crate) struct ResolvedView<'a> {
 impl ResolvedView<'_> {
     /// Whether the named variable has an apply-to-all or arrayed equation, and
     /// so draws stacked copies.
-    pub(crate) fn is_arrayed(&self, name: &str) -> bool {
+    pub fn is_arrayed(&self, name: &str) -> bool {
         self.arrayed.is_arrayed(name)
     }
 }
@@ -151,7 +151,7 @@ impl<'a> Arrayed<'a> {
 /// An element whose drawing needs a neighbour the view does not hold -- a
 /// link with a missing endpoint, a flow with a missing source or sink or fewer
 /// than two points -- is not drawn and so does not appear.
-pub(crate) fn resolve_view<'a>(
+pub fn resolve_view<'a>(
     project: &'a datamodel::Project,
     model_name: &str,
 ) -> Result<ResolvedView<'a>, String> {
@@ -207,7 +207,7 @@ pub(crate) fn resolve_view<'a>(
 /// preview resolves the elements a frame changed over the base view with the
 /// frame's changes substituted, so the two can never disagree about how an
 /// element draws.
-pub(crate) fn resolve_element<'a>(
+pub fn resolve_element<'a>(
     element: &'a ViewElement,
     lookup: &dyn Fn(i32) -> Option<&'a ViewElement>,
     is_arrayed: &dyn Fn(&str) -> bool,

@@ -154,7 +154,7 @@ Do not add a re-export shim for that surface -- a second spelling of the same ty
   - `simlin_project_render_svg()`, `simlin_project_render_scene()`, and (behind the `png_render` feature, on by default) `simlin_project_render_png()`.
     All three share one body, `render_model_to_buffer`: the NULL and model-name checks, a transient layout for a model with no stock-and-flow view (`datamodel_to_render`, never persisted), and the `simlin_malloc` output buffer; only the engine call differs.
     A model with a view is drawn from the shared contents with no project lock held; laying one out takes the contents and the db (`lock_contents_and_db`) and holds the db for the layout alone.
-    `render_scene` returns `simlin_engine::diagram::build_scene` as UTF-8 JSON (camelCase keys, `version: 1`; the contract is `docs/design/diagram-scene.md`): a display list for native renderers, drawn with the SVG's own geometry.
+    `render_scene` returns `simlin_diagram::build_scene` as UTF-8 JSON (camelCase keys, `version: 1`; the contract is `docs/design/diagram-scene.md`): a display list for native renderers, drawn with the SVG's own geometry.
     The browser wasm bundle is built `--no-default-features` to drop the PNG rasterization stack (resvg + text shaping + an embedded font, ~17% of the optimized binary); native consumers (pysimlin, CGo, the server's full wasm artifact) keep it. cbindgen emits the function into `simlin.h` unconditionally -- the header documents the full native API.
 
 ### Analysis

@@ -20,10 +20,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::diagram::constants::{CLOUD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
-use crate::diagram::flow_geometry::{CORNER_CLEARANCE, PIPE_SPACING};
 use simlin_base::datamodel::ViewElement;
 use simlin_base::datamodel::view_element::FlowPoint;
+use simlin_diagram::constants::{CLOUD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
+use simlin_diagram::flow_geometry::{CORNER_CLEARANCE, PIPE_SPACING};
 
 const EPS: f64 = 1e-6;
 
@@ -392,7 +392,7 @@ fn separate_created_clouds(
     let is_free = |p: &FlowPoint| !p.attached_to_uid.is_some_and(|u| stocks.contains_key(&u));
     // Clouds are measured by the free ends, since the finishing pass recenters
     // them there.
-    let shapes: Vec<(i32, crate::diagram::common::Rect)> = elements
+    let shapes: Vec<(i32, simlin_diagram::common::Rect)> = elements
         .iter()
         .filter(|e| !matches!(e, ViewElement::Cloud(_)))
         .filter_map(|e| crate::layout::metrics::node_shape_box(e).map(|r| (e.get_uid(), r)))

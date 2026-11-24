@@ -2,10 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::diagram::common::{
-    Rect, escape_xml_attr, escape_xml_text, js_format_number, merge_bounds,
-};
-use crate::diagram::constants::{
+use crate::common::{Rect, escape_xml_attr, escape_xml_text, js_format_number, merge_bounds};
+use crate::constants::{
     AUX_RADIUS, LABEL_FONT_SIZE, LABEL_FONT_WEIGHT, LABEL_PADDING, LINE_SPACING,
 };
 use simlin_base::datamodel::view_element::LabelSide;
@@ -29,12 +27,12 @@ impl TextAnchor {
 
 #[derive(Debug)]
 pub struct LabelProps {
-    pub cx: f64,
-    pub cy: f64,
-    pub side: LabelSide,
-    pub rw: f64,
-    pub rh: f64,
-    pub text: String,
+    pub(crate) cx: f64,
+    pub(crate) cy: f64,
+    pub(crate) side: LabelSide,
+    pub(crate) rw: f64,
+    pub(crate) rh: f64,
+    pub(crate) text: String,
 }
 
 impl LabelProps {
@@ -226,7 +224,7 @@ pub fn label_bounds(props: &LabelProps) -> Rect {
     }
 }
 
-pub fn render_label(props: &LabelProps) -> String {
+pub(crate) fn render_label(props: &LabelProps) -> String {
     let layout = label_layout(props);
 
     let mut svg = String::new();
@@ -270,7 +268,7 @@ pub fn render_label(props: &LabelProps) -> String {
 }
 
 /// Combined bounds: merge element bounds with label bounds
-pub fn element_with_label_bounds(element_bounds: Rect, label_props: &LabelProps) -> Rect {
+pub(crate) fn element_with_label_bounds(element_bounds: Rect, label_props: &LabelProps) -> Rect {
     merge_bounds(element_bounds, label_bounds(label_props))
 }
 

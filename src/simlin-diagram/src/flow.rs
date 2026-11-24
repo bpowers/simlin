@@ -4,15 +4,15 @@
 
 use std::f64::consts::PI;
 
-use crate::diagram::arrowhead::{
+use crate::arrowhead::{
     ArrowheadGeometry, ArrowheadType, arrowhead_geometry, render_arrowhead_geometry,
 };
-use crate::diagram::common::{
+use crate::common::{
     Circle, Frame, Point, Rect, arrayed_offsets, display_name, js_format_number, merge_bounds,
     svg_circle,
 };
-use crate::diagram::constants::*;
-use crate::diagram::label::{LabelProps, label_bounds, render_label};
+use crate::constants::*;
+use crate::label::{LabelProps, label_bounds, render_label};
 use simlin_base::datamodel::ViewElement;
 use simlin_base::datamodel::view_element;
 
@@ -24,7 +24,7 @@ const PIPE_FINAL_ADJUST: f64 = 7.5;
 /// Everything a drawn flow is made of. `render_flow` prints it and the scene
 /// display list reads it, so the two cannot place a flow differently.
 #[derive(Debug)]
-pub(crate) struct FlowGeometry {
+pub struct FlowGeometry {
     /// The pipe's vertices: the view's points with a cloud sink's retraction
     /// and the arrowhead adjustment applied to the last one.
     pub pipe: Vec<Point>,
@@ -41,7 +41,7 @@ pub(crate) struct FlowGeometry {
 
 /// The drawn geometry of `element` flowing into `sink`, or `None` for a flow
 /// with fewer than two points, which draws nothing.
-pub(crate) fn flow_geometry(
+pub fn flow_geometry(
     element: &view_element::Flow,
     sink: &ViewElement,
     is_arrayed: bool,
@@ -146,7 +146,11 @@ pub(crate) fn flow_geometry(
     })
 }
 
-pub fn render_flow(element: &view_element::Flow, sink: &ViewElement, is_arrayed: bool) -> String {
+pub(crate) fn render_flow(
+    element: &view_element::Flow,
+    sink: &ViewElement,
+    is_arrayed: bool,
+) -> String {
     let Some(g) = flow_geometry(element, sink, is_arrayed) else {
         return String::new();
     };
@@ -226,7 +230,7 @@ pub(crate) fn flow_shape_bounds(element: &view_element::Flow) -> Rect {
     bounds
 }
 
-pub fn flow_bounds(element: &view_element::Flow) -> Rect {
+pub(crate) fn flow_bounds(element: &view_element::Flow) -> Rect {
     let cx = element.x;
     let cy = element.y;
     let r = FLOW_VALVE_RADIUS;

@@ -21,10 +21,6 @@
 
 use rayon::prelude::*;
 
-use crate::diagram::connector::{ConnectorGeometry, connector_geometry};
-use crate::diagram::elements::aux_geometry;
-use crate::diagram::flow::flow_geometry;
-use crate::diagram::label::label_bounds;
 use crate::editing::hit::{HitIndex, hit_test};
 use crate::editing::scene_gen::{Rng, strict_scene};
 use crate::editing::test_support::{
@@ -34,6 +30,10 @@ use crate::editing::test_support::{
 use crate::json;
 use simlin_base::common::canonicalize;
 use simlin_base::datamodel;
+use simlin_diagram::connector::{ConnectorGeometry, connector_geometry};
+use simlin_diagram::elements::aux_geometry;
+use simlin_diagram::flow::flow_geometry;
+use simlin_diagram::label::label_bounds;
 
 use super::*;
 

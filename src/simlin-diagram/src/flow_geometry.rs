@@ -43,7 +43,7 @@ use super::constants::{FLOW_ARROWHEAD_RADIUS, STOCK_HEIGHT, STOCK_WIDTH};
 /// The minimum distance between a stock endpoint and the nearest corner of
 /// the face it sits on. A pipe drawn into a corner reads as attached to two
 /// faces at once, and its arrowhead overlaps the stock's outline.
-pub(crate) const CORNER_CLEARANCE: f64 = 3.0;
+pub const CORNER_CLEARANCE: f64 = 3.0;
 
 /// The shortest first segment (a stub out of the source) or interior segment
 /// (a riser) a pipe is held to when its terminals leave room.
@@ -55,7 +55,7 @@ pub(crate) const MIN_SINK_SEGMENT: f64 = FLOW_ARROWHEAD_RADIUS + 7.5;
 
 /// How far the valve is kept from the path's ends, by arc length, when the
 /// path is at least twice this long.
-pub(crate) const VALVE_CLAMP_MARGIN: f64 = 10.0;
+pub const VALVE_CLAMP_MARGIN: f64 = 10.0;
 
 /// The distance a flow that newly lands on a face keeps from the ends already
 /// there, where the face has room: the design plan's routing preference ("a
@@ -63,7 +63,7 @@ pub(crate) const VALVE_CLAMP_MARGIN: f64 = 10.0;
 /// existing endpoints on that face if one exists, else the slot maximizing
 /// the minimum distance"). A preference of the layout's placement, not an
 /// invariant this module establishes.
-pub(crate) const PIPE_SPACING: f64 = 10.0;
+pub const PIPE_SPACING: f64 = 10.0;
 
 /// The segment minimum when the terminals crowd each other. G3 demands no
 /// minimum then, so no segment is short for the checker; this is only the
@@ -88,7 +88,7 @@ const HALF_H: f64 = STOCK_HEIGHT / 2.0;
 /// both corners. `center` is the stock center's coordinate along the face and
 /// `half_extent` the stock's half-size in that direction (`STOCK_WIDTH / 2`
 /// for the top and bottom faces, `STOCK_HEIGHT / 2` for the left and right).
-pub(crate) fn clamp_to_face_span(v: f64, center: f64, half_extent: f64) -> f64 {
+pub fn clamp_to_face_span(v: f64, center: f64, half_extent: f64) -> f64 {
     let reach = half_extent - CORNER_CLEARANCE;
     v.clamp(center - reach, center + reach)
 }
@@ -886,7 +886,7 @@ pub(crate) fn project_valve_onto_pipe(points: &[FlowPoint], valve: &mut (f64, f6
 /// the layout owns: an imported valve is held to the arc-length margin alone
 /// (`project_valve_onto_pipe`), which this never undoes, since every placement
 /// here is at least the margin from the path's ends.
-pub(crate) fn settle_laid_out_valve(
+pub fn settle_laid_out_valve(
     points: &[FlowPoint],
     valve: &mut (f64, f64),
     other_pipes: &[&[FlowPoint]],
@@ -1059,7 +1059,7 @@ fn capsule_crossing(
 ///
 /// Unattached endpoints and diagonal multi-point segments are left alone:
 /// the importer that produced them owns resolving them.
-pub(crate) fn normalize_flow_geometry(elements: &mut [ViewElement]) {
+pub fn normalize_flow_geometry(elements: &mut [ViewElement]) {
     normalize_flow_geometry_where(elements, |_| true);
 }
 
@@ -1067,10 +1067,7 @@ pub(crate) fn normalize_flow_geometry(elements: &mut [ViewElement]) {
 /// Stocks and clouds are read from the whole view, but only the selected
 /// flows and the clouds their ends are attached to move: incremental layout
 /// normalizes the flows it creates and leaves every preserved flow as it was.
-pub(crate) fn normalize_flow_geometry_where(
-    elements: &mut [ViewElement],
-    include: impl Fn(i32) -> bool,
-) {
+pub fn normalize_flow_geometry_where(elements: &mut [ViewElement], include: impl Fn(i32) -> bool) {
     let stocks: HashMap<i32, (f64, f64)> = elements
         .iter()
         .filter_map(|e| match e {
@@ -1142,8 +1139,8 @@ pub(crate) fn normalize_flow_geometry_where(
 /// test oracle, stated independently of the code that establishes the
 /// invariants, and follows the editor's checker for the same invariants
 /// (`docs/design-plans/2026-09-10-diagram-editing-core.md`, "Invariants").
-#[cfg(test)]
-pub(crate) fn flow_invariant_violations(elements: &[ViewElement]) -> Vec<String> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn flow_invariant_violations(elements: &[ViewElement]) -> Vec<String> {
     let by_uid: HashMap<i32, &ViewElement> = elements.iter().map(|e| (e.get_uid(), e)).collect();
     let mut out = Vec::new();
     for elem in elements {
@@ -1322,7 +1319,7 @@ pub(crate) fn flow_invariant_violations(elements: &[ViewElement]) -> Vec<String>
     out
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn stock_endpoint_problem(p: &FlowPoint, q: &FlowPoint, stock: (f64, f64)) -> Option<String> {
     let dx = p.x - stock.0;
     let dy = p.y - stock.1;

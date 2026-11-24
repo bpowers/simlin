@@ -15,6 +15,7 @@ Exception: protobuf files must follow standard versioning (we have a DB with ser
 | Component             | Language    | Description                                                       | Docs                                        |
 |-----------------------|-------------|-------------------------------------------------------------------|---------------------------------------------|
 | `src/simlin-base`     | Rust        | Data model, identifiers, equation AST, results: what the rest is built on | [CLAUDE.md](/src/simlin-base/CLAUDE.md) |
+| `src/simlin-diagram`  | Rust        | Draws a diagram: SVG, PNG and the scene display list              | [CLAUDE.md](/src/simlin-diagram/CLAUDE.md)  |
 | `src/simlin-engine`   | Rust        | Compiles, type-checks, and simulates SD models                    | [CLAUDE.md](/src/simlin-engine/CLAUDE.md)   |
 | `src/libsimlin`       | Rust        | Flat C FFI to simlin-engine (WASM, CGo, C/C++)                    | [CLAUDE.md](/src/libsimlin/CLAUDE.md)       |
 | `src/simlin-mcp-core` | Rust        | Transport-agnostic MCP tool surface (`ProjectAccess` trait, rmcp `ServerHandler`) | [CLAUDE.md](/src/simlin-mcp-core/CLAUDE.md) |

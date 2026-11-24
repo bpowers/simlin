@@ -21,14 +21,14 @@
 // where they fall never raises the metric's crossing and strike terms.
 
 use super::*;
-use crate::diagram::common::{
-    Point, Rect as Bounds, rect_overlap_area, segment_clip_interval_in_rect,
-};
-use crate::diagram::label::label_bounds;
 use crate::layout::metrics::{
     COMFORTABLE_CLEARANCE, LABEL_INSET, MetricWeights, OWN_LINK_STRIKE_FACTOR,
     alias_label_props_for, alias_source_names, element_label_props_for, node_shape_box, pipe_rects,
 };
+use simlin_diagram::common::{
+    Point, Rect as Bounds, rect_overlap_area, segment_clip_interval_in_rect,
+};
+use simlin_diagram::label::label_bounds;
 
 /// Passes over the free nodes; each pass that moves nothing ends the polish.
 const POLISH_ROUNDS: usize = 3;

@@ -2128,7 +2128,7 @@ fn test_incremental_add_second_side_flow_takes_its_own_face() {
     let valve_gap =
         ((new_waste_a.x - new_waste_b.x).powi(2) + (new_waste_a.y - new_waste_b.y).powi(2)).sqrt();
     assert!(
-        valve_gap > 2.0 * crate::diagram::constants::AUX_RADIUS,
+        valve_gap > 2.0 * simlin_diagram::constants::AUX_RADIUS,
         "the two valves must not overlap: {valve_gap}"
     );
 }
@@ -2987,7 +2987,7 @@ fn test_layout_two_horizontal_cloud_outflows_spaced() {
 
     let dist = ((f1.x - f2.x).powi(2) + (f1.y - f2.y).powi(2)).sqrt();
     assert!(
-        dist > 2.0 * crate::diagram::constants::AUX_RADIUS,
+        dist > 2.0 * simlin_diagram::constants::AUX_RADIUS,
         "f1 ({}, {}) and f2 ({}, {}) should not overlap (dist={})",
         f1.x,
         f1.y,

@@ -24,7 +24,7 @@ crate-type = ["staticlib", "rlib", "cdylib"]
 default = ["png_render", "agent_tools"]
 file_io = ["simlin-engine/file_io"]
 ext_data = ["simlin-engine/ext_data"]
-png_render = ["simlin-engine/png_render"]
+png_render = ["simlin-diagram/png_render"]
 # The agent tool entry points (`simlin_tools_describe`,
 # `simlin_tool_session_*`). On by default for native hosts; the browser wasm
 # bundle's --no-default-features build leaves them out, as it does png_render.
@@ -39,6 +39,7 @@ mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 simlin-base = { path = "../simlin-base" }
+simlin-diagram = { path = "../simlin-diagram" }
 simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }

@@ -35,12 +35,12 @@
 //! Label sides are enumerated in `layout_label_tests.rs`.
 
 use super::*;
-use crate::diagram::constants::CLOUD_RADIUS;
-use crate::diagram::flow_geometry::{
-    CORNER_CLEARANCE, PIPE_SPACING, VALVE_CLAMP_MARGIN, flow_invariant_violations,
-};
 use simlin_base::datamodel::{self, view_element::Cloud};
 use simlin_base::project_patch::{ModelOperation, ModelPatch};
+use simlin_diagram::constants::CLOUD_RADIUS;
+use simlin_diagram::flow_geometry::{
+    CORNER_CLEARANCE, PIPE_SPACING, VALVE_CLAMP_MARGIN, flow_invariant_violations,
+};
 
 fn stock(ident: &str, inflows: &[&str], outflows: &[&str]) -> datamodel::Variable {
     datamodel::Variable::Stock(datamodel::Stock {

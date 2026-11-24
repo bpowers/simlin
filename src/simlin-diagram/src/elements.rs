@@ -2,12 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::diagram::common::{
+use crate::common::{
     Circle, Frame, Point, Rect, arrayed_offsets, display_name, escape_xml_attr, escape_xml_text,
     js_format_number, svg_circle,
 };
-use crate::diagram::constants::*;
-use crate::diagram::label::{LabelProps, element_with_label_bounds, render_label};
+use crate::constants::*;
+use crate::label::{LabelProps, element_with_label_bounds, render_label};
 use simlin_base::datamodel::view_element;
 
 /// The cloud outline, in its own 55-unit design box. Both renderers draw this
@@ -23,7 +23,7 @@ const UNKNOWN_ALIAS_LABEL: &str = "unknown alias";
 /// Everything a drawn auxiliary is made of: the SVG prints it and the scene
 /// display list reads it.
 #[derive(Debug)]
-pub(crate) struct AuxGeometry {
+pub struct AuxGeometry {
     /// The circles, back to front.
     pub circles: Vec<Circle>,
     pub label: LabelProps,
@@ -31,7 +31,7 @@ pub(crate) struct AuxGeometry {
     pub sparkline: Frame,
 }
 
-pub(crate) fn aux_geometry(element: &view_element::Aux, is_arrayed: bool) -> AuxGeometry {
+pub fn aux_geometry(element: &view_element::Aux, is_arrayed: bool) -> AuxGeometry {
     let cx = element.x;
     let cy = element.y;
     let r = AUX_RADIUS;
@@ -57,7 +57,7 @@ pub(crate) fn aux_geometry(element: &view_element::Aux, is_arrayed: bool) -> Aux
     }
 }
 
-pub fn render_aux(element: &view_element::Aux, is_arrayed: bool) -> String {
+pub(crate) fn render_aux(element: &view_element::Aux, is_arrayed: bool) -> String {
     let g = aux_geometry(element, is_arrayed);
 
     let mut svg = String::new();
@@ -74,7 +74,7 @@ pub fn render_aux(element: &view_element::Aux, is_arrayed: bool) -> String {
 /// `aux_bounds` is this box merged with the label; quality metrics that already
 /// account for labels separately (e.g. label-vs-node overlap) need the
 /// label-free shape to avoid double-counting the label area.
-pub(crate) fn aux_shape_bounds(element: &view_element::Aux) -> Rect {
+pub fn aux_shape_bounds(element: &view_element::Aux) -> Rect {
     let cx = element.x;
     let cy = element.y;
     let r = AUX_RADIUS;
@@ -86,7 +86,7 @@ pub(crate) fn aux_shape_bounds(element: &view_element::Aux) -> Rect {
     }
 }
 
-pub fn aux_bounds(element: &view_element::Aux) -> Rect {
+pub(crate) fn aux_bounds(element: &view_element::Aux) -> Rect {
     let cx = element.x;
     let cy = element.y;
     let bounds = aux_shape_bounds(element);
@@ -99,7 +99,7 @@ pub fn aux_bounds(element: &view_element::Aux) -> Rect {
 
 /// Everything a drawn stock is made of.
 #[derive(Debug)]
-pub(crate) struct StockGeometry {
+pub struct StockGeometry {
     /// The rectangles, back to front.
     pub rects: Vec<Frame>,
     pub label: LabelProps,
@@ -108,7 +108,7 @@ pub(crate) struct StockGeometry {
     pub sparkline: Frame,
 }
 
-pub(crate) fn stock_geometry(element: &view_element::Stock, is_arrayed: bool) -> StockGeometry {
+pub fn stock_geometry(element: &view_element::Stock, is_arrayed: bool) -> StockGeometry {
     let cx = element.x;
     let cy = element.y;
     let w = STOCK_WIDTH;
@@ -139,7 +139,7 @@ pub(crate) fn stock_geometry(element: &view_element::Stock, is_arrayed: bool) ->
     }
 }
 
-pub fn render_stock(element: &view_element::Stock, is_arrayed: bool) -> String {
+pub(crate) fn render_stock(element: &view_element::Stock, is_arrayed: bool) -> String {
     let g = stock_geometry(element, is_arrayed);
 
     let mut svg = String::new();
@@ -160,7 +160,7 @@ pub fn render_stock(element: &view_element::Stock, is_arrayed: bool) -> String {
 
 /// The stock's bare *shape* box (the rect), WITHOUT its label. See
 /// `aux_shape_bounds` for why the label-free shape is exposed separately.
-pub(crate) fn stock_shape_bounds(element: &view_element::Stock) -> Rect {
+pub fn stock_shape_bounds(element: &view_element::Stock) -> Rect {
     let cx = element.x;
     let cy = element.y;
     let w = STOCK_WIDTH;
@@ -173,7 +173,7 @@ pub(crate) fn stock_shape_bounds(element: &view_element::Stock) -> Rect {
     }
 }
 
-pub fn stock_bounds(element: &view_element::Stock) -> Rect {
+pub(crate) fn stock_bounds(element: &view_element::Stock) -> Rect {
     let cx = element.x;
     let cy = element.y;
     let w = STOCK_WIDTH;
@@ -189,13 +189,13 @@ pub fn stock_bounds(element: &view_element::Stock) -> Rect {
 
 /// Everything a drawn module is made of.
 #[derive(Debug)]
-pub(crate) struct ModuleGeometry {
+pub struct ModuleGeometry {
     pub rect: Frame,
     pub corner_radius: f64,
     pub label: LabelProps,
 }
 
-pub(crate) fn module_geometry(element: &view_element::Module) -> ModuleGeometry {
+pub fn module_geometry(element: &view_element::Module) -> ModuleGeometry {
     let cx = element.x;
     let cy = element.y;
     let w = MODULE_WIDTH;
@@ -215,7 +215,7 @@ pub(crate) fn module_geometry(element: &view_element::Module) -> ModuleGeometry 
     }
 }
 
-pub fn render_module(element: &view_element::Module) -> String {
+pub(crate) fn render_module(element: &view_element::Module) -> String {
     let g = module_geometry(element);
 
     let mut svg = String::new();
@@ -236,7 +236,7 @@ pub fn render_module(element: &view_element::Module) -> String {
 
 /// The module's bare *shape* box (the rounded rect), WITHOUT its label. See
 /// `aux_shape_bounds` for why the label-free shape is exposed separately.
-pub(crate) fn module_shape_bounds(element: &view_element::Module) -> Rect {
+pub fn module_shape_bounds(element: &view_element::Module) -> Rect {
     let cx = element.x;
     let cy = element.y;
     let w = MODULE_WIDTH;
@@ -251,7 +251,7 @@ pub(crate) fn module_shape_bounds(element: &view_element::Module) -> Rect {
 
 /// The module's drawn extent: its shape and its label, as the TS Canvas's
 /// `moduleBounds` measures it.
-pub fn module_bounds(element: &view_element::Module) -> Rect {
+pub(crate) fn module_bounds(element: &view_element::Module) -> Rect {
     element_with_label_bounds(
         module_shape_bounds(element),
         &module_geometry(element).label,
@@ -289,7 +289,7 @@ pub(crate) fn cloud_transform(element: &view_element::Cloud) -> CloudTransform {
     }
 }
 
-pub fn render_cloud(element: &view_element::Cloud) -> String {
+pub(crate) fn render_cloud(element: &view_element::Cloud) -> String {
     let t = cloud_transform(element);
 
     let transform = format!(
@@ -323,7 +323,7 @@ pub fn cloud_bounds(element: &view_element::Cloud) -> Rect {
 
 /// Everything a drawn alias is made of.
 #[derive(Debug)]
-pub(crate) struct AliasGeometry {
+pub struct AliasGeometry {
     pub circle: Circle,
     pub label: LabelProps,
     /// The box the web canvas draws the aliased variable's sparkline in
@@ -333,10 +333,7 @@ pub(crate) struct AliasGeometry {
 
 /// `alias_of_name` is the name of the element the alias points at, `None`
 /// when that element is missing from the view.
-pub(crate) fn alias_geometry(
-    element: &view_element::Alias,
-    alias_of_name: Option<&str>,
-) -> AliasGeometry {
+pub fn alias_geometry(element: &view_element::Alias, alias_of_name: Option<&str>) -> AliasGeometry {
     let cx = element.x;
     let cy = element.y;
     let r = AUX_RADIUS;
@@ -357,7 +354,7 @@ pub(crate) fn alias_geometry(
 
 /// The alias's drawn extent: its circle and its label, as the TS Canvas's
 /// `aliasBounds` measures it.
-pub fn alias_bounds(element: &view_element::Alias, alias_of_name: Option<&str>) -> Rect {
+pub(crate) fn alias_bounds(element: &view_element::Alias, alias_of_name: Option<&str>) -> Rect {
     let g = alias_geometry(element, alias_of_name);
     let circle = Rect {
         top: g.circle.y - g.circle.r,
@@ -368,7 +365,7 @@ pub fn alias_bounds(element: &view_element::Alias, alias_of_name: Option<&str>) 
     element_with_label_bounds(circle, &g.label)
 }
 
-pub fn render_alias(element: &view_element::Alias, alias_of_name: Option<&str>) -> String {
+pub(crate) fn render_alias(element: &view_element::Alias, alias_of_name: Option<&str>) -> String {
     let g = alias_geometry(element, alias_of_name);
 
     let mut svg = String::new();
@@ -383,7 +380,7 @@ pub fn render_alias(element: &view_element::Alias, alias_of_name: Option<&str>) 
 
 /// Everything a drawn group (sector box) is made of.
 #[derive(Debug)]
-pub(crate) struct GroupGeometry {
+pub struct GroupGeometry {
     pub rect: Frame,
     pub corner_radius: f64,
     /// The label's top-left anchor: SVG `dominant-baseline="hanging"` at
@@ -392,7 +389,7 @@ pub(crate) struct GroupGeometry {
     pub label_text: String,
 }
 
-pub(crate) fn group_geometry(element: &view_element::Group) -> GroupGeometry {
+pub fn group_geometry(element: &view_element::Group) -> GroupGeometry {
     let left = element.x - element.width / 2.0;
     let top = element.y - element.height / 2.0;
 
@@ -412,7 +409,7 @@ pub(crate) fn group_geometry(element: &view_element::Group) -> GroupGeometry {
     }
 }
 
-pub fn render_group(element: &view_element::Group) -> String {
+pub(crate) fn render_group(element: &view_element::Group) -> String {
     let g = group_geometry(element);
 
     let mut svg = String::new();
@@ -437,7 +434,7 @@ pub fn render_group(element: &view_element::Group) -> String {
     svg
 }
 
-pub fn group_bounds(element: &view_element::Group) -> Rect {
+pub(crate) fn group_bounds(element: &view_element::Group) -> Rect {
     let x = element.x;
     let y = element.y;
     let width = element.width;

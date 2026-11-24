@@ -2,12 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::diagram::connector::render_connector;
-use crate::diagram::elements::{
+use crate::connector::render_connector;
+use crate::elements::{
     render_alias, render_aux, render_cloud, render_group, render_module, render_stock,
 };
-use crate::diagram::flow::render_flow;
-use crate::diagram::resolve::{ResolvedElement, resolve_view};
+use crate::flow::render_flow;
+use crate::resolve::{ResolvedElement, resolve_view};
 use simlin_base::datamodel;
 
 // Keep in sync with the TypeScript source of truth: src/diagram/drawing/render-styles.ts
@@ -305,7 +305,7 @@ mod tests {
         assert!(
             rule.contains(&format!(
                 "font-weight: {};",
-                crate::diagram::constants::GROUP_LABEL_FONT_WEIGHT
+                crate::constants::GROUP_LABEL_FONT_WEIGHT
             )),
             "the group text rule states a different weight: {rule}"
         );
@@ -618,10 +618,10 @@ mod tests {
         // (a flow needs two endpoints to be drawn at all, and an alias's
         // target sits far away, so only the alias's own box can hold its
         // label).
-        use crate::diagram::constants::{
+        use crate::constants::{
             AUX_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
         };
-        use crate::diagram::label::{LabelProps, label_bounds};
+        use crate::label::{LabelProps, label_bounds};
         let name = "a fairly long name";
         let rows: Vec<(&str, Vec<ViewElement>, (f64, f64))> = vec![
             (
@@ -861,70 +861,5 @@ mod tests {
         // Should not contain a connector path since 'to' endpoint is missing
         // (note: "simlin-connector" appears in CSS styles, so we check for the <path> element)
         assert!(!svg.contains("class=\"simlin-connector\""));
-    }
-
-    fn load_xmile_project(path: &str) -> datamodel::Project {
-        let file = std::fs::File::open(path).unwrap_or_else(|e| {
-            panic!("failed to open {}: {}", path, e);
-        });
-        let mut reader = std::io::BufReader::new(file);
-        crate::compat::open_xmile(&mut reader).unwrap_or_else(|e| {
-            panic!("failed to parse {}: {}", path, e);
-        })
-    }
-
-    #[test]
-    fn test_render_teacup_model() {
-        let project = load_xmile_project(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test/test-models/samples/teacup/teacup_w_diagram.xmile"
-        ));
-        let svg = render_svg(&project, "main").unwrap();
-        assert!(svg.starts_with("<svg"));
-        assert!(svg.ends_with("</svg>"));
-        // Teacup has stocks, flows, aux, connectors
-        let body = &svg[svg.find("</defs>").unwrap()..];
-        assert!(body.contains("<g class=\"simlin-stock\">"));
-        assert!(body.contains("<g class=\"simlin-flow\">"));
-        assert!(body.contains("<g class=\"simlin-aux\">"));
-        assert!(body.contains("simlin-connector"));
-    }
-
-    #[test]
-    fn test_render_sir_model() {
-        let project = load_xmile_project(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test/test-models/samples/SIR/SIR.xmile"
-        ));
-        let svg = render_svg(&project, "main").unwrap();
-        assert!(svg.starts_with("<svg"));
-        assert!(svg.ends_with("</svg>"));
-        let body = &svg[svg.find("</defs>").unwrap()..];
-        assert!(body.contains("<g class=\"simlin-stock\">"));
-        assert!(body.contains("<g class=\"simlin-flow\">"));
-    }
-
-    #[test]
-    fn test_render_alias_model() {
-        let project = load_xmile_project(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test/alias1/alias1.stmx"
-        ));
-        let svg = render_svg(&project, "main").unwrap();
-        assert!(svg.starts_with("<svg"));
-        let body = &svg[svg.find("</defs>").unwrap()..];
-        assert!(body.contains("<g class=\"simlin-alias\">"));
-    }
-
-    #[test]
-    fn test_render_modules_model() {
-        let project = load_xmile_project(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test/test-models/samples/bpowers-hares_and_lynxes_modules/model.stmx"
-        ));
-        let svg = render_svg(&project, "main").unwrap();
-        assert!(svg.starts_with("<svg"));
-        let body = &svg[svg.find("</defs>").unwrap()..];
-        assert!(body.contains("<g class=\"simlin-module\">"));
     }
 }

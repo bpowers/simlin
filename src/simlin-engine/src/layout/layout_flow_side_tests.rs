@@ -462,7 +462,7 @@ fn test_layout_multiple_side_flows_spaced() {
 
     let valve_gap = ((waste_a.x - waste_b.x).powi(2) + (waste_a.y - waste_b.y).powi(2)).sqrt();
     assert!(
-        valve_gap > 2.0 * crate::diagram::constants::AUX_RADIUS,
+        valve_gap > 2.0 * simlin_diagram::constants::AUX_RADIUS,
         "waste_a ({}, {}) and waste_b ({}, {}) valves should not overlap",
         waste_a.x,
         waste_a.y,
@@ -562,7 +562,7 @@ fn test_layout_side_flows_take_separate_faces() {
                         for f2 in &side_flows[i + 1..] {
                             let gap = ((f1.x - f2.x).powi(2) + (f1.y - f2.y).powi(2)).sqrt();
                             assert!(
-                                gap > 2.0 * crate::diagram::constants::AUX_RADIUS,
+                                gap > 2.0 * simlin_diagram::constants::AUX_RADIUS,
                                 "{row}: valves of {} and {} overlap (gap {gap})",
                                 f1.name,
                                 f2.name

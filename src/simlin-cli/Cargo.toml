@@ -13,6 +13,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
 simlin-base = { path = "../simlin-base" }
+simlin-diagram = { path = "../simlin-diagram" }
 simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["file_io"] }
 # mimalloc is this binary's global allocator (installed in main.rs): the engine
 # compile path is allocation-heavy and mimalloc roughly halves allocator time

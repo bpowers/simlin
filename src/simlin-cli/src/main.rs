@@ -204,9 +204,9 @@ fn render_diagram(
 ) -> StdResult<Vec<u8>, String> {
     match format {
         RenderFormat::Svg => {
-            simlin_engine::diagram::render_svg(project, model_name).map(String::into_bytes)
+            simlin_diagram::render_svg(project, model_name).map(String::into_bytes)
         }
-        RenderFormat::Scene => simlin_engine::diagram::build_scene(project, model_name)
+        RenderFormat::Scene => simlin_diagram::build_scene(project, model_name)
             .and_then(|scene| scene.to_json())
             .map(String::into_bytes),
     }
@@ -981,10 +981,7 @@ mod render_tests {
             match format {
                 RenderFormat::Svg => {
                     assert!(text.starts_with("<svg "), "{text}");
-                    assert_eq!(
-                        text,
-                        simlin_engine::diagram::render_svg(&project, "main").unwrap()
-                    );
+                    assert_eq!(text, simlin_diagram::render_svg(&project, "main").unwrap());
                 }
                 RenderFormat::Scene => {
                     assert!(

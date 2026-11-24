@@ -4,16 +4,8 @@
     "test-support"
   ],
   "layers": {
-    "diagram": {
-      "uses": [],
-      "modules": [
-        "diagram"
-      ]
-    },
     "formats": {
-      "uses": [
-        "diagram"
-      ],
+      "uses": [],
       "modules": [
         "compat",
         "data_provider",
@@ -65,7 +57,6 @@
     },
     "edit": {
       "uses": [
-        "diagram",
         "formats"
       ],
       "modules": [
@@ -86,7 +77,6 @@
     },
     "layout": {
       "uses": [
-        "diagram",
         "compiler",
         "edit"
       ],
@@ -96,7 +86,6 @@
     },
     "tools": {
       "uses": [
-        "diagram",
         "formats",
         "compiler",
         "edit",
